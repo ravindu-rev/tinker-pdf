@@ -190,27 +190,37 @@ exactly where cheap corpus wins live.
 ### The chain driver
 
 ```rust
-pub enum FilterKind {
-    Flate { predictor: Option<PredictorParams> },
-    Lzw { early_change: bool, predictor: Option<PredictorParams> },
-    AsciiHex,
-    Ascii85,
-    RunLength,
+pub enum Filter { Flate, Lzw, AsciiHex, Ascii85, RunLength, Dct, Ccitt, Jbig2, Jpx }
+
+pub struct FilterSpec {
+    pub filter: Filter,
+    pub predictor: Option<PredictorParams>,  // Flate and LZW only
+    pub early_change: bool,                  // LZW only, default true
 }
 
-pub fn decode_chain(
+pub enum ChainOutput {
+    Bytes(Decoded),
+    EncodedImage { kind: ImageCodec, data: Vec<u8>, warnings: Vec<Warning> },
+}
+
+pub fn apply_chain(
     input: &[u8],
-    chain: &[FilterKind],
+    chain: &[FilterSpec],
     limits: &Limits,
-) -> Decoded;
+) -> Result<ChainOutput, FilterError>;
 ```
 
 COS maps `/Filter` name-or-array plus `/DecodeParms` null-or-dict-or-array
-into this, in order. Image codecs (`jpeg_decode`, `fax_decode`) are separate
-entry points, not `FilterKind` variants, because their output is an image,
-not bytes: the caller runs the byte prefix of the chain here, then hands the
-result to the codec. A filter name appearing *after* an image codec is
-nonsense; the caller warns and ignores the tail.
+into this, in order. Image codecs (`jpeg_decode`, `fax_decode`) keep their own
+entry points, because their output is an image, not bytes — but they are
+*named* in the chain enum so the driver can be the one place that knows a
+codec terminates a chain. It applies the byte prefix, then returns the
+still-encoded payload tagged with its codec for the caller to forward; that
+keeps "which codec" from being re-derived by every caller. A filter name
+appearing *after* an image codec is nonsense: the tail is dropped with a
+warning. Sub-crate parameters (predictor, `/EarlyChange`) ride on the spec
+rather than on the variant so COS can forward a `/DecodeParms` entry without
+first deciding whether it is meaningful for the named filter.
 
 ### JPEG (DCTDecode)
 

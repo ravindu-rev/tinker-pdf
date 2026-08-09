@@ -9,3 +9,6 @@ authors.workspace = true
 description = "PDF stream filters, hand-rolled: Flate, LZW, ASCIIHex, ASCII85, RunLength, predictors; DCT and CCITT in wave 2"
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1"

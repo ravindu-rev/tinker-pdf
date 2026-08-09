@@ -11,3 +11,6 @@ description = "PDF file syntax: lexer, objects, xref (classic, stream, hybrid), 
 [dependencies]
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-crypto = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.11.0"
