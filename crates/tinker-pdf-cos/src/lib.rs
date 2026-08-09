@@ -44,6 +44,7 @@
 pub mod decrypt;
 pub mod dest;
 pub mod doc;
+pub mod font;
 pub mod lexer;
 pub mod limits;
 pub mod name;
@@ -68,6 +69,7 @@ mod streams;
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{Action, DestKind, Destination, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
+pub use font::{DecodedCode, Font, FontKind};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};

@@ -301,6 +301,7 @@ dependencies = [
  "proptest",
  "tinker-pdf-crypto",
  "tinker-pdf-filters",
+ "tinker-pdf-font",
 ]
 
 [[package]]
