@@ -1,3 +1,365 @@
-//! A from-scratch, pure-Rust PDF engine. This facade is the only crate users depend on.
+//! A from-scratch, pure-Rust PDF engine.
+//!
+//! This facade is the only crate users depend on; everything below it is an
+//! implementation detail that may be reshaped without notice until the API
+//! freezes at 0.1.0.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let bytes = std::fs::read("document.pdf")?;
+//! let doc = tinker_pdf::Document::open(bytes)?;
+//! println!("{} pages", doc.page_count());
+//! for page in doc.pages() {
+//!     println!("{}", page.text().plain_text());
+//! }
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! Scope, design and exit criteria: `docs/plans/00-architecture.md`.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tinker_pdf_content::{interpret, FontSource, Matrix, TextDevice};
+use tinker_pdf_cos::{font as cos_font, outline as cos_outline, pages as cos_pages, CosDocument};
+
+pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
+pub use tinker_pdf_cos::{
+    AuthError, AuthLevel, DestKind, Destination, LadderLevel, Metadata, OutlineItem, Warning,
+    WarningKind,
+};
+pub use tinker_pdf_crypto::Permissions;
+
+/// The engine's version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What this build is and what it can do.
+///
+/// Reachable on purpose: the engine this replaces blocklisted its own version
+/// constant from its bindings, so nothing could report which build a bug
+/// report came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildInfo {
+    /// The crate version.
+    pub version: &'static str,
+    /// The PDF specification this engine targets.
+    pub spec: &'static str,
+}
+
+/// Describes this build.
+#[must_use]
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        version: VERSION,
+        spec: "ISO 32000-1 (PDF 1.7)",
+    }
+}
+
+/// Why a document could not be opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenError {
+    /// Nothing in the bytes resembles a PDF: not one indirect object could be
+    /// found, even after a full rescan.
+    NotAPdf,
+}
+
+impl core::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            OpenError::NotAPdf => f.write_str("not a PDF: no indirect objects found"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+/// An open document.
+///
+/// Cheap to clone: the bytes and the object store are shared.
+#[derive(Clone)]
+pub struct Document {
+    inner: Arc<CosDocument>,
+}
+
+impl Document {
+    /// Opens a document from bytes.
+    ///
+    /// Bytes rather than a path because `wasm32-unknown-unknown` has no
+    /// filesystem and is a first-class target; native callers read the file
+    /// themselves, or memory-map it and pass the mapping.
+    ///
+    /// A damaged file opens anyway wherever anything can be recovered — see
+    /// [`Document::ladder_level`] and [`Document::warnings`] for what that
+    /// cost.
+    pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
+        let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
+        Ok(Document {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Whether the bytes look like a PDF, without opening them.
+    #[must_use]
+    pub fn sniff(bytes: &[u8]) -> bool {
+        let window = bytes.get(..1024.min(bytes.len())).unwrap_or_default();
+        window.windows(5).any(|w| w == b"%PDF-")
+    }
+
+    /// How much repair opening the document needed.
+    #[must_use]
+    pub fn ladder_level(&self) -> LadderLevel {
+        self.inner.ladder_level()
+    }
+
+    /// Everything the engine tolerated, in the order it happened.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<Warning> {
+        self.inner.warnings()
+    }
+
+    /// Whether the document is encrypted.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.inner.is_encrypted()
+    }
+
+    /// How far the accepted password got.
+    #[must_use]
+    pub fn auth_level(&self) -> AuthLevel {
+        self.inner.auth_level()
+    }
+
+    /// The document's permission flags, respecting the authentication level.
+    ///
+    /// An unencrypted document and one opened with the owner password both
+    /// permit everything. Note that PDF permissions are advisory: a document
+    /// that says printing is denied is asking, not enforcing.
+    #[must_use]
+    pub fn permissions(&self) -> Permissions {
+        self.inner.permissions()
+    }
+
+    /// Tries a password.
+    ///
+    /// Reports **which** password matched, which the engine this replaces
+    /// could not: its binding collapsed the C API's bitmask to a boolean, so
+    /// "the owner password lifts every restriction" was unimplementable.
+    pub fn authenticate(&mut self, password: &str) -> Result<AuthLevel, AuthError> {
+        let inner = Arc::get_mut(&mut self.inner).ok_or(AuthError::NotEncrypted)?;
+        inner.authenticate(password)
+    }
+
+    /// The number of pages.
+    #[must_use]
+    pub fn page_count(&self) -> u32 {
+        cos_pages::count(&self.inner)
+    }
+
+    /// Every page, in document order.
+    #[must_use]
+    pub fn pages(&self) -> Vec<Page> {
+        cos_pages::collect(&self.inner)
+            .into_iter()
+            .map(|inner| Page {
+                doc: self.inner.clone(),
+                inner,
+            })
+            .collect()
+    }
+
+    /// One page by zero-based index.
+    #[must_use]
+    pub fn page(&self, index: u32) -> Option<Page> {
+        self.pages().into_iter().nth(index as usize)
+    }
+
+    /// The document's information dictionary.
+    #[must_use]
+    pub fn metadata(&self) -> Metadata {
+        cos_outline::metadata(&self.inner)
+    }
+
+    /// The version, as "PDF 1.7".
+    #[must_use]
+    pub fn pdf_version(&self) -> Option<String> {
+        cos_outline::version_string(&self.inner)
+    }
+
+    /// The outline tree; empty when the document has none.
+    #[must_use]
+    pub fn outline(&self) -> Vec<OutlineItem> {
+        cos_outline::outline(&self.inner)
+    }
+
+    /// Page labels, when the document defines them.
+    #[must_use]
+    pub fn page_labels(&self) -> Vec<String> {
+        cos_outline::page_labels(&self.inner, self.page_count())
+    }
+
+    /// The underlying object model, for callers that need raw access.
+    #[must_use]
+    pub fn cos(&self) -> &CosDocument {
+        &self.inner
+    }
+}
+
+impl core::fmt::Debug for Document {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Document")
+            .field("pages", &self.page_count())
+            .field("encrypted", &self.is_encrypted())
+            .field("ladder", &self.ladder_level())
+            .finish()
+    }
+}
+
+/// One page.
+#[derive(Clone)]
+pub struct Page {
+    doc: Arc<CosDocument>,
+    inner: cos_pages::Page,
+}
+
+impl Page {
+    /// Zero-based position in the document.
+    #[must_use]
+    pub fn index(&self) -> u32 {
+        self.inner.index
+    }
+
+    /// `/MediaBox`, as `(x0, y0, x1, y1)` in points.
+    #[must_use]
+    pub fn media_box(&self) -> (f64, f64, f64, f64) {
+        let r = self.inner.media_box;
+        (r.x0, r.y0, r.x1, r.y1)
+    }
+
+    /// `/CropBox`, clipped to the media box.
+    #[must_use]
+    pub fn crop_box(&self) -> (f64, f64, f64, f64) {
+        let r = self.inner.crop_box;
+        (r.x0, r.y0, r.x1, r.y1)
+    }
+
+    /// `/Rotate`, normalized to 0, 90, 180 or 270.
+    #[must_use]
+    pub fn rotation(&self) -> u16 {
+        self.inner.rotation
+    }
+
+    /// The page's size in points after rotation, which is what a viewer lays
+    /// out.
+    #[must_use]
+    pub fn size(&self) -> (f64, f64) {
+        self.inner.display_size()
+    }
+
+    /// The page's text.
+    #[must_use]
+    pub fn text(&self) -> TextPage {
+        let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        let fonts = PageFonts::new(&self.doc, &self.inner);
+
+        let mut device = TextDevice::new();
+        // Text is reported in PDF user space, y upward, which is the space the
+        // page's own boxes are in; a device transform is the renderer's job.
+        interpret(&content, Matrix::IDENTITY, &mut device, &fonts);
+        device.finish()
+    }
+}
+
+impl core::fmt::Debug for Page {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Page")
+            .field("index", &self.index())
+            .field("size", &self.size())
+            .field("rotation", &self.rotation())
+            .finish()
+    }
+}
+
+/// The fonts of one page, resolved once and handed to the interpreter.
+struct PageFonts {
+    by_name: HashMap<Vec<u8>, Arc<cos_font::Font>>,
+    ids: HashMap<Vec<u8>, u64>,
+}
+
+impl PageFonts {
+    fn new(doc: &CosDocument, page: &cos_pages::Page) -> PageFonts {
+        let mut by_name = HashMap::new();
+        let mut ids = HashMap::new();
+
+        if let Some(resources) = page.resources {
+            if let Ok(object) = doc.get(resources) {
+                if let Some(dict) = object.as_dict() {
+                    for (name, font) in cos_font::from_resources(doc, dict) {
+                        if let Some(bytes) = doc.name_bytes(name) {
+                            let key = bytes.to_vec();
+                            ids.insert(key.clone(), u64::from(name.id()));
+                            by_name.insert(key, font);
+                        }
+                    }
+                }
+            }
+        }
+
+        PageFonts { by_name, ids }
+    }
+}
+
+impl FontSource for PageFonts {
+    fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+        let Some(font) = self.by_name.get(font) else {
+            return Vec::new();
+        };
+        font.decode(bytes)
+            .into_iter()
+            .map(|d| (d.code, d.text, d.width))
+            .collect()
+    }
+
+    fn is_vertical(&self, font: &[u8]) -> bool {
+        self.by_name.get(font).is_some_and(|f| f.is_vertical())
+    }
+
+    fn font_id(&self, font: &[u8]) -> u64 {
+        self.ids.get(font).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sniffing_recognizes_a_header() {
+        assert!(Document::sniff(b"%PDF-1.7\n..."));
+        assert!(
+            Document::sniff(b"junk before the header %PDF-1.4"),
+            "leading junk is routine"
+        );
+        assert!(!Document::sniff(b"not a pdf at all"));
+        assert!(!Document::sniff(b""));
+    }
+
+    #[test]
+    fn opening_nonsense_reports_it_rather_than_panicking() {
+        assert_eq!(Document::open(b"".to_vec()).err(), Some(OpenError::NotAPdf));
+        assert_eq!(
+            Document::open(b"hello".to_vec()).err(),
+            Some(OpenError::NotAPdf)
+        );
+    }
+
+    #[test]
+    fn build_info_is_reachable() {
+        let info = build_info();
+        assert_eq!(info.version, VERSION);
+        assert!(info.spec.contains("32000"));
+    }
+}

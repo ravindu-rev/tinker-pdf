@@ -10,5 +10,7 @@ description = "A from-scratch, pure-Rust PDF engine: open, authenticate, extract
 
 [dependencies]
 tinker-pdf-cos = { workspace = true }
+tinker-pdf-font = { workspace = true }
+tinker-pdf-crypto = { workspace = true }
 tinker-pdf-content = { workspace = true }
 tinker-pdf-render = { workspace = true }

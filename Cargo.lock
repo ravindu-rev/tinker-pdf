@@ -278,6 +278,8 @@ version = "0.0.1"
 dependencies = [
  "tinker-pdf-content",
  "tinker-pdf-cos",
+ "tinker-pdf-crypto",
+ "tinker-pdf-font",
  "tinker-pdf-render",
 ]
 
