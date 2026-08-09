@@ -29,6 +29,7 @@ use core::ops::Range;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use tinker_pdf_crypto::Permissions;
 use tinker_pdf_filters::FilterError;
 
 use crate::decrypt::{self, Decryptor, EncryptParams, IdentityDecryptor};
@@ -37,6 +38,7 @@ use crate::name::{Name, NameTable};
 use crate::objstm::{self, ObjStm, ObjStmCache};
 use crate::parse::{parse_indirect_at, parse_object_at};
 use crate::repair::ScanIndex;
+use crate::security::{AuthError, AuthLevel};
 use crate::store::{MutexExt, ResolveCtx, SlotStore};
 use crate::warn::{Warning, WarningKind, WarningSink};
 use crate::xref::{self, Revision, XrefBuild, XrefEntry, XrefTable};
@@ -259,6 +261,7 @@ pub struct CosDocument {
     pub(crate) decryptor: Arc<dyn Decryptor>,
     has_decryptor: bool,
     encrypt: Option<EncryptParams>,
+    auth_level: AuthLevel,
     ladder: LadderLevel,
 }
 
@@ -388,6 +391,7 @@ impl CosDocument {
             decryptor: Arc::new(IdentityDecryptor),
             has_decryptor: false,
             encrypt: None,
+            auth_level: AuthLevel::None,
             ladder,
         };
         doc.absorb(sink);
@@ -461,6 +465,44 @@ impl CosDocument {
         self.has_decryptor = true;
         self.store.clear();
         self.objstm = ObjStmCache::new();
+    }
+
+    /// Whether the document declares an `/Encrypt` dictionary.
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypt.is_some()
+    }
+
+    /// How far the accepted password got. [`AuthLevel::None`] until one is.
+    pub fn auth_level(&self) -> AuthLevel {
+        self.auth_level
+    }
+
+    /// The permission flags, respecting the authentication level: an
+    /// unencrypted document and one opened with the owner password both
+    /// permit everything.
+    pub fn permissions(&self) -> Permissions {
+        crate::security::permissions(self.encrypt.as_ref(), self.auth_level)
+    }
+
+    /// Tries `password` and, if it matches, installs the decryptor.
+    ///
+    /// The owner password is tried first, so a document whose two passwords
+    /// are equal authenticates as the owner. Whatever the handler had to
+    /// tolerate reaching that answer becomes document warnings.
+    pub fn authenticate(&mut self, password: &str) -> Result<AuthLevel, AuthError> {
+        let params = self.encrypt.clone().ok_or(AuthError::NotEncrypted)?;
+        let auth = crate::security::authenticate(&params, password)?;
+
+        {
+            let mut sink = self.warnings.lock_safe();
+            for note in auth.notes {
+                sink.warn(0, WarningKind::SecurityHandler(note));
+            }
+        }
+
+        self.set_decryptor(auth.decryptor);
+        self.auth_level = auth.level;
+        Ok(auth.level)
     }
 
     /// How many object streams were actually decompressed.

@@ -48,6 +48,7 @@ pub mod limits;
 pub mod name;
 pub mod object;
 pub mod parse;
+pub mod security;
 pub mod warn;
 pub mod xref;
 
@@ -65,5 +66,6 @@ pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
+pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use warn::{Warning, WarningKind, WarningSink};
 pub use xref::{Revision, XrefEntry, XrefTable};

@@ -36,6 +36,8 @@ impl fmt::Display for Warning {
 /// behaviour, and callers that match exhaustively should be forced to notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WarningKind {
+    /// 7.6: something the security handler tolerated reaching its answer.
+    SecurityHandler(tinker_pdf_crypto::HandlerNote),
     /// 7.3.4.2: a literal string ran to end of input; it was closed there.
     UnterminatedString,
     /// 7.3.4.3: a hex string ran to end of input; it was closed there.
@@ -223,6 +225,7 @@ impl WarningKind {
     /// A short stable identifier, suitable for a debug dump or a test name.
     pub fn as_str(self) -> &'static str {
         match self {
+            WarningKind::SecurityHandler(_) => "security-handler",
             WarningKind::UnterminatedString => "unterminated-string",
             WarningKind::UnterminatedHexString => "unterminated-hex-string",
             WarningKind::NonHexInHexString => "non-hex-in-hex-string",
@@ -307,6 +310,7 @@ impl fmt::Display for WarningKind {
                 actual,
             } => write!(f, "stream-length-recovered (undeclared, actual {actual})"),
             WarningKind::Filter(w) => write!(f, "filter: {w}"),
+            WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
             other => f.write_str(other.as_str()),
         }
     }

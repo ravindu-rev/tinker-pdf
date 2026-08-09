@@ -1,0 +1,164 @@
+//! Decrypting real encrypted documents.
+//!
+//! Two of these assertions are the whole point of the phase: they are the
+//! MuPDF defects Tinker documented, fixed. Owner and user authentication are
+//! told apart, and a `/P` whose reserved bits are set still reports its
+//! restrictions instead of degrading to "everything is permitted".
+
+use std::path::PathBuf;
+use tinker_pdf_cos::{AuthError, AuthLevel, CosDocument, Name};
+
+fn fixture(name: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+fn open(name: &str) -> CosDocument {
+    CosDocument::open(fixture(name)).expect("the fixture opens")
+}
+
+#[test]
+fn the_user_password_authenticates_as_the_user() {
+    let mut doc = open("encrypted-aes256.pdf");
+    assert!(doc.is_encrypted());
+    assert_eq!(doc.auth_level(), AuthLevel::None, "before any password");
+
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+    assert_eq!(doc.auth_level(), AuthLevel::User);
+}
+
+/// The distinction MuPDF's bindings could not make: `fz_authenticate_password`
+/// returns a bitmask saying *which* password matched, and the wrapper Tinker
+/// used collapsed it to a bool.
+#[test]
+fn the_owner_password_authenticates_as_the_owner() {
+    let mut doc = open("encrypted-aes256.pdf");
+    assert_eq!(doc.authenticate("owner-secret"), Ok(AuthLevel::Owner));
+    assert_eq!(doc.auth_level(), AuthLevel::Owner);
+    assert!(
+        doc.auth_level() > AuthLevel::User,
+        "owner authority exceeds user authority"
+    );
+}
+
+#[test]
+fn a_wrong_password_is_refused() {
+    let mut doc = open("encrypted-aes256.pdf");
+    assert_eq!(
+        doc.authenticate("not-the-password"),
+        Err(AuthError::WrongPassword)
+    );
+    assert_eq!(doc.auth_level(), AuthLevel::None);
+    // A refusal must leave the document usable for another attempt.
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+}
+
+#[test]
+fn an_unencrypted_document_has_nothing_to_authenticate() {
+    let mut doc = open("simple-text.pdf");
+    assert!(!doc.is_encrypted());
+    assert_eq!(doc.authenticate("anything"), Err(AuthError::NotEncrypted));
+    assert!(
+        doc.permissions().print(),
+        "an unencrypted document permits everything"
+    );
+}
+
+/// The second MuPDF defect: `/P`'s reserved bits are 1 by specification, so a
+/// strict bitflags parse fails on every real value and the fallback granted
+/// everything — including for this file, which forbids printing.
+#[test]
+fn permissions_survive_their_reserved_bits() {
+    let mut doc = open("permissions-noprint.pdf");
+    assert_eq!(doc.authenticate("user"), Ok(AuthLevel::User));
+
+    let p = doc.permissions();
+    assert_eq!(p.raw(), -2056, "the raw /P is preserved");
+    assert!(!p.print(), "this document forbids printing");
+    assert!(!p.print_high_res());
+    assert!(p.copy(), "and permits copying");
+}
+
+/// Under owner authentication the flags remain in the file but no longer
+/// restrict, which is the policy Tinker's security plan settled on.
+#[test]
+fn the_owner_password_lifts_restrictions() {
+    let mut doc = open("permissions-noprint.pdf");
+    assert_eq!(doc.authenticate("owner"), Ok(AuthLevel::Owner));
+    assert!(doc.permissions().print(), "restrictions no longer apply");
+}
+
+/// Authentication is worth nothing if the content stays ciphertext.
+#[test]
+fn content_decrypts_and_decodes_after_authentication() {
+    let mut doc = open("encrypted-aes256.pdf");
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+
+    let contents = first_page_contents(&doc).expect("a first page with contents");
+    let decoded = doc.stream_decoded(contents).expect("the stream decodes");
+    let text = String::from_utf8_lossy(&decoded);
+    assert!(
+        text.contains("BT"),
+        "decrypted content should hold text operators, got: {}",
+        &text.chars().take(80).collect::<String>()
+    );
+}
+
+/// Descends `/Root` → `/Pages` to the first leaf and returns its `/Contents`
+/// reference. `/Kids` may nest, and `/Contents` may be an array of streams.
+fn first_page_contents(doc: &CosDocument) -> Option<tinker_pdf_cos::ObjRef> {
+    let page = tinker_pdf_cos::Name::PAGES;
+    let root = doc.trailer().get_ref(Name::ROOT)?;
+    let catalog = doc.get(root).ok()?;
+    let mut node = catalog.as_dict().and_then(|d| d.get_ref(page))?;
+
+    for _ in 0..16 {
+        let object = doc.get(node).ok()?;
+        let dict = object.as_dict()?;
+
+        match dict.get_array(Name::KIDS) {
+            Some(kids) => node = kids.first().and_then(tinker_pdf_cos::Object::as_objref)?,
+            None => {
+                return dict.get_ref(Name::CONTENTS).or_else(|| {
+                    dict.get_array(Name::CONTENTS)?
+                        .first()
+                        .and_then(tinker_pdf_cos::Object::as_objref)
+                })
+            }
+        }
+    }
+    None
+}
+
+/// Strings are decrypted too, not only streams — and a document that opened
+/// before authentication must not keep serving ciphertext afterwards.
+#[test]
+fn strings_decrypt_after_the_store_is_cleared() {
+    let mut doc = open("encrypted-aes256.pdf");
+
+    let producer = doc.intern(b"Producer");
+    let info_ref = doc.trailer().get_ref(Name::INFO);
+    let read = |doc: &CosDocument| {
+        info_ref
+            .and_then(|r| doc.get(r).ok())
+            .and_then(|o| o.as_dict().and_then(|d| d.get_string(producer)).cloned())
+    };
+
+    let before = read(&doc);
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+    let after = read(&doc);
+
+    if let (Some(before), Some(after)) = (before, after) {
+        assert_ne!(
+            before.bytes, after.bytes,
+            "the ciphertext read before authentication must not persist"
+        );
+        assert!(
+            after.bytes.is_ascii(),
+            "a decrypted /Producer should be readable text, got {:?}",
+            after.bytes
+        );
+    }
+}
