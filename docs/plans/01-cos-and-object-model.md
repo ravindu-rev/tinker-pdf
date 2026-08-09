@@ -347,6 +347,40 @@ them, and the exclusion list is committed so the debt is visible.
 | Corpus redistribution: qpdf and pdf.js test files carry mixed licenses | Fetched in CI at pinned upstream commits, never vendored or redistributed — same posture as the oracle rule (ruling 9); a local mirror script exists for offline work |
 | Xref pathology diversity exceeds the enumerated cases | That is what level 3 is for: the rescan path assumes nothing about the tables, so an unforeseen pathology degrades to a full scan instead of a failure; each new one becomes a fixture and, if systematic, a level-2 patch rule |
 
+## As built
+
+Milestones 1–4 are implemented (336 tests across `tinker-pdf-cos` and
+`tinker-pdf-filters`; fmt, clippy `-D warnings`, and wasm32 green). Milestone 5 —
+the corpus gate and the 24-hour fuzz campaign — is outstanding and moves to
+[14-testing-and-corpora](14-testing-and-corpora.md)'s runner. Six places where
+the implementation diverged from the design above, each because the design was
+wrong rather than inconvenient:
+
+1. **`warnings()` returns an owned `Vec`, not `&[Warning]`.** Objects load lazily
+   behind `&self`, so warnings keep arriving after `open`; no borrow could stay
+   valid across the next read, and a `Deref` guard would deadlock if held across
+   a `get`.
+2. **The leading-junk offset shift is a two-candidate probe, not an
+   unconditional rewrite.** Shifted is tried first at every offset, unshifted
+   second — a producer that prepends junk *and* corrects its own offsets exists,
+   and one extra probe is far cheaper than pushing that file to level 2.
+3. **Unknown xref-stream entry types map to `Free`.** The enum keeps the three
+   specified variants; a free entry reads as null (7.5.8.3's requirement) *and*
+   still occupies its slot, so an older revision stays correctly shadowed.
+4. **The ladder is decided eagerly at open**, by validating every type-1 entry's
+   `N G obj` header. "Per-object failures past a threshold" is not
+   deterministically evaluable lazily: `ladder_level()` would depend on the
+   caller's access order, contradicting this plan's own requirement that the same
+   bytes always take the same path. Level 3 triggers on no usable `startxref`, no
+   section parsed, an empty table, an unlocatable `/Root`, or four-plus failures
+   that are also a majority of type-1 entries.
+5. **`get` ignores the generation number.** The object number is the identity and
+   the file's own `N G obj` header wins over a disagreeing table — real tables
+   disagree routinely and every surviving reader does this.
+6. **`in_objstm` is a separate load path, not a flag.** `load_from_objstm` simply
+   never calls the decryptor, which is stronger than threading a boolean that a
+   later edit could forget to check (7.6.2).
+
 ---
 
 Sibling context: [02-filters](02-filters.md) and [03-encryption](03-encryption.md)
