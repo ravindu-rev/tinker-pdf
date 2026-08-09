@@ -42,13 +42,18 @@
 #![deny(missing_docs)]
 
 pub mod decrypt;
+pub mod dest;
 pub mod doc;
 pub mod lexer;
 pub mod limits;
 pub mod name;
 pub mod object;
+pub mod outline;
+pub mod pages;
 pub mod parse;
 pub mod security;
+pub mod text_string;
+pub mod trees;
 pub mod warn;
 pub mod xref;
 
@@ -61,11 +66,16 @@ mod store;
 mod streams;
 
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
+pub use dest::{Action, DestKind, Destination, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};
+pub use outline::{metadata, outline, page_labels, LabelStyle, Metadata, OutlineItem};
+pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
+pub use text_string::{decode_text_string, parse_date, Date};
+pub use trees::{name_tree, number_tree};
 pub use warn::{Warning, WarningKind, WarningSink};
 pub use xref::{Revision, XrefEntry, XrefTable};

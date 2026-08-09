@@ -38,6 +38,24 @@ impl fmt::Display for Warning {
 pub enum WarningKind {
     /// 7.6: something the security handler tolerated reaching its answer.
     SecurityHandler(tinker_pdf_crypto::HandlerNote),
+    /// 7.7.3.2: a page-tree node was reached twice; the branch was cut.
+    PageTreeCycle,
+    /// 7.7.3.2: the page tree exceeded its depth or page cap.
+    PageTreeTruncated,
+    /// 7.7.3.3: `/MediaBox` was absent or degenerate; US Letter was assumed.
+    MediaBoxMissing,
+    /// 7.7.3.2: `/Count` disagreed with the pages actually found.
+    PageCountMismatch,
+    /// 7.9.6: a name or number tree node was reached twice.
+    TreeCycle,
+    /// 7.9.6: a tree exceeded its depth or entry cap.
+    TreeTruncated,
+    /// 7.9.6: a leaf's key/value array had an odd length.
+    TreeOddEntries,
+    /// 12.3.3: an outline `/Next` or `/First` chain looped.
+    OutlineCycle,
+    /// 12.3.3: the outline exceeded its depth or entry cap.
+    OutlineTruncated,
     /// 7.3.4.2: a literal string ran to end of input; it was closed there.
     UnterminatedString,
     /// 7.3.4.3: a hex string ran to end of input; it was closed there.
@@ -226,6 +244,15 @@ impl WarningKind {
     pub fn as_str(self) -> &'static str {
         match self {
             WarningKind::SecurityHandler(_) => "security-handler",
+            WarningKind::PageTreeCycle => "page-tree-cycle",
+            WarningKind::PageTreeTruncated => "page-tree-truncated",
+            WarningKind::MediaBoxMissing => "media-box-missing",
+            WarningKind::PageCountMismatch => "page-count-mismatch",
+            WarningKind::TreeCycle => "tree-cycle",
+            WarningKind::TreeTruncated => "tree-truncated",
+            WarningKind::TreeOddEntries => "tree-odd-entries",
+            WarningKind::OutlineCycle => "outline-cycle",
+            WarningKind::OutlineTruncated => "outline-truncated",
             WarningKind::UnterminatedString => "unterminated-string",
             WarningKind::UnterminatedHexString => "unterminated-hex-string",
             WarningKind::NonHexInHexString => "non-hex-in-hex-string",

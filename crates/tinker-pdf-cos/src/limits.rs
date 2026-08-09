@@ -89,3 +89,16 @@ pub const MAX_OBJSTM_ENTRIES: usize = 1 << 20;
 /// ladder level 3. Below this, a majority of bad offsets is still cheaper to
 /// patch entry by entry than to rescan.
 pub const LADDER_RESCAN_MIN_FAILURES: usize = 4;
+
+/// The most pages one document may report.
+///
+/// A hostile `/Kids` graph can describe far more pages than a file could hold;
+/// this bounds the walk without bounding any real document, the largest of
+/// which run to a few hundred thousand pages.
+pub const MAX_PAGES: usize = 1 << 21;
+
+/// The most entries one name or number tree may yield.
+///
+/// Bounds a hostile or cyclic tree without bounding any real one: documents
+/// carry destinations and labels in the hundreds, not the millions.
+pub const MAX_TREE_ENTRIES: usize = 1 << 18;

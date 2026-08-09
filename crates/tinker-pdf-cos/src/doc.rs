@@ -146,6 +146,8 @@ pub(crate) struct DocNames {
     pub eff: Name,
     pub encrypt_metadata: Name,
     pub sub_filter: Name,
+    pub crop_box: Name,
+    pub rotate: Name,
     info_keys: [Name; 6],
 }
 
@@ -196,6 +198,8 @@ impl DocNames {
             eff: n(b"EFF"),
             encrypt_metadata: n(b"EncryptMetadata"),
             sub_filter: n(b"SubFilter"),
+            crop_box: n(b"CropBox"),
+            rotate: n(b"Rotate"),
             info_keys: [
                 n(b"Producer"),
                 n(b"Creator"),
@@ -465,6 +469,58 @@ impl CosDocument {
         self.has_decryptor = true;
         self.store.clear();
         self.objstm = ObjStmCache::new();
+    }
+
+    /// The document catalog (7.7.2), resolved from the trailer's `/Root`.
+    ///
+    /// `None` only when no catalog could be found at all — after a rescan the
+    /// synthesized trailer points at the best candidate the scanner saw.
+    pub fn catalog(&self) -> Option<Arc<Dict>> {
+        let root = self.trailer().get_ref(Name::ROOT)?;
+        let object = self.get(root).ok()?;
+        object.as_dict().map(|d| Arc::new(d.clone()))
+    }
+
+    /// The version from the `%PDF-` header (7.5.2), as "1.7".
+    ///
+    /// Read from the buffer rather than stored at open, because a document
+    /// with junk before its header has one at a shifted offset and the scan
+    /// that found it is cheap.
+    pub fn header_version(&self) -> Option<String> {
+        let window = self
+            .buffer
+            .get(..limits::MAX_HEADER_SCAN.min(self.buffer.len()))?;
+        let at = window
+            .windows(5)
+            .position(|w| w == b"%PDF-")
+            .map(|p| p + 5)?;
+        let digits: Vec<u8> = self
+            .buffer
+            .get(at..(at + 8).min(self.buffer.len()))?
+            .iter()
+            .copied()
+            .take_while(|b| b.is_ascii_digit() || *b == b'.')
+            .collect();
+        String::from_utf8(digits).ok().filter(|s| !s.is_empty())
+    }
+
+    /// Records a warning noticed by a layer built on this one.
+    ///
+    /// The structural readers — the page tree, outlines, name trees — sit
+    /// above the parser but their leniency belongs in the same list as
+    /// everything else the document tolerated (ruling 10).
+    pub fn warn(&self, kind: WarningKind) {
+        self.warnings.lock_safe().warn(0, kind);
+    }
+
+    /// `/CropBox`, interned once per document.
+    pub(crate) fn crop_box_name(&self) -> Name {
+        self.names.crop_box
+    }
+
+    /// `/Rotate`, interned once per document.
+    pub(crate) fn rotate_name(&self) -> Name {
+        self.names.rotate
     }
 
     /// Whether the document declares an `/Encrypt` dictionary.
