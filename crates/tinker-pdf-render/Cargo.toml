@@ -1,0 +1,15 @@
+[package]
+name = "tinker-pdf-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The rasterizing Device: content interpretation drawn through the rasterizer"
+
+[dependencies]
+tinker-pdf-content = { workspace = true }
+tinker-pdf-raster = { workspace = true }
+tinker-pdf-font = { workspace = true }
+tinker-pdf-color = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "oracle-diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Differential test runner: invokes mutool, pdftoppm or pdfium_test as subprocess oracles and compares"
+
+[dependencies]

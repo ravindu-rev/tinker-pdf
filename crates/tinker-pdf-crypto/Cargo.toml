@@ -1,0 +1,11 @@
+[package]
+name = "tinker-pdf-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF standard security handler and its hand-rolled primitives: MD5, RC4, SHA-2, AES-CBC"
+
+[dependencies]

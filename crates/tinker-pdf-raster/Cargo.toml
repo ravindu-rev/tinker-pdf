@@ -1,0 +1,11 @@
+[package]
+name = "tinker-pdf-raster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pure 2D rasterizer: Bezier flattening, analytic-coverage AA fill, stroking, clipping, image sampling, compositing. Zero PDF knowledge"
+
+[dependencies]

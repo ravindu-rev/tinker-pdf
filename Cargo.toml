@@ -1,0 +1,49 @@
+# tinker-pdf — a from-scratch, pure-Rust PDF engine.
+#
+# Everything that touches PDF data is hand-rolled in this workspace: parsing,
+# filters, crypto, fonts, rasterization. No third-party crates for PDF logic or
+# primitives. Dev/build/binding tooling (proptest, criterion, PyO3, wasm-bindgen,
+# cargo-fuzz) is exempt from that rule; nothing in the exempt set ships inside
+# the engine. See docs/plans/00-architecture.md for the policy and its boundary.
+
+[workspace]
+resolver = "2"
+members = [
+  "crates/tinker-pdf-cos",
+  "crates/tinker-pdf-filters",
+  "crates/tinker-pdf-crypto",
+  "crates/tinker-pdf-font",
+  "crates/tinker-pdf-color",
+  "crates/tinker-pdf-raster",
+  "crates/tinker-pdf-content",
+  "crates/tinker-pdf-render",
+  "crates/tinker-pdf",
+  "crates/tinker-pdf-ffi",
+  "tools/pdfcmp",
+  "tools/oracle-diff",
+  "tools/tpdf",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ravindu-rev/tinker-pdf"
+authors = ["tinker-pdf contributors"]
+
+[workspace.dependencies]
+tinker-pdf-cos = { path = "crates/tinker-pdf-cos" }
+tinker-pdf-filters = { path = "crates/tinker-pdf-filters" }
+tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto" }
+tinker-pdf-font = { path = "crates/tinker-pdf-font" }
+tinker-pdf-color = { path = "crates/tinker-pdf-color" }
+tinker-pdf-raster = { path = "crates/tinker-pdf-raster" }
+tinker-pdf-content = { path = "crates/tinker-pdf-content" }
+tinker-pdf-render = { path = "crates/tinker-pdf-render" }
+tinker-pdf = { path = "crates/tinker-pdf" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

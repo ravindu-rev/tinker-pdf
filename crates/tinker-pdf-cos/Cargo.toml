@@ -1,0 +1,13 @@
+[package]
+name = "tinker-pdf-cos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF file syntax: lexer, objects, xref (classic, stream, hybrid), object streams, repair scanner, serializers"
+
+[dependencies]
+tinker-pdf-filters = { workspace = true }
+tinker-pdf-crypto = { workspace = true }

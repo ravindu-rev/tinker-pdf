@@ -1,0 +1,11 @@
+[package]
+name = "tinker-pdf-color"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Color spaces and the PDF function interpreter (Types 0, 2, 3, 4)"
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "tinker-pdf-filters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PDF stream filters, hand-rolled: Flate, LZW, ASCIIHex, ASCII85, RunLength, predictors; DCT and CCITT in wave 2"
+
+[dependencies]

@@ -1,0 +1,31 @@
+# tinker-pdf is MIT OR Apache-2.0 and intends to stay that way. The point of this
+# file is to fail CI when a dependency arrives with a license we cannot ship under.
+#
+# There is deliberately NO copyleft in this list — not even weak copyleft. The
+# engine is a library meant to be embeddable anywhere (including the app stores
+# that reject (A)GPL), and the hand-rolled policy means the dependency tree is
+# tiny dev-tooling anyway. If something copyleft ever seems necessary, that is a
+# design smell to fix, not an exception to add.
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+  "OFL-1.1",   # bundled substitute fonts (Liberation family), an asset not code
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

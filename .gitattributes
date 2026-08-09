@@ -1,0 +1,7 @@
+# LF everywhere; Windows contributors get consistent bytes (same rationale as Tinker).
+* text=auto eol=lf
+
+# Fixtures and any future golden images are binary - never normalized.
+*.pdf binary
+*.png binary
+*.jpg binary
