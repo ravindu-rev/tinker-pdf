@@ -45,6 +45,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --manifest-path fuzz/Cargo.toml --all-targets
 
+  bindings:
+    # Excluded from the workspace for the same reason as fuzz/ — they pull
+    # dependencies the engine refuses — and so invisible to
+    # `cargo check --workspace` for the same reason. A facade change that
+    # breaks them would otherwise be found by whoever next tried to publish.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --manifest-path bindings/python/Cargo.toml
+      - run: cargo check --manifest-path bindings/js/Cargo.toml
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - run: dotnet build bindings/dotnet/TinkerPdf.csproj
+
   wasm:
     # wasm32-unknown-unknown is a first-class target from day one. The ffi crate
     # (cdylib for native bindings) and the CLI tools are excluded; the engine
