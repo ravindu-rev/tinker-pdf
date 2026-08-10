@@ -19,12 +19,14 @@
 
 mod ascii;
 mod inflate;
+mod jpeg;
 mod lzw;
 mod predictors;
 mod runlength;
 
 use core::fmt;
 
+pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use predictors::PredictorParams;
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
