@@ -25,6 +25,17 @@ pub enum WriteMode {
     Incremental,
 }
 
+/// How a document should be encrypted on save.
+#[derive(Clone, Debug)]
+pub struct Encryption {
+    /// The password a reader needs to open the document. Empty means none.
+    pub user_password: String,
+    /// The password that lifts the document's restrictions.
+    pub owner_password: String,
+    /// The permission bits, as `/P` stores them.
+    pub permissions: i32,
+}
+
 /// Options for writing.
 #[derive(Clone, Debug)]
 pub struct WriteOptions {
@@ -32,6 +43,16 @@ pub struct WriteOptions {
     pub mode: WriteMode,
     /// The PDF version to declare in the header, on a rewrite.
     pub version: (u8, u8),
+    /// Pack eligible objects into object streams (7.5.7).
+    ///
+    /// Smaller files, because the packed objects compress together and their
+    /// cross-reference entries shrink. Streams, and anything a reader must
+    /// find before decryption, cannot go in one.
+    pub object_streams: bool,
+    /// Compress content streams the caller has not already encoded.
+    pub compress: bool,
+    /// Encrypt on save. Requires an entropy source at the call site.
+    pub encryption: Option<Encryption>,
 }
 
 impl Default for WriteOptions {
@@ -39,6 +60,9 @@ impl Default for WriteOptions {
         WriteOptions {
             mode: WriteMode::Rewrite,
             version: (1, 7),
+            object_streams: false,
+            compress: false,
+            encryption: None,
         }
     }
 }
@@ -184,6 +208,9 @@ pub enum Written {
 #[derive(Clone, Debug, Default)]
 pub struct ObjectSet {
     entries: BTreeMap<u32, Written>,
+    /// Trailer entries a cross-reference stream must carry in its own
+    /// dictionary, since such a file has no `trailer` keyword (7.5.8.2).
+    trailer_hints: Dict,
 }
 
 impl ObjectSet {
@@ -201,6 +228,11 @@ impl ObjectSet {
     /// Adds or replaces a stream.
     pub fn insert_stream(&mut self, num: u32, stream: StreamData) {
         self.entries.insert(num, Written::Stream(stream));
+    }
+
+    /// Records a trailer entry for a cross-reference stream to carry.
+    pub fn set_trailer_hint(&mut self, key: Name, value: Object) {
+        self.trailer_hints.insert(key, value);
     }
 
     /// How many objects the set holds.
@@ -321,13 +353,71 @@ pub fn rewrite(
     out.extend_from_slice(&[b'%', 0xE2, 0xE3, 0xCF, 0xD3, b'\n']);
 
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(objects.entries.len());
+
+    // 7.5.7: an object stream holds objects that are not themselves streams.
+    // Packing them costs one container and saves each object's own header,
+    // and the container compresses them together.
+    let packed: Vec<u32> = if options.object_streams {
+        objects
+            .entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry, Written::Object(o) if packable(o)))
+            .map(|(num, _)| *num)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     for (num, object) in &objects.entries {
+        if packed.contains(num) {
+            continue;
+        }
         offsets.push((*num, out.len() as u64));
         write_entry(&mut out, *num, object, names);
     }
 
+    let container = objects.max_number().saturating_add(1);
+    if !packed.is_empty() {
+        let mut prologue = Vec::new();
+        let mut body = Vec::new();
+        for num in &packed {
+            if let Some(Written::Object(object)) = objects.entries.get(num) {
+                // The prologue pairs each object number with where its value
+                // begins, measured from /First.
+                prologue.extend_from_slice(format!("{num} {} ", body.len()).as_bytes());
+                write_object(&mut body, object, names);
+                body.push(b' ');
+            }
+        }
+
+        let first = prologue.len();
+        let mut data = prologue;
+        data.extend_from_slice(&body);
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(names.intern(b"ObjStm")));
+        dict.insert(Name::N, Object::Int(packed.len() as i64));
+        dict.insert(Name::FIRST, Object::Int(first as i64));
+
+        offsets.push((container, out.len() as u64));
+        write_entry(
+            &mut out,
+            container,
+            &Written::Stream(StreamData { dict, data }),
+            names,
+        );
+    }
+
     let xref_at = out.len() as u64;
-    write_classic_xref(&mut out, &offsets);
+    // Objects inside a container need a cross-reference stream to be found:
+    // a classic table can say "free" or "at this offset" and nothing else.
+    if packed.is_empty() {
+        write_classic_xref(&mut out, &offsets);
+    } else {
+        write_xref_stream(
+            &mut out, &offsets, &packed, container, trailer, objects, names,
+        );
+    }
 
     // A rewrite has no earlier revision, so /Prev is simply not written; the
     // caller's trailer is not expected to carry one.
@@ -337,11 +427,95 @@ pub fn rewrite(
         Object::Int(i64::from(objects.max_number().saturating_add(1))),
     );
 
-    out.extend_from_slice(b"trailer\n");
-    write_dict(&mut out, &trailer, names, 0);
+    if packed.is_empty() {
+        out.extend_from_slice(b"trailer\n");
+        write_dict(&mut out, &trailer, names, 0);
+    }
     out.extend_from_slice(format!("\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
 
     out
+}
+
+/// Whether an object may live inside an object stream (7.5.7).
+///
+/// A stream cannot, because its data lies outside the object. Nor may
+/// anything a reader must read before decryption — but this writer packs only
+/// what the caller handed it, and the encryption dictionary is never in that
+/// set.
+fn packable(object: &Object) -> bool {
+    !matches!(object, Object::Stream(_))
+}
+
+/// Writes a cross-reference stream (7.5.8).
+///
+/// Needed rather than preferred once objects live in containers: a classic
+/// table has only "free" and "at this offset", and no way to say "object N is
+/// the k-th in stream M".
+#[allow(clippy::too_many_arguments)]
+fn write_xref_stream(
+    out: &mut Vec<u8>,
+    offsets: &[(u32, u64)],
+    packed: &[u32],
+    container: u32,
+    trailer: &Dict,
+    objects: &ObjectSet,
+    names: &NameTable,
+) {
+    let stream_number = container.saturating_add(1);
+    let size = stream_number.saturating_add(1);
+
+    // Three bytes of offset covers 16 MB; four covers 4 GB, which is past
+    // what any single PDF should be.
+    let mut data = Vec::with_capacity((size as usize) * 8);
+    for num in 0..size {
+        if num == 0 {
+            // Object zero heads the free list.
+            data.push(0);
+            data.extend_from_slice(&[0, 0, 0, 0]);
+            data.extend_from_slice(&[255, 255]);
+            continue;
+        }
+        if let Some((_, offset)) = offsets.iter().find(|(n, _)| *n == num) {
+            data.push(1);
+            data.extend_from_slice(&(*offset as u32).to_be_bytes());
+            data.extend_from_slice(&0u16.to_be_bytes());
+        } else if let Some(index) = packed.iter().position(|n| *n == num) {
+            data.push(2);
+            data.extend_from_slice(&container.to_be_bytes());
+            data.extend_from_slice(&(index as u16).to_be_bytes());
+        } else if num == stream_number {
+            data.push(1);
+            data.extend_from_slice(&(out.len() as u32).to_be_bytes());
+            data.extend_from_slice(&0u16.to_be_bytes());
+        } else {
+            data.push(0);
+            data.extend_from_slice(&[0, 0, 0, 0]);
+            data.extend_from_slice(&[255, 255]);
+        }
+    }
+
+    let mut dict = Dict::new();
+    dict.insert(Name::TYPE, Object::Name(names.intern(b"XRef")));
+    dict.insert(Name::SIZE, Object::Int(i64::from(size)));
+    dict.insert(
+        Name::W,
+        Object::Array(vec![Object::Int(1), Object::Int(4), Object::Int(2)]),
+    );
+    // 7.5.8.2: a file with a cross-reference stream has no `trailer` keyword,
+    // so /Root and the rest live in the stream's own dictionary.
+    for (key, value) in trailer.iter() {
+        dict.insert(*key, value.clone());
+    }
+    for (key, value) in objects.trailer_hints.iter() {
+        dict.insert(*key, value.clone());
+    }
+
+    write_entry(
+        out,
+        stream_number,
+        &Written::Stream(StreamData { dict, data }),
+        names,
+    );
 }
 
 /// Writes a classic cross-reference table (7.5.4).
@@ -590,5 +764,105 @@ mod tests {
         let mut out = Vec::new();
         write_object(&mut out, &object, &names());
         assert!(!out.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod objstm_tests {
+    use super::*;
+    use crate::object::ObjRef;
+    use crate::CosDocument;
+
+    /// Objects packed into a container must still be findable, which needs a
+    /// cross-reference stream — a classic table cannot express "object N is
+    /// inside stream M".
+    #[test]
+    fn objects_packed_into_a_stream_are_still_readable() {
+        let table = NameTable::new();
+        let mut objects = ObjectSet::new();
+
+        let mut catalog = Dict::new();
+        catalog.insert(Name::TYPE, Object::Name(table.intern(b"Catalog")));
+        catalog.insert(Name::PAGES, Object::Ref(ObjRef::new(2, 0)));
+        objects.insert(1, Object::Dict(catalog));
+
+        let mut pages = Dict::new();
+        pages.insert(Name::TYPE, Object::Name(table.intern(b"Pages")));
+        pages.insert(Name::COUNT, Object::Int(0));
+        pages.insert(Name::KIDS, Object::Array(Vec::new()));
+        objects.insert(2, Object::Dict(pages));
+        objects.insert(3, Object::Int(1234));
+
+        let mut trailer = Dict::new();
+        trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
+
+        let options = WriteOptions {
+            object_streams: true,
+            ..WriteOptions::default()
+        };
+        let bytes = rewrite(&objects, &trailer, &options, &table);
+
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/ObjStm"), "a container was written");
+        assert!(text.contains("/XRef"), "and a cross-reference stream");
+        assert!(
+            !text.contains("\ntrailer\n"),
+            "which replaces the trailer keyword entirely"
+        );
+
+        let doc = CosDocument::open(bytes).expect("the packed document opens");
+        assert!(doc.catalog().is_some(), "the catalog is reachable");
+        assert_eq!(
+            doc.get(ObjRef::new(3, 0)).ok().as_deref(),
+            Some(&Object::Int(1234)),
+            "and so is an object that only exists inside the container"
+        );
+    }
+
+    #[test]
+    fn streams_are_never_packed() {
+        let table = NameTable::new();
+        let mut objects = ObjectSet::new();
+        objects.insert(1, Object::Int(7));
+        objects.insert_stream(
+            2,
+            StreamData {
+                dict: Dict::new(),
+                data: b"content".to_vec(),
+            },
+        );
+
+        let mut trailer = Dict::new();
+        trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
+        let options = WriteOptions {
+            object_streams: true,
+            ..WriteOptions::default()
+        };
+        let bytes = rewrite(&objects, &trailer, &options, &table);
+
+        // A stream's data lies outside its object, so it cannot live in a
+        // container; it must still be written at its own offset.
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("2 0 obj"), "the stream kept its own header");
+        assert!(text.contains("content"), "and its data");
+
+        let doc = CosDocument::open(bytes).expect("it opens");
+        assert_eq!(
+            doc.stream_decoded(ObjRef::new(2, 0)).ok(),
+            Some(b"content".to_vec())
+        );
+    }
+
+    #[test]
+    fn packing_is_off_by_default() {
+        let table = NameTable::new();
+        let mut objects = ObjectSet::new();
+        objects.insert(1, Object::Int(1));
+        let trailer = Dict::new();
+
+        let bytes = rewrite(&objects, &trailer, &WriteOptions::default(), &table);
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("/ObjStm"));
+        assert!(text.contains("\ntrailer\n"), "a classic table and trailer");
     }
 }
