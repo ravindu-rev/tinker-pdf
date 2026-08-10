@@ -97,8 +97,13 @@ pub struct Page {
     pub crop_box: Rect,
     /// `/Rotate` normalized to 0, 90, 180 or 270.
     pub rotation: u16,
-    /// `/Resources`, inherited. A page without any is legal and empty.
-    pub resources: Option<ObjRef>,
+    /// `/Resources`, inherited and already resolved.
+    ///
+    /// The dictionary itself rather than a reference to it, because 7.7.3.3
+    /// allows it to be written inline and plenty of producers do — including
+    /// this crate's own builder. Holding a reference here silently lost every
+    /// direct one, which cost a page all of its fonts.
+    pub resources: Option<Dict>,
 }
 
 impl Page {
@@ -115,12 +120,12 @@ impl Page {
 }
 
 /// Attributes that descend the tree (7.7.3.4).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Inherited {
     media_box: Option<Rect>,
     crop_box: Option<Rect>,
     rotation: Option<i64>,
-    resources: Option<ObjRef>,
+    resources: Option<Dict>,
 }
 
 impl Inherited {
@@ -130,11 +135,19 @@ impl Inherited {
             let value = doc.resolve_key(dict, key);
             value.as_array().and_then(Rect::from_array)
         };
+        // Resolved through the reference when there is one, taken as it
+        // stands when the dictionary is written inline.
+        let resources = doc
+            .resolve_key(dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .or(self.resources);
+
         Inherited {
             media_box: rect(Name::MEDIA_BOX).or(self.media_box),
             crop_box: rect(doc.crop_box_name()).or(self.crop_box),
             rotation: dict.get_int(doc.rotate_name()).or(self.rotation),
-            resources: dict.get_ref(Name::RESOURCES).or(self.resources),
+            resources,
         }
     }
 }
@@ -192,7 +205,7 @@ fn walk(
         Some(kids) => {
             let kids: Vec<ObjRef> = kids.iter().filter_map(Object::as_objref).collect();
             for kid in kids {
-                walk(doc, kid, inherited, depth + 1, visited, out);
+                walk(doc, kid, inherited.clone(), depth + 1, visited, out);
             }
         }
         // 7.7.3.3: a node without /Kids is a leaf, whatever its /Type says —
@@ -390,5 +403,55 @@ mod tests {
             ..page
         };
         assert_eq!(upside_down.display_size(), (612.0, 792.0));
+    }
+
+    /// 7.7.3.3 allows `/Resources` to be an inline dictionary, and producers
+    /// use it — this crate's own builder among them.
+    ///
+    /// This was once typed as a reference, so a direct dictionary resolved to
+    /// nothing and the page lost every font it had. Nothing failed loudly:
+    /// text extraction simply returned an empty string.
+    #[test]
+    fn a_direct_resource_dictionary_is_read() {
+        let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+   /Resources << /Font << /F0 4 0 R >> >> >>\nendobj\n\
+4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = CosDocument::open(&bytes[..]).expect("it opens");
+        let pages = collect(&doc);
+        assert_eq!(pages.len(), 1);
+
+        let resources = pages[0]
+            .resources
+            .as_ref()
+            .expect("the inline dictionary is read");
+        assert!(
+            resources.get(doc.intern(b"Font")).is_some(),
+            "and its /Font survives"
+        );
+    }
+
+    /// The indirect form still works, and still inherits down the tree.
+    #[test]
+    fn an_inherited_indirect_resource_dictionary_is_read() {
+        let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] /Resources 4 0 R >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] >>\nendobj\n\
+4 0 obj\n<< /Font << /F0 5 0 R >> >>\nendobj\n\
+5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = CosDocument::open(&bytes[..]).expect("it opens");
+        let pages = collect(&doc);
+        let resources = pages[0]
+            .resources
+            .as_ref()
+            .expect("inherited from the parent node");
+        assert!(resources.get(doc.intern(b"Font")).is_some());
     }
 }

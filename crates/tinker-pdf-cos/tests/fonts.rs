@@ -21,10 +21,8 @@ fn open(name: &str) -> CosDocument {
 fn first_page_fonts(doc: &CosDocument) -> Vec<std::sync::Arc<font::Font>> {
     let pages = pages::collect(doc);
     let page = pages.first().expect("a first page");
-    let resources = page.resources.expect("the page has resources");
-    let object = doc.get(resources).expect("resources load");
-    let dict = object.as_dict().expect("a resource dictionary");
-    font::from_resources(doc, dict).into_values().collect()
+    let resources = page.resources.as_ref().expect("the page has resources");
+    font::from_resources(doc, resources).into_values().collect()
 }
 
 #[test]

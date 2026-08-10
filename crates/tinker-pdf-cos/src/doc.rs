@@ -504,6 +504,35 @@ impl CosDocument {
         String::from_utf8(digits).ok().filter(|s| !s.is_empty())
     }
 
+    /// The document's own bytes.
+    ///
+    /// An incremental update must reproduce them exactly as its prefix, which
+    /// is what keeps a signature over the original valid.
+    pub fn bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// The highest object number the cross-reference table knows.
+    ///
+    /// New objects start above it, so an edit cannot collide with something
+    /// the document already uses.
+    pub fn max_object_number(&self) -> u32 {
+        self.xref.max_number()
+    }
+
+    /// The offset of the most recent cross-reference section, which an
+    /// incremental update chains to through `/Prev`.
+    pub fn last_startxref(&self) -> u64 {
+        self.revisions
+            .first()
+            .map_or(0, |revision| revision.byte_range.end)
+    }
+
+    /// The name table, so a writer emits the same symbols this document read.
+    pub fn names_table(&self) -> &NameTable {
+        &self.names.table
+    }
+
     /// Records a warning noticed by a layer built on this one.
     ///
     /// The structural readers — the page tree, outlines, name trees — sit

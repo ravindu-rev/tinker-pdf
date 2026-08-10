@@ -44,21 +44,17 @@ impl PageResources {
         let mut programs = HashMap::new();
         let mut resources = None;
 
-        if let Some(reference) = page.resources {
-            if let Ok(object) = doc.get(reference) {
-                if let Some(dict) = object.as_dict() {
-                    resources = Some(dict.clone());
-                    for (name, font) in cos_font::from_resources(doc, dict) {
-                        if let Some(bytes) = doc.name_bytes(name) {
-                            let key = bytes.to_vec();
-                            let id = u64::from(name.id());
-                            if let Some(program) = embedded_program(doc, &key, dict) {
-                                programs.insert(id, Arc::new(program));
-                            }
-                            font_ids.insert(key.clone(), id);
-                            fonts.insert(key, font);
-                        }
+        if let Some(dict) = page.resources.as_ref() {
+            resources = Some(dict.clone());
+            for (name, font) in cos_font::from_resources(doc, dict) {
+                if let Some(bytes) = doc.name_bytes(name) {
+                    let key = bytes.to_vec();
+                    let id = u64::from(name.id());
+                    if let Some(program) = embedded_program(doc, &key, dict) {
+                        programs.insert(id, Arc::new(program));
                     }
+                    font_ids.insert(key.clone(), id);
+                    fonts.insert(key, font);
                 }
             }
         }

@@ -83,6 +83,15 @@ impl XrefTable {
         self.count
     }
 
+    /// The highest object number with an entry, or zero.
+    ///
+    /// An editor allocates above this, so a new object cannot collide with
+    /// one the document already uses — including one only an older revision
+    /// still mentions.
+    pub fn max_number(&self) -> u32 {
+        self.iter().map(|(num, _)| num).max().unwrap_or(0)
+    }
+
     /// Whether no object number has an entry.
     pub fn is_empty(&self) -> bool {
         self.count == 0

@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod redact;
 mod resources;
 
 use std::sync::Arc;
