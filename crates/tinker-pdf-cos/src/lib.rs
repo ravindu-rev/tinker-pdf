@@ -56,6 +56,7 @@ pub mod security;
 pub mod text_string;
 pub mod trees;
 pub mod warn;
+pub mod write;
 pub mod xref;
 
 // The three-tier stream API lives on `CosDocument`, and the scanner, the slot
@@ -80,4 +81,5 @@ pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use text_string::{decode_text_string, parse_date, Date};
 pub use trees::{name_tree, number_tree};
 pub use warn::{Warning, WarningKind, WarningSink};
+pub use write::{ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};
