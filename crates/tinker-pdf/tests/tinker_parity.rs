@@ -5,9 +5,10 @@
 //! four fixtures. Ruling 12: parity is a `cargo test` invocation, not a
 //! judgement call.
 //!
-//! The rendering half of the parity bar (`render_pages.rs`,
-//! `visual_regression.rs`) arrives with Checkpoint B; what is here is
-//! Checkpoint A: everything Tinker consumes except pixels.
+//! The rendering assertions from `render_pages.rs` are here too, including
+//! the A4-at-150-dpi size Tinker pins. `visual_regression.rs` is not: it
+//! compares against goldens that would have to be regenerated against this
+//! engine, which is integration work rather than parity work.
 
 use std::path::PathBuf;
 

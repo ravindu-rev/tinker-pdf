@@ -45,10 +45,23 @@ and it deserves an unusual amount of scrutiny, so here is the honest framing:
 
 - **Scope is document decryption and encryption-on-save.** No TLS, no key
   exchange, no long-term secret storage, no protocol implementation.
-- **Correctness is gated on published vectors**: NIST CAVP for AES and SHA-2,
-  RFC 6229 for RC4, RFC 1321 for MD5. These are merge gates, not aspirations —
-  the implementations do not land without them passing.
-- **Password comparison is constant-time**; decrypt paths are fuzzed.
+- **Correctness is checked against published vectors** — RFC 1321 for MD5,
+  RFC 6229 for RC4, worked examples for SHA-2, and known-answer tests for AES.
+
+  Stated precisely, because the previous wording here claimed more than was
+  true: the full NIST CAVP suites are **not** wired in, and there is no
+  CBC-AES-256 vector even though that is the mode the fixtures use. AES-256 in
+  CBC is exercised end to end by decrypting a MuPDF-produced R6 file and by an
+  independent Python reimplementation of Algorithm 2.B in the test suite, which
+  is real evidence and is not the same thing as CAVP. Wiring the suites is
+  tracked in [plan 03](docs/plans/03-encryption.md).
+- **Password comparison is constant-time.**
+
+  Decrypt paths are **not** fuzzed today. A `tinker-pdf-crypto` fuzz target
+  does not exist, and the `cos_document` target reaches the decryptor only for
+  inputs that happen to carry an `/Encrypt` dictionary. The stable hostile-input
+  sweep authenticates with several passwords against every mutated fixture,
+  which exercises the failure paths but is far shallower than a fuzzer.
 - **PDF encryption is weak by design in its older revisions** (RC4-40 exists
   because the spec has it, not because it protects anything), and the format's
   permission flags are advisory — a document that says "printing denied" is

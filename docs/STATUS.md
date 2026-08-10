@@ -3,125 +3,111 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**733 tests**, `cargo fmt --check` and `clippy -D warnings` clean, and
-`wasm32-unknown-unknown` builds — on every commit.
+**793 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+`wasm32-unknown-unknown` builds, and the fuzz targets and language bindings
+type-check — on every commit.
+
+> **This file was wrong for a long time.** A 47-agent audit against every plan
+> file in August 2026 found ~35 of ~211 milestones genuinely complete, ~123
+> partial and ~53 missing, and found this file claiming several of the missing
+> ones as done. What follows is written to be checkable rather than
+> encouraging. Where something is partial, the gap is named.
+
+## What the audit changed
+
+Fixed since, each with tests that would have caught it:
+
+| Was | Now |
+| --- | --- |
+| **Four of eleven fuzz targets never compiled.** Wrong arity since written; `fuzz/` sits outside the workspace so nothing checked it | Fixed, and `cargo check` on the fuzz crate is a CI job. The bindings, excluded for the same reason, are too |
+| **`authenticate` failed on any shared document.** `Arc::get_mut` returns None once a `Page` exists, so "look at a page, then supply the password" returned `NotEncrypted` for an encrypted file | Interior mutability; `authenticate(&self)`, as the plan always specified |
+| **`/Rotate` was never applied**, though the canvas *was* sized for it — rotated pages drew upright and clipped | `page_view_transform`, with the crop-box origin as well |
+| **`J j M d` were discarded**, so every stroke was solid, butt-capped, miter-joined, while the rasterizer's tested implementation sat unreachable | Wired through the graphics state |
+| **Pattern fills painted black.** Every gradient from a design tool became an opaque rectangle | Shading patterns paint; tiling patterns are reported, not blacked out |
+| **`/Function` arrays truncated to the first element**; **Separation tint transforms were the identity**; **`/Lab` was aliased to RGB** | All three read properly; Lab converts through XYZ |
+| **`/SMask` was never read** — every soft-masked image painted an opaque rectangle. `/Decode` likewise. Stencils were hardcoded black | All three honoured |
+| **Text render modes**: mode 1 filled instead of stroking, modes 4–7 never clipped | Fill, stroke and clip decided independently; clip accumulates to `ET` |
+| **Inline images were skipped entirely** | Decoded, with Table 93's abbreviated keys |
+| **~2330 lines of `src/semantics/` never compiled** — no `mod` declaration anywhere. Anyone grepping concluded phase 04 was done | Deleted. `link.rs` was the only part describing something the live tree lacked, so links are reimplemented and tested |
+| **No deflate encoder existed**, so `compress` had no reader and every written byte was uncompressed | Implemented; round-tripped against our own inflate |
+| **Object streams produced files that opened with zero pages** — the source trailer's stale `/Size` overwrote the correct one | Fixed. This had been true since the feature landed |
+| **Rewriting an authenticated encrypted document emitted `/Encrypt` over plaintext** | `/Encrypt` dropped on rewrite |
+| **"Full rewrite" had no garbage collection** | Opt-in mark-and-sweep |
+| **Redaction read `Tm` as translation only**, so scaled text cut the wrong glyphs — the worst failure mode for a redaction, because it looks like it worked | The whole matrix is read; rotated runs are refused rather than cut wrongly |
 
 ## Built
 
 | Phase | State | What works |
 | --- | --- | --- |
 | [01 COS](plans/01-cos-and-object-model.md) | milestones 1–4 | Lexer, object model, xref in every flavour, object streams, lazy `Send + Sync` store, repair scanner, leniency ladder, three stream tiers |
-| [02 Filters](plans/02-filters.md) | wave 1 + JPEG + CCITT | Own inflate/deflate, LZW, ASCIIHex/85, RunLength, predictors; **baseline JPEG** with subsampling, restarts, YCbCr/YCCK and Adobe's inverted CMYK; **CCITT G3 and G4** |
-| [03 Encryption](plans/03-encryption.md) | complete for reading | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; **owner vs user distinguished**; **`/P` read correctly through its reserved bits** |
-| [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata, page tree with inheritance, geometry, outlines, name/number trees, **destination enum**, page labels, actions |
-| [05 Fonts](plans/05-fonts.md) | both waves + host seam | Encodings, CMaps, standard-14 metrics, TrueType tables; TrueType `glyf` and CFF Type 2 outlines; **`FontProvider` for faces a document does not embed** |
-| [06 Content & text](plans/06-content-and-text.md) | complete | Tokenizer, full text state machine, `Device` seam, text device with quads and search |
+| [02 Filters](plans/02-filters.md) | wave 1 + **deflate** + JPEG + CCITT | Own inflate **and deflate**, LZW, ASCIIHex/85, RunLength, predictors; baseline JPEG; CCITT G3/G4 |
+| [03 Encryption](plans/03-encryption.md) | reading, R6 exercised | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits |
+| [04 Document semantics](plans/04-document-semantics.md) | most of it | Metadata, page tree with inheritance, geometry, outlines, name/number trees, destination enum, page labels, actions, **links** |
+| [05 Fonts](plans/05-fonts.md) | TrueType + CFF + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf` and CFF Type 2 outlines; `FontProvider` for faces a document does not embed |
+| [06 Content & text](plans/06-content-and-text.md) | substantially | Tokenizer, text state machine, `Device` seam, text device with quads and search, **inline images**, **all stroke parameters** |
 | [07 Rasterizer](plans/07-rasterizer.md) | complete | Paths, deterministic anti-aliased fill, stroking with caps/joins/dashes, clipping, compositing |
-| [08 Rendering device](plans/08-rendering-device.md) | substantively complete | Colour operators and spaces, all four function types, clipping, images, axial and radial shadings, ExtGState alpha, glyphs, outward pixel rounding, **annotation appearances drawn**, **page-area ceiling** |
-| [09 Writing](plans/09-writing.md) | rewrite + incremental + object streams | Full rewrite, **incremental update with byte-identical prefix**, classic xref, **object streams with cross-reference streams**, signature placeholder record |
-| [10 Editing](plans/10-editing.md) | editor, pages, annotations, redaction | Copy-on-write `DocumentEditor`; delete/move/rotate pages; annotations **with synthesized appearance streams**; **redaction that removes content rather than covering it** |
-| [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree with inheritance and qualified names; fill text, choice, checkbox and radio; **appearances rebuilt on every fill**; reset |
-| [12 Creation](plans/12-creation.md) | pages, text, images | `DocumentBuilder`: pages, base-14 text, rectangles, colour, JPEG/RGB/grey images, metadata, outlines — output reopens at ladder level Trust |
-| [13 Bindings](plans/13-bindings.md) | all three compile | C ABI; **Python** (PyO3, releases the GIL), **JavaScript/wasm** (wasm-bindgen), **.NET** (C# over the C ABI, SafeHandle lifetimes) |
-| [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing written | **`tpdf`**, **`pdfcmp`** and **`oracle-diff`** are working programs; **11 fuzz targets**; **a hostile-input sweep that runs on stable, every commit** |
-
-**Checkpoint A is reached and exceeded.** All 22 ported assertions from
-Tinker's own suite pass — `open_documents`, `text_and_search`, `outline` and
-`render_pages` — including the two that were MuPDF defects and the A4-at-150-dpi
-rounding its engine left as folklore.
+| [08 Rendering device](plans/08-rendering-device.md) | broad, see gaps | Colour spaces incl. **Lab, Separation, DeviceN**; all four function types **and function arrays**; clipping incl. **text clip modes**; images with **`/SMask` and `/Decode`**; axial and radial shadings; **shading patterns**; **`/Rotate` and `/CropBox`**; alpha; outward pixel rounding; page-area ceiling |
+| [09 Writing](plans/09-writing.md) | rewrite + incremental + object streams | Full rewrite with **optional GC**, incremental update with byte-identical prefix, classic xref, **working object streams**, **compression** |
+| [10 Editing](plans/10-editing.md) | editor, pages, annotations, redaction | Copy-on-write editor; delete/move/rotate pages; annotations with synthesized appearances; redaction that removes content |
+| [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree, fill text/choice/checkbox/radio, appearances rebuilt, reset |
+| [12 Creation](plans/12-creation.md) | pages, text, images | `DocumentBuilder` |
+| [13 Bindings](plans/13-bindings.md) | all three build, now checked | C ABI, Python, JS/wasm, .NET |
+| [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing written | `tpdf`, `pdfcmp`, `oracle-diff`; 11 fuzz targets; a hostile-input sweep on stable |
 
 ## Not built
 
-Stated plainly, because a plan that reads as if everything is done is worse
-than no plan.
-
-| Gap | Consequence | Where it belongs |
+| Gap | Consequence | Where |
 | --- | --- | --- |
-| **No corpus of any size has been run** | Eight real-world files have now been through `tpdf` (see below) — enough to be encouraging and far too few to be evidence. The pinned public corpora have still never been fetched. **This remains the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
-| **Fuzzing written but never run** | Eleven targets exist and now compile — four did not, and said so only when something finally checked them; `cargo check` on `fuzz/Cargo.toml` is a CI job as of that discovery. None has been *executed*, which needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
-| **`oracle-diff` never met an oracle** | None of mutool, poppler or pdfium is installed on the machine it was written on. Its similarity metric is unit-tested; its subprocess plumbing is not. | [14](plans/14-testing-and-corpora.md) |
-| **No bundled substitute fonts** | A host can now supply faces through `FontProvider`, so this is no longer a blocker — but a caller that supplies nothing still gets no text for documents that embed no fonts. Bundling Liberation would fix it out of the box, and needs a licensing answer for Symbol and ZapfDingbats. | [05](plans/05-fonts.md) |
-| **The font seam is not in the bindings** | `FontProvider` is reachable from Rust only. The C ABI, Python, JS and .NET cannot supply one, so they cannot draw text for non-embedding documents at all. | [13](plans/13-bindings.md) |
-| **Editing: no merge, split, or flatten** | Cross-document merge with resource grafting, page insertion, and annotation flattening are unbuilt. Page delete, move and rotate work. | [10](plans/10-editing.md) |
-| **Forms: no comb fields, no calculations** | A comb field's fixed cells are not laid out, and `/AA` calculation scripts are not run — the open JavaScript question in the plan is still open. | [11](plans/11-forms.md) |
-| **Progressive JPEG, JBIG2, JPX; mesh shadings** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
-| **Transparency groups, soft masks, tiling patterns** | Skipped; constant alpha works. | [08](plans/08-rendering-device.md) |
+| **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
+| **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
+| **Type 1 and Type 3 fonts** | Absent. Worse, `/FontFile` (a Type 1 program) is handed to the sfnt/CFF parsers, which cannot read it — an embedded Type 1 font silently draws nothing. | [05](plans/05-fonts.md) |
+| **Redaction: `cm`, form XObjects, images** | The text matrix is handled; the *transformation* matrix is not, form XObjects are not recursed into, and images are not scrubbed. A redaction over content inside a form XObject does nothing. | [10](plans/10-editing.md) |
+| **Editing: merge, split, insert, flatten** | Only delete, move and rotate exist. | [10](plans/10-editing.md) |
+| **Encrypt-on-save, linearization** | `WriteOptions::encryption` still has no reader; set it and you get a plaintext file with no error. Rewriting now drops `/Encrypt` rather than lying about it. | [09](plans/09-writing.md) |
+| **CCITT `/EndOfLine`, `/EndOfBlock`, EOL/EOFB/RTC** | Not recognised at all; an EOL aborts the image. `/K > 0` is not true mixed mode. | [02](plans/02-filters.md) |
+| **Progressive JPEG** | Refused, not decoded — and it appeared in 4 of the first 8 real files. | [02](plans/02-filters.md) |
+| **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
+| **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
+| **Annotation `/BBox` clipping** | An appearance stream larger than its box is not clipped to it. | [08](plans/08-rendering-device.md) |
+| **The enforcement tier** | `xtask` is a stub that exits 2. No DAG check — and the declared DAG is already violated, `cos` depending on `font`. No cargo-deny allowlist for the hand-rolled rule. No determinism job, and platform `libm` is called on paths that reach pixels, so bit-identical cross-target output is not achievable today. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
+| **Error convergence** | The facade's `OpenError` has one variant and `Document::open` throws every distinct cos failure away. A caller cannot tell "not a PDF" from "needs a password". | [00](plans/00-architecture.md) |
 | **Font embedding and subsetting in the builder** | Built documents can use the standard 14 but cannot embed a font. | [12](plans/12-creation.md) |
-| **Encrypt-on-save, linearization** | The options exist and reading handles both; writing produces neither. Encryption also needs the host entropy source wired. | [09](plans/09-writing.md) |
-| **Binding packaging** | All three compile; none is published, and there is no CI job building wheels or per-RID natives. | [13](plans/13-bindings.md) |
-| **Tinker integration** | Tinker still runs on MuPDF. Nothing has been swapped. See below. | [15](plans/15-tinker-integration.md) |
+| **The font seam is not in the bindings** | `FontProvider` is Rust-only, so no binding can draw text for a non-embedding document. | [13](plans/13-bindings.md) |
+| **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
+| **Forms: comb fields, calculations** | A comb field's fixed cells are not laid out; `/AA` scripts are not run (the open JavaScript question). | [11](plans/11-forms.md) |
+| **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [15](plans/15-tinker-integration.md) |
 
-## The first real files
+## Where Tinker integration stands
 
-Eight documents from outside this repository — produced by Microsoft Print to
-PDF and by web-to-PDF tooling, none of them written by the engine — were run
-through `tpdf check`, `tpdf render` and `tpdf text`. Too small to be a corpus,
-large enough to be the first evidence that was not self-generated.
-
-| | Result |
-| --- | --- |
-| Opened | 8 of 8, all at ladder level **Trust**, zero warnings |
-| Rendered | 20 of 20 pages, no failures, every page with real ink except one |
-| Progressive JPEG | **4 of 8 files** — reported and degraded, not decoded |
-| No embedded fonts | 1 of 8 — rendered its rules and none of its text |
-| No text at all | 1 of 8, a scan with zero font resources; extracting nothing is correct |
-
-The finding worth acting on is the first one. **Progressive JPEG turned up in
-half of them.** Plan [02](plans/02-filters.md) defers it behind a capability
-flag pending corpus hit-rates, under ruling 3 — schedule capabilities on
-evidence rather than on guesswork. This is that evidence arriving earlier and
-louder than expected, on a sample where JBIG2 and JPX did not appear at all.
-It should be reweighted against them before any further filter work.
-
-Nothing here says the engine is correct on real files: no output was compared
-against another renderer, only checked for not failing and not being blank.
-It says the engine does not fall over on them, which is a different and much
-weaker claim.
-
-## Where Tinker integration actually stands
-
-Tinker's engine layer is narrow — `open`, `open_bytes`, `page_count`,
-`metadata`, `permissions`, `page_geometry`, `encryption_info`, `render`,
-`page_text`, `search_page`, `outline` — and **every one of those is now
-covered**, several better than MuPDF covered them:
-
-- `permissions` returns real flags rather than reporting every document
-  unrestricted, and `auth_level` distinguishes owner from user.
-- `render` pins A4 at 150 dpi to 1240×1755 as an API guarantee.
-- Destinations are an enum, so a named destination is never mistaken for an
-  explicit one.
-- Reads are `Send + Sync`, which dissolves the constraint behind the
-  render-clone-pool plan.
+Tinker's engine layer is eleven functions wide — open, page count, metadata,
+permissions, geometry, encryption info, render, text, search, outline — and
+every one is covered, several better than MuPDF covered them: real permission
+flags, owner-versus-user, a pinned A4-at-150-dpi size, destinations as an enum,
+`Send + Sync` reads.
 
 Two things still block the swap, and neither is a missing feature.
 
-**The corpus has never been run.** Swapping engines on the strength of four
-fixtures and a mutation sweep would be trading a battle-tested renderer for an
-untested one. Running `tpdf check` over a real corpus is the cheapest
-remaining work with the highest information return, and it should happen
-before any Tinker file changes.
+**The corpus has never been run.** Swapping a battle-tested renderer for one
+validated on four self-authored fixtures and eight files from one laptop would
+be a bad trade. `tpdf check` over the pinned corpora is the cheapest remaining
+work with the highest information return.
 
 **One decision is the owner's.** MuPDF also opens EPUB, XPS and CBZ, which is
 what `Doc::Other` exists for. This engine reads PDF and will not read those.
-Dropping them, shelling out to another tool, or keeping MuPDF alongside for
-those formats alone is a product decision, not a technical one, and the plan
-has always recorded it as such.
+Dropping them, shelling out, or keeping MuPDF for those formats alone is a
+product decision.
 
-Beyond those: Tinker will need to hand the engine a `FontProvider` — a system
-face on desktop — or its rendered pages will lose the text of any document
-that does not embed fonts.
+Beyond those, Tinker will need to hand the engine a `FontProvider`, or rendered
+pages lose the text of every document that does not embed its fonts.
 
 ## The honest summary
 
-The engine reads PDFs properly: it opens damaged ones, decrypts them with
-correct security semantics, extracts text with geometry, and answers every
-structural question Tinker asks. It renders vector graphics, images, gradients
-and annotations in colour, and writes valid files including object streams and
-signature-safe incremental updates. It edits: page operations, annotations
-with real appearance streams, form filling that regenerates appearances, and
-redaction that actually removes the bytes. Three language bindings compile
-against it, and three working tools drive it from a command line.
+The engine reads PDFs properly and now renders them substantially correctly:
+the silent-wrongness class of defect — rotation, patterns, soft masks, tint
+transforms, stroke parameters, text render modes — has been found and fixed,
+each with a test that would have caught it. It writes valid files, compresses
+them, and no longer claims encryption it did not apply.
 
-What it has never done is meet a real corpus. Everything above is true of the
-inputs it has been shown, and those inputs were mostly written by this
-repository. That is the next thing worth doing, ahead of any new feature.
+What it still has not done is meet a real corpus. Everything above is true of
+the inputs it has been shown, and almost all of those were written by this
+repository. That remains the next thing worth doing, ahead of any new feature.
