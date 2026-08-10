@@ -71,6 +71,57 @@ impl<'a> Bits<'a> {
         self.at = self.at.saturating_add(count as usize);
     }
 
+    /// Whether an EOL sits at the cursor (T.4 §4.1.2: eleven zeros then a one).
+    ///
+    /// A stream may pad with extra zeros to byte-align the code that follows,
+    /// so any run of at least eleven zeros ending in a one is an EOL.
+    fn at_eol(&self) -> bool {
+        let mut zeros = 0u32;
+        let mut index = self.at;
+        let end = self.data.len() * 8;
+        while index < end && zeros < 64 {
+            let bit = self
+                .data
+                .get(index / 8)
+                .map_or(0, |byte| (byte >> (7 - (index % 8))) & 1);
+            if bit == 1 {
+                return zeros >= 11;
+            }
+            zeros += 1;
+            index += 1;
+        }
+        false
+    }
+
+    /// Steps past an EOL, however much zero padding it carries.
+    fn skip_eol(&mut self) {
+        let end = self.data.len() * 8;
+        while self.at < end {
+            let bit = self
+                .data
+                .get(self.at / 8)
+                .map_or(0, |byte| (byte >> (7 - (self.at % 8))) & 1);
+            self.at += 1;
+            if bit == 1 {
+                return;
+            }
+        }
+    }
+
+    /// Whether the remaining bits are all zero.
+    ///
+    /// Trailing zero padding is how a stream ends when it carries no EOFB, and
+    /// reading it as data yields a spurious truncation warning on a file that
+    /// is perfectly well formed.
+    fn only_padding_left(&self) -> bool {
+        let end = self.data.len() * 8;
+        (self.at..end).all(|index| {
+            self.data
+                .get(index / 8)
+                .is_none_or(|byte| (byte >> (7 - (index % 8))) & 1 == 0)
+        })
+    }
+
     fn bit(&mut self) -> u32 {
         let value = self.peek(1);
         self.skip(1);
@@ -370,6 +421,21 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
             break;
         }
 
+        // T.4 §4.1.2: rows may be separated by an EOL, and a stream may open
+        // with one. Two in a row is EOFB (T.6) or RTC (T.4) — the end of the
+        // image, not a damaged row. Reading an EOL as data aborted the whole
+        // image, which is what happened to every fax stream that carried them.
+        if bits.at_eol() {
+            bits.skip_eol();
+            if bits.at_eol() {
+                // EOFB/RTC: whatever follows is not image data.
+                break;
+            }
+        }
+        if bits.exhausted() || bits.only_padding_left() {
+            break;
+        }
+
         // 7.4.6: /K decides the mode. A positive K means each row announces
         // its own mode with a bit after the EOL, which this reads when the
         // data provides it and otherwise assumes one-dimensional.
@@ -382,7 +448,16 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
         };
 
         let Some(changes) = decode_row(&mut bits, &reference, columns, two_dimensional) else {
+            // A row that will not decode is one row, not the rest of the page.
+            // Repeating the row above is what every fax decoder does with a
+            // damaged line: it keeps the image legible and localises the loss.
             warnings.push(Warning::TruncatedInput);
+            if rows_done > 0 && out.len() >= columns && params.rows > rows_done {
+                let previous: Vec<u8> = out[out.len() - columns..].to_vec();
+                out.extend_from_slice(&previous);
+                rows_done += 1;
+                // Nothing else can be decoded from a broken bit position.
+            }
             break;
         };
 
@@ -558,6 +633,83 @@ fn following(reference: &[usize], b1: usize, columns: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a bit string from a pattern of '0' and '1', padded with zeros.
+    fn bits_from(pattern: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut byte = 0u8;
+        let mut count = 0u32;
+        for c in pattern.chars().filter(|c| *c == '0' || *c == '1') {
+            byte = (byte << 1) | u8::from(c == '1');
+            count += 1;
+            if count % 8 == 0 {
+                out.push(byte);
+                byte = 0;
+            }
+        }
+        if count % 8 != 0 {
+            out.push(byte << (8 - count % 8));
+        }
+        out
+    }
+
+    /// T.4 §4.1.2: an EOL is eleven zeros and a one. Reading it as data
+    /// aborted the entire image, which is what happened to every fax stream
+    /// that carried them — and carrying them is the norm for `/K > 0`.
+    #[test]
+    fn an_end_of_line_code_is_recognised() {
+        let plain = bits_from("00000000000 1 0101");
+        assert!(Bits::new(&plain).at_eol());
+
+        // Extra zero padding before the one is legal and still an EOL.
+        let padded = bits_from("0000000000000000 1");
+        assert!(Bits::new(&padded).at_eol());
+
+        // Ten zeros is not enough.
+        let short = bits_from("0000000000 1");
+        assert!(!Bits::new(&short).at_eol());
+    }
+
+    #[test]
+    fn skipping_an_end_of_line_lands_after_it() {
+        let data = bits_from("00000000000 1 1101");
+        let mut reader = Bits::new(&data);
+        reader.skip_eol();
+        // The first data bit after the EOL is a one.
+        assert_eq!(reader.peek(1), 1);
+    }
+
+    /// Trailing zeros are padding, not a truncated row. Reading them as data
+    /// warned about a file that was perfectly well formed.
+    #[test]
+    fn trailing_padding_is_not_mistaken_for_data() {
+        let data = bits_from("1101 0000000000000000");
+        let mut reader = Bits::new(&data);
+        reader.skip(4);
+        assert!(reader.only_padding_left());
+    }
+
+    /// An all-white row, then an EOL, then another: the EOL must not end the
+    /// image or corrupt the row after it.
+    #[test]
+    fn rows_separated_by_end_of_line_codes_both_decode() {
+        // 0x35 is the white run-length code for 1728, the standard width.
+        let mut data = Vec::new();
+        data.extend_from_slice(&bits_from("00110101"));
+        data.extend_from_slice(&bits_from("00000000000 1"));
+        data.extend_from_slice(&bits_from("00110101"));
+
+        let params = CcittParams {
+            k: 0,
+            columns: 1728,
+            rows: 2,
+            black_is_1: false,
+            byte_align: false,
+        };
+        let (out, _) = decode(&data, &params, 1 << 20);
+        assert_eq!(out.len(), 1728 * 2, "both rows decoded");
+        assert!(out.iter().all(|p| *p == 255), "and both are white");
+    }
 
     /// Packs a sequence of `(length, code)` pairs into bytes.
     fn pack(codes: &[(u32, u32)]) -> Vec<u8> {
