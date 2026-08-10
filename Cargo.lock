@@ -276,9 +276,11 @@ dependencies = [
 name = "tinker-pdf"
 version = "0.0.1"
 dependencies = [
+ "tinker-pdf-color",
  "tinker-pdf-content",
  "tinker-pdf-cos",
  "tinker-pdf-crypto",
+ "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-raster",
  "tinker-pdf-render",

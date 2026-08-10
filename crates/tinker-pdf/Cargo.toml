@@ -15,3 +15,8 @@ tinker-pdf-crypto = { workspace = true }
 tinker-pdf-content = { workspace = true }
 tinker-pdf-render = { workspace = true }
 tinker-pdf-raster = { workspace = true }
+tinker-pdf-filters = { workspace = true }
+tinker-pdf-color = { workspace = true }
+
+[dev-dependencies]
+tinker-pdf-cos = { workspace = true }

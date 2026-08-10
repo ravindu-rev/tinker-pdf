@@ -72,14 +72,36 @@ pub enum RenderWarning {
     Cancelled,
 }
 
-/// Where glyph outlines come from, supplied by the caller so this crate stays
-/// free of PDF dictionaries.
+/// A decoded image, ready to draw.
+#[derive(Clone, Debug)]
+pub struct DecodedImage {
+    /// Width in samples.
+    pub width: u32,
+    /// Height in samples.
+    pub height: u32,
+    /// RGB, three bytes per sample, row-major from the top.
+    pub rgb: Vec<u8>,
+    /// Per-sample opacity from a mask; empty means fully opaque.
+    pub alpha: Vec<u8>,
+}
+
+/// Where glyph outlines and image data come from, supplied by the caller so
+/// this crate stays free of PDF dictionaries.
 pub trait GlyphSource {
     /// The outline of one glyph, in a space where one unit is one em.
     ///
     /// Returning `None` means the glyph could not be drawn, which the renderer
     /// reports rather than substituting a shape.
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline>;
+
+    /// A named image XObject, decoded to RGB.
+    ///
+    /// `Err` carries the codec's name so the warning can say what was missing;
+    /// `Ok(None)` means the resource is not an image at all.
+    fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+        let _ = name;
+        Ok(None)
+    }
 }
 
 /// A `GlyphSource` that has nothing, for callers that only want geometry.
@@ -160,6 +182,86 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             None => mask,
         };
         self.canvas.fill_mask(&mask, color, alpha);
+    }
+
+    /// Draws a decoded image into the unit square of the current transform.
+    ///
+    /// 8.9.5.2: an image occupies the unit square in user space whatever its
+    /// pixel dimensions, so the transform carries the placement. Sampling maps
+    /// *backwards* — every destination pixel takes exactly one source lookup —
+    /// which is what avoids the seams and double-writes a forward map leaves
+    /// under rotation or scaling.
+    fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
+        if image.width == 0 || image.height == 0 {
+            return;
+        }
+
+        let unit_to_device = state.ctm.then(&self.base);
+        let Some(inverse) = invert(&unit_to_device) else {
+            return; // A degenerate transform maps the image to nothing.
+        };
+
+        // Only the pixels the unit square could cover need visiting.
+        let corners = [
+            unit_to_device.apply(0.0, 0.0),
+            unit_to_device.apply(1.0, 0.0),
+            unit_to_device.apply(0.0, 1.0),
+            unit_to_device.apply(1.0, 1.0),
+        ];
+        if corners
+            .iter()
+            .any(|(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return;
+        }
+        let xs = corners.iter().map(|(x, _)| *x);
+        let ys = corners.iter().map(|(_, y)| *y);
+        let x0 = xs.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
+        let x1 =
+            (xs.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(self.canvas.width);
+        let y0 = ys.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
+        let y1 =
+            (ys.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(self.canvas.height);
+
+        let alpha = state.fill_alpha.clamp(0.0, 1.0);
+        for py in y0..y1 {
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            for px in x0..x1 {
+                // Sample at the pixel's centre.
+                let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+
+                // Image rows run top-down; the unit square's v runs upward.
+                let sx = ((u * f64::from(image.width)) as u32).min(image.width - 1);
+                let sy = (((1.0 - v) * f64::from(image.height)) as u32).min(image.height - 1);
+                let index = (sy as usize)
+                    .saturating_mul(image.width as usize)
+                    .saturating_add(sx as usize);
+
+                let Some(rgb) = image.rgb.get(index * 3..index * 3 + 3) else {
+                    continue;
+                };
+                let coverage = image.alpha.get(index).copied().unwrap_or(255);
+                if coverage == 0 {
+                    continue;
+                }
+                let clip = self
+                    .clip
+                    .as_ref()
+                    .map_or(255, |mask| mask.at(px as i32, py as i32));
+                if clip == 0 {
+                    continue;
+                }
+
+                let effective = alpha * f64::from(coverage) / 255.0 * f64::from(clip) / 255.0;
+                self.canvas
+                    .blend_pixel(px, py, Color::rgb(rgb[0], rgb[1], rgb[2]), effective);
+            }
+        }
     }
 
     /// Converts interpreter path segments into a rasterizer path.
@@ -368,19 +470,32 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.paint(&path, FillRule::NonZero, color, state.fill_alpha);
     }
 
-    fn draw_image(&mut self, image: &ImageRef, _state: &GraphicsState) {
-        // Images arrive here identified but not decoded; wiring the decoders
-        // through is the next milestone of this phase. Until then a page with
-        // an image still renders everything else and says what was skipped
-        // (ruling 2).
-        let codec = if image.inline {
-            "inline".to_string()
+    fn draw_image(&mut self, image: &ImageRef, state: &GraphicsState) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
+
+        let decoded = if image.inline {
+            // 8.9.7: inline image data is scanned past rather than captured,
+            // so there is nothing here to draw.
+            Err("inline".to_string())
         } else {
-            String::from_utf8_lossy(&image.name).into_owned()
+            match self.glyphs.image(&image.name) {
+                Ok(Some(decoded)) => Ok(decoded),
+                Ok(None) => Err(String::from_utf8_lossy(&image.name).into_owned()),
+                Err(codec) => Err(codec),
+            }
         };
-        let warning = RenderWarning::UnsupportedImage { codec };
-        if !self.warnings.contains(&warning) {
-            self.warnings.push(warning);
+
+        match decoded {
+            Ok(decoded) => self.blit(&decoded, state),
+            Err(codec) => {
+                // Ruling 2: the page renders without it and says so.
+                let warning = RenderWarning::UnsupportedImage { codec };
+                if !self.warnings.contains(&warning) {
+                    self.warnings.push(warning);
+                }
+            }
         }
     }
 
@@ -394,6 +509,23 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             self.clip = clip;
         }
     }
+}
+
+/// Inverts an affine transform, or `None` when it is degenerate.
+fn invert(m: &Matrix) -> Option<Matrix> {
+    let determinant = m.a * m.d - m.b * m.c;
+    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+        return None;
+    }
+    let inv = 1.0 / determinant;
+    Some(Matrix {
+        a: m.d * inv,
+        b: -m.b * inv,
+        c: -m.c * inv,
+        d: m.a * inv,
+        e: (m.c * m.f - m.d * m.e) * inv,
+        f: (m.b * m.e - m.a * m.f) * inv,
+    })
 }
 
 fn last_point(path: &Path) -> Option<(f64, f64)> {
@@ -628,6 +760,104 @@ mod tests {
 
         assert_eq!(nonzero.pixel(10, 10).map(|c| c.r), Some(0), "filled");
         assert_eq!(evenodd.pixel(10, 10).map(|c| c.r), Some(255), "a hole");
+    }
+
+    /// A source that answers with one solid-colour image.
+    struct OneImage {
+        color: (u8, u8, u8),
+        alpha: Vec<u8>,
+    }
+
+    impl GlyphSource for OneImage {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+            if name != b"Im0" {
+                return Ok(None);
+            }
+            let (r, g, b) = self.color;
+            Ok(Some(DecodedImage {
+                width: 2,
+                height: 2,
+                rgb: vec![r, g, b, r, g, b, r, g, b, r, g, b],
+                alpha: self.alpha.clone(),
+            }))
+        }
+    }
+
+    fn render_with(content: &[u8], size: u32, source: &OneImage) -> (Canvas, Vec<RenderWarning>) {
+        let canvas = Canvas::new(size, size, PixelFormat::Rgb8, Color::WHITE);
+        let base = page_transform(f64::from(size), 1.0);
+        let mut renderer = Renderer::new(canvas, base, source);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+        renderer.finish()
+    }
+
+    #[test]
+    fn an_image_lands_in_the_unit_square_of_its_transform() {
+        let source = OneImage {
+            color: (255, 0, 0),
+            alpha: Vec::new(),
+        };
+        // Ten by ten at the origin: the bottom-left corner in PDF space.
+        let (canvas, warnings) = render_with(b"q 10 0 0 10 0 0 cm /Im0 Do Q", 20, &source);
+
+        assert!(warnings.is_empty(), "a decodable image warns about nothing");
+        assert_eq!(
+            canvas.pixel(5, 15),
+            Some(Color::rgb(255, 0, 0)),
+            "inside the placement"
+        );
+        assert_eq!(
+            canvas.pixel(15, 5),
+            Some(Color::WHITE),
+            "outside it, untouched"
+        );
+    }
+
+    #[test]
+    fn an_images_alpha_channel_is_honoured() {
+        let source = OneImage {
+            color: (0, 0, 0),
+            // The two left samples transparent, the two right opaque.
+            alpha: vec![0, 255, 0, 255],
+        };
+        let (canvas, _) = render_with(b"q 20 0 0 20 0 0 cm /Im0 Do Q", 20, &source);
+
+        assert_eq!(
+            canvas.pixel(2, 10),
+            Some(Color::WHITE),
+            "a transparent sample leaves the page alone"
+        );
+        assert_eq!(
+            canvas.pixel(17, 10),
+            Some(Color::BLACK),
+            "an opaque one paints"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_image_transform_draws_nothing() {
+        let source = OneImage {
+            color: (255, 0, 0),
+            alpha: Vec::new(),
+        };
+        // A zero-area transform is not invertible.
+        let (canvas, _) = render_with(b"q 0 0 0 0 5 5 cm /Im0 Do Q", 20, &source);
+        assert_eq!(canvas.pixel(5, 15), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn an_unknown_image_still_warns() {
+        let source = OneImage {
+            color: (255, 0, 0),
+            alpha: Vec::new(),
+        };
+        let (_, warnings) = render_with(b"q 10 0 0 10 0 0 cm /Missing Do Q", 20, &source);
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })));
     }
 
     #[test]

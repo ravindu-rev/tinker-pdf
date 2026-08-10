@@ -172,6 +172,36 @@ impl Canvas {
         }
     }
 
+    /// Composites one pixel, for callers that sample rather than rasterize.
+    ///
+    /// An image is drawn by mapping device pixels back into its samples, so
+    /// there is no coverage mask to go through — each pixel is decided
+    /// individually and blended here.
+    pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color, alpha: f64) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let alpha = if alpha.is_finite() {
+            (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
+        } else {
+            return;
+        };
+        let effective = mul255(alpha, u32::from(color.a));
+        if effective == 0 {
+            return;
+        }
+
+        let components = self.format.components();
+        let source = self.encode(color);
+        let base = (y as usize) * self.stride + (x as usize) * components;
+        blend(
+            self.data.get_mut(base..base + components),
+            &source,
+            effective,
+            self.format,
+        );
+    }
+
     /// The pixel at `(x, y)` as a colour, for tests and readback.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<Color> {

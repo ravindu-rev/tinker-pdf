@@ -322,3 +322,32 @@ fn documents_are_usable_from_several_threads() {
         handle.join().expect("no thread panicked");
     }
 }
+
+/// Rendering must put ink on the page, not merely produce a bitmap of the
+/// right size — a blank render passes every dimension assertion above.
+///
+/// Vector content, because the fixtures use base-14 fonts and carry no
+/// embedded font program: there is no outline to draw for their text, and
+/// substituting one needs a bundled face that this engine does not yet ship.
+/// See `docs/STATUS.md`.
+#[test]
+fn a_rendered_page_actually_has_marks_on_it() {
+    use tinker_pdf_cos::DocumentBuilder;
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(100.0, 100.0, |page| {
+        page.fill_rect(10.0, 10.0, 50.0, 30.0, 0.0);
+    });
+    let doc = Document::open(builder.finish()).expect("the built document opens");
+
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default());
+
+    let dark = bitmap.data.iter().filter(|&&b| b < 200).count();
+    assert!(
+        dark > 1000,
+        "a 50x30 filled rectangle should darken thousands of subpixels, got {dark}"
+    );
+}

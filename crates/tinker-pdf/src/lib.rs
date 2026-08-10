@@ -21,12 +21,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::collections::HashMap;
+mod resources;
+
 use std::sync::Arc;
 
-use tinker_pdf_content::{interpret, FontSource, Matrix, TextDevice};
-use tinker_pdf_cos::{font as cos_font, outline as cos_outline, pages as cos_pages, CosDocument};
-use tinker_pdf_render::NoGlyphs;
+use tinker_pdf_content::{interpret, Matrix, TextDevice};
+use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages, CosDocument};
 
 pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
 pub use tinker_pdf_cos::{
@@ -336,13 +336,13 @@ impl Page {
         let base = tinker_pdf_render::page_transform(h, scale);
 
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let fonts = PageFonts::new(&self.doc, &self.inner);
+        let resources = resources::PageResources::new(&self.doc, &self.inner);
 
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &NoGlyphs);
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
-        interpret(&content, Matrix::IDENTITY, &mut renderer, &fonts);
+        interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
         let (canvas, warnings) = renderer.finish();
 
         Bitmap {
@@ -359,12 +359,12 @@ impl Page {
     #[must_use]
     pub fn text(&self) -> TextPage {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let fonts = PageFonts::new(&self.doc, &self.inner);
+        let resources = resources::PageResources::new(&self.doc, &self.inner);
 
         let mut device = TextDevice::new();
         // Text is reported in PDF user space, y upward, which is the space the
         // page's own boxes are in; a device transform is the renderer's job.
-        interpret(&content, Matrix::IDENTITY, &mut device, &fonts);
+        interpret(&content, Matrix::IDENTITY, &mut device, &resources);
         device.finish()
     }
 }
@@ -376,55 +376,6 @@ impl core::fmt::Debug for Page {
             .field("size", &self.size())
             .field("rotation", &self.rotation())
             .finish()
-    }
-}
-
-/// The fonts of one page, resolved once and handed to the interpreter.
-struct PageFonts {
-    by_name: HashMap<Vec<u8>, Arc<cos_font::Font>>,
-    ids: HashMap<Vec<u8>, u64>,
-}
-
-impl PageFonts {
-    fn new(doc: &CosDocument, page: &cos_pages::Page) -> PageFonts {
-        let mut by_name = HashMap::new();
-        let mut ids = HashMap::new();
-
-        if let Some(resources) = page.resources {
-            if let Ok(object) = doc.get(resources) {
-                if let Some(dict) = object.as_dict() {
-                    for (name, font) in cos_font::from_resources(doc, dict) {
-                        if let Some(bytes) = doc.name_bytes(name) {
-                            let key = bytes.to_vec();
-                            ids.insert(key.clone(), u64::from(name.id()));
-                            by_name.insert(key, font);
-                        }
-                    }
-                }
-            }
-        }
-
-        PageFonts { by_name, ids }
-    }
-}
-
-impl FontSource for PageFonts {
-    fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
-        let Some(font) = self.by_name.get(font) else {
-            return Vec::new();
-        };
-        font.decode(bytes)
-            .into_iter()
-            .map(|d| (d.code, d.text, d.width))
-            .collect()
-    }
-
-    fn is_vertical(&self, font: &[u8]) -> bool {
-        self.by_name.get(font).is_some_and(|f| f.is_vertical())
-    }
-
-    fn font_id(&self, font: &[u8]) -> u64 {
-        self.ids.get(font).copied().unwrap_or(0)
     }
 }
 
