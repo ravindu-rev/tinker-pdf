@@ -34,8 +34,8 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages, CosDocument};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
 pub use tinker_pdf_cos::{
-    AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue, LadderLevel,
-    Metadata, OutlineItem, Warning, WarningKind,
+    Action, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue, LadderLevel,
+    Link, Metadata, OutlineItem, Warning, WarningKind,
 };
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
@@ -412,6 +412,15 @@ impl Page {
             data: canvas.data,
             warnings,
         }
+    }
+
+    /// The page's link annotations, in `/Annots` order (12.5.6.5).
+    ///
+    /// Only links. Every other annotation subtype belongs to the annotation
+    /// model rather than to navigation.
+    #[must_use]
+    pub fn links(&self) -> Vec<Link> {
+        tinker_pdf_cos::links(&self.doc, self.inner.reference)
     }
 
     /// The page's text.

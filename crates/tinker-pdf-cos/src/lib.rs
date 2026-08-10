@@ -75,7 +75,7 @@ mod streams;
 pub use appearance::synthesize as synthesize_appearance;
 pub use build::{DocumentBuilder, ImageData, OutlineEntry, PageBuilder};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
-pub use dest::{Action, DestKind, Destination, Resolver};
+pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
 pub use edit::{annot, DocumentEditor};
 pub use fill::text_appearance;

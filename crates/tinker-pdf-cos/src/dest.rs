@@ -9,7 +9,7 @@
 use crate::doc::CosDocument;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
-use crate::pages::Page;
+use crate::pages::{Page, Rect};
 
 /// How a destination positions the page it names (12.3.2.2, Table 151).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -378,6 +378,89 @@ impl<'d> Resolver<'d> {
     }
 }
 
+/// One link annotation on a page (12.5.6.5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    /// The annotation object, when `/Annots` named it indirectly.
+    pub reference: Option<ObjRef>,
+    /// `/Rect`, with its corners ordered.
+    pub rect: Rect,
+    /// Where the link goes.
+    ///
+    /// `None` for a `/Link` that carries neither `/Dest` nor a usable `/A`,
+    /// which is legal, useless, and worth reporting rather than hiding.
+    pub target: Option<Action>,
+}
+
+/// The link annotations of a page, in `/Annots` order.
+///
+/// Only `/Subtype /Link` is returned. Every other annotation subtype belongs
+/// to the annotation model in [`crate::edit`], and reaching for them from here
+/// is how one gets written twice.
+///
+/// 12.5.6.5: `/Dest` and `/A` are alternatives, and a file that carries both
+/// is malformed. `/Dest` wins, because a destination cannot launch anything
+/// and an action can.
+#[must_use]
+pub fn links(doc: &CosDocument, page: ObjRef) -> Vec<Link> {
+    let Ok(object) = doc.get(page) else {
+        return Vec::new();
+    };
+    let Some(dict) = object.as_dict() else {
+        return Vec::new();
+    };
+
+    let annots = doc.resolve_key(dict, doc.intern(b"Annots"));
+    let Some(items) = annots.as_array() else {
+        return Vec::new();
+    };
+
+    let resolver = Resolver::new(doc);
+    let subtype_key = doc.intern(b"Subtype");
+    let link_name = doc.intern(b"Link");
+    let rect_key = doc.intern(b"Rect");
+    let dest_key = doc.intern(b"Dest");
+
+    let mut out = Vec::new();
+    for item in items.iter().take(crate::limits::MAX_ARRAY_LEN) {
+        let reference = item.as_objref();
+        let resolved = doc.resolve(item);
+        let Some(annot) = resolved.as_dict() else {
+            continue;
+        };
+        if annot.get_name(subtype_key) != Some(link_name) {
+            continue;
+        }
+
+        let Some(rect) = doc
+            .resolve_key(annot, rect_key)
+            .as_array()
+            .and_then(Rect::from_array)
+        else {
+            // 12.5.2 requires /Rect; without one there is nothing to click.
+            continue;
+        };
+
+        let target = annot
+            .get(dest_key)
+            .and_then(|value| resolver.destination(value))
+            .map(Action::GoTo)
+            .or_else(|| {
+                // 12.5.3: /A holds the action dictionary itself, not the
+                // annotation that carries it.
+                let action = doc.resolve_key(annot, doc.intern(b"A"));
+                resolver.action(action.as_dict()?)
+            });
+
+        out.push(Link {
+            reference,
+            rect,
+            target,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +472,76 @@ mod tests {
         let uri = Destination::Uri(b"https://example.invalid/x".to_vec());
         let named = Destination::Named(b"https://example.invalid/x".to_vec());
         assert_ne!(uri, named);
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    fn document() -> CosDocument {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /Dests 8 0 R >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+   /Annots [5 0 R 6 0 R 7 0 R 9 0 R] >>\nendobj\n\
+4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>\nendobj\n\
+5 0 obj\n<< /Type /Annot /Subtype /Link /Rect [10 20 90 40]\n\
+   /Dest [4 0 R /Fit] >>\nendobj\n\
+6 0 obj\n<< /Type /Annot /Subtype /Link /Rect [10 60 90 80]\n\
+   /A << /S /URI /URI (https://example.invalid/) >> >>\nendobj\n\
+7 0 obj\n<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] >>\nendobj\n\
+8 0 obj\n<< /Names [(chapter) [4 0 R /Fit]] >>\nendobj\n\
+9 0 obj\n<< /Type /Annot /Subtype /Link /Rect [10 100 90 120] >>\nendobj\n\
+trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n";
+        CosDocument::open(bytes).expect("it opens")
+    }
+
+    #[test]
+    fn only_link_annotations_are_returned() {
+        let doc = document();
+        let found = links(&doc, ObjRef::new(3, 0));
+        assert_eq!(found.len(), 3, "the /Square is not a link");
+        assert_eq!(found[0].rect.x0, 10.0);
+        assert_eq!(found[0].rect.y1, 40.0);
+    }
+
+    /// Ruling 6: an explicit destination stays explicit, and a URI is never
+    /// mistaken for one.
+    #[test]
+    fn a_destination_and_a_uri_stay_distinct() {
+        let doc = document();
+        let found = links(&doc, ObjRef::new(3, 0));
+
+        match &found[0].target {
+            Some(Action::GoTo(Destination::Explicit { page_index, .. })) => {
+                assert_eq!(*page_index, Some(1), "it points at the second page");
+            }
+            other => panic!("expected an explicit destination, got {other:?}"),
+        }
+
+        match &found[1].target {
+            Some(Action::Uri(uri)) => {
+                assert_eq!(uri.as_slice(), b"https://example.invalid/");
+            }
+            other => panic!("expected a URI action, got {other:?}"),
+        }
+    }
+
+    /// A link with neither `/Dest` nor `/A` is legal and useless. It is
+    /// reported with no target rather than dropped, because a reader that
+    /// draws link borders still has to draw this one.
+    #[test]
+    fn a_link_with_no_target_is_kept() {
+        let doc = document();
+        let found = links(&doc, ObjRef::new(3, 0));
+        assert!(found[2].target.is_none());
+        assert_eq!(found[2].reference, Some(ObjRef::new(9, 0)));
+    }
+
+    #[test]
+    fn a_page_with_no_annotations_has_no_links() {
+        let doc = document();
+        assert!(links(&doc, ObjRef::new(4, 0)).is_empty());
     }
 }
