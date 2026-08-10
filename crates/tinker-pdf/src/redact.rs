@@ -146,7 +146,14 @@ struct Pen {
     y: f64,
     line_x: f64,
     line_y: f64,
-    /// The scale `Tm` and `cm` apply, as `(x, y)`.
+    /// The scale and translation `cm` applies, as `(sx, sy, tx, ty)`.
+    ///
+    /// A redaction rectangle is given in *page* space, so content drawn under
+    /// a `cm` has to be mapped into it. Ignoring the transform measures every
+    /// glyph in the wrong space: `q 2 0 0 2 0 0 cm` halves every computed
+    /// position, so the rectangle covers the wrong half of the line.
+    ctm: (f64, f64, f64, f64),
+    /// The scale `Tm` applies, as `(x, y)`.
     ///
     /// A text matrix is not only a translation: `12 0 0 12 x y Tm` with a
     /// `/F0 1 Tf` is a perfectly ordinary way to write twelve-point text, and
@@ -182,6 +189,7 @@ impl Default for Pen {
             horizontal_scale: 1.0,
             leading: 0.0,
             rise: 0.0,
+            ctm: (1.0, 1.0, 0.0, 0.0),
             scale: (1.0, 1.0),
             skewed: false,
         }
@@ -253,6 +261,21 @@ fn rewrite(
         let mut rewritten = false;
 
         match op.as_slice() {
+            b"cm" => {
+                let (a, b, c, d) = (number(5), number(4), number(3), number(2));
+                let (e, f) = (number(1), number(0));
+                // Composed with whatever is already in force, because `cm`
+                // concatenates rather than replaces (8.4.4).
+                pen.ctm = (
+                    pen.ctm.0 * a,
+                    pen.ctm.1 * d,
+                    pen.ctm.2 + e * pen.ctm.0,
+                    pen.ctm.3 + f * pen.ctm.1,
+                );
+                if b.abs() > 1e-9 || c.abs() > 1e-9 {
+                    pen.skewed = true;
+                }
+            }
             b"q" => saved.push(pen),
             b"Q" => {
                 if let Some(restored) = saved.pop() {
@@ -455,12 +478,19 @@ fn redact_string(bytes: &[u8], pen: &Pen, font: Option<&Font>, areas: &[Redactio
         // Approximating is right here: an exact outline would let a descender
         // poking one hundredth of a point into the box decide the redaction,
         // and erring towards removal is the safe direction anyway.
-        let x0 = x.min(x + advance);
-        let x1 = x.max(x + advance);
-        let y0 = pen.y + pen.rise * pen.scale.1;
+        // Text space to page space: the transformation matrix in force when
+        // the glyph was shown. The rectangle a caller gave is in page space,
+        // so the glyph has to be measured there and not in whatever space the
+        // content stream happened to be using.
+        let to_page_x = |v: f64| v * pen.ctm.0 + pen.ctm.2;
+        let to_page_y = |v: f64| v * pen.ctm.1 + pen.ctm.3;
+
+        let x0 = to_page_x(x.min(x + advance));
+        let x1 = to_page_x(x.max(x + advance));
+        let y0 = to_page_y(pen.y + pen.rise * pen.scale.1);
         // The height scales with the text matrix too, so a `Tm` that sets the
         // size leaves a box of the right height rather than one em tall.
-        let y1 = y0 + pen.size * pen.scale.1;
+        let y1 = to_page_y(pen.y + pen.rise * pen.scale.1 + pen.size * pen.scale.1);
         let inside = areas.iter().any(|redaction| {
             let a = redaction.area;
             x1 > a.x0 && x0 < a.x1 && y1 > a.y0 && y0 < a.y1
@@ -751,6 +781,77 @@ mod tests {
         assert!(
             streams.contains("SECRET"),
             "and the text is intact rather than half-removed"
+        );
+    }
+
+    /// A redaction rectangle is in page space. Content drawn under a `cm` is
+    /// in some other space, and ignoring the transform measured every glyph in
+    /// the wrong one — so the rectangle covered the wrong part of the line, or
+    /// nothing at all.
+    #[test]
+    fn a_transform_is_mapped_into_page_space() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(400.0, 200.0, |page| {
+            // Everything at double scale: the text is written at (5, 25) in
+            // its own space, which is (10, 50) on the page.
+            page.raw(
+                b"q 2 0 0 2 0 0 cm BT /F0 6 Tf 5 25 Td (PUBLIC SECRET) Tj ET Q
+",
+            );
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        assert!(all_streams(&doc).contains("SECRET"));
+
+        // In page space the text starts at x = 10 and is 12pt tall. `PUBLIC`
+        // ends near x = 65, so a band from 57 rightwards takes the second word.
+        let band = Redaction {
+            area: Rect {
+                x0: 57.0,
+                y0: 45.0,
+                x1: 400.0,
+                y1: 70.0,
+            },
+            mark: false,
+        };
+
+        let (streams, report) = redact_to_streams(doc, &[band]);
+        assert!(report.glyphs > 0, "the transform was followed");
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+        assert!(streams.contains("PUBLIC"), "and the first word survives");
+    }
+
+    /// The transform is restored by `Q`, so a rectangle over content outside
+    /// the `q`/`Q` pair is not measured through it.
+    #[test]
+    fn a_transform_does_not_outlive_its_q() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(400.0, 200.0, |page| {
+            page.raw(
+                b"q 2 0 0 2 0 0 cm BT /F0 6 Tf 5 60 Td (SCALED) Tj ET Q
+                  BT /F0 12 Tf 10 30 Td (PLAIN) Tj ET
+",
+            );
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+
+        // A band over the lower line only, in page space.
+        let band = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 25.0,
+                x1: 400.0,
+                y1: 45.0,
+            },
+            mark: false,
+        };
+        let (streams, report) = redact_to_streams(doc, &[band]);
+        assert!(report.glyphs > 0);
+        assert!(!streams.contains("PLAIN"), "the lower line went");
+        assert!(
+            streams.contains("SCALED"),
+            "and the scaled line, which sits higher, stayed: {streams}"
         );
     }
 
