@@ -331,6 +331,25 @@ Wave 1 (1–4) sums to the M in [PLAN.md](../PLAN.md); wave 2 (5–7) sums to
 the top of its L band — milestone 7 shares nothing with 5–6 and can proceed
 in parallel if a second pair of hands exists.
 
+### Evidence, August 2026: progressive JPEG is not a tail case
+
+Milestone 6 was scheduled behind baseline on the assumption that progressive
+is the rarer half. The first eight real-world files ever put through the
+engine ([STATUS](../STATUS.md)) contained progressive JPEG in **four of
+them**, while JBIG2, JPX and arithmetic JPEG appeared in none.
+
+Eight files decide nothing on their own, and the sample is biased: they came
+from one machine and mostly from web-to-PDF tooling, which is exactly the
+software that emits progressive JPEG. What it does establish is that
+milestone 6 is not a long-tail item to sit indefinitely behind the flags in
+Non-goals, and that the codecs it was implicitly ranked alongside did not
+appear at all.
+
+Ruling 3 says schedule capabilities on hit-rates rather than on ambition. The
+action that implies is not "build progressive immediately" but "measure before
+ranking anything else against it" — run the pinned corpora through `tpdf
+check` and read the distribution off a sample large enough to mean something.
+
 ## Dependencies
 
 - **Upstream: none.** This is a leaf crate (ruling 8) — no COS types, no

@@ -37,7 +37,7 @@ than no plan.
 
 | Gap | Consequence | Where it belongs |
 | --- | --- | --- |
-| **No corpus has ever been run** | Correctness rests on unit tests, fixtures and a mutation sweep, not on the real-world corpus that would prove the leniency. The tools to run one now exist and nothing has been fetched through them. **This remains the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
+| **No corpus of any size has been run** | Eight real-world files have now been through `tpdf` (see below) — enough to be encouraging and far too few to be evidence. The pinned public corpora have still never been fetched. **This remains the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
 | **Fuzzing written but never run** | Eleven targets exist and compile against the real APIs; none has been executed, because that needs a nightly toolchain and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
 | **`oracle-diff` never met an oracle** | None of mutool, poppler or pdfium is installed on the machine it was written on. Its similarity metric is unit-tested; its subprocess plumbing is not. | [14](plans/14-testing-and-corpora.md) |
 | **No bundled substitute fonts** | A host can now supply faces through `FontProvider`, so this is no longer a blocker — but a caller that supplies nothing still gets no text for documents that embed no fonts. Bundling Liberation would fix it out of the box, and needs a licensing answer for Symbol and ZapfDingbats. | [05](plans/05-fonts.md) |
@@ -50,6 +50,33 @@ than no plan.
 | **Encrypt-on-save, linearization** | The options exist and reading handles both; writing produces neither. Encryption also needs the host entropy source wired. | [09](plans/09-writing.md) |
 | **Binding packaging** | All three compile; none is published, and there is no CI job building wheels or per-RID natives. | [13](plans/13-bindings.md) |
 | **Tinker integration** | Tinker still runs on MuPDF. Nothing has been swapped. See below. | [15](plans/15-tinker-integration.md) |
+
+## The first real files
+
+Eight documents from outside this repository — produced by Microsoft Print to
+PDF and by web-to-PDF tooling, none of them written by the engine — were run
+through `tpdf check`, `tpdf render` and `tpdf text`. Too small to be a corpus,
+large enough to be the first evidence that was not self-generated.
+
+| | Result |
+| --- | --- |
+| Opened | 8 of 8, all at ladder level **Trust**, zero warnings |
+| Rendered | 20 of 20 pages, no failures, every page with real ink except one |
+| Progressive JPEG | **4 of 8 files** — reported and degraded, not decoded |
+| No embedded fonts | 1 of 8 — rendered its rules and none of its text |
+| No text at all | 1 of 8, a scan with zero font resources; extracting nothing is correct |
+
+The finding worth acting on is the first one. **Progressive JPEG turned up in
+half of them.** Plan [02](plans/02-filters.md) defers it behind a capability
+flag pending corpus hit-rates, under ruling 3 — schedule capabilities on
+evidence rather than on guesswork. This is that evidence arriving earlier and
+louder than expected, on a sample where JBIG2 and JPX did not appear at all.
+It should be reweighted against them before any further filter work.
+
+Nothing here says the engine is correct on real files: no output was compared
+against another renderer, only checked for not failing and not being blank.
+It says the engine does not fall over on them, which is a different and much
+weaker claim.
 
 ## Where Tinker integration actually stands
 
