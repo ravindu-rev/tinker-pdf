@@ -22,6 +22,7 @@
 #![warn(missing_docs)]
 
 mod annots;
+pub mod fonts;
 pub mod redact;
 mod resources;
 
@@ -30,6 +31,7 @@ use std::sync::Arc;
 use tinker_pdf_content::{interpret, Matrix, TextDevice};
 use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages, CosDocument};
 
+pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
 pub use tinker_pdf_cos::{
     AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue, LadderLevel,
@@ -152,6 +154,12 @@ impl std::error::Error for OpenError {}
 #[derive(Clone)]
 pub struct Document {
     inner: Arc<CosDocument>,
+    /// Where glyphs come from for fonts the document does not embed.
+    ///
+    /// None by default: the engine bundles no faces and reads no font
+    /// directories, so a host that wants text drawn for such documents says
+    /// where to find it. See [`fonts`].
+    fonts: Option<Arc<dyn FontProvider>>,
 }
 
 impl Document {
@@ -168,7 +176,22 @@ impl Document {
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
         Ok(Document {
             inner: Arc::new(inner),
+            fonts: None,
         })
+    }
+
+    /// Supplies fonts for documents that do not embed their own.
+    ///
+    /// Without one, such a document extracts its text perfectly — the
+    /// standard-14 metrics are built in — and draws none of it, reporting
+    /// [`RenderWarning::UnreadableFont`]. The engine bundles no faces and
+    /// reads no font directories: bundling is a licensing decision and
+    /// reading a directory is an operating-system dependency, and
+    /// `wasm32-unknown-unknown` has neither.
+    #[must_use]
+    pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> Document {
+        self.fonts = Some(provider);
+        self
     }
 
     /// Whether the bytes look like a PDF, without opening them.
@@ -236,6 +259,7 @@ impl Document {
             .map(|inner| Page {
                 doc: self.inner.clone(),
                 inner,
+                fonts: self.fonts.clone(),
             })
             .collect()
     }
@@ -300,6 +324,7 @@ impl core::fmt::Debug for Document {
 pub struct Page {
     doc: Arc<CosDocument>,
     inner: cos_pages::Page,
+    fonts: Option<Arc<dyn FontProvider>>,
 }
 
 impl Page {
@@ -353,7 +378,8 @@ impl Page {
         let base = tinker_pdf_render::page_transform(h, scale);
 
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let resources = resources::PageResources::new(&self.doc, &self.inner);
+        let resources =
+            resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_deref());
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
@@ -363,7 +389,7 @@ impl Page {
         if options.annotations {
             // After the content, because an annotation sits on top of the
             // page rather than under it.
-            annots::draw(&self.doc, &self.inner, &mut renderer);
+            annots::draw(&self.doc, &self.inner, self.fonts.as_deref(), &mut renderer);
         }
         let (canvas, warnings) = renderer.finish();
 
@@ -381,7 +407,9 @@ impl Page {
     #[must_use]
     pub fn text(&self) -> TextPage {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let resources = resources::PageResources::new(&self.doc, &self.inner);
+        // Text extraction needs no glyph outlines — the widths come from the
+        // font dictionary — so no provider is consulted here.
+        let resources = resources::PageResources::new(&self.doc, &self.inner, None);
 
         let mut device = TextDevice::new();
         // Text is reported in PDF user space, y upward, which is the space the

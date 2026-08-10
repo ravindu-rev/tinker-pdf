@@ -14,6 +14,8 @@ use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
 use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt};
 use tinker_pdf_render::{DecodedImage, GlyphSource, Shading};
 
+use crate::fonts::{self, FontProvider, FontRequest};
+
 /// Extracted glyph outlines, keyed by font identity and character code.
 ///
 /// `None` records that a glyph was looked for and is not there, so a missing
@@ -38,7 +40,11 @@ pub struct PageResources {
 impl PageResources {
     /// Reads a page's resource dictionary.
     #[must_use]
-    pub fn new(doc: &Arc<CosDocument>, page: &cos_pages::Page) -> PageResources {
+    pub fn new(
+        doc: &Arc<CosDocument>,
+        page: &cos_pages::Page,
+        provider: Option<&dyn FontProvider>,
+    ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
         let mut programs = HashMap::new();
@@ -50,8 +56,8 @@ impl PageResources {
                 if let Some(bytes) = doc.name_bytes(name) {
                     let key = bytes.to_vec();
                     let id = u64::from(name.id());
-                    if let Some(program) = embedded_program(doc, &key, dict) {
-                        programs.insert(id, Arc::new(program));
+                    if let Some(program) = program_for(doc, &key, dict, &font, provider) {
+                        programs.insert(id, program);
                     }
                     font_ids.insert(key.clone(), id);
                     fonts.insert(key, font);
@@ -76,7 +82,11 @@ impl PageResources {
     /// resolving its fonts against the page's would find the wrong ones or
     /// none at all.
     #[must_use]
-    pub fn from_dict(doc: &Arc<CosDocument>, dict: Dict) -> PageResources {
+    pub fn from_dict(
+        doc: &Arc<CosDocument>,
+        dict: Dict,
+        provider: Option<&dyn FontProvider>,
+    ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
         let mut programs = HashMap::new();
@@ -85,8 +95,8 @@ impl PageResources {
             if let Some(bytes) = doc.name_bytes(name) {
                 let key = bytes.to_vec();
                 let id = u64::from(name.id());
-                if let Some(program) = embedded_program(doc, &key, &dict) {
-                    programs.insert(id, Arc::new(program));
+                if let Some(program) = program_for(doc, &key, &dict, &font, provider) {
+                    programs.insert(id, program);
                 }
                 font_ids.insert(key.clone(), id);
                 fonts.insert(key, font);
@@ -216,6 +226,31 @@ impl PageResources {
 }
 
 /// The embedded font program of a font resource, if it has one (9.9).
+/// The font program to draw a font's glyphs with: the embedded one, or a
+/// substitute the host supplied.
+///
+/// The document's own program always wins. A substitute is a different face
+/// with different outlines, and preferring it over what the file carries
+/// would change how a correctly embedded document looks.
+fn program_for(
+    doc: &CosDocument,
+    name: &[u8],
+    resources: &Dict,
+    font: &cos_font::Font,
+    provider: Option<&dyn FontProvider>,
+) -> Option<Arc<Vec<u8>>> {
+    if let Some(embedded) = embedded_program(doc, name, resources) {
+        return Some(Arc::new(embedded));
+    }
+
+    let provider = provider?;
+    if !fonts::is_substitutable(font) {
+        return None;
+    }
+    let dict = fonts::font_dict(doc, resources, name)?;
+    provider.substitute(&FontRequest::read(doc, &dict))
+}
+
 fn embedded_program(doc: &CosDocument, name: &[u8], resources: &Dict) -> Option<Vec<u8>> {
     let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
     let dict = fonts.as_dict()?;

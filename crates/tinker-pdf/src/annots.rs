@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tinker_pdf_content::{interpret, Device, Matrix};
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Object, Rect};
 
+use crate::fonts::FontProvider;
 use crate::resources::PageResources;
 
 /// 12.5.3: the flags that keep an annotation off the page.
@@ -23,7 +24,12 @@ const HIDDEN: i64 = 1 << 1;
 const NO_VIEW: i64 = 1 << 5;
 
 /// Draws every visible annotation of a page.
-pub fn draw<D: Device>(doc: &Arc<CosDocument>, page: &cos_pages::Page, device: &mut D) {
+pub fn draw<D: Device>(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+    provider: Option<&dyn FontProvider>,
+    device: &mut D,
+) {
     let Ok(object) = doc.get(page.reference) else {
         return;
     };
@@ -45,12 +51,17 @@ pub fn draw<D: Device>(doc: &Arc<CosDocument>, page: &cos_pages::Page, device: &
             _ => None,
         };
         if let Some(annotation) = annotation {
-            draw_one(doc, &annotation, device);
+            draw_one(doc, &annotation, provider, device);
         }
     }
 }
 
-fn draw_one<D: Device>(doc: &Arc<CosDocument>, annotation: &Dict, device: &mut D) {
+fn draw_one<D: Device>(
+    doc: &Arc<CosDocument>,
+    annotation: &Dict,
+    provider: Option<&dyn FontProvider>,
+    device: &mut D,
+) {
     let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
     if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
         return;
@@ -101,7 +112,7 @@ fn draw_one<D: Device>(doc: &Arc<CosDocument>, annotation: &Dict, device: &mut D
         .as_dict()
         .cloned()
         .unwrap_or_default();
-    let resources = PageResources::from_dict(doc, resources);
+    let resources = PageResources::from_dict(doc, resources, provider);
 
     interpret(&content, transform, device, &resources);
 }
