@@ -146,6 +146,21 @@ struct Pen {
     y: f64,
     line_x: f64,
     line_y: f64,
+    /// The scale `Tm` and `cm` apply, as `(x, y)`.
+    ///
+    /// A text matrix is not only a translation: `12 0 0 12 x y Tm` with a
+    /// `/F0 1 Tf` is a perfectly ordinary way to write twelve-point text, and
+    /// reading only the translation leaves every advance twelve times too
+    /// small — so the glyphs a rectangle covers are computed from positions
+    /// that drift further wrong across the line, and the wrong text is cut.
+    scale: (f64, f64),
+    /// Whether the text or transformation matrix is rotated or skewed.
+    ///
+    /// The pen here is one-dimensional and cannot follow rotated text. Rather
+    /// than cut the wrong glyphs, a rotated run is left alone and reported:
+    /// under-redacting is visible, and over-redacting destroys content that
+    /// was never meant to go.
+    skewed: bool,
     size: f64,
     char_spacing: f64,
     word_spacing: f64,
@@ -167,6 +182,8 @@ impl Default for Pen {
             horizontal_scale: 1.0,
             leading: 0.0,
             rise: 0.0,
+            scale: (1.0, 1.0),
+            skewed: false,
         }
     }
 }
@@ -180,6 +197,9 @@ impl Pen {
     }
 
     /// The displacement of one decoded code, per 9.4.4.
+    ///
+    /// In *text space*, then scaled by the text matrix's horizontal factor,
+    /// because the rectangle a caller gave is in page space.
     fn advance(&self, code: &tinker_pdf_cos::DecodedCode) -> f64 {
         // Word spacing applies to single-byte code 32 only — the classic bug
         // is applying it to a two-byte CID that happens to equal 32.
@@ -188,7 +208,9 @@ impl Pen {
         } else {
             0.0
         };
-        (code.width / 1000.0 * self.size + self.char_spacing + word) * self.horizontal_scale
+        (code.width / 1000.0 * self.size + self.char_spacing + word)
+            * self.horizontal_scale
+            * self.scale.0
     }
 
     /// The displacement of a whole string.
@@ -275,12 +297,15 @@ fn rewrite(
                 pen.y = pen.line_y;
             }
             b"Tm" => {
-                // Only the translation is tracked. A rotated or skewed text
-                // matrix is handled conservatively below.
+                let (a, b, c, d) = (number(5), number(4), number(3), number(2));
                 pen.line_x = number(1);
                 pen.line_y = number(0);
                 pen.x = pen.line_x;
                 pen.y = pen.line_y;
+                // 9.4.2: the matrix scales the glyph space as well as placing
+                // it, and `b`/`c` rotate or skew it.
+                pen.scale = (a, d);
+                pen.skewed = b.abs() > 1e-9 || c.abs() > 1e-9;
             }
             b"T*" => pen.next_line(),
             b"Tj" | b"'" | b"\"" => {
@@ -406,7 +431,11 @@ struct Cut {
 
 /// Removes the glyphs of `bytes` that fall inside a redaction.
 fn redact_string(bytes: &[u8], pen: &Pen, font: Option<&Font>, areas: &[Redaction]) -> Cut {
-    let Some(font) = font else {
+    // A rotated or skewed run cannot be measured by a pen that only moves
+    // along one axis. Leaving it is the safe failure: an under-redaction is
+    // visible to whoever checks, while cutting glyphs computed from wrong
+    // positions destroys text that was never meant to go.
+    let Some(font) = font.filter(|_| !pen.skewed) else {
         return Cut {
             runs: vec![Run::Text(bytes.to_vec())],
             removed: 0,
@@ -428,8 +457,10 @@ fn redact_string(bytes: &[u8], pen: &Pen, font: Option<&Font>, areas: &[Redactio
         // and erring towards removal is the safe direction anyway.
         let x0 = x.min(x + advance);
         let x1 = x.max(x + advance);
-        let y0 = pen.y + pen.rise;
-        let y1 = y0 + pen.size;
+        let y0 = pen.y + pen.rise * pen.scale.1;
+        // The height scales with the text matrix too, so a `Tm` that sets the
+        // size leaves a box of the right height rather than one em tall.
+        let y1 = y0 + pen.size * pen.scale.1;
         let inside = areas.iter().any(|redaction| {
             let a = redaction.area;
             x1 > a.x0 && x0 < a.x1 && y1 > a.y0 && y0 < a.y1
@@ -652,6 +683,75 @@ mod tests {
         assert!(streams.contains(" re f"), "a rectangle is painted");
         assert!(streams.contains("0 g"), "in black");
         assert!(!streams.contains("SECRET"), "and the text is still gone");
+    }
+
+    /// Builds a page whose text is placed by a scaling `Tm` rather than by
+    /// `Td` with a sized font — `/F0 1 Tf` plus `12 0 0 12 x y Tm` is an
+    /// ordinary way to write twelve-point text.
+    fn scaled_document(text: &str) -> Arc<CosDocument> {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(400.0, 100.0, |page| {
+            page.raw(
+                format!(
+                    "BT /F0 1 Tf 12 0 0 12 10 50 Tm ({text}) Tj ET
+"
+                )
+                .as_bytes(),
+            );
+        });
+        Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    }
+
+    /// Reading only `Tm`'s translation left every advance twelve times too
+    /// small, so the positions drifted further wrong across the line and the
+    /// rectangle cut the wrong glyphs — or none at all.
+    #[test]
+    fn a_scaling_text_matrix_places_the_glyphs() {
+        let doc = scaled_document("PUBLIC SECRET");
+        assert!(all_streams(&doc).contains("SECRET"));
+
+        let (streams, report) = redact_to_streams(doc, &[second_word()]);
+        assert!(report.glyphs > 0, "something was found to cut");
+        assert!(
+            !streams.contains("SECRET"),
+            "the second word is gone: {streams}"
+        );
+        assert!(streams.contains("PUBLIC"), "and the first survives");
+    }
+
+    /// A rotated run cannot be measured by a pen that moves along one axis.
+    /// Leaving it is the safe failure: an under-redaction is visible, while
+    /// cutting glyphs from wrong positions destroys text that was never meant
+    /// to go.
+    #[test]
+    fn a_rotated_run_is_left_alone_rather_than_cut_wrongly() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(400.0, 400.0, |page| {
+            // A quarter turn: b and c are non-zero.
+            page.raw(
+                b"BT /F0 12 Tf 0 1 -1 0 200 50 Tm (SECRET) Tj ET
+",
+            );
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+
+        let everywhere = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 400.0,
+                y1: 400.0,
+            },
+            mark: false,
+        };
+        let (streams, report) = redact_to_streams(doc, &[everywhere]);
+        assert_eq!(report.glyphs, 0, "nothing was cut");
+        assert!(
+            streams.contains("SECRET"),
+            "and the text is intact rather than half-removed"
+        );
     }
 
     #[test]
