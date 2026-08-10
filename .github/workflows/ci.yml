@@ -28,6 +28,9 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The crate graph is a design rule the compiler cannot enforce: a new
+      # edge compiles perfectly well. Plan 00 and ruling 8 say what it is.
+      - run: cargo run -p xtask -- dag
 
   fuzz-targets:
     # The fuzz crate sits outside the workspace, so `cargo check --workspace`

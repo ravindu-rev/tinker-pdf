@@ -197,6 +197,25 @@ Raster dimensions are `ceil` per axis of the scaled page box: A4 (595.276 × 841
 
 Milestone rows overlap heavily and share scaffolding; the phase as a whole sits in the S band.
 
+### Amendment, August 2026: `cos -> font`
+
+The DAG above lists `cos -> {filters, crypto}`. The shipped graph has a third
+edge, `cos -> font`, and it is deliberate.
+
+Reading a font *dictionary* — its `/Encoding` and `/Differences`, its
+`/ToUnicode` CMap, its standard-14 metrics — is COS work: it is what turns a
+`/Font` resource into widths and Unicode, and it belongs beside the rest of the
+object model. Doing it needs the leaf font crate's CMap parser and encoding
+tables. The alternatives were a fourth crate between them whose only job is to
+hold two tables, or duplicating the tables, and both are worse than an edge
+that still points from a higher layer down to a leaf.
+
+It does not weaken ruling 8: `tinker-pdf-font` remains PDF-free, takes bytes
+and returns values, and is independently fuzzable.
+
+The graph is enforced by `cargo xtask dag`, which runs in CI. It exists
+because nothing else can catch this: an undeclared edge compiles.
+
 ## Dependencies
 
 Phase 00 depends on nothing — it is the root. It unblocks everything, and unblocks the leaves *in parallel*: [02-filters](02-filters.md), [03-crypto](03-encryption.md), [05-fonts](05-fonts.md), [08-rendering-device](08-rendering-device.md), and [07-raster](07-rasterizer.md) have no dependencies on each other and can start the moment their crate skeletons and fuzz targets exist. [01-cos](01-cos-and-object-model.md) starts against stub filter/crypto traits immediately and binds to real implementations as they land. [06-content-and-text](06-content-and-text.md) needs cos/font/color surfaces; [08-render](08-rendering-device.md) needs content and raster; [09-write](09-writing.md) needs cos and the `DocumentEditor` reader guarantee proven here. Checkpoint A and B definitions and the integration sequencing live in [PLAN.md](../PLAN.md).
