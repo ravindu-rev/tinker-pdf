@@ -317,6 +317,30 @@ const NAMED: [(&str, char); 72] = [
     ("hyphen", '-'),
 ];
 
+/// The glyph name a character is known by, the inverse of
+/// [`glyph_name_to_char`].
+///
+/// Type 1 fonts address their glyphs by name and by nothing else — there is no
+/// glyph id — so a code that has been turned into a character has to be turned
+/// back into a name before the font can be asked for it.
+///
+/// Falls back to the AGL's algorithmic `uniXXXX` form, which is what a font
+/// tool writes for anything outside the named set, so a glyph the tables do
+/// not list is still reachable when the font happens to spell it that way.
+#[must_use]
+pub fn glyph_name_for_char(c: char) -> Option<String> {
+    let code = u32::from(c);
+    if let Ok(byte) = u8::try_from(code) {
+        if let Some((_, name)) = ASCII_NAMES.iter().find(|(b, _)| *b == byte) {
+            return Some((*name).to_string());
+        }
+    }
+    if let Some((name, _)) = NAMED.iter().find(|(_, ch)| *ch == c) {
+        return Some((*name).to_string());
+    }
+    (code <= 0xFFFF).then(|| format!("uni{code:04X}"))
+}
+
 /// The character a glyph name stands for.
 ///
 /// Covers the ASCII names, the common named glyphs, and the algorithmic

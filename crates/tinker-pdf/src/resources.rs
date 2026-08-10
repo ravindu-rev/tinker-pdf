@@ -11,7 +11,7 @@ use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{FontSource, Matrix, Rgb};
 use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
 use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
-use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt};
+use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt, Type1};
 use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading};
 
 use crate::fonts::{self, FontProvider, FontRequest};
@@ -781,6 +781,30 @@ impl PageResources {
             let outline = cff.outline(glyph)?;
             // A CFF font matrix is usually 1/1000 but need not be.
             let scale_factor = cff.font_matrix.first().copied().unwrap_or(0.001);
+            return Some(scale(&outline, scale_factor));
+        }
+
+        // 9.9: a `/FontFile` is a Type 1 program. Until this existed the bytes
+        // reached the two parsers above, both declined them correctly, and the
+        // glyph was silently absent — an embedded Type 1 font drew nothing and
+        // said nothing about why.
+        if let Some(type1) = Type1::parse(program) {
+            // Type 1 addresses glyphs by *name*: through the encoding the PDF
+            // font dictionary specifies, or through the font's own built-in
+            // one. The index is not a glyph id.
+            let glyph = ch
+                .and_then(|c| {
+                    let name = tinker_pdf_font::glyph_name_for_char(c)?;
+                    type1.glyph_for_name(name.as_bytes())
+                })
+                .or_else(|| {
+                    u8::try_from(code)
+                        .ok()
+                        .and_then(|b| type1.glyph_for_code(b))
+                })?;
+
+            let outline = type1.outline(glyph)?;
+            let scale_factor = type1.font_matrix.first().copied().unwrap_or(0.001);
             return Some(scale(&outline, scale_factor));
         }
 

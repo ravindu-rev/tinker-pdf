@@ -303,3 +303,204 @@ fn an_embedded_font_is_not_replaced() {
 
     assert!(ink(&bitmap) > 0, "and the embedded font still draws");
 }
+
+/// Adobe's stream cipher, encrypting, so a test can build a Type 1 program
+/// the way a font tool would.
+fn t1_encrypt(plain: &[u8], key: u16, pad: usize) -> Vec<u8> {
+    const C1: u16 = 52_845;
+    const C2: u16 = 22_719;
+
+    let mut r = key;
+    let mut out = Vec::new();
+    let mut input = vec![0x55u8; pad];
+    input.extend_from_slice(plain);
+
+    for byte in input {
+        let cipher = byte ^ (r >> 8) as u8;
+        r = (u16::from(cipher).wrapping_add(r))
+            .wrapping_mul(C1)
+            .wrapping_add(C2);
+        out.push(cipher);
+    }
+    out
+}
+
+/// A Type 1 program whose glyph `A` is a filled 600-unit box.
+fn type1_program() -> Vec<u8> {
+    let num = |v: i32, out: &mut Vec<u8>| {
+        if (-107..=107).contains(&v) {
+            out.push((v + 139) as u8);
+        } else if (108..=1131).contains(&v) {
+            let v = v - 108;
+            out.push((v / 256 + 247) as u8);
+            out.push((v % 256) as u8);
+        } else {
+            out.push(255);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    };
+
+    let mut cs = Vec::new();
+    num(0, &mut cs);
+    num(700, &mut cs);
+    cs.push(13); // hsbw: no side bearing, 700 wide
+    num(0, &mut cs);
+    num(0, &mut cs);
+    cs.push(21); // rmoveto
+    num(600, &mut cs);
+    cs.push(6); // hlineto
+    num(600, &mut cs);
+    cs.push(7); // vlineto
+    num(-600, &mut cs);
+    cs.push(6); // hlineto
+    cs.push(9); // closepath
+    cs.push(14); // endchar
+
+    let encrypted = t1_encrypt(&cs, 4330, 4);
+
+    let mut private = Vec::new();
+    private.extend_from_slice(
+        b"dup /Private 8 dict dup begin
+/lenIV 4 def
+",
+    );
+    private.extend_from_slice(
+        b"/CharStrings 1 dict dup begin
+",
+    );
+    private.extend_from_slice(format!("/A {} RD ", encrypted.len()).as_bytes());
+    private.extend_from_slice(&encrypted);
+    private.extend_from_slice(
+        b" ND
+end
+end
+",
+    );
+
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        b"%!PS-AdobeFont-1.0: Boxy
+",
+    );
+    out.extend_from_slice(
+        b"/FontMatrix [0.001 0 0 0.001 0 0] readonly def
+",
+    );
+    out.extend_from_slice(
+        b"/Encoding 256 array
+dup 65 /A put
+readonly def
+",
+    );
+    out.extend_from_slice(
+        b"currentfile eexec
+",
+    );
+    out.extend_from_slice(&t1_encrypt(&private, 55_665, 4));
+    out
+}
+
+/// 9.9: `/FontFile` is a Type 1 program. Before this existed its bytes went to
+/// the sfnt and CFF parsers, both of which declined them correctly — so an
+/// embedded Type 1 font drew nothing at all and reported only that some font
+/// was unreadable.
+#[test]
+fn an_embedded_type1_font_draws() {
+    let program = type1_program();
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        b"%PDF-1.7
+",
+    );
+    bytes.extend_from_slice(
+        b"1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+",
+    );
+    bytes.extend_from_slice(
+        b"2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+",
+    );
+    bytes.extend_from_slice(
+        b"3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 60]
+          /Resources << /Font << /F0 4 0 R >> >> /Contents 6 0 R >>
+endobj
+",
+    );
+    bytes.extend_from_slice(
+        b"4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Boxy
+          /FirstChar 65 /LastChar 65 /Widths [700] /FontDescriptor 5 0 R >>
+endobj
+",
+    );
+    bytes.extend_from_slice(
+        b"5 0 obj
+<< /Type /FontDescriptor /FontName /Boxy /Flags 4 /FontFile 7 0 R >>
+endobj
+",
+    );
+    let content = b"BT /F0 40 Tf 10 10 Td (A) Tj ET
+";
+    bytes.extend_from_slice(
+        format!(
+            "6 0 obj
+<< /Length {} >>
+stream
+",
+            content.len()
+        )
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(content);
+    bytes.extend_from_slice(
+        b"endstream
+endobj
+",
+    );
+    bytes.extend_from_slice(
+        format!(
+            "7 0 obj
+<< /Length {} /Length1 {} >>
+stream
+",
+            program.len(),
+            program.len()
+        )
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(&program);
+    bytes.extend_from_slice(
+        b"
+endstream
+endobj
+",
+    );
+    bytes.extend_from_slice(
+        b"trailer
+<< /Size 8 /Root 1 0 R >>
+%%EOF
+",
+    );
+
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&RenderOptions::default());
+
+    assert!(
+        ink(&bitmap) > 0,
+        "the Type 1 glyph drew nothing, warnings: {:?}",
+        bitmap.warnings
+    );
+    assert!(
+        !bitmap
+            .warnings
+            .contains(&tinker_pdf::RenderWarning::UnreadableFont),
+        "and the font is no longer unreadable"
+    );
+}
