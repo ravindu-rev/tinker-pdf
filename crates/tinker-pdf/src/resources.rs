@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{FontSource, Matrix, Rgb};
 use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
-use tinker_pdf_filters::{jpeg_decode, JpegColor};
+use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
 use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt};
 use tinker_pdf_render::{DecodedImage, GlyphSource, Shading};
 
@@ -419,6 +419,21 @@ impl GlyphSource for PageResources {
 }
 
 impl PageResources {
+    /// The `/DecodeParms` of a stream, which may be one dictionary or an
+    /// array with one entry per filter (7.4.1).
+    fn decode_parms(&self, dict: &Dict) -> Option<Dict> {
+        let value = self.doc.resolve_key(dict, Name::DECODE_PARMS);
+        if let Some(d) = value.as_dict() {
+            return Some(d.clone());
+        }
+        // The last filter's parameters are the ones an image codec wants.
+        let items = value.as_array()?;
+        items
+            .iter()
+            .rev()
+            .find_map(|o| self.doc.resolve(o).as_dict().cloned())
+    }
+
     /// Reads a `/Function` entry, which is one function or an array of them,
     /// one per output component (7.10).
     fn function(&self, dict: &Dict) -> Option<Function> {
@@ -620,11 +635,53 @@ impl PageResources {
                 alpha: Vec::new(),
             });
         }
+        // CCITT data likewise arrives still coded, and carries its own
+        // parameters in /DecodeParms.
+        if matches!(
+            last_filter.as_deref(),
+            Some(b"CCITTFaxDecode") | Some(b"CCF")
+        ) {
+            let raw = self
+                .doc
+                .stream_raw(reference)
+                .map_err(|_| "CCITTFaxDecode".to_string())?;
+            let parms = self.decode_parms(&dict);
+            let params = CcittParams {
+                k: parms
+                    .as_ref()
+                    .and_then(|p| p.get_int(self.doc.intern(b"K")))
+                    .unwrap_or(0) as i32,
+                columns: parms
+                    .as_ref()
+                    .and_then(|p| p.get_int(self.doc.intern(b"Columns")))
+                    .unwrap_or(1728)
+                    .clamp(1, 1 << 16) as u32,
+                rows: height,
+                black_is_1: parms
+                    .as_ref()
+                    .and_then(|p| p.get_bool(self.doc.intern(b"BlackIs1")))
+                    .unwrap_or(false),
+                byte_align: parms
+                    .as_ref()
+                    .and_then(|p| p.get_bool(self.doc.intern(b"EncodedByteAlign")))
+                    .unwrap_or(false),
+            };
+
+            let (gray, _) = ccitt_decode(&raw, &params, 1 << 28);
+            let mut rgb = Vec::with_capacity(gray.len() * 3);
+            for value in &gray {
+                rgb.extend_from_slice(&[*value, *value, *value]);
+            }
+            rgb.resize((width as usize) * (height as usize) * 3, 255);
+            return Ok(DecodedImage {
+                width,
+                height,
+                rgb,
+                alpha: Vec::new(),
+            });
+        }
         if let Some(filter) = last_filter.as_deref() {
-            if matches!(
-                filter,
-                b"JPXDecode" | b"JBIG2Decode" | b"CCITTFaxDecode" | b"CCF"
-            ) {
+            if matches!(filter, b"JPXDecode" | b"JBIG2Decode") {
                 return Err(String::from_utf8_lossy(filter).into_owned());
             }
         }
