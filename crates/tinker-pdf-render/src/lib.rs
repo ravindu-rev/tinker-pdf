@@ -200,13 +200,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     }
 }
 
-/// The colour a graphics state paints with.
-///
-/// The interpreter does not track colour operators yet, so this is where the
-/// renderer's own default lives: black, which is what 8.6.8 makes the initial
-/// colour in every device space.
-fn fill_color(_state: &GraphicsState) -> Color {
-    Color::BLACK
+fn fill_color(state: &GraphicsState) -> Color {
+    Color::rgb(state.fill_color.r, state.fill_color.g, state.fill_color.b)
+}
+
+fn stroke_color(state: &GraphicsState) -> Color {
+    Color::rgb(
+        state.stroke_color.r,
+        state.stroke_color.g,
+        state.stroke_color.b,
+    )
 }
 
 impl<G: GlyphSource> Device for Renderer<'_, G> {
@@ -214,7 +217,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.cancel.is_cancelled()
     }
 
-    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
+    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
         if self.cancel.is_cancelled() {
             return;
         }
@@ -222,8 +225,51 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if built.is_empty() {
             return;
         }
+        let rule = if even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::NonZero
+        };
         let color = fill_color(state);
-        self.paint(&built, FillRule::NonZero, color, state.fill_alpha);
+        self.paint(&built, rule, color, state.fill_alpha);
+    }
+
+    fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
+        let built = self.to_path(path);
+        if built.is_empty() {
+            return;
+        }
+        let rule = if even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::NonZero
+        };
+        // 8.5.4: the new clip is the intersection with whatever is in force,
+        // which is a multiply rather than a replacement — an anti-aliased edge
+        // clipped by another must stay soft on both.
+        let mask = fill(
+            &built,
+            rule,
+            0,
+            0,
+            self.canvas.width,
+            self.canvas.height,
+            self.tolerance,
+        );
+        self.clip = Some(match &self.clip {
+            Some(existing) => mask.intersect(existing),
+            None => mask,
+        });
+    }
+
+    fn save_state(&mut self) {
+        self.clip_stack.push(self.clip.clone());
+    }
+
+    fn restore_state(&mut self) {
+        if let Some(clip) = self.clip_stack.pop() {
+            self.clip = clip;
+        }
     }
 
     fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
@@ -235,14 +281,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return;
         }
 
-        // The line width is in user space, so it scales with the transform.
-        let width = self.base.expansion().max(f64::MIN_POSITIVE);
+        // 8.4.3.2: the line width is in user space, so the transform scales
+        // it. A hairline still has to cover a pixel to be visible.
+        let width = (state.line_width * self.base.expansion()).max(0.8);
         let style = StrokeStyle {
             width,
             ..StrokeStyle::default()
         };
         let outline = stroke(&built, &style, self.tolerance);
-        let color = fill_color(state);
+        let color = stroke_color(state);
         self.paint(&outline, FillRule::NonZero, color, state.stroke_alpha);
     }
 
@@ -502,6 +549,85 @@ mod tests {
             "nothing was painted"
         );
         assert!(warnings.contains(&RenderWarning::Cancelled));
+    }
+
+    #[test]
+    fn colour_operators_reach_the_canvas() {
+        // Pure red, then pure blue, each in its own rectangle.
+        let (canvas, _) = render(b"1 0 0 rg 0 0 8 20 re f  0 0 1 rg 12 0 8 20 re f", 20);
+
+        assert_eq!(canvas.pixel(4, 10), Some(Color::rgb(255, 0, 0)), "red half");
+        assert_eq!(
+            canvas.pixel(16, 10),
+            Some(Color::rgb(0, 0, 255)),
+            "blue half"
+        );
+    }
+
+    #[test]
+    fn grey_and_cmyk_operators_convert_correctly() {
+        let (grey, _) = render(b"0.5 g 0 0 20 20 re f", 20);
+        let px = grey.pixel(10, 10).expect("a pixel");
+        assert!(
+            (126..=130).contains(&px.r) && px.r == px.g && px.g == px.b,
+            "0.5 g is mid grey, got {px:?}"
+        );
+
+        // Cyan ink alone: no red, full green and blue.
+        let (cyan, _) = render(b"1 0 0 0 k 0 0 20 20 re f", 20);
+        assert_eq!(cyan.pixel(10, 10), Some(Color::rgb(0, 255, 255)));
+
+        // Full black ink.
+        let (black, _) = render(b"0 0 0 1 k 0 0 20 20 re f", 20);
+        assert_eq!(black.pixel(10, 10), Some(Color::BLACK));
+    }
+
+    #[test]
+    fn a_stroke_uses_the_stroking_colour_not_the_fill() {
+        let (canvas, _) = render(b"1 0 0 rg 0 1 0 RG 2 10 m 18 10 l S", 20);
+        let px = canvas.pixel(10, 10).expect("a pixel");
+        assert!(
+            px.g > px.r && px.g > px.b,
+            "the stroke should be green, got {px:?}"
+        );
+    }
+
+    #[test]
+    fn a_clipping_path_confines_what_follows() {
+        // Clip to the left half, then fill the whole page.
+        let (canvas, _) = render(b"0 0 10 20 re W n 0 0 20 20 re f", 20);
+
+        assert_eq!(
+            canvas.pixel(5, 10).map(|c| c.r),
+            Some(0),
+            "inside the clip is painted"
+        );
+        assert_eq!(
+            canvas.pixel(15, 10).map(|c| c.r),
+            Some(255),
+            "outside it is not"
+        );
+    }
+
+    #[test]
+    fn a_clip_is_restored_with_the_graphics_state() {
+        // Clip inside q/Q, then paint after Q: the clip must be gone.
+        let (canvas, _) = render(b"q 0 0 4 20 re W n Q 0 0 20 20 re f", 20);
+        assert_eq!(
+            canvas.pixel(15, 10).map(|c| c.r),
+            Some(0),
+            "the clip should not survive Q"
+        );
+    }
+
+    #[test]
+    fn the_even_odd_rule_reaches_the_fill() {
+        // Two nested rectangles: even-odd leaves the middle empty.
+        let nonzero = render(b"0 0 20 20 re 5 5 10 10 re f", 20).0;
+        let evenodd = render(b"0 0 20 20 re 5 5 10 10 re f*", 20).0;
+
+        assert_eq!(nonzero.pixel(10, 10).map(|c| c.r), Some(0), "filled");
+        assert_eq!(evenodd.pixel(10, 10).map(|c| c.r), Some(255), "a hole");
     }
 
     #[test]

@@ -44,15 +44,32 @@ pub trait Device {
     /// A text object ended (`ET`).
     fn end_text(&mut self) {}
 
-    /// A path was painted. The points are already in device space.
-    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
-        let _ = (path, state);
+    /// A path was filled. `even_odd` selects the rule (8.5.3.3).
+    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        let _ = (path, state, even_odd);
     }
 
     /// A path was stroked.
     fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
         let _ = (path, state);
     }
+
+    /// A path was added to the clipping path by `W` or `W*` (8.5.4).
+    ///
+    /// Arrives after the painting operator that ended the path, because that
+    /// is when the clip takes effect.
+    fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        let _ = (path, state, even_odd);
+    }
+
+    /// `q`: the graphics state was saved.
+    ///
+    /// A device holding state the interpreter does not model — a clip mask,
+    /// say — saves it here.
+    fn save_state(&mut self) {}
+
+    /// `Q`: the graphics state was restored.
+    fn restore_state(&mut self) {}
 
     /// An image XObject was drawn into the unit square of the current
     /// transform.

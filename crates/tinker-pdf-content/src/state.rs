@@ -189,6 +189,33 @@ impl Default for TextState {
     }
 }
 
+/// A colour, resolved to RGB by the time it reaches a device.
+///
+/// The interpreter does not know colour spaces — resolving `/CS` names against
+/// a resource dictionary is the caller's job, through
+/// [`crate::ColorResolver`] — but it does track which components are current,
+/// and hands over the RGB they mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rgb {
+    /// Red.
+    pub r: u8,
+    /// Green.
+    pub g: u8,
+    /// Blue.
+    pub b: u8,
+}
+
+impl Rgb {
+    /// Opaque black, the initial colour in every device space (8.6.8).
+    pub const BLACK: Rgb = Rgb { r: 0, g: 0, b: 0 };
+}
+
+impl Default for Rgb {
+    fn default() -> Self {
+        Rgb::BLACK
+    }
+}
+
 /// The graphics state (8.4.1), reduced to what interpretation needs.
 #[derive(Clone, Debug, Default)]
 pub struct GraphicsState {
@@ -200,6 +227,17 @@ pub struct GraphicsState {
     pub fill_alpha: f64,
     /// `CA`, the stroking alpha.
     pub stroke_alpha: f64,
+    /// The non-stroking colour.
+    pub fill_color: Rgb,
+    /// The stroking colour.
+    pub stroke_color: Rgb,
+    /// `w`, the line width in user space.
+    pub line_width: f64,
+    /// The resource name of the non-stroking colour space, when one was set
+    /// by name rather than by a device operator.
+    pub fill_space: Option<Vec<u8>>,
+    /// The same for the stroking colour space.
+    pub stroke_space: Option<Vec<u8>>,
 }
 
 impl GraphicsState {
@@ -211,6 +249,12 @@ impl GraphicsState {
             text: TextState::default(),
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
+            fill_color: Rgb::BLACK,
+            stroke_color: Rgb::BLACK,
+            // 8.4.3.2: the initial line width is 1.0 user-space units.
+            line_width: 1.0,
+            fill_space: None,
+            stroke_space: None,
         }
     }
 }

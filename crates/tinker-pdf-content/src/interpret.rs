@@ -6,11 +6,15 @@
 //! of the page.
 
 use crate::device::{Device, Glyph, ImageRef, PathSegment};
-use crate::state::{GraphicsState, Matrix, TextRenderMode};
+use crate::state::{GraphicsState, Matrix, Rgb, TextRenderMode};
 use crate::tokenizer::{Token, Tokenizer};
 
-/// What the interpreter needs to know about a font, supplied by the caller so
-/// this crate stays free of PDF dictionaries.
+/// Everything the interpreter needs from a page's resources.
+///
+/// This is the seam that keeps the crate free of PDF dictionaries: the
+/// interpreter knows *which* font or colour space a stream selected, and the
+/// caller says what that name means. Every method has a default, so an
+/// implementation supplies only what it has.
 pub trait FontSource {
     /// Splits a string into `(code, text, advance in 1/1000 em)`.
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)>;
@@ -31,6 +35,26 @@ pub trait FontSource {
     /// one. Returning `None` skips it.
     fn form(&self, name: &[u8]) -> Option<(Vec<u8>, Matrix)> {
         let _ = name;
+        None
+    }
+
+    /// The RGB a named colour space gives these components.
+    ///
+    /// The interpreter cannot know what `/CS0 0.2 0.9 0.1 scn` means — RGB, a
+    /// separation, an indexed palette — because only the resource dictionary
+    /// says. `None` leaves the colour unchanged, which is what a viewer does
+    /// with a space it cannot resolve.
+    fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
+        let _ = (space, components);
+        None
+    }
+
+    /// How many components a named colour space takes.
+    ///
+    /// Used to tell `scn`'s optional trailing pattern name from its numeric
+    /// operands.
+    fn color_components(&self, space: &[u8]) -> Option<usize> {
+        let _ = space;
         None
     }
 }
@@ -57,6 +81,7 @@ pub fn interpret<D: Device, F: FontSource>(
         current: (0.0, 0.0),
         start: (0.0, 0.0),
         depth: 0,
+        pending_clip: None,
     };
     interp.run(content);
 }
@@ -73,6 +98,7 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     current: (f64, f64),
     start: (f64, f64),
     depth: u32,
+    pending_clip: Option<bool>,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -131,11 +157,13 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             b"q" => {
                 if self.saved.len() < 64 {
                     self.saved.push(self.gs.clone());
+                    self.device.save_state();
                 }
             }
             b"Q" => {
                 if let Some(prev) = self.saved.pop() {
                     self.gs = prev;
+                    self.device.restore_state();
                 }
             }
             b"cm" => {
@@ -366,18 +394,26 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
                 let path = std::mem::take(&mut self.path);
                 self.device.stroke_path(&path, &self.gs);
+                self.apply_pending_clip(&path);
             }
             b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" => {
+                let even_odd = op.ends_with(b"*");
                 let path = std::mem::take(&mut self.path);
-                self.device.fill_path(&path, &self.gs);
+                self.device.fill_path(&path, &self.gs, even_odd);
                 if matches!(op, b"B" | b"B*" | b"b" | b"b*") {
                     self.device.stroke_path(&path, &self.gs);
                 }
+                self.apply_pending_clip(&path);
             }
-            b"n" => self.path.clear(),
-            // 8.5.4: W and W* set the clip from the current path, which the
-            // painting operator that follows then consumes.
-            b"W" | b"W*" => {}
+            b"n" => {
+                let path = std::mem::take(&mut self.path);
+                self.apply_pending_clip(&path);
+            }
+            // 8.5.4: W and W* mark the current path as the new clip, but it
+            // does not take effect until the painting operator that ends the
+            // path — which is why this only records the intent.
+            b"W" => self.pending_clip = Some(false),
+            b"W*" => self.pending_clip = Some(true),
 
             // 8.10 XObjects
             b"Do" => {
@@ -386,11 +422,120 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
 
-            // 8.4.5 external graphics state, of which alpha is what a text
-            // device could plausibly care about.
+            // 8.4.3 line parameters. Only the width reaches a device; the
+            // rest is carried for completeness.
+            b"w" => {
+                if let Some(v) = self.num(0) {
+                    if v.is_finite() && v >= 0.0 {
+                        self.gs.line_width = v;
+                    }
+                }
+            }
+            b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" => {}
+
+            // 8.6.8 colour. The device operators resolve immediately; the
+            // named ones go through the resource seam.
+            b"g" | b"G" => {
+                if let Some(v) = self.num(0) {
+                    let value = to_byte(v);
+                    let color = Rgb {
+                        r: value,
+                        g: value,
+                        b: value,
+                    };
+                    self.set_color(op == b"g", color, None);
+                }
+            }
+            b"rg" | b"RG" => {
+                if let (Some(r), Some(g), Some(b)) = (self.num(2), self.num(1), self.num(0)) {
+                    let color = Rgb {
+                        r: to_byte(r),
+                        g: to_byte(g),
+                        b: to_byte(b),
+                    };
+                    self.set_color(op == b"rg", color, None);
+                }
+            }
+            b"k" | b"K" => {
+                if let (Some(c), Some(m), Some(y), Some(k)) =
+                    (self.num(3), self.num(2), self.num(1), self.num(0))
+                {
+                    self.set_color(op == b"k", cmyk_to_rgb(c, m, y, k), None);
+                }
+            }
+            b"cs" | b"CS" => {
+                let Some(Token::Name(space)) = self.stack.last().cloned() else {
+                    return;
+                };
+                let fill = op == b"cs";
+                // 8.6.8: selecting a space resets the colour to that space's
+                // initial value, which is black in every device space.
+                let initial = self
+                    .fonts
+                    .color_components(&space)
+                    .and_then(|n| self.fonts.resolve_color(&space, &vec![0.0; n]))
+                    .unwrap_or(Rgb::BLACK);
+                self.set_color(fill, initial, Some(space));
+            }
+            b"sc" | b"SC" | b"scn" | b"SCN" => {
+                let fill = op == b"sc" || op == b"scn";
+                let components: Vec<f64> = self
+                    .stack
+                    .iter()
+                    .filter_map(|t| match t {
+                        Token::Number(v) if v.is_finite() => Some(*v),
+                        _ => None,
+                    })
+                    .collect();
+                if components.is_empty() {
+                    // `scn` with only a pattern name: a pattern's colour comes
+                    // from the pattern, which this device does not paint.
+                    return;
+                }
+
+                let space = if fill {
+                    self.gs.fill_space.clone()
+                } else {
+                    self.gs.stroke_space.clone()
+                };
+                let resolved = match &space {
+                    Some(space) => self.fonts.resolve_color(space, &components),
+                    // Without a named space the component count is the only
+                    // clue, and it is a reliable one.
+                    None => Some(components_to_rgb(&components)),
+                };
+                if let Some(color) = resolved {
+                    self.set_color(fill, color, space);
+                }
+            }
+
+            // 8.4.5 external graphics state. Alpha is what a device can act
+            // on; the rest needs the resource dictionary.
             b"gs" => {}
 
             _ => {}
+        }
+    }
+
+    /// Hands a recorded `W`/`W*` to the device, now that the path has ended.
+    fn apply_pending_clip(&mut self, path: &[PathSegment]) {
+        if let Some(even_odd) = self.pending_clip.take() {
+            self.device.clip_path(path, &self.gs, even_odd);
+        }
+    }
+
+    /// Applies a colour to the fill or stroke slot.
+    fn set_color(&mut self, fill: bool, color: Rgb, space: Option<Vec<u8>>) {
+        if fill {
+            self.gs.fill_color = color;
+            if let Some(space) = space {
+                self.gs.fill_space = Some(space);
+            }
+        } else {
+            self.gs.stroke_color = color;
+            if let Some(space) = space {
+                self.gs.stroke_space = Some(space);
+            }
         }
     }
 
@@ -530,6 +675,43 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     }
 }
 
+fn to_byte(value: f64) -> u8 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// 8.6.4.4: the additive complement, with black applied.
+fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
+    let k = k.clamp(0.0, 1.0);
+    Rgb {
+        r: to_byte((1.0 - c.clamp(0.0, 1.0)) * (1.0 - k)),
+        g: to_byte((1.0 - m.clamp(0.0, 1.0)) * (1.0 - k)),
+        b: to_byte((1.0 - y.clamp(0.0, 1.0)) * (1.0 - k)),
+    }
+}
+
+/// Reads components as a device colour, by how many there are.
+///
+/// `sc` without a preceding `cs` is malformed but occurs; the count is the
+/// only signal available and it is an unambiguous one.
+fn components_to_rgb(components: &[f64]) -> Rgb {
+    let at = |i: usize| components.get(i).copied().unwrap_or(0.0);
+    match components.len() {
+        1 => {
+            let v = to_byte(at(0));
+            Rgb { r: v, g: v, b: v }
+        }
+        4 => cmyk_to_rgb(at(0), at(1), at(2), at(3)),
+        _ => Rgb {
+            r: to_byte(at(0)),
+            g: to_byte(at(1)),
+            b: to_byte(at(2)),
+        },
+    }
+}
+
 /// Finds the end of an inline image, returning how many bytes to skip.
 ///
 /// 8.9.7 ends the data at `EI` surrounded by whitespace, and binary data can
@@ -577,7 +759,7 @@ mod tests {
             self.glyphs
                 .push((glyph.text.clone(), glyph.transform.e, glyph.transform.f));
         }
-        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState) {
+        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
             self.fills += 1;
         }
         fn stroke_path(&mut self, _path: &[PathSegment], _state: &GraphicsState) {

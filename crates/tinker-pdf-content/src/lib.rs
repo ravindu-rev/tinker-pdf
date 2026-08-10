@@ -11,6 +11,6 @@ pub mod tokenizer;
 
 pub use device::{Device, Glyph, ImageRef, PathSegment};
 pub use interpret::{interpret, FontSource};
-pub use state::{GraphicsState, Matrix, TextRenderMode, TextState};
+pub use state::{GraphicsState, Matrix, Rgb, TextRenderMode, TextState};
 pub use text::{Quad, TextBlock, TextChar, TextDevice, TextLine, TextPage, WritingMode};
 pub use tokenizer::{Token, Tokenizer};
