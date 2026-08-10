@@ -9,3 +9,4 @@ authors.workspace = true
 description = "Differential test runner: invokes mutool, pdftoppm or pdfium_test as subprocess oracles and compares"
 
 [dependencies]
+tinker-pdf = { workspace = true }
