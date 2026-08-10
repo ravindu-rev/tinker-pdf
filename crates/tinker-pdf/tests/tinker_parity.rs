@@ -365,3 +365,36 @@ fn authenticating_still_works_after_taking_a_page() {
     let _page = doc.page(0);
     assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
 }
+
+/// A caller opening a file needs to tell "this is not a PDF" from "this is a
+/// PDF and it wants a password". `Document::open` collapsed every distinct
+/// failure into `NotAPdf`, so an encrypted document — which opens perfectly
+/// well — was indistinguishable from a corrupt one.
+#[test]
+fn an_encrypted_document_says_it_wants_a_password() {
+    use tinker_pdf::DocumentError;
+
+    let doc = open("encrypted-aes256.pdf");
+    assert_eq!(doc.readable(), Err(DocumentError::PasswordRequired));
+
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+    assert_eq!(doc.readable(), Ok(()), "and is readable once it has one");
+}
+
+#[test]
+fn an_unencrypted_document_is_readable_immediately() {
+    assert_eq!(open("simple-text.pdf").readable(), Ok(()));
+}
+
+/// Empty input is a caller's bug far more often than a bad document, and
+/// saying so is the difference between checking the file and checking the code.
+#[test]
+fn empty_bytes_are_distinguished_from_a_bad_document() {
+    use tinker_pdf::{Document, OpenError};
+
+    assert_eq!(Document::open(Vec::new()).unwrap_err(), OpenError::Empty);
+    assert_eq!(
+        Document::open(b"this is not a pdf at all".to_vec()).unwrap_err(),
+        OpenError::NotAPdf
+    );
+}

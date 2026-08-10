@@ -136,12 +136,51 @@ pub enum OpenError {
     /// Nothing in the bytes resembles a PDF: not one indirect object could be
     /// found, even after a full rescan.
     NotAPdf,
+    /// The bytes are empty.
+    ///
+    /// Distinguished from [`OpenError::NotAPdf`] because it is almost always a
+    /// caller's bug — a path that did not exist, a stream not read to the end —
+    /// rather than a bad document, and telling the two apart is the difference
+    /// between checking the file and checking the code.
+    Empty,
 }
+
+/// Why a document could not be *used* after it opened.
+///
+/// Separate from [`OpenError`]: a document that needs a password has opened
+/// perfectly well, and a caller has to be able to tell that from bytes that
+/// were never a PDF. Collapsing both into one variant meant every failure
+/// looked like a corrupt file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentError {
+    /// The document is encrypted and no password has been accepted yet.
+    ///
+    /// Call [`Document::authenticate`]; the empty string is the right first
+    /// try, since a document encrypted only to restrict permissions has no
+    /// user password.
+    PasswordRequired,
+    /// The document is encrypted with a handler this build does not implement.
+    UnsupportedEncryption,
+}
+
+impl core::fmt::Display for DocumentError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DocumentError::PasswordRequired => f.write_str("a password is required"),
+            DocumentError::UnsupportedEncryption => {
+                f.write_str("the encryption handler is not supported")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DocumentError {}
 
 impl core::fmt::Display for OpenError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             OpenError::NotAPdf => f.write_str("not a PDF: no indirect objects found"),
+            OpenError::Empty => f.write_str("no bytes to read"),
         }
     }
 }
@@ -173,6 +212,10 @@ impl Document {
     /// [`Document::ladder_level`] and [`Document::warnings`] for what that
     /// cost.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
+        let bytes: Arc<[u8]> = bytes.into();
+        if bytes.is_empty() {
+            return Err(OpenError::Empty);
+        }
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
         Ok(Document {
             inner: Arc::new(inner),
@@ -248,6 +291,32 @@ impl Document {
     /// as unencrypted.
     pub fn authenticate(&self, password: &str) -> Result<AuthLevel, AuthError> {
         self.inner.authenticate(password)
+    }
+
+    /// Whether the document can be read, or what it wants first.
+    ///
+    /// A caller that opens a file and immediately asks for its text needs to
+    /// know the difference between "this is not a PDF" and "this is a PDF and
+    /// it wants a password". `open` answers the first; this answers the
+    /// second, which it cannot, because a document that needs a password has
+    /// opened perfectly well.
+    ///
+    /// # Errors
+    /// [`DocumentError::PasswordRequired`] when the document is encrypted and
+    /// nothing has been authenticated, and
+    /// [`DocumentError::UnsupportedEncryption`] when the handler is one this
+    /// build does not implement.
+    pub fn readable(&self) -> Result<(), DocumentError> {
+        if !self.is_encrypted() {
+            return Ok(());
+        }
+        if self.auth_level() == AuthLevel::None {
+            // An empty user password is the common case for a document
+            // encrypted only to restrict permissions, and `open` does not try
+            // it — trying it here would hide the distinction this exists for.
+            return Err(DocumentError::PasswordRequired);
+        }
+        Ok(())
     }
 
     /// The number of pages.
