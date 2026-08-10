@@ -179,6 +179,8 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// Curve flattening tolerance in device pixels.
     tolerance: f64,
     missing_fonts: u32,
+    /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
+    text_clip: Option<Path>,
 }
 
 impl<'g, G: GlyphSource> Renderer<'g, G> {
@@ -198,6 +200,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             cancel: CancelToken::new(),
             tolerance: 0.2,
             missing_fonts: 0,
+            text_clip: None,
         }
     }
 
@@ -545,6 +548,34 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         });
     }
 
+    fn end_text(&mut self) {
+        // 9.3.6: text clipping modes accumulate every glyph of the text
+        // object and intersect the result at `ET`, not glyph by glyph —
+        // clipping each glyph as it arrived would leave the next one clipped
+        // to the previous, which is empty.
+        //
+        // A text object that selects a clipping mode and then shows no glyphs
+        // at all should clip everything away. It does not here: nothing
+        // records the mode unless a glyph reaches the device, so the clip
+        // stays absent rather than becoming empty.
+        let Some(path) = self.text_clip.take() else {
+            return;
+        };
+        let mask = fill(
+            &path,
+            FillRule::NonZero,
+            0,
+            0,
+            self.canvas.width,
+            self.canvas.height,
+            self.tolerance,
+        );
+        self.clip = Some(match &self.clip {
+            Some(existing) => mask.intersect(existing),
+            None => mask,
+        });
+    }
+
     fn save_state(&mut self) {
         self.clip_stack.push(self.clip.clone());
     }
@@ -599,7 +630,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
         // 9.3.6: mode 3 paints nothing, which is exactly what a scanned page's
         // invisible OCR layer relies on. It is still extracted, just not drawn.
-        if !state.text.render_mode.paints() {
+        //
+        // Mode 7 is clip-only and paints nothing either, but it does add to the
+        // clip, so it cannot return here — the accumulation happens below.
+        let mode = state.text.render_mode;
+        if matches!(mode, tinker_pdf_content::TextRenderMode::Invisible) {
+            return;
+        }
+        if !mode.paints() && !mode.clips() {
             return;
         }
 
@@ -664,8 +702,37 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             }
         }
 
-        let color = fill_color(state);
-        self.paint(&path, FillRule::NonZero, color, state.fill_alpha);
+        // 9.3.6, Table 106: the mode decides which of fill, stroke and clip
+        // happen, and they are independent. Filling regardless — which is what
+        // this did — paints stroke-only text solid, in the wrong colour.
+        if mode.fills() {
+            self.paint(
+                &path,
+                FillRule::NonZero,
+                fill_color(state),
+                state.fill_alpha,
+            );
+        }
+        if mode.strokes() {
+            let scale = state.ctm.then(&self.base).expansion();
+            let style = StrokeStyle {
+                width: (state.line_width * scale).max(0.6),
+                ..StrokeStyle::default()
+            };
+            let outlined = stroke(&path, &style, self.tolerance);
+            self.paint(
+                &outlined,
+                FillRule::NonZero,
+                stroke_color(state),
+                state.stroke_alpha,
+            );
+        }
+        if mode.clips() {
+            // 9.3.6: the glyphs of a text object accumulate into one clip that
+            // takes effect at `ET`, not glyph by glyph — clipping immediately
+            // would leave each glyph clipped to itself, which is empty.
+            self.text_clip.get_or_insert_with(Path::new).extend(&path);
+        }
     }
 
     fn draw_image(&mut self, image: &ImageRef, state: &GraphicsState) {

@@ -83,6 +83,14 @@ impl Path {
     }
 
     /// Closes the current subpath.
+    /// Appends another path's verbs to this one.
+    ///
+    /// The two keep their own subpaths — nothing is joined — which is what
+    /// accumulating many glyph outlines into a single clipping path needs.
+    pub fn extend(&mut self, other: &Path) {
+        self.verbs.extend_from_slice(other.verbs());
+    }
+
     pub fn close(&mut self) {
         self.push(Verb::Close);
     }

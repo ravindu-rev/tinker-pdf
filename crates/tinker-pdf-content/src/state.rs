@@ -146,6 +146,30 @@ impl TextRenderMode {
         )
     }
 
+    /// Whether the mode fills the glyph (9.3.6, Table 106).
+    #[must_use]
+    pub fn fills(self) -> bool {
+        matches!(
+            self,
+            TextRenderMode::Fill
+                | TextRenderMode::FillStroke
+                | TextRenderMode::FillClip
+                | TextRenderMode::FillStrokeClip
+        )
+    }
+
+    /// Whether the mode strokes the glyph's outline.
+    #[must_use]
+    pub fn strokes(self) -> bool {
+        matches!(
+            self,
+            TextRenderMode::Stroke
+                | TextRenderMode::FillStroke
+                | TextRenderMode::StrokeClip
+                | TextRenderMode::FillStrokeClip
+        )
+    }
+
     /// Whether the mode paints anything.
     #[must_use]
     pub fn paints(self) -> bool {
