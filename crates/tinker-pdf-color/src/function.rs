@@ -68,6 +68,14 @@ pub enum Function {
         /// The parsed program.
         program: Vec<PsOp>,
     },
+    /// 7.10.1: an *array* of functions, one per output component.
+    ///
+    /// A shading may give `/Function [f_r f_g f_b]` instead of one function
+    /// with three outputs. Taking only the first — which is what happens if
+    /// this variant does not exist — renders an RGB gradient as a red ramp on
+    /// black, and does it silently, because a one-output function is
+    /// perfectly valid on its own.
+    Array(Vec<Function>),
     /// A function that could not be read; the identity on its inputs.
     Identity,
 }
@@ -92,6 +100,13 @@ impl Function {
     pub fn eval(&self, inputs: &[f64]) -> Vec<f64> {
         match self {
             Function::Identity => inputs.to_vec(),
+
+            // Each member contributes its own outputs, in order. Members are
+            // one-output functions by the spec's own requirement, but a
+            // member that yields several is concatenated rather than
+            // truncated: dropping values would be the same silent loss this
+            // variant exists to prevent.
+            Function::Array(functions) => functions.iter().flat_map(|f| f.eval(inputs)).collect(),
 
             Function::Exponential { domain, c0, c1, n } => {
                 let x = clamp(inputs.first().copied().unwrap_or(0.0), *domain);

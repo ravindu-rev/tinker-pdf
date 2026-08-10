@@ -551,9 +551,13 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         _ => None,
                     })
                     .collect();
+                // 8.6.8.2: `scn` may end with a pattern name, with or without
+                // preceding components (an uncoloured pattern takes both).
+                if let Some(Token::Name(name)) = self.stack.last().cloned() {
+                    self.set_pattern(fill, name);
+                    return;
+                }
                 if components.is_empty() {
-                    // `scn` with only a pattern name: a pattern's colour comes
-                    // from the pattern, which this device does not paint.
                     return;
                 }
 
@@ -610,14 +614,25 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     fn set_color(&mut self, fill: bool, color: Rgb, space: Option<Vec<u8>>) {
         if fill {
             self.gs.fill_color = color;
+            self.gs.fill_pattern = None;
             if let Some(space) = space {
                 self.gs.fill_space = Some(space);
             }
         } else {
             self.gs.stroke_color = color;
+            self.gs.stroke_pattern = None;
             if let Some(space) = space {
                 self.gs.stroke_space = Some(space);
             }
+        }
+    }
+
+    /// Records the pattern a `scn`/`SCN` selected (8.7.3).
+    fn set_pattern(&mut self, fill: bool, name: Vec<u8>) {
+        if fill {
+            self.gs.fill_pattern = Some(name);
+        } else {
+            self.gs.stroke_pattern = Some(name);
         }
     }
 

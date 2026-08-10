@@ -300,6 +300,15 @@ pub struct GraphicsState {
     pub fill_space: Option<Vec<u8>>,
     /// The same for the stroking colour space.
     pub stroke_space: Option<Vec<u8>>,
+    /// The pattern name a non-stroking `scn` selected, when it selected one.
+    ///
+    /// 8.7.3: a pattern carries no colour of its own — the paint comes from
+    /// the pattern object. Without this the interpreter has nowhere to put the
+    /// name, the device never learns a pattern was chosen, and the black that
+    /// `/Pattern` reports as its initial colour is what gets painted.
+    pub fill_pattern: Option<Vec<u8>>,
+    /// The same for a stroking `SCN`.
+    pub stroke_pattern: Option<Vec<u8>>,
 }
 
 impl GraphicsState {
@@ -323,6 +332,8 @@ impl GraphicsState {
             dash_phase: 0.0,
             fill_space: None,
             stroke_space: None,
+            fill_pattern: None,
+            stroke_pattern: None,
         }
     }
 }

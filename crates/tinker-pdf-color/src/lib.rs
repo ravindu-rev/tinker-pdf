@@ -53,6 +53,15 @@ pub enum ColorSpace {
         /// How many components.
         components: usize,
     },
+    /// `/Lab`: CIE 1976 L*a*b* (8.6.5.4).
+    ///
+    /// Not an `Approximated`, because its components are not in 0..1: L runs
+    /// 0..100 and a/b run roughly -128..127. Treating it as RGB clamps every
+    /// value into 0..1 and renders almost the whole space as black.
+    Lab {
+        /// `/Range`, as `[a_min a_max b_min b_max]`.
+        range: [f64; 4],
+    },
     /// `/Pattern`, which carries no colour of its own (8.7.3).
     Pattern,
 }
@@ -68,6 +77,7 @@ impl ColorSpace {
             ColorSpace::Indexed { .. } => 1,
             ColorSpace::Separation { components, .. } => *components,
             ColorSpace::Approximated { components } => *components,
+            ColorSpace::Lab { .. } => 3,
             ColorSpace::Pattern => 1,
         }
     }
@@ -79,6 +89,10 @@ impl ColorSpace {
             // Black in every device space, which for CMYK means all zeros
             // except the black ink.
             ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            // 8.6.5.4: black is L=0 with no chroma, and zero is inside every
+            // legal /Range, so the generic all-zeros answer is right here for
+            // a different reason than it is elsewhere.
+            ColorSpace::Lab { .. } => vec![0.0, 0.0, 0.0],
             other => vec![0.0; other.components()],
         }
     }
@@ -126,6 +140,15 @@ impl ColorSpace {
                 let converted = tint.eval(components);
                 alternate.to_rgb(&converted)
             }
+            ColorSpace::Lab { range } => {
+                // Raw, not `at`: these components are not in 0..1, and
+                // clamping them there is precisely the bug this variant fixes.
+                let raw = |i: usize| components.get(i).copied().unwrap_or(0.0);
+                let l = raw(0).clamp(0.0, 100.0);
+                let a = raw(1).clamp(range[0], range[1]);
+                let b = raw(2).clamp(range[2], range[3]);
+                lab_to_rgb(l, a, b)
+            }
             ColorSpace::Approximated { components: n } => match n {
                 1 => ColorSpace::DeviceGray.to_rgb(components),
                 4 => ColorSpace::DeviceCmyk.to_rgb(components),
@@ -143,6 +166,54 @@ fn byte(value: f64) -> u8 {
         return 0;
     }
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// CIE L*a*b* to sRGB, through XYZ (8.6.5.4).
+///
+/// The white point is D50, which is what PDF's `/WhitePoint` defaults to and
+/// what almost every file that uses Lab declares. A document with a different
+/// one is converted slightly wrongly rather than not at all — visibly closer
+/// than the alternative, which was rendering the whole space black.
+fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+    // D50, normalized so Y is 1.
+    const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+
+    let fy = (l + 16.0) / 116.0;
+    let fx = fy + a / 500.0;
+    let fz = fy - b / 200.0;
+
+    // The inverse of the piecewise cube root: linear near zero, so the
+    // gradient stays finite where a plain cube would flatten.
+    let finv = |t: f64| -> f64 {
+        const DELTA: f64 = 6.0 / 29.0;
+        if t > DELTA {
+            t * t * t
+        } else {
+            3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
+        }
+    };
+
+    let x = WHITE[0] * finv(fx);
+    let y = WHITE[1] * finv(fy);
+    let z = WHITE[2] * finv(fz);
+
+    // XYZ (D50) to linear sRGB, Bradford-adapted.
+    let r = 3.134_136 * x - 1.617_036 * y - 0.490_662 * z;
+    let g = -0.978_755 * x + 1.916_143 * y + 0.033_454 * z;
+    let bl = 0.071_95 * x - 0.228_988 * y + 1.405_386 * z;
+
+    let encode = |v: f64| -> u8 {
+        let v = v.clamp(0.0, 1.0);
+        // The sRGB transfer function, linear near zero for the same reason.
+        let s = if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
+        byte(s)
+    };
+
+    (encode(r), encode(g), encode(bl))
 }
 
 #[cfg(test)]

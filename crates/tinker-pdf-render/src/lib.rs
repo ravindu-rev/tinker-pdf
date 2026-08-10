@@ -75,8 +75,32 @@ pub enum RenderWarning {
         /// The shading type number.
         kind: i64,
     },
+    /// A pattern this build cannot paint was left unpainted.
+    ///
+    /// Reported rather than filled with the black that `/Pattern` nominally
+    /// reports as its colour: an unpainted area reads as missing, whereas a
+    /// black one reads as content and hides the gap.
+    UnsupportedPattern {
+        /// The resource name.
+        name: String,
+    },
     /// The render stopped because it was cancelled.
     Cancelled,
+}
+
+/// What a pattern name paints with (8.7.3).
+#[derive(Clone, Debug)]
+pub enum PatternPaint {
+    /// A shading pattern, and the matrix mapping pattern space to the page's
+    /// default space.
+    Shading(Box<Shading>, Matrix),
+    /// A pattern this build does not paint — a tiling pattern, or a shading
+    /// pattern over a mesh.
+    ///
+    /// The area is left alone and reported, rather than filled with the black
+    /// that `/Pattern` nominally reports as its colour: an unpainted area
+    /// reads as missing, a black one reads as content.
+    Unsupported,
 }
 
 /// A decoded image, ready to draw.
@@ -115,6 +139,14 @@ pub trait GlyphSource {
     fn shading(&self, name: &[u8]) -> Result<Option<Shading>, i64> {
         let _ = name;
         Ok(None)
+    }
+
+    /// A named pattern (8.7.3).
+    ///
+    /// `None` means the name resolves to nothing at all.
+    fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
+        let _ = name;
+        None
     }
 }
 
@@ -221,6 +253,77 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             a: 0xFF,
         };
         self.paint(&path, FillRule::NonZero, PLACEHOLDER, state.fill_alpha);
+    }
+
+    /// Fills a path with a shading pattern, or reports one that cannot be.
+    ///
+    /// The path becomes the clip and the shading is evaluated per pixel inside
+    /// it, which is the same machinery `sh` uses — a shading pattern is `sh`
+    /// bounded by a path rather than by the current clip.
+    ///
+    /// 8.7.3.1: a pattern's matrix maps pattern space to the *default* space
+    /// of the page, not to the space in force when it is used. The CTM at fill
+    /// time is therefore not part of it, which is why `base` appears here and
+    /// `state.ctm` does not.
+    fn fill_with_pattern(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        name: &[u8],
+        state: &GraphicsState,
+    ) {
+        let (shading, matrix) = match self.glyphs.pattern(name) {
+            Some(PatternPaint::Shading(shading, matrix)) => (*shading, matrix),
+            None => return,
+            Some(PatternPaint::Unsupported) => {
+                let warning = RenderWarning::UnsupportedPattern {
+                    name: String::from_utf8_lossy(name).into_owned(),
+                };
+                if !self.warnings.contains(&warning) {
+                    self.warnings.push(warning);
+                }
+                return;
+            }
+        };
+
+        let to_device = matrix.then(&self.base);
+        let Some(inverse) = invert(&to_device) else {
+            return;
+        };
+
+        let area = fill(
+            path,
+            rule,
+            0,
+            0,
+            self.canvas.width,
+            self.canvas.height,
+            self.tolerance,
+        );
+        let area = match &self.clip {
+            Some(clip) => area.intersect(clip),
+            None => area,
+        };
+
+        let alpha = state.fill_alpha.clamp(0.0, 1.0);
+        for py in 0..self.canvas.height {
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            for px in 0..self.canvas.width {
+                let coverage = area.at(px as i32, py as i32);
+                if coverage == 0 {
+                    continue;
+                }
+                let (x, y) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
+                let Some((r, g, b)) = shading.color_at(x, y) else {
+                    continue;
+                };
+                let weight = alpha * f64::from(coverage) / 255.0;
+                self.canvas
+                    .blend_pixel(px, py, Color { r, g, b, a: 0xFF }, weight);
+            }
+        }
     }
 
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64) {
@@ -388,6 +491,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         } else {
             FillRule::NonZero
         };
+
+        // 8.7.3: a pattern supplies the paint, so the fill colour is not used
+        // at all. Painting it would put `/Pattern`'s nominal black over every
+        // gradient in the document.
+        if let Some(name) = state.fill_pattern.clone() {
+            self.fill_with_pattern(&built, rule, &name, state);
+            return;
+        }
+
         let color = fill_color(state);
         self.paint(&built, rule, color, state.fill_alpha);
     }

@@ -12,7 +12,7 @@ use tinker_pdf_content::{FontSource, Matrix, Rgb};
 use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
 use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
 use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt};
-use tinker_pdf_render::{DecodedImage, GlyphSource, Shading};
+use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading};
 
 use crate::fonts::{self, FontProvider, FontRequest};
 
@@ -209,18 +209,119 @@ impl PageResources {
                         .map_or(1, <[Object]>::len)
                 };
                 let alternate = self.parse_space(items.get(2)?, depth + 1)?;
+
+                // 8.6.6.4: the fourth element converts tint values into the
+                // alternate space. Left as the identity, a one-ink Separation
+                // feeds its tint straight into a CMYK alternate as cyan, so
+                // full-tint black prints cyan — and nothing about the result
+                // looks like a bug. Spot colours are everywhere in
+                // print-origin files.
+                let tint = items
+                    .get(3)
+                    .and_then(|o| self.parse_function(o, depth + 1))
+                    .unwrap_or(Function::Identity);
+
                 Some(ColorSpace::Separation {
                     components,
                     alternate: Box::new(alternate),
-                    // The tint transform needs the function machinery; until a
-                    // function is read from the document, the identity keeps
-                    // the alternate space's own reading of the components.
-                    tint: Box::new(Function::Identity),
+                    tint: Box::new(tint),
                 })
             }
             b"CalGray" => Some(ColorSpace::DeviceGray),
-            b"CalRGB" | b"Lab" => Some(ColorSpace::DeviceRgb),
+            b"CalRGB" => Some(ColorSpace::DeviceRgb),
+            // 8.6.5.4: L runs 0..100 and a/b roughly -128..127. Aliasing Lab
+            // to RGB clamps every component into 0..1, which renders almost
+            // the whole space black.
+            b"Lab" => {
+                let params = items.get(1).map(|o| self.doc.resolve(o));
+                let range = params
+                    .as_ref()
+                    .and_then(|p| p.as_dict())
+                    .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Range")))
+                    .and_then(|r| {
+                        let values: Vec<f64> =
+                            r.as_array()?.iter().filter_map(Object::as_number).collect();
+                        (values.len() >= 4).then(|| [values[0], values[1], values[2], values[3]])
+                    })
+                    .unwrap_or([-100.0, 100.0, -100.0, 100.0]);
+                Some(ColorSpace::Lab { range })
+            }
             _ => None,
+        }
+    }
+
+    /// Reads a shading dictionary, wherever it was found.
+    ///
+    /// Split out of [`GlyphSource::shading`] so a shading *pattern* can reuse
+    /// it on the dictionary it resolved itself, rather than duplicating the
+    /// nine entries a shading is made of.
+    fn read_shading(&self, dict: &Dict) -> Result<Option<Shading>, i64> {
+        let kind = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ShadingType"))
+            .as_int()
+            .unwrap_or(0);
+
+        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let space = self.parse_space(&space, 0).unwrap_or(ColorSpace::DeviceRgb);
+        let function = self.function(dict).unwrap_or(Function::Identity);
+
+        let coords = self.doc.resolve_key(dict, self.doc.intern(b"Coords"));
+        let coords: Vec<f64> = coords
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let extend = self.doc.resolve_key(dict, self.doc.intern(b"Extend"));
+        let extend = extend
+            .as_array()
+            .map(|a| {
+                (
+                    a.first().and_then(Object::as_bool).unwrap_or(false),
+                    a.get(1).and_then(Object::as_bool).unwrap_or(false),
+                )
+            })
+            .unwrap_or((false, false));
+
+        match kind {
+            1 => {
+                let domain = self.doc.resolve_key(dict, self.doc.intern(b"Domain"));
+                let domain: Vec<f64> = domain
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| self.doc.resolve(o).as_number())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let d = |i: usize, fallback: f64| domain.get(i).copied().unwrap_or(fallback);
+                Ok(Some(Shading::FunctionBased {
+                    space,
+                    function,
+                    domain: [d(0, 0.0), d(1, 1.0), d(2, 0.0), d(3, 1.0)],
+                }))
+            }
+            2 if coords.len() >= 4 => Ok(Some(Shading::Axial {
+                space,
+                function,
+                coords: [coords[0], coords[1], coords[2], coords[3]],
+                extend,
+            })),
+            3 if coords.len() >= 6 => Ok(Some(Shading::Radial {
+                space,
+                function,
+                coords: [
+                    coords[0], coords[1], coords[2], coords[3], coords[4], coords[5],
+                ],
+                extend,
+            })),
+            // The mesh types are behind a capability (ruling 3).
+            4..=7 => Err(kind),
+            _ => Ok(None),
         }
     }
 }
@@ -396,73 +497,60 @@ impl GlyphSource for PageResources {
             return Ok(None);
         };
 
+        self.read_shading(dict)
+    }
+
+    fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
+        let resources = self.resources.as_ref()?;
+        let table = self.doc.resolve_key(resources, self.doc.intern(b"Pattern"));
+        let table = table.as_dict()?;
+        let entry = self.doc.resolve_key(table, self.doc.intern(name));
+        let dict = entry.as_dict()?;
+
+        // 8.7.3.3: type 2 is a shading pattern, type 1 a tiling pattern. A
+        // tiling pattern needs its content stream replayed into a tile and
+        // repeated, which this build does not do — reported, not painted.
         let kind = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"ShadingType"))
+            .resolve_key(dict, self.doc.intern(b"PatternType"))
             .as_int()
             .unwrap_or(0);
+        if kind != 2 {
+            return Some(PatternPaint::Unsupported);
+        }
 
-        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
-        let space = self.parse_space(&space, 0).unwrap_or(ColorSpace::DeviceRgb);
-        let function = self.function(dict).unwrap_or(Function::Identity);
+        let shading = self.doc.resolve_key(dict, self.doc.intern(b"Shading"));
+        let shading = shading.as_dict()?;
+        // A mesh inside a pattern is as unpaintable as a mesh anywhere else,
+        // and reports as an unpainted pattern rather than as a missing one.
+        let Ok(Some(shading)) = self.read_shading(shading) else {
+            return Some(PatternPaint::Unsupported);
+        };
 
-        let coords = self.doc.resolve_key(dict, self.doc.intern(b"Coords"));
-        let coords: Vec<f64> = coords
+        // 8.7.3.1: the pattern matrix maps pattern space to the page's
+        // *default* space, so the CTM in force at fill time is not part of it.
+        let matrix = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Matrix"))
             .as_array()
             .map(|a| {
                 a.iter()
                     .filter_map(|o| self.doc.resolve(o).as_number())
-                    .collect()
+                    .collect::<Vec<f64>>()
             })
-            .unwrap_or_default();
-
-        let extend = self.doc.resolve_key(dict, self.doc.intern(b"Extend"));
-        let extend = extend
-            .as_array()
-            .map(|a| {
-                (
-                    a.first().and_then(Object::as_bool).unwrap_or(false),
-                    a.get(1).and_then(Object::as_bool).unwrap_or(false),
-                )
+            .and_then(|v| {
+                (v.len() >= 6 && v.iter().all(|x| x.is_finite())).then(|| Matrix {
+                    a: v[0],
+                    b: v[1],
+                    c: v[2],
+                    d: v[3],
+                    e: v[4],
+                    f: v[5],
+                })
             })
-            .unwrap_or((false, false));
+            .unwrap_or(Matrix::IDENTITY);
 
-        match kind {
-            1 => {
-                let domain = self.doc.resolve_key(dict, self.doc.intern(b"Domain"));
-                let domain: Vec<f64> = domain
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|o| self.doc.resolve(o).as_number())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let d = |i: usize, fallback: f64| domain.get(i).copied().unwrap_or(fallback);
-                Ok(Some(Shading::FunctionBased {
-                    space,
-                    function,
-                    domain: [d(0, 0.0), d(1, 1.0), d(2, 0.0), d(3, 1.0)],
-                }))
-            }
-            2 if coords.len() >= 4 => Ok(Some(Shading::Axial {
-                space,
-                function,
-                coords: [coords[0], coords[1], coords[2], coords[3]],
-                extend,
-            })),
-            3 if coords.len() >= 6 => Ok(Some(Shading::Radial {
-                space,
-                function,
-                coords: [
-                    coords[0], coords[1], coords[2], coords[3], coords[4], coords[5],
-                ],
-                extend,
-            })),
-            // The mesh types are behind a capability (ruling 3).
-            4..=7 => Err(kind),
-            _ => Ok(None),
-        }
+        Some(PatternPaint::Shading(Box::new(shading), matrix))
     }
 
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
@@ -504,7 +592,19 @@ impl PageResources {
     fn function(&self, dict: &Dict) -> Option<Function> {
         let value = self.doc.resolve_key(dict, self.doc.intern(b"Function"));
         if let Some(items) = value.as_array() {
-            return items.first().and_then(|o| self.parse_function(o, 0));
+            // 7.10.1: every member supplies one output component. Reading only
+            // the first turns an RGB gradient into a red ramp on black, and
+            // does it silently — a one-output function is valid on its own, so
+            // nothing downstream can tell the difference.
+            let parsed: Vec<Function> = items
+                .iter()
+                .filter_map(|o| self.parse_function(o, 0))
+                .collect();
+            return match parsed.len() {
+                0 => None,
+                1 => parsed.into_iter().next(),
+                _ => Some(Function::Array(parsed)),
+            };
         }
         self.parse_function(&value, 0)
     }
