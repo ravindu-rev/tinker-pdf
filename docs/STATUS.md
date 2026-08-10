@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**577 tests**, `cargo fmt --check` and `clippy -D warnings` clean, and
+**585 tests**, `cargo fmt --check` and `clippy -D warnings` clean, and
 `wasm32-unknown-unknown` builds — on every commit.
 
 ## Built
@@ -11,7 +11,7 @@ land; the plan files say what *should* exist, this says what *does*.
 | Phase | State | What works |
 | --- | --- | --- |
 | [01 COS](plans/01-cos-and-object-model.md) | milestones 1–4 | Lexer, object model, xref in every flavour, object streams, lazy `Send + Sync` store, repair scanner, leniency ladder, three stream tiers |
-| [02 Filters](plans/02-filters.md) | wave 1 | Own inflate/deflate, LZW, ASCIIHex/85, RunLength, PNG and TIFF predictors |
+| [02 Filters](plans/02-filters.md) | wave 1 + baseline JPEG | Own inflate/deflate, LZW, ASCIIHex/85, RunLength, predictors; **baseline JPEG** with subsampling, restarts, YCbCr/YCCK and Adobe's inverted CMYK |
 | [03 Encryption](plans/03-encryption.md) | complete for reading | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; **owner vs user distinguished**; **`/P` read correctly through its reserved bits** |
 | [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata, page tree with inheritance, geometry, outlines, name/number trees, **destination enum**, page labels, actions |
 | [05 Fonts](plans/05-fonts.md) | both waves | Encodings, CMaps, standard-14 metrics, TrueType tables; TrueType `glyf` and CFF Type 2 outlines |
@@ -34,7 +34,8 @@ than no plan.
 
 | Gap | Consequence | Where it belongs |
 | --- | --- | --- |
-| **Image decoding** (JPEG, CCITT, and the deferred JBIG2/JPX) | A page with an image renders everything else and reports `UnsupportedImage`. Nothing fails; the image is simply absent. | [02 wave 2](plans/02-filters.md) |
+| **Images not wired to the renderer** | The baseline JPEG decoder exists and is tested, but the rendering device does not yet fetch and draw image XObjects — so a page with one still reports `UnsupportedImage`. This is now plumbing, not a missing decoder. | [08](plans/08-rendering-device.md) |
+| **CCITT, progressive JPEG, JBIG2, JPX** | Reported rather than half-decoded. | [02 wave 2](plans/02-filters.md) |
 | **Colour operators in the interpreter** | Everything paints black. The colour machinery exists and is tested; the interpreter does not yet track `cs`/`sc`/`rg`/`k` and hand it over. | [08](plans/08-rendering-device.md) |
 | **Glyph source wiring** | The renderer draws outlines it is given, and the font crate produces them, but the facade does not yet connect embedded font programs to it — so text renders only where a document embeds nothing. | [08](plans/08-rendering-device.md) |
 | **Shadings, patterns, transparency groups, soft masks** | Skipped with a warning. | [08](plans/08-rendering-device.md) |
