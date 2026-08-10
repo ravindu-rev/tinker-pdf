@@ -368,8 +368,10 @@ impl Page {
 
     /// Renders the page to a bitmap.
     ///
-    /// The bitmap's size is the page's, scaled and **rounded outward** so a
-    /// page never loses its last row or column: A4 at 150 dpi is 1240×1755.
+    /// The bitmap's size is the page's *displayed* size — the crop box, with
+    /// its axes swapped for a quarter-turn `/Rotate` — scaled and **rounded
+    /// outward** so a page never loses its last row or column: A4 at 150 dpi
+    /// is 1240×1755.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         let (w, h) = self.size();
@@ -380,7 +382,11 @@ impl Page {
         };
 
         let canvas = tinker_pdf_render::page_canvas(w, h, scale, options.format);
-        let base = tinker_pdf_render::page_transform(h, scale);
+        // The rotation and the crop-box origin belong in the transform, not
+        // only in the canvas size: sizing for a rotated page and then drawing
+        // it upright fills a sideways canvas with clipped, upright content.
+        let crop = self.crop_box();
+        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), scale);
 
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         let resources =

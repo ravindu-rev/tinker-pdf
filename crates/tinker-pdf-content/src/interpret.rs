@@ -6,7 +6,7 @@
 //! of the page.
 
 use crate::device::{Device, Glyph, ImageRef, PathSegment};
-use crate::state::{GraphicsState, Matrix, Rgb, TextRenderMode};
+use crate::state::{GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode};
 use crate::tokenizer::{Token, Tokenizer};
 
 /// Everything the interpreter needs from a page's resources.
@@ -155,6 +155,42 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             Token::Number(v) if v.is_finite() => Some(*v),
             _ => None,
         }
+    }
+
+    /// Reads `d`: a dash array and a phase (8.4.3.6).
+    ///
+    /// An array of all zeros, or one containing a negative, is invalid and
+    /// means a solid line rather than an invisible one — the alternative is a
+    /// stroke that vanishes, which reads as missing content.
+    fn set_dashes(&mut self) {
+        let phase = self.num(0).filter(|v| v.is_finite() && *v >= 0.0);
+        let Some(phase) = phase else { return };
+
+        // The array is the operand before the phase, and the tokenizer leaves
+        // its elements on the stack between the brackets.
+        let mut dashes: Vec<f64> = Vec::new();
+        let mut seen_open = false;
+        for token in self.stack.iter().rev().skip(1) {
+            match token {
+                Token::Number(v) if v.is_finite() && *v >= 0.0 => dashes.push(*v),
+                Token::ArrayClose => {}
+                Token::ArrayOpen => {
+                    seen_open = true;
+                    break;
+                }
+                _ => return,
+            }
+        }
+        if !seen_open {
+            return;
+        }
+        dashes.reverse();
+
+        if dashes.iter().all(|v| *v == 0.0) {
+            dashes.clear();
+        }
+        self.gs.dashes = dashes;
+        self.gs.dash_phase = phase;
     }
 
     fn operator(&mut self, op: &[u8]) {
@@ -428,8 +464,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
 
-            // 8.4.3 line parameters. Only the width reaches a device; the
-            // rest is carried for completeness.
+            // 8.4.3 line parameters. All of them reach the device: a stroke
+            // drawn with the wrong cap, or without its dashes, is wrong in a
+            // way that looks deliberate.
             b"w" => {
                 if let Some(v) = self.num(0) {
                     if v.is_finite() && v >= 0.0 {
@@ -437,7 +474,28 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     }
                 }
             }
-            b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" => {}
+            b"J" => {
+                if let Some(v) = self.num(0) {
+                    self.gs.line_cap = LineCap::from_operand(v);
+                }
+            }
+            b"j" => {
+                if let Some(v) = self.num(0) {
+                    self.gs.line_join = LineJoin::from_operand(v);
+                }
+            }
+            b"M" => {
+                if let Some(v) = self.num(0) {
+                    // 8.4.3.5: a limit below 1 is meaningless — the ratio it
+                    // bounds is never less than 1 — so it is ignored rather
+                    // than turning every join into a bevel.
+                    if v.is_finite() && v >= 1.0 {
+                        self.gs.miter_limit = v;
+                    }
+                }
+            }
+            b"d" => self.set_dashes(),
+            b"ri" | b"i" => {}
 
             // 8.6.8 colour. The device operators resolve immediately; the
             // named ones go through the resource seam.

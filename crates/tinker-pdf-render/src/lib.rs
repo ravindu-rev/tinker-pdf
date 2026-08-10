@@ -16,14 +16,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use shading::Shading;
-use tinker_pdf_content::{Device, Glyph, GraphicsState, ImageRef, Matrix, PathSegment};
+use tinker_pdf_content::{
+    Device, Glyph, GraphicsState, ImageRef, LineCap as ContentCap, LineJoin as ContentJoin, Matrix,
+    PathSegment,
+};
 
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, PixelFormat},
     fill::{fill, Mask},
     geom::{FillRule, Path},
-    stroke::{stroke, StrokeStyle},
+    stroke::{stroke, LineCap, LineJoin, StrokeStyle},
 };
 
 /// Lets a caller stop a render that is taking too long.
@@ -176,6 +179,48 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.warnings.push(RenderWarning::Cancelled);
         }
         (self.canvas, self.warnings)
+    }
+
+    /// Fills an undecodable image's area with a neutral grey.
+    ///
+    /// Ruling 2 asks for a placeholder, not merely a warning, and the
+    /// difference is what a reader sees: an image that silently occupies no
+    /// space lets the page look complete and wrong. Grey rather than a
+    /// diagonal-cross convention because it composites predictably over
+    /// whatever is beneath it and never reads as content.
+    ///
+    /// 8.9.5.2: the image occupies the unit square of the current transform,
+    /// so the placeholder is that square — exactly the area the real image
+    /// would have covered.
+    fn draw_image_placeholder(&mut self, state: &GraphicsState) {
+        let unit_to_device = state.ctm.then(&self.base);
+        let corners = [
+            unit_to_device.apply(0.0, 0.0),
+            unit_to_device.apply(1.0, 0.0),
+            unit_to_device.apply(1.0, 1.0),
+            unit_to_device.apply(0.0, 1.0),
+        ];
+        if corners
+            .iter()
+            .any(|(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return;
+        }
+
+        let mut path = Path::new();
+        path.move_to(corners[0].0, corners[0].1);
+        for (x, y) in &corners[1..] {
+            path.line_to(*x, *y);
+        }
+        path.close();
+
+        const PLACEHOLDER: Color = Color {
+            r: 0xBF,
+            g: 0xBF,
+            b: 0xBF,
+            a: 0xFF,
+        };
+        self.paint(&path, FillRule::NonZero, PLACEHOLDER, state.fill_alpha);
     }
 
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64) {
@@ -396,10 +441,27 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
         // 8.4.3.2: the line width is in user space, so the transform scales
         // it. A hairline still has to cover a pixel to be visible.
-        let width = (state.line_width * self.base.expansion()).max(0.8);
+        //
+        // The dashes scale by the same factor, and for the same reason: a
+        // pattern measured in user space and applied in device space comes out
+        // at the wrong pitch under any zoom.
+        let scale = state.ctm.then(&self.base).expansion();
+        let width = (state.line_width * scale).max(0.8);
         let style = StrokeStyle {
             width,
-            ..StrokeStyle::default()
+            cap: match state.line_cap {
+                ContentCap::Butt => LineCap::Butt,
+                ContentCap::Round => LineCap::Round,
+                ContentCap::Square => LineCap::Square,
+            },
+            join: match state.line_join {
+                ContentJoin::Miter => LineJoin::Miter,
+                ContentJoin::Round => LineJoin::Round,
+                ContentJoin::Bevel => LineJoin::Bevel,
+            },
+            miter_limit: state.miter_limit,
+            dashes: state.dashes.iter().map(|d| d * scale).collect(),
+            dash_phase: state.dash_phase * scale,
         };
         let outline = stroke(&built, &style, self.tolerance);
         let color = stroke_color(state);
@@ -506,6 +568,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 if !self.warnings.contains(&warning) {
                     self.warnings.push(warning);
                 }
+                self.draw_image_placeholder(state);
             }
         }
     }
@@ -602,6 +665,11 @@ fn last_point(path: &Path) -> Option<(f64, f64)> {
 /// PDF's y axis points up from the bottom-left of the page; a raster's points
 /// down from the top-left, so the flip belongs here rather than in every
 /// caller.
+///
+/// Ignores `/Rotate` and any crop-box origin; [`page_view_transform`] is what
+/// a page should actually be rendered through. Kept because it is the honest
+/// primitive — a raw flip for a box that starts at the origin — and because
+/// the tests that pin the flip should not have to state a rotation.
 #[must_use]
 pub fn page_transform(page_height: f64, scale: f64) -> Matrix {
     Matrix {
@@ -612,6 +680,80 @@ pub fn page_transform(page_height: f64, scale: f64) -> Matrix {
         e: 0.0,
         f: page_height * scale,
     }
+}
+
+/// The transform that maps a page's visible area onto its canvas.
+///
+/// Three things the raw flip does not do, each of which silently misplaces
+/// content when it is missing:
+///
+/// - **`/Rotate`** (7.7.3.3) turns the page clockwise when displayed. The
+///   canvas is sized from the *rotated* extent, so without the matching
+///   rotation here the content is drawn upright inside a sideways canvas and
+///   clipped away.
+/// - **The crop box's origin.** `/CropBox [20 30 »]` means the visible area
+///   starts at (20, 30) in user space and must land at the canvas origin.
+///   A box that does not start at (0, 0) otherwise shifts everything.
+/// - **The y flip**, as before.
+///
+/// `crop` is the page's visible box in user space, `rotation` its normalized
+/// `/Rotate` (0, 90, 180 or 270).
+#[must_use]
+pub fn page_view_transform(crop: (f64, f64, f64, f64), rotation: u16, scale: f64) -> Matrix {
+    let (x0, y0, x1, y1) = crop;
+    let (w, h) = ((x1 - x0).max(0.0), (y1 - y0).max(0.0));
+
+    // Move the visible box's lower-left corner to the origin first; every
+    // case below then reasons about a box at (0, 0).
+    let to_origin = Matrix::translate(-x0, -y0);
+
+    // 7.7.3.3: `/Rotate` turns the page **clockwise** when it is displayed.
+    //
+    // Each case below is derived from where the corners land, because the sign
+    // is easy to get backwards and looks plausible either way — a page rotated
+    // the wrong way is still a rotated page. Turning a sheet clockwise sends
+    // its bottom-left corner to the top-left; anticlockwise sends it to the
+    // bottom-right. These matrices are stated in user space (y still up), and
+    // the y flip happens afterwards in `page_transform`.
+    let rotate = match rotation % 360 {
+        // Clockwise: (x, y) -> (y, w - x), so (0, 0) ends up at the top-left
+        // once the flip is applied.
+        90 => Matrix {
+            a: 0.0,
+            b: -1.0,
+            c: 1.0,
+            d: 0.0,
+            e: 0.0,
+            f: w,
+        },
+        // (x, y) -> (w - x, h - y): the opposite corner.
+        180 => Matrix {
+            a: -1.0,
+            b: 0.0,
+            c: 0.0,
+            d: -1.0,
+            e: w,
+            f: h,
+        },
+        // Anticlockwise: (x, y) -> (h - y, x), bottom-left to bottom-right.
+        270 => Matrix {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: h,
+            f: 0.0,
+        },
+        _ => Matrix::IDENTITY,
+    };
+
+    // After rotating, the extent swaps for the quarter turns — which is the
+    // same swap `Page::display_size` makes when it sizes the canvas.
+    let rotated_height = if rotation % 180 == 90 { w } else { h };
+
+    to_origin
+        .then(&rotate)
+        .then(&page_transform(rotated_height, scale))
 }
 
 /// The largest canvas this will allocate for one page, in pixels.

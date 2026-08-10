@@ -216,6 +216,58 @@ impl Default for Rgb {
     }
 }
 
+/// How a stroke's ends are finished (8.4.3.3, Table 54).
+///
+/// Restated here rather than imported: the rasterizer has the same three
+/// cases, but ruling 8 keeps this crate free of it, and a leaf crate must not
+/// learn PDF operator numbers to be usable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineCap {
+    /// 0: cut off square at the endpoint.
+    #[default]
+    Butt,
+    /// 1: a semicircle beyond the endpoint.
+    Round,
+    /// 2: a square extending half the width beyond.
+    Square,
+}
+
+impl LineCap {
+    /// Reads the operand of `J`. Anything else is the default (8.4.3.3).
+    #[must_use]
+    pub fn from_operand(value: f64) -> LineCap {
+        match value as i64 {
+            1 => LineCap::Round,
+            2 => LineCap::Square,
+            _ => LineCap::Butt,
+        }
+    }
+}
+
+/// How a stroke's corners are finished (8.4.3.4, Table 55).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineJoin {
+    /// 0: extended to a point, unless the miter limit is exceeded.
+    #[default]
+    Miter,
+    /// 1: rounded.
+    Round,
+    /// 2: cut off square.
+    Bevel,
+}
+
+impl LineJoin {
+    /// Reads the operand of `j`. Anything else is the default (8.4.3.4).
+    #[must_use]
+    pub fn from_operand(value: f64) -> LineJoin {
+        match value as i64 {
+            1 => LineJoin::Round,
+            2 => LineJoin::Bevel,
+            _ => LineJoin::Miter,
+        }
+    }
+}
+
 /// The graphics state (8.4.1), reduced to what interpretation needs.
 #[derive(Clone, Debug, Default)]
 pub struct GraphicsState {
@@ -233,6 +285,16 @@ pub struct GraphicsState {
     pub stroke_color: Rgb,
     /// `w`, the line width in user space.
     pub line_width: f64,
+    /// `J`, the line cap.
+    pub line_cap: LineCap,
+    /// `j`, the line join.
+    pub line_join: LineJoin,
+    /// `M`, the miter limit.
+    pub miter_limit: f64,
+    /// `d`, the dash array in user space. Empty means a solid line.
+    pub dashes: Vec<f64>,
+    /// `d`, the distance into the pattern at which to start.
+    pub dash_phase: f64,
     /// The resource name of the non-stroking colour space, when one was set
     /// by name rather than by a device operator.
     pub fill_space: Option<Vec<u8>>,
@@ -253,6 +315,12 @@ impl GraphicsState {
             stroke_color: Rgb::BLACK,
             // 8.4.3.2: the initial line width is 1.0 user-space units.
             line_width: 1.0,
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
+            // 8.4.3.5: the initial miter limit is 10.
+            miter_limit: 10.0,
+            dashes: Vec::new(),
+            dash_phase: 0.0,
             fill_space: None,
             stroke_space: None,
         }
