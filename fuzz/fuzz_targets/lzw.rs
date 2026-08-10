@@ -7,6 +7,6 @@ use tinker_pdf_filters::{lzw_decode, Limits};
 
 fuzz_target!(|data: &[u8]| {
     let limits = Limits::new(1 << 20);
-    let _ = lzw_decode(data, true, &limits);
-    let _ = lzw_decode(data, false, &limits);
+    let _ = lzw_decode(data, &limits, true, None);
+    let _ = lzw_decode(data, &limits, false, None);
 });

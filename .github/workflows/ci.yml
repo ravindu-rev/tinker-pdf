@@ -29,6 +29,22 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  fuzz-targets:
+    # The fuzz crate sits outside the workspace, so `cargo check --workspace`
+    # never looks at it and its targets can drift out of sync with the APIs
+    # they drive without anything noticing. They did exactly that once: four of
+    # the eleven had been calling functions with the wrong arity since the day
+    # they were written, and nothing caught it because running them needs
+    # nightly and cargo-fuzz.
+    #
+    # `cargo check` alone needs neither. Running them still does.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --manifest-path fuzz/Cargo.toml --all-targets
+
   wasm:
     # wasm32-unknown-unknown is a first-class target from day one. The ffi crate
     # (cdylib for native bindings) and the CLI tools are excluded; the engine

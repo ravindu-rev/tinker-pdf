@@ -19,14 +19,26 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 
 ## Running
 
-These need a nightly toolchain and `cargo-fuzz`, so nothing here runs on an
-ordinary `cargo test`:
+*Running* these needs a nightly toolchain and `cargo-fuzz`:
 
 ```sh
 cargo install cargo-fuzz
 cargo +nightly fuzz run cos_document
 cargo +nightly fuzz run cos_document -- -max_total_time=3600   # a long soak
 ```
+
+*Compiling* them needs neither, and CI does it on every push:
+
+```sh
+cargo check --manifest-path fuzz/Cargo.toml --all-targets
+```
+
+That distinction is not academic. This crate sits outside the workspace, so
+`cargo check --workspace` never looks at it, and four of the eleven targets
+called functions with the wrong arity from the day they were written — a
+mistake nothing caught, because the only thing that would have caught it was
+a toolchain nobody had installed. Anything unrunnable in the normal loop needs
+*something* in the normal loop that would notice it rotting.
 
 The crate is deliberately outside the workspace. `cargo-fuzz` builds it with
 its own profile and sanitizer flags, and `libfuzzer-sys` pulls in a C++

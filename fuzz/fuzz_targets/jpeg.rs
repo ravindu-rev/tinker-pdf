@@ -6,5 +6,5 @@ use libfuzzer_sys::fuzz_target;
 use tinker_pdf_filters::jpeg_decode;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = jpeg_decode(data);
+    let _ = jpeg_decode(data, 1 << 22);
 });
