@@ -367,7 +367,7 @@ pub unsafe extern "C" fn tpdf_page_render(
     let bitmap = page.render(&RenderOptions {
         scale,
         format: format.into(),
-        cancel: None,
+        ..RenderOptions::default()
     });
     unsafe { *out = Box::into_raw(Box::new(TpdfBitmap { inner: bitmap })) };
     TpdfStatus::Ok

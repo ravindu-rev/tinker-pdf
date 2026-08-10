@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod annots;
 pub mod redact;
 mod resources;
 
@@ -72,6 +73,12 @@ pub struct RenderOptions {
     pub format: PixelFormat,
     /// Lets a caller stop a long render.
     pub cancel: Option<CancelToken>,
+    /// Whether to draw annotation appearance streams over the page.
+    ///
+    /// On by default, because that is what a reader sees: a page rendered
+    /// without its annotations is missing its highlights, its stamps and its
+    /// filled-in form fields, and looks convincingly complete without them.
+    pub annotations: bool,
 }
 
 impl Default for RenderOptions {
@@ -80,6 +87,7 @@ impl Default for RenderOptions {
             scale: 1.0,
             format: PixelFormat::Rgb8,
             cancel: None,
+            annotations: true,
         }
     }
 }
@@ -344,6 +352,11 @@ impl Page {
             renderer = renderer.with_cancel(cancel.clone());
         }
         interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
+        if options.annotations {
+            // After the content, because an annotation sits on top of the
+            // page rather than under it.
+            annots::draw(&self.doc, &self.inner, &mut renderer);
+        }
         let (canvas, warnings) = renderer.finish();
 
         Bitmap {

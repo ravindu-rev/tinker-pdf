@@ -109,7 +109,7 @@ impl PdfDocument {
             inner: page.render(&tinker_pdf::RenderOptions {
                 scale,
                 format: tinker_pdf::PixelFormat::Rgba8,
-                cancel: None,
+                ..tinker_pdf::RenderOptions::default()
             }),
         })
     }

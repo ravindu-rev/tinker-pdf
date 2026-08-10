@@ -70,6 +70,40 @@ impl PageResources {
         }
     }
 
+    /// Reads a resource dictionary that is not a page's.
+    ///
+    /// An annotation's appearance stream carries its own resources, and
+    /// resolving its fonts against the page's would find the wrong ones or
+    /// none at all.
+    #[must_use]
+    pub fn from_dict(doc: &Arc<CosDocument>, dict: Dict) -> PageResources {
+        let mut fonts = HashMap::new();
+        let mut font_ids = HashMap::new();
+        let mut programs = HashMap::new();
+
+        for (name, font) in cos_font::from_resources(doc, &dict) {
+            if let Some(bytes) = doc.name_bytes(name) {
+                let key = bytes.to_vec();
+                let id = u64::from(name.id());
+                if let Some(program) = embedded_program(doc, &key, &dict) {
+                    programs.insert(id, Arc::new(program));
+                }
+                font_ids.insert(key.clone(), id);
+                fonts.insert(key, font);
+            }
+        }
+
+        PageResources {
+            doc: doc.clone(),
+            fonts,
+            font_ids,
+            programs,
+            resources: Some(dict),
+            images: Mutex::new(HashMap::new()),
+            outlines: RwLock::new(HashMap::new()),
+        }
+    }
+
     fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_ref()?;
         let value = self.doc.resolve_key(resources, self.doc.intern(b"XObject"));

@@ -173,13 +173,28 @@ impl DocumentEditor {
 
     /// Adds an annotation to a page (12.5).
     ///
-    /// The dictionary is written as given; [`annot`] builds the common kinds
-    /// with their appearance streams.
+    /// An appearance stream is synthesized and attached unless the dictionary
+    /// already carries an `/AP`, because an annotation without one looks like
+    /// whatever the viewer decides and prints like nothing at all. Passing an
+    /// `/AP` in keeps it untouched; [`crate::appearance::synthesize`] is what
+    /// gets called otherwise, and the subtypes it declines are left bare.
     pub fn add_annotation(&mut self, page: u32, annotation: Dict) -> Option<ObjRef> {
         let reference = self.page_refs().get(page as usize).copied()?;
         let Some(Object::Dict(mut dict)) = self.get(reference) else {
             return None;
         };
+
+        let mut annotation = annotation;
+        let ap = self.intern(b"AP");
+        if !annotation.contains_key(ap) {
+            if let Some(stream) = crate::appearance::synthesize(&self.doc, &annotation) {
+                let form = self.allocate();
+                self.put_stream(form, stream);
+                let mut states = Dict::new();
+                states.insert(self.intern(b"N"), Object::Ref(form));
+                annotation.insert(ap, Object::Dict(states));
+            }
+        }
 
         let annot_ref = self.allocate();
         self.put(annot_ref, Object::Dict(annotation));
@@ -649,6 +664,102 @@ mod tests {
             Some(4),
             "the print flag is set, or it will not appear on paper"
         );
+    }
+
+    /// An annotation without an appearance stream is drawn by guesswork, and
+    /// viewers guess differently. One is attached on the way in, and it has to
+    /// survive being written and read back as a real form.
+    #[test]
+    fn an_annotation_is_given_an_appearance_stream() {
+        let doc = document(1);
+        let mut editor = DocumentEditor::new(doc.clone());
+
+        let rect = Rect {
+            x0: 10.0,
+            y0: 10.0,
+            x1: 60.0,
+            y1: 30.0,
+        };
+        let square = annot::square(
+            &doc,
+            rect,
+            annot::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            },
+            2.0,
+        );
+        editor.add_annotation(0, square).expect("it is added");
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let page = pages::collect(&saved)[0].reference;
+        let annot_ref = saved
+            .get(page)
+            .ok()
+            .and_then(|o| o.as_dict().cloned())
+            .and_then(|d| d.get_array(saved.intern(b"Annots")).map(<[Object]>::to_vec))
+            .and_then(|a| a.first().and_then(Object::as_objref))
+            .expect("the annotation is on the page");
+
+        let annot = saved.get(annot_ref).expect("it loads");
+        let form_ref = annot
+            .as_dict()
+            .and_then(|d| d.get_dict(saved.intern(b"AP")))
+            .and_then(|ap| ap.get_ref(saved.intern(b"N")))
+            .expect("with a normal appearance");
+
+        let form = saved.get(form_ref).expect("the form loads");
+        let form_dict = form.as_dict().expect("a stream dictionary");
+        assert_eq!(
+            form_dict
+                .get_name(saved.intern(b"Subtype"))
+                .and_then(|n| saved.name_bytes(n))
+                .as_deref(),
+            Some(b"Form".as_slice()),
+            "the appearance is a form XObject"
+        );
+
+        let content = saved.stream_decoded(form_ref).expect("its content decodes");
+        let text = String::from_utf8_lossy(&content);
+        assert!(text.contains(" re"), "which draws the square: {text}");
+    }
+
+    /// An appearance supplied by the caller is theirs, not ours to replace.
+    #[test]
+    fn a_supplied_appearance_is_left_alone() {
+        let doc = document(1);
+        let mut editor = DocumentEditor::new(doc.clone());
+
+        let rect = Rect {
+            x0: 10.0,
+            y0: 10.0,
+            x1: 60.0,
+            y1: 30.0,
+        };
+        let mut square = annot::square(
+            &doc,
+            rect,
+            annot::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            },
+            2.0,
+        );
+        let mine = ObjRef::new(4242, 0);
+        let mut ap = Dict::new();
+        ap.insert(doc.intern(b"N"), Object::Ref(mine));
+        square.insert(doc.intern(b"AP"), Object::Dict(ap));
+
+        let annot_ref = editor.add_annotation(0, square).expect("it is added");
+        let kept = editor
+            .get(annot_ref)
+            .and_then(|o| o.as_dict().cloned())
+            .and_then(|d| d.get_dict(doc.intern(b"AP")).cloned())
+            .and_then(|ap| ap.get_ref(doc.intern(b"N")))
+            .expect("the appearance survives");
+        assert_eq!(kept, mine);
     }
 
     #[test]

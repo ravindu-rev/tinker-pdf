@@ -41,6 +41,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod appearance;
 pub mod build;
 pub mod decrypt;
 pub mod dest;
@@ -69,6 +70,7 @@ mod repair;
 mod store;
 mod streams;
 
+pub use appearance::synthesize as synthesize_appearance;
 pub use build::{DocumentBuilder, ImageData, OutlineEntry, PageBuilder};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{Action, DestKind, Destination, Resolver};
