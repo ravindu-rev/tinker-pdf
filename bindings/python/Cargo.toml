@@ -1,0 +1,18 @@
+[package]
+name = "tinker-pdf-python"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ravindu-rev/tinker-pdf"
+authors = ["tinker-pdf contributors"]
+description = "Python bindings for tinker-pdf"
+publish = false
+
+[lib]
+name = "tinker_pdf"
+crate-type = ["cdylib"]
+
+[dependencies]
+tinker-pdf = { path = "../../crates/tinker-pdf" }
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }

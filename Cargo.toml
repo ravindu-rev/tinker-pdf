@@ -25,6 +25,14 @@ members = [
   "xtask",
 ]
 
+# The language bindings build with their own tooling — maturin for Python,
+# wasm-pack for JavaScript — and pull dependencies the engine itself refuses.
+# Excluding them keeps `cargo build` at the workspace root free of both.
+exclude = [
+  "bindings/python",
+  "bindings/js",
+]
+
 [workspace.package]
 version = "0.0.1"
 edition = "2021"

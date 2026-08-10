@@ -1,3 +1,9 @@
 /target
+# The excluded bindings build into their own target directories.
+target/
 corpus/data/
 testdata/golden/actual/
+bindings/dotnet/bin/
+bindings/dotnet/obj/
+bindings/dotnet/runtimes/
+bindings/*/Cargo.lock

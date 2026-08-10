@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <PackageId>TinkerPdf</PackageId>
+    <Version>0.0.1</Version>
+    <Authors>tinker-pdf contributors</Authors>
+    <Description>A from-scratch, pure-Rust PDF engine</Description>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/ravindu-rev/tinker-pdf</RepositoryUrl>
+  </PropertyGroup>
+
+  <!--
+    The native library is built by cargo and dropped into runtimes/<rid>/native
+    before packing. Each RID carries its own build of tinker-pdf-ffi.
+  -->
+  <ItemGroup>
+    <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes" />
+  </ItemGroup>
+
+</Project>
