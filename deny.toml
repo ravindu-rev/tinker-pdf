@@ -26,6 +26,69 @@ allow = [
 [bans]
 multiple-versions = "warn"
 
+# The hand-rolled rule, made enforceable.
+#
+# The owner's decision was that no third-party crate implements PDF logic or a
+# primitive: no inflate, no JPEG, no CCITT, no fonts, no rasterizer, no crypto.
+# Until now that rule lived only in prose, so a new dependency that happened to
+# be MIT-licensed would have passed every check in this file unnoticed — the
+# licence list has nothing to say about *what a crate does*.
+#
+# The workspace's whole dependency tree is `proptest` and its transitive
+# closure, plus the binding and fuzz tooling which lives outside the workspace.
+# Anything else arriving in the engine crates is the thing this policy exists
+# to prevent, so it is denied by name.
+deny = [
+  # Compression and image codecs.
+  { name = "flate2" },
+  { name = "miniz_oxide" },
+  { name = "libz-sys" },
+  { name = "zlib-rs" },
+  { name = "inflate" },
+  { name = "deflate" },
+  { name = "weezl" },
+  { name = "jpeg-decoder" },
+  { name = "zune-jpeg" },
+  { name = "mozjpeg-sys" },
+  { name = "image" },
+  { name = "png" },
+  { name = "fax" },
+  # Fonts and text shaping.
+  { name = "ttf-parser" },
+  { name = "rustybuzz" },
+  { name = "font-kit" },
+  { name = "fontdb" },
+  { name = "ab_glyph" },
+  { name = "owned_ttf_parser" },
+  { name = "swash" },
+  { name = "allsorts" },
+  # Rasterization and geometry.
+  { name = "tiny-skia" },
+  { name = "raqote" },
+  { name = "lyon" },
+  { name = "kurbo" },
+  { name = "euclid" },
+  { name = "zeno" },
+  # Cryptography.
+  { name = "ring" },
+  { name = "openssl" },
+  { name = "openssl-sys" },
+  { name = "rustls" },
+  { name = "aes" },
+  { name = "sha2" },
+  { name = "md-5" },
+  { name = "rc4" },
+  { name = "digest" },
+  { name = "rsa" },
+  # PDF itself, which would rather defeat the point.
+  { name = "lopdf" },
+  { name = "pdf" },
+  { name = "printpdf" },
+  { name = "mupdf" },
+  { name = "mupdf-sys" },
+  { name = "pdfium-render" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

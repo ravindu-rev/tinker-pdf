@@ -111,6 +111,31 @@ pub struct TextBlock {
 pub struct TextPage {
     /// The blocks, in reading order.
     pub blocks: Vec<TextBlock>,
+    /// What extraction had to tolerate.
+    ///
+    /// Ruling 2 applies to text as much as to pixels: a page whose font could
+    /// not be read still extracts what it can, and a caller comparing two
+    /// extractions needs to know which one was guessing. Without this the
+    /// difference between "this page has no text" and "this page has text this
+    /// build could not decode" is invisible.
+    pub warnings: Vec<TextWarning>,
+}
+
+/// Something extraction could not do exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextWarning {
+    /// A font resource the page named could not be resolved, so its codes were
+    /// decoded by their bytes rather than by its encoding.
+    UnknownFont {
+        /// The resource name.
+        name: String,
+    },
+    /// A code had no `/ToUnicode` entry and no encoding that named it, so the
+    /// character it stands for is a guess.
+    UnmappedCode {
+        /// The code.
+        code: u32,
+    },
 }
 
 impl TextPage {
@@ -205,6 +230,7 @@ fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
 pub struct TextDevice {
     lines: Vec<PendingLine>,
     current: Option<PendingLine>,
+    warnings: Vec<TextWarning>,
 }
 
 struct PendingLine {
@@ -222,6 +248,16 @@ impl TextDevice {
     #[must_use]
     pub fn new() -> TextDevice {
         TextDevice::default()
+    }
+
+    /// Records something extraction had to tolerate.
+    ///
+    /// Deduplicated: a page whose font is unknown says so once rather than
+    /// once per glyph, which would bury the report under its own noise.
+    pub fn warn(&mut self, warning: TextWarning) {
+        if !self.warnings.contains(&warning) && self.warnings.len() < 64 {
+            self.warnings.push(warning);
+        }
     }
 
     /// The page assembled from everything shown so far.
@@ -285,7 +321,10 @@ impl TextDevice {
             }
         }
 
-        TextPage { blocks }
+        TextPage {
+            blocks,
+            warnings: std::mem::take(&mut self.warnings),
+        }
     }
 
     fn flush(&mut self) {

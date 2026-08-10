@@ -32,7 +32,9 @@ use tinker_pdf_content::{interpret, Matrix, TextDevice};
 use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages, CosDocument};
 
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
-pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
+pub use tinker_pdf_content::{
+    Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
+};
 pub use tinker_pdf_cos::{
     Action, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue, LadderLevel,
     Link, Metadata, OutlineItem, Warning, WarningKind,
@@ -504,6 +506,13 @@ impl Page {
         // Text is reported in PDF user space, y upward, which is the space the
         // page's own boxes are in; a device transform is the renderer's job.
         interpret(&content, Matrix::IDENTITY, &mut device, &resources);
+
+        // Ruling 2 applies to text as much as to pixels: extraction reports
+        // what it had to tolerate rather than returning a shorter string and
+        // leaving the caller to wonder.
+        for name in resources.missing_fonts() {
+            device.warn(TextWarning::UnknownFont { name });
+        }
         device.finish()
     }
 }
@@ -535,7 +544,10 @@ mod tests {
 
     #[test]
     fn opening_nonsense_reports_it_rather_than_panicking() {
-        assert_eq!(Document::open(b"".to_vec()).err(), Some(OpenError::NotAPdf));
+        // Empty input is its own answer: it is a caller's bug far more often
+        // than a bad document, and it used to be reported as `NotAPdf`, which
+        // sent people to look at the file.
+        assert_eq!(Document::open(b"".to_vec()).err(), Some(OpenError::Empty));
         assert_eq!(
             Document::open(b"hello".to_vec()).err(),
             Some(OpenError::NotAPdf)

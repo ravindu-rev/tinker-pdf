@@ -398,3 +398,43 @@ fn empty_bytes_are_distinguished_from_a_bad_document() {
         OpenError::NotAPdf
     );
 }
+
+/// Ruling 2 applies to text as much as to pixels. A page whose `Tf` names a
+/// font the resource dictionary does not define extracted an empty string and
+/// said nothing, so "this page has no text" and "this page has text this build
+/// could not decode" were indistinguishable.
+#[test]
+fn extraction_reports_a_font_it_could_not_resolve() {
+    use tinker_pdf::{Document, TextWarning};
+
+    let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 36 >>\nstream\n\
+BT /Nonesuch 12 Tf 10 50 Td (hi) Tj ET\n\
+endstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+
+    let doc = Document::open(bytes.to_vec()).expect("it opens");
+    let text = doc.page(0).expect("a page").text();
+
+    assert!(text.plain_text().is_empty(), "nothing could be decoded");
+    assert!(
+        text.warnings
+            .iter()
+            .any(|w| matches!(w, TextWarning::UnknownFont { name } if name == "Nonesuch")),
+        "and it says which font was missing: {:?}",
+        text.warnings
+    );
+}
+
+/// A page whose fonts all resolve reports nothing, so the warning list stays
+/// meaningful rather than becoming noise every caller learns to ignore.
+#[test]
+fn extraction_of_a_sound_page_reports_nothing() {
+    let text = open("simple-text.pdf").page(0).expect("a page").text();
+    assert!(!text.plain_text().is_empty());
+    assert!(text.warnings.is_empty(), "got {:?}", text.warnings);
+}

@@ -35,9 +35,20 @@ pub struct PageResources {
     images: Mutex<HashMap<Vec<u8>, Option<Arc<DecodedImage>>>>,
     /// Outlines already extracted, keyed by font and code.
     outlines: RwLock<OutlineCache>,
+    /// Resource names that named no font this build could resolve.
+    missing_fonts: Mutex<Vec<String>>,
 }
 
 impl PageResources {
+    /// The font resource names that could not be resolved.
+    #[must_use]
+    pub fn missing_fonts(&self) -> Vec<String> {
+        self.missing_fonts
+            .lock()
+            .map(|names| names.clone())
+            .unwrap_or_default()
+    }
+
     /// Reads a page's resource dictionary.
     #[must_use]
     pub fn new(
@@ -73,6 +84,7 @@ impl PageResources {
             resources,
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
+            missing_fonts: Mutex::new(Vec::new()),
         }
     }
 
@@ -111,6 +123,7 @@ impl PageResources {
             resources: Some(dict),
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
+            missing_fonts: Mutex::new(Vec::new()),
         }
     }
 
@@ -383,9 +396,19 @@ fn embedded_program(doc: &CosDocument, name: &[u8], resources: &Dict) -> Option<
 
 impl FontSource for PageResources {
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
-        let Some(font) = self.fonts.get(font) else {
+        let Some(found) = self.fonts.get(font) else {
+            // A name the resource dictionary does not define. Recorded so a
+            // caller can tell "this page has no text" from "this page has text
+            // whose font this build could not resolve".
+            if let Ok(mut missing) = self.missing_fonts.lock() {
+                let name = String::from_utf8_lossy(font).into_owned();
+                if missing.len() < 64 && !missing.contains(&name) {
+                    missing.push(name);
+                }
+            }
             return Vec::new();
         };
+        let font = found;
         font.decode(bytes)
             .into_iter()
             .map(|d| (d.code, d.text, d.width))
