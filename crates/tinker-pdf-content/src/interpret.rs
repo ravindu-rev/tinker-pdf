@@ -128,15 +128,23 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
 
             match op.as_slice() {
                 b"BI" => {
-                    // 8.9.7: an inline image's data is not tokenizable, so
-                    // scan for its end and resume there.
-                    let consumed = skip_inline_image(tokens.rest());
+                    // 8.9.7: an inline image's data is not tokenizable, so the
+                    // span from here to `EI` is taken whole and handed to the
+                    // device, which is the layer that can read a dictionary
+                    // and run a filter chain.
+                    let rest = tokens.rest();
+                    let consumed = skip_inline_image(rest);
                     let at = tokens.position();
                     tokens.seek(at + consumed);
+
+                    let span = rest.get(..consumed).unwrap_or(rest);
+                    let (dict, data) = split_inline_image(span);
                     self.device.draw_image(
                         &ImageRef {
                             name: Vec::new(),
                             inline: true,
+                            inline_dict: dict.to_vec(),
+                            inline_data: data.to_vec(),
                         },
                         &self.gs,
                     );
@@ -656,6 +664,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 &ImageRef {
                     name: name.to_vec(),
                     inline: false,
+                    inline_dict: Vec::new(),
+                    inline_data: Vec::new(),
                 },
                 &self.gs,
             );
@@ -814,6 +824,30 @@ fn components_to_rgb(components: &[f64]) -> Rgb {
 /// 8.9.7 ends the data at `EI` surrounded by whitespace, and binary data can
 /// contain those bytes, so the match is only accepted when what follows looks
 /// like a content stream again.
+/// Splits an inline image's span into its dictionary and its data (8.9.7).
+///
+/// `ID` is followed by exactly one whitespace byte before the data starts, and
+/// the span ends at `EI`. A span with no `ID` at all is all dictionary and no
+/// data, which is what a truncated stream leaves behind.
+fn split_inline_image(span: &[u8]) -> (&[u8], &[u8]) {
+    let mut i = 0usize;
+    while i + 1 < span.len() {
+        if span[i] == b'I' && span[i + 1] == b'D' {
+            let before_ok =
+                i == 0 || span[i - 1].is_ascii_whitespace() || is_delimiter(span[i - 1]);
+            if before_ok {
+                let dict = &span[..i];
+                // One whitespace byte separates `ID` from the samples.
+                let start = (i + 3).min(span.len());
+                let end = span.len().saturating_sub(2).max(start);
+                return (dict, &span[start..end]);
+            }
+        }
+        i += 1;
+    }
+    (span, &[])
+}
+
 fn skip_inline_image(rest: &[u8]) -> usize {
     let mut i = 0usize;
     while i + 1 < rest.len() {

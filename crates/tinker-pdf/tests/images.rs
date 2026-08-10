@@ -239,3 +239,82 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
          colour was baked in at decode time"
     );
 }
+
+/// Builds a one-page document whose content stream is raw bytes.
+fn page_with_content(content: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"%PDF-1.7\n");
+    bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+    bytes.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+          /Resources << >> /Contents 4 0 R >>\nendobj\n",
+    );
+    bytes.extend_from_slice(
+        format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+    );
+    bytes.extend_from_slice(content);
+    bytes.extend_from_slice(b"\nendstream\nendobj\n");
+    bytes.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n");
+    bytes
+}
+
+/// 8.9.7: an inline image carries its dictionary and samples in the content
+/// stream itself. They were scanned past and discarded, so the image never
+/// drew — and once undecodable images began leaving a placeholder, every
+/// inline image became a grey rectangle instead of nothing.
+#[test]
+fn an_inline_image_is_decoded() {
+    let mut content = Vec::new();
+    content.extend_from_slice(b"q 20 0 0 20 0 0 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID ");
+    content.extend_from_slice(&[0xFF, 0x00, 0x00].repeat(4));
+    content.extend_from_slice(b" EI Q");
+
+    let bitmap = render(page_with_content(&content));
+    let (r, g, b) = pixel(&bitmap, 10, 10);
+    assert!(
+        r > 200 && g < 60 && b < 60,
+        "the inline image painted red, got ({r}, {g}, {b})"
+    );
+    assert!(
+        bitmap.warnings.is_empty(),
+        "and needed no excuses: {:?}",
+        bitmap.warnings
+    );
+}
+
+/// Table 93's short keys and the long ones mean the same thing.
+#[test]
+fn an_inline_image_accepts_long_key_names() {
+    let mut content = Vec::new();
+    content.extend_from_slice(
+        b"q 20 0 0 20 0 0 cm BI /Width 2 /Height 2 /ColorSpace /DeviceGray \
+          /BitsPerComponent 8 ID ",
+    );
+    content.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    content.extend_from_slice(b" EI Q");
+
+    let bitmap = render(page_with_content(&content));
+    let (r, _, _) = pixel(&bitmap, 10, 10);
+    assert!(r < 60, "all-zero grey samples are black, got {r}");
+}
+
+/// An inline image whose filter this build cannot run is reported, and the
+/// placeholder marks where it was.
+#[test]
+fn an_undecodable_inline_image_is_reported() {
+    let mut content = Vec::new();
+    content.extend_from_slice(b"q 20 0 0 20 0 0 cm BI /W 2 /H 2 /CS /G /BPC 8 /F /DCT ID ");
+    content.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    content.extend_from_slice(b" EI Q");
+
+    let bitmap = render(page_with_content(&content));
+    assert!(
+        bitmap
+            .warnings
+            .iter()
+            .any(|w| matches!(w, tinker_pdf::RenderWarning::UnsupportedImage { .. })),
+        "got {:?}",
+        bitmap.warnings
+    );
+}

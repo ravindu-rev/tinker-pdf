@@ -144,4 +144,12 @@ pub struct ImageRef {
     pub name: Vec<u8>,
     /// Whether the image was inline (8.9.7).
     pub inline: bool,
+    /// An inline image's dictionary, as the bytes between `BI` and `ID`.
+    ///
+    /// Handed over rather than parsed here: this crate has no object parser,
+    /// and the device that draws the image is the one that already knows how
+    /// to read a dictionary and run a filter chain.
+    pub inline_dict: Vec<u8>,
+    /// An inline image's sample data, as the bytes between `ID` and `EI`.
+    pub inline_data: Vec<u8>,
 }

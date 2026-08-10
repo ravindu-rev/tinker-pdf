@@ -553,6 +553,49 @@ impl GlyphSource for PageResources {
         Some(PatternPaint::Shading(Box::new(shading), matrix))
     }
 
+    fn inline_image(&self, dict: &[u8], data: &[u8]) -> Result<Option<DecodedImage>, String> {
+        // 8.9.7 Table 93: an inline image's keys have short forms. They are
+        // rewritten to the long ones so the shared decoder sees an ordinary
+        // image dictionary rather than learning a second vocabulary.
+        const ABBREVIATIONS: &[(&[u8], &[u8])] = &[
+            (b"/BPC", b"/BitsPerComponent"),
+            (b"/CS", b"/ColorSpace"),
+            (b"/D", b"/Decode"),
+            (b"/DP", b"/DecodeParms"),
+            (b"/F", b"/Filter"),
+            (b"/H", b"/Height"),
+            (b"/IM", b"/ImageMask"),
+            (b"/I", b"/Interpolate"),
+            (b"/W", b"/Width"),
+            (b"/G", b"/DeviceGray"),
+            (b"/RGB", b"/DeviceRGB"),
+            (b"/CMYK", b"/DeviceCMYK"),
+            (b"/AHx", b"/ASCIIHexDecode"),
+            (b"/A85", b"/ASCII85Decode"),
+            (b"/LZW", b"/LZWDecode"),
+            (b"/Fl", b"/FlateDecode"),
+            (b"/RL", b"/RunLengthDecode"),
+            (b"/CCF", b"/CCITTFaxDecode"),
+            (b"/DCT", b"/DCTDecode"),
+        ];
+
+        let mut text = format!("<< {} >>", String::from_utf8_lossy(dict));
+        for (short, long) in ABBREVIATIONS {
+            let short = format!("{} ", String::from_utf8_lossy(short));
+            let long = format!("{} ", String::from_utf8_lossy(long));
+            text = text.replace(&short, &long);
+        }
+
+        let mut sink = tinker_pdf_cos::WarningSink::new();
+        let parsed =
+            tinker_pdf_cos::parse_object_at(text.as_bytes(), 0, self.doc.names_table(), &mut sink);
+        let Some(dict) = parsed.object.as_dict() else {
+            return Ok(None);
+        };
+
+        self.decode_inline(dict, data).map(Some)
+    }
+
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
         if let Ok(cache) = self.images.lock() {
             if let Some(hit) = cache.get(name) {
@@ -940,6 +983,140 @@ impl PageResources {
 
                 if is_mask {
                     // A zero sample paints, a one does not (8.9.6.2).
+                    let paints = components.first().copied().unwrap_or(0.0) < 0.5;
+                    rgb.extend_from_slice(&[0, 0, 0]);
+                    alpha.push(if paints { 255 } else { 0 });
+                } else {
+                    let (r, g, b) = space.to_rgb(&components);
+                    rgb.extend_from_slice(&[r, g, b]);
+                }
+            }
+        }
+
+        Ok(DecodedImage {
+            width,
+            height,
+            rgb,
+            alpha,
+            stencil: is_mask,
+        })
+    }
+
+    /// Decodes an inline image's samples (8.9.7).
+    ///
+    /// Separate from [`Self::decode_image_at`] because an inline image has no
+    /// object number: its bytes are in hand rather than behind a stream tier,
+    /// so the filter chain is run here instead of by the document.
+    fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
+        use tinker_pdf_filters::{
+            ascii85_decode, ascii_hex_decode, flate_decode, lzw_decode, run_length_decode, Limits,
+        };
+
+        let int = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_int()
+                .unwrap_or(0)
+        };
+        let width = int(b"Width").clamp(0, 1 << 16) as u32;
+        let height = int(b"Height").clamp(0, 1 << 16) as u32;
+        if width == 0 || height == 0 {
+            return Err("inline".to_string());
+        }
+
+        let is_mask = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .as_bool()
+            .unwrap_or(false);
+        // 8.9.6.2: a mask is one bit per sample whatever /BPC claims.
+        let bpc = if is_mask {
+            1
+        } else {
+            int(b"BitsPerComponent").clamp(1, 16) as u32
+        };
+
+        // The filters, in the order they were applied.
+        let filters_value = self.doc.resolve_key(dict, Name::FILTER);
+        let mut filters: Vec<Vec<u8>> = Vec::new();
+        if let Some(name) = filters_value.as_name() {
+            if let Some(bytes) = self.doc.name_bytes(name) {
+                filters.push(bytes.to_vec());
+            }
+        } else if let Some(items) = filters_value.as_array() {
+            for item in items {
+                if let Some(bytes) = item.as_name().and_then(|n| self.doc.name_bytes(n)) {
+                    filters.push(bytes.to_vec());
+                }
+            }
+        }
+
+        let limits = Limits::new(1 << 26);
+        let mut bytes = data.to_vec();
+        for filter in &filters {
+            bytes = match filter.as_slice() {
+                b"FlateDecode" | b"Fl" => {
+                    flate_decode(&bytes, &limits, None)
+                        .map_err(|_| "FlateDecode".to_string())?
+                        .data
+                }
+                b"LZWDecode" | b"LZW" => {
+                    lzw_decode(&bytes, &limits, true, None)
+                        .map_err(|_| "LZWDecode".to_string())?
+                        .data
+                }
+                b"ASCIIHexDecode" | b"AHx" => ascii_hex_decode(&bytes, &limits).data,
+                b"ASCII85Decode" | b"A85" => ascii85_decode(&bytes, &limits).data,
+                b"RunLengthDecode" | b"RL" => run_length_decode(&bytes, &limits).data,
+                // 8.9.7 permits DCT and CCITT inline too; they arrive still
+                // coded and are reported rather than half-decoded.
+                other => return Err(String::from_utf8_lossy(other).into_owned()),
+            };
+        }
+
+        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let space = self
+            .parse_space(&space, 0)
+            .unwrap_or(ColorSpace::DeviceGray);
+        let n = if is_mask { 1 } else { space.components() };
+
+        let decode: Vec<(f64, f64)> = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default();
+
+        let row_bytes = ((width as usize) * n * (bpc as usize)).div_ceil(8);
+        let max = ((1u32 << bpc.min(16)) - 1) as f64;
+        let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
+        let mut alpha = Vec::new();
+
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let mut components = Vec::with_capacity(n);
+                for c in 0..n {
+                    let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
+                    let value = read_bits(&bytes, bit, bpc);
+                    let raw = match &space {
+                        ColorSpace::Indexed { .. } => f64::from(value),
+                        _ => f64::from(value) / max,
+                    };
+                    components.push(match decode.get(c) {
+                        Some((dmin, dmax)) => match &space {
+                            ColorSpace::Indexed { .. } => dmin + raw * (dmax - dmin) / max.max(1.0),
+                            _ => dmin + raw * (dmax - dmin),
+                        },
+                        None => raw,
+                    });
+                }
+
+                if is_mask {
                     let paints = components.first().copied().unwrap_or(0.0) < 0.5;
                     rgb.extend_from_slice(&[0, 0, 0]);
                     alpha.push(if paints { 255 } else { 0 });

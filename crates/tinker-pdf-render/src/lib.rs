@@ -141,6 +141,16 @@ pub trait GlyphSource {
         Ok(None)
     }
 
+    /// An inline image (8.9.7), from the bytes between `BI`/`ID` and `EI`.
+    ///
+    /// Passed as bytes because the interpreter has no object parser; the
+    /// implementor already reads dictionaries and runs filter chains for
+    /// every other image, and an inline one differs only in where it lives.
+    fn inline_image(&self, dict: &[u8], data: &[u8]) -> Result<Option<DecodedImage>, String> {
+        let _ = (dict, data);
+        Ok(None)
+    }
+
     /// A named shading, and the type number when it is one this engine does
     /// not paint.
     fn shading(&self, name: &[u8]) -> Result<Option<Shading>, i64> {
@@ -741,9 +751,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
 
         let decoded = if image.inline {
-            // 8.9.7: inline image data is scanned past rather than captured,
-            // so there is nothing here to draw.
-            Err("inline".to_string())
+            match self
+                .glyphs
+                .inline_image(&image.inline_dict, &image.inline_data)
+            {
+                Ok(Some(decoded)) => Ok(decoded),
+                Ok(None) => Err("inline".to_string()),
+                Err(codec) => Err(codec),
+            }
         } else {
             match self.glyphs.image(&image.name) {
                 Ok(Some(decoded)) => Ok(decoded),
