@@ -41,6 +41,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod build;
 pub mod decrypt;
 pub mod dest;
 pub mod doc;
@@ -67,6 +68,7 @@ mod repair;
 mod store;
 mod streams;
 
+pub use build::{DocumentBuilder, OutlineEntry, PageBuilder};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{Action, DestKind, Destination, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
