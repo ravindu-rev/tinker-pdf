@@ -83,7 +83,8 @@ impl<'a> Sfnt<'a> {
     #[must_use]
     pub fn table(&self, tag: u32) -> Option<&'a [u8]> {
         let (_, off, len) = self.tables.iter().find(|(t, _, _)| *t == tag)?;
-        self.data.get(*off as usize..(*off as usize).checked_add(*len as usize)?)
+        self.data
+            .get(*off as usize..(*off as usize).checked_add(*len as usize)?)
     }
 
     /// The advance of a glyph, in font units.
@@ -150,9 +151,7 @@ impl<'a> Sfnt<'a> {
         }
         let count = be16(post, 32)? as usize;
 
-        let indices: Vec<u16> = (0..count)
-            .filter_map(|i| be16(post, 34 + i * 2))
-            .collect();
+        let indices: Vec<u16> = (0..count).filter_map(|i| be16(post, 34 + i * 2)).collect();
 
         // Names past the 258 standard Macintosh ones are Pascal strings
         // packed after the index array.
@@ -212,8 +211,7 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
                 }
                 // The offset is relative to its own slot, which is the one
                 // genuinely awkward thing about format 4.
-                let at = ranges + i * 2 + usize::from(range_offset)
-                    + usize::from(code - start) * 2;
+                let at = ranges + i * 2 + usize::from(range_offset) + usize::from(code - start) * 2;
                 let glyph = be16(sub, at)?;
                 return Some(if glyph == 0 {
                     0
