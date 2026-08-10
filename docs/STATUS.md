@@ -3,9 +3,9 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**793 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
-`wasm32-unknown-unknown` builds, and the fuzz targets and language bindings
-type-check — on every commit.
+**808 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+`wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
+targets and language bindings type-check — on every commit.
 
 > **This file was wrong for a long time.** A 47-agent audit against every plan
 > file in August 2026 found ~35 of ~211 milestones genuinely complete, ~123
@@ -34,6 +34,8 @@ Fixed since, each with tests that would have caught it:
 | **Rewriting an authenticated encrypted document emitted `/Encrypt` over plaintext** | `/Encrypt` dropped on rewrite |
 | **"Full rewrite" had no garbage collection** | Opt-in mark-and-sweep |
 | **Redaction read `Tm` as translation only**, so scaled text cut the wrong glyphs — the worst failure mode for a redaction, because it looks like it worked | The whole matrix is read; rotated runs are refused rather than cut wrongly |
+| **`/FontFile` (a Type 1 program) went to the sfnt and CFF parsers**, which declined it correctly, so embedded Type 1 fonts drew nothing and said only that some font was unreadable | Type 1 is read: eexec, charstrings, `seac`, flex |
+| **`xtask` was a stub that exited 2**, so nothing checked the crate graph — a design rule the compiler cannot enforce | `cargo xtask dag`, in CI, with the one undeclared edge written down and justified |
 
 ## Built
 
@@ -43,7 +45,7 @@ Fixed since, each with tests that would have caught it:
 | [02 Filters](plans/02-filters.md) | wave 1 + **deflate** + JPEG + CCITT | Own inflate **and deflate**, LZW, ASCIIHex/85, RunLength, predictors; baseline JPEG; CCITT G3/G4 |
 | [03 Encryption](plans/03-encryption.md) | reading, R6 exercised | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits |
 | [04 Document semantics](plans/04-document-semantics.md) | most of it | Metadata, page tree with inheritance, geometry, outlines, name/number trees, destination enum, page labels, actions, **links** |
-| [05 Fonts](plans/05-fonts.md) | TrueType + CFF + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf` and CFF Type 2 outlines; `FontProvider` for faces a document does not embed |
+| [05 Fonts](plans/05-fonts.md) | TrueType + CFF + **Type 1** + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf`, CFF Type 2 **and Type 1** outlines; `FontProvider` for faces a document does not embed |
 | [06 Content & text](plans/06-content-and-text.md) | substantially | Tokenizer, text state machine, `Device` seam, text device with quads and search, **inline images**, **all stroke parameters** |
 | [07 Rasterizer](plans/07-rasterizer.md) | complete | Paths, deterministic anti-aliased fill, stroking with caps/joins/dashes, clipping, compositing |
 | [08 Rendering device](plans/08-rendering-device.md) | broad, see gaps | Colour spaces incl. **Lab, Separation, DeviceN**; all four function types **and function arrays**; clipping incl. **text clip modes**; images with **`/SMask` and `/Decode`**; axial and radial shadings; **shading patterns**; **`/Rotate` and `/CropBox`**; alpha; outward pixel rounding; page-area ceiling |
@@ -60,7 +62,7 @@ Fixed since, each with tests that would have caught it:
 | --- | --- | --- |
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
 | **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
-| **Type 1 and Type 3 fonts** | Absent. Worse, `/FontFile` (a Type 1 program) is handed to the sfnt/CFF parsers, which cannot read it — an embedded Type 1 font silently draws nothing. | [05](plans/05-fonts.md) |
+| **Type 3 fonts** | A Type 3 glyph is a content stream rather than an outline, so it needs the interpreter to recurse the way it does for a form XObject. Not built; such glyphs do not draw. **Type 1 is now read** — eexec, charstrings, `seac` and flex — so an embedded `/FontFile` draws. | [05](plans/05-fonts.md) |
 | **Redaction: `cm`, form XObjects, images** | The text matrix is handled; the *transformation* matrix is not, form XObjects are not recursed into, and images are not scrubbed. A redaction over content inside a form XObject does nothing. | [10](plans/10-editing.md) |
 | **Editing: merge, split, insert, flatten** | Only delete, move and rotate exist. | [10](plans/10-editing.md) |
 | **Encrypt-on-save, linearization** | `WriteOptions::encryption` still has no reader; set it and you get a plaintext file with no error. Rewriting now drops `/Encrypt` rather than lying about it. | [09](plans/09-writing.md) |
