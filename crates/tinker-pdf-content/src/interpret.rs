@@ -38,6 +38,20 @@ pub trait FontSource {
         None
     }
 
+    /// A Type 3 glyph procedure and the font's `/FontMatrix` (9.6.5).
+    ///
+    /// A Type 3 glyph is a content stream, not an outline: it can fill, stroke,
+    /// draw images, do anything a page can. So it is *run*, the way a form
+    /// XObject is, rather than handed to a glyph source that only knows how to
+    /// return curves.
+    ///
+    /// `None` for every other kind of font, which is what keeps the ordinary
+    /// path unchanged.
+    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
+        let _ = (font, code);
+        None
+    }
+
     /// The RGB a named colour space gives these components.
     ///
     /// The interpreter cannot know what `/CS0 0.2 0.9 0.1 scn` means — RGB, a
@@ -753,6 +767,38 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             };
             let transform = scale.then(&self.text_matrix).then(&self.gs.ctm);
 
+            // 9.6.5: a Type 3 glyph is a content stream. Its procedure runs in
+            // glyph space, which the font matrix maps into text space — so the
+            // matrix goes *inside* the transform that places the glyph, not
+            // outside it.
+            if let Some((proc_bytes, font_matrix)) = self.fonts.type3_glyph(&font_name, code) {
+                if self.depth < MAX_FORM_DEPTH {
+                    let saved_gs = self.gs.clone();
+                    let saved_text = self.text_matrix;
+                    let saved_line = self.line_matrix;
+
+                    self.gs.ctm = font_matrix.then(&transform);
+                    self.depth += 1;
+                    self.device.save_state();
+                    let inner = proc_bytes.clone();
+                    self.run(&inner);
+                    self.device.restore_state();
+                    self.depth -= 1;
+
+                    self.gs = saved_gs;
+                    self.text_matrix = saved_text;
+                    self.line_matrix = saved_line;
+                }
+
+                // The advance still comes from /Widths, which are in glyph
+                // space and so scale by the font matrix rather than by 1/1000.
+                let advance = width * font_matrix.a * ts.size * ts.horizontal_scale;
+                let shift =
+                    advance + (ts.char_spacing + word_spacing(code, &ts)) * ts.horizontal_scale;
+                self.text_matrix = Matrix::translate(shift, 0.0).then(&self.text_matrix);
+                continue;
+            }
+
             let glyph = Glyph {
                 code,
                 text: text.clone(),
@@ -824,6 +870,15 @@ fn components_to_rgb(components: &[f64]) -> Rgb {
 /// 8.9.7 ends the data at `EI` surrounded by whitespace, and binary data can
 /// contain those bytes, so the match is only accepted when what follows looks
 /// like a content stream again.
+/// 9.4.4: word spacing applies to a single-byte code 32 and to nothing else.
+fn word_spacing(code: u32, ts: &crate::state::TextState) -> f64 {
+    if code == 32 {
+        ts.word_spacing
+    } else {
+        0.0
+    }
+}
+
 /// Splits an inline image's span into its dictionary and its data (8.9.7).
 ///
 /// `ID` is followed by exactly one whitespace byte before the data starts, and

@@ -400,6 +400,70 @@ impl FontSource for PageResources {
         self.font_ids.get(font).copied().unwrap_or(0)
     }
 
+    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
+        // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
+        // returns None here, which leaves the ordinary outline path untouched.
+        let dict = fonts::font_dict(&self.doc, self.resources.as_ref()?, font)?;
+        let subtype = dict
+            .get_name(self.doc.intern(b"Subtype"))
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Type3" {
+            return None;
+        }
+
+        // A Type 3 font addresses its procedures by name, and the only way to
+        // get one is the /Encoding /Differences array — there is no built-in
+        // encoding for a font whose glyphs the document invented.
+        let encoding = self.doc.resolve_key(&dict, self.doc.intern(b"Encoding"));
+        let differences = self
+            .doc
+            .resolve_key(encoding.as_dict()?, self.doc.intern(b"Differences"));
+        let differences = differences.as_array()?;
+
+        let mut current = 0u32;
+        let mut name: Option<Name> = None;
+        for item in differences {
+            match self.doc.resolve(item).as_ref() {
+                Object::Int(v) => current = u32::try_from(*v).unwrap_or(0),
+                Object::Real(v) => current = *v as u32,
+                Object::Name(n) => {
+                    if current == code {
+                        name = Some(*n);
+                        break;
+                    }
+                    current = current.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        let name = name?;
+
+        let procs = self.doc.resolve_key(&dict, self.doc.intern(b"CharProcs"));
+        let reference = procs.as_dict()?.get_ref(name)?;
+        let content = self.doc.stream_decoded(reference).ok()?;
+
+        // 9.6.5: /FontMatrix maps glyph space to text space. Unlike every
+        // other font it is not 1/1000 by convention — a Type 3 font chooses
+        // its own units, and the matrix is required for that reason.
+        let matrix = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"FontMatrix"))
+            .as_array()
+            .and_then(|values| {
+                let n = |i: usize| values.get(i).and_then(Object::as_number);
+                Some(Matrix {
+                    a: n(0)?,
+                    b: n(1)?,
+                    c: n(2)?,
+                    d: n(3)?,
+                    e: n(4)?,
+                    f: n(5)?,
+                })
+            })?;
+
+        Some((content, matrix))
+    }
+
     fn form(&self, name: &[u8]) -> Option<(Vec<u8>, Matrix)> {
         let (dict, reference) = self.xobject(name)?;
         let subtype = self
