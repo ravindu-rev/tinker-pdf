@@ -17,6 +17,21 @@ use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::pages::{self, Rect};
 use crate::write::{self, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
+use crate::{fill, form};
+
+/// A copy of `dict` with one key gone.
+///
+/// Removing an entry is rare enough that [`Dict`] has no method for it, and
+/// rare enough that rebuilding is cheaper than carrying one.
+fn without(dict: &Dict, key: Name) -> Dict {
+    let mut out = Dict::with_capacity(dict.len());
+    for (name, value) in dict.iter() {
+        if *name != key {
+            out.insert(*name, value.clone());
+        }
+    }
+    out
+}
 
 /// Edits layered over an open document.
 pub struct DocumentEditor {
@@ -285,6 +300,292 @@ impl DocumentEditor {
         pages::collect(&self.doc)
             .get(index as usize)
             .map(|p| p.media_box)
+    }
+
+    /// The document's form fields (12.7).
+    #[must_use]
+    pub fn fields(&self) -> Vec<form::Field> {
+        form::fields(&self.doc)
+    }
+
+    /// Fills a text or choice field, rebuilding its appearance.
+    ///
+    /// Returns false when there is no such field, when it is read-only, or
+    /// when the value is one the field does not accept — a value over
+    /// `/MaxLen`, or one a non-editable list does not offer. Refusing is the
+    /// point: writing a truncated value would hide a data error inside a file
+    /// that then looks correctly filled.
+    pub fn set_field_value(&mut self, name: &str, value: &str) -> bool {
+        let Some(field) = self.fields().into_iter().find(|f| f.name == name) else {
+            return false;
+        };
+        if !fill::accepts(&field, value) {
+            return false;
+        }
+
+        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
+            return false;
+        };
+        dict.insert(self.intern(b"V"), fill::value_object(value));
+        self.put(field.reference, Object::Dict(dict));
+
+        let resources = form::default_resources(&self.doc);
+        let quadding = fill::quadding(&self.doc, &field);
+        let multiline = field.flags & fill::MULTILINE != 0;
+
+        for widget in &field.widgets {
+            let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
+                continue;
+            };
+            let da = fill::appearance_string(&self.doc, &field, *widget);
+            let stream = fill::text_appearance(
+                &self.doc,
+                rect,
+                value,
+                &da,
+                quadding,
+                multiline,
+                resources.as_ref(),
+            );
+
+            let form_ref = self.allocate();
+            self.put_stream(form_ref, stream);
+            self.set_normal_appearance(*widget, Object::Ref(form_ref));
+        }
+
+        self.clear_need_appearances();
+        true
+    }
+
+    /// Turns a checkbox on or off.
+    ///
+    /// The on state is whatever the widget's appearance dictionary calls it,
+    /// which is `/Yes` by convention and something else often enough that
+    /// assuming `/Yes` ticks a box the file cannot draw.
+    pub fn set_checkbox(&mut self, name: &str, on: bool) -> bool {
+        let Some(field) = self
+            .fields()
+            .into_iter()
+            .find(|f| f.name == name && f.kind == form::FieldKind::Checkbox)
+        else {
+            return false;
+        };
+        if field.is_read_only() {
+            return false;
+        }
+
+        let off = self.intern(b"Off");
+        let state = if on {
+            let Some(widget) = field.widgets.first() else {
+                return false;
+            };
+            match form::on_state(&self.doc, *widget) {
+                Some(state) => state,
+                // Without an appearance for the on state there is nothing to
+                // draw, and setting /V alone would leave a box that reads as
+                // ticked and displays as empty.
+                None => return false,
+            }
+        } else {
+            off
+        };
+
+        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
+            return false;
+        };
+        dict.insert(self.intern(b"V"), Object::Name(state));
+        self.put(field.reference, Object::Dict(dict));
+
+        for widget in &field.widgets {
+            self.set_appearance_state(*widget, state);
+        }
+        self.clear_need_appearances();
+        true
+    }
+
+    /// Selects one button of a radio group.
+    ///
+    /// 12.7.4.2: the group holds one value, and every widget's `/AS` follows
+    /// it — the one whose appearance offers that state shows on, the rest show
+    /// off. Setting only the chosen widget leaves the previous one still
+    /// drawn, which is how two options end up looking selected at once.
+    pub fn select_radio(&mut self, name: &str, option: &str) -> bool {
+        let Some(field) = self
+            .fields()
+            .into_iter()
+            .find(|f| f.name == name && f.kind == form::FieldKind::Radio)
+        else {
+            return false;
+        };
+        if field.is_read_only() {
+            return false;
+        }
+
+        let wanted = self.intern(option.as_bytes());
+        let off = self.intern(b"Off");
+        let offers = |editor: &DocumentEditor, widget: ObjRef| -> bool {
+            editor
+                .get(widget)
+                .and_then(|o| o.as_dict().cloned())
+                .and_then(|d| d.get_dict(editor.intern(b"AP")).cloned())
+                .and_then(|ap| ap.get_dict(editor.intern(b"N")).cloned())
+                .is_some_and(|states| states.get(wanted).is_some())
+        };
+
+        if !field.widgets.iter().any(|w| offers(self, *w)) {
+            return false;
+        }
+
+        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
+            return false;
+        };
+        dict.insert(self.intern(b"V"), Object::Name(wanted));
+        self.put(field.reference, Object::Dict(dict));
+
+        for widget in &field.widgets {
+            let state = if offers(self, *widget) { wanted } else { off };
+            self.set_appearance_state(*widget, state);
+        }
+        self.clear_need_appearances();
+        true
+    }
+
+    /// Restores every field to its default value (12.7.5.3).
+    ///
+    /// A field with no `/DV` loses its `/V` entirely rather than gaining an
+    /// empty one, because "never filled" and "filled with nothing" are
+    /// different states and a submitted form distinguishes them.
+    pub fn reset_form(&mut self) {
+        for field in self.fields() {
+            let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
+                continue;
+            };
+            let v = self.intern(b"V");
+            let dv = self.intern(b"DV");
+
+            match dict.get(dv).cloned() {
+                Some(default) => {
+                    dict.insert(v, default);
+                }
+                None => {
+                    dict = without(&dict, v);
+                }
+            }
+            self.put(field.reference, Object::Dict(dict));
+
+            match field.kind {
+                form::FieldKind::Checkbox | form::FieldKind::Radio => {
+                    let off = self.intern(b"Off");
+                    let state = self
+                        .get(field.reference)
+                        .and_then(|o| o.as_dict().and_then(|d| d.get_name(self.intern(b"V"))))
+                        .unwrap_or(off);
+                    for widget in &field.widgets {
+                        self.set_appearance_state(*widget, state);
+                    }
+                }
+                _ => {
+                    let value = self
+                        .get(field.reference)
+                        .map(|o| {
+                            o.as_dict()
+                                .and_then(|d| d.get(self.intern(b"V")).cloned())
+                                .map_or(String::new(), |v| {
+                                    v.as_string()
+                                        .map(|s| crate::text_string::decode_text_string(&s.bytes))
+                                        .unwrap_or_default()
+                                })
+                        })
+                        .unwrap_or_default();
+                    self.regenerate_text(&field, &value);
+                }
+            }
+        }
+        self.clear_need_appearances();
+    }
+
+    /// Rewrites a text field's appearance for a value already stored.
+    fn regenerate_text(&mut self, field: &form::Field, value: &str) {
+        let resources = form::default_resources(&self.doc);
+        let quadding = fill::quadding(&self.doc, field);
+        let multiline = field.flags & fill::MULTILINE != 0;
+
+        for widget in &field.widgets {
+            let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
+                continue;
+            };
+            let da = fill::appearance_string(&self.doc, field, *widget);
+            let stream = fill::text_appearance(
+                &self.doc,
+                rect,
+                value,
+                &da,
+                quadding,
+                multiline,
+                resources.as_ref(),
+            );
+            let form_ref = self.allocate();
+            self.put_stream(form_ref, stream);
+            self.set_normal_appearance(*widget, Object::Ref(form_ref));
+        }
+    }
+
+    /// Points a widget's `/AP` `/N` at something.
+    fn set_normal_appearance(&mut self, widget: ObjRef, normal: Object) {
+        let Some(Object::Dict(mut dict)) = self.get(widget) else {
+            return;
+        };
+        let ap = self.intern(b"AP");
+        let n = self.intern(b"N");
+        let mut states = dict.get_dict(ap).cloned().unwrap_or_else(Dict::new);
+        states.insert(n, normal);
+        dict.insert(ap, Object::Dict(states));
+        // A widget showing a single appearance has no state to select, and a
+        // leftover /AS naming one would suppress it entirely.
+        let dict = without(&dict, self.intern(b"AS"));
+        self.put(widget, Object::Dict(dict));
+    }
+
+    /// Selects which of a widget's appearance states is shown.
+    fn set_appearance_state(&mut self, widget: ObjRef, state: Name) {
+        let Some(Object::Dict(mut dict)) = self.get(widget) else {
+            return;
+        };
+        dict.insert(self.intern(b"AS"), Object::Name(state));
+        self.put(widget, Object::Dict(dict));
+    }
+
+    /// Drops `/NeedAppearances` now that the appearances are right.
+    ///
+    /// Leaving it set asks every viewer to throw away what was just written
+    /// and rebuild it from its own idea of the field, which is how a correctly
+    /// filled form comes out looking different in each one.
+    fn clear_need_appearances(&mut self) {
+        let Some(catalog) = self.doc.catalog() else {
+            return;
+        };
+        let Some(form_ref) = catalog.get_ref(self.intern(b"AcroForm")) else {
+            // A direct /AcroForm cannot be replaced without rewriting the
+            // catalog, which is done here rather than skipped.
+            let key = self.intern(b"AcroForm");
+            let Some(form) = catalog.get_dict(key).cloned() else {
+                return;
+            };
+            let cleaned = without(&form, self.intern(b"NeedAppearances"));
+            let Some(root) = self.doc.trailer().get_ref(Name::ROOT) else {
+                return;
+            };
+            let mut updated = (*catalog).clone();
+            updated.insert(key, Object::Dict(cleaned));
+            self.put(root, Object::Dict(updated));
+            return;
+        };
+
+        let Some(Object::Dict(form)) = self.get(form_ref) else {
+            return;
+        };
+        let cleaned = without(&form, self.intern(b"NeedAppearances"));
+        self.put(form_ref, Object::Dict(cleaned));
     }
 
     /// Saves the edits.
@@ -820,5 +1121,204 @@ mod tests {
             String::from_utf8_lossy(&content).contains("page 1"),
             "including content streams, whose data lives outside the object"
         );
+    }
+
+    /// A form with a text field, a checkbox whose on state is not `/Yes`, and
+    /// a radio pair — the shapes that trip a naive filler.
+    fn form_document() -> Arc<CosDocument> {
+        let bytes: &[u8] = b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 20 0 R 30 0 R]
+   /NeedAppearances true /DA (/Helv 0 Tf 0 g)
+   /DR << /Font << /Helv 5 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]
+   /Annots [10 0 R 20 0 R 31 0 R 32 0 R] >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+10 0 obj
+<< /FT /Tx /T (name) /Rect [10 150 190 170] /Subtype /Widget /Type /Annot
+   /MaxLen 10 >>
+endobj
+20 0 obj
+<< /FT /Btn /T (agree) /Rect [10 120 30 140] /Subtype /Widget /Type /Annot
+   /AP << /N << /On 21 0 R /Off 22 0 R >> >> >>
+endobj
+21 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 0 >>
+stream
+
+endstream
+endobj
+22 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 0 >>
+stream
+
+endstream
+endobj
+30 0 obj
+<< /FT /Btn /Ff 32768 /T (colour) /Kids [31 0 R 32 0 R] >>
+endobj
+31 0 obj
+<< /Parent 30 0 R /Subtype /Widget /Type /Annot /Rect [10 90 30 110] /AS /Off
+   /AP << /N << /red 21 0 R /Off 22 0 R >> >> >>
+endobj
+32 0 obj
+<< /Parent 30 0 R /Subtype /Widget /Type /Annot /Rect [40 90 60 110] /AS /Off
+   /AP << /N << /blue 21 0 R /Off 22 0 R >> >> >>
+endobj
+trailer
+<< /Size 33 /Root 1 0 R >>
+%%EOF
+";
+        Arc::new(CosDocument::open(bytes).expect("the form opens"))
+    }
+
+    fn field_named(doc: &CosDocument, name: &str) -> form::Field {
+        form::fields(doc)
+            .into_iter()
+            .find(|f| f.name == name)
+            .expect("the field is there")
+    }
+
+    /// The half that usually gets skipped: the value must come with an
+    /// appearance, or the field shows filled in some viewers and blank in the
+    /// rest.
+    #[test]
+    fn filling_a_text_field_writes_a_value_and_an_appearance() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        assert!(editor.set_field_value("name", "Ada"));
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let field = field_named(&saved, "name");
+        assert_eq!(field.value, form::FieldValue::Text("Ada".to_string()));
+
+        let widget = saved.get(field.widgets[0]).expect("the widget loads");
+        let form_ref = widget
+            .as_dict()
+            .and_then(|d| d.get_dict(saved.intern(b"AP")))
+            .and_then(|ap| ap.get_ref(saved.intern(b"N")))
+            .expect("an appearance was written");
+        let content = saved.stream_decoded(form_ref).expect("it decodes");
+        let text = String::from_utf8_lossy(&content);
+        assert!(text.contains("(Ada) Tj"), "which draws the value: {text}");
+        assert!(text.starts_with("/Tx BMC"), "marked as a field appearance");
+    }
+
+    /// Leaving `/NeedAppearances` set asks every viewer to throw away what was
+    /// just written and rebuild it from its own idea of the field.
+    #[test]
+    fn filling_clears_the_rebuild_request() {
+        let doc = form_document();
+        assert!(form::needs_appearances(&doc), "the fixture sets it");
+
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        editor.set_field_value("name", "Ada");
+        let saved = reopen(&editor, WriteMode::Incremental);
+        assert!(!form::needs_appearances(&saved));
+    }
+
+    #[test]
+    fn a_value_the_field_refuses_changes_nothing() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+
+        assert!(
+            !editor.set_field_value("name", "far too long for ten"),
+            "over /MaxLen"
+        );
+        assert!(!editor.set_field_value("nonesuch", "x"), "no such field");
+        assert!(!editor.is_dirty(), "and nothing was written");
+    }
+
+    /// `/Yes` is a convention, not a rule, and assuming it ticks a box the
+    /// file has no appearance for.
+    #[test]
+    fn a_checkbox_uses_the_on_state_its_appearance_declares() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        assert!(editor.set_checkbox("agree", true));
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let field = field_named(&saved, "agree");
+        assert_eq!(field.value, form::FieldValue::State("On".to_string()));
+
+        let widget = saved.get(field.widgets[0]).expect("the widget");
+        let state = widget
+            .as_dict()
+            .and_then(|d| d.get_name(saved.intern(b"AS")))
+            .and_then(|n| saved.name_bytes(n));
+        assert_eq!(
+            state.as_deref(),
+            Some(b"On".as_slice()),
+            "the shown state follows the value"
+        );
+    }
+
+    #[test]
+    fn a_checkbox_turned_off_shows_off() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        editor.set_checkbox("agree", true);
+        assert!(editor.set_checkbox("agree", false));
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let field = field_named(&saved, "agree");
+        assert!(!field.value.is_on());
+    }
+
+    /// Setting only the chosen widget leaves the previous one still drawn,
+    /// which is how two radio options end up looking selected at once.
+    #[test]
+    fn selecting_a_radio_turns_its_siblings_off() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        assert!(editor.select_radio("colour", "blue"));
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let field = field_named(&saved, "colour");
+        assert_eq!(field.value, form::FieldValue::State("blue".to_string()));
+
+        let state_of = |widget: ObjRef| -> String {
+            saved
+                .get(widget)
+                .ok()
+                .and_then(|o| o.as_dict().and_then(|d| d.get_name(saved.intern(b"AS"))))
+                .and_then(|n| saved.name_bytes(n))
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
+        assert_eq!(state_of(field.widgets[0]), "Off", "the red one is off");
+        assert_eq!(state_of(field.widgets[1]), "blue", "the blue one is on");
+    }
+
+    #[test]
+    fn selecting_a_radio_option_that_does_not_exist_is_refused() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        assert!(!editor.select_radio("colour", "green"));
+        assert!(!editor.is_dirty());
+    }
+
+    /// A field that was never filled and one filled with nothing are
+    /// different states, and a submitted form distinguishes them.
+    #[test]
+    fn resetting_removes_a_value_that_has_no_default() {
+        let doc = form_document();
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        editor.set_field_value("name", "Ada");
+        editor.set_checkbox("agree", true);
+        editor.reset_form();
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        assert_eq!(field_named(&saved, "name").value, form::FieldValue::None);
+        assert!(!field_named(&saved, "agree").value.is_on());
     }
 }
