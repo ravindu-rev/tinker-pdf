@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**808 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**826 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
@@ -36,6 +36,12 @@ Fixed since, each with tests that would have caught it:
 | **Redaction read `Tm` as translation only**, so scaled text cut the wrong glyphs — the worst failure mode for a redaction, because it looks like it worked | The whole matrix is read; rotated runs are refused rather than cut wrongly |
 | **`/FontFile` (a Type 1 program) went to the sfnt and CFF parsers**, which declined it correctly, so embedded Type 1 fonts drew nothing and said only that some font was unreadable | Type 1 is read: eexec, charstrings, `seac`, flex |
 | **`xtask` was a stub that exited 2**, so nothing checked the crate graph — a design rule the compiler cannot enforce | `cargo xtask dag`, in CI, with the one undeclared edge written down and justified |
+| **Type 3 glyphs never drew.** A Type 3 glyph is a content stream, not an outline, and there was no path for one — no warning either, because nothing was missing | The interpreter recurses into the procedure, with the `/FontMatrix` inside the placing transform and the graphics state restored after |
+| **An EOL aborted a whole CCITT image.** T.4 separates rows with one and `/K > 0` streams always carry them | EOL and EOFB recognised; a damaged row repeats the row above rather than ending the page |
+| **`Document::open` collapsed every failure into `NotAPdf`**, so "needs a password" and "not a PDF" were the same answer | `readable()` reports `PasswordRequired`; `OpenError::Empty` separates zero bytes from bad bytes |
+| **`TextPage` had no warnings**, so "no text" and "text this build could not decode" were indistinguishable | `TextPage::warnings`, deduplicated |
+| **`deny.toml` could not express the hand-rolled rule** — it lists licences, which say nothing about what a crate *does* | The crates that would violate it are denied by name |
+| **Redaction ignored `cm`**, so content under a transform was measured in the wrong space | The matrix is composed, saved and restored with the pen |
 
 ## Built
 
@@ -62,18 +68,16 @@ Fixed since, each with tests that would have caught it:
 | --- | --- | --- |
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
 | **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
-| **Type 3 fonts** | A Type 3 glyph is a content stream rather than an outline, so it needs the interpreter to recurse the way it does for a form XObject. Not built; such glyphs do not draw. **Type 1 is now read** — eexec, charstrings, `seac` and flex — so an embedded `/FontFile` draws. | [05](plans/05-fonts.md) |
-| **Redaction: `cm`, form XObjects, images** | The text matrix is handled; the *transformation* matrix is not, form XObjects are not recursed into, and images are not scrubbed. A redaction over content inside a form XObject does nothing. | [10](plans/10-editing.md) |
+| **Font embedding and subsetting in the builder** | Built documents can use the standard 14 but cannot embed a font. Reading is complete: TrueType, CFF, **Type 1** and **Type 3** all draw. | [12](plans/12-creation.md) |
+| **Redaction: form XObjects, images** | The text *and* transformation matrices are handled. Form XObjects are not recursed into and images are not scrubbed, so a redaction over content inside a form XObject still does nothing. | [10](plans/10-editing.md) |
 | **Editing: merge, split, insert, flatten** | Only delete, move and rotate exist. | [10](plans/10-editing.md) |
 | **Encrypt-on-save, linearization** | `WriteOptions::encryption` still has no reader; set it and you get a plaintext file with no error. Rewriting now drops `/Encrypt` rather than lying about it. | [09](plans/09-writing.md) |
-| **CCITT `/EndOfLine`, `/EndOfBlock`, EOL/EOFB/RTC** | Not recognised at all; an EOL aborts the image. `/K > 0` is not true mixed mode. | [02](plans/02-filters.md) |
+| **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
 | **Progressive JPEG** | Refused, not decoded — and it appeared in 4 of the first 8 real files. | [02](plans/02-filters.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
 | **Annotation `/BBox` clipping** | An appearance stream larger than its box is not clipped to it. | [08](plans/08-rendering-device.md) |
-| **The enforcement tier** | `xtask` is a stub that exits 2. No DAG check — and the declared DAG is already violated, `cos` depending on `font`. No cargo-deny allowlist for the hand-rolled rule. No determinism job, and platform `libm` is called on paths that reach pixels, so bit-identical cross-target output is not achievable today. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
-| **Error convergence** | The facade's `OpenError` has one variant and `Document::open` throws every distinct cos failure away. A caller cannot tell "not a PDF" from "needs a password". | [00](plans/00-architecture.md) |
-| **Font embedding and subsetting in the builder** | Built documents can use the standard 14 but cannot embed a font. | [12](plans/12-creation.md) |
+| **Determinism** | The DAG check and the hand-rolled allowlist now exist and run in CI. What does not: a determinism job, and platform `libm` is still called on paths that reach pixels (`powf`, `sin`, `cos`, `atan2`, `ln`), so bit-identical cross-target output is not achievable today whatever a job would measure. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
 | **The font seam is not in the bindings** | `FontProvider` is Rust-only, so no binding can draw text for a non-embedding document. | [13](plans/13-bindings.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
 | **Forms: comb fields, calculations** | A comb field's fixed cells are not laid out; `/AA` scripts are not run (the open JavaScript question). | [11](plans/11-forms.md) |
