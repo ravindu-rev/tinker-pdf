@@ -4,10 +4,12 @@ A from-scratch, pure-Rust PDF engine: parse, decrypt, extract text, render,
 write. The engine behind [Tinker](https://github.com/ravindu-rev/Tinker), and a
 standalone library for Rust, JavaScript/wasm, Python and .NET.
 
-> **Status: planning complete, implementation starting.** The full scope is
-> designed phase by phase in [`docs/PLAN.md`](docs/PLAN.md); nothing here parses
-> a PDF yet. The workspace compiles, CI runs on four targets, and every crate
-> states which plan file governs it.
+> **Status: it reads PDFs.** Opens damaged files, decrypts with correct
+> security semantics, extracts text with geometry, renders paths, and writes
+> valid documents — 577 tests, four CI targets including wasm. It is not yet a
+> viewer-grade renderer: no image decoding, no colour operators, no embedded
+> glyphs. [`docs/STATUS.md`](docs/STATUS.md) is the honest ledger of what is
+> built and what is not; [`docs/PLAN.md`](docs/PLAN.md) is the full design.
 
 ## Why another PDF engine
 
@@ -40,6 +42,7 @@ dev/build/binding tooling only. That is a deliberate, documented choice; see
 
 | | |
 | --- | --- |
+| [**Status**](docs/STATUS.md) | **What is built and what is not** |
 | [Master plan](docs/PLAN.md) | Phases, dependency lanes, checkpoints, off-ramps |
 | [00 Architecture](docs/plans/00-architecture.md) | Crate DAG, policies, concurrency model |
 | [01 COS & objects](docs/plans/01-cos-and-object-model.md) · [02 Filters](docs/plans/02-filters.md) · [03 Encryption](docs/plans/03-encryption.md) | The file format |
