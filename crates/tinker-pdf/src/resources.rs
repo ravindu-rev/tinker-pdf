@@ -749,6 +749,28 @@ impl PageResources {
         let Some((dict, reference)) = self.xobject(name) else {
             return Err(String::from_utf8_lossy(name).into_owned());
         };
+        let label = String::from_utf8_lossy(name).into_owned();
+        let mut image = self.decode_image_at(&dict, reference, &label)?;
+
+        // 11.6.5.3: /SMask is a greyscale image whose samples are this one's
+        // opacity. Without it every soft-masked image — a drop shadow, a
+        // feathered edge, anything composited in a design tool — paints as an
+        // opaque rectangle over the page.
+        if let Some(mask) = self.soft_mask(&dict) {
+            apply_soft_mask(&mut image, &mask);
+        }
+        Ok(image)
+    }
+
+    /// Decodes an image from its dictionary, wherever that came from.
+    fn decode_image_at(
+        &self,
+        dict: &Dict,
+        reference: tinker_pdf_cos::ObjRef,
+        name: &str,
+    ) -> Result<DecodedImage, String> {
+        let dict = dict.clone();
+        let name = name.as_bytes();
 
         let subtype = self
             .doc
@@ -798,6 +820,7 @@ impl PageResources {
                 height: image.height,
                 rgb,
                 alpha: Vec::new(),
+                stencil: false,
             });
         }
         // CCITT data likewise arrives still coded, and carries its own
@@ -843,6 +866,7 @@ impl PageResources {
                 height,
                 rgb,
                 alpha: Vec::new(),
+                stencil: false,
             });
         }
         if let Some(filter) = last_filter.as_deref() {
@@ -871,6 +895,21 @@ impl PageResources {
             .as_bool()
             .unwrap_or(false);
 
+        // 8.9.5.2: /Decode remaps each component's sample range. `/Decode
+        // [1 0]` on a stencil or a greyscale image inverts it, and ignoring it
+        // renders the image as its own negative.
+        let decode: Vec<(f64, f64)> = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default();
+
         let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
         let mut alpha = Vec::new();
         let row_bits = (width as usize) * n * (bpc as usize);
@@ -883,10 +922,19 @@ impl PageResources {
                 for c in 0..n {
                     let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                     let value = read_bits(&data, bit, bpc);
-                    components.push(match &space {
+                    let raw = match &space {
                         // An indexed space's component is the index itself.
                         ColorSpace::Indexed { .. } => f64::from(value),
                         _ => f64::from(value) / max,
+                    };
+                    components.push(match decode.get(c) {
+                        // The interpolation is over the *sample* range, so an
+                        // indexed image maps its index rather than a fraction.
+                        Some((dmin, dmax)) => match &space {
+                            ColorSpace::Indexed { .. } => dmin + raw * (dmax - dmin) / max.max(1.0),
+                            _ => dmin + raw * (dmax - dmin),
+                        },
+                        None => raw,
                     });
                 }
 
@@ -907,8 +955,58 @@ impl PageResources {
             height,
             rgb,
             alpha,
+            stencil: is_mask,
         })
     }
+
+    /// The `/SMask` of an image, decoded (11.6.5.3).
+    fn soft_mask(&self, dict: &Dict) -> Option<DecodedImage> {
+        let reference = dict.get_ref(self.doc.intern(b"SMask"))?;
+        let object = self.doc.get(reference).ok()?;
+        let mask = object.as_dict()?.clone();
+        // A mask that is itself masked is not a thing the spec allows, and
+        // decoding it through the top-level entry point would recurse.
+        self.decode_image_at(&mask, reference, "SMask").ok()
+    }
+}
+
+/// Applies a soft mask's luminance as the image's per-sample opacity
+/// (11.6.5.3).
+///
+/// The mask has its own dimensions and need not match the image's, so it is
+/// sampled by position rather than by index — a 2x2 mask over a 512x512 image
+/// is legal and common, because a mask only has to carry as much detail as its
+/// gradient needs.
+fn apply_soft_mask(image: &mut DecodedImage, mask: &DecodedImage) {
+    if image.width == 0 || image.height == 0 || mask.width == 0 || mask.height == 0 {
+        return;
+    }
+
+    let samples = (image.width as usize).saturating_mul(image.height as usize);
+    let mut alpha = Vec::with_capacity(samples);
+
+    for y in 0..image.height as usize {
+        // Nearest-neighbour: a mask is a smooth ramp far more often than not,
+        // and interpolating it would cost more than it buys.
+        let my = y * mask.height as usize / image.height as usize;
+        for x in 0..image.width as usize {
+            let mx = x * mask.width as usize / image.width as usize;
+            let at = (my * mask.width as usize + mx) * 3;
+            // The mask is greyscale, so any channel is its value.
+            let value = mask.rgb.get(at).copied().unwrap_or(255);
+
+            // An image that already had alpha keeps the more opaque
+            // constraint of the two rather than losing one of them.
+            let existing = image
+                .alpha
+                .get(y * image.width as usize + x)
+                .copied()
+                .unwrap_or(255);
+            alpha.push(((u16::from(existing) * u16::from(value)) / 255) as u8);
+        }
+    }
+
+    image.alpha = alpha;
 }
 
 /// Reads `bits` bits starting at bit offset `at`, big-endian.

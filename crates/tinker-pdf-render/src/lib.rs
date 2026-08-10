@@ -114,6 +114,13 @@ pub struct DecodedImage {
     pub rgb: Vec<u8>,
     /// Per-sample opacity from a mask; empty means fully opaque.
     pub alpha: Vec<u8>,
+    /// Whether this is a stencil mask (8.9.6.2).
+    ///
+    /// A stencil carries no colour of its own: it selects where the *current
+    /// fill colour* is painted. Baking black in at decode time — which is
+    /// what happens without this flag — paints every stencil black whatever
+    /// the page asked for.
+    pub stencil: bool,
 }
 
 /// Where glyph outlines and image data come from, supplied by the caller so
@@ -417,8 +424,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
 
                 let effective = alpha * f64::from(coverage) / 255.0 * f64::from(clip) / 255.0;
-                self.canvas
-                    .blend_pixel(px, py, Color::rgb(rgb[0], rgb[1], rgb[2]), effective);
+                // 8.9.6.2: a stencil selects where the *current fill colour*
+                // is painted; it has no colour of its own.
+                let color = if image.stencil {
+                    fill_color(state)
+                } else {
+                    Color::rgb(rgb[0], rgb[1], rgb[2])
+                };
+                self.canvas.blend_pixel(px, py, color, effective);
             }
         }
     }
@@ -1120,6 +1133,7 @@ mod tests {
             }
             let (r, g, b) = self.color;
             Ok(Some(DecodedImage {
+                stencil: false,
                 width: 2,
                 height: 2,
                 rgb: vec![r, g, b, r, g, b, r, g, b, r, g, b],
