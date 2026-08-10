@@ -4,12 +4,14 @@ A from-scratch, pure-Rust PDF engine: parse, decrypt, extract text, render,
 write. The engine behind [Tinker](https://github.com/ravindu-rev/Tinker), and a
 standalone library for Rust, JavaScript/wasm, Python and .NET.
 
-> **Status: it reads PDFs.** Opens damaged files, decrypts with correct
-> security semantics, extracts text with geometry, renders paths, and writes
-> valid documents — 577 tests, four CI targets including wasm. It is not yet a
-> viewer-grade renderer: no image decoding, no colour operators, no embedded
-> glyphs. [`docs/STATUS.md`](docs/STATUS.md) is the honest ledger of what is
-> built and what is not; [`docs/PLAN.md`](docs/PLAN.md) is the full design.
+> **Status: it reads and renders PDFs.** Opens damaged files, decrypts with
+> correct security semantics, extracts text with geometry, renders vector
+> graphics, images and gradients in colour, and writes valid documents —
+> 620 tests, four CI targets including wasm, with Python, JavaScript and .NET
+> bindings. The two things it still cannot do: draw text for documents that do
+> not embed their fonts (it ships no substitute face), and prove its leniency
+> against a real-world corpus. [`docs/STATUS.md`](docs/STATUS.md) is the honest
+> ledger; [`docs/PLAN.md`](docs/PLAN.md) is the full design.
 
 ## Why another PDF engine
 
