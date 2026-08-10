@@ -199,6 +199,83 @@ fn documents_without_an_outline_return_an_empty_one() {
     assert!(open("simple-text.pdf").outline().is_empty());
 }
 
+// --- render_pages.rs -------------------------------------------------------
+
+/// Tinker: `renders_a4_at_one_pixel_per_point`.
+#[test]
+fn renders_a4_at_one_pixel_per_point() {
+    let doc = open("simple-text.pdf");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&tinker_pdf::RenderOptions::default());
+
+    assert_eq!((bitmap.width, bitmap.height), (595, 842));
+    assert_eq!(bitmap.components(), 3, "colour renders are RGB");
+    assert_eq!(bitmap.data.len(), 595 * 842 * 3);
+}
+
+/// Tinker: `scale_multiplies_both_dimensions`, including the 150 dpi case
+/// whose outward rounding the previous engine left as folklore.
+#[test]
+fn scale_multiplies_both_dimensions() {
+    let doc = open("simple-text.pdf");
+    let page = doc.page(0).expect("a page");
+
+    let doubled = page.render(&tinker_pdf::RenderOptions {
+        scale: 2.0,
+        ..tinker_pdf::RenderOptions::default()
+    });
+    assert_eq!((doubled.width, doubled.height), (1190, 1684));
+
+    // A4 at 150 dpi is 842 × 150/72 = 1754.17, rounded outward.
+    let at_150 = page.render(&tinker_pdf::RenderOptions::at_dpi(150.0));
+    assert_eq!((at_150.width, at_150.height), (1240, 1755));
+}
+
+/// Tinker: `grayscale_renders_one_component_per_pixel`.
+#[test]
+fn grayscale_renders_one_component_per_pixel() {
+    let doc = open("simple-text.pdf");
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions {
+            format: tinker_pdf::PixelFormat::Gray8,
+            ..tinker_pdf::RenderOptions::default()
+        });
+
+    assert_eq!(bitmap.components(), 1);
+    assert_eq!(bitmap.data.len(), (bitmap.width * bitmap.height) as usize);
+}
+
+/// Tinker: `rendering_the_same_page_twice_is_consistent`.
+#[test]
+fn rendering_the_same_page_twice_is_consistent() {
+    let doc = open("simple-text.pdf");
+    let page = doc.page(1).expect("a page");
+
+    let first = page.render(&tinker_pdf::RenderOptions::default());
+    let second = page.render(&tinker_pdf::RenderOptions::default());
+    assert_eq!(first.data, second.data, "ruling 4: determinism");
+}
+
+/// Tinker: nonsense options are rejected rather than producing nonsense.
+#[test]
+fn nonsense_scales_produce_a_usable_bitmap() {
+    let doc = open("simple-text.pdf");
+    let page = doc.page(0).expect("a page");
+
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let bitmap = page.render(&tinker_pdf::RenderOptions {
+            scale,
+            ..tinker_pdf::RenderOptions::default()
+        });
+        assert!(
+            bitmap.width > 0 && bitmap.height > 0,
+            "scale {scale} should fall back rather than produce nothing"
+        );
+    }
+}
+
 // --- engine behaviour beyond the ported suite ------------------------------
 
 #[test]

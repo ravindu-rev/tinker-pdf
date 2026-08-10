@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use tinker_pdf_content::{interpret, FontSource, Matrix, TextDevice};
 use tinker_pdf_cos::{font as cos_font, outline as cos_outline, pages as cos_pages, CosDocument};
+use tinker_pdf_render::NoGlyphs;
 
 pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
 pub use tinker_pdf_cos::{
@@ -33,6 +34,8 @@ pub use tinker_pdf_cos::{
     WarningKind,
 };
 pub use tinker_pdf_crypto::Permissions;
+pub use tinker_pdf_raster::canvas::PixelFormat;
+pub use tinker_pdf_render::{CancelToken, RenderWarning};
 
 /// The engine's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -56,6 +59,63 @@ pub fn build_info() -> BuildInfo {
     BuildInfo {
         version: VERSION,
         spec: "ISO 32000-1 (PDF 1.7)",
+    }
+}
+
+/// How a page should be rendered.
+#[derive(Clone, Debug)]
+pub struct RenderOptions {
+    /// Pixels per PDF point. 1.0 renders at 72 dpi.
+    pub scale: f64,
+    /// How the bitmap stores its pixels.
+    pub format: PixelFormat,
+    /// Lets a caller stop a long render.
+    pub cancel: Option<CancelToken>,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions {
+            scale: 1.0,
+            format: PixelFormat::Rgb8,
+            cancel: None,
+        }
+    }
+}
+
+impl RenderOptions {
+    /// Options rendering at a resolution in dots per inch.
+    #[must_use]
+    pub fn at_dpi(dpi: f64) -> RenderOptions {
+        RenderOptions {
+            scale: dpi / 72.0,
+            ..RenderOptions::default()
+        }
+    }
+}
+
+/// A rendered page.
+#[derive(Clone, Debug)]
+pub struct Bitmap {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// How pixels are stored.
+    pub format: PixelFormat,
+    /// Bytes per row.
+    pub stride: usize,
+    /// The pixels.
+    pub data: Vec<u8>,
+    /// What the renderer could not do exactly (ruling 2).
+    pub warnings: Vec<RenderWarning>,
+}
+
+impl Bitmap {
+    /// How many bytes each pixel occupies.
+    #[must_use]
+    pub fn components(&self) -> usize {
+        self.format.components()
     }
 }
 
@@ -257,6 +317,42 @@ impl Page {
     #[must_use]
     pub fn size(&self) -> (f64, f64) {
         self.inner.display_size()
+    }
+
+    /// Renders the page to a bitmap.
+    ///
+    /// The bitmap's size is the page's, scaled and **rounded outward** so a
+    /// page never loses its last row or column: A4 at 150 dpi is 1240×1755.
+    #[must_use]
+    pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        let (w, h) = self.size();
+        let scale = if options.scale.is_finite() && options.scale > 0.0 {
+            options.scale
+        } else {
+            1.0
+        };
+
+        let canvas = tinker_pdf_render::page_canvas(w, h, scale, options.format);
+        let base = tinker_pdf_render::page_transform(h, scale);
+
+        let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        let fonts = PageFonts::new(&self.doc, &self.inner);
+
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &NoGlyphs);
+        if let Some(cancel) = &options.cancel {
+            renderer = renderer.with_cancel(cancel.clone());
+        }
+        interpret(&content, Matrix::IDENTITY, &mut renderer, &fonts);
+        let (canvas, warnings) = renderer.finish();
+
+        Bitmap {
+            width: canvas.width,
+            height: canvas.height,
+            format: canvas.format,
+            stride: canvas.stride,
+            data: canvas.data,
+            warnings,
+        }
     }
 
     /// The page's text.

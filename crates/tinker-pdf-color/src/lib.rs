@@ -1,3 +1,241 @@
-//! Color spaces and the PDF function interpreter.
+//! Colour spaces and the PDF function interpreter (8.6, 7.10).
 //!
-//! Scope, design and exit criteria: `docs/plans/08-rendering-device.md`.
+//! A leaf crate: component values in, RGB out, with no PDF types anywhere in
+//! the surface. The caller translates `/ColorSpace` dictionaries into these
+//! plain descriptions.
+//!
+//! Colour management is reduced on purpose for this version. ICC profiles are
+//! honoured only by their component count, falling back to the alternate space
+//! the document names, and CIE-based spaces are approximated. A full profile
+//! parser is a named later capability; what it would change is the exact shade
+//! of a managed document, not whether it renders.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod function;
+
+pub use function::Function;
+
+/// A colour space, reduced to what conversion needs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColorSpace {
+    /// `/DeviceGray`, one component.
+    DeviceGray,
+    /// `/DeviceRGB`, three components.
+    DeviceRgb,
+    /// `/DeviceCMYK`, four components.
+    DeviceCmyk,
+    /// `/Indexed`: a palette over a base space (8.6.6.3).
+    Indexed {
+        /// The space the palette's entries are in.
+        base: Box<ColorSpace>,
+        /// The palette, base-space components packed one entry after another.
+        lookup: Vec<u8>,
+        /// The highest valid index.
+        high: u32,
+    },
+    /// `/Separation` or `/DeviceN`: named inks mapped through a tint transform
+    /// into an alternate space (8.6.6.4, 8.6.6.5).
+    Separation {
+        /// How many inks.
+        components: usize,
+        /// The space the transform produces.
+        alternate: Box<ColorSpace>,
+        /// The tint transform.
+        tint: Box<Function>,
+    },
+    /// A CIE-based or ICC space, approximated by its component count.
+    ///
+    /// 8.6.5.5 lets a reader use the alternate space, and that is what this
+    /// is: the shape of the data without the profile's exact rendering.
+    Approximated {
+        /// How many components.
+        components: usize,
+    },
+    /// `/Pattern`, which carries no colour of its own (8.7.3).
+    Pattern,
+}
+
+impl ColorSpace {
+    /// How many components a colour in this space has.
+    #[must_use]
+    pub fn components(&self) -> usize {
+        match self {
+            ColorSpace::DeviceGray => 1,
+            ColorSpace::DeviceRgb => 3,
+            ColorSpace::DeviceCmyk => 4,
+            ColorSpace::Indexed { .. } => 1,
+            ColorSpace::Separation { components, .. } => *components,
+            ColorSpace::Approximated { components } => *components,
+            ColorSpace::Pattern => 1,
+        }
+    }
+
+    /// The colour this space's initial value is (8.6.8).
+    #[must_use]
+    pub fn initial(&self) -> Vec<f64> {
+        match self {
+            // Black in every device space, which for CMYK means all zeros
+            // except the black ink.
+            ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            other => vec![0.0; other.components()],
+        }
+    }
+
+    /// Converts components to 8-bit sRGB.
+    ///
+    /// Out-of-range components clamp rather than wrap: a content stream may
+    /// name any number, and a wrapped one turns black into white.
+    #[must_use]
+    pub fn to_rgb(&self, components: &[f64]) -> (u8, u8, u8) {
+        let at = |i: usize| components.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+
+        match self {
+            ColorSpace::DeviceGray => {
+                let v = byte(at(0));
+                (v, v, v)
+            }
+            ColorSpace::DeviceRgb => (byte(at(0)), byte(at(1)), byte(at(2))),
+            ColorSpace::DeviceCmyk => {
+                // 8.6.4.4: the additive complement, with black applied.
+                let (c, m, y, k) = (at(0), at(1), at(2), at(3));
+                (
+                    byte((1.0 - c) * (1.0 - k)),
+                    byte((1.0 - m) * (1.0 - k)),
+                    byte((1.0 - y) * (1.0 - k)),
+                )
+            }
+            ColorSpace::Indexed { base, lookup, high } => {
+                let index = components
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, f64::from(*high))
+                    .round() as usize;
+                let n = base.components();
+                let start = index.saturating_mul(n);
+                let entry: Vec<f64> = (0..n)
+                    .map(|i| lookup.get(start + i).map_or(0.0, |&b| f64::from(b) / 255.0))
+                    .collect();
+                base.to_rgb(&entry)
+            }
+            ColorSpace::Separation {
+                alternate, tint, ..
+            } => {
+                let converted = tint.eval(components);
+                alternate.to_rgb(&converted)
+            }
+            ColorSpace::Approximated { components: n } => match n {
+                1 => ColorSpace::DeviceGray.to_rgb(components),
+                4 => ColorSpace::DeviceCmyk.to_rgb(components),
+                // Three components, or anything unexpected, read as RGB.
+                _ => ColorSpace::DeviceRgb.to_rgb(components),
+            },
+            // A pattern's colour comes from the pattern, not from here.
+            ColorSpace::Pattern => (0, 0, 0),
+        }
+    }
+}
+
+fn byte(value: f64) -> u8 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_spaces_convert_as_the_specification_says() {
+        assert_eq!(ColorSpace::DeviceGray.to_rgb(&[0.0]), (0, 0, 0));
+        assert_eq!(ColorSpace::DeviceGray.to_rgb(&[1.0]), (255, 255, 255));
+        assert_eq!(ColorSpace::DeviceRgb.to_rgb(&[1.0, 0.0, 0.0]), (255, 0, 0));
+
+        // CMYK: no ink is white, full black ink is black.
+        assert_eq!(
+            ColorSpace::DeviceCmyk.to_rgb(&[0.0, 0.0, 0.0, 0.0]),
+            (255, 255, 255)
+        );
+        assert_eq!(
+            ColorSpace::DeviceCmyk.to_rgb(&[0.0, 0.0, 0.0, 1.0]),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            ColorSpace::DeviceCmyk.to_rgb(&[1.0, 0.0, 0.0, 0.0]),
+            (0, 255, 255),
+            "cyan"
+        );
+    }
+
+    #[test]
+    fn cmyk_starts_black_and_rgb_starts_black() {
+        assert_eq!(ColorSpace::DeviceCmyk.initial(), vec![0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            ColorSpace::DeviceCmyk.to_rgb(&ColorSpace::DeviceCmyk.initial()),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            ColorSpace::DeviceRgb.to_rgb(&ColorSpace::DeviceRgb.initial()),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn an_indexed_space_reads_its_palette() {
+        let space = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::DeviceRgb),
+            lookup: vec![255, 0, 0, 0, 255, 0, 0, 0, 255],
+            high: 2,
+        };
+        assert_eq!(space.to_rgb(&[0.0]), (255, 0, 0));
+        assert_eq!(space.to_rgb(&[1.0]), (0, 255, 0));
+        assert_eq!(space.to_rgb(&[2.0]), (0, 0, 255));
+        // Beyond the palette clamps rather than reading past it.
+        assert_eq!(space.to_rgb(&[99.0]), (0, 0, 255));
+        assert_eq!(space.to_rgb(&[-5.0]), (255, 0, 0));
+        assert_eq!(space.components(), 1);
+    }
+
+    #[test]
+    fn a_separation_runs_its_tint_transform() {
+        // A single ink that maps to grey through a linear function.
+        let space = ColorSpace::Separation {
+            components: 1,
+            alternate: Box::new(ColorSpace::DeviceGray),
+            tint: Box::new(Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: vec![1.0],
+                c1: vec![0.0],
+                n: 1.0,
+            }),
+        };
+        assert_eq!(space.to_rgb(&[0.0]), (255, 255, 255), "no ink is white");
+        assert_eq!(space.to_rgb(&[1.0]), (0, 0, 0), "full ink is black");
+    }
+
+    #[test]
+    fn an_approximated_space_reads_by_its_component_count() {
+        assert_eq!(
+            ColorSpace::Approximated { components: 1 }.to_rgb(&[0.5]),
+            ColorSpace::DeviceGray.to_rgb(&[0.5])
+        );
+        assert_eq!(
+            ColorSpace::Approximated { components: 4 }.to_rgb(&[0.0, 0.0, 0.0, 1.0]),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn nonsense_components_clamp_rather_than_wrap() {
+        assert_eq!(ColorSpace::DeviceGray.to_rgb(&[5.0]), (255, 255, 255));
+        assert_eq!(ColorSpace::DeviceGray.to_rgb(&[-5.0]), (0, 0, 0));
+        assert_eq!(ColorSpace::DeviceGray.to_rgb(&[f64::NAN]), (0, 0, 0));
+        // Too few components read as zero rather than panicking.
+        assert_eq!(ColorSpace::DeviceRgb.to_rgb(&[]), (0, 0, 0));
+        assert_eq!(ColorSpace::DeviceCmyk.to_rgb(&[0.5]), (128, 255, 255));
+    }
+}
