@@ -49,6 +49,12 @@ pub trait FontSource {
         None
     }
 
+    /// The fill and stroke alphas an `/ExtGState` sets, if it sets them.
+    fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
+        let _ = name;
+        None
+    }
+
     /// How many components a named colour space takes.
     ///
     /// Used to tell `scn`'s optional trailing pattern name from its numeric
@@ -509,9 +515,27 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
 
-            // 8.4.5 external graphics state. Alpha is what a device can act
-            // on; the rest needs the resource dictionary.
-            b"gs" => {}
+            // 8.4.5 external graphics state. Only the alphas are modelled;
+            // the rest of an /ExtGState needs the resource dictionary.
+            b"gs" => {
+                if let Some(Token::Name(name)) = self.stack.last().cloned() {
+                    if let Some((fill, stroke)) = self.fonts.ext_g_state_alpha(&name) {
+                        if let Some(alpha) = fill {
+                            self.gs.fill_alpha = alpha.clamp(0.0, 1.0);
+                        }
+                        if let Some(alpha) = stroke {
+                            self.gs.stroke_alpha = alpha.clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+
+            // 8.7.4.2: `sh` paints a shading over the current clip.
+            b"sh" => {
+                if let Some(Token::Name(name)) = self.stack.last().cloned() {
+                    self.device.draw_shading(&name, &self.gs);
+                }
+            }
 
             _ => {}
         }

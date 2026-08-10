@@ -12,7 +12,7 @@ use tinker_pdf_content::{FontSource, Matrix, Rgb};
 use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
 use tinker_pdf_filters::{jpeg_decode, JpegColor};
 use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt};
-use tinker_pdf_render::{DecodedImage, GlyphSource};
+use tinker_pdf_render::{DecodedImage, GlyphSource, Shading};
 
 /// Extracted glyph outlines, keyed by font identity and character code.
 ///
@@ -276,6 +276,28 @@ impl FontSource for PageResources {
     fn color_components(&self, space: &[u8]) -> Option<usize> {
         Some(self.color_space(space)?.components())
     }
+
+    fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"ExtGState"));
+        let entry = self
+            .doc
+            .resolve_key(table.as_dict()?, self.doc.intern(name));
+        let dict = entry.as_dict()?;
+
+        // 8.4.5 Table 58: `ca` is the non-stroking alpha, `CA` the stroking.
+        let fill = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ca"))
+            .as_number();
+        let stroke = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"CA"))
+            .as_number();
+        (fill.is_some() || stroke.is_some()).then_some((fill, stroke))
+    }
 }
 
 impl GlyphSource for PageResources {
@@ -294,6 +316,88 @@ impl GlyphSource for PageResources {
             }
         }
         outline.map(|o| (*o).clone())
+    }
+
+    fn shading(&self, name: &[u8]) -> Result<Option<Shading>, i64> {
+        let Some(resources) = self.resources.as_ref() else {
+            return Ok(None);
+        };
+        let table = self.doc.resolve_key(resources, self.doc.intern(b"Shading"));
+        let Some(table) = table.as_dict() else {
+            return Ok(None);
+        };
+        let entry = self.doc.resolve_key(table, self.doc.intern(name));
+        let Some(dict) = entry.as_dict() else {
+            return Ok(None);
+        };
+
+        let kind = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ShadingType"))
+            .as_int()
+            .unwrap_or(0);
+
+        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let space = self.parse_space(&space, 0).unwrap_or(ColorSpace::DeviceRgb);
+        let function = self.function(dict).unwrap_or(Function::Identity);
+
+        let coords = self.doc.resolve_key(dict, self.doc.intern(b"Coords"));
+        let coords: Vec<f64> = coords
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let extend = self.doc.resolve_key(dict, self.doc.intern(b"Extend"));
+        let extend = extend
+            .as_array()
+            .map(|a| {
+                (
+                    a.first().and_then(Object::as_bool).unwrap_or(false),
+                    a.get(1).and_then(Object::as_bool).unwrap_or(false),
+                )
+            })
+            .unwrap_or((false, false));
+
+        match kind {
+            1 => {
+                let domain = self.doc.resolve_key(dict, self.doc.intern(b"Domain"));
+                let domain: Vec<f64> = domain
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| self.doc.resolve(o).as_number())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let d = |i: usize, fallback: f64| domain.get(i).copied().unwrap_or(fallback);
+                Ok(Some(Shading::FunctionBased {
+                    space,
+                    function,
+                    domain: [d(0, 0.0), d(1, 1.0), d(2, 0.0), d(3, 1.0)],
+                }))
+            }
+            2 if coords.len() >= 4 => Ok(Some(Shading::Axial {
+                space,
+                function,
+                coords: [coords[0], coords[1], coords[2], coords[3]],
+                extend,
+            })),
+            3 if coords.len() >= 6 => Ok(Some(Shading::Radial {
+                space,
+                function,
+                coords: [
+                    coords[0], coords[1], coords[2], coords[3], coords[4], coords[5],
+                ],
+                extend,
+            })),
+            // The mesh types are behind a capability (ruling 3).
+            4..=7 => Err(kind),
+            _ => Ok(None),
+        }
     }
 
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
@@ -315,6 +419,112 @@ impl GlyphSource for PageResources {
 }
 
 impl PageResources {
+    /// Reads a `/Function` entry, which is one function or an array of them,
+    /// one per output component (7.10).
+    fn function(&self, dict: &Dict) -> Option<Function> {
+        let value = self.doc.resolve_key(dict, self.doc.intern(b"Function"));
+        if let Some(items) = value.as_array() {
+            return items.first().and_then(|o| self.parse_function(o, 0));
+        }
+        self.parse_function(&value, 0)
+    }
+
+    fn parse_function(&self, object: &Object, depth: u32) -> Option<Function> {
+        if depth > 8 {
+            return None;
+        }
+        let resolved = self.doc.resolve(object);
+        let dict = resolved.as_dict()?;
+
+        let numbers = |key: &[u8]| -> Vec<f64> {
+            let value = self.doc.resolve_key(dict, self.doc.intern(key));
+            value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|o| self.doc.resolve(o).as_number())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let pairs = |values: &[f64]| -> Vec<(f64, f64)> {
+            values.chunks_exact(2).map(|p| (p[0], p[1])).collect()
+        };
+
+        let kind = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"FunctionType"))
+            .as_int()?;
+
+        match kind {
+            2 => {
+                let c0 = numbers(b"C0");
+                let c1 = numbers(b"C1");
+                let domain = numbers(b"Domain");
+                Some(Function::Exponential {
+                    domain: (
+                        domain.first().copied().unwrap_or(0.0),
+                        domain.get(1).copied().unwrap_or(1.0),
+                    ),
+                    c0: if c0.is_empty() { vec![0.0] } else { c0 },
+                    c1: if c1.is_empty() { vec![1.0] } else { c1 },
+                    n: self
+                        .doc
+                        .resolve_key(dict, self.doc.intern(b"N"))
+                        .as_number()
+                        .unwrap_or(1.0),
+                })
+            }
+            3 => {
+                let value = self.doc.resolve_key(dict, self.doc.intern(b"Functions"));
+                let functions: Vec<Function> = value
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| self.parse_function(o, depth + 1))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let domain = numbers(b"Domain");
+                Some(Function::Stitching {
+                    domain: (
+                        domain.first().copied().unwrap_or(0.0),
+                        domain.get(1).copied().unwrap_or(1.0),
+                    ),
+                    functions,
+                    bounds: numbers(b"Bounds"),
+                    encode: pairs(&numbers(b"Encode")),
+                })
+            }
+            0 | 4 => {
+                // Both are streams, so the object handed in is the reference.
+                let reference = object.as_objref()?;
+                let data = self.doc.stream_decoded(reference).ok()?;
+                if kind == 4 {
+                    return Some(Function::PostScript {
+                        domain: pairs(&numbers(b"Domain")),
+                        range: pairs(&numbers(b"Range")),
+                        program: tinker_pdf_color::function::parse_postscript(&data),
+                    });
+                }
+                Some(Function::Sampled {
+                    domain: pairs(&numbers(b"Domain")),
+                    range: pairs(&numbers(b"Range")),
+                    size: numbers(b"Size").iter().map(|v| *v as usize).collect(),
+                    bits: self
+                        .doc
+                        .resolve_key(dict, self.doc.intern(b"BitsPerSample"))
+                        .as_int()
+                        .unwrap_or(8) as u32,
+                    encode: pairs(&numbers(b"Encode")),
+                    decode: pairs(&numbers(b"Decode")),
+                    samples: data,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Pulls one glyph's outline out of an embedded font program.
     fn extract_outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         let program = self.programs.get(&font_id)?;

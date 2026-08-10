@@ -10,10 +10,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod shading;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub use shading::Shading;
 use tinker_pdf_content::{Device, Glyph, GraphicsState, ImageRef, Matrix, PathSegment};
+
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, PixelFormat},
@@ -99,6 +103,13 @@ pub trait GlyphSource {
     /// `Err` carries the codec's name so the warning can say what was missing;
     /// `Ok(None)` means the resource is not an image at all.
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+        let _ = name;
+        Ok(None)
+    }
+
+    /// A named shading, and the type number when it is one this engine does
+    /// not paint.
+    fn shading(&self, name: &[u8]) -> Result<Option<Shading>, i64> {
         let _ = name;
         Ok(None)
     }
@@ -499,6 +510,55 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
+    fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
+
+        let shading = match self.glyphs.shading(name) {
+            Ok(Some(shading)) => shading,
+            Ok(None) => return,
+            Err(kind) => {
+                let warning = RenderWarning::UnsupportedShading { kind };
+                if !self.warnings.contains(&warning) {
+                    self.warnings.push(warning);
+                }
+                return;
+            }
+        };
+
+        // 8.7.4.2: `sh` fills the current clip, so a page without one paints
+        // everywhere — and the shading's own extent decides the rest.
+        let to_device = state.ctm.then(&self.base);
+        let Some(inverse) = invert(&to_device) else {
+            return;
+        };
+
+        let alpha = state.fill_alpha.clamp(0.0, 1.0);
+        for py in 0..self.canvas.height {
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            for px in 0..self.canvas.width {
+                let clip = self
+                    .clip
+                    .as_ref()
+                    .map_or(255, |mask| mask.at(px as i32, py as i32));
+                if clip == 0 {
+                    continue;
+                }
+
+                let (x, y) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
+                let Some((r, g, b)) = shading.color_at(x, y) else {
+                    continue;
+                };
+                let effective = alpha * f64::from(clip) / 255.0;
+                self.canvas
+                    .blend_pixel(px, py, Color::rgb(r, g, b), effective);
+            }
+        }
+    }
+
     fn begin_form(&mut self, _id: u64) -> bool {
         self.clip_stack.push(self.clip.clone());
         !self.cancel.is_cancelled()
@@ -858,6 +918,75 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })));
+    }
+
+    struct OneShading;
+
+    impl GlyphSource for OneShading {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn shading(&self, name: &[u8]) -> Result<Option<Shading>, i64> {
+            match name {
+                b"Sh0" => Ok(Some(Shading::Axial {
+                    space: tinker_pdf_color::ColorSpace::DeviceGray,
+                    function: tinker_pdf_color::Function::Exponential {
+                        domain: (0.0, 1.0),
+                        c0: vec![0.0],
+                        c1: vec![1.0],
+                        n: 1.0,
+                    },
+                    coords: [0.0, 0.0, 20.0, 0.0],
+                    extend: (true, true),
+                })),
+                b"Mesh" => Err(4),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    #[test]
+    fn a_shading_paints_a_gradient() {
+        let canvas = Canvas::new(20, 20, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(20.0, 1.0), &OneShading);
+        interpret(b"/Sh0 sh", Matrix::IDENTITY, &mut renderer, &NoFonts);
+        let (canvas, warnings) = renderer.finish();
+
+        assert!(warnings.is_empty());
+        let left = canvas.pixel(1, 10).expect("a pixel").r;
+        let right = canvas.pixel(18, 10).expect("a pixel").r;
+        assert!(
+            right > left + 100,
+            "the gradient should run dark to light, got {left} then {right}"
+        );
+    }
+
+    #[test]
+    fn a_shading_is_confined_by_the_clip() {
+        let canvas = Canvas::new(20, 20, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(20.0, 1.0), &OneShading);
+        interpret(
+            b"0 0 10 20 re W n /Sh0 sh",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &NoFonts,
+        );
+        let (canvas, _) = renderer.finish();
+
+        assert_ne!(canvas.pixel(5, 10), Some(Color::WHITE), "inside the clip");
+        assert_eq!(canvas.pixel(15, 10), Some(Color::WHITE), "outside it");
+    }
+
+    #[test]
+    fn an_unpaintable_shading_type_warns() {
+        let canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(8.0, 1.0), &OneShading);
+        interpret(b"/Mesh sh", Matrix::IDENTITY, &mut renderer, &NoFonts);
+        let (_, warnings) = renderer.finish();
+
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::UnsupportedShading { kind: 4 })));
     }
 
     #[test]

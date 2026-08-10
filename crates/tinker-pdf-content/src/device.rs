@@ -77,6 +77,11 @@ pub trait Device {
         let _ = (image, state);
     }
 
+    /// `sh`: a named shading was painted over the current clip (8.7.4.2).
+    fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+        let _ = (name, state);
+    }
+
     /// A form XObject is about to be interpreted; returning false skips it.
     fn begin_form(&mut self, id: u64) -> bool {
         let _ = id;
