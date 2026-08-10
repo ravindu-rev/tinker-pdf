@@ -68,7 +68,7 @@ mod repair;
 mod store;
 mod streams;
 
-pub use build::{DocumentBuilder, OutlineEntry, PageBuilder};
+pub use build::{DocumentBuilder, ImageData, OutlineEntry, PageBuilder};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{Action, DestKind, Destination, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};

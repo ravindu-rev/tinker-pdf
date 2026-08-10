@@ -8,12 +8,41 @@ use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
 
+/// Image data to embed.
+pub enum ImageData<'a> {
+    /// JPEG bytes, placed **as they are**.
+    ///
+    /// Never re-encoded: recompression is generational quality loss the
+    /// caller cannot undo, and one who wants different quality can decode and
+    /// re-add.
+    Jpeg(&'a [u8]),
+    /// Eight-bit RGB, three bytes per pixel, row-major from the top.
+    Rgb8 {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The samples.
+        data: &'a [u8],
+    },
+    /// Eight-bit greyscale, one byte per pixel.
+    Gray8 {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The samples.
+        data: &'a [u8],
+    },
+}
+
 /// A page being assembled.
 pub struct PageBuilder {
     width: f64,
     height: f64,
     content: Vec<u8>,
     fonts: Vec<(Vec<u8>, ObjRef)>,
+    images: Vec<(Vec<u8>, ObjRef)>,
 }
 
 impl PageBuilder {
@@ -43,6 +72,24 @@ impl PageBuilder {
             .extend_from_slice(format!("{grey} g {x} {y} {w} {h} re f\n").as_bytes());
     }
 
+    /// Draws a registered image into the given rectangle.
+    ///
+    /// 8.9.5.2: an image occupies the unit square, so placing it is entirely
+    /// a matter of the transform — which is what this writes.
+    pub fn image(&mut self, resource: &[u8], x: f64, y: f64, w: f64, h: f64) {
+        self.content
+            .extend_from_slice(format!("q {w} 0 0 {h} {x} {y} cm /").as_bytes());
+        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b" Do Q\n");
+    }
+
+    /// Sets the non-stroking colour, as red, green and blue from zero to one.
+    pub fn set_fill_rgb(&mut self, r: f64, g: f64, b: f64) {
+        let c = |v: f64| v.clamp(0.0, 1.0);
+        self.content
+            .extend_from_slice(format!("{} {} {} rg\n", c(r), c(g), c(b)).as_bytes());
+    }
+
     /// Appends raw content-stream operators.
     ///
     /// An escape hatch for callers that know the operator set; nothing checks
@@ -51,6 +98,43 @@ impl PageBuilder {
         self.content.extend_from_slice(operators);
         self.content.push(b'\n');
     }
+}
+
+/// Reads a JPEG's dimensions and component count from its frame header.
+fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
+    if data.get(..2) != Some(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut at = 2usize;
+    while at + 3 < data.len() {
+        if data.get(at) != Some(&0xFF) {
+            at += 1;
+            continue;
+        }
+        let marker = *data.get(at + 1)?;
+        at += 2;
+        // Standalone markers carry no length.
+        if matches!(marker, 0x01 | 0xD0..=0xD9 | 0xFF) {
+            continue;
+        }
+        let length = data
+            .get(at..at + 2)
+            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))?;
+
+        // Any SOF marker; 0xC4, 0xC8 and 0xCC are tables, not frames.
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let h = data.get(at + 3..at + 5)?;
+            let w = data.get(at + 5..at + 7)?;
+            let components = *data.get(at + 7)?;
+            return Some((
+                u32::from(u16::from_be_bytes([w[0], w[1]])),
+                u32::from(u16::from_be_bytes([h[0], h[1]])),
+                components,
+            ));
+        }
+        at += length.max(2);
+    }
+    None
 }
 
 /// One outline entry to write.
@@ -70,6 +154,7 @@ pub struct DocumentBuilder {
     next: u32,
     pages: Vec<PageBuilder>,
     fonts: Vec<(Vec<u8>, ObjRef)>,
+    images: Vec<(Vec<u8>, ObjRef)>,
     info: Dict,
     outline: Vec<OutlineEntry>,
 }
@@ -91,6 +176,7 @@ impl DocumentBuilder {
             next: 3,
             pages: Vec::new(),
             fonts: Vec::new(),
+            images: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
         }
@@ -127,6 +213,82 @@ impl DocumentBuilder {
         self.fonts.push((resource.to_vec(), r));
     }
 
+    /// Registers an image under a resource name.
+    ///
+    /// Returns false when the data does not describe an image of the size it
+    /// claims, rather than writing a stream a reader would choke on.
+    pub fn add_image(&mut self, resource: &[u8], image: &ImageData<'_>) -> bool {
+        let r = self.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"Image")),
+        );
+
+        let data = match image {
+            ImageData::Jpeg(bytes) => {
+                // The dimensions live in the JPEG's own SOF marker and must
+                // agree with /Width and /Height, so they are read out of it
+                // rather than taken on trust.
+                let Some((width, height, components)) = jpeg_shape(bytes) else {
+                    return false;
+                };
+                dict.insert(self.names.intern(b"Width"), Object::Int(i64::from(width)));
+                dict.insert(self.names.intern(b"Height"), Object::Int(i64::from(height)));
+                dict.insert(self.names.intern(b"BitsPerComponent"), Object::Int(8));
+                dict.insert(
+                    self.names.intern(b"ColorSpace"),
+                    Object::Name(self.names.intern(match components {
+                        1 => b"DeviceGray".as_slice(),
+                        4 => b"DeviceCMYK",
+                        _ => b"DeviceRGB",
+                    })),
+                );
+                dict.insert(Name::FILTER, Object::Name(self.names.intern(b"DCTDecode")));
+                bytes.to_vec()
+            }
+            ImageData::Rgb8 {
+                width,
+                height,
+                data,
+            }
+            | ImageData::Gray8 {
+                width,
+                height,
+                data,
+            } => {
+                let gray = matches!(image, ImageData::Gray8 { .. });
+                let n = if gray { 1 } else { 3 };
+                let expected = (*width as usize)
+                    .saturating_mul(*height as usize)
+                    .saturating_mul(n);
+                if *width == 0 || *height == 0 || data.len() < expected {
+                    return false;
+                }
+                dict.insert(self.names.intern(b"Width"), Object::Int(i64::from(*width)));
+                dict.insert(
+                    self.names.intern(b"Height"),
+                    Object::Int(i64::from(*height)),
+                );
+                dict.insert(self.names.intern(b"BitsPerComponent"), Object::Int(8));
+                dict.insert(
+                    self.names.intern(b"ColorSpace"),
+                    Object::Name(self.names.intern(if gray {
+                        b"DeviceGray".as_slice()
+                    } else {
+                        b"DeviceRGB"
+                    })),
+                );
+                data.get(..expected).unwrap_or(data).to_vec()
+            }
+        };
+
+        self.objects.insert_stream(r.num, StreamData { dict, data });
+        self.images.push((resource.to_vec(), r));
+        true
+    }
+
     /// Adds a page, drawing it with the given closure.
     ///
     /// A closure rather than a returned reference so the API stays infallible:
@@ -138,6 +300,7 @@ impl DocumentBuilder {
             height,
             content: Vec::new(),
             fonts: self.fonts.clone(),
+            images: self.images.clone(),
         };
         draw(&mut page);
         self.pages.push(page);
@@ -179,9 +342,18 @@ impl DocumentBuilder {
                 let name = self.names.intern(resource);
                 font_dict.insert(name, Object::Ref(*font_ref));
             }
+            let mut xobjects = Dict::new();
+            for (resource, image_ref) in &page.images {
+                let name = self.names.intern(resource);
+                xobjects.insert(name, Object::Ref(*image_ref));
+            }
+
             let mut resources = Dict::new();
             if !font_dict.is_empty() {
                 resources.insert(self.names.intern(b"Font"), Object::Dict(font_dict));
+            }
+            if !xobjects.is_empty() {
+                resources.insert(self.names.intern(b"XObject"), Object::Dict(xobjects));
             }
 
             let mut dict = Dict::new();
@@ -463,5 +635,126 @@ mod tests {
         let doc = CosDocument::open(bytes).expect("even an empty one opens");
         assert_eq!(crate::pages::count(&doc), 0);
         assert!(doc.catalog().is_some());
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::CosDocument;
+
+    #[test]
+    fn a_raw_image_round_trips_through_the_reader() {
+        let mut builder = DocumentBuilder::new();
+        // Two by two: red, green, blue, white.
+        let pixels = [255u8, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        assert!(builder.add_image(
+            b"Im0",
+            &ImageData::Rgb8 {
+                width: 2,
+                height: 2,
+                data: &pixels,
+            }
+        ));
+        builder.add_page(100.0, 100.0, |page| {
+            page.image(b"Im0", 10.0, 10.0, 50.0, 50.0);
+        });
+
+        let doc = CosDocument::open(builder.finish()).expect("it opens");
+        let pages = crate::pages::collect(&doc);
+        let content = crate::pages::content_bytes(&doc, pages.first().expect("a page"));
+        let text = String::from_utf8_lossy(&content);
+
+        assert!(text.contains("/Im0 Do"), "the image is drawn: {text}");
+        assert!(text.contains("50 0 0 50 10 10 cm"), "and placed: {text}");
+    }
+
+    #[test]
+    fn an_images_samples_survive_the_round_trip() {
+        let mut builder = DocumentBuilder::new();
+        let pixels = [1u8, 2, 3, 4, 5, 6];
+        assert!(builder.add_image(
+            b"Im0",
+            &ImageData::Rgb8 {
+                width: 2,
+                height: 1,
+                data: &pixels,
+            }
+        ));
+        builder.add_page(10.0, 10.0, |_| {});
+
+        let doc = CosDocument::open(builder.finish()).expect("it opens");
+        // The image is the only stream with /Subtype /Image.
+        let subtype = doc.intern(b"Subtype");
+        let found = (1..20u32).find_map(|num| {
+            let r = ObjRef::new(num, 0);
+            let object = doc.get(r).ok()?;
+            let dict = object.as_dict()?;
+            let is_image = dict
+                .get(subtype)
+                .and_then(Object::as_name)
+                .and_then(|n| doc.name_bytes(n))
+                .is_some_and(|b| b.as_ref() == b"Image");
+            is_image.then_some(r)
+        });
+
+        let reference = found.expect("an image object");
+        assert_eq!(
+            doc.stream_decoded(reference).ok(),
+            Some(pixels.to_vec()),
+            "the samples come back unchanged"
+        );
+    }
+
+    #[test]
+    fn a_jpeg_is_embedded_without_being_re_encoded() {
+        // A minimal JPEG header declaring 4x3, three components.
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        jpeg.extend_from_slice(&3u16.to_be_bytes()); // height
+        jpeg.extend_from_slice(&4u16.to_be_bytes()); // width
+        jpeg.push(3); // components
+        jpeg.extend_from_slice(&[1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_image(b"Im0", &ImageData::Jpeg(&jpeg)));
+        builder.add_page(10.0, 10.0, |_| {});
+
+        let bytes = builder.finish();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/DCTDecode"), "kept as JPEG");
+        assert!(
+            text.contains("/Width 4") && text.contains("/Height 3"),
+            "dimensions read from the frame header, not guessed"
+        );
+
+        // And the exact bytes are still in the file.
+        assert!(
+            bytes.windows(jpeg.len()).any(|w| w == jpeg),
+            "the JPEG data is embedded byte for byte"
+        );
+    }
+
+    #[test]
+    fn an_image_that_does_not_match_its_size_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        // Three bytes cannot be a 2x2 RGB image.
+        assert!(!builder.add_image(
+            b"Im0",
+            &ImageData::Rgb8 {
+                width: 2,
+                height: 2,
+                data: &[1, 2, 3],
+            }
+        ));
+        assert!(!builder.add_image(b"Im1", &ImageData::Jpeg(b"not a jpeg")));
+        assert!(!builder.add_image(
+            b"Im2",
+            &ImageData::Gray8 {
+                width: 0,
+                height: 5,
+                data: &[],
+            }
+        ));
     }
 }
