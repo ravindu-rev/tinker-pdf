@@ -23,7 +23,7 @@ use crate::{fill, form};
 ///
 /// Removing an entry is rare enough that [`Dict`] has no method for it, and
 /// rare enough that rebuilding is cheaper than carrying one.
-fn without(dict: &Dict, key: Name) -> Dict {
+pub(crate) fn without(dict: &Dict, key: Name) -> Dict {
     let mut out = Dict::with_capacity(dict.len());
     for (name, value) in dict.iter() {
         if *name != key {
@@ -631,6 +631,7 @@ impl DocumentEditor {
                 &trailer,
                 self.doc.last_startxref(),
                 self.doc.names_table(),
+                options.compress,
             ),
             WriteMode::Rewrite => {
                 // A rewrite must carry everything, not only the changes.

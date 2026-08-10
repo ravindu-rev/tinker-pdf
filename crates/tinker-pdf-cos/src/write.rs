@@ -254,8 +254,31 @@ impl ObjectSet {
     }
 }
 
+/// Compresses a stream's data and records the filter, when asked and when it
+/// helps.
+///
+/// A stream that already declares a `/Filter` is left alone: its bytes are
+/// already encoded, and wrapping them again would need the filter array
+/// rewritten and would usually make them larger. A result no smaller than the
+/// input is discarded for the same reason — an already-compressed image does
+/// not compress twice.
+fn maybe_compress(data: &[u8], dict: &mut Dict, names: &NameTable, compress: bool) -> Vec<u8> {
+    if !compress || data.is_empty() || dict.contains_key(Name::FILTER) {
+        return data.to_vec();
+    }
+
+    let packed = tinker_pdf_filters::zlib_compress(data);
+    if packed.len() >= data.len() {
+        return data.to_vec();
+    }
+
+    let flate = names.intern(b"FlateDecode");
+    dict.insert(Name::FILTER, Object::Name(flate));
+    packed
+}
+
 /// Writes one numbered object, whichever kind it is.
-fn write_entry(out: &mut Vec<u8>, num: u32, entry: &Written, names: &NameTable) {
+fn write_entry(out: &mut Vec<u8>, num: u32, entry: &Written, names: &NameTable, compress: bool) {
     out.extend_from_slice(
         format!(
             "{num} 0 obj
@@ -269,14 +292,15 @@ fn write_entry(out: &mut Vec<u8>, num: u32, entry: &Written, names: &NameTable) 
             // 7.3.8.2: /Length must agree with the bytes that follow, so the
             // writer computes it rather than trusting whatever was there.
             let mut dict = stream.dict.clone();
-            dict.insert(Name::LENGTH, Object::Int(stream.data.len() as i64));
+            let data = maybe_compress(&stream.data, &mut dict, names, compress);
+            dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
             write_dict(out, &dict, names, 0);
             out.extend_from_slice(
                 b"
 stream
 ",
             );
-            out.extend_from_slice(&stream.data);
+            out.extend_from_slice(&data);
             out.extend_from_slice(
                 b"
 endstream",
@@ -305,6 +329,7 @@ pub fn incremental_update(
     trailer: &Dict,
     previous_startxref: u64,
     names: &NameTable,
+    compress: bool,
 ) -> Vec<u8> {
     let mut out = original.to_vec();
 
@@ -317,7 +342,7 @@ pub fn incremental_update(
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(changed.entries.len());
     for (num, object) in &changed.entries {
         offsets.push((*num, out.len() as u64));
-        write_entry(&mut out, *num, object, names);
+        write_entry(&mut out, *num, object, names, compress);
     }
 
     let xref_at = out.len() as u64;
@@ -373,7 +398,7 @@ pub fn rewrite(
             continue;
         }
         offsets.push((*num, out.len() as u64));
-        write_entry(&mut out, *num, object, names);
+        write_entry(&mut out, *num, object, names, options.compress);
     }
 
     let container = objects.max_number().saturating_add(1);
@@ -405,6 +430,11 @@ pub fn rewrite(
             container,
             &Written::Stream(StreamData { dict, data }),
             names,
+            // The container is compressed whenever compression is on at all:
+            // packing many small objects together and then leaving the result
+            // uncompressed makes the file *larger* than not packing it, which
+            // is the opposite of the reason object streams exist.
+            options.compress,
         );
     }
 
@@ -495,14 +525,17 @@ fn write_xref_stream(
     }
 
     let mut dict = Dict::new();
-    dict.insert(Name::TYPE, Object::Name(names.intern(b"XRef")));
-    dict.insert(Name::SIZE, Object::Int(i64::from(size)));
-    dict.insert(
-        Name::W,
-        Object::Array(vec![Object::Int(1), Object::Int(4), Object::Int(2)]),
-    );
+
     // 7.5.8.2: a file with a cross-reference stream has no `trailer` keyword,
     // so /Root and the rest live in the stream's own dictionary.
+    //
+    // The caller's trailer goes in *first*. It is the trailer of the document
+    // this one was built from, and it carries that document's /Size — which
+    // is smaller than this one's, because the container and this stream are
+    // both new objects. Merging it afterwards silently overwrote the correct
+    // /Size with the stale one, and a reader that trusts /Size then drops
+    // every entry past it: the container became unreachable, every packed
+    // object read as null, and the file opened with no pages at all.
     for (key, value) in trailer.iter() {
         dict.insert(*key, value.clone());
     }
@@ -510,11 +543,25 @@ fn write_xref_stream(
         dict.insert(*key, value.clone());
     }
 
+    // The three the writer owns, and which no inherited value may override.
+    dict.insert(Name::TYPE, Object::Name(names.intern(b"XRef")));
+    dict.insert(Name::SIZE, Object::Int(i64::from(size)));
+    dict.insert(
+        Name::W,
+        Object::Array(vec![Object::Int(1), Object::Int(4), Object::Int(2)]),
+    );
+    // A stale /Prev would point at a revision this file does not contain.
+    let dict = crate::edit::without(&dict, Name::PREV);
+
+    // Not compressed: a cross-reference stream is what a reader finds *first*,
+    // by offset, before it knows anything about filters, and its entries are
+    // already packed into fixed-width fields.
     write_entry(
         out,
         stream_number,
         &Written::Stream(StreamData { dict, data }),
         names,
+        false,
     );
 }
 
@@ -660,6 +707,7 @@ mod tests {
                 data: b"hello".to_vec(),
             }),
             &table,
+            false,
         );
         let text = String::from_utf8_lossy(&out);
 
@@ -708,7 +756,7 @@ mod tests {
 
         let mut changed = ObjectSet::new();
         changed.insert(2, Object::Int(42));
-        let updated = incremental_update(&original, &changed, &trailer, 0, &table);
+        let updated = incremental_update(&original, &changed, &trailer, 0, &table, false);
 
         assert!(
             updated.starts_with(&original),

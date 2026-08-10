@@ -210,3 +210,101 @@ fn every_fixture_opens_without_warnings() {
         assert_eq!(doc.ladder_level(), LadderLevel::Trust, "{name}");
     }
 }
+
+/// `WriteOptions::compress` had no reader at all: the flag existed, was
+/// documented, defaulted to false, and nothing anywhere consulted it. Every
+/// byte the engine wrote was uncompressed, and object streams — whose whole
+/// purpose is to compress many small objects together — made files larger
+/// than not using them.
+#[test]
+fn compression_shrinks_a_written_file_and_it_still_opens() {
+    use std::sync::Arc;
+    use tinker_pdf_cos::{DocumentBuilder, DocumentEditor, WriteMode, WriteOptions};
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Helvetica");
+    for page in 0..12 {
+        builder.add_page(400.0, 400.0, |p| {
+            // Repetitive content, which is what a real page is.
+            for line in 0..30 {
+                p.text(
+                    b"F0",
+                    11.0,
+                    20.0,
+                    380.0 - f64::from(line) * 12.0,
+                    &format!("page {page} line {line}: the quick brown fox"),
+                );
+            }
+        });
+    }
+    let plain = builder.finish();
+
+    let doc = Arc::new(CosDocument::open(plain.clone()).expect("it opens"));
+    let editor = DocumentEditor::new(doc);
+    let packed = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        compress: true,
+        object_streams: true,
+        ..WriteOptions::default()
+    });
+
+    // Object streams alone make a file *larger* — packing many objects into
+    // one container only pays once the container is compressed, which is
+    // exactly why the two options belong together.
+    assert!(
+        packed.len() < plain.len() * 2 / 3,
+        "compression saved nothing: {} against {}",
+        packed.len(),
+        plain.len()
+    );
+
+    // And the result is still a document, not merely smaller.
+    let reopened = CosDocument::open(packed).expect("the compressed file opens");
+    assert_eq!(tinker_pdf_cos::pages::count(&reopened), 12);
+    let pages = tinker_pdf_cos::pages::collect(&reopened);
+    let content = tinker_pdf_cos::pages::content_bytes(&reopened, &pages[3]);
+    assert!(
+        String::from_utf8_lossy(&content).contains("page 3 line 0"),
+        "and its content survived the round trip"
+    );
+}
+
+/// A stream that already declares a filter is left alone: its bytes are
+/// encoded already, and wrapping them again would need the filter array
+/// rewritten and would usually make them bigger.
+#[test]
+fn an_already_filtered_stream_is_not_compressed_twice() {
+    use std::sync::Arc;
+    use tinker_pdf_cos::{DocumentEditor, Name, Object, StreamData, WriteMode, WriteOptions};
+
+    let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
+    let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let r = editor.allocate();
+    let mut dict = tinker_pdf_cos::Dict::new();
+    dict.insert(Name::FILTER, Object::Name(editor.intern(b"ASCIIHexDecode")));
+    editor.put_stream(
+        r,
+        StreamData {
+            dict,
+            data: b"48656C6C6F>".repeat(60),
+        },
+    );
+
+    let saved = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        compress: true,
+        ..WriteOptions::default()
+    });
+
+    let text = String::from_utf8_lossy(&saved);
+    assert!(
+        !text.contains("/FlateDecode"),
+        "a filtered stream was wrapped again"
+    );
+    assert!(text.contains("/ASCIIHexDecode"), "and kept its own filter");
+}

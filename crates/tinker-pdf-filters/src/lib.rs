@@ -19,6 +19,7 @@
 
 mod ascii;
 mod ccitt;
+pub mod deflate;
 mod inflate;
 mod jpeg;
 mod lzw;
@@ -28,6 +29,7 @@ mod runlength;
 use core::fmt;
 
 pub use ccitt::{decode as ccitt_decode, CcittParams};
+pub use deflate::{deflate, zlib_compress};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use predictors::PredictorParams;
 
