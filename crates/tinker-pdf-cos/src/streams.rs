@@ -295,7 +295,7 @@ impl CosDocument {
         if !self.encrypted() || stream.dict.get_name(Name::TYPE) == Some(self.names.xref) {
             return raw.to_vec();
         }
-        self.decryptor.decrypt_stream(r, raw)
+        self.decryptor().decrypt_stream(r, raw)
     }
 
     /// The stream's data extent, computed once per object and remembered.

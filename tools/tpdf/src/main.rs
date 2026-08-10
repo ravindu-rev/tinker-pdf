@@ -152,7 +152,7 @@ impl Options {
 
 fn open(path: &str, password: Option<&str>) -> Result<Document, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let mut doc = Document::open(bytes).map_err(|e| format!("{path}: {e:?}"))?;
+    let doc = Document::open(bytes).map_err(|e| format!("{path}: {e:?}"))?;
 
     if doc.is_encrypted() {
         // An empty password is the usual case for a file encrypted only to

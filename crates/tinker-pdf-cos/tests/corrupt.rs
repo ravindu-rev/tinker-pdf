@@ -915,7 +915,7 @@ fn a_decryptor_reaches_strings_and_streams_but_not_the_exemptions() {
         .stream(3, "", b"plain");
     let bytes = b.finish("/Root 1 0 R /Encrypt 7 0 R");
 
-    let mut doc = CosDocument::open(bytes).expect("opens");
+    let doc = CosDocument::open(bytes).expect("opens");
     let params = doc
         .encrypt_params()
         .expect("an /Encrypt dictionary")
@@ -976,7 +976,7 @@ fn strings_inside_an_object_stream_are_not_decrypted_again() {
     b.obj(8, b"<< /Note (abc) >>");
     let bytes = b.finish_xref_stream(5, &[(1, 4, 0), (2, 4, 1)], "/Root 1 0 R /Encrypt 7 0 R");
 
-    let mut doc = CosDocument::open(bytes).expect("opens");
+    let doc = CosDocument::open(bytes).expect("opens");
     doc.set_decryptor(Arc::new(ReverseStringsOnly));
     let note = doc_name(&doc, "Note");
 

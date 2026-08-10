@@ -21,7 +21,7 @@ fn open(name: &str) -> CosDocument {
 
 #[test]
 fn the_user_password_authenticates_as_the_user() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert!(doc.is_encrypted());
     assert_eq!(doc.auth_level(), AuthLevel::None, "before any password");
 
@@ -34,7 +34,7 @@ fn the_user_password_authenticates_as_the_user() {
 /// used collapsed it to a bool.
 #[test]
 fn the_owner_password_authenticates_as_the_owner() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert_eq!(doc.authenticate("owner-secret"), Ok(AuthLevel::Owner));
     assert_eq!(doc.auth_level(), AuthLevel::Owner);
     assert!(
@@ -45,7 +45,7 @@ fn the_owner_password_authenticates_as_the_owner() {
 
 #[test]
 fn a_wrong_password_is_refused() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert_eq!(
         doc.authenticate("not-the-password"),
         Err(AuthError::WrongPassword)
@@ -57,7 +57,7 @@ fn a_wrong_password_is_refused() {
 
 #[test]
 fn an_unencrypted_document_has_nothing_to_authenticate() {
-    let mut doc = open("simple-text.pdf");
+    let doc = open("simple-text.pdf");
     assert!(!doc.is_encrypted());
     assert_eq!(doc.authenticate("anything"), Err(AuthError::NotEncrypted));
     assert!(
@@ -71,7 +71,7 @@ fn an_unencrypted_document_has_nothing_to_authenticate() {
 /// everything — including for this file, which forbids printing.
 #[test]
 fn permissions_survive_their_reserved_bits() {
-    let mut doc = open("permissions-noprint.pdf");
+    let doc = open("permissions-noprint.pdf");
     assert_eq!(doc.authenticate("user"), Ok(AuthLevel::User));
 
     let p = doc.permissions();
@@ -85,7 +85,7 @@ fn permissions_survive_their_reserved_bits() {
 /// restrict, which is the policy Tinker's security plan settled on.
 #[test]
 fn the_owner_password_lifts_restrictions() {
-    let mut doc = open("permissions-noprint.pdf");
+    let doc = open("permissions-noprint.pdf");
     assert_eq!(doc.authenticate("owner"), Ok(AuthLevel::Owner));
     assert!(doc.permissions().print(), "restrictions no longer apply");
 }
@@ -93,7 +93,7 @@ fn the_owner_password_lifts_restrictions() {
 /// Authentication is worth nothing if the content stays ciphertext.
 #[test]
 fn content_decrypts_and_decodes_after_authentication() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
 
     let contents = first_page_contents(&doc).expect("a first page with contents");
@@ -136,7 +136,7 @@ fn first_page_contents(doc: &CosDocument) -> Option<tinker_pdf_cos::ObjRef> {
 /// before authentication must not keep serving ciphertext afterwards.
 #[test]
 fn strings_decrypt_after_the_store_is_cleared() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
 
     let producer = doc.intern(b"Producer");
     let info_ref = doc.trailer().get_ref(Name::INFO);

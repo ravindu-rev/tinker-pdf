@@ -156,6 +156,17 @@ impl ObjStmCache {
         self.streams.read_lock().get(&num).cloned()
     }
 
+    /// Forgets every decoded container.
+    ///
+    /// Needed when a decryptor is installed after the fact: anything already
+    /// decoded came out of ciphertext read as plaintext, and keeping it would
+    /// serve that garbage forever. Outstanding `Arc`s keep their values. The
+    /// decode counter is deliberately left alone — it counts work done, not
+    /// results held.
+    pub(crate) fn clear(&self) {
+        self.streams.write_lock().clear();
+    }
+
     /// Publishes a decoded stream, first writer winning as everywhere else.
     pub(crate) fn publish(&self, num: u32, stream: Arc<ObjStm>) -> Arc<ObjStm> {
         let mut streams = self.streams.write_lock();

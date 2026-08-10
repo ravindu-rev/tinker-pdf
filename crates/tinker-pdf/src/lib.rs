@@ -240,9 +240,14 @@ impl Document {
     /// Reports **which** password matched, which the engine this replaces
     /// could not: its binding collapsed the C API's bitmask to a boolean, so
     /// "the owner password lifts every restriction" was unimplementable.
-    pub fn authenticate(&mut self, password: &str) -> Result<AuthLevel, AuthError> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or(AuthError::NotEncrypted)?;
-        inner.authenticate(password)
+    ///
+    /// Takes `&self`, so it works on a document that has already been shared —
+    /// cloned, or had a page taken from it, which every caller does. Requiring
+    /// unique ownership made the most ordinary sequence in the API
+    /// (look at a page, then supply the password) report an encrypted document
+    /// as unencrypted.
+    pub fn authenticate(&self, password: &str) -> Result<AuthLevel, AuthError> {
+        self.inner.authenticate(password)
     }
 
     /// The number of pages.

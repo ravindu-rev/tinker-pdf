@@ -56,7 +56,7 @@ fn page_geometry_covers_every_page() {
 /// Tinker: `encrypted_documents_ask_for_a_password_before_anything_else`.
 #[test]
 fn encrypted_documents_need_their_password() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert!(doc.is_encrypted());
 
     assert_eq!(
@@ -73,7 +73,7 @@ fn encrypted_documents_need_their_password() {
 /// bits made its bitflags parse fail, and the fallback granted everything.
 #[test]
 fn permission_flags_are_reported_under_user_authentication() {
-    let mut doc = open("permissions-noprint.pdf");
+    let doc = open("permissions-noprint.pdf");
     assert_eq!(doc.authenticate("user"), Ok(AuthLevel::User));
 
     let p = doc.permissions();
@@ -85,7 +85,7 @@ fn permission_flags_are_reported_under_user_authentication() {
 /// engine could not manage.
 #[test]
 fn owner_authentication_is_distinguishable() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert_eq!(doc.authenticate("owner-secret"), Ok(AuthLevel::Owner));
     assert!(doc.auth_level() > AuthLevel::User);
     assert!(doc.permissions().print(), "the owner password lifts limits");
@@ -291,7 +291,7 @@ fn a_clean_file_opens_without_leniency() {
 
 #[test]
 fn an_encrypted_documents_text_is_readable_once_unlocked() {
-    let mut doc = open("encrypted-aes256.pdf");
+    let doc = open("encrypted-aes256.pdf");
     assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
 
     let plain = doc.page(0).expect("a page").text().plain_text();
@@ -350,4 +350,17 @@ fn a_rendered_page_actually_has_marks_on_it() {
         dark > 1000,
         "a 50x30 filled rectangle should darken thousands of subpixels, got {dark}"
     );
+}
+
+/// Regression: taking a page must not break authentication.
+///
+/// `Document` is `Clone` and every `Page` holds a clone of the same `Arc`, so
+/// an `Arc::get_mut` inside `authenticate` fails the moment a caller has done
+/// the most ordinary thing in the API — looked at a page — and reports
+/// `NotEncrypted` for a document that is plainly encrypted.
+#[test]
+fn authenticating_still_works_after_taking_a_page() {
+    let doc = open("encrypted-aes256.pdf");
+    let _page = doc.page(0);
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
 }

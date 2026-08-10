@@ -39,7 +39,7 @@ use crate::objstm::{self, ObjStm, ObjStmCache};
 use crate::parse::{parse_indirect_at, parse_object_at};
 use crate::repair::ScanIndex;
 use crate::security::{AuthError, AuthLevel};
-use crate::store::{MutexExt, ResolveCtx, SlotStore};
+use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
 use crate::warn::{Warning, WarningKind, WarningSink};
 use crate::xref::{self, Revision, XrefBuild, XrefEntry, XrefTable};
 use crate::Dict;
@@ -262,11 +262,23 @@ pub struct CosDocument {
     scan: Option<Arc<ScanIndex>>,
     warnings: Mutex<WarningSink>,
     pub(crate) stream_ranges: RwLock<HashMap<u32, Range<u64>>>,
-    pub(crate) decryptor: Arc<dyn Decryptor>,
-    has_decryptor: bool,
+    /// Everything authentication installs, behind a lock.
+    ///
+    /// Interior mutability rather than `&mut self` because a document is
+    /// shared the moment a caller takes a page — every `Page` holds a clone of
+    /// the same `Arc` — and an `Arc::get_mut` at that point fails. Requiring
+    /// unique ownership to authenticate meant "look at a page, then supply the
+    /// password" reported the document as unencrypted.
+    security: RwLock<Security>,
     encrypt: Option<EncryptParams>,
-    auth_level: AuthLevel,
     ladder: LadderLevel,
+}
+
+/// The state a successful authentication installs.
+struct Security {
+    decryptor: Arc<dyn Decryptor>,
+    has_decryptor: bool,
+    auth_level: AuthLevel,
 }
 
 impl fmt::Debug for CosDocument {
@@ -392,10 +404,12 @@ impl CosDocument {
             scan,
             warnings: Mutex::new(WarningSink::new()),
             stream_ranges: RwLock::new(HashMap::new()),
-            decryptor: Arc::new(IdentityDecryptor),
-            has_decryptor: false,
+            security: RwLock::new(Security {
+                decryptor: Arc::new(IdentityDecryptor),
+                has_decryptor: false,
+                auth_level: AuthLevel::None,
+            }),
             encrypt: None,
-            auth_level: AuthLevel::None,
             ladder,
         };
         doc.absorb(sink);
@@ -464,11 +478,17 @@ impl CosDocument {
     /// Every object loaded so far is forgotten, because strings decrypt when
     /// their containing object loads. `Arc`s already handed out keep the
     /// values they were given.
-    pub fn set_decryptor(&mut self, decryptor: Arc<dyn Decryptor>) {
-        self.decryptor = decryptor;
-        self.has_decryptor = true;
+    pub fn set_decryptor(&self, decryptor: Arc<dyn Decryptor>) {
+        {
+            let mut security = self.security.write_lock();
+            security.decryptor = decryptor;
+            security.has_decryptor = true;
+        }
+        // Everything already loaded was read as plaintext out of ciphertext.
+        // Both caches are dropped so the next read goes back to the buffer;
+        // outstanding `Arc`s keep the values they were given.
         self.store.clear();
-        self.objstm = ObjStmCache::new();
+        self.objstm.clear();
     }
 
     /// The document catalog (7.7.2), resolved from the trailer's `/Root`.
@@ -559,14 +579,14 @@ impl CosDocument {
 
     /// How far the accepted password got. [`AuthLevel::None`] until one is.
     pub fn auth_level(&self) -> AuthLevel {
-        self.auth_level
+        self.security.read_lock().auth_level
     }
 
     /// The permission flags, respecting the authentication level: an
     /// unencrypted document and one opened with the owner password both
     /// permit everything.
     pub fn permissions(&self) -> Permissions {
-        crate::security::permissions(self.encrypt.as_ref(), self.auth_level)
+        crate::security::permissions(self.encrypt.as_ref(), self.auth_level())
     }
 
     /// Tries `password` and, if it matches, installs the decryptor.
@@ -574,7 +594,7 @@ impl CosDocument {
     /// The owner password is tried first, so a document whose two passwords
     /// are equal authenticates as the owner. Whatever the handler had to
     /// tolerate reaching that answer becomes document warnings.
-    pub fn authenticate(&mut self, password: &str) -> Result<AuthLevel, AuthError> {
+    pub fn authenticate(&self, password: &str) -> Result<AuthLevel, AuthError> {
         let params = self.encrypt.clone().ok_or(AuthError::NotEncrypted)?;
         let auth = crate::security::authenticate(&params, password)?;
 
@@ -586,7 +606,7 @@ impl CosDocument {
         }
 
         self.set_decryptor(auth.decryptor);
-        self.auth_level = auth.level;
+        self.security.write_lock().auth_level = auth.level;
         Ok(auth.level)
     }
 
@@ -654,7 +674,12 @@ impl CosDocument {
     }
 
     pub(crate) fn encrypted(&self) -> bool {
-        self.has_decryptor
+        self.security.read_lock().has_decryptor
+    }
+
+    /// The installed decryptor, cloned so no lock is held while it runs.
+    pub(crate) fn decryptor(&self) -> Arc<dyn Decryptor> {
+        Arc::clone(&self.security.read_lock().decryptor)
     }
 
     /// The reference for an object number, taking the generation from the
@@ -809,11 +834,11 @@ impl CosDocument {
 
         // 7.6.2: strings decrypt with the containing object's reference. The
         // /Encrypt dictionary is the one object exempt from it.
-        if self.has_decryptor && self.encrypt_num() != Some(num) {
+        if self.encrypted() && self.encrypt_num() != Some(num) {
             decrypt::decrypt_strings(
                 &mut object,
                 ObjRef::new(num, parsed.reference.gen),
-                self.decryptor.as_ref(),
+                self.decryptor().as_ref(),
             );
         }
         Some(object)

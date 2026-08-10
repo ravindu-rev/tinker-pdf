@@ -160,7 +160,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// panics on open, so this exercises the whole surface rather than stopping
 /// at `open`.
 fn exercise(bytes: Vec<u8>) {
-    let Ok(mut doc) = Document::open(bytes) else {
+    let Ok(doc) = Document::open(bytes) else {
         return;
     };
 
