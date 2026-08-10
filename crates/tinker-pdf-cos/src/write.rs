@@ -53,6 +53,15 @@ pub struct WriteOptions {
     pub compress: bool,
     /// Encrypt on save. Requires an entropy source at the call site.
     pub encryption: Option<Encryption>,
+    /// Drop objects nothing reaches from the trailer, on a rewrite.
+    ///
+    /// Off by default, because "rewrite" has meant "serialize everything"
+    /// since the writer was written and some callers rely on it — redaction
+    /// overwrites a content stream in place precisely *because* an
+    /// unreferenced object would otherwise survive with the original text in
+    /// it, and that is a guarantee it should keep making for itself rather
+    /// than inheriting from a flag.
+    pub garbage_collect: bool,
 }
 
 impl Default for WriteOptions {
@@ -63,6 +72,7 @@ impl Default for WriteOptions {
             object_streams: false,
             compress: false,
             encryption: None,
+            garbage_collect: false,
         }
     }
 }
@@ -247,7 +257,18 @@ impl ObjectSet {
         self.entries.is_empty()
     }
 
-    /// The highest object number, or zero.
+    /// One object, by number.
+    #[must_use]
+    pub fn get(&self, num: u32) -> Option<&Written> {
+        self.entries.get(&num)
+    }
+
+    /// Every object, in ascending number order.
+    pub fn iter(&self) -> impl Iterator<Item = (&u32, &Written)> {
+        self.entries.iter()
+    }
+
+    /// The highest object number in the set, or zero when it is empty.
     #[must_use]
     pub fn max_number(&self) -> u32 {
         self.entries.keys().next_back().copied().unwrap_or(0)

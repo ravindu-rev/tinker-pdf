@@ -19,6 +19,29 @@ use crate::pages::{self, Rect};
 use crate::write::{self, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 use crate::{fill, form};
 
+/// Every indirect reference inside an object, pushed onto `queue`.
+fn references_of(object: &Object, queue: &mut Vec<ObjRef>) {
+    match object {
+        Object::Ref(r) => queue.push(*r),
+        Object::Array(items) => {
+            for item in items {
+                references_of(item, queue);
+            }
+        }
+        Object::Dict(dict) => {
+            for (_, value) in dict.iter() {
+                references_of(value, queue);
+            }
+        }
+        Object::Stream(stream) => {
+            for (_, value) in stream.dict.iter() {
+                references_of(value, queue);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A copy of `dict` with one key gone.
 ///
 /// Removing an entry is rare enough that [`Dict`] has no method for it, and
@@ -588,6 +611,53 @@ impl DocumentEditor {
         self.put(form_ref, Object::Dict(cleaned));
     }
 
+    /// Keeps only the objects something reaches from the trailer.
+    ///
+    /// A mark from the trailer's own references, then a sweep. Without it a
+    /// rewrite is a serializer rather than a rewrite: an object detached from
+    /// the page tree is still written, still numbered, and still readable by
+    /// anyone who scans the file rather than following it — which is how
+    /// "deleted" content stays recoverable.
+    fn reachable(&self, all: &ObjectSet, trailer: &Dict) -> ObjectSet {
+        let mut live: HashSet<u32> = HashSet::new();
+        let mut queue: Vec<ObjRef> = Vec::new();
+
+        for (_, value) in trailer.iter() {
+            references_of(value, &mut queue);
+        }
+
+        while let Some(r) = queue.pop() {
+            if !live.insert(r.num) {
+                continue;
+            }
+            let Some(entry) = all.get(r.num) else {
+                continue;
+            };
+            let dict = match entry {
+                Written::Object(object) => {
+                    references_of(object, &mut queue);
+                    continue;
+                }
+                Written::Stream(stream) => &stream.dict,
+            };
+            for (_, value) in dict.iter() {
+                references_of(value, &mut queue);
+            }
+        }
+
+        let mut kept = ObjectSet::new();
+        for (num, entry) in all.iter() {
+            if !live.contains(num) {
+                continue;
+            }
+            match entry {
+                Written::Object(object) => kept.insert(*num, object.clone()),
+                Written::Stream(stream) => kept.insert_stream(*num, stream.clone()),
+            }
+        }
+        kept
+    }
+
     /// Saves the edits.
     ///
     /// An incremental save appends only what changed, leaving the original
@@ -634,11 +704,31 @@ impl DocumentEditor {
                 options.compress,
             ),
             WriteMode::Rewrite => {
+                // 7.6.1: a rewrite decrypts on the way through — `stream_raw`
+                // hands back plaintext once a decryptor is installed, and the
+                // strings were decrypted when they were parsed. So the output
+                // is a plaintext file, and carrying `/Encrypt` forward would
+                // advertise encryption over it: every reader would then try to
+                // decrypt bytes that are already clear and get garbage.
+                //
+                // Encrypt-on-save is a separate, unbuilt feature. Until it
+                // exists, writing a readable file is the honest outcome, and
+                // it is what `WriteOptions::encryption` will replace.
+                let encrypt = self.intern(b"Encrypt");
+                let trailer = without(&trailer, encrypt);
+                let encrypt_num = self.doc.trailer().get_ref(encrypt).map(|r| r.num);
+
                 // A rewrite must carry everything, not only the changes.
                 let mut all = ObjectSet::new();
                 for num in 1..=self.doc.max_object_number() {
                     let r = ObjRef::new(num, 0);
                     if self.deleted.contains(&num) {
+                        continue;
+                    }
+                    // The encryption dictionary itself goes with the entry
+                    // that named it; left behind it is an orphan describing a
+                    // scheme the file no longer uses.
+                    if encrypt_num == Some(num) {
                         continue;
                     }
                     match self.overlay.get(&num) {
@@ -673,6 +763,9 @@ impl DocumentEditor {
                         Written::Object(object) => all.insert(*num, object.clone()),
                         Written::Stream(stream) => all.insert_stream(*num, stream.clone()),
                     }
+                }
+                if options.garbage_collect {
+                    all = self.reachable(&all, &trailer);
                 }
                 write::rewrite(&all, &trailer, options, self.doc.names_table())
             }
@@ -1321,5 +1414,110 @@ trailer
         let saved = reopen(&editor, WriteMode::Incremental);
         assert_eq!(field_named(&saved, "name").value, form::FieldValue::None);
         assert!(!field_named(&saved, "agree").value.is_on());
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+    use crate::build::DocumentBuilder;
+
+    fn document_with_orphan() -> (Arc<CosDocument>, ObjRef) {
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(100.0, 100.0, |page| {
+            page.fill_rect(0.0, 0.0, 10.0, 10.0, 0.0);
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        let orphan = editor.allocate();
+        editor.put_stream(
+            orphan,
+            StreamData {
+                dict: Dict::new(),
+                data: b"THIS-IS-UNREFERENCED".to_vec(),
+            },
+        );
+        let saved = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        (
+            Arc::new(CosDocument::open(saved).expect("it reopens")),
+            orphan,
+        )
+    }
+
+    /// The default is unchanged: a rewrite serializes everything, which is
+    /// what callers that overwrite objects in place depend on.
+    #[test]
+    fn a_rewrite_keeps_orphans_by_default() {
+        let (doc, orphan) = document_with_orphan();
+        let editor = DocumentEditor::new(Arc::clone(&doc));
+        let saved = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        let text = String::from_utf8_lossy(&saved).into_owned();
+        assert!(
+            text.contains("THIS-IS-UNREFERENCED"),
+            "orphan {orphan:?} kept"
+        );
+    }
+
+    /// With collection on, nothing the trailer cannot reach survives. An
+    /// object detached from the page tree is still readable by anyone who
+    /// scans the file rather than following it.
+    #[test]
+    fn collection_drops_what_nothing_references() {
+        let (doc, _) = document_with_orphan();
+        let editor = DocumentEditor::new(Arc::clone(&doc));
+        let saved = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            garbage_collect: true,
+            ..WriteOptions::default()
+        });
+
+        let text = String::from_utf8_lossy(&saved).into_owned();
+        assert!(
+            !text.contains("THIS-IS-UNREFERENCED"),
+            "the orphan survived collection"
+        );
+
+        // And the document is still whole.
+        let reopened = CosDocument::open(saved).expect("it reopens");
+        let pages = pages::collect(&reopened);
+        assert_eq!(pages.len(), 1);
+        assert!(!pages::content_bytes(&reopened, &pages[0]).is_empty());
+    }
+
+    /// Collection must follow references through arrays and nested
+    /// dictionaries, not only through the trailer's direct entries.
+    #[test]
+    fn collection_follows_references_through_nesting() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(100.0, 100.0, |page| {
+            page.text(b"F0", 12.0, 10.0, 50.0, "reachable");
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+
+        let editor = DocumentEditor::new(Arc::clone(&doc));
+        let saved = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            garbage_collect: true,
+            ..WriteOptions::default()
+        });
+
+        let reopened = CosDocument::open(saved).expect("it reopens");
+        let pages = pages::collect(&reopened);
+        assert_eq!(pages.len(), 1, "the page tree survived");
+        // The font is reached only through the page's /Resources /Font.
+        let resources = pages[0].resources.as_ref().expect("resources survived");
+        let fonts = reopened.resolve_key(resources, reopened.intern(b"Font"));
+        assert!(
+            fonts.as_dict().is_some_and(|d| !d.is_empty()),
+            "a font reached through two levels of nesting was collected"
+        );
     }
 }

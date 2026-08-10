@@ -162,3 +162,39 @@ fn strings_decrypt_after_the_store_is_cleared() {
         );
     }
 }
+
+/// Rewriting an authenticated encrypted document produced a corrupt file: the
+/// trailer was copied verbatim, so `/Encrypt` survived, while the streams went
+/// out through `stream_raw` — which is plaintext once a decryptor is
+/// installed. The output advertised encryption over clear bytes, and every
+/// reader that believed it decrypted garbage.
+#[test]
+fn rewriting_a_decrypted_document_does_not_claim_to_be_encrypted() {
+    use std::sync::Arc;
+    use tinker_pdf_cos::{DocumentEditor, WriteMode, WriteOptions};
+
+    let doc = open("encrypted-aes256.pdf");
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+    assert!(doc.is_encrypted(), "the source is encrypted");
+
+    let editor = DocumentEditor::new(Arc::new(doc));
+    let saved = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+
+    let reopened = CosDocument::open(saved).expect("the rewrite opens");
+    assert!(
+        !reopened.is_encrypted(),
+        "the output is plaintext and must not say otherwise"
+    );
+
+    // And it is genuinely readable without a password.
+    let pages = tinker_pdf_cos::pages::collect(&reopened);
+    assert!(!pages.is_empty(), "the page tree survived");
+    let content = tinker_pdf_cos::pages::content_bytes(&reopened, &pages[0]);
+    assert!(
+        !content.is_empty(),
+        "and the content decrypted rather than being copied as ciphertext"
+    );
+}
