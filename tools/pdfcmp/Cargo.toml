@@ -9,3 +9,4 @@ authors.workspace = true
 description = "Perceptual bitmap diff for render comparisons; the canonical visual-test comparator"
 
 [dependencies]
+tinker-pdf = { workspace = true }

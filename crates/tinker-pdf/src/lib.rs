@@ -32,8 +32,8 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages, CosDocument};
 
 pub use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
 pub use tinker_pdf_cos::{
-    AuthError, AuthLevel, DestKind, Destination, LadderLevel, Metadata, OutlineItem, Warning,
-    WarningKind,
+    AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue, LadderLevel,
+    Metadata, OutlineItem, Warning, WarningKind,
 };
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
@@ -268,6 +268,14 @@ impl Document {
     #[must_use]
     pub fn page_labels(&self) -> Vec<String> {
         cos_outline::page_labels(&self.inner, self.page_count())
+    }
+
+    /// The document's interactive form fields (12.7).
+    ///
+    /// Empty when the document has no `/AcroForm`, which is most documents.
+    #[must_use]
+    pub fn form_fields(&self) -> Vec<Field> {
+        tinker_pdf_cos::fields(&self.inner)
     }
 
     /// The underlying object model, for callers that need raw access.

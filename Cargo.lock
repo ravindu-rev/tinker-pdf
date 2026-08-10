@@ -114,6 +114,9 @@ version = "0.0.1"
 [[package]]
 name = "pdfcmp"
 version = "0.0.1"
+dependencies = [
+ "tinker-pdf",
+]
 
 [[package]]
 name = "ppv-lite86"

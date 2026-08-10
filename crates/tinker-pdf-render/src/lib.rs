@@ -614,12 +614,29 @@ pub fn page_transform(page_height: f64, scale: f64) -> Matrix {
     }
 }
 
+/// The largest canvas this will allocate for one page, in pixels.
+///
+/// About 67 million, which is 201 MB at three bytes a pixel — larger than any
+/// legitimate single-page render, and small enough that a hostile file cannot
+/// exhaust memory with it. A caller who genuinely wants more renders in tiles,
+/// which go through the same path with a translated viewport (ruling 7).
+///
+/// The cap exists because the page box is attacker-controlled: `/MediaBox
+/// [0 0 1e9 1e9]` is four tokens, and without a ceiling it asks for an
+/// allocation no machine can serve. A failed allocation **aborts** the process
+/// rather than unwinding, so it cannot be caught and reported afterwards —
+/// which makes this the one place it has to be prevented rather than handled.
+pub const MAX_PAGE_PIXELS: u64 = 1 << 26;
+
 /// The pixel size of a page at a given scale.
 ///
 /// **Rounded outward**, so a page never loses its last row or column to
 /// rounding: A4 at 150 dpi is 1240×1755, not 1240×1754. This is an API
 /// guarantee, pinned by tests, because the engine being replaced left it as
 /// folklore that callers rediscovered.
+///
+/// A page whose area would exceed [`MAX_PAGE_PIXELS`] is scaled down to fit,
+/// keeping its aspect ratio — degraded rather than refused (ruling 2).
 #[must_use]
 pub fn page_pixels(width_pt: f64, height_pt: f64, scale: f64) -> (u32, u32) {
     let round_out = |v: f64| {
@@ -628,7 +645,18 @@ pub fn page_pixels(width_pt: f64, height_pt: f64, scale: f64) -> (u32, u32) {
         }
         (v * scale).ceil().max(1.0).min(f64::from(u32::MAX)) as u32
     };
-    (round_out(width_pt), round_out(height_pt))
+    let (w, h) = (round_out(width_pt), round_out(height_pt));
+
+    let area = u64::from(w) * u64::from(h);
+    if area <= MAX_PAGE_PIXELS {
+        return (w, h);
+    }
+
+    // Both dimensions shrink by the same factor, so the page keeps its shape
+    // and stays recognisable rather than becoming a stripe of itself.
+    let shrink = (MAX_PAGE_PIXELS as f64 / area as f64).sqrt();
+    let clamp = |v: u32| (f64::from(v) * shrink).floor().max(1.0) as u32;
+    (clamp(w), clamp(h))
 }
 
 /// Convenience: a white canvas of the right size for a page.
@@ -1008,6 +1036,57 @@ mod tests {
         ] {
             let (canvas, _) = render(content, 8);
             assert_eq!(canvas.data.len(), 8 * 8 * 3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_size_tests {
+    use super::{page_pixels, MAX_PAGE_PIXELS};
+
+    /// The pinned contract, which callers depend on.
+    #[test]
+    fn a4_at_150_dpi_rounds_outward() {
+        assert_eq!(page_pixels(595.0, 842.0, 150.0 / 72.0), (1240, 1755));
+    }
+
+    /// `/MediaBox [0 0 1e9 1e9]` is four tokens and, without a ceiling, asks
+    /// for an allocation that aborts the process instead of failing politely.
+    #[test]
+    fn an_absurd_page_box_is_clamped_rather_than_allocated() {
+        let (w, h) = page_pixels(1e9, 1e9, 1.0);
+        let area = u64::from(w) * u64::from(h);
+        assert!(
+            area <= MAX_PAGE_PIXELS,
+            "a hostile page box asked for {area} pixels"
+        );
+        assert_eq!(w, h, "and it keeps its shape");
+    }
+
+    /// A scale can be hostile even when the page box is ordinary.
+    #[test]
+    fn an_absurd_scale_is_clamped_too() {
+        let (w, h) = page_pixels(595.0, 842.0, 100_000.0);
+        assert!(u64::from(w) * u64::from(h) <= MAX_PAGE_PIXELS);
+    }
+
+    #[test]
+    fn a_clamped_page_keeps_its_aspect_ratio() {
+        // Twice as wide as it is tall, at a size far past the ceiling.
+        let (w, h) = page_pixels(200_000.0, 100_000.0, 1.0);
+        let ratio = f64::from(w) / f64::from(h);
+        assert!(
+            (ratio - 2.0).abs() < 0.01,
+            "expected a 2:1 page, got {w}x{h}"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_or_infinite_box_still_yields_a_page() {
+        for (w, h) in [(0.0, 0.0), (f64::NAN, 10.0), (f64::INFINITY, f64::INFINITY)] {
+            let (pw, ph) = page_pixels(w, h, 1.0);
+            assert!(pw >= 1 && ph >= 1, "{w}x{h} gave {pw}x{ph}");
+            assert!(u64::from(pw) * u64::from(ph) <= MAX_PAGE_PIXELS);
         }
     }
 }

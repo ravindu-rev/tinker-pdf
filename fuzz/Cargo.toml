@@ -1,0 +1,95 @@
+# The fuzz crate is deliberately outside the workspace: `cargo-fuzz` builds it
+# with its own profile and sanitizer flags, and `libfuzzer-sys` pulls in a C++
+# runtime that the engine itself refuses. Tooling is exempt from the
+# hand-rolled rule; nothing here ships inside the library.
+[package]
+name = "tinker-pdf-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tinker-pdf = { path = "../crates/tinker-pdf" }
+tinker-pdf-cos = { path = "../crates/tinker-pdf-cos" }
+tinker-pdf-filters = { path = "../crates/tinker-pdf-filters" }
+tinker-pdf-font = { path = "../crates/tinker-pdf-font" }
+tinker-pdf-content = { path = "../crates/tinker-pdf-content" }
+tinker-pdf-crypto = { path = "../crates/tinker-pdf-crypto" }
+
+# Detaches from the parent workspace so `cargo build` at the root never tries
+# to build a libFuzzer target on a stable toolchain.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "cos_document"
+path = "fuzz_targets/cos_document.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cos_object"
+path = "fuzz_targets/cos_object.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "inflate"
+path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lzw"
+path = "fuzz_targets/lzw.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "jpeg"
+path = "fuzz_targets/jpeg.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ccitt"
+path = "fuzz_targets/ccitt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ascii_filters"
+path = "fuzz_targets/ascii_filters.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "truetype"
+path = "fuzz_targets/truetype.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cff"
+path = "fuzz_targets/cff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "content_tokenizer"
+path = "fuzz_targets/content_tokenizer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "render_page"
+path = "fuzz_targets/render_page.rs"
+test = false
+doc = false
