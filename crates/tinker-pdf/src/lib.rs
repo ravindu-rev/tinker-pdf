@@ -29,7 +29,7 @@ mod resources;
 use std::sync::Arc;
 
 use tinker_pdf_content::{interpret, Matrix, TextDevice};
-use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages, CosDocument};
+use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 pub use tinker_pdf_content::{
@@ -38,6 +38,23 @@ pub use tinker_pdf_content::{
 pub use tinker_pdf_cos::{
     Action, Attachment, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue,
     LadderLevel, Link, Metadata, OutlineItem, Warning, WarningKind,
+};
+/// The object model behind [`Document::cos`].
+///
+/// The escape hatch is only an escape hatch if the types it hands back can be
+/// named without depending on the crate underneath, so they are re-exported
+/// here rather than left for a caller to find.
+pub use tinker_pdf_cos::{
+    CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
+    XrefTable,
+};
+/// Writing: creation, editing and saving.
+///
+/// Without these on the facade a caller depending only on this crate could
+/// read a document and never produce one, which is half a library.
+pub use tinker_pdf_cos::{
+    DocumentBuilder, DocumentEditor, Encryption, ImageData, OutlineEntry, PageBuilder, WriteMode,
+    WriteOptions,
 };
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;

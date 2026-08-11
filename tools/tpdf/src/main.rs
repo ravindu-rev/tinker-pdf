@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{CosDocument, Document, ObjRef, Object, RenderOptions, StreamObj, XrefEntry};
 
 const USAGE: &str = "\
 tpdf — inspect and convert PDFs with the tinker-pdf engine
@@ -22,10 +22,14 @@ usage:
   tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
   tpdf outline <file.pdf> [--password P]
+  tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>...
 
 options:
   --page N     one page, 1-based; the default is every page
+  --object N   one object, by number; the default is a summary of all
+  --stream     with --object, write that object's stream data to stdout
+  --raw        with --stream, before the filters rather than after
   --dpi D      resolution for render (default 150)
   --out DIR    where render writes its PNMs
   --password P the password to open an encrypted file with
@@ -34,6 +38,13 @@ options:
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
 corpus.
+
+`objects` is the view underneath every other command: what the engine
+actually parsed, object by object. It is what a corpus failure gets looked
+at with, which is why it prints the cross-reference kind alongside each
+object — an object the table says lives in an object stream and an object
+found by the repair scanner read the same afterwards, and the difference
+is usually the bug.
 ";
 
 fn main() -> ExitCode {
@@ -57,6 +68,7 @@ fn main() -> ExitCode {
         "render" => run(&options, render),
         "fields" => run(&options, fields),
         "outline" => run(&options, outline),
+        "objects" => run(&options, objects),
         "check" => check(&options),
         other => Err(format!("unknown command `{other}`; try --help")),
     };
@@ -73,11 +85,14 @@ fn main() -> ExitCode {
 struct Options {
     files: Vec<String>,
     page: Option<u32>,
+    object: Option<u32>,
     dpi: f64,
     out: Option<String>,
     password: Option<String>,
     annotations: bool,
     quiet: bool,
+    raw: bool,
+    stream: bool,
 }
 
 impl Options {
@@ -85,11 +100,14 @@ impl Options {
         let mut options = Options {
             files: Vec::new(),
             page: None,
+            object: None,
             dpi: 150.0,
             out: None,
             password: None,
             annotations: true,
             quiet: false,
+            raw: false,
+            stream: false,
         };
 
         let mut index = 0;
@@ -125,10 +143,19 @@ impl Options {
                     }
                     options.dpi = d;
                 }
+                "--object" => {
+                    let raw = value()?;
+                    let n: u32 = raw
+                        .parse()
+                        .map_err(|_| format!("`--object {raw}` is not a number"))?;
+                    options.object = Some(n);
+                }
                 "--out" => options.out = Some(value()?),
                 "--password" => options.password = Some(value()?),
                 "--no-annotations" => options.annotations = false,
                 "--quiet" => options.quiet = true,
+                "--raw" => options.raw = true,
+                "--stream" => options.stream = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
@@ -373,6 +400,236 @@ fn print_outline(item: &tinker_pdf::OutlineItem, depth: usize) {
     }
 }
 
+/// Dumps the object model: what the engine parsed, not what the bytes say.
+///
+/// The two differ exactly where the interesting bugs are — an object recovered
+/// by the repair scanner, a `/Length` that disagreed with `endstream`, a
+/// stream whose filter chain half-decoded — and a hex editor cannot show the
+/// difference because it only has the bytes.
+fn objects(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
+    let cos = doc.cos();
+
+    if let Some(number) = options.object {
+        return one_object(options, cos, number);
+    }
+
+    println!("{path}");
+    for line in object_lines(cos) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The summary listing, built rather than printed so it can be asserted on.
+fn object_lines(cos: &CosDocument) -> Vec<String> {
+    let mut lines = vec!["  trailer".to_string()];
+    for (key, value) in cos.trailer().iter() {
+        lines.push(format!(
+            "    /{} {}",
+            name_of(cos, *key),
+            inline(cos, value)
+        ));
+    }
+
+    let highest = cos.max_object_number();
+    lines.push(format!("  objects (highest number {highest})"));
+    for number in 1..=highest {
+        let Some(entry) = cos.xref().get(number) else {
+            continue;
+        };
+        let (kind, generation) = match entry {
+            XrefEntry::Free { gen, .. } => ("free".to_string(), gen),
+            XrefEntry::Offset { offset, gen } => (format!("at {offset}"), gen),
+            XrefEntry::InStream { stream_num, idx } => (format!("in {stream_num} #{idx}"), 0),
+        };
+        if matches!(entry, XrefEntry::Free { .. }) {
+            lines.push(format!("    {number:>6} {generation:<5} free"));
+            continue;
+        }
+
+        let summary = match cos.get(ObjRef::new(number, generation)) {
+            Ok(object) => summarize(cos, &object),
+            // A slot the table promises and the file does not deliver is the
+            // single most common corruption, so it is reported per object
+            // rather than rolled into a count.
+            Err(error) => format!("unreadable: {error:?}"),
+        };
+        lines.push(format!(
+            "    {number:>6} {generation:<5} {kind:<16} {summary}"
+        ));
+    }
+    lines
+}
+
+/// One object in full, and optionally its stream.
+fn one_object(options: &Options, cos: &CosDocument, number: u32) -> Result<(), String> {
+    let generation = match cos.xref().get(number) {
+        Some(XrefEntry::Offset { gen, .. }) => gen,
+        Some(XrefEntry::InStream { .. }) | None => 0,
+        Some(XrefEntry::Free { .. }) => return Err(format!("object {number} is free")),
+    };
+    let reference = ObjRef::new(number, generation);
+    let object = cos
+        .get(reference)
+        .map_err(|e| format!("object {number}: {e:?}"))?;
+
+    if options.stream {
+        let data = if options.raw {
+            cos.stream_raw(reference)
+        } else {
+            cos.stream_decoded(reference)
+        }
+        .map_err(|e| format!("object {number} stream: {e:?}"))?;
+
+        // Straight to stdout with no framing, so it can be redirected into a
+        // file and compared with what another tool produces.
+        use std::io::Write;
+        return std::io::stdout()
+            .write_all(&data)
+            .map_err(|e| format!("writing stream: {e}"));
+    }
+
+    println!("{number} {generation} obj");
+    let mut text = String::new();
+    write_object(cos, &object, 0, &mut text);
+    println!("{text}");
+
+    if let Object::Stream(_) = object.as_ref() {
+        let raw = cos.stream_raw(reference).map(|d| d.len());
+        let decoded = cos.stream_decoded(reference).map(|d| d.len());
+        println!(
+            "stream: {} raw, {} decoded",
+            describe_length(raw),
+            describe_length(decoded)
+        );
+    }
+    Ok(())
+}
+
+fn describe_length(result: Result<usize, tinker_pdf::CosError>) -> String {
+    match result {
+        Ok(n) => format!("{n} bytes"),
+        Err(error) => format!("unreadable ({error:?})"),
+    }
+}
+
+fn name_of(cos: &CosDocument, name: tinker_pdf::Name) -> String {
+    cos.name_bytes(name)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+/// One line saying what an object is, for the summary listing.
+fn summarize(cos: &CosDocument, object: &Object) -> String {
+    match object {
+        Object::Dict(dict) | Object::Stream(StreamObj { dict, .. }) => {
+            let kind = if matches!(object, Object::Stream(_)) {
+                "stream"
+            } else {
+                "dict"
+            };
+            let mut label = String::from(kind);
+            for key in ["Type", "Subtype"] {
+                if let Some(Object::Name(name)) = dict.get(cos.intern(key.as_bytes())) {
+                    label.push_str(&format!(" /{}", name_of(cos, *name)));
+                }
+            }
+            format!("{label} ({} keys)", dict.len())
+        }
+        Object::Array(items) => format!("array ({} items)", items.len()),
+        other => inline(cos, other),
+    }
+}
+
+/// A short single-line rendering, for values inside a summary.
+fn inline(cos: &CosDocument, object: &Object) -> String {
+    let mut text = String::new();
+    write_object(cos, object, 0, &mut text);
+    if text.len() > 96 {
+        text.truncate(93);
+        text.push_str("...");
+    }
+    text.replace('\n', " ")
+}
+
+/// Writes an object the way the file would spell it.
+///
+/// Hand-rolled here rather than borrowed from the writer: this is a debugging
+/// view and wants indentation the writer would never emit, and a CLI that
+/// shared the writer's formatting would start constraining it.
+fn write_object(cos: &CosDocument, object: &Object, depth: usize, out: &mut String) {
+    let pad = "  ".repeat(depth + 1);
+    match object {
+        Object::Null => out.push_str("null"),
+        Object::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        Object::Int(value) => out.push_str(&value.to_string()),
+        Object::Real(value) => out.push_str(&format!("{value}")),
+        Object::Name(name) => {
+            out.push('/');
+            out.push_str(&name_of(cos, *name));
+        }
+        Object::Ref(reference) => {
+            out.push_str(&format!("{} {} R", reference.num, reference.gen));
+        }
+        Object::String(string) => out.push_str(&show_string(string)),
+        Object::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(' ');
+                }
+                write_object(cos, item, depth, out);
+            }
+            out.push(']');
+        }
+        Object::Dict(dict) | Object::Stream(StreamObj { dict, .. }) => {
+            out.push_str("<<\n");
+            for (key, value) in dict.iter() {
+                out.push_str(&pad);
+                out.push('/');
+                out.push_str(&name_of(cos, *key));
+                out.push(' ');
+                write_object(cos, value, depth + 1, out);
+                out.push('\n');
+            }
+            out.push_str(&"  ".repeat(depth));
+            out.push_str(">>");
+        }
+    }
+}
+
+/// Strings as they were spelled where that is readable, and as hex where it
+/// is not — a UTF-16 title printed as mojibake is worse than useless.
+fn show_string(string: &tinker_pdf::PdfString) -> String {
+    let printable = string
+        .bytes
+        .iter()
+        .all(|&b| (0x20..0x7F).contains(&b) || b == b'\n' || b == b'\t');
+
+    if printable && !string.hex {
+        let escaped = string
+            .bytes
+            .iter()
+            .map(|&b| match b {
+                b'(' => "\\(".to_string(),
+                b')' => "\\)".to_string(),
+                b'\\' => "\\\\".to_string(),
+                b'\n' => "\\n".to_string(),
+                b'\t' => "\\t".to_string(),
+                other => char::from(other).to_string(),
+            })
+            .collect::<String>();
+        return format!("({escaped})");
+    }
+
+    let mut out = String::from("<");
+    for byte in &string.bytes {
+        out.push_str(&format!("{byte:02X}"));
+    }
+    out.push('>');
+    out
+}
+
 /// Opens every file and reports what happened, without rendering.
 ///
 /// This is the corpus pass: it exits non-zero only when a file could not be
@@ -415,4 +672,137 @@ fn check(options: &Options) -> Result<(), String> {
         return Err(format!("{failed} files could not be opened"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tinker_pdf::{DocumentBuilder, PdfString};
+
+    fn document() -> Document {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.set_info(b"Title", "a document");
+        builder.add_page(200.0, 100.0, |page| {
+            page.text(b"F0", 12.0, 10.0, 50.0, "hello");
+        });
+        Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// The listing names every object the table claims, with what it is and
+    /// where the table says it lives. A corpus failure is read off this, so an
+    /// object silently missing from it is the whole command failing.
+    #[test]
+    fn the_summary_lists_every_object_with_its_kind() {
+        let doc = document();
+        let lines = object_lines(doc.cos()).join("\n");
+
+        assert!(lines.contains("/Root"), "the trailer is shown: {lines}");
+        assert!(lines.contains("dict /Catalog"), "the catalog: {lines}");
+        assert!(lines.contains("dict /Pages"), "the page tree: {lines}");
+        assert!(lines.contains("dict /Page "), "a page: {lines}");
+        assert!(lines.contains("stream"), "a content stream: {lines}");
+        assert!(
+            lines.contains("dict /Font /Type1"),
+            "and both /Type and /Subtype, which is what tells two fonts \
+             apart: {lines}"
+        );
+    }
+
+    /// Where the object came from is the point: an object the table places in
+    /// an object stream and one at a byte offset read the same afterwards, and
+    /// which it was is usually the bug.
+    #[test]
+    fn the_summary_says_where_each_object_lives() {
+        let doc = document();
+        let lines = object_lines(doc.cos()).join("\n");
+        assert!(lines.contains(" at "), "byte offsets are shown: {lines}");
+    }
+
+    #[test]
+    fn objects_are_written_the_way_the_file_spells_them() {
+        let doc = document();
+        let cos = doc.cos();
+        let catalog = cos.catalog().expect("a catalog");
+
+        let mut text = String::new();
+        write_object(cos, &Object::Dict((*catalog).clone()), 0, &mut text);
+        assert!(text.starts_with("<<"), "a dictionary: {text}");
+        assert!(text.contains("/Type /Catalog"), "with names: {text}");
+        assert!(text.contains(" R"), "and indirect references: {text}");
+    }
+
+    #[test]
+    fn arrays_and_scalars_round_trip_into_readable_syntax() {
+        let doc = document();
+        let cos = doc.cos();
+
+        let object = Object::Array(vec![
+            Object::Int(1),
+            Object::Real(2.5),
+            Object::Bool(true),
+            Object::Null,
+            Object::Ref(ObjRef::new(7, 1)),
+        ]);
+        let mut text = String::new();
+        write_object(cos, &object, 0, &mut text);
+        assert_eq!(text, "[1 2.5 true null 7 1 R]");
+    }
+
+    /// A title in UTF-16 printed as if it were ASCII is mojibake, which reads
+    /// like a decoding bug in the engine rather than a display choice here.
+    #[test]
+    fn unprintable_strings_are_shown_as_hex() {
+        assert_eq!(
+            show_string(&PdfString::literal(b"hello".to_vec())),
+            "(hello)"
+        );
+        assert_eq!(
+            show_string(&PdfString::literal(vec![0xFE, 0xFF, 0x00, 0x41])),
+            "<FEFF0041>"
+        );
+        assert_eq!(
+            show_string(&PdfString::literal(br"a(b)c\d".to_vec())),
+            r"(a\(b\)c\\d)",
+            "and the characters that would end the string early are escaped"
+        );
+    }
+
+    /// A file whose table promises an object the bytes do not contain is the
+    /// case this command exists for. Whatever the ladder decided — trust the
+    /// entry, or rescan and drop it — every number still in the table must
+    /// appear in the listing, because an object silently missing from the
+    /// diagnostic view is indistinguishable from an object that was never
+    /// there.
+    #[test]
+    fn every_object_the_table_still_claims_is_listed() {
+        let mut bytes = Vec::from(*b"%PDF-1.7\n");
+        let first = bytes.len();
+        bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        let second = bytes.len();
+        bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n");
+
+        let xref_at = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        bytes.extend_from_slice(format!("{first:010} 00000 n \n").as_bytes());
+        bytes.extend_from_slice(format!("{second:010} 00000 n \n").as_bytes());
+        // Object 3 is promised at an offset past the end of the file.
+        bytes.extend_from_slice(b"0000009999 00000 n \n");
+        bytes.extend_from_slice(b"trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n");
+        bytes.extend_from_slice(format!("{xref_at}\n%%EOF\n").as_bytes());
+
+        let doc = Document::open(bytes).expect("it opens");
+        let cos = doc.cos();
+        let lines = object_lines(cos).join("\n");
+
+        for number in 1..=cos.max_object_number() {
+            if cos.xref().get(number).is_some() {
+                assert!(
+                    lines.contains(&format!("    {number:>6} ")),
+                    "object {number} is in the table and must be listed: {lines}"
+                );
+            }
+        }
+        assert!(lines.contains("dict /Catalog"), "and read: {lines}");
+    }
 }
