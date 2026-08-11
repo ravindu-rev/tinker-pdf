@@ -91,6 +91,17 @@ pub trait FontSource {
         None
     }
 
+    /// `/BM` from a named external graphics state (11.3.5).
+    ///
+    /// Separate from the alphas rather than folded in with them because a
+    /// dictionary may set either without the other, and `None` here has to
+    /// mean "unchanged" rather than "Normal" — a `gs` that sets only `/ca`
+    /// must not silently reset the blend mode.
+    fn ext_g_state_blend(&self, name: &[u8]) -> Option<crate::state::BlendMode> {
+        let _ = name;
+        None
+    }
+
     /// How many components a named colour space takes.
     ///
     /// Used to tell `scn`'s optional trailing pattern name from its numeric
@@ -632,6 +643,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         if let Some(alpha) = stroke {
                             self.gs.stroke_alpha = alpha.clamp(0.0, 1.0);
                         }
+                    }
+                    if let Some(blend) = self.fonts.ext_g_state_blend(&name) {
+                        self.gs.blend = blend;
                     }
                 }
             }

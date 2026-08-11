@@ -10,6 +10,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use tinker_pdf_raster::blend::BlendMode as RasterBlend;
+
 pub mod shading;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,7 +274,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             b: 0xBF,
             a: 0xFF,
         };
-        self.paint(&path, FillRule::NonZero, PLACEHOLDER, state.fill_alpha);
+        self.paint(
+            &path,
+            FillRule::NonZero,
+            PLACEHOLDER,
+            state.fill_alpha,
+            blend_mode(state.blend),
+        );
     }
 
     /// Fills a path with a shading pattern, or reports one that cannot be.
@@ -326,6 +334,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         };
 
         let alpha = state.fill_alpha.clamp(0.0, 1.0);
+        let mode = blend_mode(state.blend);
         for py in 0..self.canvas.height {
             if self.cancel.is_cancelled() {
                 return;
@@ -341,12 +350,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 };
                 let weight = alpha * f64::from(coverage) / 255.0;
                 self.canvas
-                    .blend_pixel(px, py, Color { r, g, b, a: 0xFF }, weight);
+                    .blend_pixel_with(px, py, Color { r, g, b, a: 0xFF }, weight, mode);
             }
         }
     }
 
-    fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64) {
+    fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
         let mask = fill(
             path,
             rule,
@@ -360,7 +369,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             Some(clip) => mask.intersect(clip),
             None => mask,
         };
-        self.canvas.fill_mask(&mask, color, alpha);
+        self.canvas.fill_mask_with(&mask, color, alpha, mode);
     }
 
     /// Draws a decoded image into the unit square of the current transform.
@@ -371,6 +380,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// which is what avoids the seams and double-writes a forward map leaves
     /// under rotation or scaling.
     fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
+        let mode = blend_mode(state.blend);
         if image.width == 0 || image.height == 0 {
             return;
         }
@@ -444,7 +454,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 } else {
                     Color::rgb(rgb[0], rgb[1], rgb[2])
                 };
-                self.canvas.blend_pixel(px, py, color, effective);
+                self.canvas.blend_pixel_with(px, py, color, effective, mode);
             }
         }
     }
@@ -527,7 +537,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
 
         let color = fill_color(state);
-        self.paint(&built, rule, color, state.fill_alpha);
+        self.paint(
+            &built,
+            rule,
+            color,
+            state.fill_alpha,
+            blend_mode(state.blend),
+        );
     }
 
     fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
@@ -631,7 +647,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         };
         let outline = stroke(&built, &style, self.tolerance);
         let color = stroke_color(state);
-        self.paint(&outline, FillRule::NonZero, color, state.stroke_alpha);
+        self.paint(
+            &outline,
+            FillRule::NonZero,
+            color,
+            state.stroke_alpha,
+            blend_mode(state.blend),
+        );
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
@@ -721,6 +743,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 FillRule::NonZero,
                 fill_color(state),
                 state.fill_alpha,
+                blend_mode(state.blend),
             );
         }
         if mode.strokes() {
@@ -735,6 +758,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 FillRule::NonZero,
                 stroke_color(state),
                 state.stroke_alpha,
+                blend_mode(state.blend),
             );
         }
         if mode.clips() {
@@ -805,6 +829,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         };
 
         let alpha = state.fill_alpha.clamp(0.0, 1.0);
+        let mode = blend_mode(state.blend);
         for py in 0..self.canvas.height {
             if self.cancel.is_cancelled() {
                 return;
@@ -824,7 +849,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 };
                 let effective = alpha * f64::from(clip) / 255.0;
                 self.canvas
-                    .blend_pixel(px, py, Color::rgb(r, g, b), effective);
+                    .blend_pixel_with(px, py, Color::rgb(r, g, b), effective, mode);
             }
         }
     }
@@ -1438,5 +1463,33 @@ mod page_size_tests {
             assert!(pw >= 1 && ph >= 1, "{w}x{h} gave {pw}x{ph}");
             assert!(u64::from(pw) * u64::from(ph) <= MAX_PAGE_PIXELS);
         }
+    }
+}
+
+/// Maps the content layer's blend mode onto the rasteriser's.
+///
+/// The two enums are deliberately separate — ruling 8 keeps the content crate
+/// free of any dependency on how pixels are made — so this function is the
+/// single seam between them, and the exhaustive match is what makes adding a
+/// mode to one a compile error until it is added to the other.
+fn blend_mode(mode: tinker_pdf_content::BlendMode) -> RasterBlend {
+    use tinker_pdf_content::BlendMode as Pdf;
+    match mode {
+        Pdf::Normal => RasterBlend::Normal,
+        Pdf::Multiply => RasterBlend::Multiply,
+        Pdf::Screen => RasterBlend::Screen,
+        Pdf::Overlay => RasterBlend::Overlay,
+        Pdf::Darken => RasterBlend::Darken,
+        Pdf::Lighten => RasterBlend::Lighten,
+        Pdf::ColorDodge => RasterBlend::ColorDodge,
+        Pdf::ColorBurn => RasterBlend::ColorBurn,
+        Pdf::HardLight => RasterBlend::HardLight,
+        Pdf::SoftLight => RasterBlend::SoftLight,
+        Pdf::Difference => RasterBlend::Difference,
+        Pdf::Exclusion => RasterBlend::Exclusion,
+        Pdf::Hue => RasterBlend::Hue,
+        Pdf::Saturation => RasterBlend::Saturation,
+        Pdf::Color => RasterBlend::Color,
+        Pdf::Luminosity => RasterBlend::Luminosity,
     }
 }

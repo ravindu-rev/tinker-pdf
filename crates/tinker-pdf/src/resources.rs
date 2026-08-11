@@ -568,6 +568,32 @@ impl FontSource for PageResources {
             .as_number();
         (fill.is_some() || stroke.is_some()).then_some((fill, stroke))
     }
+
+    fn ext_g_state_blend(&self, name: &[u8]) -> Option<tinker_pdf_content::BlendMode> {
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"ExtGState"));
+        let entry = self
+            .doc
+            .resolve_key(table.as_dict()?, self.doc.intern(name));
+        let dict = entry.as_dict()?;
+
+        // 11.3.5: /BM is a name, or an array of names offering fallbacks.
+        let value = self.doc.resolve_key(dict, self.doc.intern(b"BM"));
+        if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
+            return Some(tinker_pdf_content::BlendMode::from_name(&name));
+        }
+        let names: Vec<Vec<u8>> = value
+            .as_array()?
+            .iter()
+            .filter_map(|item| self.doc.resolve(item).as_name())
+            .filter_map(|n| self.doc.name_bytes(n))
+            .map(|n| n.to_vec())
+            .collect();
+        (!names.is_empty())
+            .then(|| tinker_pdf_content::BlendMode::from_names(names.iter().map(Vec::as_slice)))
+    }
 }
 
 impl GlyphSource for PageResources {

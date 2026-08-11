@@ -292,6 +292,94 @@ impl LineJoin {
     }
 }
 
+/// How a source colour combines with what is already there (11.3.5).
+///
+/// Restated here rather than imported from the rasteriser: ruling 8 keeps
+/// this crate free of any dependency on how pixels are made, exactly as
+/// `LineCap` and `LineJoin` are. The rendering device maps one onto the
+/// other, which is also where the two would be caught disagreeing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlendMode {
+    /// The source replaces the backdrop, and the default.
+    #[default]
+    Normal,
+    /// `/Multiply`.
+    Multiply,
+    /// `/Screen`.
+    Screen,
+    /// `/Overlay`.
+    Overlay,
+    /// `/Darken`.
+    Darken,
+    /// `/Lighten`.
+    Lighten,
+    /// `/ColorDodge`.
+    ColorDodge,
+    /// `/ColorBurn`.
+    ColorBurn,
+    /// `/HardLight`.
+    HardLight,
+    /// `/SoftLight`.
+    SoftLight,
+    /// `/Difference`.
+    Difference,
+    /// `/Exclusion`.
+    Exclusion,
+    /// `/Hue`.
+    Hue,
+    /// `/Saturation`.
+    Saturation,
+    /// `/Color`.
+    Color,
+    /// `/Luminosity`.
+    Luminosity,
+}
+
+impl BlendMode {
+    /// The mode a `/BM` name selects.
+    ///
+    /// 11.3.5: `/Compatible` is a synonym for `/Normal`, and a name this
+    /// build does not know is `Normal` rather than an error — a document
+    /// using a blend mode from a later specification should still draw.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> BlendMode {
+        match name {
+            b"Multiply" => BlendMode::Multiply,
+            b"Screen" => BlendMode::Screen,
+            b"Overlay" => BlendMode::Overlay,
+            b"Darken" => BlendMode::Darken,
+            b"Lighten" => BlendMode::Lighten,
+            b"ColorDodge" => BlendMode::ColorDodge,
+            b"ColorBurn" => BlendMode::ColorBurn,
+            b"HardLight" => BlendMode::HardLight,
+            b"SoftLight" => BlendMode::SoftLight,
+            b"Difference" => BlendMode::Difference,
+            b"Exclusion" => BlendMode::Exclusion,
+            b"Hue" => BlendMode::Hue,
+            b"Saturation" => BlendMode::Saturation,
+            b"Color" => BlendMode::Color,
+            b"Luminosity" => BlendMode::Luminosity,
+            _ => BlendMode::Normal,
+        }
+    }
+
+    /// The first name in a `/BM` array this build recognises (11.3.5).
+    ///
+    /// The array form exists so a producer can offer fallbacks; taking the
+    /// first *entry* rather than the first *recognised* entry would pick a
+    /// mode nobody implements and render Normal anyway.
+    #[must_use]
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a [u8]>) -> BlendMode {
+        for name in names {
+            let mode = BlendMode::from_name(name);
+            if mode != BlendMode::Normal {
+                return mode;
+            }
+        }
+        BlendMode::Normal
+    }
+}
+
 /// The graphics state (8.4.1), reduced to what interpretation needs.
 #[derive(Clone, Debug, Default)]
 pub struct GraphicsState {
@@ -331,6 +419,8 @@ pub struct GraphicsState {
     /// name, the device never learns a pattern was chosen, and the black that
     /// `/Pattern` reports as its initial colour is what gets painted.
     pub fill_pattern: Option<Vec<u8>>,
+    /// `/BM` from the external graphics state (11.3.5).
+    pub blend: BlendMode,
     /// The same for a stroking `SCN`.
     pub stroke_pattern: Option<Vec<u8>>,
 }
@@ -357,6 +447,7 @@ impl GraphicsState {
             fill_space: None,
             stroke_space: None,
             fill_pattern: None,
+            blend: BlendMode::Normal,
             stroke_pattern: None,
         }
     }
