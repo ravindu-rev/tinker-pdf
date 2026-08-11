@@ -42,6 +42,50 @@ fn references_of(object: &Object, queue: &mut Vec<ObjRef>) {
     }
 }
 
+/// 12.5.5's algorithm, reduced to the scale and offset a `cm` needs.
+///
+/// The transformed bounding box is fitted to the rectangle. A form with no box
+/// is drawn where its own matrix puts it, which is what a viewer does with one.
+fn fit(bbox: Option<Rect>, matrix: [f64; 6], rect: Rect) -> (f64, f64, f64, f64) {
+    let Some(bbox) = bbox.filter(|b| !b.is_empty()) else {
+        return (1.0, 1.0, 0.0, 0.0);
+    };
+
+    let corners = [
+        (bbox.x0, bbox.y0),
+        (bbox.x1, bbox.y0),
+        (bbox.x1, bbox.y1),
+        (bbox.x0, bbox.y1),
+    ];
+    let mapped: Vec<(f64, f64)> = corners
+        .iter()
+        .map(|(x, y)| {
+            (
+                matrix[0] * x + matrix[2] * y + matrix[4],
+                matrix[1] * x + matrix[3] * y + matrix[5],
+            )
+        })
+        .collect();
+
+    let (mut x0, mut y0) = mapped[0];
+    let (mut x1, mut y1) = mapped[0];
+    for (x, y) in &mapped {
+        x0 = x0.min(*x);
+        y0 = y0.min(*y);
+        x1 = x1.max(*x);
+        y1 = y1.max(*y);
+    }
+
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    if dx <= f64::EPSILON || dy <= f64::EPSILON {
+        return (1.0, 1.0, 0.0, 0.0);
+    }
+
+    let sx = (rect.x1 - rect.x0) / dx;
+    let sy = (rect.y1 - rect.y0) / dy;
+    (sx, sy, rect.x0 - x0 * sx, rect.y0 - y0 * sy)
+}
+
 /// A copy of `dict` with one key gone.
 ///
 /// Removing an entry is rare enough that [`Dict`] has no method for it, and
@@ -207,6 +251,352 @@ impl DocumentEditor {
         dict.insert(rotate, Object::Int(i64::from(next)));
         self.put(reference, Object::Dict(dict));
         true
+    }
+
+    /// Inserts a blank page of the given size at `index`.
+    ///
+    /// `index` may equal the page count, which appends. A larger one is
+    /// refused rather than clamped: a caller who miscounted wants to know,
+    /// not to have the page land somewhere plausible.
+    pub fn insert_page(&mut self, index: u32, width: f64, height: f64) -> Option<ObjRef> {
+        let at = index as usize;
+        if at > self.page_refs().len() || !width.is_finite() || !height.is_finite() {
+            return None;
+        }
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+
+        let reference = self.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.intern(b"Page")));
+        dict.insert(
+            Name::MEDIA_BOX,
+            Object::Array(vec![
+                Object::Int(0),
+                Object::Int(0),
+                Object::Real(width),
+                Object::Real(height),
+            ]),
+        );
+        dict.insert(Name::RESOURCES, Object::Dict(Dict::new()));
+        // /Parent is written by `save`, which is the only place that knows
+        // what the tree will look like once every operation has been applied.
+        self.put(reference, Object::Dict(dict));
+
+        self.ensure_order().insert(at, reference);
+        Some(reference)
+    }
+
+    /// Copies a page from another document into this one, at `index`.
+    ///
+    /// Every object the page reaches is copied with it and renumbered, because
+    /// the two documents number independently and the source's numbers mean
+    /// nothing here. A shared resource copied twice is copied twice: dedup
+    /// needs content hashing to be safe, and a wrong dedup silently merges two
+    /// different fonts.
+    ///
+    /// Returns the new page's reference, or `None` when the source has no such
+    /// page.
+    pub fn import_page(&mut self, source: &CosDocument, page: u32, index: u32) -> Option<ObjRef> {
+        let at = index as usize;
+        if at > self.page_refs().len() {
+            return None;
+        }
+
+        let pages = pages::collect(source);
+        let from = pages.get(page as usize)?;
+
+        // The page's own dictionary, minus the entries that describe where it
+        // sat in a tree it is leaving.
+        let object = source.get(from.reference).ok()?;
+        let mut dict = object.as_dict()?.clone();
+        dict = without(&dict, Name::PARENT);
+
+        // Inheritable attributes are resolved rather than inherited, because
+        // the ancestors that carried them are not coming along.
+        let media = Object::Array(vec![
+            Object::Real(from.media_box.x0),
+            Object::Real(from.media_box.y0),
+            Object::Real(from.media_box.x1),
+            Object::Real(from.media_box.y1),
+        ]);
+        dict.insert(Name::MEDIA_BOX, media);
+        if let Some(resources) = from.resources.clone() {
+            dict.insert(Name::RESOURCES, Object::Dict(resources));
+        }
+        if from.rotation != 0 {
+            dict.insert(
+                source.intern(b"Rotate"),
+                Object::Int(i64::from(from.rotation)),
+            );
+        }
+
+        let mut mapping: HashMap<u32, ObjRef> = HashMap::new();
+        let copied = self.copy_value(source, &Object::Dict(dict), &mut mapping, 0)?;
+
+        let reference = self.allocate();
+        self.put(reference, copied);
+        self.ensure_order().insert(at, reference);
+        Some(reference)
+    }
+
+    /// Copies one value from `source`, following every reference it holds.
+    ///
+    /// Depth-capped and cycle-guarded through `mapping`: a page whose
+    /// resources refer back to it is unusual but legal, and following it
+    /// blindly does not terminate.
+    fn copy_value(
+        &mut self,
+        source: &CosDocument,
+        value: &Object,
+        mapping: &mut HashMap<u32, ObjRef>,
+        depth: u32,
+    ) -> Option<Object> {
+        if depth > crate::limits::MAX_NEST_DEPTH {
+            return Some(Object::Null);
+        }
+
+        match value {
+            Object::Ref(r) => {
+                if let Some(existing) = mapping.get(&r.num) {
+                    return Some(Object::Ref(*existing));
+                }
+                let target = self.allocate();
+                // Recorded *before* recursing, so a cycle finds the number
+                // rather than allocating forever.
+                mapping.insert(r.num, target);
+
+                let loaded = source.get(*r).ok()?;
+                match loaded.as_ref() {
+                    Object::Stream(stream) => {
+                        // The raw bytes, which are plaintext once the source
+                        // has been authenticated, plus its dictionary with the
+                        // references inside it remapped.
+                        let data = source.stream_raw(*r).unwrap_or_default();
+                        let dict = self.copy_dict(source, &stream.dict, mapping, depth + 1)?;
+                        self.put_stream(target, StreamData { dict, data });
+                    }
+                    other => {
+                        let copied = self.copy_value(source, other, mapping, depth + 1)?;
+                        self.put(target, copied);
+                    }
+                }
+                Some(Object::Ref(target))
+            }
+            Object::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.copy_value(source, item, mapping, depth + 1)?);
+                }
+                Some(Object::Array(out))
+            }
+            Object::Dict(dict) => Some(Object::Dict(self.copy_dict(
+                source,
+                dict,
+                mapping,
+                depth + 1,
+            )?)),
+            Object::Name(name) => {
+                // Names are interned per document, so the *bytes* travel and
+                // the number is re-derived. Copying the number would name
+                // whatever this document happens to have at that index.
+                let bytes = source.name_bytes(*name)?;
+                Some(Object::Name(self.intern(&bytes)))
+            }
+            other => Some(other.clone()),
+        }
+    }
+
+    fn copy_dict(
+        &mut self,
+        source: &CosDocument,
+        dict: &Dict,
+        mapping: &mut HashMap<u32, ObjRef>,
+        depth: u32,
+    ) -> Option<Dict> {
+        let mut out = Dict::with_capacity(dict.len());
+        for (key, value) in dict.iter() {
+            let key_bytes = source.name_bytes(*key)?;
+            let copied = self.copy_value(source, value, mapping, depth + 1)?;
+            out.insert(self.intern(&key_bytes), copied);
+        }
+        Some(out)
+    }
+
+    /// Keeps only the pages in `keep`, in that order.
+    ///
+    /// The split half of split-and-merge: saving the result twice with
+    /// different selections divides a document. Pages appear in the order
+    /// given, so this reorders as well, and a repeated index appears twice —
+    /// both are what a caller asking for an explicit order means.
+    ///
+    /// Returns false when any index is out of range, having changed nothing.
+    pub fn keep_pages(&mut self, keep: &[u32]) -> bool {
+        let order = self.page_refs();
+        if keep.iter().any(|i| *i as usize >= order.len()) {
+            return false;
+        }
+        let kept: Vec<ObjRef> = keep
+            .iter()
+            .filter_map(|i| order.get(*i as usize).copied())
+            .collect();
+        *self.ensure_order() = kept;
+        true
+    }
+
+    /// Draws a page's annotations into its content and removes them (12.5.5).
+    ///
+    /// Flattening is what makes an annotation permanent: a filled form or a
+    /// highlight stops being a separate object a viewer may choose not to
+    /// draw, or a user may delete. Only annotations with a normal appearance
+    /// are flattened — one without has nothing to draw, and inventing
+    /// something for it is the appearance synthesizer's job, not this.
+    ///
+    /// Returns how many were flattened.
+    pub fn flatten_annotations(&mut self, page: u32) -> Option<usize> {
+        let reference = self.page_refs().get(page as usize).copied()?;
+        let Some(Object::Dict(dict)) = self.get(reference) else {
+            return None;
+        };
+
+        let annots_key = self.intern(b"Annots");
+        let list: Vec<Object> = match dict.get(annots_key) {
+            Some(Object::Array(items)) => items.clone(),
+            Some(Object::Ref(r)) => self
+                .get(*r)
+                .and_then(|o| o.as_array().map(<[Object]>::to_vec))
+                .unwrap_or_default(),
+            _ => return Some(0),
+        };
+
+        let mut painted = Vec::new();
+        let mut names = Vec::new();
+        let mut count = 0usize;
+
+        for entry in &list {
+            let Some(annot) = entry
+                .as_objref()
+                .and_then(|r| self.get(r))
+                .and_then(|o| o.as_dict().cloned())
+            else {
+                continue;
+            };
+
+            // 12.5.3: hidden and no-view annotations are not on the page, so
+            // flattening must not put them there.
+            let flags = annot.get_int(self.intern(b"F")).unwrap_or(0);
+            if flags & 2 != 0 || flags & 32 != 0 {
+                continue;
+            }
+
+            let Some(rect) = self
+                .doc
+                .resolve_key(&annot, self.intern(b"Rect"))
+                .as_array()
+                .and_then(Rect::from_array)
+            else {
+                continue;
+            };
+            let Some(form) = self.normal_appearance(&annot) else {
+                continue;
+            };
+
+            // 12.5.5 maps the form's bounding box onto the rectangle. The
+            // synthesizer writes them equal, and a form from elsewhere may
+            // not, so the scale is computed rather than assumed.
+            let (bbox, matrix) = self.appearance_box(form);
+            let (sx, sy, tx, ty) = fit(bbox, matrix, rect);
+
+            let name = format!("TpdfFlat{count}");
+            names.push((name.clone(), form));
+            painted.push(format!("q {sx} 0 0 {sy} {tx} {ty} cm /{name} Do Q\n"));
+            count += 1;
+        }
+
+        if count == 0 {
+            return Some(0);
+        }
+
+        // The appearances become ordinary XObject resources of the page.
+        let Some(Object::Dict(mut dict)) = self.get(reference) else {
+            return None;
+        };
+        let resources_key = Name::RESOURCES;
+        let mut resources = self
+            .doc
+            .resolve_key(&dict, resources_key)
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        let xobject_key = self.intern(b"XObject");
+        let mut xobjects = resources
+            .get_dict(xobject_key)
+            .cloned()
+            .unwrap_or_else(Dict::new);
+        for (name, form) in names {
+            xobjects.insert(self.intern(name.as_bytes()), Object::Ref(form));
+        }
+        resources.insert(xobject_key, Object::Dict(xobjects));
+        dict.insert(resources_key, Object::Dict(resources));
+
+        // The annotations go: a flattened one that stayed would be drawn
+        // twice, once as content and once as itself.
+        dict = without(&dict, annots_key);
+        self.put(reference, Object::Dict(dict));
+
+        self.append_content(page, painted.concat().as_bytes());
+        Some(count)
+    }
+
+    /// The `/AP` `/N` stream of an annotation, when it has one.
+    fn normal_appearance(&self, annot: &Dict) -> Option<ObjRef> {
+        let ap = self.doc.resolve_key(annot, self.intern(b"AP"));
+        let normal = ap.as_dict()?.get(self.intern(b"N"))?.clone();
+        match normal {
+            Object::Ref(r) => {
+                let object = self.get(r)?;
+                let dict = object.as_dict()?;
+                if dict.get(self.intern(b"BBox")).is_some() {
+                    return Some(r);
+                }
+                // A dictionary of states: the one `/AS` names.
+                let state = annot.get_name(self.intern(b"AS"))?;
+                dict.get_ref(state)
+            }
+            Object::Dict(states) => {
+                let state = annot.get_name(self.intern(b"AS"))?;
+                states.get_ref(state)
+            }
+            _ => None,
+        }
+    }
+
+    /// An appearance stream's `/BBox` and `/Matrix`.
+    fn appearance_box(&self, form: ObjRef) -> (Option<Rect>, [f64; 6]) {
+        let Some(object) = self.get(form) else {
+            return (None, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        };
+        let Some(dict) = object.as_dict() else {
+            return (None, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        };
+
+        let bbox = self
+            .doc
+            .resolve_key(dict, self.intern(b"BBox"))
+            .as_array()
+            .and_then(Rect::from_array);
+
+        let matrix = self
+            .doc
+            .resolve_key(dict, self.intern(b"Matrix"))
+            .as_array()
+            .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
+            .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
+            .map(|v| [v[0], v[1], v[2], v[3], v[4], v[5]])
+            .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+        (bbox, matrix)
     }
 
     /// Adds an annotation to a page (12.5).
@@ -658,6 +1048,47 @@ impl DocumentEditor {
         kept
     }
 
+    /// The page tree and page dictionaries a reordering changes.
+    ///
+    /// Returned rather than applied, because the two save modes build
+    /// different object sets and both need them.
+    fn page_tree_updates(&self) -> Vec<(u32, Object)> {
+        let Some(order) = &self.page_order else {
+            return Vec::new();
+        };
+        let Some(catalog) = self.doc.catalog() else {
+            return Vec::new();
+        };
+        let Some(tree_ref) = catalog.get_ref(Name::PAGES) else {
+            return Vec::new();
+        };
+        let Some(Object::Dict(mut tree)) = self.get(tree_ref) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::with_capacity(order.len() + 1);
+        tree.insert(
+            Name::KIDS,
+            Object::Array(order.iter().map(|r| Object::Ref(*r)).collect()),
+        );
+        tree.insert(Name::COUNT, Object::Int(order.len() as i64));
+        out.push((tree_ref.num, Object::Dict(tree)));
+
+        // 7.7.3.2: every page names its parent, and a reader walking upward
+        // from a page — for an inherited attribute, or to find which document
+        // it belongs to — needs it. An inserted or imported page has never had
+        // one, and a moved page may have belonged to a node that is no longer
+        // in the tree, so the whole flattened list is pointed at the root
+        // rather than only the new arrivals.
+        for reference in order {
+            if let Some(Object::Dict(mut page)) = self.get(*reference) {
+                page.insert(Name::PARENT, Object::Ref(tree_ref));
+                out.push((reference.num, Object::Dict(page)));
+            }
+        }
+        out
+    }
+
     /// Saves the edits.
     ///
     /// An incremental save appends only what changed, leaving the original
@@ -678,19 +1109,17 @@ impl DocumentEditor {
         }
 
         // A reordered page tree needs its /Kids and /Count rewritten.
-        if let Some(order) = &self.page_order {
-            if let Some(catalog) = self.doc.catalog() {
-                if let Some(tree_ref) = catalog.get_ref(Name::PAGES) {
-                    if let Some(Object::Dict(mut tree)) = self.get(tree_ref) {
-                        tree.insert(
-                            Name::KIDS,
-                            Object::Array(order.iter().map(|r| Object::Ref(*r)).collect()),
-                        );
-                        tree.insert(Name::COUNT, Object::Int(order.len() as i64));
-                        set.insert(tree_ref.num, Object::Dict(tree));
-                    }
-                }
-            }
+        //
+        // Computed once and applied to whichever object set the chosen mode
+        // builds. Writing it only into the incremental set — which is what
+        // this did — meant a *rewrite* silently dropped every page operation:
+        // the tree kept its original /Kids, so an inserted page was written
+        // into the file and never referenced, and a reordering did nothing at
+        // all. Nothing caught it because the page-operation tests all saved
+        // incrementally.
+        let tree_updates = self.page_tree_updates();
+        for (num, object) in &tree_updates {
+            set.insert(*num, object.clone());
         }
 
         let trailer = self.doc.trailer().clone();
@@ -763,6 +1192,9 @@ impl DocumentEditor {
                         Written::Object(object) => all.insert(*num, object.clone()),
                         Written::Stream(stream) => all.insert_stream(*num, stream.clone()),
                     }
+                }
+                for (num, object) in &tree_updates {
+                    all.insert(*num, object.clone());
                 }
                 if options.garbage_collect {
                     all = self.reachable(&all, &trailer);
