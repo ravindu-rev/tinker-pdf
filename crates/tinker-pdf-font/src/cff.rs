@@ -53,9 +53,13 @@ impl<'a> Index<'a> {
             offsets.push(value);
         }
 
-        // Offsets are 1-based from the byte after the offset array.
-        let base = offsets_at + (count + 1) * off_size - 1;
-        let end = base + offsets.last().copied().unwrap_or(1);
+        // Offsets are 1-based from the first byte of the data, so item `i`
+        // starts at `base + offsets[i] - 1` — and `get` is where that one is
+        // subtracted. Taking it off here as well pointed `base` at the last
+        // byte of the offset array, which shifted every item in every INDEX
+        // one byte earlier and one byte shorter than it is.
+        let base = offsets_at + (count + 1) * off_size;
+        let end = base + offsets.last().copied().unwrap_or(1).saturating_sub(1);
 
         Some((
             Index {
@@ -719,6 +723,117 @@ impl Charstring<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wraps `items` as a CFF INDEX with one-byte offsets.
+    fn index(items: &[&[u8]]) -> Vec<u8> {
+        if items.is_empty() {
+            return vec![0, 0];
+        }
+        let mut out = (items.len() as u16).to_be_bytes().to_vec();
+        out.push(1);
+        let mut offset = 1u8;
+        out.push(offset);
+        for item in items {
+            offset += item.len() as u8;
+            out.push(offset);
+        }
+        for item in items {
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    /// A whole CFF font program: three glyphs, a local subroutine, and a
+    /// Private DICT carrying both widths.
+    ///
+    /// This is `fuzz/corpus/cff/three_glyphs.cff`, built here so the seed and
+    /// the test cannot drift apart.
+    fn three_glyph_program() -> Vec<u8> {
+        // Glyph 0 is .notdef; glyph 1 carries a width prefix and two lines;
+        // glyph 2 declares a stem, masks it, and calls the local subroutine.
+        let charstrings = index(&[
+            &[14][..],
+            &[250, 100, 189, 189, 21, 239, 139, 5, 139, 239, 5, 14][..],
+            &[189, 217, 1, 189, 189, 21, 19, 0x80, 32, 10, 14][..],
+        ]);
+        let subrs = index(&[&[239, 139, 5, 11][..]]);
+        // defaultWidthX, nominalWidthX, then Subrs at the byte after this
+        // DICT — fourteen bytes on, so the operand is 14 + 139.
+        let private = vec![29, 0, 0, 1, 244, 20, 29, 0, 0, 1, 144, 21, 153, 19];
+
+        let header = [1u8, 0, 4, 1];
+        let names = index(&[b"TinkerSeed".as_slice()]);
+        // Every Top DICT operand takes the fixed five-byte form, so the
+        // offsets it holds do not depend on their own encoded width.
+        let top_len = 6 + 11;
+        let private_at = header.len() + names.len() + (2 + 1 + 2 + top_len) + 2 + 2;
+        let charstrings_at = private_at + private.len() + subrs.len();
+
+        let mut top = Vec::new();
+        top.push(29);
+        top.extend_from_slice(&(charstrings_at as u32).to_be_bytes());
+        top.push(17);
+        top.push(29);
+        top.extend_from_slice(&(private.len() as u32).to_be_bytes());
+        top.push(29);
+        top.extend_from_slice(&(private_at as u32).to_be_bytes());
+        top.push(18);
+        assert_eq!(top.len(), top_len);
+
+        let mut out = header.to_vec();
+        out.extend_from_slice(&names);
+        out.extend_from_slice(&index(&[top.as_slice()]));
+        out.extend_from_slice(&index(&[])); // strings
+        out.extend_from_slice(&index(&[])); // global subrs
+        assert_eq!(out.len(), private_at);
+        out.extend_from_slice(&private);
+        out.extend_from_slice(&subrs);
+        assert_eq!(out.len(), charstrings_at);
+        out.extend_from_slice(&charstrings);
+        out
+    }
+
+    /// The minimised reproducer for the INDEX shift: one item, `abc`, whose
+    /// offsets are the 1 and 4 every CFF writer emits. Reading it as
+    /// `[4, b'a', b'b']` is the whole bug in eight bytes.
+    #[test]
+    fn an_index_item_starts_after_the_offset_array() {
+        let raw = [0u8, 1, 1, 1, 4, b'a', b'b', b'c'];
+        let (index, next) = Index::parse(&raw, 0).expect("an INDEX");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.get(0), Some(b"abc".as_slice()));
+        assert_eq!(next, raw.len(), "and the next structure begins after it");
+    }
+
+    /// Nothing in this crate had ever parsed a whole CFF program — the tests
+    /// covered DICT operands, subroutine bias and refusal of garbage, all of
+    /// which pass with the INDEX reader off by a byte. So embedded CFF and
+    /// OpenType/CFF faces resolved no glyph at all, and only a font that got
+    /// as far as a charstring could show it.
+    #[test]
+    fn a_whole_font_program_parses_and_outlines_its_glyphs() {
+        let program = three_glyph_program();
+        let cff = Cff::parse(&program).expect("a CFF font");
+        assert_eq!(cff.glyph_count(), 3);
+
+        assert!(
+            cff.outline(0).expect("notdef answers").is_empty(),
+            "glyph 0 is .notdef and draws nothing"
+        );
+        assert!(
+            !cff.outline(1).expect("glyph 1").is_empty(),
+            "glyph 1 draws two lines from a width-prefixed rmoveto"
+        );
+        assert!(
+            !cff.outline(2).expect("glyph 2").is_empty(),
+            "glyph 2 reaches its line through hintmask and callsubr"
+        );
+
+        // The width prefix on glyph 1 is nominalWidthX plus the operand.
+        assert_eq!(cff.advance(1), Some(1376.0));
+        // Glyph 2 clears its stack without one, so it takes defaultWidthX.
+        assert_eq!(cff.advance(2), Some(500.0));
+    }
 
     #[test]
     fn dict_operands_decode_in_every_encoding() {
