@@ -547,6 +547,56 @@ mod tests {
         );
     }
 
+    /// An OpenType/CFF program: the `OTTO` tag, a `CFF ` table holding the
+    /// outlines, and no `glyf` at all.
+    fn opentype_cff() -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+        let mut hhea = vec![0u8; 36];
+        hhea[34..36].copy_from_slice(&1u16.to_be_bytes()); // numberOfHMetrics
+
+        let tables: [(&[u8; 4], &[u8]); 4] = [
+            (b"CFF ", &[1, 0, 4, 1, 0, 0, 0, 0]),
+            (b"cmap", &[0; 4]),
+            (b"head", &head),
+            (b"hhea", &hhea),
+        ];
+
+        let mut out = b"OTTO".to_vec();
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, data) in tables {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// The trap behind the OpenType/CFF fix: asked for a glyph from a face
+    /// that keeps its outlines in `CFF `, this module answers `Some(empty)`
+    /// rather than `None` — and an empty outline reads downstream as a
+    /// legitimate space, like a word gap, so a whole face drew as blank and
+    /// reported nothing. A caller must therefore look for `CFF ` itself
+    /// before asking here; `None` would have let it fall through instead.
+    #[test]
+    fn an_opentype_cff_face_yields_an_empty_outline_rather_than_none() {
+        let data = opentype_cff();
+        let sfnt = Sfnt::parse(&data).expect("the sfnt parser accepts OTTO");
+        assert!(sfnt.table(0x676C_7966).is_none(), "there is no glyf");
+        assert!(sfnt.table(0x4346_4620).is_some(), "the outlines are in CFF");
+
+        let outline = outline(&sfnt, 3).expect("an answer rather than a refusal");
+        assert!(outline.is_empty(), "and the answer is an empty outline");
+    }
+
     #[test]
     fn a_glyph_with_no_outline_is_empty_not_missing() {
         // loca giving an empty range: a space.
