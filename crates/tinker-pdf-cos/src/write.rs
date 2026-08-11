@@ -34,6 +34,15 @@ pub struct Encryption {
     pub owner_password: String,
     /// The permission bits, as `/P` stores them.
     pub permissions: i32,
+    /// Forty-eight bytes of randomness: the 32-byte file key and two 8-byte
+    /// salts.
+    ///
+    /// Supplied by the caller because this crate has no opinion about where
+    /// randomness comes from, and `wasm32-unknown-unknown` has no source of it
+    /// at all. Passing predictable bytes produces a predictably weak document
+    /// — which is the caller's decision, and honest, where pretending to have
+    /// entropy would not be.
+    pub entropy: [u8; 48],
 }
 
 /// Options for writing.
@@ -275,6 +284,135 @@ impl ObjectSet {
     }
 }
 
+/// Encrypts strings and streams on the way out (7.6.2).
+///
+/// R6 only. Earlier revisions derive a key per object; R6 uses the file key
+/// directly, which is why nothing here needs the generation number.
+pub(crate) struct StreamCipher {
+    key: [u8; 32],
+    /// Seed for the per-object initialisation vectors.
+    ///
+    /// CBC needs a different IV per message or two identical plaintexts
+    /// encrypt identically and the fact leaks. Derived from the file key and
+    /// the object number rather than asked for separately: it must be
+    /// unpredictable to an attacker without the key, and it is.
+    seed: [u8; 32],
+}
+
+impl StreamCipher {
+    fn new(key: [u8; 32]) -> StreamCipher {
+        let mut seed_input = Vec::with_capacity(40);
+        seed_input.extend_from_slice(&key);
+        seed_input.extend_from_slice(b"tpdf-iv");
+        StreamCipher {
+            key,
+            seed: tinker_pdf_crypto::sha2::sha256(&seed_input),
+        }
+    }
+
+    fn iv_for(&self, num: u32, counter: u32) -> [u8; 16] {
+        let mut input = Vec::with_capacity(40);
+        input.extend_from_slice(&self.seed);
+        input.extend_from_slice(&num.to_be_bytes());
+        input.extend_from_slice(&counter.to_be_bytes());
+        let digest = tinker_pdf_crypto::sha2::sha256(&input);
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&digest[..16]);
+        iv
+    }
+
+    fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
+        tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &self.iv_for(num, 0), data)
+    }
+
+    /// A copy of `object` with every string inside it encrypted.
+    fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
+        let mut counter = 1u32;
+        self.walk(object, num, &mut counter)
+    }
+
+    fn walk(&self, object: &Object, num: u32, counter: &mut u32) -> Object {
+        match object {
+            Object::String(s) => {
+                let iv = self.iv_for(num, *counter);
+                *counter = counter.saturating_add(1);
+                let bytes = tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &iv, &s.bytes);
+                // Hex, because ciphertext is arbitrary bytes and a literal
+                // string would need every one of them escaped.
+                Object::String(PdfString::hex(bytes))
+            }
+            Object::Array(items) => Object::Array(
+                items
+                    .iter()
+                    .map(|item| self.walk(item, num, counter))
+                    .collect(),
+            ),
+            Object::Dict(dict) => {
+                let mut out = Dict::with_capacity(dict.len());
+                for (key, value) in dict.iter() {
+                    out.insert(*key, self.walk(value, num, counter));
+                }
+                Object::Dict(out)
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// Builds the `/Encrypt` dictionary and the cipher that goes with it.
+fn build_encryption(encryption: &Encryption, names: &NameTable) -> Option<(Dict, StreamCipher)> {
+    let built = tinker_pdf_crypto::handler::build_r6(
+        encryption.user_password.as_bytes(),
+        encryption.owner_password.as_bytes(),
+        encryption.permissions,
+        true,
+        &encryption.entropy,
+    )?;
+
+    let mut dict = Dict::new();
+    dict.insert(Name::FILTER, Object::Name(names.intern(b"Standard")));
+    dict.insert(names.intern(b"V"), Object::Int(5));
+    dict.insert(names.intern(b"R"), Object::Int(6));
+    dict.insert(names.intern(b"Length"), Object::Int(256));
+    dict.insert(
+        names.intern(b"P"),
+        Object::Int(i64::from(encryption.permissions)),
+    );
+    dict.insert(names.intern(b"U"), Object::String(PdfString::hex(built.u)));
+    dict.insert(
+        names.intern(b"UE"),
+        Object::String(PdfString::hex(built.ue)),
+    );
+    dict.insert(names.intern(b"O"), Object::String(PdfString::hex(built.o)));
+    dict.insert(
+        names.intern(b"OE"),
+        Object::String(PdfString::hex(built.oe)),
+    );
+    dict.insert(
+        names.intern(b"Perms"),
+        Object::String(PdfString::hex(built.perms)),
+    );
+    dict.insert(names.intern(b"EncryptMetadata"), Object::Bool(true));
+
+    // 7.6.5: V5 names its crypt filters, and /StmF and /StrF say which applies
+    // to streams and strings. Without them a reader falls back to /Identity
+    // and reads ciphertext as content.
+    let mut std_cf = Dict::new();
+    std_cf.insert(names.intern(b"CFM"), Object::Name(names.intern(b"AESV3")));
+    std_cf.insert(
+        names.intern(b"AuthEvent"),
+        Object::Name(names.intern(b"DocOpen")),
+    );
+    std_cf.insert(names.intern(b"Length"), Object::Int(32));
+    let mut cf = Dict::new();
+    cf.insert(names.intern(b"StdCF"), Object::Dict(std_cf));
+    dict.insert(names.intern(b"CF"), Object::Dict(cf));
+    dict.insert(names.intern(b"StmF"), Object::Name(names.intern(b"StdCF")));
+    dict.insert(names.intern(b"StrF"), Object::Name(names.intern(b"StdCF")));
+
+    Some((dict, StreamCipher::new(built.file_key)))
+}
+
 /// Compresses a stream's data and records the filter, when asked and when it
 /// helps.
 ///
@@ -299,7 +437,14 @@ fn maybe_compress(data: &[u8], dict: &mut Dict, names: &NameTable, compress: boo
 }
 
 /// Writes one numbered object, whichever kind it is.
-fn write_entry(out: &mut Vec<u8>, num: u32, entry: &Written, names: &NameTable, compress: bool) {
+fn write_entry(
+    out: &mut Vec<u8>,
+    num: u32,
+    entry: &Written,
+    names: &NameTable,
+    compress: bool,
+    crypt: Option<&StreamCipher>,
+) {
     out.extend_from_slice(
         format!(
             "{num} 0 obj
@@ -308,12 +453,25 @@ fn write_entry(out: &mut Vec<u8>, num: u32, entry: &Written, names: &NameTable, 
         .as_bytes(),
     );
     match entry {
-        Written::Object(object) => write_object(out, object, names),
+        Written::Object(object) => match crypt {
+            // 7.6.2: every string in the file is encrypted too, not only the
+            // streams. Leaving them in the clear puts titles, form values and
+            // annotation contents in plain sight inside a file that claims to
+            // be encrypted.
+            Some(cipher) => write_object(out, &cipher.encrypt_strings(object, num), names),
+            None => write_object(out, object, names),
+        },
         Written::Stream(stream) => {
             // 7.3.8.2: /Length must agree with the bytes that follow, so the
             // writer computes it rather than trusting whatever was there.
             let mut dict = stream.dict.clone();
             let data = maybe_compress(&stream.data, &mut dict, names, compress);
+            // Encryption is the last thing applied and the first thing undone,
+            // so it wraps the compressed bytes rather than the other way round.
+            let data = match crypt {
+                Some(cipher) => cipher.encrypt_stream(&data, num),
+                None => data,
+            };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
             write_dict(out, &dict, names, 0);
             out.extend_from_slice(
@@ -363,7 +521,10 @@ pub fn incremental_update(
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(changed.entries.len());
     for (num, object) in &changed.entries {
         offsets.push((*num, out.len() as u64));
-        write_entry(&mut out, *num, object, names, compress);
+        // An incremental update inherits the original file's encryption,
+        // which this build cannot reproduce without its key — so it refuses
+        // rather than appending plaintext into a ciphertext file.
+        write_entry(&mut out, *num, object, names, compress, None);
     }
 
     let xref_at = out.len() as u64;
@@ -398,6 +559,14 @@ pub fn rewrite(
     // 7.5.2: four bytes above 127 tell transfer software the file is binary.
     out.extend_from_slice(&[b'%', 0xE2, 0xE3, 0xCF, 0xD3, b'\n']);
 
+    // 7.6.1: the /Encrypt dictionary is written in the clear and everything
+    // else is not. Built first so the cipher exists before the first object.
+    let encryption = options
+        .encryption
+        .as_ref()
+        .and_then(|e| build_encryption(e, names));
+    let crypt = encryption.as_ref().map(|(_, cipher)| cipher);
+
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(objects.entries.len());
 
     // 7.5.7: an object stream holds objects that are not themselves streams.
@@ -419,7 +588,7 @@ pub fn rewrite(
             continue;
         }
         offsets.push((*num, out.len() as u64));
-        write_entry(&mut out, *num, object, names, options.compress);
+        write_entry(&mut out, *num, object, names, options.compress, crypt);
     }
 
     let container = objects.max_number().saturating_add(1);
@@ -456,8 +625,30 @@ pub fn rewrite(
             // uncompressed makes the file *larger* than not packing it, which
             // is the opposite of the reason object streams exist.
             options.compress,
+            crypt,
         );
     }
+
+    // 7.6.1: the /Encrypt dictionary is the one object never encrypted, since
+    // a reader needs it to decrypt everything else.
+    let mut trailer = trailer.clone();
+    if let Some((dict, _)) = &encryption {
+        let encrypt_num = objects.max_number().saturating_add(3);
+        offsets.push((encrypt_num, out.len() as u64));
+        write_entry(
+            &mut out,
+            encrypt_num,
+            &Written::Object(Object::Dict(dict.clone())),
+            names,
+            false,
+            None,
+        );
+        trailer.insert(
+            Name::ENCRYPT,
+            Object::Ref(crate::object::ObjRef::new(encrypt_num, 0)),
+        );
+    }
+    let trailer = &trailer;
 
     let xref_at = out.len() as u64;
     // Objects inside a container need a cross-reference stream to be found:
@@ -583,6 +774,9 @@ fn write_xref_stream(
         &Written::Stream(StreamData { dict, data }),
         names,
         false,
+        // 7.6.2: a cross-reference stream is never encrypted — a reader finds
+        // it before it knows there is an /Encrypt dictionary to look for.
+        None,
     );
 }
 
@@ -729,6 +923,7 @@ mod tests {
             }),
             &table,
             false,
+            None,
         );
         let text = String::from_utf8_lossy(&out);
 

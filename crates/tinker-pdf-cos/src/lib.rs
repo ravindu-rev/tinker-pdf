@@ -94,5 +94,5 @@ pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use text_string::{decode_text_string, parse_date, Date};
 pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use warn::{Warning, WarningKind, WarningSink};
-pub use write::{ObjectSet, StreamData, WriteMode, WriteOptions, Written};
+pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};

@@ -512,6 +512,114 @@ fn check_perms(params: &HandlerParams, key: &[u8], notes: &mut Vec<HandlerNote>)
 }
 
 /// Comparison whose duration does not depend on where two byte strings first
+/// Everything the `/Encrypt` dictionary of a new R6 document needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltHandler {
+    /// The 32-byte file key, which encrypts every string and stream.
+    pub file_key: [u8; 32],
+    /// `/U`: 48 bytes, the user password's hash and its two salts.
+    pub u: Vec<u8>,
+    /// `/UE`: the file key wrapped with the user password.
+    pub ue: Vec<u8>,
+    /// `/O`: 48 bytes, the owner password's hash over `/U`.
+    pub o: Vec<u8>,
+    /// `/OE`: the file key wrapped with the owner password.
+    pub oe: Vec<u8>,
+    /// `/Perms`: the permissions, encrypted with the file key, so a reader can
+    /// tell a tampered `/P` from an honest one.
+    pub perms: Vec<u8>,
+}
+
+/// Builds an R6 (AES-256) handler for a new document.
+///
+/// 7.6.4.3.3 and Algorithms 8, 9 and 10. `entropy` supplies the 32-byte file
+/// key and the two 8-byte user salts — 48 bytes in all, which is what `/U`'s
+/// layout of hash-then-validation-salt-then-key-salt requires. This crate has
+/// no opinion about where randomness comes from, and
+/// `wasm32-unknown-unknown` has no source of it at all. A caller passing
+/// predictable bytes gets a predictably weak document, which is their decision
+/// to make and more honest than pretending to have entropy.
+///
+/// Returns `None` only when the AES layer refuses, which it does not for these
+/// fixed sizes.
+#[must_use]
+pub fn build_r6(
+    user_password: &[u8],
+    owner_password: &[u8],
+    permissions: i32,
+    encrypt_metadata: bool,
+    entropy: &[u8; 48],
+) -> Option<BuiltHandler> {
+    let mut file_key = [0u8; 32];
+    file_key.copy_from_slice(&entropy[..32]);
+
+    // 7.6.4.3.3: both salts are eight bytes. `/U` is the 32-byte hash, then
+    // the validation salt, then the key salt — 48 bytes, and a reader slices
+    // it at exactly those offsets.
+    let user_validation = &entropy[32..40];
+    let user_key_salt = &entropy[40..48];
+
+    // The owner salts are derived rather than asked for: they must differ from
+    // the user's, and hashing the same entropy achieves that without inventing
+    // a second contract for the caller to get wrong.
+    let owner_salts = crate::sha2::sha256(entropy);
+    let owner_validation = &owner_salts[..8];
+    let owner_key_salt = &owner_salts[8..16];
+
+    // Algorithm 8: /U is hash || validation salt || key salt, and /UE is the
+    // file key encrypted with a key derived from the password and key salt.
+    let mut u = hash_2b(user_password, user_validation, &[], 6);
+    u.extend_from_slice(user_validation);
+    u.extend_from_slice(user_key_salt);
+
+    let intermediate = hash_2b(user_password, user_key_salt, &[], 6);
+    let ue = crate::aes::cbc_encrypt_no_padding(&intermediate, &[0u8; 16], &file_key)?;
+
+    // Algorithm 9: the owner hashes are taken over the password *and* /U, so
+    // the two passwords cannot be swapped and the owner one cannot be checked
+    // without the file already carrying /U.
+    let mut o = hash_2b(owner_password, owner_validation, &u, 6);
+    o.extend_from_slice(owner_validation);
+    o.extend_from_slice(owner_key_salt);
+
+    let intermediate = hash_2b(owner_password, owner_key_salt, &u, 6);
+    let oe = crate::aes::cbc_encrypt_no_padding(&intermediate, &[0u8; 16], &file_key)?;
+
+    // Algorithm 10: /Perms is the permissions, a marker, and the metadata
+    // flag, encrypted with the file key in ECB — which for one block is CBC
+    // with a zero IV. A reader that decrypts it and finds /P disagreeing knows
+    // the permissions were edited.
+    let mut perms = [0u8; 16];
+    perms[..4].copy_from_slice(&permissions.to_le_bytes());
+    perms[4..8].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+    perms[8] = if encrypt_metadata { b'T' } else { b'F' };
+    perms[9] = b'a';
+    perms[10] = b'd';
+    perms[11] = b'b';
+    // The last four bytes are unspecified filler.
+    perms[12..].copy_from_slice(&entropy[32..36]);
+    let perms = crate::aes::cbc_encrypt_no_padding(&file_key, &[0u8; 16], &perms)?;
+
+    Some(BuiltHandler {
+        file_key,
+        u,
+        ue,
+        o,
+        oe,
+        perms,
+    })
+}
+
+/// Encrypts one string or stream with an R6 file key (7.6.3.2).
+///
+/// AES-256-CBC with the initialisation vector prefixed, and — unlike every
+/// earlier revision — no per-object key derivation: R6 uses the file key
+/// directly, which is why the object number is not a parameter.
+#[must_use]
+pub fn encrypt_aes256(file_key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    crate::aes::cbc_encrypt_with_iv_prefix(file_key, iv, data).unwrap_or_default()
+}
+
 /// differ.
 #[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
