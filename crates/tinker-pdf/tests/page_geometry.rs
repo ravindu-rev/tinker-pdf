@@ -183,3 +183,61 @@ fn content_inside_a_shifted_crop_box_lands_at_its_corner() {
     assert!(x0 <= 1, "against the left edge: {x0}");
     assert!(y1 >= bitmap.height - 2, "and the bottom: {y1}");
 }
+
+/// A page too large to render at the requested resolution must be *scaled*,
+/// not cropped.
+///
+/// The canvas was clamped to a pixel ceiling and the transform was not, so the
+/// content was drawn at full size onto a smaller surface — the top-left corner
+/// of the page, with no warning. This fires on real paper: ANSI E at 300 dpi
+/// loses three quarters of the sheet.
+#[test]
+fn an_enormous_page_is_scaled_rather_than_cropped() {
+    // A page with a mark in each corner, far too large for the ceiling.
+    let content = "0 0 0 rg\n\
+                   0 0 400 400 re f\n\
+                   19600 0 400 400 re f\n\
+                   0 19600 400 400 re f\n\
+                   19600 19600 400 400 re f";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20000 20000]\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes();
+
+    let doc = Document::open(bytes).expect("it opens");
+    let bitmap = doc.page(0).expect("a page").render(&RenderOptions {
+        scale: 4.0,
+        ..RenderOptions::default()
+    });
+
+    let dark = |x: u32, y: u32| -> bool {
+        let at = (y as usize) * bitmap.stride + (x as usize) * bitmap.components();
+        bitmap.data.get(at).copied().unwrap_or(255) < 128
+    };
+
+    // All four corners are on the canvas. Cropping keeps only one.
+    let (w, h) = (bitmap.width, bitmap.height);
+    assert!(dark(2, h - 3), "the lower-left mark");
+    assert!(dark(w - 3, h - 3), "the lower-right mark");
+    assert!(dark(2, 2), "the upper-left mark");
+    assert!(
+        dark(w - 3, 2),
+        "and the upper-right mark, which cropping would have lost"
+    );
+
+    assert!(
+        bitmap
+            .warnings
+            .iter()
+            .any(|w| matches!(w, tinker_pdf::RenderWarning::PageScaledDown { .. })),
+        "and the caller is told the scale is not the one asked for: {:?}",
+        bitmap.warnings
+    );
+}

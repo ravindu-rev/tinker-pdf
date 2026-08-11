@@ -491,12 +491,21 @@ impl Page {
             1.0
         };
 
-        let canvas = tinker_pdf_render::page_canvas(w, h, scale, options.format);
+        // The canvas is clamped for an enormous page; the transform has to be
+        // clamped by the same factor or the content is drawn full-size onto a
+        // smaller surface, which crops instead of scaling.
+        let applied = tinker_pdf_render::page_scale(w, h, scale);
+
+        let canvas = tinker_pdf_render::page_canvas(w, h, applied, options.format);
+
+        // Ruling 2: the caller gets a whole page rather than a fragment, and
+        // is told the resolution is not the one they asked for.
+        let scaled_down = applied < scale;
         // The rotation and the crop-box origin belong in the transform, not
         // only in the canvas size: sizing for a rotated page and then drawing
         // it upright fills a sideways canvas with clipped, upright content.
         let crop = self.crop_box();
-        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), scale);
+        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
 
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         let resources =
@@ -512,7 +521,13 @@ impl Page {
             // page rather than under it.
             annots::draw(&self.doc, &self.inner, self.fonts.as_deref(), &mut renderer);
         }
-        let (canvas, warnings) = renderer.finish();
+        let (canvas, mut warnings) = renderer.finish();
+        if scaled_down {
+            warnings.push(RenderWarning::PageScaledDown {
+                requested: scale,
+                applied,
+            });
+        }
 
         Bitmap {
             width: canvas.width,

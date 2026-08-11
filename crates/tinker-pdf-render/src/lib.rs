@@ -63,12 +63,27 @@ impl CancelToken {
 /// Ruling 2: a page never fails because one thing on it was unsupported. It
 /// renders what it can, substitutes a neutral placeholder for what it cannot,
 /// and says so here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// `Eq` is not derivable now that a variant carries the scale, and a scale is
+// an `f64`. `PartialEq` is what the deduplication in the renderer uses.
+#[derive(Clone, Debug, PartialEq)]
 pub enum RenderWarning {
     /// An image used a codec that is not built in; a placeholder was drawn.
     UnsupportedImage {
         /// Which codec.
         codec: String,
+    },
+    /// The page was too large to render at the requested resolution, so it
+    /// was rendered smaller.
+    ///
+    /// Ruling 2: the caller gets a whole page rather than a fragment of one,
+    /// and is told the scale is not the one they asked for. Without this the
+    /// only signal is a bitmap whose dimensions do not match the arithmetic
+    /// the caller just did.
+    PageScaledDown {
+        /// The scale that was asked for.
+        requested: f64,
+        /// The scale that was used.
+        applied: f64,
     },
     /// A font program could not be read, so its glyphs were not drawn.
     UnreadableFont,
@@ -1010,7 +1025,40 @@ pub const MAX_PAGE_PIXELS: u64 = 1 << 26;
 /// folklore that callers rediscovered.
 ///
 /// A page whose area would exceed [`MAX_PAGE_PIXELS`] is scaled down to fit,
-/// keeping its aspect ratio — degraded rather than refused (ruling 2).
+/// keeping its aspect ratio — degraded rather than refused (ruling 2). Pass
+/// the result of [`page_scale`] rather than the caller's own scale, or the
+/// canvas shrinks and the content does not.
+///
+/// The scale a page will actually be rendered at.
+///
+/// [`page_pixels`] clamps an enormous page to a bounded canvas. The canvas was
+/// clamped and the *transform* was not, so the content was drawn at full size
+/// onto a smaller surface — which crops rather than scales. On real paper:
+/// ANSI E at 300 dpi lost three quarters of the sheet, silently.
+///
+/// Both the canvas and the transform take this, so they cannot disagree.
+#[must_use]
+pub fn page_scale(width_pt: f64, height_pt: f64, scale: f64) -> f64 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 1.0;
+    }
+    let side = |v: f64| {
+        if !v.is_finite() || v <= 0.0 {
+            1.0
+        } else {
+            (v * scale).ceil().max(1.0)
+        }
+    };
+    let area = side(width_pt) * side(height_pt);
+    if area <= MAX_PAGE_PIXELS as f64 {
+        return scale;
+    }
+    // `sqrt` is correctly rounded by IEEE 754, so this stays target-stable
+    // (ruling 4).
+    scale * (MAX_PAGE_PIXELS as f64 / area).sqrt()
+}
+
+/// The pixel size of a page at a given scale, rounded outward.
 #[must_use]
 pub fn page_pixels(width_pt: f64, height_pt: f64, scale: f64) -> (u32, u32) {
     let round_out = |v: f64| {
