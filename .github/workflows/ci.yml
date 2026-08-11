@@ -55,6 +55,73 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --manifest-path fuzz/Cargo.toml --all-targets
 
+  fuzz-seeds:
+    # A short run over the committed seed corpora, on every push and pull
+    # request. It is not here to find anything new — the nightly in
+    # `fuzz.yml` does that with a hundredfold the budget. It is here so that
+    # a change reintroducing a crash we have already found fails the pull
+    # request that makes it, rather than the next scheduled run.
+    #
+    # That works because a minimised reproducer lands twice: as a test in the
+    # crate that owns the parser, and as a seed here. libFuzzer replays the
+    # whole corpus before it mutates anything, so the replay alone is the
+    # regression check, and the seconds after it are a free look around.
+    #
+    # Bounded on purpose, and bounded per target rather than in total, so
+    # adding a target adds a known amount of time instead of quietly taking
+    # it from the others: fifteen targets, twenty seconds each, one build.
+    # Unlike the nightly this is one runner rather than fifteen, because
+    # holding fifteen machines for twenty seconds each is worse for everyone
+    # queueing behind it than holding one for five minutes.
+    #
+    # This job replaces nothing: `fuzz-targets` above still type-checks the
+    # crate on stable, on every platform's schedule, and it is the check that
+    # would notice a target rotting even if nightly or cargo-fuzz were
+    # unavailable.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@cargo-fuzz
+      - name: Build every target once
+        run: cargo fuzz build
+        # `-D warnings` from a nightly compiler would fail this on a lint
+        # that has nothing to do with the code under test.
+        env:
+          RUSTFLAGS: ''
+      - name: Replay the seed corpora
+        run: |
+          set -uo pipefail
+          failed=()
+          for target in $(cargo fuzz list); do
+            echo "::group::$target"
+            if ! cargo fuzz run "$target" "fuzz/corpus/$target" -- \
+                 -max_total_time=20 -timeout=20; then
+              failed+=("$target")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -ne 0 ]; then
+            echo "::error::fuzz targets crashed: ${failed[*]}"
+            exit 1
+          fi
+        env:
+          RUSTFLAGS: ''
+      - name: Attach the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-seed-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
   bindings:
     # Excluded from the workspace for the same reason as fuzz/ — they pull
     # dependencies the engine refuses — and so invisible to
