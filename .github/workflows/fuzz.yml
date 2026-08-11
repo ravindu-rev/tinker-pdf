@@ -1,0 +1,118 @@
+# Nightly fuzzing.
+#
+# Separate from ci.yml because the trigger is different, and in GitHub Actions
+# the trigger belongs to the *workflow*, not the job. Adding `schedule:` to
+# ci.yml would schedule everything in it — the three-OS test matrix, wasm,
+# the bindings, the licence check — every night, unless all six jobs grew an
+# `if: github.event_name != 'schedule'` guard, which is six chances to get it
+# wrong for no benefit. One file, one trigger, one concern.
+#
+# It also keeps `RUSTFLAGS: -D warnings` out of this build. That env is set at
+# workflow level in ci.yml and it is right there; here it would mean a lint
+# added to a nightly compiler can fail the fuzz run, which is a false alarm
+# about the one thing this job exists to report honestly.
+
+name: Fuzz
+
+on:
+  schedule:
+    # 03:17 UTC. Off the hour, because everything is scheduled on the hour.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        required: false
+        default: '600'
+
+# A nightly that is still running when the next one starts is a nightly whose
+# results nobody can attribute.
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The matrix is read off the directory rather than written down here. A
+  # hardcoded list is a list someone forgets to add a target to, and a target
+  # nobody runs is the exact defect this whole job exists to end.
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.find.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          list=""
+          for path in fuzz/fuzz_targets/*.rs; do
+            list="$list\"$(basename "$path" .rs)\","
+          done
+          echo "targets=[${list%,}]" >> "$GITHUB_OUTPUT"
+          echo "Fuzzing: [${list%,}]"
+
+  fuzz:
+    needs: list
+    # One runner per target, so the time budget is *per target* rather than
+    # shared: a new target cannot starve the others, and a target that starts
+    # crashing in its first second does not cost the rest their run. With
+    # `fail-fast: false` a crash fails its own leg and the workflow, and the
+    # others still report.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.list.outputs.targets) }}
+    runs-on: ubuntu-latest
+    # libFuzzer is not supported on x86_64-pc-windows-msvc, so this job is
+    # Linux-only by necessity rather than by choice. The parsers are the same
+    # code on every target and `tests/determinism.rs` is what proves that.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # `cargo fuzz` builds the standard library with the sanitizer and
+          # the same debug assertions as the target, which needs its source.
+          components: rust-src, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cargo fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=${{ github.event.inputs.seconds || 600 }} \
+            -timeout=25 \
+            -print_final_stats=1
+        # A hang counts. `-timeout` makes one input taking 25 seconds a
+        # finding rather than something that quietly eats the budget.
+
+      # The failing input, attached. `cargo fuzz` also prints it base64-encoded
+      # in the log, so a crash is diagnosable from the summary alone; this is
+      # the copy you can feed straight back to `cargo fuzz tmin`.
+      - name: Attach the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Whatever the run learned, minimised. Merging it back into the
+      # committed seeds is a human's pull request — plan 14 caps corpora per
+      # target and commits only minimised seeds, and neither is a decision a
+      # scheduled job should be making on its own.
+      - name: Minimise and attach the corpus
+        if: success()
+        run: cargo fuzz cmin ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
+      - name: Attach the minimised corpus
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 14
