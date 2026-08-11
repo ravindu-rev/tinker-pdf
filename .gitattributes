@@ -5,3 +5,7 @@
 *.pdf binary
 *.png binary
 *.jpg binary
+
+# Fuzz seeds are bytes chosen for what they make a parser do; a normalized
+# line ending is a different input, and several of them have no extension.
+fuzz/corpus/** binary

@@ -62,6 +62,46 @@ caught and reported after the fact.
 
 ## Corpora
 
-Minimized corpora are committed under `corpus/<target>/` as they accumulate.
+Every target has a committed seed corpus under `corpus/<target>/`. They are
+the difference between a run that explores and one that spends its hour
+rediscovering the file header, and plan 14 asks for them minimised and small
+enough to review: the whole set is about 22 KB across 50 files, and the
+largest single seed is 2.8 KB.
+
+They are built from material this repository already had, so each one is
+something a parser here is known to accept rather than a blob nobody can
+account for:
+
+| Target | Seeds come from |
+| --- | --- |
+| `ascii_filters` | Hand-written hex, ASCII85 and RunLength streams, plus rows shaped for a PNG-Up predictor |
+| `ccitt` | `ccitt.rs`'s own `pack` fixtures, behind the two control bytes the target reads first |
+| `cff` | `cff.rs`'s `three_glyph_program` test — the same bytes, built by the test so the two cannot drift |
+| `content_tokenizer` | Hand-written operator streams: text, paths, an inline image, escapes, comments |
+| `cos_document` | The four `testdata/` PDFs and the four pages `determinism.rs` builds |
+| `cos_object` | Hand-written 7.3 objects: dictionary, stream, nested array, every number form, two unterminated |
+| `inflate` | Our own `zlib_compress` output, including an empty stream and an incompressible one |
+| `jpeg` | `jpeg.rs`'s `tiny_gray`, `sequential_block` and both progressive fixtures |
+| `lzw` | 7.4.4.2's Table 8 example, truncated, and a clear-code stream |
+| `render_page` | The subset of the `cos_document` PDFs that has a page worth rendering |
+| `truetype` | `determinism.rs`'s `curvy_font`, plus a truncated copy and its directory alone |
+
+Replaying a corpus without mutating it is the cheapest check that a seed
+still reaches what it was chosen for:
+
+```sh
+cargo +nightly fuzz run cff corpus/cff -- -runs=0
+```
+
 Large third-party corpora are fetched by pinned checksum and never committed —
 see the plan for the per-corpus licence table.
+
+## Crashes
+
+`cargo-fuzz` writes a failing input to `artifacts/<target>/`. It does not stay
+there: minimise it with `cargo +nightly fuzz tmin <target> <artifact>`, then
+land the minimised bytes as an ordinary test in the crate that owns the
+parser, in the style `hostile_input.rs` uses, with a comment naming what it
+triggered. The value is not the fuzzer finding it once; it is the reproducer
+running on every `cargo test` afterwards, on stable, where it cannot be
+ignored.
