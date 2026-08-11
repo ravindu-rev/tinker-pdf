@@ -1,15 +1,19 @@
-//! Baseline JPEG decoding (DCTDecode, 7.4.8; ITU-T T.81).
+//! JPEG decoding (DCTDecode, 7.4.8; ITU-T T.81).
 //!
-//! Huffman-coded baseline and extended sequential at 8 bits, which is what
-//! essentially every PDF carries. Progressive is a named gap: it needs a
-//! second coefficient pass with spectral selection and successive
-//! approximation, and until it exists a progressive image is reported rather
-//! than half-decoded.
+//! Huffman-coded baseline, extended sequential and **progressive** at 8 bits,
+//! which between them is what essentially every PDF carries. Arithmetic coding
+//! and 12-bit precision are reported rather than half-decoded.
 //!
-//! The IDCT is the integer AAN-style separable transform. That means output
-//! can differ from libjpeg's by a least-significant bit on some coefficients —
-//! there is no single correct IDCT, only conforming ones — so comparison
-//! against a reference is perceptual, never exact.
+//! Every mode decodes into the same per-component coefficient buffer and is
+//! then rendered once, at the end, by a single dequantise-and-transform pass.
+//! Progressive forces that shape — a coefficient is refined by later scans, so
+//! nothing can be turned into a pixel until the last scan has been read — and
+//! baseline shares it rather than keeping a second path that could drift.
+//!
+//! The IDCT is the integer separable transform. That means output can differ
+//! from libjpeg's by a least-significant bit on some coefficients — there is no
+//! single correct IDCT, only conforming ones — so comparison against a
+//! reference is perceptual, never exact.
 
 use crate::Warning;
 
@@ -47,8 +51,6 @@ pub struct JpegImage {
 pub enum JpegError {
     /// The bytes do not begin like a JPEG.
     NotJpeg,
-    /// Progressive JPEG, which is not yet implemented.
-    Progressive,
     /// Arithmetic coding, which is deferred behind a capability.
     Arithmetic,
     /// A sample precision other than 8 bits.
@@ -59,7 +61,7 @@ pub enum JpegError {
     UnsupportedComponents,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Component {
     id: u8,
     h: usize,
@@ -68,6 +70,43 @@ struct Component {
     dc_table: usize,
     ac_table: usize,
     dc_prediction: i32,
+    /// Blocks per line in the coefficient buffer, padded out to whole MCUs so
+    /// an interleaved scan can address every block it codes.
+    blocks_x: usize,
+    /// Blocks per column, likewise padded.
+    blocks_y: usize,
+    /// Blocks per line that carry image rather than padding, which is what a
+    /// non-interleaved scan iterates over (T.81 A.2.2). Getting this wrong
+    /// desynchronises every later block in the scan.
+    scan_x: usize,
+    /// Blocks per column, likewise.
+    scan_y: usize,
+    /// Coefficients in zig-zag order, one 64-entry block after another.
+    ///
+    /// Zig-zag rather than natural order because spectral selection names its
+    /// band in zig-zag indices; storing them any other way would mean
+    /// converting on every scan instead of once at the end. `i16` because that
+    /// is the range a coefficient occupies, and the buffer covers the whole
+    /// image.
+    coeffs: Vec<i16>,
+}
+
+impl Component {
+    fn block(&self, bx: usize, by: usize) -> Option<&[i16]> {
+        if bx >= self.blocks_x || by >= self.blocks_y {
+            return None;
+        }
+        let at = (by * self.blocks_x + bx).checked_mul(64)?;
+        self.coeffs.get(at..at + 64)
+    }
+
+    fn block_mut(&mut self, bx: usize, by: usize) -> Option<&mut [i16]> {
+        if bx >= self.blocks_x || by >= self.blocks_y {
+            return None;
+        }
+        let at = (by * self.blocks_x + bx).checked_mul(64)?;
+        self.coeffs.get_mut(at..at + 64)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -125,6 +164,9 @@ struct BitReader<'a> {
     count: u32,
     /// True once the reader has run past the end.
     exhausted: bool,
+    /// Set when `bit` walked over a restart marker by itself, so `restart`
+    /// knows not to skip a second one and lose a whole interval.
+    crossed_restart: bool,
 }
 
 impl<'a> BitReader<'a> {
@@ -135,6 +177,7 @@ impl<'a> BitReader<'a> {
             bits: 0,
             count: 0,
             exhausted: false,
+            crossed_restart: false,
         }
     }
 
@@ -156,6 +199,7 @@ impl<'a> BitReader<'a> {
                     Some(&m) if (0xD0..=0xD7).contains(&m) => {
                         // A restart marker: skip it and carry on.
                         self.at += 1;
+                        self.crossed_restart = true;
                         return self.bit();
                     }
                     _ => {
@@ -173,7 +217,7 @@ impl<'a> BitReader<'a> {
 
     fn bits(&mut self, n: u32) -> i32 {
         let mut value = 0i32;
-        for _ in 0..n.min(32) {
+        for _ in 0..n.min(31) {
             value = (value << 1) | self.bit() as i32;
         }
         value
@@ -200,6 +244,14 @@ impl<'a> BitReader<'a> {
     /// Resets at a restart marker (T.81 F.2.1.3.1).
     fn restart(&mut self) {
         self.count = 0;
+        if self.crossed_restart {
+            // The bit reader already stepped over it while filling its
+            // accumulator; skipping another would drop an entire interval's
+            // worth of blocks.
+            self.crossed_restart = false;
+            return;
+        }
+
         // Skip to just past the next RSTn marker.
         while self.at + 1 < self.data.len() {
             if self.data.get(self.at) == Some(&0xFF) {
@@ -222,9 +274,14 @@ const ZIGZAG: [usize; 64] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+/// The largest magnitude category T.81 defines. A Huffman table is free to
+/// contain a larger byte, and a corrupt one will; shifting by it is undefined
+/// in the spec and a panic in Rust (ruling 1).
+const MAX_CATEGORY: u32 = 16;
+
 /// Extends a Huffman-decoded magnitude to its signed value (T.81 F.2.2.1).
 fn extend(value: i32, length: u32) -> i32 {
-    if length == 0 {
+    if length == 0 || length > MAX_CATEGORY {
         return 0;
     }
     if value < (1 << (length - 1)) {
@@ -234,7 +291,68 @@ fn extend(value: i32, length: u32) -> i32 {
     }
 }
 
-/// Decodes a baseline JPEG.
+/// Finds the next real marker, stepping over stuffed bytes and restarts.
+///
+/// A scan's entropy-coded data has no length field, so the only way to reach
+/// the segment after it is to look for the next thing that cannot occur inside
+/// it. Trusting the bit reader's position instead would put a corrupt scan's
+/// desynchronisation into the marker stream as well.
+fn next_marker(data: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while at + 1 < data.len() {
+        if data.get(at) == Some(&0xFF) {
+            if let Some(&marker) = data.get(at + 1) {
+                if marker != 0x00 && marker != 0xFF && !(0xD0..=0xD7).contains(&marker) {
+                    return at;
+                }
+            }
+        }
+        at += 1;
+    }
+    data.len()
+}
+
+/// Sizes the coefficient buffers, returning the MCU grid.
+///
+/// Returns `None` when the image would exceed the output cap, which is checked
+/// here rather than after decoding because the buffers are the allocation that
+/// a hostile size field is trying to provoke.
+fn allocate(
+    components: &mut [Component],
+    width: usize,
+    height: usize,
+    max_output: usize,
+) -> Option<(usize, usize)> {
+    if width
+        .saturating_mul(height)
+        .saturating_mul(components.len())
+        > max_output
+    {
+        return None;
+    }
+
+    let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
+    let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
+    let mcus_x = width.div_ceil(h_max * 8);
+    let mcus_y = height.div_ceil(v_max * 8);
+
+    for component in components.iter_mut() {
+        component.blocks_x = mcus_x * component.h;
+        component.blocks_y = mcus_y * component.v;
+
+        // A.1.1: a component's own resolution, rounded up to whole blocks.
+        let own_w = (width * component.h).div_ceil(h_max);
+        let own_h = (height * component.v).div_ceil(v_max);
+        component.scan_x = own_w.div_ceil(8).min(component.blocks_x);
+        component.scan_y = own_h.div_ceil(8).min(component.blocks_y);
+
+        component.coeffs = vec![0i16; component.blocks_x * component.blocks_y * 64];
+    }
+
+    Some((mcus_x, mcus_y))
+}
+
+/// Decodes a JPEG.
 pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     if data.get(..2) != Some(&[0xFF, 0xD8]) {
         return Err(JpegError::NotJpeg);
@@ -249,6 +367,10 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     let mut restart_interval = 0usize;
     let mut adobe_transform: Option<u8> = None;
     let mut adobe_seen = false;
+    let mut progressive = false;
+    let mut mcus = (0usize, 0usize);
+    let mut allocated = false;
+    let mut truncated = false;
 
     let mut at = 2usize;
     while at + 1 < data.len() {
@@ -280,8 +402,10 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         };
 
         match marker {
-            // SOF0 baseline, SOF1 extended sequential.
-            0xC0 | 0xC1 => {
+            // SOF0 baseline, SOF1 extended sequential, SOF2 progressive.
+            0xC0..=0xC2 => {
+                progressive = marker == 0xC2;
+
                 let (Some(&precision), Some(h), Some(w)) =
                     (segment.first(), segment.get(1..3), segment.get(3..5))
                 else {
@@ -313,7 +437,6 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                     });
                 }
             }
-            0xC2 => return Err(JpegError::Progressive),
             0xC9..=0xCB => return Err(JpegError::Arithmetic),
 
             // DQT
@@ -394,36 +517,62 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                 }
             }
 
-            // SOS: the scan itself.
+            // SOS: one scan, of which a progressive file has many.
             0xDA => {
                 let count = usize::from(segment.first().copied().unwrap_or(0));
+                let mut parts: Vec<usize> = Vec::with_capacity(count.min(4));
                 for i in 0..count.min(4) {
                     let (Some(&id), Some(&tables)) =
                         (segment.get(1 + i * 2), segment.get(2 + i * 2))
                     else {
                         return Err(JpegError::Truncated);
                     };
-                    if let Some(component) = components.iter_mut().find(|c| c.id == id) {
-                        component.dc_table = usize::from(tables >> 4).min(3);
-                        component.ac_table = usize::from(tables & 0x0F).min(3);
+                    if let Some(index) = components.iter().position(|c| c.id == id) {
+                        if let Some(component) = components.get_mut(index) {
+                            component.dc_table = usize::from(tables >> 4).min(3);
+                            component.ac_table = usize::from(tables & 0x0F).min(3);
+                        }
+                        parts.push(index);
                     }
                 }
 
+                // G.1.1.1.1: the spectral band and the point transform. A
+                // baseline scan always says 0..63 with no approximation, so
+                // reading them costs nothing and progressive needs them.
+                let base = 1 + count.min(4) * 2;
+                let ss = usize::from(segment.get(base).copied().unwrap_or(0)).min(63);
+                let se = usize::from(segment.get(base + 1).copied().unwrap_or(63)).min(63);
+                let a = segment.get(base + 2).copied().unwrap_or(0);
+                let (ah, al) = (u32::from(a >> 4), u32::from(a & 0x0F));
+
+                if !allocated {
+                    let Some(grid) = allocate(&mut components, width, height, max_output) else {
+                        warnings.push(Warning::OutputCapHit);
+                        return Err(JpegError::Truncated);
+                    };
+                    mcus = grid;
+                    allocated = true;
+                }
+
                 let scan = data.get(segment_end..).unwrap_or_default();
-                return finish(
+                let complete = decode_scan(
                     scan,
-                    width,
-                    height,
                     &mut components,
-                    &quant,
+                    &parts,
                     &dc_tables,
                     &ac_tables,
                     restart_interval,
-                    adobe_seen,
-                    adobe_transform,
-                    max_output,
-                    warnings,
+                    progressive,
+                    (ss, se.max(ss)),
+                    (ah, al),
+                    mcus,
                 );
+                truncated |= !complete;
+
+                // Entropy data carries no length; the next segment starts at
+                // the next marker that cannot appear inside it.
+                at = next_marker(data, segment_end);
+                continue;
             }
 
             _ => {}
@@ -432,21 +581,455 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         at = segment_end;
     }
 
-    warnings.push(Warning::TruncatedInput);
-    Err(JpegError::Truncated)
+    if !allocated {
+        warnings.push(Warning::TruncatedInput);
+        return Err(JpegError::Truncated);
+    }
+    if truncated {
+        warnings.push(Warning::TruncatedInput);
+    }
+
+    finish(
+        &components,
+        &quant,
+        width,
+        height,
+        adobe_seen,
+        adobe_transform,
+        max_output,
+        warnings,
+    )
 }
 
-/// Decodes the scan and assembles the image.
+/// Decodes one scan into the components' coefficient buffers.
+///
+/// Returns false when the entropy data ran out or a table was missing. What
+/// was decoded stays in place either way: a progressive file that loses its
+/// last refinement still shows an image, just a coarser one, which is exactly
+/// the degradation the format was designed around (ruling 2).
 #[allow(clippy::too_many_arguments)]
-fn finish(
-    scan: &[u8],
-    width: usize,
-    height: usize,
+fn decode_scan(
+    data: &[u8],
     components: &mut [Component],
-    quant: &[[u16; 64]; 4],
+    parts: &[usize],
     dc_tables: &[HuffmanTable],
     ac_tables: &[HuffmanTable],
     restart_interval: usize,
+    progressive: bool,
+    band: (usize, usize),
+    approximation: (u32, u32),
+    mcus: (usize, usize),
+) -> bool {
+    if parts.is_empty() {
+        return false;
+    }
+
+    let mut reader = BitReader::new(data);
+    let mut eobrun = 0u32;
+    for &index in parts {
+        if let Some(component) = components.get_mut(index) {
+            component.dc_prediction = 0;
+        }
+    }
+
+    // A.2: more than one component in a scan means the blocks are interleaved
+    // MCU by MCU; one component means plain raster order over that component's
+    // own blocks, with no MCU padding.
+    let interleaved = parts.len() > 1;
+    let (units_x, units_y) = if interleaved {
+        mcus
+    } else {
+        parts
+            .first()
+            .and_then(|&index| components.get(index))
+            .map_or((0, 0), |c| (c.scan_x, c.scan_y))
+    };
+
+    let mut unit = 0usize;
+    let mut complete = true;
+
+    'outer: for uy in 0..units_y {
+        for ux in 0..units_x {
+            if restart_interval > 0 && unit > 0 && unit % restart_interval == 0 {
+                reader.restart();
+                eobrun = 0;
+                for &index in parts {
+                    if let Some(component) = components.get_mut(index) {
+                        component.dc_prediction = 0;
+                    }
+                }
+            }
+            unit += 1;
+
+            if !interleaved {
+                let Some(&index) = parts.first() else {
+                    break 'outer;
+                };
+                let Some(component) = components.get_mut(index) else {
+                    break 'outer;
+                };
+                if !decode_block(
+                    &mut reader,
+                    component,
+                    ux,
+                    uy,
+                    dc_tables,
+                    ac_tables,
+                    progressive,
+                    band,
+                    approximation,
+                    &mut eobrun,
+                ) {
+                    complete = false;
+                    break 'outer;
+                }
+                continue;
+            }
+
+            for &index in parts {
+                let (h, v) = components.get(index).map_or((1, 1), |c| (c.h, c.v));
+                for by in 0..v {
+                    for bx in 0..h {
+                        let Some(component) = components.get_mut(index) else {
+                            complete = false;
+                            break 'outer;
+                        };
+                        if !decode_block(
+                            &mut reader,
+                            component,
+                            ux * h + bx,
+                            uy * v + by,
+                            dc_tables,
+                            ac_tables,
+                            progressive,
+                            band,
+                            approximation,
+                            &mut eobrun,
+                        ) {
+                            complete = false;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    complete && !reader.exhausted
+}
+
+/// Decodes one block, in whichever of the four codings this scan is using.
+#[allow(clippy::too_many_arguments)]
+fn decode_block(
+    reader: &mut BitReader,
+    component: &mut Component,
+    bx: usize,
+    by: usize,
+    dc_tables: &[HuffmanTable],
+    ac_tables: &[HuffmanTable],
+    progressive: bool,
+    band: (usize, usize),
+    approximation: (u32, u32),
+    eobrun: &mut u32,
+) -> bool {
+    // Worked on as i32 and stored as i16: refinement adds to what earlier
+    // scans left, and the intermediate must not wrap where the stored value
+    // saturates.
+    let mut block = [0i32; 64];
+    if let Some(existing) = component.block(bx, by) {
+        for (slot, &value) in block.iter_mut().zip(existing.iter()) {
+            *slot = i32::from(value);
+        }
+    }
+
+    let (ss, se) = band;
+    let (ah, al) = approximation;
+
+    let ok = if !progressive {
+        decode_sequential(reader, component, &mut block, dc_tables, ac_tables)
+    } else if ss == 0 {
+        decode_dc_progressive(reader, component, &mut block, dc_tables, ah, al)
+    } else {
+        decode_ac_progressive(
+            reader, component, &mut block, ac_tables, ss, se, ah, al, eobrun,
+        )
+    };
+
+    if let Some(target) = component.block_mut(bx, by) {
+        for (slot, &value) in target.iter_mut().zip(block.iter()) {
+            *slot = value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        }
+    }
+    ok
+}
+
+/// Baseline and extended sequential: the whole block in one pass.
+fn decode_sequential(
+    reader: &mut BitReader,
+    component: &mut Component,
+    block: &mut [i32; 64],
+    dc_tables: &[HuffmanTable],
+    ac_tables: &[HuffmanTable],
+) -> bool {
+    let (Some(dc_table), Some(ac_table)) = (
+        dc_tables.get(component.dc_table),
+        ac_tables.get(component.ac_table),
+    ) else {
+        return false;
+    };
+
+    // DC: a difference from the previous block's value.
+    let Some(t) = reader.huffman(dc_table) else {
+        return false;
+    };
+    let t = u32::from(t).min(MAX_CATEGORY);
+    let diff = extend(reader.bits(t), t);
+    component.dc_prediction = component.dc_prediction.saturating_add(diff);
+    block[0] = component.dc_prediction;
+
+    // AC: run-length pairs to the end of the block.
+    let mut k = 1usize;
+    while k < 64 {
+        let Some(rs) = reader.huffman(ac_table) else {
+            return false;
+        };
+        let run = usize::from(rs >> 4);
+        let size = u32::from(rs & 0x0F);
+        if size == 0 {
+            if run == 15 {
+                k += 16; // ZRL: sixteen zeros.
+                continue;
+            }
+            break; // EOB.
+        }
+        k += run;
+        if k >= 64 {
+            break;
+        }
+        let value = extend(reader.bits(size), size);
+        if let Some(slot) = block.get_mut(k) {
+            *slot = value;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// Progressive DC (G.1.2.1): the first scan sends the value shifted right by
+/// the point transform; every later one sends the next bit down.
+fn decode_dc_progressive(
+    reader: &mut BitReader,
+    component: &mut Component,
+    block: &mut [i32; 64],
+    dc_tables: &[HuffmanTable],
+    ah: u32,
+    al: u32,
+) -> bool {
+    if ah == 0 {
+        let Some(table) = dc_tables.get(component.dc_table) else {
+            return false;
+        };
+        let Some(t) = reader.huffman(table) else {
+            return false;
+        };
+        let t = u32::from(t).min(MAX_CATEGORY);
+        let diff = extend(reader.bits(t), t);
+        component.dc_prediction = component.dc_prediction.saturating_add(diff);
+        block[0] = component.dc_prediction << al.min(15);
+        return true;
+    }
+
+    if reader.bit() == 1 {
+        block[0] |= 1 << al.min(15);
+    }
+    !reader.exhausted
+}
+
+/// Progressive AC, first pass (G.1.2.2): run-length pairs within the band,
+/// with an end-of-band run that can span whole blocks.
+#[allow(clippy::too_many_arguments)]
+fn decode_ac_first(
+    reader: &mut BitReader,
+    block: &mut [i32; 64],
+    table: &HuffmanTable,
+    ss: usize,
+    se: usize,
+    al: u32,
+    eobrun: &mut u32,
+) -> bool {
+    if *eobrun > 0 {
+        *eobrun -= 1;
+        return true;
+    }
+
+    let mut k = ss;
+    while k <= se {
+        let Some(rs) = reader.huffman(table) else {
+            return false;
+        };
+        let run = u32::from(rs >> 4);
+        let size = u32::from(rs & 0x0F);
+
+        if size == 0 {
+            if run < 15 {
+                // An EOB run of 2^run blocks, this one included.
+                *eobrun = (1u32 << run).saturating_sub(1);
+                if run > 0 {
+                    *eobrun = eobrun.saturating_add(reader.bits(run) as u32);
+                }
+                break;
+            }
+            k += 16; // ZRL.
+            continue;
+        }
+
+        k += run as usize;
+        if k > se {
+            break;
+        }
+        let value = extend(reader.bits(size), size);
+        if let Some(slot) = block.get_mut(k) {
+            *slot = value << al.min(15);
+        }
+        k += 1;
+    }
+    true
+}
+
+/// Progressive AC, refinement (G.1.2.3).
+///
+/// The awkward one: the bit stream interleaves corrections to coefficients an
+/// earlier scan already found with the run-lengths that place new ones, and a
+/// correction bit is only present for a coefficient that is already non-zero.
+/// Reading one bit too many or too few here desynchronises the rest of the
+/// image, which is why this follows the reference structure closely.
+#[allow(clippy::too_many_arguments)]
+fn decode_ac_refine(
+    reader: &mut BitReader,
+    block: &mut [i32; 64],
+    table: &HuffmanTable,
+    ss: usize,
+    se: usize,
+    al: u32,
+    eobrun: &mut u32,
+) -> bool {
+    let shift = al.min(14);
+    let positive = 1i32 << shift;
+    let negative = -(1i32 << shift);
+
+    let mut k = ss;
+    if *eobrun == 0 {
+        while k <= se {
+            let Some(rs) = reader.huffman(table) else {
+                return false;
+            };
+            let mut run = i32::from(rs >> 4);
+            let size = rs & 0x0F;
+
+            let mut new_value = 0i32;
+            if size == 0 {
+                if run < 15 {
+                    *eobrun = 1u32 << (run.clamp(0, 14) as u32);
+                    if run > 0 {
+                        *eobrun = eobrun.saturating_add(reader.bits(run as u32) as u32);
+                    }
+                    break;
+                }
+                // run == 15 with no size: skip sixteen zero coefficients,
+                // correcting any non-zero ones passed on the way.
+            } else {
+                // The magnitude is always one bit in a refinement scan; the
+                // bit that follows is its sign.
+                new_value = if reader.bit() == 1 {
+                    positive
+                } else {
+                    negative
+                };
+            }
+
+            while k <= se {
+                let coefficient = block.get(k).copied().unwrap_or(0);
+                if coefficient != 0 {
+                    if reader.bit() == 1 && (coefficient & positive) == 0 {
+                        if let Some(slot) = block.get_mut(k) {
+                            *slot = if coefficient >= 0 {
+                                coefficient.saturating_add(positive)
+                            } else {
+                                coefficient.saturating_add(negative)
+                            };
+                        }
+                    }
+                } else {
+                    if run == 0 {
+                        if new_value != 0 {
+                            if let Some(slot) = block.get_mut(k) {
+                                *slot = new_value;
+                            }
+                        }
+                        k += 1;
+                        break;
+                    }
+                    run -= 1;
+                }
+                k += 1;
+            }
+
+            if reader.exhausted {
+                return false;
+            }
+        }
+    }
+
+    if *eobrun > 0 {
+        // Inside an end-of-band run no new coefficients appear, but the ones
+        // already there still get their correction bit.
+        while k <= se {
+            let coefficient = block.get(k).copied().unwrap_or(0);
+            if coefficient != 0 && reader.bit() == 1 && (coefficient & positive) == 0 {
+                if let Some(slot) = block.get_mut(k) {
+                    *slot = if coefficient >= 0 {
+                        coefficient.saturating_add(positive)
+                    } else {
+                        coefficient.saturating_add(negative)
+                    };
+                }
+            }
+            k += 1;
+        }
+        *eobrun -= 1;
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_ac_progressive(
+    reader: &mut BitReader,
+    component: &mut Component,
+    block: &mut [i32; 64],
+    ac_tables: &[HuffmanTable],
+    ss: usize,
+    se: usize,
+    ah: u32,
+    al: u32,
+    eobrun: &mut u32,
+) -> bool {
+    let Some(table) = ac_tables.get(component.ac_table) else {
+        return false;
+    };
+    if ah == 0 {
+        decode_ac_first(reader, block, table, ss, se, al, eobrun)
+    } else {
+        decode_ac_refine(reader, block, table, ss, se, al, eobrun)
+    }
+}
+
+/// Turns the finished coefficients into pixels.
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    components: &[Component],
+    quant: &[[u16; 64]; 4],
+    width: usize,
+    height: usize,
     adobe_seen: bool,
     adobe_transform: Option<u8>,
     max_output: usize,
@@ -481,10 +1064,6 @@ fn finish(
 
     let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
     let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
-    let mcu_w = h_max * 8;
-    let mcu_h = v_max * 8;
-    let mcus_x = width.div_ceil(mcu_w);
-    let mcus_y = height.div_ceil(mcu_h);
 
     // One full-resolution plane per component, upsampled as it is written.
     let mut planes: Vec<Vec<u8>> = components
@@ -492,96 +1071,54 @@ fn finish(
         .map(|_| vec![128u8; width * height])
         .collect();
 
-    let mut reader = BitReader::new(scan);
     let mut block = [0i32; 64];
     let mut pixels = [0u8; 64];
-    let mut mcu_index = 0usize;
 
-    'outer: for my in 0..mcus_y {
-        for mx in 0..mcus_x {
-            if restart_interval > 0 && mcu_index > 0 && mcu_index % restart_interval == 0 {
-                reader.restart();
-                for component in components.iter_mut() {
-                    component.dc_prediction = 0;
+    for (ci, component) in components.iter().enumerate() {
+        let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
+        let scale_x = h_max / component.h.max(1);
+        let scale_y = v_max / component.v.max(1);
+        let Some(plane) = planes.get_mut(ci) else {
+            continue;
+        };
+
+        for by in 0..component.blocks_y {
+            for bx in 0..component.blocks_x {
+                let Some(source) = component.block(bx, by) else {
+                    continue;
+                };
+
+                // Dequantise out of zig-zag order and into the natural one the
+                // transform expects.
+                block.fill(0);
+                for (k, &coefficient) in source.iter().enumerate() {
+                    if coefficient == 0 {
+                        continue;
+                    }
+                    let Some(&z) = ZIGZAG.get(k) else { continue };
+                    let q = i32::from(table.get(z).copied().unwrap_or(1));
+                    if let Some(slot) = block.get_mut(z) {
+                        *slot = i32::from(coefficient).saturating_mul(q);
+                    }
                 }
-            }
-            mcu_index += 1;
+                idct_block(&block, &mut pixels);
 
-            for (ci, component) in components.iter_mut().enumerate() {
-                for by in 0..component.v {
-                    for bx in 0..component.h {
-                        block.fill(0);
+                let origin_x = bx * 8 * scale_x;
+                let origin_y = by * 8 * scale_y;
+                if origin_x >= width || origin_y >= height {
+                    continue;
+                }
 
-                        let dc_table = dc_tables.get(component.dc_table);
-                        let ac_table = ac_tables.get(component.ac_table);
-                        let (Some(dc_table), Some(ac_table)) = (dc_table, ac_table) else {
-                            break 'outer;
-                        };
-
-                        // DC: a difference from the previous block's value.
-                        let Some(t) = reader.huffman(dc_table) else {
-                            break 'outer;
-                        };
-                        let diff = extend(reader.bits(u32::from(t)), u32::from(t));
-                        component.dc_prediction = component.dc_prediction.saturating_add(diff);
-                        block[0] = component.dc_prediction;
-
-                        // AC: run-length pairs to the end of the block.
-                        let mut k = 1usize;
-                        while k < 64 {
-                            let Some(rs) = reader.huffman(ac_table) else {
-                                break 'outer;
-                            };
-                            let run = usize::from(rs >> 4);
-                            let size = u32::from(rs & 0x0F);
-                            if size == 0 {
-                                if run == 15 {
-                                    k += 16; // ZRL: sixteen zeros.
-                                    continue;
-                                }
-                                break; // EOB.
-                            }
-                            k += run;
-                            if k >= 64 {
-                                break;
-                            }
-                            let value = extend(reader.bits(size), size);
-                            if let Some(&z) = ZIGZAG.get(k) {
-                                if let Some(slot) = block.get_mut(z) {
-                                    *slot = value;
-                                }
-                            }
-                            k += 1;
-                        }
-
-                        let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
-                        for (value, q) in block.iter_mut().zip(table.iter()) {
-                            *value = value.saturating_mul(i32::from(*q));
-                        }
-                        idct_block(&block, &mut pixels);
-
-                        // Write the block into its plane, upsampled to full
-                        // resolution by pixel replication.
-                        let scale_x = h_max / component.h.max(1);
-                        let scale_y = v_max / component.v.max(1);
-                        let origin_x = mx * mcu_w + bx * 8 * scale_x;
-                        let origin_y = my * mcu_h + by * 8 * scale_y;
-
-                        let Some(plane) = planes.get_mut(ci) else {
-                            break 'outer;
-                        };
-                        for py in 0..8usize {
-                            for px in 0..8usize {
-                                let value = pixels.get(py * 8 + px).copied().unwrap_or(128);
-                                for ry in 0..scale_y {
-                                    for rx in 0..scale_x {
-                                        let x = origin_x + px * scale_x + rx;
-                                        let y = origin_y + py * scale_y + ry;
-                                        if x < width && y < height {
-                                            if let Some(slot) = plane.get_mut(y * width + x) {
-                                                *slot = value;
-                                            }
-                                        }
+                for py in 0..8usize {
+                    for px in 0..8usize {
+                        let value = pixels.get(py * 8 + px).copied().unwrap_or(128);
+                        for ry in 0..scale_y {
+                            for rx in 0..scale_x {
+                                let x = origin_x + px * scale_x + rx;
+                                let y = origin_y + py * scale_y + ry;
+                                if x < width && y < height {
+                                    if let Some(slot) = plane.get_mut(y * width + x) {
+                                        *slot = value;
                                     }
                                 }
                             }
@@ -590,10 +1127,6 @@ fn finish(
                 }
             }
         }
-    }
-
-    if reader.exhausted {
-        warnings.push(Warning::TruncatedInput);
     }
 
     // Interleave, converting colour where the model calls for it.
@@ -761,9 +1294,12 @@ mod tests {
         out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
         out.extend_from_slice(&[1u8; 64]);
 
-        // SOF0: 8-bit, 1×1, one component, no subsampling.
+        // SOF0: 8-bit, 1×1, one component with id 1, no subsampling. The
+        // length says nine body bytes and there are nine — this fixture used
+        // to declare eleven and supply eight, so the component descriptor was
+        // read out of the following marker and matched nothing in the scan.
         out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01]);
-        out.extend_from_slice(&[0x11, 0x00]);
+        out.extend_from_slice(&[0x01, 0x11, 0x00]);
 
         // DHT for DC: one code of length 2, value 0.
         let mut dht = vec![0x00];
@@ -811,14 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn progressive_and_arithmetic_are_reported_rather_than_half_decoded() {
-        let mut progressive = vec![0xFF, 0xD8, 0xFF, 0xC2, 0x00, 0x0B, 0x08];
-        progressive.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00]);
-        assert_eq!(
-            decode(&progressive, 1 << 20).err(),
-            Some(JpegError::Progressive)
-        );
-
+    fn arithmetic_coding_is_reported_rather_than_half_decoded() {
         let mut arithmetic = vec![0xFF, 0xD8, 0xFF, 0xC9, 0x00, 0x0B, 0x08];
         arithmetic.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00]);
         assert_eq!(
@@ -883,6 +1412,248 @@ mod tests {
             let mut truncated = tiny_gray();
             truncated.truncate(cut);
             let _ = decode(&truncated, 1 << 20);
+        }
+    }
+
+    // ---- Progressive ----------------------------------------------------
+    //
+    // The fixtures below encode one 8×8 block carrying the same two
+    // coefficients three different ways: sequentially, progressively in two
+    // scans, and progressively with successive approximation in four. All
+    // three must decode to the same pixels, which is a far stronger assertion
+    // than any single expected value — it says the scans reassemble into the
+    // coefficients the encoder meant, without needing to agree with anyone
+    // about what the IDCT should produce from them.
+
+    /// Writes entropy-coded bits, stuffing a zero after every 0xFF.
+    #[derive(Default)]
+    struct Bits {
+        out: Vec<u8>,
+        acc: u32,
+        held: u32,
+    }
+
+    impl Bits {
+        fn bit(&mut self, value: u32) {
+            self.acc = (self.acc << 1) | (value & 1);
+            self.held += 1;
+            if self.held == 8 {
+                let byte = self.acc as u8;
+                self.out.push(byte);
+                if byte == 0xFF {
+                    self.out.push(0x00);
+                }
+                self.acc = 0;
+                self.held = 0;
+            }
+        }
+
+        fn push(&mut self, value: u32, length: u32) {
+            for i in (0..length).rev() {
+                self.bit((value >> i) & 1);
+            }
+        }
+
+        /// Pads to a byte boundary with ones, which is what an encoder does.
+        fn finish(mut self) -> Vec<u8> {
+            while self.held != 0 {
+                self.bit(1);
+            }
+            self.out
+        }
+    }
+
+    fn marker(out: &mut Vec<u8>, code: u8, body: &[u8]) {
+        out.extend_from_slice(&[0xFF, code]);
+        out.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(body);
+    }
+
+    /// DC table: "00" → size 3, "01" → size 2.
+    /// AC table: "00" → run 0 size 3, "01" → EOB with run 0, "10" → run 0
+    /// size 2. The size-2 codes exist because a successive-approximation scan
+    /// sends a value with its low bit removed, and a magnitude that fits in
+    /// three bits usually does not fit in three bits once halved.
+    fn tables(out: &mut Vec<u8>) {
+        let mut dc_counts = [0u8; 16];
+        dc_counts[1] = 2;
+        let mut dc = vec![0x00];
+        dc.extend_from_slice(&dc_counts);
+        dc.extend_from_slice(&[0x03, 0x02]);
+        marker(out, 0xC4, &dc);
+
+        let mut ac_counts = [0u8; 16];
+        ac_counts[1] = 3;
+        let mut ac = vec![0x10];
+        ac.extend_from_slice(&ac_counts);
+        ac.extend_from_slice(&[0x03, 0x00, 0x02]);
+        marker(out, 0xC4, &ac);
+    }
+
+    fn header(out: &mut Vec<u8>, sof: u8) {
+        out.extend_from_slice(&[0xFF, 0xD8]);
+
+        let mut dqt = vec![0x00];
+        dqt.extend_from_slice(&[1u8; 64]);
+        marker(out, 0xDB, &dqt);
+
+        // 8×8, one component with id 1, no subsampling, quantisation table 0.
+        marker(
+            out,
+            sof,
+            &[0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00],
+        );
+        tables(out);
+    }
+
+    /// Sequential: DC 5, then AC 5 at zig-zag index 1, then end of block.
+    fn sequential_block() -> Vec<u8> {
+        let mut out = Vec::new();
+        header(&mut out, 0xC0);
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+
+        let mut bits = Bits::default();
+        bits.push(0b00, 2); // DC size 3
+        bits.push(5, 3); // difference +5
+        bits.push(0b00, 2); // AC run 0 size 3
+        bits.push(5, 3); // value +5 at index 1
+        bits.push(0b01, 2); // EOB
+        out.extend_from_slice(&bits.finish());
+
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    /// Progressive, no successive approximation: one DC scan, one AC scan.
+    fn progressive_block() -> Vec<u8> {
+        let mut out = Vec::new();
+        header(&mut out, 0xC2);
+
+        // DC scan: band 0..0, Ah 0, Al 0.
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x00, 0x00, 0x00]);
+        let mut bits = Bits::default();
+        bits.push(0b00, 2); // size 3
+        bits.push(5, 3); // difference +5
+        out.extend_from_slice(&bits.finish());
+
+        // AC scan: band 1..63, Ah 0, Al 0.
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x01, 0x3F, 0x00]);
+        let mut bits = Bits::default();
+        bits.push(0b00, 2); // run 0 size 3
+        bits.push(5, 3); // value +5 at index 1
+        bits.push(0b01, 2); // EOB run of one
+        out.extend_from_slice(&bits.finish());
+
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    /// Progressive with successive approximation: every coefficient arrives
+    /// one bit short and is completed by a refinement scan.
+    fn progressive_refined_block() -> Vec<u8> {
+        let mut out = Vec::new();
+        header(&mut out, 0xC2);
+
+        // DC first scan, Al 1: sends 5 >> 1 = 2.
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x00, 0x00, 0x01]);
+        let mut bits = Bits::default();
+        bits.push(0b01, 2); // size 2
+        bits.push(0b10, 2); // difference +2
+        out.extend_from_slice(&bits.finish());
+
+        // AC first scan, band 1..63, Al 1: sends 5 >> 1 = 2, stored as 4.
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x01, 0x3F, 0x01]);
+        let mut bits = Bits::default();
+        bits.push(0b10, 2); // run 0 size 2
+        bits.push(0b10, 2); // +2, which the point transform stores as 4
+        bits.push(0b01, 2); // EOB run of one
+        out.extend_from_slice(&bits.finish());
+
+        // DC refinement, Ah 1 Al 0: the low bit, making 5.
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x00, 0x00, 0x10]);
+        let mut bits = Bits::default();
+        bits.push(1, 1);
+        out.extend_from_slice(&bits.finish());
+
+        // AC refinement, band 1..63, Ah 1 Al 0: an EOB run, then the
+        // correction bit for the one coefficient already there.
+        marker(&mut out, 0xDA, &[0x01, 0x01, 0x00, 0x01, 0x3F, 0x10]);
+        let mut bits = Bits::default();
+        bits.push(0b01, 2); // EOB run of one
+        bits.push(1, 1); // correction for index 1
+        out.extend_from_slice(&bits.finish());
+
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    #[test]
+    fn a_progressive_image_decodes_at_all() {
+        let image = decode(&progressive_block(), 1 << 20).expect("progressive decodes");
+        assert_eq!((image.width, image.height), (8, 8));
+        assert_eq!(image.color, JpegColor::Gray);
+        assert_eq!(image.data.len(), 64);
+        assert!(
+            image.data.iter().any(|&p| p != 128),
+            "the coefficients reached the pixels"
+        );
+    }
+
+    #[test]
+    fn progressive_scans_reassemble_the_sequential_image() {
+        let sequential = decode(&sequential_block(), 1 << 20).expect("sequential decodes");
+        let progressive = decode(&progressive_block(), 1 << 20).expect("progressive decodes");
+        assert_eq!(
+            sequential.data, progressive.data,
+            "the same coefficients sent in two scans give the same pixels"
+        );
+    }
+
+    #[test]
+    fn successive_approximation_refines_to_the_same_image() {
+        let sequential = decode(&sequential_block(), 1 << 20).expect("sequential decodes");
+        let refined = decode(&progressive_refined_block(), 1 << 20).expect("refined decodes");
+        assert_eq!(
+            sequential.data, refined.data,
+            "the refinement scans supply the bits the first scans left out"
+        );
+    }
+
+    /// A progressive file cut short must still produce the coarse image the
+    /// scans it did carry describe — that is the entire point of the format,
+    /// and refusing it outright would be worse than what came before.
+    #[test]
+    fn a_truncated_progressive_file_keeps_what_it_decoded() {
+        let full = progressive_refined_block();
+        // Cut after the first two scans: the DC and AC first passes.
+        let cut = full.len() - 12;
+        let partial = decode(&full[..cut], 1 << 20).expect("the partial file still decodes");
+
+        assert_eq!(partial.data.len(), 64);
+        assert!(
+            partial.data.iter().any(|&p| p != 128),
+            "the scans that did arrive were used"
+        );
+
+        let refined = decode(&full, 1 << 20).expect("the whole file decodes");
+        assert_ne!(
+            partial.data, refined.data,
+            "and the missing refinement is visible as a coarser image"
+        );
+    }
+
+    #[test]
+    fn progressive_garbage_terminates_without_panicking() {
+        let full = progressive_refined_block();
+        for cut in 0..full.len() {
+            let _ = decode(&full[..cut], 1 << 20);
+        }
+        for (seed, byte) in full.iter().enumerate() {
+            let mut damaged = full.clone();
+            if let Some(slot) = damaged.get_mut(seed) {
+                *slot = byte.wrapping_add(97);
+            }
+            let _ = decode(&damaged, 1 << 20);
         }
     }
 }

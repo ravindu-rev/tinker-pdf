@@ -107,6 +107,85 @@ fn an_image_lands_where_its_transform_puts_it() {
     );
 }
 
+/// A progressive JPEG, which appeared in half of the first real-world files
+/// tested and until now rendered as a grey placeholder.
+///
+/// One 8×8 block, DC only, sent across two scans: the first carries the value
+/// with its low bit removed and the second supplies that bit. The second scan
+/// is also what makes this a progressive file rather than a sequential one
+/// wearing an SOF2 marker, so a decoder that quietly ignored later scans would
+/// land two quantisation steps away and fail the assertion below.
+fn progressive_jpeg() -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+
+    // DQT: a large DC quantiser, so the one bit the second scan adds is a
+    // visible difference rather than a rounding one.
+    out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+    let mut quant = [1u8; 64];
+    quant[0] = 255;
+    out.extend_from_slice(&quant);
+
+    // SOF2: progressive, 8-bit, 8×8, one component, no subsampling.
+    out.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x0B, 0x08]);
+    out.extend_from_slice(&[0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00]);
+
+    // DHT, DC table 0: a single two-bit code "00" meaning magnitude size 2.
+    // No AC table: a DC-only progressive file never needs one, and a decoder
+    // that demanded one anyway would refuse this.
+    let mut counts = [0u8; 16];
+    counts[1] = 1;
+    let mut dht = vec![0x00];
+    dht.extend_from_slice(&counts);
+    dht.push(0x02);
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((dht.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&dht);
+
+    // First DC scan, band 0..0, Ah 0 Al 1: code "00" then "01", which extends
+    // to −2 and the point transform stores as −4.
+    out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01]);
+    out.push(0b0001_1111);
+
+    // Refining DC scan, Ah 1 Al 0: one set bit, making −3. Its padding runs
+    // the byte to 0xFF, so the fixture carries the stuffed zero a real encoder
+    // would write — and a reader that skipped it would desynchronise.
+    out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x10]);
+    out.extend_from_slice(&[0xFF, 0x00]);
+
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+#[test]
+fn a_progressive_jpeg_is_decoded_rather_than_placeheld() {
+    let jpeg = progressive_jpeg();
+    let mut builder = DocumentBuilder::new();
+    assert!(
+        builder.add_image(b"Im0", &ImageData::Jpeg(&jpeg)),
+        "the builder reads a progressive SOF2 header"
+    );
+    builder.add_page(20.0, 20.0, |page| {
+        page.image(b"Im0", 0.0, 0.0, 20.0, 20.0);
+    });
+
+    let bitmap = render(builder.finish());
+    let (r, g, b) = pixel(&bitmap, 10, 10);
+
+    // −3 × 255 through the transform is a dark grey near 32. The placeholder
+    // this used to render was a light neutral, and stopping after the first
+    // scan would leave −4 × 255, which clamps to black.
+    assert_eq!((r, g, b), (r, r, r), "grey, got ({r}, {g}, {b})");
+    assert!(
+        (20..=45).contains(&r),
+        "the decoded value, not a placeholder or an unrefined first scan: {r}"
+    );
+    assert!(
+        bitmap.warnings.is_empty(),
+        "and nothing was degraded: {:?}",
+        bitmap.warnings
+    );
+}
+
 /// An image resource that names a codec this build has no decoder for is
 /// reported *and* leaves a placeholder, rather than silently occupying no
 /// space (ruling 2).
