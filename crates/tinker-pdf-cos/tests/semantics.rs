@@ -76,8 +76,11 @@ fn the_version_string_matches_the_header() {
     assert_eq!(outline::version_string(&doc).as_deref(), Some("PDF 1.7"));
 }
 
+/// The fixture's `/Info` holds `/Producer` and nothing else, so it pins the
+/// absent half of the rule only. The present-and-empty half needs a document
+/// no producer writes, and lives beside the code in `outline.rs`.
 #[test]
-fn metadata_reports_absent_rather_than_empty() {
+fn metadata_reports_absent_for_keys_the_file_omits() {
     let doc = open("simple-text.pdf");
     let meta = outline::metadata(&doc);
 
@@ -86,14 +89,13 @@ fn metadata_reports_absent_rather_than_empty() {
         meta.producer.is_some() || meta.creator.is_some(),
         "a generated file names its producer or creator"
     );
-    for text in [&meta.title, &meta.author, &meta.subject, &meta.keywords]
-        .into_iter()
-        .flatten()
-    {
-        assert!(
-            !text.trim().is_empty(),
-            "a present field is never blank: {text:?}"
-        );
+    for (label, value) in [
+        ("title", &meta.title),
+        ("author", &meta.author),
+        ("subject", &meta.subject),
+        ("keywords", &meta.keywords),
+    ] {
+        assert_eq!(value, &None, "{label} is not in this file's /Info");
     }
 }
 

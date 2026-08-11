@@ -133,3 +133,19 @@ fn xmp_metadata_is_reachable_as_bytes() {
     let xmp = xmp_metadata(&doc).expect("the metadata stream");
     assert!(String::from_utf8_lossy(&xmp).contains("identity here"));
 }
+
+/// The same absent-versus-empty rule `/Info` obeys, on the other metadata
+/// path: a catalog naming a `/Metadata` stream that happens to be empty has
+/// one, and `None` is reserved for a catalog that names none at all. An
+/// archival profile requiring the stream to exist cares about the difference.
+#[test]
+fn an_empty_xmp_stream_is_present_rather_than_absent() {
+    let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Metadata 20 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+20 0 obj\n<< /Type /Metadata /Subtype /XML /Length 0 >>\nstream\n\
+endstream\nendobj\n\
+trailer\n<< /Size 21 /Root 1 0 R >>\n%%EOF\n";
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(xmp_metadata(&doc).as_deref(), Some(&[][..]));
+}

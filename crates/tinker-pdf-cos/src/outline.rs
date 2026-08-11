@@ -127,6 +127,11 @@ fn siblings(
 /// Every field is absent rather than empty when the document does not define
 /// it — a blank title and no title are different facts, and only one of them
 /// should reach a user interface.
+///
+/// So `None` means the key is missing, or `/Info` is; `Some("")` means the
+/// producer wrote an empty string and meant to. A viewer showing "(untitled)"
+/// for the first and an empty field for the second needs both answers, and
+/// nothing downstream can recover one from the other.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
     /// `/Title`.
@@ -190,9 +195,12 @@ pub fn metadata(doc: &CosDocument) -> Metadata {
     let field = |key: &[u8]| -> Option<String> {
         let name = doc.intern(key);
         let value = doc.resolve_key(dict, name);
-        let text = value.as_string().map(|s| decode_text_string(&s.bytes))?;
-        // Absent beats empty once this reaches a caller.
-        (!text.trim().is_empty()).then_some(text)
+        // Absent is not empty. A key the document does not define is `None`; a
+        // key holding `()` is `Some("")`, and whitespace is kept as written
+        // because a producer that indented its title meant to. Deciding here
+        // that a blank field is no field puts the difference beyond every
+        // caller's reach, and only the caller knows what to show for either.
+        value.as_string().map(|s| decode_text_string(&s.bytes))
     };
 
     Metadata {
@@ -471,6 +479,113 @@ pub fn xmp_metadata(doc: &CosDocument) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-page document whose trailer carries `info` verbatim as `/Info`.
+    ///
+    /// Written out by hand so the `/Info` dictionary is exactly what the test
+    /// says it is: the fixtures in `testdata/` are MuPDF's, and no producer
+    /// emits the degenerate entries this rule is about.
+    fn with_info(info: &str) -> CosDocument {
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n\
+4 0 obj\n<< {info} >>\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\n%%EOF\n"
+        );
+        CosDocument::open(bytes.into_bytes()).expect("it opens")
+    }
+
+    /// The distinction plan 04 calls a contract: a key that is present and
+    /// empty is not a key that is missing. A user interface shows "(untitled)"
+    /// for one and a blank field for the other, and collapsing them on read
+    /// makes that unrecoverable.
+    #[test]
+    fn a_blank_title_is_not_the_same_as_no_title() {
+        assert_eq!(
+            metadata(&with_info("/Title ()")).title.as_deref(),
+            Some(""),
+            "a producer that wrote an empty title wrote one"
+        );
+        assert_eq!(
+            metadata(&with_info("/Author (Ada)")).title,
+            None,
+            "a key the /Info dictionary does not hold is absent"
+        );
+    }
+
+    /// Whitespace is the producer's choice, not ours: a title indented to line
+    /// up in a table is still that title. Trimming is a caller's decision.
+    #[test]
+    fn whitespace_survives_untrimmed() {
+        assert_eq!(
+            metadata(&with_info("/Title (   )")).title.as_deref(),
+            Some("   ")
+        );
+        assert_eq!(
+            metadata(&with_info("/Title (  spaced  )")).title.as_deref(),
+            Some("  spaced  ")
+        );
+    }
+
+    /// The rule holds for every field the closure serves, not just `/Title` —
+    /// one of them being special would be the same bug with a smaller blast
+    /// radius. `/Trapped` is a name rather than a string and is not here.
+    #[test]
+    fn every_info_string_field_tells_empty_from_absent() {
+        let all = "/Title () /Author () /Subject () /Keywords () \
+                   /Creator () /Producer () /CreationDate () /ModDate ()";
+        let present = metadata(&with_info(all));
+        for (label, value) in [
+            ("title", &present.title),
+            ("author", &present.author),
+            ("subject", &present.subject),
+            ("keywords", &present.keywords),
+            ("creator", &present.creator),
+            ("producer", &present.producer),
+            ("creation date", &present.creation_date),
+            ("modification date", &present.modification_date),
+        ] {
+            assert_eq!(value.as_deref(), Some(""), "{label} was present");
+        }
+
+        assert_eq!(metadata(&with_info("/Type /Info")), Metadata::default());
+    }
+
+    /// Empty is a string; a name, a number or a null is not, and a caller
+    /// asking for text should not be handed the empty one for those.
+    #[test]
+    fn a_value_that_is_not_a_string_is_absent() {
+        assert_eq!(metadata(&with_info("/Title /NotAString")).title, None);
+        assert_eq!(metadata(&with_info("/Title 42")).title, None);
+        assert_eq!(metadata(&with_info("/Title null")).title, None);
+        assert_eq!(metadata(&with_info("/Title [(a) (b)]")).title, None);
+    }
+
+    /// No `/Info` at all is the ordinary case, and every field is `None` —
+    /// which is the answer the empty string would otherwise have hidden.
+    #[test]
+    fn a_document_without_an_info_dictionary_reports_nothing() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
+        let doc = CosDocument::open(bytes).expect("it opens");
+        assert_eq!(metadata(&doc), Metadata::default());
+        assert_eq!(metadata(&doc).title, None);
+    }
+
+    /// 7.9.2.2: the value is decoded before it is handed over, and a UTF-16BE
+    /// string that is nothing but a BOM decodes to the empty string — present,
+    /// empty, and not the same as absent.
+    #[test]
+    fn a_bom_only_string_decodes_to_present_and_empty() {
+        assert_eq!(
+            metadata(&with_info("/Title <FEFF>")).title.as_deref(),
+            Some(""),
+        );
+    }
 
     #[test]
     fn roman_numerals_match_the_usual_forms() {

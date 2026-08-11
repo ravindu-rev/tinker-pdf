@@ -65,7 +65,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 | --- | --- | --- | --- |
 | 19 | [Encrypt and linearize](19-encrypt-and-linearize.md) | Linearization is silently dropped when encryption is on | M |
 | 20 | [Linearization validation](20-linearization-validation.md) | The hint tables have never been checked by anything | S |
-| 21 | [Metadata: absent versus empty](21-metadata-absent-vs-empty.md) | A title that is present and blank reads as absent | S |
+| 21 | [Metadata: absent versus empty](21-metadata-absent-vs-empty.md) | ~~A title that is present and blank reads as absent~~ **DONE**, see the plan's `As built` | S |
 | 22 | [PDF version and /Trapped](22-pdf-version-and-trapped.md) | The catalog overrides the header unconditionally; `/Trapped` is absent | S |
 
 ## Test infrastructure and shipping

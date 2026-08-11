@@ -77,3 +77,57 @@ for.
 | --- | --- |
 | A caller somewhere treats `Some` as "has a useful title" and now shows an empty string where it used to show a fallback | That is the intended change, and it is the caller's decision to make. Search the facade and the bindings for consumers before landing |
 | The same collapse exists elsewhere for other fields | The closure serves all six `/Info` string fields, so one fix covers them; check the XMP path separately |
+
+## As built
+
+*August 2026.* Milestone 1 is done, and the two lines the Design predicted are
+the two lines that changed. Five things the plan did not say:
+
+1. **The closure serves eight fields, not six.** `/CreationDate` and
+   `/ModDate` go through it too — they are text strings held raw for the
+   parity tests, and `Metadata::created` parses them on demand. So a document
+   with `/ModDate ()` used to claim it had never been modified. The date
+   parser returns `None` for an empty string either way, which is why nothing
+   downstream breaks and why nothing downstream noticed.
+
+2. **Nothing consumes it that had to change.** `tinker-pdf` re-exports
+   `Metadata` and `Document::metadata` verbatim (ruling 11); the C ABI, Python,
+   JS and .NET bindings expose no metadata surface at all, so there was nothing
+   to project the new answer through. The one live consumer is `tpdf info`,
+   which prints a field only when it is `Some` — it now prints a label with
+   nothing after it for a blank field, which is the honest rendering and
+   exactly the change the Risks table anticipated.
+
+3. **The XMP path was already right.** `xmp_metadata` returns
+   `stream_decoded(...).ok()`, so a zero-length `/Metadata` stream was always
+   `Some(&[])` and only a catalog naming no stream was `None`. Checked, not
+   assumed, and now pinned by a test — an archival profile that requires the
+   stream to exist cares which of the two it has.
+
+4. **The `Metadata` doc comment was ambiguous, not wrong.** "Absent rather
+   than empty" reads as a description of either rule depending on what you
+   already believe. It now names both answers: `None` for a missing key,
+   `Some("")` for a key holding `()`.
+
+5. **A test for this already existed and passed throughout.**
+   `metadata_reports_absent_rather_than_empty` asserted "a present field is
+   never blank" over the title, author, subject and keywords of
+   `simple-text.pdf` — whose `/Info` is `<< /Producer (MuPDF 1.27.2) >>` and
+   nothing else. The loop body never executed. It asserted the inverted rule,
+   it could not have failed, and it is renamed to
+   `metadata_reports_absent_for_keys_the_file_omits` and now checks those four
+   fields are `None`, which is the half of the contract a MuPDF fixture can
+   pin. The other half needs a document no producer writes, so the new tests
+   are hand-built byte by byte beside the code in `outline.rs`: `/Title ()` →
+   `Some("")`, `/Title (   )` → `Some("   ")`, `/Title <FEFF>` → `Some("")`
+   after 7.9.2.2 decoding, all eight fields together, `/Title` as a name, an
+   integer, a null and an array → `None`, and no `/Info` at all → every field
+   `None`.
+
+`docs/plans/04-document-semantics.md` needed no amendment: its absent-not-empty
+paragraph is what the code now does. Its `Info` sketch still differs from the
+shipped `Metadata` in the `trapped` field and in two names, which
+[22](22-pdf-version-and-trapped.md) owns and reconciles.
+
+Seven tests added, 971 → 978. Whitespace is still untrimmed and `/Trapped` is
+still absent, both deliberately.

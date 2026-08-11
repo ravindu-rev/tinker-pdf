@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**971 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**978 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
@@ -12,7 +12,7 @@ targets and language bindings type-check — on every commit.
 > incomplete: **22 things listed as built are absent or materially thinner
 > than claimed**, seven of them producing silently wrong output or unopenable
 > files. They are written down in [audit-2026-08.md](audit-2026-08.md), with
-> the five fixed so far struck through there. A known gap is manageable; a
+> the eleven fixed so far struck through there. A known gap is manageable; a
 > false claim is not, because nobody goes looking.
 
 > **This file was wrong for a long time.** A 47-agent audit against every plan
@@ -67,6 +67,7 @@ Fixed since, each with tests that would have caught it:
 | **Comb fields laid out as ordinary text**, drifting out of their printed cells | Laid out in cells |
 | **Attachments, XMP and `/Limits` descent were unreachable** | All three implemented |
 | **The font seam was Rust-only**, so no binding could draw text for a document embedding no fonts | `set_fonts` across the C ABI, Python, JS and .NET |
+| **`/Info` collapsed blank onto absent.** A field present and empty — or all whitespace — read as `None`, identically to a key the document never wrote, so no caller could tell "the producer left the title blank" from "there is no title" | Present and a string is `Some`, whatever it holds, untrimmed. Plan 04 always called this a contract; the code and the comment on the line both said the opposite |
 
 ## Built
 
