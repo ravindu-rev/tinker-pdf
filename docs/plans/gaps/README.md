@@ -73,7 +73,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 | # | Plan | What goes wrong today | Size |
 | --- | --- | --- | --- |
 | 23 | [Corpus runner](23-corpus-runner.md) | No corpus has ever been run. Eight real files, total | M |
-| 24 | [Fuzz execution](24-fuzz-execution.md) | Eleven targets compile and none has ever run | S |
+| 24 | [Fuzz execution](24-fuzz-execution.md) | ~~Eleven targets compile and none has ever run~~ **M1–M4 done**, see the plan's `As built`: fifteen targets, seed corpora, a nightly job and a per-PR replay. M5, the first real campaign, is outstanding — the longest run so far is thirty seconds a target | S |
 | 25 | [The wasm determinism leg](25-wasm-determinism-leg.md) | Three targets prove ruling 4; the fourth job has never executed | S |
 | 26 | [Binding packaging](26-binding-packaging.md) | Four surfaces build and none ships | M |
 

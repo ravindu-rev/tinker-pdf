@@ -106,6 +106,11 @@ jobs:
       # committed seeds is a human's pull request — plan 14 caps corpora per
       # target and commits only minimised seeds, and neither is a decision a
       # scheduled job should be making on its own.
+      #
+      # `cmin` rewrites the directory in place and renames every file to its
+      # hash, so the descriptive seed names do not survive it. That is fine
+      # here, where the checkout is thrown away, and is why the README tells
+      # anyone running it locally to run it on a copy.
       - name: Minimise and attach the corpus
         if: success()
         run: cargo fuzz cmin ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}

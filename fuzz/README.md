@@ -101,6 +101,13 @@ still reaches what it was chosen for:
 cargo +nightly fuzz run cff corpus/cff -- -runs=0
 ```
 
+Two things a run does to `corpus/` that are easy to be surprised by: it
+writes every new unit it finds straight into the directory it was given, and
+`cargo fuzz cmin` rewrites that directory in place, renaming every file to
+its hash. Neither is reversible and both discard the names above, so minimise
+a *copy* unless you mean to lose them. `git status` after a run is worth a
+look before `git add`.
+
 Large third-party corpora are fetched by pinned checksum and never committed —
 see the plan for the per-corpus licence table.
 

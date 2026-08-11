@@ -3,9 +3,10 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**978 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**981 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
-targets and language bindings type-check — on every commit.
+targets and language bindings type-check — on every commit. The fuzz targets
+also *run* on every commit now, briefly, over committed seed corpora.
 
 > **It was wrong again.** A second audit in August 2026 checked this file
 > against the code in *both* directions and found the gap table accurate but
@@ -28,6 +29,8 @@ Fixed since, each with tests that would have caught it:
 | Was | Now |
 | --- | --- |
 | **Four of eleven fuzz targets never compiled.** Wrong arity since written; `fuzz/` sits outside the workspace so nothing checked it | Fixed, and `cargo check` on the fuzz crate is a CI job. The bindings, excluded for the same reason, are too |
+| **A `cmap` format 12 group could overflow a glyph id into a panic.** `startGlyphID + (code - startCharCode)` in `u32`, all three from the file — the first thing the fuzzers found, by two targets within thirty seconds of each other. Format 12 is the subtable used past the BMP, so any CJK or emoji face reaches it (ruling 1) | `checked_add` before the `u16::try_from` that was already there and could never run. The 68-byte reproducer is a test in `sfnt.rs` and a seed in two corpora |
+| **Every CFF INDEX was read one byte early**, so no embedded CFF or OpenType/CFF face ever resolved a glyph — `Cff::parse` refused almost every real program, and `resources.rs` read that as a font it could not read. The tests covered DICT operands and subroutine bias, none of which builds an INDEX, so nothing had ever parsed a whole program | The 1-based offset is subtracted once rather than twice. Two tests: the eight-byte reproducer, and a whole three-glyph program that also serves as the `cff` fuzz seed |
 | **`authenticate` failed on any shared document.** `Arc::get_mut` returns None once a `Page` exists, so "look at a page, then supply the password" returned `NotEncrypted` for an encrypted file | Interior mutability; `authenticate(&self)`, as the plan always specified |
 | **`/Rotate` was never applied**, though the canvas *was* sized for it — rotated pages drew upright and clipped | `page_view_transform`, with the crop-box origin as well |
 | **`J j M d` were discarded**, so every stroke was solid, butt-capped, miter-joined, while the rasterizer's tested implementation sat unreachable | Wired through the graphics state |
@@ -87,7 +90,7 @@ Fixed since, each with tests that would have caught it:
 | [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree, fill text/choice/checkbox/radio, **comb fields**, appearances rebuilt, reset |
 | [12 Creation](plans/12-creation.md) | pages, text, images, embedded fonts **with subsetting** | `DocumentBuilder` |
 | [13 Bindings](plans/13-bindings.md) | all three build and are checked | C ABI, Python, JS/wasm, .NET, each able to **supply fonts** |
-| [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing written | `tpdf`, `pdfcmp`, `oracle-diff`; 11 fuzz targets; a hostile-input sweep on stable |
+| [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing **running** | `tpdf`, `pdfcmp`, `oracle-diff`; **15** fuzz targets with committed seed corpora, a nightly job and a short per-PR run; a hostile-input sweep on stable |
 
 ## Not built
 
@@ -99,7 +102,7 @@ by value over risk.
 | Gap | Consequence | Where |
 | --- | --- | --- |
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [23](plans/gaps/23-corpus-runner.md) |
-| **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [24](plans/gaps/24-fuzz-execution.md) |
+| **Fuzzers run, but no long campaign has happened** | They *have* now been executed: fifteen targets, each with a committed seed corpus, each proved to build and run under `cargo-fuzz` on a nightly toolchain, and wired into a bounded nightly job and a short per-PR one. What has not happened is a real session — the longest run so far is thirty seconds a target, which found nothing and is not evidence that there is nothing. Milestone 5 of the gap plan is the campaign; until it runs, ruling 1 is better measured than it was and still not measured deeply. Building the seed corpora alone found a CFF bug (see above), which is the argument for doing the rest. | [24](plans/gaps/24-fuzz-execution.md) |
 | **Linearization: external validation, and encrypt+linearize** | The layout is written and every offset it declares is checked against the bytes — but `qpdf --check` and `--show-linearization` are the arbiters the plan names and neither has been run, so the hint *tables* are unproven. `linearize` is also silently dropped when encryption is on, rather than combining with it. An *incremental* update still cannot encrypt, since it would need the original file's key. | [19](plans/gaps/19-encrypt-and-linearize.md), [20](plans/gaps/20-linearization-validation.md) |
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [16](plans/gaps/16-ccitt-completion.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [17](plans/gaps/17-jbig2-generic-region.md), [18](plans/gaps/18-jpx-decision.md), [10](plans/gaps/10-mesh-shadings.md), [09](plans/gaps/09-tiling-patterns.md) |
