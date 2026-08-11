@@ -71,6 +71,17 @@ impl Rect {
         self.width() <= 0.0 || self.height() <= 0.0
     }
 
+    /// Whether every edge is a real number.
+    ///
+    /// A rectangle read from a file can hold an infinity or a NaN, and any of
+    /// those written back into a content stream produces bytes no reader can
+    /// lex — `NaN` is not a number to a PDF parser, it is a syntax error that
+    /// throws away the rest of the stream.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        self.x0.is_finite() && self.y0.is_finite() && self.x1.is_finite() && self.y1.is_finite()
+    }
+
     /// The overlap of two rectangles, or `None` when they do not meet.
     #[must_use]
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {

@@ -107,6 +107,33 @@ fn draw_one<D: Device>(
         return;
     };
 
+    // 8.10.2: the bounding box is expressed in form space and clips whatever
+    // the form draws. An appearance stream that paints outside its box —
+    // which plenty do, because the box is often the *intended* extent rather
+    // than the drawn one — would otherwise spill across the page, over
+    // content that has nothing to do with the annotation.
+    //
+    // Written as a content prefix rather than a second clip implementation:
+    // `transform` already carries the form's own `/Matrix`, so a rectangle in
+    // form space lands exactly where the spec puts it, and `W n` here behaves
+    // the way `W n` behaves everywhere else by construction.
+    let content = match bbox {
+        Some(bbox) if !bbox.is_empty() && bbox.is_finite() => {
+            let mut clipped = format!(
+                "q {} {} {} {} re W n\n",
+                bbox.x0,
+                bbox.y0,
+                bbox.x1 - bbox.x0,
+                bbox.y1 - bbox.y0
+            )
+            .into_bytes();
+            clipped.extend_from_slice(&content);
+            clipped.extend_from_slice(b"\nQ\n");
+            clipped
+        }
+        _ => content,
+    };
+
     let resources = doc
         .resolve_key(form_dict, tinker_pdf_cos::Name::RESOURCES)
         .as_dict()
@@ -127,12 +154,18 @@ fn normal_appearance(doc: &CosDocument, annotation: &Dict) -> Option<tinker_pdf_
         Object::Ref(r) => {
             // Either the stream itself or a dictionary of states, which is how
             // a checkbox carries its on and off appearances.
+            //
+            // The two are told apart by *being a stream*, not by carrying a
+            // `/BBox`. 8.10.2 makes the box required, so using it as the test
+            // works on well-formed files — and on a file that omits it, the
+            // appearance was silently treated as a dictionary of states,
+            // found none, and drew nothing at all. Which is worse than
+            // drawing it unclipped, and invisible either way.
             let object = doc.get(*r).ok()?;
-            let dict = object.as_dict()?;
-            if dict.get(doc.intern(b"BBox")).is_some() {
+            if object.as_stream().is_some() {
                 return Some(*r);
             }
-            state_of(doc, annotation, dict)
+            state_of(doc, annotation, object.as_dict()?)
         }
         Object::Dict(states) => state_of(doc, annotation, states),
         _ => None,
