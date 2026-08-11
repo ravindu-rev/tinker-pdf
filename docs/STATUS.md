@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**869 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**923 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
