@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**938 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**964 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
@@ -93,7 +93,7 @@ half-implementation would be worse than none.
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
-| **Determinism: the cross-target job** | The obstacle is gone — no pixel path calls the platform's libm any more, and `cargo xtask libm` fails the build if one starts to. What is still missing is the CI job that renders the goldens on all four targets and compares them, so the property is now achievable and not yet *demonstrated*. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
+| **Determinism: the wasm leg** | `tests/determinism.rs` hashes rendered pages against committed fingerprints and runs on linux, windows and macos in the existing matrix — so ruling 4 is demonstrated on three of the four targets, not merely achievable. The fourth runs under wasmtime on `wasm32-wasip1` in a job that has never executed here, because neither the target nor wasmtime is installed locally. Written, unverified. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
 | **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [11](plans/11-forms.md) |
 | **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [15](plans/15-tinker-integration.md) |
