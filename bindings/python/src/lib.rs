@@ -88,6 +88,35 @@ impl PyDocument {
         Ok(py.detach(|| page.text().plain_text()))
     }
 
+    /// Supplies a font for documents that embed none.
+    ///
+    /// Without one such a document extracts its text perfectly and draws none
+    /// of it: the standard-14 metrics are built in, the outlines are not. The
+    /// engine bundles no faces and reads no font directories, so a host that
+    /// wants text drawn says where to find it.
+    ///
+    /// `regular` is required; the other three fall back to it.
+    #[pyo3(signature = (regular, bold = None, italic = None, bold_italic = None))]
+    fn set_fonts(
+        &mut self,
+        regular: Vec<u8>,
+        bold: Option<Vec<u8>>,
+        italic: Option<Vec<u8>>,
+        bold_italic: Option<Vec<u8>>,
+    ) {
+        let mut provider = tinker_pdf::SimpleFontProvider::new(regular);
+        if let Some(bytes) = bold {
+            provider = provider.with_bold(bytes);
+        }
+        if let Some(bytes) = italic {
+            provider = provider.with_italic(bytes);
+        }
+        if let Some(bytes) = bold_italic {
+            provider = provider.with_bold_italic(bytes);
+        }
+        self.inner = self.inner.clone().with_fonts(std::sync::Arc::new(provider));
+    }
+
     /// Renders a page at a resolution in dots per inch.
     #[pyo3(signature = (index, dpi = 72.0))]
     fn render(&self, py: Python<'_>, index: u32, dpi: f64) -> PyResult<PyBitmap> {

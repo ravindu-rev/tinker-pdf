@@ -98,6 +98,33 @@ impl PdfDocument {
             .unwrap_or_default()
     }
 
+    /// Supplies a font for documents that embed none.
+    ///
+    /// Without one such a document extracts its text perfectly and draws none
+    /// of it: the standard-14 metrics are built in, the outlines are not. The
+    /// engine bundles no faces, and a browser has no font directory to read,
+    /// so the page supplies the bytes.
+    #[wasm_bindgen(js_name = setFonts)]
+    pub fn set_fonts(
+        &mut self,
+        regular: Vec<u8>,
+        bold: Option<Vec<u8>>,
+        italic: Option<Vec<u8>>,
+        bold_italic: Option<Vec<u8>>,
+    ) {
+        let mut provider = tinker_pdf::SimpleFontProvider::new(regular);
+        if let Some(bytes) = bold {
+            provider = provider.with_bold(bytes);
+        }
+        if let Some(bytes) = italic {
+            provider = provider.with_italic(bytes);
+        }
+        if let Some(bytes) = bold_italic {
+            provider = provider.with_bold_italic(bytes);
+        }
+        self.inner = self.inner.clone().with_fonts(std::sync::Arc::new(provider));
+    }
+
     /// Renders a page at a scale, where 1.0 is 72 dpi.
     #[wasm_bindgen(js_name = renderPage)]
     pub fn render_page(&self, index: u32, scale: f64) -> Result<PdfBitmap, JsError> {

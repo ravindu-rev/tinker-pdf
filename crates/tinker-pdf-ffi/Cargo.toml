@@ -12,3 +12,5 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 tinker-pdf = { workspace = true }
+
+[dev-dependencies]

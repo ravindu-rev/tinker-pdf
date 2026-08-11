@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 
-use tinker_pdf::{AuthLevel, Bitmap, Document, PixelFormat, RenderOptions};
+use tinker_pdf::{AuthLevel, Bitmap, Document, PixelFormat, RenderOptions, SimpleFontProvider};
 
 /// How a call went.
 #[repr(C)]
@@ -340,6 +340,73 @@ pub unsafe extern "C" fn tpdf_string_free(text: *mut c_char) {
     }
 }
 
+/// Supplies a font for documents that embed none.
+///
+/// Without one, such a document extracts its text perfectly and draws none of
+/// it — the standard-14 metrics are built in, the outlines are not. The engine
+/// bundles no faces and reads no font directories, so a host that wants text
+/// drawn says where to find it.
+///
+/// The bytes are a TrueType or bare CFF program and are **copied**, so the
+/// caller may free them on return. Passing the same document twice replaces
+/// the previous face.
+///
+/// Weight and slope are chosen from the four faces given; a null pointer for
+/// any of them falls back to `regular`, which is why that one is required.
+///
+/// # Safety
+///
+/// `doc` must be a live handle. Each non-null `*_data` pointer must be valid
+/// for its stated length.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_document_set_fonts(
+    doc: *mut TpdfDocument,
+    regular_data: *const u8,
+    regular_len: usize,
+    bold_data: *const u8,
+    bold_len: usize,
+    italic_data: *const u8,
+    italic_len: usize,
+    bold_italic_data: *const u8,
+    bold_italic_len: usize,
+) -> TpdfStatus {
+    let Some(doc) = (unsafe { doc.as_mut() }) else {
+        set_error("null document");
+        return TpdfStatus::BadArgument;
+    };
+
+    // Safety: each pointer is checked for null and paired with its own length,
+    // which the contract above makes the caller's responsibility.
+    let face = |data: *const u8, len: usize| -> Option<Vec<u8>> {
+        if data.is_null() || len == 0 {
+            return None;
+        }
+        Some(unsafe { std::slice::from_raw_parts(data, len) }.to_vec())
+    };
+
+    let Some(regular) = face(regular_data, regular_len) else {
+        set_error("a regular face is required");
+        return TpdfStatus::BadArgument;
+    };
+
+    let mut provider = SimpleFontProvider::new(regular);
+    if let Some(bytes) = face(bold_data, bold_len) {
+        provider = provider.with_bold(bytes);
+    }
+    if let Some(bytes) = face(italic_data, italic_len) {
+        provider = provider.with_italic(bytes);
+    }
+    if let Some(bytes) = face(bold_italic_data, bold_italic_len) {
+        provider = provider.with_bold_italic(bytes);
+    }
+
+    // `with_fonts` consumes and returns the document, and a Document is cheap
+    // to clone — the bytes and the object store are shared — so replacing the
+    // handle's contents costs an Arc bump rather than a reparse.
+    doc.inner = doc.inner.clone().with_fonts(std::sync::Arc::new(provider));
+    TpdfStatus::Ok
+}
+
 /// Renders a page.
 ///
 /// The caller frees the result with [`tpdf_bitmap_free`].
@@ -440,6 +507,221 @@ pub unsafe extern "C" fn tpdf_bitmap_free(bitmap: *mut TpdfBitmap) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A face whose every glyph from 32 up is a filled box, so "did anything
+    /// draw" has an unambiguous answer.
+    fn boxy_font() -> Vec<u8> {
+        let mut glyph = Vec::new();
+        glyph.extend_from_slice(&1i16.to_be_bytes());
+        for value in [0i16, 0, 700, 700] {
+            glyph.extend_from_slice(&value.to_be_bytes());
+        }
+        glyph.extend_from_slice(&3u16.to_be_bytes());
+        glyph.extend_from_slice(&0u16.to_be_bytes());
+        glyph.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+        for dx in [0i16, 700, 0, -700] {
+            glyph.extend_from_slice(&dx.to_be_bytes());
+        }
+        for dy in [0i16, 0, 700, 0] {
+            glyph.extend_from_slice(&dy.to_be_bytes());
+        }
+
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        head[50..52].copy_from_slice(&1i16.to_be_bytes());
+
+        const FIRST: usize = 32;
+        const LAST: usize = 255;
+        let size = glyph.len() as u32;
+        let mut glyf = Vec::new();
+        for _ in FIRST..=LAST {
+            glyf.extend_from_slice(&glyph);
+        }
+        let mut loca = Vec::new();
+        for index in 0..=LAST + 1 {
+            loca.extend_from_slice(&((index.saturating_sub(FIRST)) as u32 * size).to_be_bytes());
+        }
+
+        let tables: [(&[u8; 4], &[u8]); 3] = [(b"head", &head), (b"loca", &loca), (b"glyf", &glyf)];
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, data) in tables {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A page of base-14 text with nothing embedded — the shape of most simple
+    /// documents, and the one no binding could draw.
+    fn text_document() -> Vec<u8> {
+        // Written by hand rather than with the builder: ruling 11 keeps a
+        // binding on the facade alone, and reaching into the COS crate for a
+        // test fixture is still an edge. The DAG check caught exactly that.
+        let content = b"BT /F0 24 Tf 10 20 Td (HELLO) Tj ET
+";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            b"%PDF-1.7
+",
+        );
+        bytes.extend_from_slice(
+            b"1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+",
+        );
+        bytes.extend_from_slice(
+            b"2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+",
+        );
+        bytes.extend_from_slice(
+            b"3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 60]
+              /Resources << /Font << /F0 4 0 R >> >> /Contents 5 0 R >>
+endobj
+",
+        );
+        bytes.extend_from_slice(
+            b"4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+",
+        );
+        bytes.extend_from_slice(
+            format!(
+                "5 0 obj
+<< /Length {} >>
+stream
+",
+                content.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(content);
+        bytes.extend_from_slice(
+            b"endstream
+endobj
+",
+        );
+        bytes.extend_from_slice(
+            b"trailer
+<< /Size 6 /Root 1 0 R >>
+%%EOF
+",
+        );
+        bytes
+    }
+
+    fn inked(bitmap: &TpdfBitmap) -> usize {
+        bitmap
+            .inner
+            .data
+            .chunks_exact(bitmap.inner.components())
+            .filter(|p| p[0] < 250)
+            .count()
+    }
+
+    /// The font seam was Rust-only, so no binding could draw text for a
+    /// document that embeds no fonts — which is most simple documents.
+    #[test]
+    fn a_supplied_face_reaches_the_c_abi() {
+        let bytes = text_document();
+        let mut doc: *mut TpdfDocument = std::ptr::null_mut();
+        let status = unsafe { tpdf_document_open(bytes.as_ptr(), bytes.len(), &mut doc) };
+        assert_eq!(status, TpdfStatus::Ok);
+
+        let mut before: *mut TpdfBitmap = std::ptr::null_mut();
+        let status = unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8, &mut before) };
+        assert_eq!(status, TpdfStatus::Ok);
+        assert_eq!(
+            inked(unsafe { &*before }),
+            0,
+            "without a face there is nothing to draw"
+        );
+
+        let face = boxy_font();
+        let status = unsafe {
+            tpdf_document_set_fonts(
+                doc,
+                face.as_ptr(),
+                face.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(status, TpdfStatus::Ok);
+
+        let mut after: *mut TpdfBitmap = std::ptr::null_mut();
+        let status = unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8, &mut after) };
+        assert_eq!(status, TpdfStatus::Ok);
+        assert!(inked(unsafe { &*after }) > 0, "and with one, text draws");
+
+        unsafe {
+            tpdf_bitmap_free(before);
+            tpdf_bitmap_free(after);
+            tpdf_document_free(doc);
+        }
+    }
+
+    /// A regular face is the one that cannot be omitted, since the others fall
+    /// back to it.
+    #[test]
+    fn setting_fonts_without_a_regular_face_is_refused() {
+        let bytes = text_document();
+        let mut doc: *mut TpdfDocument = std::ptr::null_mut();
+        unsafe { tpdf_document_open(bytes.as_ptr(), bytes.len(), &mut doc) };
+
+        let status = unsafe {
+            tpdf_document_set_fonts(
+                doc,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(status, TpdfStatus::BadArgument);
+        unsafe { tpdf_document_free(doc) };
+    }
+
+    #[test]
+    fn setting_fonts_on_a_null_document_is_refused() {
+        let face = boxy_font();
+        let status = unsafe {
+            tpdf_document_set_fonts(
+                std::ptr::null_mut(),
+                face.as_ptr(),
+                face.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(status, TpdfStatus::BadArgument);
+    }
     use super::*;
     use std::path::PathBuf;
 

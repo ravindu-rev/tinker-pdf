@@ -69,6 +69,14 @@ internal static class Native
     internal static extern void tpdf_document_free(IntPtr doc);
 
     [DllImport(Library)]
+    internal static extern int tpdf_document_set_fonts(
+        IntPtr doc,
+        byte[]? regular, nuint regularLen,
+        byte[]? bold, nuint boldLen,
+        byte[]? italic, nuint italicLen,
+        byte[]? boldItalic, nuint boldItalicLen);
+
+    [DllImport(Library)]
     internal static extern uint tpdf_document_page_count(IntPtr doc);
 
     [DllImport(Library)]
@@ -268,6 +276,36 @@ public sealed class Document : IDisposable
         {
             Native.tpdf_string_free(raw);
         }
+    }
+
+    /// <summary>
+    /// Supplies a font for documents that embed none.
+    /// </summary>
+    /// <remarks>
+    /// Without one, such a document extracts its text perfectly and draws none
+    /// of it: the standard-14 metrics are built in, the outlines are not. The
+    /// engine bundles no faces and reads no font directories, so a host that
+    /// wants text drawn says where to find it — on .NET, usually a face read
+    /// from the system font folder or shipped beside the application.
+    ///
+    /// The bytes are copied, so the arrays may be reused or collected after
+    /// the call. <paramref name="regular"/> is required; the others fall back
+    /// to it.
+    /// </remarks>
+    public void SetFonts(
+        byte[] regular,
+        byte[]? bold = null,
+        byte[]? italic = null,
+        byte[]? boldItalic = null)
+    {
+        ArgumentNullException.ThrowIfNull(regular);
+
+        Native.Check(Native.tpdf_document_set_fonts(
+            _handle.DangerousGetHandle(),
+            regular, (nuint)regular.Length,
+            bold, (nuint)(bold?.Length ?? 0),
+            italic, (nuint)(italic?.Length ?? 0),
+            boldItalic, (nuint)(boldItalic?.Length ?? 0)));
     }
 
     /// <summary>Renders a page. A scale of 1.0 is 72 dpi.</summary>
