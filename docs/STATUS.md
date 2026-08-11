@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**866 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**869 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
@@ -65,7 +65,7 @@ Fixed since, each with tests that would have caught it:
 | [09 Writing](plans/09-writing.md) | rewrite + incremental + object streams + **encryption** | Full rewrite with optional GC, incremental update with byte-identical prefix, classic xref, working object streams, compression, **R6 encrypt-on-save** |
 | [10 Editing](plans/10-editing.md) | substantially complete | Copy-on-write editor; delete/move/rotate/**insert/import/keep**; annotations with synthesized appearances **and flattening**; redaction through **forms and images** |
 | [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree, fill text/choice/checkbox/radio, **comb fields**, appearances rebuilt, reset |
-| [12 Creation](plans/12-creation.md) | pages, text, images | `DocumentBuilder` |
+| [12 Creation](plans/12-creation.md) | pages, text, images, **embedded fonts** | `DocumentBuilder` |
 | [13 Bindings](plans/13-bindings.md) | all three build and are checked | C ABI, Python, JS/wasm, .NET, each able to **supply fonts** |
 | [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing written | `tpdf`, `pdfcmp`, `oracle-diff`; 11 fuzz targets; a hostile-input sweep on stable |
 
@@ -75,7 +75,7 @@ Fixed since, each with tests that would have caught it:
 | --- | --- | --- |
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
 | **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
-| **Font embedding and subsetting in the builder** | Built documents can use the standard 14 but cannot embed a font. Reading is complete: TrueType, CFF, **Type 1** and **Type 3** all draw. | [12](plans/12-creation.md) |
+| **Font subsetting in the builder** | A TrueType face can now be embedded, whole. Subsetting needs a glyph-set analysis and a table rewriter; shipping the whole face is correct, merely larger. | [12](plans/12-creation.md) |
 | **Linearization** | Reading handles it; writing produces none, so a viewer cannot show page one before the whole file arrives. Encrypt-on-save now works (R6); an *incremental* update still cannot encrypt, since it would need the original file's key. | [09](plans/09-writing.md) |
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
 | **Progressive JPEG** | Refused, not decoded — and it appeared in 4 of the first 8 real files. | [02](plans/02-filters.md) |
