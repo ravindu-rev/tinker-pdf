@@ -36,8 +36,8 @@ pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
 pub use tinker_pdf_cos::{
-    Action, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue, LadderLevel,
-    Link, Metadata, OutlineItem, Warning, WarningKind,
+    Action, Attachment, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue,
+    LadderLevel, Link, Metadata, OutlineItem, Warning, WarningKind,
 };
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
@@ -368,6 +368,28 @@ impl Document {
     #[must_use]
     pub fn page_labels(&self) -> Vec<String> {
         cos_outline::page_labels(&self.inner, self.page_count())
+    }
+
+    /// Every file attached to the document (7.11.4).
+    ///
+    /// Attachments are how a PDF carries a spreadsheet next to the report made
+    /// from it, and how some invoicing standards carry their machine-readable
+    /// half. The bytes are not read here — listing what a document carries
+    /// should not cost what extracting it costs — so each entry hands back the
+    /// stream reference to read through [`Document::cos`].
+    #[must_use]
+    pub fn attachments(&self) -> Vec<Attachment> {
+        tinker_pdf_cos::attachments(&self.inner)
+    }
+
+    /// The document's XMP metadata, unparsed (14.3.2).
+    ///
+    /// RDF/XML, handed over as bytes: parsing it needs an XML reader this
+    /// engine does not have and should not grow, and a caller that wants it
+    /// already has one.
+    #[must_use]
+    pub fn xmp_metadata(&self) -> Option<Vec<u8>> {
+        tinker_pdf_cos::xmp_metadata(&self.inner)
     }
 
     /// The document's interactive form fields (12.7).

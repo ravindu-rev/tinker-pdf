@@ -366,6 +366,108 @@ fn letters(n: i64) -> String {
     core::iter::repeat_n(letter, repeats).collect()
 }
 
+/// One file attached to the document (7.11.4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attachment {
+    /// The name it was filed under in `/Names /EmbeddedFiles`.
+    pub name: String,
+    /// `/F` or `/UF`: the filename to offer when saving it out.
+    pub filename: String,
+    /// `/Desc`, when the producer wrote one.
+    pub description: Option<String>,
+    /// The embedded file stream, so a caller can read the bytes itself.
+    ///
+    /// The bytes are deliberately not read here: an attachment may be
+    /// enormous, and listing what a document carries should not cost what it
+    /// costs to extract it.
+    pub stream: Option<ObjRef>,
+    /// `/Params /Size`, when declared. Advisory — the stream is the truth.
+    pub size: Option<i64>,
+}
+
+/// Every file attached to the document, in name order (7.11.4).
+///
+/// Attachments are how a PDF carries a spreadsheet next to the report made
+/// from it, and how some invoicing standards carry their machine-readable
+/// half. A reader that cannot list them silently hides content the document
+/// plainly contains.
+#[must_use]
+pub fn attachments(doc: &CosDocument) -> Vec<Attachment> {
+    let Some(catalog) = doc.catalog() else {
+        return Vec::new();
+    };
+    let names = doc.resolve_key(&catalog, doc.intern(b"Names"));
+    let Some(names) = names.as_dict() else {
+        return Vec::new();
+    };
+    let Some(root) = names.get_ref(doc.intern(b"EmbeddedFiles")) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for (name, value) in crate::trees::name_tree(doc, root) {
+        let resolved = doc.resolve(&value);
+        let Some(spec) = resolved.as_dict() else {
+            continue;
+        };
+
+        // 7.11.3: /UF is the Unicode filename and /F the byte one. The
+        // Unicode form wins where both are present, because the other is in
+        // whatever encoding the producer's filesystem used.
+        let filename = ["UF", "F"]
+            .iter()
+            .find_map(|key| {
+                doc.resolve_key(spec, doc.intern(key.as_bytes()))
+                    .as_string()
+                    .map(|s| crate::text_string::decode_text_string(&s.bytes))
+            })
+            .unwrap_or_default();
+
+        let description = doc
+            .resolve_key(spec, doc.intern(b"Desc"))
+            .as_string()
+            .map(|s| crate::text_string::decode_text_string(&s.bytes));
+
+        // /EF holds the streams, one per naming convention; the same rule
+        // applies to which is preferred.
+        let ef = doc.resolve_key(spec, doc.intern(b"EF"));
+        let stream = ef.as_dict().and_then(|ef| {
+            ef.get_ref(doc.intern(b"UF"))
+                .or_else(|| ef.get_ref(doc.intern(b"F")))
+        });
+
+        let size = stream.and_then(|r| {
+            let object = doc.get(r).ok()?;
+            let dict = object.as_dict()?;
+            let params = doc.resolve_key(dict, doc.intern(b"Params"));
+            params.as_dict()?.get_int(doc.intern(b"Size"))
+        });
+
+        out.push(Attachment {
+            name: crate::text_string::decode_text_string(&name),
+            filename,
+            description,
+            stream,
+            size,
+        });
+    }
+    out
+}
+
+/// The document's XMP metadata stream, as bytes (14.3.2).
+///
+/// Returned unparsed. XMP is RDF/XML, parsing it needs an XML reader this
+/// engine does not have and should not grow, and a caller that wants it
+/// already has one. What matters here is that the bytes are *reachable* —
+/// they carry the document identity and rights information that `/Info` does
+/// not, and several archival profiles require them.
+#[must_use]
+pub fn xmp_metadata(doc: &CosDocument) -> Option<Vec<u8>> {
+    let catalog = doc.catalog()?;
+    let reference = catalog.get_ref(doc.intern(b"Metadata"))?;
+    doc.stream_decoded(reference).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

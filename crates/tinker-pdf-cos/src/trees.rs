@@ -30,6 +30,94 @@ pub fn name_tree(doc: &CosDocument, root: ObjRef) -> Vec<(Vec<u8>, Object)> {
         .collect()
 }
 
+/// Finds one entry of a name tree, descending by `/Limits` (7.9.6).
+///
+/// A tree exists so a lookup does not have to read all of it: each interior
+/// node declares the least and greatest key beneath it, and a key outside that
+/// range means the whole subtree can be skipped. Collecting every entry and
+/// searching the result — the only thing available before this — turns a
+/// structure designed for thousands of destinations into a linear scan of
+/// them, and reads every object on the way.
+///
+/// A node whose `/Limits` are missing or malformed is descended into anyway.
+/// The entry is likely still there, and refusing to look because the index is
+/// damaged is the opposite of what the leniency ladder is for.
+#[must_use]
+pub fn name_tree_lookup(doc: &CosDocument, root: ObjRef, key: &[u8]) -> Option<Object> {
+    let mut visited = HashSet::new();
+    descend(doc, root, key, 0, &mut visited)
+}
+
+fn descend(
+    doc: &CosDocument,
+    node: ObjRef,
+    key: &[u8],
+    depth: u32,
+    visited: &mut HashSet<u32>,
+) -> Option<Object> {
+    if depth > limits::MAX_NEST_DEPTH || !visited.insert(node.num) {
+        return None;
+    }
+
+    let object = doc.get(node).ok()?;
+    let dict = object.as_dict()?;
+
+    // A leaf: /Names is a flat [key value key value] array, sorted, so the
+    // key is found by comparison rather than by scanning for equality.
+    if let Some(names) = doc.resolve_key(dict, doc.intern(b"Names")).as_array() {
+        for pair in names.chunks_exact(2) {
+            let Some(name) = doc.resolve(&pair[0]).as_string().map(|s| s.bytes.clone()) else {
+                continue;
+            };
+            if name == key {
+                return Some(doc.resolve(&pair[1]).as_ref().clone());
+            }
+        }
+        return None;
+    }
+
+    let kids = doc.resolve_key(dict, Name::KIDS);
+    let kids = kids.as_array()?;
+    for kid in kids.iter().take(limits::MAX_ARRAY_LEN) {
+        let Some(reference) = kid.as_objref() else {
+            continue;
+        };
+        if !within_limits(doc, reference, key) {
+            continue;
+        }
+        if let Some(found) = descend(doc, reference, key, depth + 1, visited) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Whether a node's `/Limits` admit a key.
+///
+/// Absent or malformed limits admit everything: the index being damaged is no
+/// reason to conclude the entry is not there.
+fn within_limits(doc: &CosDocument, node: ObjRef, key: &[u8]) -> bool {
+    let Ok(object) = doc.get(node) else {
+        return true;
+    };
+    let Some(dict) = object.as_dict() else {
+        return true;
+    };
+    let value = doc.resolve_key(dict, doc.intern(b"Limits"));
+    let Some(pair) = value.as_array() else {
+        return true;
+    };
+    let (Some(low), Some(high)) = (
+        pair.first()
+            .and_then(|o| doc.resolve(o).as_string().map(|s| s.bytes.clone())),
+        pair.get(1)
+            .and_then(|o| doc.resolve(o).as_string().map(|s| s.bytes.clone())),
+    ) else {
+        return true;
+    };
+    key >= low.as_slice() && key <= high.as_slice()
+}
+
 /// Collects every entry of a number tree rooted at `root` (7.9.7).
 #[must_use]
 pub fn number_tree(doc: &CosDocument, root: ObjRef) -> Vec<(i64, Object)> {

@@ -84,12 +84,15 @@ pub use form::{acro_form, fields, Field, FieldKind, FieldValue};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};
-pub use outline::{metadata, outline, page_labels, LabelStyle, Metadata, OutlineItem};
+pub use outline::{
+    attachments, metadata, outline, page_labels, xmp_metadata, Attachment, LabelStyle, Metadata,
+    OutlineItem,
+};
 pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use text_string::{decode_text_string, parse_date, Date};
-pub use trees::{name_tree, number_tree};
+pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use warn::{Warning, WarningKind, WarningSink};
 pub use write::{ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};
