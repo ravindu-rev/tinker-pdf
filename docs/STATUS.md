@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**923 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**938 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
@@ -44,6 +44,9 @@ Fixed since, each with tests that would have caught it:
 | **Redaction ignored `cm`**, so content under a transform was measured in the wrong space | The matrix is composed, saved and restored with the pen |
 | **An embedded font carried its whole face** — tens of megabytes to set a line of Latin text with a CJK font, which is the reason nobody embeds | Subset to the glyphs the document draws, with composite components followed and the 9.6.4 name tag written |
 | **Nothing could write a linearized file**, so a viewer could not show page one before the last byte arrived — the capability MuPDF 1.26 removed, and the reason Tinker's plans had to shell out to qpdf | Annex F layout: parameter dictionary first, a cross-reference table for page one ahead of it, page one's objects before everything else, shared objects last, and the final `startxref` pointing back to the front |
+| **Form XObjects were not clipped to their `/BBox`** (8.10.2), and forms are how most producers place repeated content — so a form drawing outside its box painted over the rest of the page, on every page it appeared | Clipped, with the corners transformed into device space; the annotation case, which is the same defect one layer up, is fixed too |
+| **`pdfcmp` gated on the mean channel difference** while promising its budgets transfer from Tinker's, which counts changed pixels — a glyph moving one pixel barely moves the mean, so the tool would report "within budget" for exactly the regression it exists to catch | Gates on the fraction of pixels that moved by more than a threshold, with Tinker's own constants as the defaults |
+| **`cargo xtask dag` never checked xtask's own dependencies** — it looked for `tools/xtask/Cargo.toml`, which does not exist, and a failed read was a silent `continue` | Paths rather than names, and an unreadable manifest is a reported problem |
 | **Progressive JPEG was refused, not decoded** — in four of the first eight real files, so their photographs rendered as grey placeholders | Spectral selection, successive approximation for DC and AC, and end-of-band runs. Baseline moved onto the same coefficient buffer rather than keeping a second path |
 | **`extend` shifted by an unclamped magnitude category**, so any JPEG with a corrupt Huffman table panicked — reachable from baseline since the decoder was written (ruling 1) | Clamped to the largest category T.81 defines |
 | **A single-component JPEG scan was decoded over the MCU-padded block grid** instead of the component's own, desynchronising every later block where the sampling factors are not 1×1 | Non-interleaved scans iterate their own dimensions (T.81 A.2.2) |
@@ -78,6 +81,10 @@ Fixed since, each with tests that would have caught it:
 
 ## Not built
 
+[16 Build sequence](plans/16-build-sequence.md) orders everything below
+by value over risk, and — more usefully — names the six places where a
+half-implementation would be worse than none.
+
 | Gap | Consequence | Where |
 | --- | --- | --- |
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
@@ -86,7 +93,6 @@ Fixed since, each with tests that would have caught it:
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
-| **Annotation `/BBox` clipping** | An appearance stream larger than its box is not clipped to it. | [08](plans/08-rendering-device.md) |
 | **Determinism: the cross-target job** | The obstacle is gone — no pixel path calls the platform's libm any more, and `cargo xtask libm` fails the build if one starts to. What is still missing is the CI job that renders the goldens on all four targets and compares them, so the property is now achievable and not yet *demonstrated*. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
 | **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [11](plans/11-forms.md) |
