@@ -295,6 +295,9 @@ dependencies = [
 [[package]]
 name = "tinker-pdf-color"
 version = "0.0.1"
+dependencies = [
+ "tinker-pdf-math",
+]
 
 [[package]]
 name = "tinker-pdf-content"
@@ -338,8 +341,15 @@ name = "tinker-pdf-font"
 version = "0.0.1"
 
 [[package]]
+name = "tinker-pdf-math"
+version = "0.0.1"
+
+[[package]]
 name = "tinker-pdf-raster"
 version = "0.0.1"
+dependencies = [
+ "tinker-pdf-math",
+]
 
 [[package]]
 name = "tinker-pdf-render"

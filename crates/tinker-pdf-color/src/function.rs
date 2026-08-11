@@ -17,6 +17,8 @@
 //! would propagate into a colour. It cannot loop: the language has no loop
 //! operator and the interpreter never revisits an instruction.
 
+use tinker_pdf_math as math;
+
 /// A function from `m` inputs to `n` outputs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Function {
@@ -110,7 +112,7 @@ impl Function {
 
             Function::Exponential { domain, c0, c1, n } => {
                 let x = clamp(inputs.first().copied().unwrap_or(0.0), *domain);
-                let factor = if *n == 1.0 { x } else { x.powf(*n) };
+                let factor = if *n == 1.0 { x } else { math::pow(x, *n) };
                 let factor = if factor.is_finite() { factor } else { 0.0 };
                 let len = c0.len().max(c1.len());
                 (0..len)
@@ -338,15 +340,15 @@ fn run_ps(program: &[PsOp], stack: &mut Vec<f64>, depth: u32) {
                     }
                     "sin" => {
                         let a = pop();
-                        stack.push(a.to_radians().sin());
+                        stack.push(math::sin(math::to_radians(a)));
                     }
                     "cos" => {
                         let a = pop();
-                        stack.push(a.to_radians().cos());
+                        stack.push(math::cos(math::to_radians(a)));
                     }
                     "atan" => {
                         let (b, a) = (pop(), pop());
-                        let mut degrees = a.atan2(b).to_degrees();
+                        let mut degrees = math::to_degrees(math::atan2(a, b));
                         if degrees < 0.0 {
                             degrees += 360.0;
                         }
@@ -354,15 +356,15 @@ fn run_ps(program: &[PsOp], stack: &mut Vec<f64>, depth: u32) {
                     }
                     "exp" => {
                         let (b, a) = (pop(), pop());
-                        stack.push(a.powf(b));
+                        stack.push(math::pow(a, b));
                     }
                     "ln" => {
                         let a = pop();
-                        stack.push(if a > 0.0 { a.ln() } else { 0.0 });
+                        stack.push(if a > 0.0 { math::ln(a) } else { 0.0 });
                     }
                     "log" => {
                         let a = pop();
-                        stack.push(if a > 0.0 { a.log10() } else { 0.0 });
+                        stack.push(if a > 0.0 { math::log10(a) } else { 0.0 });
                     }
                     "cvi" | "truncate" => {
                         let a = pop();

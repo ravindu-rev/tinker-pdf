@@ -31,6 +31,23 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    produces bit-identical bitmaps on linux, windows, macos and wasm, and CI
    compares goldens across all four to prove it.
 
+   *Amended, August 2026.* "No platform libm in hot paths" was written as
+   guidance and held as nothing: `sin`, `cos`, `atan2`, `ln`, `log10` and
+   `powf` were being called from the stroker's round joins, from the
+   PostScript calculator functions and from the sRGB transfer function — all
+   of which reach pixels, and none of which any platform rounds the same way.
+   The rule now has a crate and a check behind it. `tinker-pdf-math` supplies
+   the functions, built from nothing but the operations IEEE 754 pins exactly,
+   and it is `no_std` so that `x.sin()` does not compile inside it.
+   `cargo xtask libm` fails the build if any pixel-path crate calls one of
+   them.
+
+   The boundary is worth stating precisely, because half of the original rule
+   was over-broad: `sqrt`, `floor`, `ceil`, `round`, `trunc` and `abs` **are**
+   correctly rounded by the standard, so they are identical on every target
+   and pixel-path code may use them freely. It is only the transcendental
+   family that diverges.
+
 5. **Tiles share the full-page code path.** Binds [07](07-rasterizer.md) and
    [08](08-rendering-device.md). A clipped render is the same pipeline with a
    translated viewport — never a second implementation. Tinker's

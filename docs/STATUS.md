@@ -42,6 +42,11 @@ Fixed since, each with tests that would have caught it:
 | **`TextPage` had no warnings**, so "no text" and "text this build could not decode" were indistinguishable | `TextPage::warnings`, deduplicated |
 | **`deny.toml` could not express the hand-rolled rule** — it lists licences, which say nothing about what a crate *does* | The crates that would violate it are denied by name |
 | **Redaction ignored `cm`**, so content under a transform was measured in the wrong space | The matrix is composed, saved and restored with the pen |
+| **Progressive JPEG was refused, not decoded** — in four of the first eight real files, so their photographs rendered as grey placeholders | Spectral selection, successive approximation for DC and AC, and end-of-band runs. Baseline moved onto the same coefficient buffer rather than keeping a second path |
+| **`extend` shifted by an unclamped magnitude category**, so any JPEG with a corrupt Huffman table panicked — reachable from baseline since the decoder was written (ruling 1) | Clamped to the largest category T.81 defines |
+| **A single-component JPEG scan was decoded over the MCU-padded block grid** instead of the component's own, desynchronising every later block where the sampling factors are not 1×1 | Non-interleaved scans iterate their own dimensions (T.81 A.2.2) |
+| **Platform `libm` was called on three pixel paths** — round joins, the PostScript calculator, the sRGB transfer function — so bit-identical cross-target output was impossible whatever CI measured (ruling 4) | `tinker-pdf-math`, built only from operations IEEE 754 pins exactly, plus `cargo xtask libm` to keep it that way |
+| **`Document::cos` returned a type the facade did not export**, and `DocumentBuilder` was not exported at all, so a caller depending on the facade alone could neither use the escape hatch nor write a file | Both exported |
 | **Redaction stopped at the page stream.** Forms are how most producers place repeated content, so a redaction could be driven straight through one; images under a rectangle were covered, not removed | Forms are rewritten recursively; images are scrubbed to a blank sample |
 | **Page operations were silently dropped by a rewrite** — the reordered `/Kids` was written into the incremental set only | Applied to whichever set the mode builds. Every existing page-operation test saved incrementally, which is why nothing caught it |
 | **`WriteOptions::encryption` had no reader**, so asking for encryption produced a plaintext file with no error | R6 encrypt-on-save, strings and streams, per-object IVs |
@@ -55,7 +60,7 @@ Fixed since, each with tests that would have caught it:
 | Phase | State | What works |
 | --- | --- | --- |
 | [01 COS](plans/01-cos-and-object-model.md) | milestones 1–4 | Lexer, object model, xref in every flavour, object streams, lazy `Send + Sync` store, repair scanner, leniency ladder, three stream tiers |
-| [02 Filters](plans/02-filters.md) | wave 1 + **deflate** + JPEG + CCITT | Own inflate **and deflate**, LZW, ASCIIHex/85, RunLength, predictors; baseline JPEG; CCITT G3/G4 |
+| [02 Filters](plans/02-filters.md) | wave 1 + deflate + JPEG + CCITT | Own inflate and deflate, LZW, ASCIIHex/85, RunLength, predictors; JPEG **baseline, extended sequential and progressive**; CCITT G3/G4 |
 | [03 Encryption](plans/03-encryption.md) | reading and **writing** | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits; `/EncryptMetadata` and `/Crypt /Identity` honoured |
 | [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata, page tree with inheritance, geometry, outlines, name/number trees with **`/Limits` descent**, destination enum, page labels, actions, links, **attachments**, **XMP** |
 | [05 Fonts](plans/05-fonts.md) | TrueType + CFF + **Type 1** + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf`, CFF Type 2 **and Type 1** outlines; `FontProvider` for faces a document does not embed |
@@ -78,11 +83,10 @@ Fixed since, each with tests that would have caught it:
 | **Font subsetting in the builder** | A TrueType face can now be embedded, whole. Subsetting needs a glyph-set analysis and a table rewriter; shipping the whole face is correct, merely larger. | [12](plans/12-creation.md) |
 | **Linearization** | Reading handles it; writing produces none, so a viewer cannot show page one before the whole file arrives. Encrypt-on-save now works (R6); an *incremental* update still cannot encrypt, since it would need the original file's key. | [09](plans/09-writing.md) |
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
-| **Progressive JPEG** | Refused, not decoded — and it appeared in 4 of the first 8 real files. | [02](plans/02-filters.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
 | **Annotation `/BBox` clipping** | An appearance stream larger than its box is not clipped to it. | [08](plans/08-rendering-device.md) |
-| **Determinism** | The DAG check and the hand-rolled allowlist now exist and run in CI. What does not: a determinism job, and platform `libm` is still called on paths that reach pixels (`powf`, `sin`, `cos`, `atan2`, `ln`), so bit-identical cross-target output is not achievable today whatever a job would measure. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
+| **Determinism: the cross-target job** | The obstacle is gone — no pixel path calls the platform's libm any more, and `cargo xtask libm` fails the build if one starts to. What is still missing is the CI job that renders the goldens on all four targets and compares them, so the property is now achievable and not yet *demonstrated*. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
 | **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [11](plans/11-forms.md) |
 | **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [15](plans/15-tinker-integration.md) |

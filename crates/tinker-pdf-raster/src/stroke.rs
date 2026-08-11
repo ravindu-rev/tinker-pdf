@@ -5,6 +5,8 @@
 //! anti-alias identically — which is what stops strokes looking subtly
 //! different from fills at the same position.
 
+use tinker_pdf_math as math;
+
 use crate::geom::{flatten, Path, Point};
 
 /// How a stroke's ends are finished (8.4.3.3, Table 54).
@@ -410,8 +412,8 @@ fn circle(center: Point, radius: f64, out: &mut Path) {
         .map(|step| {
             let angle = (step as f64) / (ARC_STEPS as f64) * std::f64::consts::TAU;
             Point::new(
-                center.x + radius * angle.cos(),
-                center.y + radius * angle.sin(),
+                center.x + radius * math::cos(angle),
+                center.y + radius * math::sin(angle),
             )
         })
         .collect();

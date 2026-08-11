@@ -9,3 +9,4 @@ authors.workspace = true
 description = "Pure 2D rasterizer: Bezier flattening, analytic-coverage AA fill, stroking, clipping, image sampling, compositing. Zero PDF knowledge"
 
 [dependencies]
+tinker-pdf-math = { workspace = true }

@@ -28,9 +28,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      # The crate graph is a design rule the compiler cannot enforce: a new
-      # edge compiles perfectly well. Plan 00 and ruling 8 say what it is.
-      - run: cargo run -p xtask -- dag
+      # Two design rules the compiler cannot enforce: a new crate edge
+      # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan
+      # 00 and ruling 8 say what the graph is; ruling 4 says why the platform
+      # libm may not appear where the output is pixels.
+      - run: cargo run -p xtask -- check
 
   fuzz-targets:
     # The fuzz crate sits outside the workspace, so `cargo check --workspace`

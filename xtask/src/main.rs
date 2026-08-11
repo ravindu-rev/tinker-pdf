@@ -12,6 +12,8 @@ xtask — repository chores
 
 usage:
   cargo xtask dag     check the crate dependency graph against the declared one
+  cargo xtask libm    check that no pixel path calls the platform's libm
+  cargo xtask check   both of the above
   cargo xtask help
 ";
 
@@ -20,19 +22,22 @@ fn main() -> ExitCode {
         .nth(1)
         .unwrap_or_else(|| "help".to_string());
     match task.as_str() {
-        "dag" => match check_dag() {
-            Ok(()) => {
-                println!("dag: ok");
-                ExitCode::SUCCESS
-            }
-            Err(problems) => {
-                for problem in &problems {
-                    eprintln!("dag: {problem}");
-                }
-                eprintln!("dag: {} problem(s)", problems.len());
-                ExitCode::FAILURE
-            }
-        },
+        "dag" => report("dag", check_dag()),
+        "libm" => report("libm", check_libm()),
+        "check" => {
+            let dag = check_dag();
+            let libm = check_libm();
+            let mut problems = dag.err().unwrap_or_default();
+            problems.extend(libm.err().unwrap_or_default());
+            report(
+                "check",
+                if problems.is_empty() {
+                    Ok(())
+                } else {
+                    Err(problems)
+                },
+            )
+        }
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -60,13 +65,21 @@ fn main() -> ExitCode {
 /// alternative is a third crate between them whose only job is to hold two
 /// tables, which is worse. The edge points from a higher layer to a leaf, so
 /// it does not invert the layering.
+///
+/// **`math` is a second-order leaf.** Deterministic `sin`, `ln` and `pow`
+/// belong *under* the rasteriser and the colour code rather than inside
+/// either, because both need them and neither may depend on the other. It has
+/// no dependencies of its own — not even `std` — so it adds a layer below the
+/// leaves rather than an edge between them.
 const ALLOWED: &[(&str, &[&str])] = &[
-    // Leaves: nothing internal at all.
+    // The bottom: nothing at all, internal or otherwise.
+    ("tinker-pdf-math", &[]),
+    // Leaves: nothing internal beyond the maths.
     ("tinker-pdf-filters", &[]),
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &[]),
-    ("tinker-pdf-color", &[]),
-    ("tinker-pdf-raster", &[]),
+    ("tinker-pdf-color", &["tinker-pdf-math"]),
+    ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
     (
         "tinker-pdf-cos",
@@ -113,6 +126,126 @@ fn repo_root() -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Prints a task's outcome and turns it into an exit code.
+fn report(task: &str, outcome: Result<(), Vec<String>>) -> ExitCode {
+    match outcome {
+        Ok(()) => {
+            println!("{task}: ok");
+            ExitCode::SUCCESS
+        }
+        Err(problems) => {
+            for problem in &problems {
+                eprintln!("{task}: {problem}");
+            }
+            eprintln!("{task}: {} problem(s)", problems.len());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The crates whose output is pixels, and which therefore may not call the
+/// platform's transcendental functions.
+///
+/// Ruling 4 wants byte-identical rendering across targets. `sqrt` and the
+/// rounding family are safe — IEEE 754 requires them to be correctly rounded,
+/// so every platform agrees. The functions below are not, and glibc, musl,
+/// the MSVC runtime, Apple's libm and the wasm shim each round them their own
+/// way. `tinker-pdf-math` exists to replace them; this makes sure nobody
+/// quietly goes back.
+const PIXEL_PATHS: &[&str] = &[
+    "tinker-pdf-raster",
+    "tinker-pdf-color",
+    "tinker-pdf-render",
+    "tinker-pdf-content",
+];
+
+/// Method calls that are not correctly rounded, and so differ between
+/// platforms. Spelled with the dot so `f.exp()` matches and a local named
+/// `exp` does not.
+const FORBIDDEN: &[&str] = &[
+    ".sin()",
+    ".cos()",
+    ".tan()",
+    ".asin()",
+    ".acos()",
+    ".atan()",
+    ".atan2(",
+    ".sinh()",
+    ".cosh()",
+    ".tanh()",
+    ".exp()",
+    ".exp2()",
+    ".exp_m1()",
+    ".ln()",
+    ".ln_1p()",
+    ".log(",
+    ".log2()",
+    ".log10()",
+    ".powf(",
+    ".cbrt()",
+    ".hypot(",
+    ".to_radians()",
+    ".to_degrees()",
+    ".mul_add(",
+];
+
+fn check_libm() -> Result<(), Vec<String>> {
+    let root = repo_root();
+    let mut problems = Vec::new();
+
+    for crate_name in PIXEL_PATHS {
+        let src = root.join("crates").join(crate_name).join("src");
+        let mut files = Vec::new();
+        collect_rust_files(&src, &mut files);
+
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            // Tests may compare against the platform — that is how the maths
+            // crate proves it agrees with one. Only shipped code is bound.
+            let shipped = text.split("#[cfg(test)]").next().unwrap_or(&text);
+
+            for (number, line) in shipped.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or(line);
+                for call in FORBIDDEN {
+                    if code.contains(call) {
+                        let shown = file
+                            .strip_prefix(&root)
+                            .unwrap_or(&file)
+                            .display()
+                            .to_string();
+                        problems.push(format!(
+                            "{shown}:{}: `{call}` is not correctly rounded, so it differs between platforms; use tinker_pdf_math (ruling 4)",
+                            number + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
 }
 
 fn check_dag() -> Result<(), Vec<String>> {

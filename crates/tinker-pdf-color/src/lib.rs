@@ -13,6 +13,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use tinker_pdf_math as math;
+
 pub mod function;
 
 pub use function::Function;
@@ -208,7 +210,7 @@ fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
         let s = if v <= 0.003_130_8 {
             12.92 * v
         } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
+            1.055 * math::pow(v, 1.0 / 2.4) - 0.055
         };
         byte(s)
     };

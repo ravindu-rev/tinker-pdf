@@ -1,12 +1,11 @@
 [package]
-name = "tinker-pdf-color"
+name = "tinker-pdf-math"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Color spaces and the PDF function interpreter (Types 0, 2, 3, 4)"
+description = "Deterministic transcendental functions: the same bits on every target, which the platform's libm does not promise"
 
 [dependencies]
-tinker-pdf-math = { workspace = true }
