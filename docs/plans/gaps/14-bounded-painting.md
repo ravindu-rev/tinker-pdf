@@ -57,6 +57,19 @@ what it would have contained anyway. So the whole change is verifiable by
 running the existing suite unchanged — and by the determinism fingerprints,
 which will not move if this is right and will move loudly if it is not.
 
+*Amended, August 2026.* That last sentence was worth nothing when it was
+written. The `text` fixture in `tests/determinism.rs` named Helvetica and
+embedded no font program, and the engine bundles no faces — so every glyph
+resolved to nothing, the page rendered blank, and its committed fingerprint
+was the hash of an empty 200x100 canvas. The glyph path this plan is about
+("one full-page mask per glyph") was the one path the fingerprints did not
+cover, so milestone 1's exit criterion would have been satisfied by a change
+that broke every glyph on the page. The fixture now embeds a synthetic
+TrueType face of curves, diagonals and a hole and paints 1486 pixels, and each
+fixture asserts a floor on its ink before it is hashed. Take the criterion at
+face value from here; anything measured against the old `text` fingerprint was
+measured against a blank page.
+
 Order matters for the payoff. Bounding the *mask* without bounding
 `fill_mask_with` keeps the full-page walk. Bounding both without touching
 `fill`'s row loop keeps the `height × 16 × edges` scan. The three land

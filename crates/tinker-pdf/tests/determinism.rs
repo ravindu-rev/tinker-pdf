@@ -26,16 +26,73 @@
 //! - **Two targets disagree.** A determinism bug. Do not update the hash;
 //!   find the arithmetic that is not target-stable. That is the failure this
 //!   file exists for, and it is the one that is silent everywhere else.
+//!
+//! # Why every fixture asserts that it painted something
+//!
+//! *Added August 2026.* The `text` fixture named Helvetica and embedded no
+//! program. The engine bundles no faces by design, so every glyph resolved to
+//! nothing, the page came out uniformly white, and its committed fingerprint
+//! was the hash of a blank 200x100 page — bit for bit the same as a document
+//! that draws nothing at all. It had been that from the day it was written,
+//! and it passed the whole time, on all four targets, because a blank page is
+//! extremely stable.
+//!
+//! That is the failure mode a hash cannot show you: a fixture measuring
+//! nothing is indistinguishable from a fixture measuring something, right up
+//! until you ask what it covers. So each fixture now carries the least ink it
+//! may paint and is checked against it before it is hashed. A page that
+//! stops drawing fails here rather than quietly becoming the new baseline.
 
-use tinker_pdf::{Document, DocumentBuilder, RenderOptions};
+use tinker_pdf::{Bitmap, Document, DocumentBuilder, RenderOptions, RenderWarning};
+
+/// A named page: how to build it, and the least ink it may draw.
+struct Fixture {
+    name: &'static str,
+    build: fn() -> Vec<u8>,
+    /// The fewest non-background pixels this page may paint.
+    ///
+    /// A floor, not a measurement — roughly half of what the page draws
+    /// today, so an ordinary rendering change moves the hash and leaves this
+    /// alone, while a fixture that has stopped drawing trips it. The point is
+    /// that "the fingerprints did not move" cannot again be evidence about a
+    /// path the fixture never exercised.
+    least_ink: usize,
+}
+
+/// Pixels that are not the white the page started as.
+fn ink(bitmap: &Bitmap) -> usize {
+    bitmap
+        .data
+        .chunks_exact(bitmap.components())
+        .filter(|pixel| pixel.iter().any(|value| *value != 255))
+        .count()
+}
 
 /// The rendered bytes of the first page, hashed.
-fn fingerprint(bytes: Vec<u8>) -> String {
-    let bitmap = Document::open(bytes)
+fn fingerprint(fixture: &Fixture) -> String {
+    let bitmap = Document::open((fixture.build)())
         .expect("it opens")
         .page(0)
         .expect("a page")
         .render(&RenderOptions::default());
+
+    let drawn = ink(&bitmap);
+    assert!(
+        drawn >= fixture.least_ink,
+        "the {} fixture painted {drawn} pixels, fewer than the {} it is \
+         supposed to: it is measuring less than it claims, and its \
+         fingerprint is not evidence about anything until that is fixed. \
+         Warnings: {:?}",
+        fixture.name,
+        fixture.least_ink,
+        bitmap.warnings,
+    );
+    assert!(
+        !bitmap.warnings.contains(&RenderWarning::UnreadableFont),
+        "the {} fixture named a font this build cannot draw, so its glyphs \
+         are missing from the fingerprint",
+        fixture.name,
+    );
 
     // The dimensions go into the hash as well: two renders that differ only
     // in size would otherwise have to differ in content to be caught, and a
@@ -54,20 +111,319 @@ fn fingerprint(bytes: Vec<u8>) -> String {
 
 /// Text, which exercises glyph rasterisation — the densest source of
 /// coverage arithmetic in the engine.
+///
+/// The face is embedded rather than named. A document naming one of the
+/// standard 14 carries no outlines, and the engine bundles none, so every
+/// glyph in the version of this fixture that stood here until August 2026
+/// resolved to nothing and the page was blank. A host `FontProvider` would
+/// also have put ink on it, but the provider is the *host's* configuration —
+/// a fixture that depends on one is measuring an arrangement made outside the
+/// document, and ruling 4 is a claim about documents. Embedding keeps this
+/// page closed: everything it renders from is in the file.
 fn text_page() -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
-    builder.add_base_font(b"F0", b"Helvetica");
+    // The whole face, so that the only thing between these bytes and the
+    // pixels is the renderer. Subsetting is correct and tested elsewhere; if
+    // it ran here, a change to the subsetter would move a fingerprint whose
+    // failure message talks about rendering.
+    builder.set_subset_fonts(false);
+    assert!(
+        builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()),
+        "the synthetic face parses as a TrueType program"
+    );
+    // Both lines are sized to end inside the page: ink that falls off the
+    // canvas is clipped away and contributes nothing to the fingerprint, so
+    // an overlong line is coverage that looks like it is being measured and
+    // is not. The second starts on a half-pixel so the same shapes land on a
+    // different sub-pixel phase.
     builder.add_page(200.0, 100.0, |page| {
-        page.text(
-            b"F0",
-            14.0,
-            10.0,
-            60.0,
-            "Determinism, and the quick brown fox.",
-        );
-        page.text(b"F0", 9.0, 10.0, 40.0, "jumps over the lazy dog 0123456789");
+        page.text(b"F0", 14.0, 10.0, 60.0, "Determinism, and the");
+        page.text(b"F0", 9.0, 10.5, 40.0, "quick brown fox jumps 0123456789");
     });
     builder.finish()
+}
+
+/// One outline point: its position in font units, and whether it lies on the
+/// curve.
+type Point = (i16, i16, bool);
+/// A closed contour.
+type Contour = &'static [Point];
+/// One glyph, as its contours.
+type Shape = &'static [Contour];
+
+/// The six outlines of [`curvy_font`], glyph 1 upward; glyph 0 is `.notdef`
+/// and empty.
+///
+/// Chosen for what they make the rasteriser do, not for looking like letters.
+/// A box outline — four axis-aligned edges — exercises almost nothing: every
+/// span is full or empty and no coverage value between 0 and 1 ever arises.
+/// These do, in six different ways:
+///
+/// 1. a chevron: long diagonals meeting at a thin apex, with a notch;
+/// 2. a ring: two curved contours wound in opposite directions, so the hole
+///    depends on the fill rule as well as on the arithmetic;
+/// 3. a wedge: one quadratic spanning the whole em against two straight
+///    edges, which is flattening tolerance on its own;
+/// 4. a slash: a parallelogram at a shallow angle, nothing but partial
+///    coverage down both sides;
+/// 5. a ribbon: consecutive off-curve points, so the implied on-curve
+///    midpoint rule decides where the curve actually goes;
+/// 6. a dot over a stem: two contours of very different size in one glyph,
+///    the small one curved and the thin one diagonal.
+const SHAPES: &[Shape] = &[
+    // 1. Chevron.
+    &[&[
+        (20, 0, true),
+        (240, 700, true),
+        (320, 700, true),
+        (540, 0, true),
+        (420, 0, true),
+        (280, 380, true),
+        (140, 0, true),
+    ]],
+    // 2. Ring: the outer contour runs clockwise and the inner one
+    // anticlockwise, which is what makes the middle a hole.
+    &[
+        &[
+            (280, 630, true),
+            (560, 630, false),
+            (560, 350, true),
+            (560, 70, false),
+            (280, 70, true),
+            (0, 70, false),
+            (0, 350, true),
+            (0, 630, false),
+        ],
+        &[
+            (280, 500, true),
+            (130, 500, false),
+            (130, 350, true),
+            (130, 200, false),
+            (280, 200, true),
+            (430, 200, false),
+            (430, 350, true),
+            (430, 500, false),
+        ],
+    ],
+    // 3. Wedge.
+    &[&[
+        (0, 0, true),
+        (560, 0, true),
+        (560, 700, false),
+        (0, 700, true),
+    ]],
+    // 4. Slash.
+    &[&[
+        (0, 0, true),
+        (200, 0, true),
+        (560, 700, true),
+        (360, 700, true),
+    ]],
+    // 5. Ribbon. Each edge is two quadratics meeting at a point the font
+    // never states — halfway between the two off-curve points.
+    &[&[
+        (40, 0, true),
+        (40, 340, false),
+        (520, 360, false),
+        (520, 700, true),
+        (400, 700, true),
+        (360, 300, false),
+        (200, 260, false),
+        (160, 0, true),
+    ]],
+    // 6. Dot over a stem.
+    &[
+        &[
+            (140, 680, true),
+            (260, 680, false),
+            (260, 560, true),
+            (260, 440, false),
+            (140, 440, true),
+            (20, 440, false),
+            (20, 560, true),
+            (20, 680, false),
+        ],
+        &[
+            (240, 0, true),
+            (380, 0, true),
+            (560, 420, true),
+            (420, 420, true),
+        ],
+    ],
+];
+
+/// How many glyphs the face has, `.notdef` included.
+const GLYPHS: u16 = SHAPES.len() as u16 + 1;
+/// The advance of every shape, in font units, and of the space.
+const ADVANCE: u16 = 640;
+const SPACE_ADVANCE: u16 = 320;
+
+/// Which glyph a character code selects: the space is empty, and every other
+/// printable code takes the six shapes in turn.
+fn glyph_for(code: u16) -> u16 {
+    if code == 0x20 {
+        return 0;
+    }
+    1 + (code - 0x21) % (GLYPHS - 1)
+}
+
+/// A synthetic TrueType face of curves and diagonals.
+///
+/// Built here rather than read from the system, because ruling 4 is a claim
+/// about every target — including `wasm32-unknown-unknown`, where there are
+/// no font directories to read — and because a repository that carries no
+/// font carries nobody's licence.
+fn curvy_font() -> Vec<u8> {
+    // Glyph 0 is `.notdef` and has no outline: an empty `loca` range, which
+    // is how a font says "no shape" (a repeated offset, rather than a zero
+    // one).
+    let mut glyf: Vec<u8> = Vec::new();
+    let mut loca: Vec<u32> = vec![0, 0];
+    for shape in SHAPES {
+        glyf.extend_from_slice(&glyph_data(shape));
+        loca.push(glyf.len() as u32);
+    }
+
+    let mut loca_bytes = Vec::new();
+    for offset in &loca {
+        loca_bytes.extend_from_slice(&offset.to_be_bytes());
+    }
+
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca offsets
+
+    let mut maxp = vec![0u8; 32];
+    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    maxp[4..6].copy_from_slice(&GLYPHS.to_be_bytes());
+
+    let mut hhea = vec![0u8; 36];
+    hhea[34..36].copy_from_slice(&GLYPHS.to_be_bytes()); // numberOfHMetrics
+
+    // The advances the builder reads out to write /Widths with, so the text
+    // is spaced by the same numbers the outlines are drawn from.
+    let mut hmtx = Vec::new();
+    for glyph in 0..GLYPHS {
+        let advance = if glyph == 0 { SPACE_ADVANCE } else { ADVANCE };
+        hmtx.extend_from_slice(&advance.to_be_bytes());
+        hmtx.extend_from_slice(&0i16.to_be_bytes()); // left side bearing
+    }
+
+    let cmap = cmap();
+    let tables: [(&[u8; 4], &[u8]); 7] = [
+        (b"cmap", &cmap),
+        (b"glyf", &glyf),
+        (b"head", &head),
+        (b"hhea", &hhea),
+        (b"hmtx", &hmtx),
+        (b"loca", &loca_bytes),
+        (b"maxp", &maxp),
+    ];
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]); // search hints, unread
+
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes()); // checksum
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// One glyph's `glyf` entry.
+fn glyph_data(shape: Shape) -> Vec<u8> {
+    let points: Vec<Point> = shape.iter().flat_map(|c| c.iter().copied()).collect();
+    let xs = || points.iter().map(|p| p.0);
+    let ys = || points.iter().map(|p| p.1);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&(shape.len() as i16).to_be_bytes());
+    out.extend_from_slice(&xs().min().unwrap_or(0).to_be_bytes()); // xMin
+    out.extend_from_slice(&ys().min().unwrap_or(0).to_be_bytes()); // yMin
+    out.extend_from_slice(&xs().max().unwrap_or(0).to_be_bytes()); // xMax
+    out.extend_from_slice(&ys().max().unwrap_or(0).to_be_bytes()); // yMax
+
+    let mut end = 0usize;
+    for contour in shape {
+        end += contour.len();
+        out.extend_from_slice(&((end - 1) as u16).to_be_bytes());
+    }
+    out.extend_from_slice(&0u16.to_be_bytes()); // no hinting instructions
+
+    // Bit 0 is the on-curve flag. None of the short-coordinate or repeat bits
+    // are set, so every delta below is a signed 16-bit word — larger than a
+    // real font would write, and far easier to read.
+    for (_, _, on_curve) in &points {
+        out.push(u8::from(*on_curve));
+    }
+    let mut previous = 0i16;
+    for (x, _, _) in &points {
+        out.extend_from_slice(&(x - previous).to_be_bytes());
+        previous = *x;
+    }
+    let mut previous = 0i16;
+    for (_, y, _) in &points {
+        out.extend_from_slice(&(y - previous).to_be_bytes());
+        previous = *y;
+    }
+
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+/// A `cmap` covering printable ASCII (9.6.6.4).
+///
+/// Format 4 through its `idRangeOffset` branch — the one where the segment
+/// points into a glyph index array at an offset measured from its own slot,
+/// which is the awkward part of the format and the part a real font uses.
+/// Going through the array rather than a plain delta is what lets every
+/// character in the fixture's text draw, out of a face with six shapes.
+fn cmap() -> Vec<u8> {
+    const FIRST: u16 = 0x20;
+    const LAST: u16 = 0x7E;
+    // The real segment, and the terminating one at 0xFFFF the format requires.
+    const SEGMENTS: u16 = 2;
+
+    let mut sub = Vec::new();
+    for value in [4u16, 0, 0, SEGMENTS * 2, 0, 0, 0] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    sub.extend_from_slice(&LAST.to_be_bytes()); // endCode
+    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+    sub.extend_from_slice(&FIRST.to_be_bytes()); // startCode
+    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes()); // idDelta: the array is absolute
+    sub.extend_from_slice(&1u16.to_be_bytes());
+    // idRangeOffset: the glyph array begins immediately after this array, and
+    // the offset is counted from this slot, so it is the distance to the end
+    // of the array — two bytes for each segment from this one on.
+    sub.extend_from_slice(&(SEGMENTS * 2).to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes());
+    for code in FIRST..=LAST {
+        sub.extend_from_slice(&glyph_for(code).to_be_bytes());
+    }
+
+    let mut cmap = Vec::new();
+    // One (3,1) Windows Unicode BMP subtable, which is the one a reader
+    // prefers and the one a Latin face would carry.
+    for value in [0u16, 1, 3, 1] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+    cmap
 }
 
 /// Curves and strokes at an angle, where flattening tolerance and the
@@ -141,14 +497,29 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
 /// Every entry is a claim that this page renders to these exact bytes on
 /// every supported target. Changing one is a deliberate act; see the module
 /// documentation for which of the two failures you are looking at.
-/// A named page, and the function that builds it.
-type Page = (&'static str, fn() -> Vec<u8>);
-
-const GOLDEN: &[Page] = &[
-    ("text", text_page as fn() -> Vec<u8>),
-    ("curves", curves_page),
-    ("shading", shading_page),
-    ("blend", blend_page),
+const GOLDEN: &[Fixture] = &[
+    // The floors are about half of what each page paints today: 1486, 2363,
+    // 9600 and 3600 pixels.
+    Fixture {
+        name: "text",
+        build: text_page,
+        least_ink: 700,
+    },
+    Fixture {
+        name: "curves",
+        build: curves_page,
+        least_ink: 1100,
+    },
+    Fixture {
+        name: "shading",
+        build: shading_page,
+        least_ink: 4500,
+    },
+    Fixture {
+        name: "blend",
+        build: blend_page,
+        least_ink: 1700,
+    },
 ];
 
 #[test]
@@ -157,9 +528,12 @@ fn rendering_is_stable_across_targets() {
     // check below is there because an empty table would make this test pass
     // by not looking at anything.
     let expected: &[(&str, &str)] = &[
+        // Moved in August 2026: the old value was the hash of a blank page,
+        // because the fixture named a standard-14 font and embedded no
+        // outlines for the engine to draw.
         (
             "text",
-            "0a04158f6a3ed3a7bf9d12ce14188de5ff82fcda4205cd85d7e6ed024729b8bf",
+            "98c3e73c83e08654f2d6076aefbe0786be1dd73f3013ca6c9f52fe5d5ed494ee",
         ),
         (
             "curves",
@@ -181,14 +555,15 @@ fn rendering_is_stable_across_targets() {
     );
 
     let mut wrong = Vec::new();
-    for (name, build) in GOLDEN {
-        let actual = fingerprint(build());
+    for fixture in GOLDEN {
+        let actual = fingerprint(fixture);
         let want = expected
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _)| *n == fixture.name)
             .map(|(_, h)| *h)
             .unwrap_or_default();
         if actual != want {
+            let name = fixture.name;
             wrong.push(format!("        (\"{name}\", \"{actual}\"),"));
         }
     }
@@ -209,10 +584,11 @@ fn rendering_is_stable_across_targets() {
 /// iterating a hash map.
 #[test]
 fn rendering_is_stable_within_one_process() {
-    for (name, build) in GOLDEN {
+    for fixture in GOLDEN {
+        let name = fixture.name;
         assert_eq!(
-            fingerprint(build()),
-            fingerprint(build()),
+            fingerprint(fixture),
+            fingerprint(fixture),
             "{name} renders the same twice"
         );
     }

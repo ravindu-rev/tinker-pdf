@@ -20,6 +20,20 @@ so the job is written from the documentation rather than from a passing run.
 It is recorded in STATUS as written-and-unverified rather than counted as
 done.
 
+*Amended, August 2026.* One of those four pages was not a page. The `text`
+fixture named Helvetica, embedded no font program and drew nothing, because
+the engine bundles no faces — its fingerprint was the hash of a blank
+200x100 canvas, and the three native targets agreeing on it proved only that
+they can all produce white. Had the wasm leg run, it would have agreed too,
+and that agreement would have been read as evidence about glyph
+rasterisation, which is the densest arithmetic on the pixel path and the
+likeliest place for a target to diverge. The fixture now embeds a synthetic
+TrueType face of curves and diagonals; the `text` hash changed in the same
+commit. Milestone 4's fixture growth inherits the lesson as a mechanism
+rather than a warning: `fingerprint` refuses to hash a page that painted
+fewer than a stated number of pixels, or that reported `UnreadableFont`, so a
+new fixture that draws nothing fails on the day it is added.
+
 ## Scope
 
 - Verify the job actually runs, in CI or locally with the target and runtime
