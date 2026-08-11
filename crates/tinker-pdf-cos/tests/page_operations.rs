@@ -244,3 +244,128 @@ fn flattening_a_page_that_does_not_exist_is_refused() {
     let mut editor = DocumentEditor::new(doc);
     assert!(editor.flatten_annotations(9).is_none());
 }
+
+/// A TrueType face whose glyphs are boxes, with a `cmap` so codes resolve.
+///
+/// Built here rather than read from the system so the test is the same on
+/// every platform and the repository carries nothing anyone has to licence.
+fn boxy_font() -> Vec<u8> {
+    let mut glyph = Vec::new();
+    glyph.extend_from_slice(&1i16.to_be_bytes());
+    for value in [0i16, 0, 700, 700] {
+        glyph.extend_from_slice(&value.to_be_bytes());
+    }
+    glyph.extend_from_slice(&3u16.to_be_bytes());
+    glyph.extend_from_slice(&0u16.to_be_bytes());
+    glyph.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+    for dx in [0i16, 700, 0, -700] {
+        glyph.extend_from_slice(&dx.to_be_bytes());
+    }
+    for dy in [0i16, 0, 700, 0] {
+        glyph.extend_from_slice(&dy.to_be_bytes());
+    }
+
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    head[50..52].copy_from_slice(&1i16.to_be_bytes());
+
+    const FIRST: usize = 32;
+    const LAST: usize = 255;
+    let size = glyph.len() as u32;
+    let mut glyf = Vec::new();
+    for _ in FIRST..=LAST {
+        glyf.extend_from_slice(&glyph);
+    }
+    let mut loca = Vec::new();
+    for index in 0..=LAST + 1 {
+        loca.extend_from_slice(&((index.saturating_sub(FIRST)) as u32 * size).to_be_bytes());
+    }
+
+    let tables: [(&[u8; 4], &[u8]); 3] = [(b"head", &head), (b"loca", &loca), (b"glyf", &glyf)];
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A document using only the standard 14 relies on the reader having them; one
+/// that embeds its font carries everything it needs. The builder could only do
+/// the former.
+#[test]
+fn a_font_can_be_embedded() {
+    let program = boxy_font();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Boxy", &program));
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "EMBEDDED");
+    });
+
+    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let collected = pages::collect(&doc);
+    let resources = collected[0].resources.as_ref().expect("resources");
+    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
+    let (_, value) = fonts.as_dict().expect("a font table").entries()[0].clone();
+
+    let font = doc
+        .get(value.as_objref().expect("indirect"))
+        .expect("loads");
+    let font = font.as_dict().expect("a font dictionary");
+
+    // The descriptor points at the program, which is what makes it embedded.
+    let descriptor = doc.resolve_key(font, doc.intern(b"FontDescriptor"));
+    let descriptor = descriptor.as_dict().expect("a descriptor");
+    let file = descriptor
+        .get_ref(doc.intern(b"FontFile2"))
+        .expect("an embedded program");
+    let bytes = doc.stream_decoded(file).expect("it decodes");
+    assert_eq!(bytes.len(), program.len(), "the whole face is carried");
+}
+
+/// Widths come from the program's own metrics, so they agree with the outlines
+/// a renderer will draw. A `/Widths` array that disagrees is how text ends up
+/// overlapping itself.
+#[test]
+fn embedded_widths_come_from_the_font_program() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_embedded_font(b"F0", b"Boxy", &boxy_font());
+    builder.add_page(100.0, 100.0, |_| {});
+
+    let doc = CosDocument::open(builder.finish()).expect("it opens");
+    let collected = pages::collect(&doc);
+    let resources = collected[0].resources.as_ref().expect("resources");
+    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
+    let (_, value) = fonts.as_dict().expect("a font table").entries()[0].clone();
+    let font = doc
+        .get(value.as_objref().expect("indirect"))
+        .expect("loads");
+    let font = font.as_dict().expect("a dictionary");
+
+    let widths = doc.resolve_key(font, doc.intern(b"Widths"));
+    let widths = widths.as_array().expect("an array");
+    assert_eq!(widths.len(), 224, "one per code from 32 to 255");
+    assert!(
+        widths.iter().all(|w| w.as_number().unwrap_or(0.0) > 0.0),
+        "and every one is a real advance"
+    );
+}
+
+/// Bytes that are not a font are refused rather than written into a dictionary
+/// pointing at nothing.
+#[test]
+fn embedding_something_that_is_not_a_font_is_refused() {
+    let mut builder = DocumentBuilder::new();
+    assert!(!builder.add_embedded_font(b"F0", b"Nope", b"not a font at all"));
+    assert!(!builder.add_embedded_font(b"F0", b"Nope", b""));
+}

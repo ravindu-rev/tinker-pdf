@@ -213,6 +213,124 @@ impl DocumentBuilder {
         self.fonts.push((resource.to_vec(), r));
     }
 
+    /// Registers a TrueType font, embedding its program (9.6.6, 9.9).
+    ///
+    /// A document using only the standard 14 relies on the reader having them;
+    /// one that embeds its font carries everything it needs, which is the
+    /// difference between a file that renders the same everywhere and one that
+    /// renders the same where the fonts happen to match.
+    ///
+    /// Widths come from the font program's own `hmtx`, scaled into the
+    /// thousandths PDF measures in, so they agree with the outlines a renderer
+    /// will draw — a `/Widths` array that disagrees with the glyphs is how
+    /// text ends up overlapping itself.
+    ///
+    /// Returns false when the bytes are not a TrueType program this can read,
+    /// rather than writing a font dictionary pointing at nothing.
+    ///
+    /// The whole program is embedded. Subsetting needs a glyph-set analysis
+    /// and a table rewriter, and shipping the entire face is correct — merely
+    /// larger — where a broken subset is neither.
+    pub fn add_embedded_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
+        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(program) else {
+            return false;
+        };
+        let units = f64::from(sfnt.units_per_em.max(1));
+
+        // 9.6.6.4: /FirstChar..//LastChar with one width each, in glyph space
+        // thousandths. WinAnsi is assumed because that is what the encoding
+        // below declares; a font used with another encoding needs the widths
+        // that encoding implies.
+        const FIRST: u8 = 32;
+        const LAST: u8 = 255;
+        let mut widths = Vec::with_capacity(usize::from(LAST - FIRST) + 1);
+        for code in FIRST..=LAST {
+            let width = sfnt
+                .glyph_for_char(char::from(code))
+                .and_then(|glyph| sfnt.advance(glyph))
+                .map_or(500.0, |advance| f64::from(advance) * 1000.0 / units);
+            widths.push(Object::Real(width.round()));
+        }
+
+        let file_ref = self.allocate();
+        let mut file_dict = Dict::new();
+        // 9.9: /Length1 is the program's length, which a reader uses to tell
+        // an embedded TrueType from a subsetted one.
+        file_dict.insert(
+            self.names.intern(b"Length1"),
+            Object::Int(program.len() as i64),
+        );
+        self.objects.insert_stream(
+            file_ref.num,
+            StreamData {
+                dict: file_dict,
+                data: program.to_vec(),
+            },
+        );
+
+        let descriptor_ref = self.allocate();
+        let mut descriptor = Dict::new();
+        descriptor.insert(
+            Name::TYPE,
+            Object::Name(self.names.intern(b"FontDescriptor")),
+        );
+        descriptor.insert(
+            self.names.intern(b"FontName"),
+            Object::Name(self.names.intern(base_font)),
+        );
+        // 9.8.2 Table 123: bit 6 marks a non-symbolic font, which is what an
+        // explicit /Encoding requires; a symbolic one is read through its own
+        // cmap and must not carry one.
+        descriptor.insert(self.names.intern(b"Flags"), Object::Int(32));
+        descriptor.insert(
+            self.names.intern(b"FontBBox"),
+            Object::Array(vec![
+                Object::Int(-500),
+                Object::Int(-300),
+                Object::Int(1500),
+                Object::Int(1000),
+            ]),
+        );
+        descriptor.insert(self.names.intern(b"ItalicAngle"), Object::Int(0));
+        descriptor.insert(self.names.intern(b"Ascent"), Object::Int(750));
+        descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
+        descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
+        descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
+        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(file_ref));
+        self.objects
+            .insert(descriptor_ref.num, Object::Dict(descriptor));
+
+        let font_ref = self.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"TrueType")),
+        );
+        dict.insert(
+            self.names.intern(b"BaseFont"),
+            Object::Name(self.names.intern(base_font)),
+        );
+        dict.insert(
+            self.names.intern(b"Encoding"),
+            Object::Name(self.names.intern(b"WinAnsiEncoding")),
+        );
+        dict.insert(
+            self.names.intern(b"FirstChar"),
+            Object::Int(i64::from(FIRST)),
+        );
+        dict.insert(self.names.intern(b"LastChar"), Object::Int(i64::from(LAST)));
+        dict.insert(self.names.intern(b"Widths"), Object::Array(widths));
+        dict.insert(
+            self.names.intern(b"FontDescriptor"),
+            Object::Ref(descriptor_ref),
+        );
+
+        self.objects.insert(font_ref.num, Object::Dict(dict));
+        self.fonts.push((resource.to_vec(), font_ref));
+        true
+    }
+
     /// Registers an image under a resource name.
     ///
     /// Returns false when the data does not describe an image of the size it
