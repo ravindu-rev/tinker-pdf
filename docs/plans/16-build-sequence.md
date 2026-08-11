@@ -7,6 +7,9 @@ usefully — where a half-implementation would be worse than none.
 
 Ranked by **value to the parity goal ÷ risk of silently-wrong output**.
 
+Each item has a plan of its own in [gaps/](gaps/README.md) — this file says
+what order, those say what to build. The mapping is at the foot.
+
 ## Two facts that set the order
 
 **Only one parity function is really in play.** Tinker's engine seam is eleven
@@ -147,3 +150,34 @@ This is the part worth re-reading before starting anything above.
 Tinker's goldens are MuPDF output. Re-baseline **once**, after item 14 — not
 per item. Six re-baselines means each one hides the next regression, which is
 the exact failure the visual-regression suite exists to prevent.
+
+## Which plan is which item
+
+| Item | Plan |
+| --- | --- |
+| 5 — Tinker's `FontProvider` | [28](gaps/28-tinker-integration-decisions.md) |
+| 6 — determinism across targets | [25](gaps/25-wasm-determinism-leg.md) |
+| 7 — appearance resource scoping | *(no plan yet — the remaining annotation findings)* |
+| 8 — the `Canvas` alpha convention | landed; the rest is [11](gaps/11-transparency-groups.md) |
+| 9, 10 — CCITT | [16](gaps/16-ccitt-completion.md) |
+| 11 — blend modes | landed |
+| 12 — tiling patterns | [09](gaps/09-tiling-patterns.md) |
+| 13, 15 — the corpus | [23](gaps/23-corpus-runner.md) |
+| 14 — transparency groups and soft masks | [11](gaps/11-transparency-groups.md) |
+| 16 — mesh shadings | [10](gaps/10-mesh-shadings.md) |
+| 17 — JBIG2 | [17](gaps/17-jbig2-generic-region.md) |
+| 18 — encrypt plus linearize | [19](gaps/19-encrypt-and-linearize.md) |
+| 19 — forms `/AA` | [27](gaps/27-form-calculations-decision.md) |
+| 20 — JPX | [18](gaps/18-jpx-decision.md) |
+
+Items with no row above are either done or are covered by a plan the table
+names twice. The gap plans that no numbered item names —
+[01](gaps/01-cff-glyph-selection.md) through [05](gaps/05-vertical-metrics.md),
+[06](gaps/06-optional-content.md), [07](gaps/07-stroked-patterns.md),
+[08](gaps/08-inline-image-filters.md),
+[12](gaps/12-image-sampling.md) through [15](gaps/15-cancellation.md),
+[20](gaps/20-linearization-validation.md) through
+[22](gaps/22-pdf-version-and-trapped.md),
+[24](gaps/24-fuzz-execution.md) and [26](gaps/26-binding-packaging.md) — come
+from the August 2026 audit, which ran after this sequence was written. They
+are ranked in [gaps/README.md](gaps/README.md) instead.

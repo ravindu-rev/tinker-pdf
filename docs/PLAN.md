@@ -42,6 +42,8 @@ Locked decisions this plan builds on, not up for relitigation here:
 | 14 | [Testing & corpora](plans/14-testing-and-corpora.md) | S + ongoing | doctrine |
 | 15 | [Tinker integration](plans/15-tinker-integration.md) | M | shipping |
 | 99 | [Consistency rulings](plans/99-consistency.md) | S | overrides all |
+| — | [Build sequence](plans/16-build-sequence.md) | — | ordering |
+| — | [Gap plans](plans/gaps/README.md) | see index | remediation |
 
 Sizes: S ≈ 0.5 engine-months, M ≈ 1–2, L ≈ 2–4, XL ≈ 5–8. Engine-months are
 focused work by one person who knows the codebase; the project parallelizes

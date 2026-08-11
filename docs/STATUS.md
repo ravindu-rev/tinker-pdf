@@ -89,22 +89,23 @@ Fixed since, each with tests that would have caught it:
 
 ## Not built
 
-[16 Build sequence](plans/16-build-sequence.md) orders everything below
-by value over risk, and — more usefully — names the six places where a
-half-implementation would be worse than none.
+Every row below has a plan of its own in [plans/gaps/](plans/gaps/README.md),
+linked in the last column — what to build, what to reuse, and how you know
+when it is done. [16 Build sequence](plans/16-build-sequence.md) orders them
+by value over risk.
 
 | Gap | Consequence | Where |
 | --- | --- | --- |
-| **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
-| **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
-| **Linearization: external validation, and encrypt+linearize** | The layout is written and every offset it declares is checked against the bytes — but `qpdf --check` and `--show-linearization` are the arbiters the plan names and neither has been run, so the hint *tables* are unproven. `linearize` is also silently dropped when encryption is on, rather than combining with it. An *incremental* update still cannot encrypt, since it would need the original file's key. | [09](plans/09-writing.md) |
-| **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
-| **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
-| **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
-| **Determinism: the wasm leg** | `tests/determinism.rs` hashes rendered pages against committed fingerprints and runs on linux, windows and macos in the existing matrix — so ruling 4 is demonstrated on three of the four targets, not merely achievable. The fourth runs under wasmtime on `wasm32-wasip1` in a job that has never executed here, because neither the target nor wasmtime is installed locally. Written, unverified. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
-| **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
-| **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [11](plans/11-forms.md) |
-| **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [15](plans/15-tinker-integration.md) |
+| **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [23](plans/gaps/23-corpus-runner.md) |
+| **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [24](plans/gaps/24-fuzz-execution.md) |
+| **Linearization: external validation, and encrypt+linearize** | The layout is written and every offset it declares is checked against the bytes — but `qpdf --check` and `--show-linearization` are the arbiters the plan names and neither has been run, so the hint *tables* are unproven. `linearize` is also silently dropped when encryption is on, rather than combining with it. An *incremental* update still cannot encrypt, since it would need the original file's key. | [19](plans/gaps/19-encrypt-and-linearize.md), [20](plans/gaps/20-linearization-validation.md) |
+| **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [16](plans/gaps/16-ccitt-completion.md) |
+| **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [17](plans/gaps/17-jbig2-generic-region.md), [18](plans/gaps/18-jpx-decision.md), [10](plans/gaps/10-mesh-shadings.md), [09](plans/gaps/09-tiling-patterns.md) |
+| **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [11](plans/gaps/11-transparency-groups.md) |
+| **Determinism: the wasm leg** | `tests/determinism.rs` hashes rendered pages against committed fingerprints and runs on linux, windows and macos in the existing matrix — so ruling 4 is demonstrated on three of the four targets, not merely achievable. The fourth runs under wasmtime on `wasm32-wasip1` in a job that has never executed here, because neither the target nor wasmtime is installed locally. Written, unverified. | [25](plans/gaps/25-wasm-determinism-leg.md) |
+| **Binding packaging** | Nothing published; no wheel or per-RID CI. | [26](plans/gaps/26-binding-packaging.md) |
+| **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [27](plans/gaps/27-form-calculations-decision.md) |
+| **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [28](plans/gaps/28-tinker-integration-decisions.md) |
 
 ## Where Tinker integration stands
 

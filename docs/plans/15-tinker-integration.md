@@ -138,6 +138,35 @@ not a prerequisite for desktop integration but its wasm package is what
 replaces mupdf.js in Tinker's web plan — sequence it before the web milestone
 of Tinker's own roadmap resumes.
 
+### Amendment, August 2026: a blocker this plan does not name
+
+Three things this file assumes, none of which currently holds. Recorded here
+rather than rewritten above, because the plan is right about the work and
+wrong only about its readiness.
+
+**The precondition is not met and cannot yet be measured.** Checkpoint B wants
+corpus render parity ratcheted at 95% or better. No corpus has ever been run —
+eight real files have been through `tpdf`, total. See
+[gaps/23](gaps/23-corpus-runner.md). Integration cannot start against evidence
+that does not exist, and the number is one corpus run away rather than far.
+
+**Tinker must supply a `FontProvider` or every non-embedding document renders
+textless.** The engine bundles no faces and reads no font directories — by
+design, so it has no OS dependencies and builds identically on wasm. That
+makes the host responsible, and Tinker is the host. This is a render-parity
+blocker on the widest class of real files, it appears in no phase plan, and it
+must land *before* any golden comparison or every comparison measures the
+absence of text. See [gaps/28](gaps/28-tinker-integration-decisions.md).
+
+**The deletion checklist is unverified against Tinker's current tree.** Its
+paths were checked at planning time, which was the scaffolding commit. The
+freeze exempts dependency and security bumps, so drift is guaranteed. Re-check
+every path before using it as a checklist.
+
+The three owner decisions below are still open. [gaps/27](gaps/27-form-calculations-decision.md)
+recommends an answer to the forms-JavaScript one;
+[gaps/28](gaps/28-tinker-integration-decisions.md) costs the other two.
+
 ## Risks
 
 | Risk | Mitigation |
