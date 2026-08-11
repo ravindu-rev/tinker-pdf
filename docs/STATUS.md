@@ -42,6 +42,7 @@ Fixed since, each with tests that would have caught it:
 | **`TextPage` had no warnings**, so "no text" and "text this build could not decode" were indistinguishable | `TextPage::warnings`, deduplicated |
 | **`deny.toml` could not express the hand-rolled rule** — it lists licences, which say nothing about what a crate *does* | The crates that would violate it are denied by name |
 | **Redaction ignored `cm`**, so content under a transform was measured in the wrong space | The matrix is composed, saved and restored with the pen |
+| **An embedded font carried its whole face** — tens of megabytes to set a line of Latin text with a CJK font, which is the reason nobody embeds | Subset to the glyphs the document draws, with composite components followed and the 9.6.4 name tag written |
 | **Progressive JPEG was refused, not decoded** — in four of the first eight real files, so their photographs rendered as grey placeholders | Spectral selection, successive approximation for DC and AC, and end-of-band runs. Baseline moved onto the same coefficient buffer rather than keeping a second path |
 | **`extend` shifted by an unclamped magnitude category**, so any JPEG with a corrupt Huffman table panicked — reachable from baseline since the decoder was written (ruling 1) | Clamped to the largest category T.81 defines |
 | **A single-component JPEG scan was decoded over the MCU-padded block grid** instead of the component's own, desynchronising every later block where the sampling factors are not 1×1 | Non-interleaved scans iterate their own dimensions (T.81 A.2.2) |
@@ -70,7 +71,7 @@ Fixed since, each with tests that would have caught it:
 | [09 Writing](plans/09-writing.md) | rewrite + incremental + object streams + **encryption** | Full rewrite with optional GC, incremental update with byte-identical prefix, classic xref, working object streams, compression, **R6 encrypt-on-save** |
 | [10 Editing](plans/10-editing.md) | substantially complete | Copy-on-write editor; delete/move/rotate/**insert/import/keep**; annotations with synthesized appearances **and flattening**; redaction through **forms and images** |
 | [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree, fill text/choice/checkbox/radio, **comb fields**, appearances rebuilt, reset |
-| [12 Creation](plans/12-creation.md) | pages, text, images, **embedded fonts** | `DocumentBuilder` |
+| [12 Creation](plans/12-creation.md) | pages, text, images, embedded fonts **with subsetting** | `DocumentBuilder` |
 | [13 Bindings](plans/13-bindings.md) | all three build and are checked | C ABI, Python, JS/wasm, .NET, each able to **supply fonts** |
 | [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing written | `tpdf`, `pdfcmp`, `oracle-diff`; 11 fuzz targets; a hostile-input sweep on stable |
 
@@ -80,7 +81,6 @@ Fixed since, each with tests that would have caught it:
 | --- | --- | --- |
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
 | **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
-| **Font subsetting in the builder** | A TrueType face can now be embedded, whole. Subsetting needs a glyph-set analysis and a table rewriter; shipping the whole face is correct, merely larger. | [12](plans/12-creation.md) |
 | **Linearization** | Reading handles it; writing produces none, so a viewer cannot show page one before the whole file arrives. Encrypt-on-save now works (R6); an *incremental* update still cannot encrypt, since it would need the original file's key. | [09](plans/09-writing.md) |
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |

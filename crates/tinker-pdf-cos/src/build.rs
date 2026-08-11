@@ -4,6 +4,8 @@
 //! an outline. It deliberately does no layout — placing what a caller already
 //! positioned is this crate's business, and composing paragraphs is not.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
@@ -36,6 +38,44 @@ pub enum ImageData<'a> {
     },
 }
 
+/// A font whose program is embedded, held until `finish`.
+///
+/// The subset depends on what the document draws, which is not known when the
+/// font is registered — so registration reserves object numbers and nothing
+/// else.
+struct Embedded {
+    resource: Vec<u8>,
+    base_font: Vec<u8>,
+    program: Vec<u8>,
+    file_ref: ObjRef,
+    descriptor_ref: ObjRef,
+    font_ref: ObjRef,
+}
+
+/// The six-letter tag and plus sign a subset font name carries (9.6.4).
+///
+/// Derived from the subset's own bytes rather than from a counter or a clock,
+/// so the same document written twice produces the same name (ruling 4). Two
+/// different subsets of the same face collide only if their bytes hash the
+/// same, and a collision would merely give two fonts the same name, which is
+/// legal.
+fn subset_tag(program: &[u8]) -> Vec<u8> {
+    // FNV-1a, for no reason beyond being short and well spread.
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in program {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    let mut tag = Vec::with_capacity(7);
+    for _ in 0..6 {
+        tag.push(b'A' + (hash % 26) as u8);
+        hash /= 26;
+    }
+    tag.push(b'+');
+    tag
+}
+
 /// A page being assembled.
 pub struct PageBuilder {
     width: f64,
@@ -43,6 +83,8 @@ pub struct PageBuilder {
     content: Vec<u8>,
     fonts: Vec<(Vec<u8>, ObjRef)>,
     images: Vec<(Vec<u8>, ObjRef)>,
+    /// Characters drawn with each font resource, for subsetting.
+    used: BTreeMap<Vec<u8>, BTreeSet<char>>,
 }
 
 impl PageBuilder {
@@ -50,6 +92,14 @@ impl PageBuilder {
     ///
     /// `font` names a font registered with [`DocumentBuilder::add_base_font`].
     pub fn text(&mut self, font: &[u8], size: f64, x: f64, y: f64, text: &str) {
+        // Recorded so `finish` can subset an embedded font to what the
+        // document actually draws. The builder is the only way content gets
+        // written, so this sees everything.
+        self.used
+            .entry(font.to_vec())
+            .or_default()
+            .extend(text.chars());
+
         self.content.extend_from_slice(b"BT /");
         self.content.extend_from_slice(font);
         self.content
@@ -155,6 +205,10 @@ pub struct DocumentBuilder {
     pages: Vec<PageBuilder>,
     fonts: Vec<(Vec<u8>, ObjRef)>,
     images: Vec<(Vec<u8>, ObjRef)>,
+    /// Fonts whose programs are embedded, written at `finish` once the
+    /// characters they are asked to draw are known.
+    embedded: Vec<Embedded>,
+    subset_fonts: bool,
     info: Dict,
     outline: Vec<OutlineEntry>,
 }
@@ -177,6 +231,8 @@ impl DocumentBuilder {
             pages: Vec::new(),
             fonts: Vec::new(),
             images: Vec::new(),
+            embedded: Vec::new(),
+            subset_fonts: true,
             info: Dict::new(),
             outline: Vec::new(),
         }
@@ -232,12 +288,101 @@ impl DocumentBuilder {
     /// and a table rewriter, and shipping the entire face is correct — merely
     /// larger — where a broken subset is neither.
     pub fn add_embedded_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(program) else {
+        if tinker_pdf_font::Sfnt::parse(program).is_none() {
             return false;
+        }
+
+        // Object numbers are reserved now, so page resources can name the
+        // font; nothing is written until `finish`, because the subset depends
+        // on what the document ends up drawing and that is not known yet.
+        let file_ref = self.allocate();
+        let descriptor_ref = self.allocate();
+        let font_ref = self.allocate();
+
+        self.embedded.push(Embedded {
+            resource: resource.to_vec(),
+            base_font: base_font.to_vec(),
+            program: program.to_vec(),
+            file_ref,
+            descriptor_ref,
+            font_ref,
+        });
+        self.fonts.push((resource.to_vec(), font_ref));
+        true
+    }
+
+    /// Whether embedded fonts are cut down to the glyphs the document draws.
+    ///
+    /// On by default: a whole CJK face to set a line of Latin text is tens of
+    /// megabytes, and subsetting is what makes embedding practical at all.
+    /// Turn it off for a file that will be edited afterwards by something
+    /// needing the other glyphs, which is the one case where the full face
+    /// earns its size.
+    pub fn set_subset_fonts(&mut self, subset: bool) {
+        self.subset_fonts = subset;
+    }
+
+    /// Writes the font dictionaries, cutting each program down to the
+    /// characters the pages drew with it.
+    fn write_embedded_fonts(&mut self, used: &BTreeMap<Vec<u8>, BTreeSet<char>>) {
+        let embedded = std::mem::take(&mut self.embedded);
+        let empty = BTreeSet::new();
+
+        for font in embedded {
+            let characters = used.get(&font.resource).unwrap_or(&empty);
+            let text: String = characters.iter().copied().collect();
+
+            // A subset that cannot be built is not a reason to fail the
+            // document: the whole face is larger and correct, which is the
+            // right way round (ruling 2).
+            let (program, subsetted) = if self.subset_fonts {
+                let glyphs = tinker_pdf_font::glyphs_for(&font.program, &text);
+                if !text.is_empty() && glyphs.is_empty() {
+                    // The document drew text with this font and the font
+                    // claims none of it: a missing or unreadable `cmap`, most
+                    // likely, or a symbolic font addressed some other way.
+                    // Subsetting on that evidence would keep `.notdef` alone
+                    // and every letter would come out blank — which reads as
+                    // a rendering bug rather than a subsetting one, and so
+                    // gets found far too late.
+                    (font.program.clone(), false)
+                } else {
+                    match tinker_pdf_font::subset(&font.program, &glyphs) {
+                        Some(reduced) => (reduced, true),
+                        None => (font.program.clone(), false),
+                    }
+                }
+            } else {
+                (font.program.clone(), false)
+            };
+
+            // 9.6.4: a subset font name carries a six-letter tag and a plus
+            // sign, which is how a reader knows the embedded program is not
+            // the whole face.
+            let base_font = if subsetted {
+                let mut tagged = subset_tag(&program);
+                tagged.extend_from_slice(&font.base_font);
+                tagged
+            } else {
+                font.base_font.clone()
+            };
+
+            self.write_font_objects(&font, &program, &base_font);
+        }
+    }
+
+    fn write_font_objects(&mut self, font: &Embedded, program: &[u8], base_font: &[u8]) {
+        // Widths come from the *original* program. Subsetting never moves a
+        // glyph identifier, so the `hmtx` entry is still the right one, and
+        // reading them from the subset would be no different — but reading
+        // them from the original says plainly that it does not depend on
+        // which glyphs survived.
+        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(&font.program) else {
+            return;
         };
         let units = f64::from(sfnt.units_per_em.max(1));
 
-        // 9.6.6.4: /FirstChar..//LastChar with one width each, in glyph space
+        // 9.6.6.4: /FirstChar../LastChar with one width each, in glyph space
         // thousandths. WinAnsi is assumed because that is what the encoding
         // below declares; a font used with another encoding needs the widths
         // that encoding implies.
@@ -252,23 +397,21 @@ impl DocumentBuilder {
             widths.push(Object::Real(width.round()));
         }
 
-        let file_ref = self.allocate();
         let mut file_dict = Dict::new();
-        // 9.9: /Length1 is the program's length, which a reader uses to tell
-        // an embedded TrueType from a subsetted one.
+        // 9.9: /Length1 is the embedded program's length — the subset's, not
+        // the original's, since the subset is what the stream contains.
         file_dict.insert(
             self.names.intern(b"Length1"),
             Object::Int(program.len() as i64),
         );
         self.objects.insert_stream(
-            file_ref.num,
+            font.file_ref.num,
             StreamData {
                 dict: file_dict,
                 data: program.to_vec(),
             },
         );
 
-        let descriptor_ref = self.allocate();
         let mut descriptor = Dict::new();
         descriptor.insert(
             Name::TYPE,
@@ -296,11 +439,10 @@ impl DocumentBuilder {
         descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
         descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
         descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
-        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(file_ref));
+        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(font.file_ref));
         self.objects
-            .insert(descriptor_ref.num, Object::Dict(descriptor));
+            .insert(font.descriptor_ref.num, Object::Dict(descriptor));
 
-        let font_ref = self.allocate();
         let mut dict = Dict::new();
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
         dict.insert(
@@ -323,12 +465,10 @@ impl DocumentBuilder {
         dict.insert(self.names.intern(b"Widths"), Object::Array(widths));
         dict.insert(
             self.names.intern(b"FontDescriptor"),
-            Object::Ref(descriptor_ref),
+            Object::Ref(font.descriptor_ref),
         );
 
-        self.objects.insert(font_ref.num, Object::Dict(dict));
-        self.fonts.push((resource.to_vec(), font_ref));
-        true
+        self.objects.insert(font.font_ref.num, Object::Dict(dict));
     }
 
     /// Registers an image under a resource name.
@@ -419,6 +559,7 @@ impl DocumentBuilder {
             content: Vec::new(),
             fonts: self.fonts.clone(),
             images: self.images.clone(),
+            used: BTreeMap::new(),
         };
         draw(&mut page);
         self.pages.push(page);
@@ -445,6 +586,19 @@ impl DocumentBuilder {
         let pages_ref = ObjRef::new(2, 0);
 
         let pages = std::mem::take(&mut self.pages);
+
+        // Every character every page drew, per font resource. Gathered before
+        // anything is written because the embedded programs are subset to it.
+        let mut used: BTreeMap<Vec<u8>, BTreeSet<char>> = BTreeMap::new();
+        for page in &pages {
+            for (resource, characters) in &page.used {
+                used.entry(resource.clone())
+                    .or_default()
+                    .extend(characters.iter().copied());
+            }
+        }
+        self.write_embedded_fonts(&used);
+
         for (page, reference) in pages.iter().zip(page_refs.iter()) {
             let content_ref = self.allocate();
             self.objects.insert_stream(

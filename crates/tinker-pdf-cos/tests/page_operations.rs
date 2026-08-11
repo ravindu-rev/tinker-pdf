@@ -330,6 +330,10 @@ fn a_font_can_be_embedded() {
         .get_ref(doc.intern(b"FontFile2"))
         .expect("an embedded program");
     let bytes = doc.stream_decoded(file).expect("it decodes");
+
+    // `boxy_font` has no `maxp` and no `cmap`, so it cannot be subset — and
+    // a font that cannot be subset is embedded whole rather than half
+    // (ruling 2). The subsetting path has its own tests below.
     assert_eq!(bytes.len(), program.len(), "the whole face is carried");
 }
 
@@ -368,4 +372,307 @@ fn embedding_something_that_is_not_a_font_is_refused() {
     let mut builder = DocumentBuilder::new();
     assert!(!builder.add_embedded_font(b"F0", b"Nope", b"not a font at all"));
     assert!(!builder.add_embedded_font(b"F0", b"Nope", b""));
+}
+
+/// A font complete enough to subset: `maxp` for the glyph count and a `cmap`
+/// to look characters up through, which `boxy_font` deliberately lacks.
+///
+/// `count` glyphs, each a square, with 'A' onto glyph 1 and so on upward.
+fn subsettable_font(count: u16) -> Vec<u8> {
+    let mut glyf: Vec<u8> = Vec::new();
+    let mut loca: Vec<u32> = Vec::new();
+
+    for _ in 0..count {
+        loca.push(glyf.len() as u32);
+        glyf.extend_from_slice(&1i16.to_be_bytes()); // one contour
+        for value in [0i16, 0, 700, 700] {
+            glyf.extend_from_slice(&value.to_be_bytes()); // bounding box
+        }
+        glyf.extend_from_slice(&3u16.to_be_bytes()); // last point index
+        glyf.extend_from_slice(&0u16.to_be_bytes()); // no instructions
+                                                     // On curve, both deltas one positive byte.
+        glyf.extend_from_slice(&[0x37; 4]);
+        glyf.extend_from_slice(&[10, 20, 30, 40]);
+        glyf.extend_from_slice(&[10, 20, 30, 40]);
+        while glyf.len() % 4 != 0 {
+            glyf.push(0);
+        }
+    }
+    loca.push(glyf.len() as u32);
+
+    let mut loca_bytes = Vec::new();
+    for offset in &loca {
+        loca_bytes.extend_from_slice(&offset.to_be_bytes());
+    }
+
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    head[50..52].copy_from_slice(&1u16.to_be_bytes()); // long loca
+
+    let mut maxp = vec![0u8; 32];
+    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    maxp[4..6].copy_from_slice(&count.to_be_bytes());
+
+    let mut hhea = vec![0u8; 36];
+    hhea[34..36].copy_from_slice(&count.to_be_bytes());
+
+    let mut hmtx = Vec::new();
+    for glyph in 0..count {
+        hmtx.extend_from_slice(&(500 + glyph).to_be_bytes());
+        hmtx.extend_from_slice(&0i16.to_be_bytes());
+    }
+
+    // cmap format 4: one segment from 'A' upward, plus the required
+    // terminating segment at 0xFFFF.
+    let first = u16::from(b'A');
+    let last = first + count - 2;
+    let mut sub = Vec::new();
+    for value in [4u16, 32, 0, 4, 4, 1, 0] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    sub.extend_from_slice(&last.to_be_bytes());
+    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes());
+    sub.extend_from_slice(&first.to_be_bytes());
+    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
+    sub.extend_from_slice(&1u16.wrapping_sub(first).to_be_bytes());
+    sub.extend_from_slice(&1u16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes());
+
+    let mut cmap = Vec::new();
+    for value in [0u16, 1, 3, 1] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+
+    let tables: [(&[u8; 4], &[u8]); 7] = [
+        (b"OS/2", &[]),
+        (b"cmap", &cmap),
+        (b"glyf", &glyf),
+        (b"head", &head),
+        (b"hhea", &hhea),
+        (b"hmtx", &hmtx),
+        (b"loca", &loca_bytes),
+    ];
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&((tables.len() + 1) as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+
+    // The directory must be sorted by tag; "maxp" sorts after "loca", so it
+    // goes last.
+    let mut all: Vec<(&[u8], &[u8])> = tables.iter().map(|(t, d)| (&t[..], *d)).collect();
+    all.push((b"maxp", &maxp));
+
+    let mut offset = 12 + all.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in &all {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Reads the embedded program and the base font name out of a written file.
+fn embedded_program(bytes: Vec<u8>) -> (Vec<u8>, String) {
+    let doc = CosDocument::open(bytes).expect("it opens");
+    let collected = pages::collect(&doc);
+    let resources = collected[0].resources.as_ref().expect("resources");
+    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
+    let (_, value) = fonts.as_dict().expect("a font table").entries()[0].clone();
+    let font = doc
+        .get(value.as_objref().expect("indirect"))
+        .expect("loads");
+    let font = font.as_dict().expect("a font dictionary");
+
+    let base = doc.resolve_key(font, doc.intern(b"BaseFont"));
+    let base = base
+        .as_name()
+        .and_then(|n| doc.name_bytes(n))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+
+    let descriptor = doc.resolve_key(font, doc.intern(b"FontDescriptor"));
+    let descriptor = descriptor.as_dict().expect("a descriptor");
+    let file = descriptor
+        .get_ref(doc.intern(b"FontFile2"))
+        .expect("an embedded program");
+    (doc.stream_decoded(file).expect("it decodes"), base)
+}
+
+/// The headline: a document that draws two letters carries a font holding two
+/// letters, not the whole face. Without this, embedding a real face costs
+/// megabytes per document and nobody can afford to do it.
+#[test]
+fn an_embedded_font_is_cut_down_to_what_the_document_draws() {
+    let program = subsettable_font(64);
+
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Boxy", &program));
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "AB");
+    });
+
+    let (embedded, _) = embedded_program(builder.finish());
+    assert!(
+        embedded.len() < program.len(),
+        "the subset is smaller: {} vs {}",
+        embedded.len(),
+        program.len()
+    );
+}
+
+/// The glyphs that were drawn have to survive it. A subset that is smaller
+/// because it dropped the letters on the page is not a subset.
+#[test]
+fn the_glyphs_that_were_drawn_survive_subsetting() {
+    let program = subsettable_font(32);
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_embedded_font(b"F0", b"Boxy", &program);
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "AC");
+    });
+
+    let (embedded, _) = embedded_program(builder.finish());
+    let sfnt = tinker_pdf_font::Sfnt::parse(&embedded).expect("the subset is a font");
+
+    for c in ['A', 'C'] {
+        let glyph = sfnt.glyph_for_char(c).expect("mapped");
+        let outline = tinker_pdf_font::glyf::outline(&sfnt, glyph).expect("an outline");
+        assert!(!outline.segments.is_empty(), "{c} still draws");
+    }
+
+    let unused = sfnt.glyph_for_char('Z').expect("still mapped");
+    let outline = tinker_pdf_font::glyf::outline(&sfnt, unused).unwrap_or_default();
+    assert!(
+        outline.segments.is_empty(),
+        "and a letter nobody drew is gone"
+    );
+}
+
+/// 9.6.4: a subset's name carries a six-letter tag and a plus sign, which is
+/// how a reader knows the program is not the whole face. Without it, two
+/// different subsets of the same font look like the same font.
+#[test]
+fn a_subset_font_name_carries_its_tag() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_embedded_font(b"F0", b"Boxy", &subsettable_font(32));
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "AB");
+    });
+
+    let (_, base) = embedded_program(builder.finish());
+    let (tag, name) = base.split_once('+').expect("a subset tag and a plus sign");
+    assert_eq!(name, "Boxy");
+    assert_eq!(tag.len(), 6, "six letters: {tag}");
+    assert!(
+        tag.bytes().all(|b| b.is_ascii_uppercase()),
+        "all uppercase: {tag}"
+    );
+}
+
+/// Ruling 4: the same document written twice is the same bytes. A tag from a
+/// counter or a clock would break that, and it is the kind of thing that only
+/// shows up when someone diffs two builds.
+#[test]
+fn the_same_document_subsets_to_the_same_bytes() {
+    let build = || {
+        let mut builder = DocumentBuilder::new();
+        builder.add_embedded_font(b"F0", b"Boxy", &subsettable_font(32));
+        builder.add_page(200.0, 100.0, |page| {
+            page.text(b"F0", 12.0, 10.0, 50.0, "AB");
+        });
+        builder.finish()
+    };
+    assert_eq!(build(), build());
+}
+
+/// Turning it off gives the whole face, for a document that will be edited
+/// afterwards by something needing the other glyphs.
+#[test]
+fn subsetting_can_be_turned_off() {
+    let program = subsettable_font(32);
+
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    builder.add_embedded_font(b"F0", b"Boxy", &program);
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "AB");
+    });
+
+    let (embedded, base) = embedded_program(builder.finish());
+    assert_eq!(embedded.len(), program.len(), "the whole face");
+    assert_eq!(base, "Boxy", "and no subset tag, because it is not one");
+}
+
+/// A font that draws text but maps none of it — no `cmap`, or a symbolic font
+/// addressed some other way — must not be subset on that evidence. Doing so
+/// keeps `.notdef` alone and every letter comes out blank, which reads as a
+/// rendering bug and gets found far too late.
+#[test]
+fn a_font_that_maps_nothing_is_embedded_whole() {
+    let program = boxy_font();
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_embedded_font(b"F0", b"Boxy", &program);
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "TEXT");
+    });
+
+    let (embedded, base) = embedded_program(builder.finish());
+    assert_eq!(embedded.len(), program.len(), "the whole face is carried");
+    assert_eq!(base, "Boxy");
+}
+
+/// `/Length1` says how long the embedded program is, and a reader uses it to
+/// find the end of the font. Leaving the original's length there points it
+/// past the end of a subset stream.
+#[test]
+fn length1_describes_the_subset_and_not_the_original() {
+    let program = subsettable_font(64);
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_embedded_font(b"F0", b"Boxy", &program);
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "AB");
+    });
+
+    let bytes = builder.finish();
+    let (embedded, _) = embedded_program(bytes.clone());
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    let collected = pages::collect(&doc);
+    let resources = collected[0].resources.as_ref().expect("resources");
+    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
+    let (_, value) = fonts.as_dict().expect("a font table").entries()[0].clone();
+    let font = doc
+        .get(value.as_objref().expect("indirect"))
+        .expect("loads");
+    let font = font.as_dict().expect("a dictionary");
+    let descriptor = doc.resolve_key(font, doc.intern(b"FontDescriptor"));
+    let descriptor = descriptor.as_dict().expect("a descriptor");
+    let file = descriptor
+        .get_ref(doc.intern(b"FontFile2"))
+        .expect("a program");
+    let stream = doc.get(file).expect("loads");
+    let stream = stream.as_stream().expect("a stream");
+
+    let length1 = doc
+        .resolve_key(&stream.dict, doc.intern(b"Length1"))
+        .as_number()
+        .expect("a length") as usize;
+    assert_eq!(
+        length1,
+        embedded.len(),
+        "the subset's length, not the face's"
+    );
 }
