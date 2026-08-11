@@ -52,6 +52,7 @@ pub mod font;
 pub mod form;
 pub mod lexer;
 pub mod limits;
+pub mod linearize;
 pub mod name;
 pub mod object;
 pub mod outline;

@@ -50,6 +50,29 @@ pub struct Encryption {
 pub struct WriteOptions {
     /// Which shape of output.
     pub mode: WriteMode,
+    /// Lay the file out for the first page to arrive first (Annex F).
+    ///
+    /// Off by default. Hints are advisory and most viewers ignore them; the
+    /// practical win is HTTP range serving and the workflows that check "fast
+    /// web view" as a box.
+    ///
+    /// It is a request, not a guarantee, and it is quietly dropped in three
+    /// cases — each because the alternative is a file that claims
+    /// `/Linearized` and is not, which is worse than an ordinary file because
+    /// a reader will believe it:
+    ///
+    /// - **An incremental update**, which by its nature appends to whatever
+    ///   layout the original had. (An incremental update to a linearized file
+    ///   also de-linearizes it, by nature rather than by bug: the parameter
+    ///   dictionary goes stale and validators say so.)
+    /// - **Encryption**, which this build cannot yet combine with the layout.
+    /// - **A document with no catalog or no pages**, which has no first page
+    ///   to put first.
+    ///
+    /// `object_streams` is ignored when this succeeds: packing objects into a
+    /// container would put the first page's objects in the same blob as
+    /// everything else, which is the opposite of the point.
+    pub linearize: bool,
     /// The PDF version to declare in the header, on a rewrite.
     pub version: (u8, u8),
     /// Pack eligible objects into object streams (7.5.7).
@@ -77,6 +100,7 @@ impl Default for WriteOptions {
     fn default() -> Self {
         WriteOptions {
             mode: WriteMode::Rewrite,
+            linearize: false,
             version: (1, 7),
             object_streams: false,
             compress: false,
@@ -264,6 +288,12 @@ impl ObjectSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Every object number in the set, ascending.
+    #[must_use]
+    pub fn numbers(&self) -> Vec<u32> {
+        self.entries.keys().copied().collect()
     }
 
     /// One object, by number.
@@ -553,6 +583,15 @@ pub fn rewrite(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Vec<u8> {
+    if options.linearize && options.encryption.is_none() {
+        // A document with no catalog or no pages has no first page to put
+        // first; the ordinary layout is then the only honest one, rather than
+        // a file claiming /Linearized and not being.
+        if let Some(bytes) = crate::linearize::linearize(objects, trailer, options, names) {
+            return bytes;
+        }
+    }
+
     let (major, minor) = options.version;
     let mut out = Vec::with_capacity(4096);
     out.extend_from_slice(format!("%PDF-{major}.{minor}\n").as_bytes());
