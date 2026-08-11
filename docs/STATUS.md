@@ -6,7 +6,9 @@ land; the plan files say what *should* exist, this says what *does*.
 **981 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit. The fuzz targets
-also *run* on every commit now, briefly, over committed seed corpora.
+also *run* on every commit now, briefly, over committed seed corpora. The four
+determinism fingerprints reproduce byte-for-byte on `wasm32-wasip1` under
+wasmtime — run locally against native Windows, not yet observed in CI.
 
 > **It was wrong again.** A second audit in August 2026 checked this file
 > against the code in *both* directions and found the gap table accurate but
@@ -107,7 +109,7 @@ by value over risk.
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [16](plans/gaps/16-ccitt-completion.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [17](plans/gaps/17-jbig2-generic-region.md), [18](plans/gaps/18-jpx-decision.md), [10](plans/gaps/10-mesh-shadings.md), [09](plans/gaps/09-tiling-patterns.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [11](plans/gaps/11-transparency-groups.md) |
-| **Determinism: the wasm leg** | `tests/determinism.rs` hashes rendered pages against committed fingerprints and runs on linux, windows and macos in the existing matrix — so ruling 4 is demonstrated on three of the four targets, not merely achievable. The fourth runs under wasmtime on `wasm32-wasip1` in a job that has never executed here, because neither the target nor wasmtime is installed locally. Written, unverified. Note that until August 2026 the `text` fixture painted nothing (see the table above), so what those three targets agreed on for text was a blank page. | [25](plans/gaps/25-wasm-determinism-leg.md) |
+| **Determinism: the wasm leg has run, but not in CI** | ~~Written, unverified.~~ It has now been executed. `wasm32-wasip1` under wasmtime 47.0.3 reproduces all four fingerprints byte-for-byte against native Windows, along with the page dimensions and the ink counts they are computed from — 1486, 2363, 9600 and 3600 pixels — so the interesting half of ruling 4's pairing holds: a 64-bit target and a 32-bit one render the same bytes, which is where a `usize` width assumption would have shown. That is **2 of ruling 4's 4 targets**, on one machine. Linux and macOS come only from the CI matrix and no run of the `wasm-determinism` job has been observed, so four-target agreement is not yet a thing anyone has seen. The job is also now guarded against reporting success without running anything, which `cargo test` will otherwise do. Milestone 4, fixture growth, belongs to gaps 09, 10, 11 and 12. | [25](plans/gaps/25-wasm-determinism-leg.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [26](plans/gaps/26-binding-packaging.md) |
 | **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [27](plans/gaps/27-form-calculations-decision.md) |
 | **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [28](plans/gaps/28-tinker-integration-decisions.md) |

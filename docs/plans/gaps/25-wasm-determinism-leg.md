@@ -89,3 +89,75 @@ CI has and this environment does not.
 | The job is red on first run and the fingerprints get updated to make it green | Said in three places — the test's module docs, the job's comment, and here. A wasm-versus-native divergence is a bug in the arithmetic |
 | The job silently skips and looks like it passed | Milestone 1's exit criterion is that a run shows it *executing*, not that CI is green |
 | Fixtures drift out of date as rendering changes, so the job proves less over time | Milestone 4 ties fixture growth to the plans that move pixels |
+
+## As built
+
+*August 2026.* Milestones 1 to 3 are done. **Milestone 4 is not**, and it is
+not this plan's to do: it belongs to [09](09-tiling-patterns.md),
+[10](10-mesh-shadings.md), [11](11-transparency-groups.md) and
+[12](12-image-sampling.md), each of which adds its own fixture as it lands.
+
+**The job runs, and it agrees.** The target and wasmtime 47.0.3 are installed
+on the development host now, so the job that had only ever been written was
+executed:
+
+```bash
+CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime \
+  cargo test -p tinker-pdf --test determinism --target wasm32-wasip1
+```
+
+Both tests pass. All four fingerprints came back byte-identical to the
+committed table, which is `x86_64-pc-windows-msvc`:
+
+```text
+text     98c3e73c83e08654f2d6076aefbe0786be1dd73f3013ca6c9f52fe5d5ed494ee
+curves   7924b1b282589efa4bbfc39055af40d9f29c9405d0c95381420706b97163968b
+shading  813a28f7b119418e76ae52f96f69047b5dec5100a26375294e9de41ed9cc90b5
+blend    759840c7df7bad4fc49a2d94f763e8b5eca6d9edb64f3af1cdfcd635b2512258
+```
+
+So did everything the hash is computed from: the same page dimensions, and
+the same ink counts — 1486, 2363, 9600 and 3600 pixels — on both. The ink is
+worth recording next to the hashes rather than leaving implicit in them,
+because a hash says only that two runs agreed and not what they agreed
+about. These agreed about 1486 pixels of glyph coverage, not about a blank
+page, which is the distinction the August amendment above exists to keep.
+
+**What this does and does not prove.** Two of ruling 4's four targets, on one
+host: 64-bit Windows against 32-bit wasm. It is the pairing most likely to
+have caught something — a `usize` that is 64 bits on one target and 32 on the
+other is the plan's own first suspect and the hardest to notice by reading —
+and it caught nothing, which is the good outcome. But the Linux and macOS legs
+still come only from the CI matrix, and **no CI run of this job has been
+observed**. Four-target agreement needs a green `wasm-determinism` job beside
+a green three-OS `test` matrix on the same commit. Three-of-four plus a
+locally verified pair is what is actually in hand.
+
+**Nothing had to be fixed to make it build.** Neither obstacle the plan
+anticipated appeared. `tinker-pdf` has no external dev-dependencies — the only
+thing the test reaches for beyond the facade is `tinker-pdf-crypto`'s SHA-256,
+which is an ordinary dependency and already builds for wasm — so there was no
+proptest or criterion to fail on the target. And all four fixtures construct
+their document bytes in memory rather than reading `testdata/`, so nothing
+wants a filesystem WASI does not offer. It compiles for the target under
+`RUSTFLAGS=-D warnings` with no warnings.
+
+**The job was changed, for the risk table's second row rather than its
+first.** `cargo test` exits 0 when it runs no tests at all — verified, not
+assumed: a filter matching nothing prints `0 passed; 0 failed; 2 filtered out`
+and returns success. So a `cfg` that excluded these two tests from wasm, or an
+`#[ignore]` added on an afternoon when the target was inconvenient, would have
+produced a green tick and no rendering. The step now tees its output and greps
+it for a non-zero pass count and for `rendering_is_stable_across_targets`
+by name, with `pipefail` so that `tee` cannot mask a real failure. Milestone
+1's exit criterion is that the job *executes*; this is what makes the green
+tick mean that.
+
+**One thing the plan did not say: wasmtime has to be findable by cargo, not
+by you.** `CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime` resolves through the
+`PATH` of the process cargo spawns. In CI `taiki-e/install-action@wasmtime`
+puts it there and the bare name is right. Locally, an installer that updated
+the user `PATH` may not have reached an already-running shell, and the symptom
+is not "wasmtime not found" but cargo trying to execute a `.wasm` file
+directly. The absolute path works and is what the runs above used;
+`CONTRIBUTING.md` now carries the recipe.

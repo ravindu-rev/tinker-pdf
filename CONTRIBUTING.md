@@ -21,6 +21,30 @@ rustup target add wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown -p tinker-pdf
 ```
 
+Ruling 4 — the same document renders to the same bytes on every target — is
+proved by rendering, not by inspection, and wasm is the fourth of the four
+targets it names. `wasm32-unknown-unknown` cannot run a test binary without a
+JavaScript harness, so the check runs on `wasm32-wasip1`, which is the same
+code generation with a `main` a runner can execute:
+
+```bash
+rustup target add wasm32-wasip1
+# and a wasmtime from https://wasmtime.dev
+CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime \
+  cargo test -p tinker-pdf --test determinism --target wasm32-wasip1
+```
+
+The runner is resolved through the `PATH` of the process cargo spawns, so if a
+fresh install has not reached your shell yet, give the absolute path rather
+than the bare name — the symptom otherwise is cargo trying to execute a
+`.wasm` directly, which does not say "wasmtime is missing".
+
+**If this disagrees with a native run, do not update the fingerprints.** Two
+targets disagreeing is a determinism bug; the table is the evidence, and
+editing it destroys the only thing in the repository that would ever report
+one. `crates/tinker-pdf/tests/determinism.rs` says which of the two failures
+you are looking at.
+
 ## The rules that are not negotiable
 
 Four of them. Each exists because breaking it costs more later than it saves
