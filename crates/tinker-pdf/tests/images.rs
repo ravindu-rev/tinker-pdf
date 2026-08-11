@@ -397,3 +397,79 @@ fn an_undecodable_inline_image_is_reported() {
         bitmap.warnings
     );
 }
+
+/// A JPEG behind another filter.
+///
+/// `[/FlateDecode /DCTDecode]` is an ordinary shape — a producer compressing
+/// the JPEG bytes again — and the image path used to hand the JPEG decoder
+/// the *undecoded* stream, so it saw deflate output and refused a perfectly
+/// good image. The CCITT half of the same bug had no refusal path at all and
+/// rendered noise.
+#[test]
+fn an_image_codec_behind_another_filter_still_decodes() {
+    let jpeg = progressive_jpeg();
+
+    // Deflate the JPEG bytes, so the stream is [/FlateDecode /DCTDecode].
+    let deflated = tinker_pdf_filters::zlib_compress(&jpeg);
+
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+   /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 27 >>\nstream\nq 20 0 0 20 0 0 cm /Im0 Do Q\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 8\n\
+   /ColorSpace /DeviceGray /BitsPerComponent 8\n\
+   /Filter [/FlateDecode /DCTDecode] /Length {} >>\nstream\n",
+        deflated.len()
+    )
+    .into_bytes();
+
+    let mut file = bytes;
+    file.extend_from_slice(&deflated);
+    file.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+
+    let bitmap = render(file);
+    let (r, g, b) = pixel(&bitmap, 10, 10);
+    assert_eq!((r, g, b), (r, r, r), "grey, got ({r}, {g}, {b})");
+    assert!(
+        (20..=45).contains(&r),
+        "the JPEG decoded through the outer filter rather than being refused: {r}"
+    );
+}
+
+/// 8.9.5.2: `/Decode [1 0]` inverts. Both codec paths returned before the
+/// decode array was even parsed, so a JPEG marked inverted rendered
+/// identically to one that was not.
+#[test]
+fn a_decode_array_inverts_a_jpeg_too() {
+    let jpeg = progressive_jpeg();
+    let with_decode = |decode: &str| -> tinker_pdf::Bitmap {
+        let mut file = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+   /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 27 >>\nstream\nq 20 0 0 20 0 0 cm /Im0 Do Q\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 8\n\
+   /ColorSpace /DeviceGray /BitsPerComponent 8 {decode}\n\
+   /Filter /DCTDecode /Length {} >>\nstream\n",
+            jpeg.len()
+        )
+        .into_bytes();
+        file.extend_from_slice(&jpeg);
+        file.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+        render(file)
+    };
+
+    let plain = pixel(&with_decode(""), 10, 10);
+    let inverted = pixel(&with_decode("/Decode [1 0]"), 10, 10);
+
+    assert!(plain.0 < 60, "the plain image is dark: {plain:?}");
+    assert!(
+        inverted.0 > 195,
+        "and the inverted one is light: {inverted:?}"
+    );
+}

@@ -246,6 +246,29 @@ impl CosDocument {
         out
     }
 
+    /// The bytes an image codec should be handed: decoded through every
+    /// filter *before* the codec, and no further.
+    ///
+    /// `[/FlateDecode /DCTDecode]` is an ordinary shape — a producer
+    /// compressing the JPEG bytes again — and the image path used to take
+    /// [`CosDocument::stream_raw`] for these, which is undecoded bytes. The
+    /// JPEG decoder was handed deflate output and refused it; the CCITT
+    /// decoder has no refusal path and rendered noise.
+    ///
+    /// Distinct from [`CosDocument::stream_decoded`] only in not warning
+    /// `ImageCodecNotDecoded`: that warning is for a caller who wanted pixels
+    /// and did not get them, and here the caller is about to produce them.
+    pub fn stream_image_input(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        let object = self.get(r)?;
+        let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
+        let mut sink = WarningSink::new();
+        sink.set_context(Some(r));
+        let data = self.decrypted_bytes(r, stream);
+        let out = self.decode_chain(&data, &stream.dict, r.num, &mut sink, false);
+        self.absorb(sink);
+        out
+    }
+
     /// Decodes already-decrypted bytes against a stream dictionary.
     pub(crate) fn decode_with(
         &self,
@@ -253,6 +276,19 @@ impl CosDocument {
         dict: &Dict,
         num: u32,
         sink: &mut WarningSink,
+    ) -> Result<Vec<u8>, CosError> {
+        self.decode_chain(data, dict, num, sink, true)
+    }
+
+    /// The chain, with `warn_undecoded` deciding whether stopping at an image
+    /// codec is worth saying so.
+    fn decode_chain(
+        &self,
+        data: &[u8],
+        dict: &Dict,
+        num: u32,
+        sink: &mut WarningSink,
+        warn_undecoded: bool,
     ) -> Result<Vec<u8>, CosError> {
         let mut ctx = ResolveCtx::new();
         ctx.push(num);
@@ -276,7 +312,9 @@ impl CosDocument {
                 for w in warnings {
                     sink.warn(0, WarningKind::Filter(w));
                 }
-                sink.warn(0, WarningKind::ImageCodecNotDecoded);
+                if warn_undecoded {
+                    sink.warn(0, WarningKind::ImageCodecNotDecoded);
+                }
                 Ok(data)
             }
             Err(e) => {

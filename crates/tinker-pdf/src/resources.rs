@@ -39,6 +39,23 @@ pub struct PageResources {
     missing_fonts: Mutex<Vec<String>>,
 }
 
+/// Applies `/Decode [1 0]` to already-decoded samples.
+///
+/// The general `/Decode` machinery works on raw samples before colour
+/// conversion, which the JPEG and CCITT paths have already done by the time
+/// they return. Reversal is the only form either of them meets in practice —
+/// `/Decode [1 0]` on a fax, `[1 0 1 0 1 0]` on a JPEG — and inverting the
+/// output is exactly equivalent for those. Any other range is left alone
+/// rather than approximated.
+fn invert_if_decode_reverses(decode: &[(f64, f64)], rgb: &mut [u8]) {
+    if decode.is_empty() || !decode.iter().all(|(a, b)| *a > *b) {
+        return;
+    }
+    for value in rgb.iter_mut() {
+        *value = 255 - *value;
+    }
+}
+
 impl PageResources {
     /// The font resource names that could not be resolved.
     #[must_use]
@@ -991,6 +1008,23 @@ impl PageResources {
         }
         let bpc = int(b"BitsPerComponent").clamp(1, 16) as u32;
 
+        // 8.9.5.2: /Decode remaps each component's sample range. Read here
+        // rather than after the codec branches, because both of those used to
+        // return before reaching it — so `/Decode [1 0]` on a JPEG or a fax
+        // did nothing at all, and the image rendered as its own negative
+        // without a word.
+        let decode: Vec<(f64, f64)> = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default();
+
         // The final filter decides how the bytes are read.
         let filters = self.doc.resolve_key(&dict, Name::FILTER);
         let last_filter = match filters.as_name() {
@@ -1006,12 +1040,17 @@ impl PageResources {
         // DCTDecode data comes out of the stream tier still encoded, which is
         // exactly what the JPEG decoder wants.
         if matches!(last_filter.as_deref(), Some(b"DCTDecode") | Some(b"DCT")) {
+            // Every filter before the codec, and no further: a producer
+            // that deflates its JPEG bytes writes `[/FlateDecode /DCTDecode]`,
+            // and handing the undecoded stream to the JPEG decoder made it
+            // refuse a perfectly good image.
             let raw = self
                 .doc
-                .stream_raw(reference)
+                .stream_image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
             let image = jpeg_decode(&raw, 1 << 28).map_err(|e| format!("{e:?}"))?;
-            let rgb = jpeg_to_rgb(&image);
+            let mut rgb = jpeg_to_rgb(&image);
+            invert_if_decode_reverses(&decode, &mut rgb);
             return Ok(DecodedImage {
                 width: image.width,
                 height: image.height,
@@ -1028,7 +1067,7 @@ impl PageResources {
         ) {
             let raw = self
                 .doc
-                .stream_raw(reference)
+                .stream_image_input(reference)
                 .map_err(|_| "CCITTFaxDecode".to_string())?;
             let parms = self.decode_parms(&dict);
             let params = CcittParams {
@@ -1058,6 +1097,7 @@ impl PageResources {
                 rgb.extend_from_slice(&[*value, *value, *value]);
             }
             rgb.resize((width as usize) * (height as usize) * 3, 255);
+            invert_if_decode_reverses(&decode, &mut rgb);
             return Ok(DecodedImage {
                 width,
                 height,
@@ -1091,21 +1131,6 @@ impl PageResources {
             .resolve_key(&dict, self.doc.intern(b"ImageMask"))
             .as_bool()
             .unwrap_or(false);
-
-        // 8.9.5.2: /Decode remaps each component's sample range. `/Decode
-        // [1 0]` on a stencil or a greyscale image inverts it, and ignoring it
-        // renders the image as its own negative.
-        let decode: Vec<(f64, f64)> = self
-            .doc
-            .resolve_key(&dict, self.doc.intern(b"Decode"))
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| self.doc.resolve(o).as_number())
-                    .collect::<Vec<f64>>()
-            })
-            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
-            .unwrap_or_default();
 
         let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
         let mut alpha = Vec::new();
