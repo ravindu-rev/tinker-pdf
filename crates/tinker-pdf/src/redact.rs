@@ -16,7 +16,7 @@
 //! The acceptance test is not "does it look right" but "decompress every
 //! stream in the output and assert the needle bytes are absent".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tinker_pdf_content::{Token, Tokenizer};
@@ -45,6 +45,13 @@ pub struct RedactionReport {
     pub operations: usize,
     /// How many glyphs were removed in total.
     pub glyphs: usize,
+    /// How many images were scrubbed.
+    ///
+    /// An image goes whole when a redaction touches it at all: cutting a hole
+    /// would mean decoding, editing and re-encoding its samples through a
+    /// codec this build may have no encoder for, and leaving the rest is not a
+    /// redaction.
+    pub images: usize,
 }
 
 /// Applies redactions to one page of an open editor.
@@ -77,7 +84,14 @@ pub fn apply(
         (content, existing, fonts)
     };
 
-    let (mut data, report) = rewrite(&content, areas, &fonts);
+    let (mut data, mut report, uses) = rewrite(&content, areas, &fonts, (1.0, 1.0, 0.0, 0.0));
+
+    // 8.10: a form XObject holds content like any other, and a redaction that
+    // stops at the page stream leaves whatever a form drew exactly where it
+    // was. Images the redaction covers are scrubbed for the same reason: a
+    // black rectangle over a photograph removes nothing.
+    let mut visited: HashSet<u32> = HashSet::new();
+    follow(editor, &uses, areas, &mut report, &mut visited, 0);
 
     if areas.iter().any(|r| r.mark) {
         // Painted last, so it covers whatever remains beneath it.
@@ -134,6 +148,207 @@ fn page_resources(doc: &CosDocument, page: ObjRef) -> Option<Dict> {
     let object = doc.get(page).ok()?;
     let dict = object.as_dict()?;
     doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned()
+}
+
+/// How deep form XObjects may nest before recursion is refused (8.10).
+const MAX_FORM_DEPTH: u32 = 12;
+
+/// Recurses into the XObjects a stream invoked.
+///
+/// A form is rewritten the way the page was, with the transform in force at
+/// the `Do` as its starting one — the rectangles stay in page space, so the
+/// form's own coordinates are brought into it rather than the other way round.
+/// An image the redaction covers is scrubbed.
+///
+/// `visited` stops a form that invokes itself, directly or through another,
+/// from recursing forever. It also means a form used twice is rewritten once,
+/// which is correct: the first pass already removed the text.
+fn follow(
+    editor: &mut DocumentEditor,
+    uses: &[XObjectUse],
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+    visited: &mut HashSet<u32>,
+    depth: u32,
+) {
+    if depth > MAX_FORM_DEPTH {
+        return;
+    }
+
+    for used in uses {
+        let Some((reference, dict)) = resolve_xobject(editor, &used.name) else {
+            continue;
+        };
+        if !visited.insert(reference.num) {
+            continue;
+        }
+
+        let doc = editor.document();
+        let subtype = doc
+            .resolve_key(&dict, doc.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .map(|b| b.to_vec());
+
+        match subtype.as_deref() {
+            Some(b"Image") => {
+                if covers_unit_square(used, areas) {
+                    scrub_image(editor, reference, &dict);
+                    report.images += 1;
+                }
+            }
+            Some(b"Form") => {
+                // 8.10.2: the form's own /Matrix sits between its space and the
+                // one that invoked it, so it composes with the transform the
+                // `Do` was made under.
+                let matrix = doc
+                    .resolve_key(&dict, doc.intern(b"Matrix"))
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
+                    .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()));
+
+                let inner = match matrix {
+                    Some(m) => (
+                        used.ctm.0 * m[0],
+                        used.ctm.1 * m[3],
+                        used.ctm.2 + m[4] * used.ctm.0,
+                        used.ctm.3 + m[5] * used.ctm.1,
+                    ),
+                    None => used.ctm,
+                };
+
+                let Ok(content) = doc.stream_decoded(reference) else {
+                    continue;
+                };
+                let resources = doc
+                    .resolve_key(&dict, Name::RESOURCES)
+                    .as_dict()
+                    .cloned()
+                    .unwrap_or_default();
+                let fonts = cos_font::from_resources(doc, &resources)
+                    .into_iter()
+                    .filter_map(|(name, font)| {
+                        doc.name_bytes(name).map(|bytes| (bytes.to_vec(), font))
+                    })
+                    .collect::<HashMap<Vec<u8>, Arc<Font>>>();
+
+                let (data, inner_report, inner_uses) = rewrite(&content, areas, &fonts, inner);
+                report.operations += inner_report.operations;
+                report.glyphs += inner_report.glyphs;
+                report.images += inner_report.images;
+
+                // Overwritten in place, for the same reason the page's content
+                // is: a freshly allocated object leaves the original text in
+                // the file, unreferenced and perfectly readable.
+                editor.put_stream(reference, StreamData { dict, data });
+                follow(editor, &inner_uses, areas, report, visited, depth + 1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The reference and dictionary a resource name selects from `/XObject`.
+fn resolve_xobject(editor: &DocumentEditor, name: &[u8]) -> Option<(ObjRef, Dict)> {
+    let doc = editor.document();
+    // Looked up in the page's resources. A form carrying its own resources is
+    // handled where it is rewritten, which is where they are in scope; this is
+    // the page-level lookup that finds the form itself.
+    let page = editor.page_refs().first().copied()?;
+    let resources = page_resources(doc, page)?;
+    let table = doc.resolve_key(&resources, doc.intern(b"XObject"));
+    let reference = table.as_dict()?.get_ref(doc.intern(name))?;
+    let object = doc.get(reference).ok()?;
+    Some((reference, object.as_dict()?.clone()))
+}
+
+/// Whether a redaction covers the unit square an XObject was drawn into.
+///
+/// 8.9.5.2: an image occupies the unit square of the transform in force. A
+/// rotated or skewed transform makes that square something four numbers cannot
+/// describe, and rather than guess at its extent the image is treated as
+/// covered — over-removing a rotated image is the safe direction here, and it
+/// is rare enough to be worth the bluntness.
+fn covers_unit_square(used: &XObjectUse, areas: &[Redaction]) -> bool {
+    if used.skewed {
+        return !areas.is_empty();
+    }
+    let x0 = used.ctm.2.min(used.ctm.2 + used.ctm.0);
+    let x1 = used.ctm.2.max(used.ctm.2 + used.ctm.0);
+    let y0 = used.ctm.3.min(used.ctm.3 + used.ctm.1);
+    let y1 = used.ctm.3.max(used.ctm.3 + used.ctm.1);
+
+    areas.iter().any(|redaction| {
+        let a = redaction.area;
+        x1 > a.x0 && x0 < a.x1 && y1 > a.y0 && y0 < a.y1
+    })
+}
+
+/// Replaces an image with a single blank sample.
+///
+/// The samples are what has to go, so the stream is rewritten rather than
+/// covered: a rectangle painted over a photograph removes nothing, and the
+/// original bytes stay in the file for anyone who decompresses it.
+///
+/// The whole image goes even when the rectangle covers only part of it.
+/// Cutting a hole would mean decoding the samples, editing them and
+/// re-encoding through a codec this build may have no encoder for, and leaving
+/// the rest is not a redaction.
+fn scrub_image(editor: &mut DocumentEditor, reference: ObjRef, dict: &Dict) {
+    let is_mask = dict
+        .get(editor.intern(b"ImageMask"))
+        .and_then(Object::as_bool)
+        .unwrap_or(false);
+
+    let mut replacement = Dict::new();
+    replacement.insert(Name::TYPE, Object::Name(editor.intern(b"XObject")));
+    replacement.insert(
+        editor.intern(b"Subtype"),
+        Object::Name(editor.intern(b"Image")),
+    );
+    replacement.insert(editor.intern(b"Width"), Object::Int(1));
+    replacement.insert(editor.intern(b"Height"), Object::Int(1));
+
+    // Nothing else carries over — no /Filter, no /DecodeParms, no /SMask, no
+    // /Decode. Every one of them describes bytes that no longer exist.
+    if is_mask {
+        // A stencil keeps its flag: one carrying a colour space is malformed,
+        // and a viewer may reject the page over it.
+        replacement.insert(editor.intern(b"ImageMask"), Object::Bool(true));
+        replacement.insert(editor.intern(b"BitsPerComponent"), Object::Int(1));
+        editor.put_stream(
+            reference,
+            StreamData {
+                dict: replacement,
+                // A set bit paints nothing (8.9.6.2).
+                data: vec![0x80],
+            },
+        );
+        return;
+    }
+
+    replacement.insert(editor.intern(b"BitsPerComponent"), Object::Int(8));
+    replacement.insert(
+        editor.intern(b"ColorSpace"),
+        Object::Name(editor.intern(b"DeviceGray")),
+    );
+    editor.put_stream(
+        reference,
+        StreamData {
+            dict: replacement,
+            data: vec![0xFF],
+        },
+    );
+}
+
+/// One `Do` invocation, and the transform in force when it happened.
+struct XObjectUse {
+    name: Vec<u8>,
+    /// `(sx, sy, tx, ty)`, mapping the XObject's space to the page's.
+    ctm: (f64, f64, f64, f64),
+    /// Whether that transform rotates or skews, which makes the unit square's
+    /// page-space extent something a four-number transform cannot describe.
+    skewed: bool,
 }
 
 /// The text state needed to place a glyph: everything in 9.4.4's displacement
@@ -233,11 +448,16 @@ fn rewrite(
     content: &[u8],
     areas: &[Redaction],
     fonts: &HashMap<Vec<u8>, Arc<Font>>,
-) -> (Vec<u8>, RedactionReport) {
+    initial: (f64, f64, f64, f64),
+) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let mut out = Vec::with_capacity(content.len());
     let mut tokens = Tokenizer::new(content);
     let mut operands: Vec<Token> = Vec::new();
-    let mut pen = Pen::default();
+    let mut uses: Vec<XObjectUse> = Vec::new();
+    let mut pen = Pen {
+        ctm: initial,
+        ..Pen::default()
+    };
     let mut saved: Vec<Pen> = Vec::new();
     let mut font: Option<Arc<Font>> = None;
     let mut report = RedactionReport::default();
@@ -261,6 +481,20 @@ fn rewrite(
         let mut rewritten = false;
 
         match op.as_slice() {
+            b"Do" => {
+                // 8.8: the operand names an XObject. Which kind it is, and
+                // what to do about it, is the caller's business — this crate
+                // has the transform, and the caller has the dictionaries.
+                if let Some(Token::Name(name)) = operands.last() {
+                    if uses.len() < 4096 {
+                        uses.push(XObjectUse {
+                            name: name.clone(),
+                            ctm: pen.ctm,
+                            skewed: pen.skewed,
+                        });
+                    }
+                }
+            }
             b"cm" => {
                 let (a, b, c, d) = (number(5), number(4), number(3), number(2));
                 let (e, f) = (number(1), number(0));
@@ -406,7 +640,7 @@ fn rewrite(
         operands.clear();
     }
 
-    (out, report)
+    (out, report, uses)
 }
 
 /// A piece of a rewritten showing operation.
@@ -855,6 +1089,177 @@ mod tests {
         );
     }
 
+    /// A form XObject holds content like any other. A redaction that stopped
+    /// at the page stream left everything a form drew exactly where it was —
+    /// and forms are how most producers place repeated content, so this was a
+    /// hole a redaction could drive through.
+    #[test]
+    fn text_inside_a_form_xobject_is_redacted() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> /Font << /F0 6 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 24 >>\nstream\n\
+q 1 0 0 1 0 0 cm /Fm0 Do Q\n\
+endstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 200]\n\
+   /Resources << /Font << /F0 6 0 R >> >> /Length 46 >>\nstream\n\
+BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET\n\
+endstream\nendobj\n\
+6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+        assert!(
+            all_streams(&doc).contains("SECRET"),
+            "the needle starts present"
+        );
+
+        let (streams, report) = redact_to_streams(doc, &[second_word()]);
+        assert!(report.glyphs > 0, "the form was followed into");
+        assert!(
+            !streams.contains("SECRET"),
+            "and the text inside it is gone from every stream: {streams}"
+        );
+        assert!(streams.contains("PUBLIC"), "the rest survives");
+    }
+
+    /// A form that invokes itself must not recurse forever.
+    #[test]
+    fn a_self_referential_form_terminates() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 10 >>\nstream\n\
+/Fm0 Do\n\
+endstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 200]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> >> /Length 10 >>\nstream\n\
+/Fm0 Do\n\
+endstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+        let (_, report) = redact_to_streams(doc, &[second_word()]);
+        assert_eq!(report.glyphs, 0, "there is no text, and it terminated");
+    }
+
+    /// An image under a redaction is scrubbed, not covered. A rectangle
+    /// painted over a photograph removes nothing at all: the samples stay in
+    /// the file for anyone who decompresses it.
+    #[test]
+    fn an_image_under_a_redaction_is_scrubbed() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"%PDF-1.7\n");
+        bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        bytes.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200]\n\
+              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        let content = b"q 100 0 0 100 60 50 cm /Im0 Do Q\n";
+        bytes.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        bytes.extend_from_slice(content);
+        bytes.extend_from_slice(b"endstream\nendobj\n");
+
+        // Recognisable samples, so their absence is checkable.
+        let samples = b"SECRETPIXELDATA!";
+        bytes.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 4\n\
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n",
+                samples.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(samples);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        bytes.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+        assert!(
+            all_streams(&doc).contains("SECRETPIXEL"),
+            "the samples start present"
+        );
+
+        // The image occupies 60..160 by 50..150 on the page.
+        let over_the_image = Redaction {
+            area: Rect {
+                x0: 80.0,
+                y0: 70.0,
+                x1: 120.0,
+                y1: 110.0,
+            },
+            mark: false,
+        };
+        let (streams, report) = redact_to_streams(doc, &[over_the_image]);
+
+        assert_eq!(report.images, 1, "the image was scrubbed");
+        assert!(
+            !streams.contains("SECRETPIXEL"),
+            "and its samples are gone from every stream: {streams}"
+        );
+    }
+
+    /// An image the redaction does not touch is left alone. Scrubbing every
+    /// image on a page would destroy content nobody asked to remove.
+    #[test]
+    fn an_image_outside_the_redaction_survives() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"%PDF-1.7\n");
+        bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        bytes.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200]\n\
+              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        let content = b"q 20 0 0 20 5 5 cm /Im0 Do Q\n";
+        bytes.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        bytes.extend_from_slice(content);
+        bytes.extend_from_slice(b"endstream\nendobj\n");
+
+        let samples = b"KEEPTHESEPIXELS!";
+        bytes.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 4\n\
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n",
+                samples.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(samples);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        bytes.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+
+        // Far from the image, which sits at 5..25 on both axes.
+        let elsewhere = Redaction {
+            area: Rect {
+                x0: 300.0,
+                y0: 150.0,
+                x1: 380.0,
+                y1: 190.0,
+            },
+            mark: false,
+        };
+        let (streams, report) = redact_to_streams(doc, &[elsewhere]);
+
+        assert_eq!(report.images, 0);
+        assert!(
+            streams.contains("KEEPTHESE"),
+            "an untouched image keeps its samples"
+        );
+    }
+
     #[test]
     fn a_page_that_does_not_exist_is_refused() {
         let doc = document("text");
@@ -899,7 +1304,7 @@ mod tests {
     fn garbage_content_survives_the_rewrite() {
         let fonts = HashMap::new();
         let content = b"q 1 0 0 1 0 0 cm ) ) ) >> BI garbage EI Q";
-        let (out, report) = rewrite(content, &[second_word()], &fonts);
+        let (out, report, _) = rewrite(content, &[second_word()], &fonts, (1.0, 1.0, 0.0, 0.0));
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");
     }
