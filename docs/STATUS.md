@@ -3,9 +3,17 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**964 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**966 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
+
+> **It was wrong again.** A second audit in August 2026 checked this file
+> against the code in *both* directions and found the gap table accurate but
+> incomplete: **22 things listed as built are absent or materially thinner
+> than claimed**, seven of them producing silently wrong output or unopenable
+> files. They are written down in [audit-2026-08.md](audit-2026-08.md), with
+> the five fixed so far struck through there. A known gap is manageable; a
+> false claim is not, because nobody goes looking.
 
 > **This file was wrong for a long time.** A 47-agent audit against every plan
 > file in August 2026 found ~35 of ~211 milestones genuinely complete, ~123

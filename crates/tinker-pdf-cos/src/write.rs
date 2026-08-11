@@ -561,7 +561,16 @@ pub fn incremental_update(
     write_classic_xref(&mut out, &offsets);
 
     let mut trailer = trailer.clone();
-    let size = changed.max_number().saturating_add(1);
+    // The *changed* set's highest number is not the file's. Writing it
+    // unqualified clobbered the correct value the caller passes in, and a
+    // conforming reader must then ignore every object above it — including
+    // the edited page's own `/Contents`. It can only ever go up.
+    let existing = trailer
+        .get(Name::SIZE)
+        .and_then(Object::as_int)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let size = changed.max_number().saturating_add(1).max(existing);
     trailer.insert(Name::SIZE, Object::Int(i64::from(size)));
     trailer.insert(
         Name::PREV,
@@ -672,7 +681,11 @@ pub fn rewrite(
     // a reader needs it to decrypt everything else.
     let mut trailer = trailer.clone();
     if let Some((dict, _)) = &encryption {
-        let encrypt_num = objects.max_number().saturating_add(3);
+        // Directly above the object-stream container, which is `max + 1`.
+        // A gap here is not merely untidy: the cross-reference table is sized
+        // from the numbers actually used, and a number nobody claims is a
+        // free entry a reader will honour.
+        let encrypt_num = objects.max_number().saturating_add(2);
         offsets.push((encrypt_num, out.len() as u64));
         write_entry(
             &mut out,
@@ -703,9 +716,17 @@ pub fn rewrite(
     // A rewrite has no earlier revision, so /Prev is simply not written; the
     // caller's trailer is not expected to carry one.
     let mut trailer = trailer.clone();
+    // 7.5.5 Table 15: one more than the highest object number *in the file*,
+    // which includes the container and the `/Encrypt` dictionary. Taking it
+    // from the object set alone understated it on every encrypted file.
+    let highest = offsets
+        .iter()
+        .map(|(num, _)| *num)
+        .max()
+        .unwrap_or_else(|| objects.max_number());
     trailer.insert(
         Name::SIZE,
-        Object::Int(i64::from(objects.max_number().saturating_add(1))),
+        Object::Int(i64::from(highest.saturating_add(1))),
     );
 
     if packed.is_empty() {
@@ -743,7 +764,17 @@ fn write_xref_stream(
     names: &NameTable,
 ) {
     let stream_number = container.saturating_add(1);
-    let size = stream_number.saturating_add(1);
+    // Every object that has an offset, not just the container. `/Encrypt` is
+    // numbered above it, and sizing from the container alone left that object
+    // with no entry at all: the file reopened as unencrypted with zero pages
+    // while its content was genuinely ciphertext, which is unrecoverable.
+    let highest = offsets
+        .iter()
+        .map(|(num, _)| *num)
+        .max()
+        .unwrap_or(stream_number)
+        .max(stream_number);
+    let size = highest.saturating_add(1);
 
     // Three bytes of offset covers 16 MB; four covers 4 GB, which is past
     // what any single PDF should be.

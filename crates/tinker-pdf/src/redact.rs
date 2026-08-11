@@ -91,7 +91,17 @@ pub fn apply(
     // was. Images the redaction covers are scrubbed for the same reason: a
     // black rectangle over a photograph removes nothing.
     let mut visited: HashSet<u32> = HashSet::new();
-    follow(editor, &uses, areas, &mut report, &mut visited, 0);
+    // The resources of the page being redacted, not of page zero.
+    let resources = page_resources(editor.document(), reference).unwrap_or_default();
+    follow(
+        editor,
+        &resources,
+        &uses,
+        areas,
+        &mut report,
+        &mut visited,
+        0,
+    );
 
     if areas.iter().any(|r| r.mark) {
         // Painted last, so it covers whatever remains beneath it.
@@ -163,8 +173,10 @@ const MAX_FORM_DEPTH: u32 = 12;
 /// `visited` stops a form that invokes itself, directly or through another,
 /// from recursing forever. It also means a form used twice is rewritten once,
 /// which is correct: the first pass already removed the text.
+#[allow(clippy::too_many_arguments)]
 fn follow(
     editor: &mut DocumentEditor,
+    resources: &Dict,
     uses: &[XObjectUse],
     areas: &[Redaction],
     report: &mut RedactionReport,
@@ -176,7 +188,7 @@ fn follow(
     }
 
     for used in uses {
-        let Some((reference, dict)) = resolve_xobject(editor, &used.name) else {
+        let Some((reference, dict)) = resolve_xobject(editor, resources, &used.name) else {
             continue;
         };
         if !visited.insert(reference.num) {
@@ -220,12 +232,16 @@ fn follow(
                 let Ok(content) = doc.stream_decoded(reference) else {
                     continue;
                 };
-                let resources = doc
+                // 8.10.1: a form's own `/Resources` is what its content
+                // names things in. A form that omits the dictionary inherits
+                // the scope that invoked it, which is why the fallback is the
+                // caller's rather than the page's.
+                let inner_resources = doc
                     .resolve_key(&dict, Name::RESOURCES)
                     .as_dict()
                     .cloned()
-                    .unwrap_or_default();
-                let fonts = cos_font::from_resources(doc, &resources)
+                    .unwrap_or_else(|| resources.clone());
+                let fonts = cos_font::from_resources(doc, &inner_resources)
                     .into_iter()
                     .filter_map(|(name, font)| {
                         doc.name_bytes(name).map(|bytes| (bytes.to_vec(), font))
@@ -241,7 +257,15 @@ fn follow(
                 // is: a freshly allocated object leaves the original text in
                 // the file, unreferenced and perfectly readable.
                 editor.put_stream(reference, StreamData { dict, data });
-                follow(editor, &inner_uses, areas, report, visited, depth + 1);
+                follow(
+                    editor,
+                    &inner_resources,
+                    &inner_uses,
+                    areas,
+                    report,
+                    visited,
+                    depth + 1,
+                );
             }
             _ => {}
         }
@@ -249,14 +273,27 @@ fn follow(
 }
 
 /// The reference and dictionary a resource name selects from `/XObject`.
-fn resolve_xobject(editor: &DocumentEditor, name: &[u8]) -> Option<(ObjRef, Dict)> {
+///
+/// The caller supplies the resource dictionary that is *in scope*, which is
+/// the whole correctness condition here. This used to look the name up in
+/// `page_refs().first()` — page zero — whatever page was being redacted and
+/// however deep in a form the name appeared.
+///
+/// Two ways that failed, and the second is the bad one:
+///
+/// - Redacting page one found nothing and reported nothing, leaving the
+///   content it was asked to remove in the file.
+/// - Redacting page one when page zero happened to have a resource of the
+///   same name — `/Im0` is the commonest name there is — scrubbed *page
+///   zero's* image and left page one's. It reported `images: 1`, so it looked
+///   like it had worked.
+fn resolve_xobject(
+    editor: &DocumentEditor,
+    resources: &Dict,
+    name: &[u8],
+) -> Option<(ObjRef, Dict)> {
     let doc = editor.document();
-    // Looked up in the page's resources. A form carrying its own resources is
-    // handled where it is rewritten, which is where they are in scope; this is
-    // the page-level lookup that finds the form itself.
-    let page = editor.page_refs().first().copied()?;
-    let resources = page_resources(doc, page)?;
-    let table = doc.resolve_key(&resources, doc.intern(b"XObject"));
+    let table = doc.resolve_key(resources, doc.intern(b"XObject"));
     let reference = table.as_dict()?.get_ref(doc.intern(name))?;
     let object = doc.get(reference).ok()?;
     Some((reference, object.as_dict()?.clone()))
@@ -1307,5 +1344,117 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
         let (out, report, _) = rewrite(content, &[second_word()], &fonts, (1.0, 1.0, 0.0, 0.0));
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");
+    }
+}
+
+#[cfg(test)]
+mod page_scope_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tinker_pdf_cos::CosDocument;
+
+    /// Two pages, each with an image under the same resource name `/Im0`,
+    /// and a redaction covering the whole of page one.
+    fn two_pages() -> Vec<u8> {
+        let content = "q 100 0 0 100 0 0 cm /Im0 Do Q";
+        format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 6 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {len} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+   /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+stream\nPAGE\nendstream\nendobj\n\
+6 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << /XObject << /Im0 8 0 R >> >> /Contents 7 0 R >>\nendobj\n\
+7 0 obj\n<< /Length {len} >>\nstream\n{content}\nendstream\nendobj\n\
+8 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+   /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+stream\nSECR\nendstream\nendobj\n\
+trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
+            len = content.len()
+        )
+        .into_bytes()
+    }
+
+    /// Redacting page one must remove page one's image.
+    ///
+    /// This failed in the worst possible way: resource names were resolved
+    /// against page *zero*, so redacting page one scrubbed page zero's `/Im0`
+    /// — a name so common that the collision is the normal case — reported
+    /// `images: 1`, and left the secret on page one untouched. It looked like
+    /// it had worked.
+    #[test]
+    fn redacting_the_second_page_removes_the_second_pages_image() {
+        let doc = Arc::new(CosDocument::open(two_pages()).expect("it opens"));
+        let mut editor = DocumentEditor::new(doc);
+
+        let report = apply(
+            &mut editor,
+            1,
+            &[Redaction {
+                area: tinker_pdf_cos::Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 100.0,
+                    y1: 100.0,
+                },
+                mark: false,
+            }],
+        )
+        .expect("it redacts");
+        assert_eq!(report.images, 1, "it found page one's image");
+
+        let saved = editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            compress: false,
+            object_streams: false,
+            ..tinker_pdf_cos::WriteOptions::default()
+        });
+        let text = String::from_utf8_lossy(&saved);
+
+        assert!(
+            !text.contains("SECR"),
+            "page one's samples are gone from the file"
+        );
+        assert!(
+            text.contains("PAGE"),
+            "and page zero's image, which nobody asked about, is untouched"
+        );
+    }
+
+    /// The mirror: redacting page zero must not reach page one.
+    #[test]
+    fn redacting_the_first_page_leaves_the_second_alone() {
+        let doc = Arc::new(CosDocument::open(two_pages()).expect("it opens"));
+        let mut editor = DocumentEditor::new(doc);
+
+        apply(
+            &mut editor,
+            0,
+            &[Redaction {
+                area: tinker_pdf_cos::Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 100.0,
+                    y1: 100.0,
+                },
+                mark: false,
+            }],
+        )
+        .expect("it redacts");
+
+        let saved = editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            compress: false,
+            object_streams: false,
+            ..tinker_pdf_cos::WriteOptions::default()
+        });
+        let text = String::from_utf8_lossy(&saved);
+
+        assert!(!text.contains("PAGE"), "page zero's samples are gone");
+        assert!(text.contains("SECR"), "page one is untouched");
     }
 }

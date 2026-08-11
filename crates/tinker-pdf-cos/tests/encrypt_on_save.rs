@@ -189,3 +189,67 @@ fn identical_content_encrypts_differently() {
         );
     }
 }
+
+/// Encryption together with object streams.
+///
+/// These two options were tested separately and never together, and together
+/// they produced a permanently unreadable file: `/Encrypt` was numbered above
+/// the object-stream container, the cross-reference stream was sized from the
+/// container alone, and so the one object a reader needs before it can decrypt
+/// anything had no entry. The file reopened as *unencrypted with zero pages*
+/// while its content was genuinely ciphertext.
+#[test]
+fn encryption_survives_object_streams() {
+    let editor = DocumentEditor::new(source());
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: true,
+        compress: true,
+        encryption: Some(Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: entropy(),
+        }),
+        ..WriteOptions::default()
+    });
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert!(doc.is_encrypted(), "the /Encrypt dictionary is reachable");
+    assert_eq!(doc.authenticate("open-me"), Ok(AuthLevel::User));
+
+    let collected = pages::collect(&doc);
+    assert_eq!(collected.len(), 1, "and the pages are there");
+    let content = pages::content_bytes(&doc, &collected[0]);
+    assert!(String::from_utf8_lossy(&content).contains("CONFIDENTIAL"));
+}
+
+/// 7.5.5 Table 15: `/Size` is one more than the highest object number in the
+/// file. Taking it from the object set alone left every encrypted file
+/// understating it, because `/Encrypt` is written above that set.
+#[test]
+fn the_trailer_size_counts_the_encryption_dictionary() {
+    let bytes = encrypted("open-me", "owner-me", -1);
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    let at = text.rfind("/Encrypt ").expect("an /Encrypt reference");
+    let number: u32 = text[at + 9..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("an object number");
+
+    let at = text.rfind("/Size ").expect("a /Size");
+    let size: u32 = text[at + 6..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("a number");
+
+    assert!(
+        size > number,
+        "/Size {size} must exceed the /Encrypt object number {number}"
+    );
+}

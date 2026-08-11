@@ -141,7 +141,10 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
 /// Every entry is a claim that this page renders to these exact bytes on
 /// every supported target. Changing one is a deliberate act; see the module
 /// documentation for which of the two failures you are looking at.
-const GOLDEN: &[(&str, fn() -> Vec<u8>)] = &[
+/// A named page, and the function that builds it.
+type Page = (&'static str, fn() -> Vec<u8>);
+
+const GOLDEN: &[Page] = &[
     ("text", text_page as fn() -> Vec<u8>),
     ("curves", curves_page),
     ("shading", shading_page),
