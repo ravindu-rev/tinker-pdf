@@ -85,6 +85,13 @@ pub enum RenderWarning {
         /// The scale that was used.
         applied: f64,
     },
+    /// A text object selected a clipping mode and produced no glyphs, so it
+    /// clipped everything away.
+    ///
+    /// Spec-correct and almost never intended: it usually means the glyphs
+    /// could not be resolved, and the visible result is a blank region rather
+    /// than missing text.
+    EmptyTextClip,
     /// A font program could not be read, so its glyphs were not drawn.
     UnreadableFont,
     /// A shading type that is not implemented was skipped.
@@ -208,6 +215,14 @@ pub struct Renderer<'g, G: GlyphSource> {
     missing_fonts: u32,
     /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
     text_clip: Option<Path>,
+    /// Whether any glyph in this text object *selected* a clipping mode,
+    /// whether or not its outline could be found.
+    ///
+    /// Separate from `text_clip` because the two answer different questions.
+    /// A text object that clips and shows nothing must clip everything away;
+    /// keying that off the accumulated path alone cannot tell "clipped to
+    /// nothing" from "never clipped".
+    text_clip_requested: bool,
 }
 
 impl<'g, G: GlyphSource> Renderer<'g, G> {
@@ -228,6 +243,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             tolerance: 0.2,
             missing_fonts: 0,
             text_clip: None,
+            text_clip_requested: false,
         }
     }
 
@@ -599,8 +615,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // at all should clip everything away. It does not here: nothing
         // records the mode unless a glyph reaches the device, so the clip
         // stays absent rather than becoming empty.
-        let Some(path) = self.text_clip.take() else {
-            return;
+        let requested = std::mem::take(&mut self.text_clip_requested);
+        let path = match self.text_clip.take() {
+            Some(path) => path,
+            // 9.3.6: a text object that selected a clipping mode and produced
+            // no glyphs clips everything away. An empty path is the honest
+            // answer; leaving the clip alone would paint the whole page.
+            None if requested => {
+                self.warnings.push(RenderWarning::EmptyTextClip);
+                Path::new()
+            }
+            None => return,
         };
         let mask = fill(
             &path,
@@ -686,6 +711,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
         if !mode.paints() && !mode.clips() {
             return;
+        }
+        // Recorded before anything can fail. Every early return below — a
+        // font whose program will not parse, a glyph with no outline — used
+        // to leave the clip unrecorded, so a text object that asked to clip
+        // and could not resolve one glyph clipped *nothing* and the rest of
+        // the page painted at full strength. With no bundled faces, that is
+        // the default configuration rather than an edge case.
+        if mode.clips() {
+            self.text_clip_requested = true;
         }
 
         let Some(outline) = self.glyphs.outline(glyph.font_id, glyph.code) else {

@@ -265,3 +265,67 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
     (0..=haystack.len() - needle.len()).find(|&at| &haystack[at..at + needle.len()] == needle)
 }
+
+/// `compress` and `linearize` together.
+///
+/// `compress` had no effect at all on the linearized path: the ordinary
+/// writer compresses inside `write_entry`, which this layout does not use, so
+/// asking for both produced an uncompressed file and no error.
+#[test]
+fn compression_applies_to_a_linearized_file() {
+    // Content long enough that deflate wins. A twenty-byte content stream
+    // compresses to more than twenty bytes, and `maybe_compress` is right to
+    // decline it, so a small fixture would prove nothing either way.
+    let build = || {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        for index in 0..6 {
+            builder.add_page(400.0, 400.0, |page| {
+                for line in 0..30 {
+                    page.text(
+                        b"F0",
+                        10.0,
+                        10.0,
+                        f64::from(line) * 12.0,
+                        &format!("page {index} line {line} of repeated filler text"),
+                    );
+                }
+            });
+        }
+        Arc::new(CosDocument::open(builder.finish()).expect("it opens"))
+    };
+
+    let save = |compress: bool| -> Vec<u8> {
+        let editor = DocumentEditor::new(build());
+        editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            linearize: true,
+            object_streams: false,
+            compress,
+            ..WriteOptions::default()
+        })
+    };
+
+    let plain = save(false);
+    let squeezed = save(true);
+
+    assert!(
+        squeezed.len() < plain.len(),
+        "compression shrinks it: {} against {}",
+        squeezed.len(),
+        plain.len()
+    );
+    assert!(
+        String::from_utf8_lossy(&squeezed).contains("/FlateDecode"),
+        "and says so in the stream dictionaries"
+    );
+
+    // And it is still a linearized file that opens.
+    let doc = CosDocument::open(squeezed.clone()).expect("it opens");
+    assert_eq!(pages::collect(&doc).len(), 6);
+    assert_eq!(
+        parameter(&squeezed, "L"),
+        squeezed.len() as u64,
+        "with /L still describing the file it is in"
+    );
+}

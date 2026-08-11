@@ -910,6 +910,24 @@ impl PageResources {
         let ch = text.chars().next();
 
         if let Some(sfnt) = Sfnt::parse(program) {
+            // An OpenType font may carry its outlines in a `CFF ` table
+            // instead of `glyf` — that is what the `OTTO` tag means. The sfnt
+            // parser accepts `OTTO`, so such a font took this branch, found
+            // no `glyf`, and `glyf::outline` returned an *empty* outline,
+            // which the renderer reads as a legitimate space. The whole face
+            // drew as blank with nothing reported.
+            if sfnt.table(0x676C_7966).is_none() {
+                if let Some(table) = sfnt.table(0x4346_4620) {
+                    if let Some(cff) = Cff::parse(table) {
+                        let glyph = u16::try_from(code).ok()?;
+                        let outline = cff.outline(glyph)?;
+                        let factor = cff.font_matrix.first().copied().unwrap_or(0.001);
+                        return Some(scale(&outline, factor));
+                    }
+                }
+                return None;
+            }
+
             let glyph = match ch {
                 Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
                 None => None,

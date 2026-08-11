@@ -451,7 +451,12 @@ fn build_encryption(encryption: &Encryption, names: &NameTable) -> Option<(Dict,
 /// rewritten and would usually make them larger. A result no smaller than the
 /// input is discarded for the same reason — an already-compressed image does
 /// not compress twice.
-fn maybe_compress(data: &[u8], dict: &mut Dict, names: &NameTable, compress: bool) -> Vec<u8> {
+pub(crate) fn maybe_compress(
+    data: &[u8],
+    dict: &mut Dict,
+    names: &NameTable,
+    compress: bool,
+) -> Vec<u8> {
     if !compress || data.is_empty() || dict.contains_key(Name::FILTER) {
         return data.to_vec();
     }

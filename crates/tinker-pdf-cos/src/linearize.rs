@@ -60,7 +60,7 @@ pub fn linearize(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Option<Vec<u8>> {
-    let plan = Plan::build(objects, trailer, names)?;
+    let plan = Plan::build(objects, trailer, names, options.compress)?;
     Some(plan.emit(options, names))
 }
 
@@ -104,7 +104,12 @@ struct Placed {
 }
 
 impl Plan {
-    fn build(objects: &ObjectSet, trailer: &Dict, names: &NameTable) -> Option<Plan> {
+    fn build(
+        objects: &ObjectSet,
+        trailer: &Dict,
+        names: &NameTable,
+        compress: bool,
+    ) -> Option<Plan> {
         let root = trailer.get_ref(Name::ROOT)?;
         let catalog = dict_of(objects, root.num)?;
         let pages_ref = catalog.get_ref(Name::PAGES)?;
@@ -200,7 +205,7 @@ impl Plan {
             let renumbered = renumber_entry(entry, &mapping);
             let number = *mapping.get(old)?;
             let mut bytes = Vec::new();
-            write_indirect(&mut bytes, number, &renumbered, names);
+            write_indirect(&mut bytes, number, &renumbered, names, compress);
 
             if section == &Section::Shared {
                 shared_objects.push(number);
@@ -268,6 +273,10 @@ impl Plan {
                     data: hint_data,
                 }),
                 names,
+                // Never compressed: `/H` measures this object's length, and
+                // shrinking it after the layout was computed from it would
+                // point every later offset somewhere else.
+                false,
             );
             bytes
         };
@@ -835,16 +844,27 @@ fn renumber(object: &Object, mapping: &BTreeMap<u32, u32>, depth: u32) -> Object
 }
 
 /// One indirect object, header to `endobj`.
-fn write_indirect(out: &mut Vec<u8>, number: u32, entry: &Written, names: &NameTable) {
+fn write_indirect(
+    out: &mut Vec<u8>,
+    number: u32,
+    entry: &Written,
+    names: &NameTable,
+    compress: bool,
+) {
     out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
     match entry {
         Written::Object(object) => write_object(out, object, names),
         Written::Stream(stream) => {
+            // `compress` had no effect at all on this path: the ordinary
+            // writer compresses inside `write_entry`, which the linearized
+            // layout does not use. Asking for both gave an uncompressed file
+            // and no error — four times the size, measured.
             let mut dict = stream.dict.clone();
-            dict.insert(Name::LENGTH, Object::Int(stream.data.len() as i64));
+            let data = crate::write::maybe_compress(&stream.data, &mut dict, names, compress);
+            dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
             write_object(out, &Object::Dict(dict), names);
             out.extend_from_slice(b"\nstream\n");
-            out.extend_from_slice(&stream.data);
+            out.extend_from_slice(&data);
             out.extend_from_slice(b"\nendstream");
         }
     }

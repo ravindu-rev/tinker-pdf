@@ -196,3 +196,52 @@ fn several_clipped_glyphs_union_rather_than_intersect() {
         inked(&one)
     );
 }
+
+/// A clipping text mode whose glyphs cannot be resolved must clip everything
+/// away, not nothing.
+///
+/// 9.3.6 is unambiguous: the clip is the union of the glyphs shown, and an
+/// empty union is an empty clip. The renderer only recorded the clip when a
+/// glyph outline actually resolved, so a page using `7 Tr` with a font this
+/// build cannot read clipped *nothing* — and everything drawn afterwards
+/// painted across the whole page. With no bundled faces that is the default
+/// configuration, not an edge case.
+#[test]
+fn a_clip_mode_with_no_resolvable_glyphs_clips_everything() {
+    let content = "BT 7 Tr /F0 24 Tf 5 20 Td (Hello) Tj ET\n\
+                   1 0 0 rg 0 0 40 40 re f";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes();
+
+    // No font provider, so no glyph outline resolves — which is the point.
+    let bitmap = tinker_pdf::Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default());
+
+    let at = (20usize) * bitmap.stride + (20usize) * bitmap.components();
+    let px = bitmap.data.get(at..at + 3).unwrap_or(&[0, 0, 0]);
+    assert!(
+        px[0] > 200 && px[1] > 200 && px[2] > 200,
+        "the red fill is clipped away rather than covering the page: {px:?}"
+    );
+    assert!(
+        bitmap
+            .warnings
+            .iter()
+            .any(|w| matches!(w, tinker_pdf::RenderWarning::EmptyTextClip)),
+        "and it says so, because a blank region is not obviously deliberate: {:?}",
+        bitmap.warnings
+    );
+}
