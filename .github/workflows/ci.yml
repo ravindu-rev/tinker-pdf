@@ -169,7 +169,20 @@ jobs:
           targets: wasm32-wasip1
       - uses: taiki-e/install-action@wasmtime
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p tinker-pdf --test determinism --target wasm32-wasip1
+      # Piped through `tee` so the run can be asserted on afterwards. A job
+      # that compiled the test and executed nothing would exit 0 and look
+      # exactly like a passing one — `cfg`-ing the tests off this target, or
+      # marking them `#[ignore]` because wasm was inconvenient one afternoon,
+      # both produce a green tick and prove nothing. `pipefail` because the
+      # pipe would otherwise return `tee`'s status and hide a real failure.
+      - name: Render on wasm32-wasip1 and compare against the fingerprints
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test determinism --target wasm32-wasip1 \
+            2>&1 | tee determinism.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
+          grep -q 'test rendering_is_stable_across_targets \.\.\. ok' \
+            determinism.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
 

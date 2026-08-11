@@ -8,6 +8,11 @@ bindings/dotnet/obj/
 bindings/dotnet/runtimes/
 bindings/*/Cargo.lock
 
+# The wasm determinism job tees its run here so the step can assert that
+# tests actually executed. Transient, and equally so if you run that step
+# by hand.
+/determinism.log
+
 # A crash artifact is transient: it gets minimised, and the minimised
 # input lands as a test in the crate that owns the parser plus a seed in
 # fuzz/corpus. Nothing in here is worth keeping.
