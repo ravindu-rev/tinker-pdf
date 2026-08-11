@@ -241,7 +241,12 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
                     break;
                 };
                 if (start..=end).contains(&code) {
-                    return u16::try_from(glyph + (code - start)).ok();
+                    // `startGlyphID` is whatever the file says and the offset
+                    // into the group runs to the whole of `u32`, so the sum
+                    // overflows long before it fails to be a glyph id.
+                    return glyph
+                        .checked_add(code - start)
+                        .and_then(|id| u16::try_from(id).ok());
                 }
             }
             Some(0)
@@ -321,6 +326,48 @@ mod tests {
         assert_eq!(sfnt.glyph_for_char('A'), Some(0x41 + 10));
         assert_eq!(sfnt.glyph_for_char('C'), Some(0x43 + 10));
         assert_eq!(sfnt.glyph_for_char('Z'), Some(0), "outside the segment");
+    }
+
+    /// Wraps a `cmap` subtable in the table and the directory around it.
+    fn font_with_cmap_subtable(platform: u16, encoding: u16, sub: &[u8]) -> Vec<u8> {
+        let mut cmap: Vec<u8> = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+        cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        cmap.extend_from_slice(&platform.to_be_bytes());
+        cmap.extend_from_slice(&encoding.to_be_bytes());
+        cmap.extend_from_slice(&12u32.to_be_bytes()); // offset
+        cmap.extend_from_slice(sub);
+        sfnt_with(b"cmap", &cmap)
+    }
+
+    /// Found by the `sfnt` and `truetype` fuzz targets within thirty seconds
+    /// of each other, both reducing to this: a format 12 group whose
+    /// `startGlyphID` is near the top of `u32`, so adding the offset into the
+    /// group overflows before the result can be rejected for not fitting a
+    /// glyph id. `attempt to add with overflow` — a panic on untrusted input,
+    /// which ruling 1 does not allow, and a silently wrong glyph in a build
+    /// with overflow checks off, which is worse.
+    #[test]
+    fn a_format_12_group_starting_near_the_top_of_u32_does_not_overflow() {
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&12u16.to_be_bytes()); // format
+        sub.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        sub.extend_from_slice(&0u32.to_be_bytes()); // length, unread
+        sub.extend_from_slice(&0u32.to_be_bytes()); // language
+        sub.extend_from_slice(&1u32.to_be_bytes()); // numGroups
+        sub.extend_from_slice(&0u32.to_be_bytes()); // startCharCode
+        sub.extend_from_slice(&0x0010_FFFFu32.to_be_bytes()); // endCharCode
+        sub.extend_from_slice(&u32::MAX.to_be_bytes()); // startGlyphID
+
+        // Platform 3, encoding 10 is the (3,10) subtable format 12 lives in.
+        let data = font_with_cmap_subtable(3, 10, &sub);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+
+        // The lowest code in the group is the one whose sum still fits.
+        assert_eq!(sfnt.glyph_for_char('\0'), None, "0xFFFFFFFF is no glyph id");
+        // Every later code used to overflow the addition itself.
+        assert_eq!(sfnt.glyph_for_char('A'), None);
+        assert_eq!(sfnt.glyph_for_char('\u{1F600}'), None);
     }
 
     #[test]

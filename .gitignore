@@ -7,3 +7,8 @@ bindings/dotnet/bin/
 bindings/dotnet/obj/
 bindings/dotnet/runtimes/
 bindings/*/Cargo.lock
+
+# A crash artifact is transient: it gets minimised, and the minimised
+# input lands as a test in the crate that owns the parser plus a seed in
+# fuzz/corpus. Nothing in here is worth keeping.
+fuzz/artifacts/
