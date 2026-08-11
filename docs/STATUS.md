@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**826 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**866 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit.
 
@@ -42,6 +42,13 @@ Fixed since, each with tests that would have caught it:
 | **`TextPage` had no warnings**, so "no text" and "text this build could not decode" were indistinguishable | `TextPage::warnings`, deduplicated |
 | **`deny.toml` could not express the hand-rolled rule** — it lists licences, which say nothing about what a crate *does* | The crates that would violate it are denied by name |
 | **Redaction ignored `cm`**, so content under a transform was measured in the wrong space | The matrix is composed, saved and restored with the pen |
+| **Redaction stopped at the page stream.** Forms are how most producers place repeated content, so a redaction could be driven straight through one; images under a rectangle were covered, not removed | Forms are rewritten recursively; images are scrubbed to a blank sample |
+| **Page operations were silently dropped by a rewrite** — the reordered `/Kids` was written into the incremental set only | Applied to whichever set the mode builds. Every existing page-operation test saved incrementally, which is why nothing caught it |
+| **`WriteOptions::encryption` had no reader**, so asking for encryption produced a plaintext file with no error | R6 encrypt-on-save, strings and streams, per-object IVs |
+| **`/EncryptMetadata` and `/Crypt /Identity` were ignored**, so exempt streams were decrypted into noise | Both honoured |
+| **Comb fields laid out as ordinary text**, drifting out of their printed cells | Laid out in cells |
+| **Attachments, XMP and `/Limits` descent were unreachable** | All three implemented |
+| **The font seam was Rust-only**, so no binding could draw text for a document embedding no fonts | `set_fonts` across the C ABI, Python, JS and .NET |
 
 ## Built
 
@@ -49,17 +56,17 @@ Fixed since, each with tests that would have caught it:
 | --- | --- | --- |
 | [01 COS](plans/01-cos-and-object-model.md) | milestones 1–4 | Lexer, object model, xref in every flavour, object streams, lazy `Send + Sync` store, repair scanner, leniency ladder, three stream tiers |
 | [02 Filters](plans/02-filters.md) | wave 1 + **deflate** + JPEG + CCITT | Own inflate **and deflate**, LZW, ASCIIHex/85, RunLength, predictors; baseline JPEG; CCITT G3/G4 |
-| [03 Encryption](plans/03-encryption.md) | reading, R6 exercised | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits |
-| [04 Document semantics](plans/04-document-semantics.md) | most of it | Metadata, page tree with inheritance, geometry, outlines, name/number trees, destination enum, page labels, actions, **links** |
+| [03 Encryption](plans/03-encryption.md) | reading and **writing** | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits; `/EncryptMetadata` and `/Crypt /Identity` honoured |
+| [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata, page tree with inheritance, geometry, outlines, name/number trees with **`/Limits` descent**, destination enum, page labels, actions, links, **attachments**, **XMP** |
 | [05 Fonts](plans/05-fonts.md) | TrueType + CFF + **Type 1** + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf`, CFF Type 2 **and Type 1** outlines; `FontProvider` for faces a document does not embed |
 | [06 Content & text](plans/06-content-and-text.md) | substantially | Tokenizer, text state machine, `Device` seam, text device with quads and search, **inline images**, **all stroke parameters** |
 | [07 Rasterizer](plans/07-rasterizer.md) | complete | Paths, deterministic anti-aliased fill, stroking with caps/joins/dashes, clipping, compositing |
 | [08 Rendering device](plans/08-rendering-device.md) | broad, see gaps | Colour spaces incl. **Lab, Separation, DeviceN**; all four function types **and function arrays**; clipping incl. **text clip modes**; images with **`/SMask` and `/Decode`**; axial and radial shadings; **shading patterns**; **`/Rotate` and `/CropBox`**; alpha; outward pixel rounding; page-area ceiling |
-| [09 Writing](plans/09-writing.md) | rewrite + incremental + object streams | Full rewrite with **optional GC**, incremental update with byte-identical prefix, classic xref, **working object streams**, **compression** |
-| [10 Editing](plans/10-editing.md) | editor, pages, annotations, redaction | Copy-on-write editor; delete/move/rotate pages; annotations with synthesized appearances; redaction that removes content |
-| [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree, fill text/choice/checkbox/radio, appearances rebuilt, reset |
+| [09 Writing](plans/09-writing.md) | rewrite + incremental + object streams + **encryption** | Full rewrite with optional GC, incremental update with byte-identical prefix, classic xref, working object streams, compression, **R6 encrypt-on-save** |
+| [10 Editing](plans/10-editing.md) | substantially complete | Copy-on-write editor; delete/move/rotate/**insert/import/keep**; annotations with synthesized appearances **and flattening**; redaction through **forms and images** |
+| [11 Forms](plans/11-forms.md) | read, fill, appearance regeneration | AcroForm field tree, fill text/choice/checkbox/radio, **comb fields**, appearances rebuilt, reset |
 | [12 Creation](plans/12-creation.md) | pages, text, images | `DocumentBuilder` |
-| [13 Bindings](plans/13-bindings.md) | all three build, now checked | C ABI, Python, JS/wasm, .NET |
+| [13 Bindings](plans/13-bindings.md) | all three build and are checked | C ABI, Python, JS/wasm, .NET, each able to **supply fonts** |
 | [14 Testing](plans/14-testing-and-corpora.md) | tools real, fuzzing written | `tpdf`, `pdfcmp`, `oracle-diff`; 11 fuzz targets; a hostile-input sweep on stable |
 
 ## Not built
@@ -69,18 +76,15 @@ Fixed since, each with tests that would have caught it:
 | **No corpus has been run** | Eight real files have been through `tpdf`. The pinned public corpora never have. **Still the largest gap between "tests pass" and "handles what exists".** | [14](plans/14-testing-and-corpora.md) |
 | **Fuzzers compile but have never been executed** | Needs nightly and `cargo-fuzz`. The stable sweep covers the same entry points far more shallowly. | [14](plans/14-testing-and-corpora.md) |
 | **Font embedding and subsetting in the builder** | Built documents can use the standard 14 but cannot embed a font. Reading is complete: TrueType, CFF, **Type 1** and **Type 3** all draw. | [12](plans/12-creation.md) |
-| **Redaction: form XObjects, images** | The text *and* transformation matrices are handled. Form XObjects are not recursed into and images are not scrubbed, so a redaction over content inside a form XObject still does nothing. | [10](plans/10-editing.md) |
-| **Editing: merge, split, insert, flatten** | Only delete, move and rotate exist. | [10](plans/10-editing.md) |
-| **Encrypt-on-save, linearization** | `WriteOptions::encryption` still has no reader; set it and you get a plaintext file with no error. Rewriting now drops `/Encrypt` rather than lying about it. | [09](plans/09-writing.md) |
+| **Linearization** | Reading handles it; writing produces none, so a viewer cannot show page one before the whole file arrives. Encrypt-on-save now works (R6); an *incremental* update still cannot encrypt, since it would need the original file's key. | [09](plans/09-writing.md) |
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [02](plans/02-filters.md) |
 | **Progressive JPEG** | Refused, not decoded — and it appeared in 4 of the first 8 real files. | [02](plans/02-filters.md) |
 | **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [02](plans/02-filters.md), [08](plans/08-rendering-device.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [08](plans/08-rendering-device.md) |
 | **Annotation `/BBox` clipping** | An appearance stream larger than its box is not clipped to it. | [08](plans/08-rendering-device.md) |
 | **Determinism** | The DAG check and the hand-rolled allowlist now exist and run in CI. What does not: a determinism job, and platform `libm` is still called on paths that reach pixels (`powf`, `sin`, `cos`, `atan2`, `ln`), so bit-identical cross-target output is not achievable today whatever a job would measure. | [00](plans/00-architecture.md), [99](plans/99-consistency.md) |
-| **The font seam is not in the bindings** | `FontProvider` is Rust-only, so no binding can draw text for a non-embedding document. | [13](plans/13-bindings.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [13](plans/13-bindings.md) |
-| **Forms: comb fields, calculations** | A comb field's fixed cells are not laid out; `/AA` scripts are not run (the open JavaScript question). | [11](plans/11-forms.md) |
+| **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [11](plans/11-forms.md) |
 | **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [15](plans/15-tinker-integration.md) |
 
 ## Where Tinker integration stands
