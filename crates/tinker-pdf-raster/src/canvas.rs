@@ -5,6 +5,8 @@
 //! division, never a float — so a composite is bit-identical everywhere
 //! (ruling 4).
 
+use crate::blend::BlendMode;
+
 use crate::fill::Mask;
 
 /// How pixels are stored.
@@ -63,6 +65,13 @@ impl Color {
     pub const BLACK: Color = Color::rgb(0, 0, 0);
     /// Opaque white.
     pub const WHITE: Color = Color::rgb(255, 255, 255);
+    /// Nothing at all: the background a group or tile buffer starts from.
+    pub const TRANSPARENT: Color = Color {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    };
 
     /// The grey this colour reads as, by the usual luma weights.
     #[must_use]
@@ -135,6 +144,11 @@ impl Canvas {
     /// `alpha` scales the whole operation, which is what the graphics state's
     /// `ca` and `CA` do (8.6.4.4).
     pub fn fill_mask(&mut self, mask: &Mask, color: Color, alpha: f64) {
+        self.fill_mask_with(mask, color, alpha, BlendMode::Normal);
+    }
+
+    /// As [`Canvas::fill_mask`], with a blend mode (11.3.5).
+    pub fn fill_mask_with(&mut self, mask: &Mask, color: Color, alpha: f64, mode: BlendMode) {
         let alpha = if alpha.is_finite() {
             (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
         } else {
@@ -167,6 +181,7 @@ impl Canvas {
                     &source,
                     effective,
                     self.format,
+                    mode,
                 );
             }
         }
@@ -178,6 +193,11 @@ impl Canvas {
     /// there is no coverage mask to go through — each pixel is decided
     /// individually and blended here.
     pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color, alpha: f64) {
+        self.blend_pixel_with(x, y, color, alpha, BlendMode::Normal);
+    }
+
+    /// As [`Canvas::blend_pixel`], with a blend mode (11.3.5).
+    pub fn blend_pixel_with(&mut self, x: u32, y: u32, color: Color, alpha: f64, mode: BlendMode) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -199,6 +219,7 @@ impl Canvas {
             &source,
             effective,
             self.format,
+            mode,
         );
     }
 
@@ -242,29 +263,105 @@ fn mul255(a: u32, b: u32) -> u32 {
     (product + (product >> 8)) >> 8
 }
 
-fn blend(dst: Option<&mut [u8]>, source: &[u8; 4], alpha: u32, format: PixelFormat) {
-    let Some(dst) = dst else { return };
-    let inverse = 255 - alpha;
-
-    let color_components = match format {
+/// How many colour channels a format carries, before any alpha.
+fn color_channels(format: PixelFormat) -> usize {
+    match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => 1,
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => 3,
+    }
+}
+
+/// Composites `source` onto `dst` with the given alpha and blend mode.
+///
+/// # The convention, which was not written down and was not consistent
+///
+/// Every channel here is **straight** — not premultiplied. `clear` and
+/// `encode` write straight colour and `pixel` reads it back, so that is the
+/// only convention the type can be said to have; but the compositing below
+/// used to compute `Co = Cs·as + Cb·(1−as)`, which is the *premultiplied*
+/// result. The two agree exactly when the backdrop is opaque and disagree
+/// everywhere else.
+///
+/// That was invisible while the only canvas was a page with an opaque
+/// background — which is every canvas the engine made until something needed
+/// to draw into a transparent buffer. A tile rendered once and blitted, or a
+/// transparency group, starts fully transparent, and there the old formula
+/// darkens everything toward the uninitialised black underneath.
+///
+/// So: straight alpha, `Co = (Cs·as + Cb·ab·(1−as)) / ao` with
+/// `ao = as + ab·(1−as)` (11.3.6). The opaque case is kept as a fast path
+/// because it is still the overwhelmingly common one and it is exactly the
+/// old arithmetic, so nothing about page rendering changes.
+fn blend(
+    dst: Option<&mut [u8]>,
+    source: &[u8; 4],
+    alpha: u32,
+    format: PixelFormat,
+    mode: BlendMode,
+) {
+    let Some(dst) = dst else { return };
+    if alpha == 0 {
+        return;
+    }
+    let inverse = 255 - alpha;
+    let channels = color_channels(format);
+
+    // A format without an alpha channel is opaque by construction.
+    let backdrop_alpha = if format.has_alpha() {
+        dst.get(channels).map_or(255, |a| u32::from(*a))
+    } else {
+        255
     };
 
-    for i in 0..color_components {
-        let (Some(slot), Some(src)) = (dst.get_mut(i), source.get(i)) else {
+    // 11.3.6: the blend function sees the backdrop only to the extent the
+    // backdrop is there. Where it is absent the source passes through
+    // unblended, which is what keeps `Multiply` from turning a transparent
+    // buffer black.
+    let mut blended = [0u32; 3];
+    for (i, out) in blended.iter_mut().enumerate().take(channels) {
+        let (Some(slot), Some(src)) = (dst.get(i), source.get(i)) else {
             continue;
         };
-        let blended = mul255(u32::from(*src), alpha) + mul255(u32::from(*slot), inverse);
-        *slot = blended.min(255) as u8;
+        let cs = u32::from(*src);
+        let cb = u32::from(*slot);
+        let mixed = mode.apply(cb, cs);
+        *out = mul255(255 - backdrop_alpha, cs) + mul255(backdrop_alpha, mixed);
+    }
+    if mode.is_nonseparable() && channels == 3 {
+        let cb = [
+            dst.first().map_or(0, |v| u32::from(*v)),
+            dst.get(1).map_or(0, |v| u32::from(*v)),
+            dst.get(2).map_or(0, |v| u32::from(*v)),
+        ];
+        let cs = [
+            u32::from(source[0]),
+            u32::from(source[1]),
+            u32::from(source[2]),
+        ];
+        let mixed = mode.apply_nonseparable(cb, cs);
+        for (i, out) in blended.iter_mut().enumerate() {
+            *out = mul255(255 - backdrop_alpha, cs[i]) + mul255(backdrop_alpha, mixed[i]);
+        }
+    }
+
+    let out_alpha = alpha + mul255(backdrop_alpha, inverse);
+
+    for (slot, mixed) in dst.iter_mut().zip(blended.iter()).take(channels) {
+        let cb = u32::from(*slot);
+        *slot = if backdrop_alpha == 255 {
+            // The fast path, and the old arithmetic exactly.
+            (mul255(*mixed, alpha) + mul255(cb, inverse)).min(255) as u8
+        } else if out_alpha == 0 {
+            0
+        } else {
+            let weighted = mul255(*mixed, alpha) + mul255(mul255(cb, backdrop_alpha), inverse);
+            ((weighted * 255 + out_alpha / 2) / out_alpha).min(255) as u8
+        };
     }
 
     if format.has_alpha() {
-        if let Some(slot) = dst.get_mut(color_components) {
-            // Source-over: the result is opaque where either contributes.
-            let existing = u32::from(*slot);
-            let combined = alpha + mul255(existing, inverse);
-            *slot = combined.min(255) as u8;
+        if let Some(slot) = dst.get_mut(channels) {
+            *slot = out_alpha.min(255) as u8;
         }
     }
 }
@@ -351,6 +448,87 @@ mod tests {
         paint(&mut a);
         paint(&mut b);
         assert_eq!(a.data, b.data, "ruling 4");
+    }
+
+    /// Compositing onto a *transparent* backdrop.
+    ///
+    /// This is the case the old arithmetic got wrong, and it was invisible
+    /// because every canvas the engine made had an opaque background. The old
+    /// formula computed the premultiplied result and stored it as straight
+    /// colour: half-covering a transparent buffer with red gave (128, 0, 0)
+    /// at alpha 128 — a dark red that is really red-over-black — instead of
+    /// (255, 0, 0) at alpha 128, which is red seen through half coverage.
+    ///
+    /// A tile rendered once and blitted, or a transparency group, starts
+    /// fully transparent. Every one of them would have darkened toward the
+    /// uninitialised black underneath.
+    #[test]
+    fn half_covering_a_transparent_buffer_keeps_the_colour() {
+        let mut canvas = Canvas::new(1, 1, PixelFormat::Rgba8, Color::TRANSPARENT);
+        canvas.blend_pixel(0, 0, Color::rgb(255, 0, 0), 0.5);
+
+        let px = canvas.pixel(0, 0).expect("a pixel");
+        assert!(
+            px.r > 250,
+            "the colour stays red rather than darkening to premultiplied: {px:?}"
+        );
+        assert!(
+            (120..=136).contains(&px.a),
+            "and the coverage lands in the alpha: {px:?}"
+        );
+    }
+
+    /// The opaque path must be untouched by that fix, or every existing
+    /// golden moves.
+    #[test]
+    fn compositing_onto_an_opaque_backdrop_is_unchanged() {
+        let mut canvas = Canvas::new(1, 1, PixelFormat::Rgb8, Color::WHITE);
+        canvas.blend_pixel(0, 0, Color::rgb(0, 0, 0), 0.5);
+
+        let px = canvas.pixel(0, 0).expect("a pixel");
+        assert!(
+            (120..=136).contains(&px.r),
+            "half black over white is mid grey: {px:?}"
+        );
+    }
+
+    /// Two half-covering paints must reach the same place as one, whichever
+    /// order they arrive in — the property that makes a group buffer usable
+    /// at all.
+    #[test]
+    fn repeated_compositing_converges_rather_than_drifting() {
+        let mut canvas = Canvas::new(1, 1, PixelFormat::Rgba8, Color::TRANSPARENT);
+        for _ in 0..8 {
+            canvas.blend_pixel(0, 0, Color::rgb(255, 0, 0), 0.5);
+        }
+        let px = canvas.pixel(0, 0).expect("a pixel");
+        assert!(px.r > 250, "still red, not drifting dark: {px:?}");
+        assert!(px.a > 250, "and now essentially opaque: {px:?}");
+    }
+
+    /// A blend mode must see a transparent backdrop as *absent*, not as
+    /// black. `Multiply` against black is black, so getting this wrong turns
+    /// every multiplied group into a silhouette.
+    #[test]
+    fn a_blend_mode_ignores_a_backdrop_that_is_not_there() {
+        let mut canvas = Canvas::new(1, 1, PixelFormat::Rgba8, Color::TRANSPARENT);
+        canvas.blend_pixel_with(0, 0, Color::rgb(255, 0, 0), 1.0, BlendMode::Multiply);
+
+        let px = canvas.pixel(0, 0).expect("a pixel");
+        assert!(
+            px.r > 250,
+            "multiplying against nothing leaves the source: {px:?}"
+        );
+    }
+
+    /// And where the backdrop *is* there, the mode applies.
+    #[test]
+    fn a_blend_mode_applies_against_a_real_backdrop() {
+        let mut canvas = Canvas::new(1, 1, PixelFormat::Rgb8, Color::rgb(128, 128, 128));
+        canvas.blend_pixel_with(0, 0, Color::rgb(128, 128, 128), 1.0, BlendMode::Multiply);
+
+        let px = canvas.pixel(0, 0).expect("a pixel");
+        assert!(px.r < 80, "mid grey multiplied by itself is darker: {px:?}");
     }
 
     #[test]

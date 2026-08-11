@@ -3,6 +3,7 @@
 //!
 //! Scope, design and exit criteria: `docs/plans/07-rasterizer.md`.
 
+pub mod blend;
 pub mod canvas;
 pub mod fill;
 pub mod geom;
