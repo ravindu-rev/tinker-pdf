@@ -1,0 +1,5 @@
+%!PS-AdobeFont-1.0: Test
+/FontMatrix [0.001 0 0 0.001 0 0] readonly def
+/Encoding 256 array
+dup 65 /square put
+readonly 

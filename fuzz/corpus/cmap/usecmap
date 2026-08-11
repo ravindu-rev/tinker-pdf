@@ -1,0 +1,11 @@
+/UniJIS-UCS2-H usecmap
+begincmap
+/CMapName /UniJIS-UCS2-HW-V def
+/WMode 1 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+1 begincidrange
+<0020> <007e> 231
+endcidrange
+endcmap

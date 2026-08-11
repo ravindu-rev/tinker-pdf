@@ -1,6 +1,6 @@
 # Fuzzing
 
-Eleven `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
+Fifteen `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
 Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-corpora.md).
 
 | Target | What it drives |
@@ -12,8 +12,12 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 | `jpeg` | Baseline JPEG: Huffman tables, restarts, sampling factors |
 | `ccitt` | G3 and G4; the first two input bytes choose the parameters |
 | `ascii_filters` | ASCIIHex, ASCII85, RunLength, and the predictors |
-| `truetype` | Table directory, `cmap`, and `glyf` including composites |
+| `sfnt` | The table directory and everything around the outlines, including the subsetter that rebuilds one |
+| `truetype` | `cmap`, and `glyf` including composites |
 | `cff` | Type 2 charstrings: subrs, `seac`, `flex`, `hintmask` |
+| `type1` | eexec and charstring decryption, `/CharStrings`, othersubrs |
+| `cmap` | CMap syntax as an embedded stream, then splitting a string by the codespaces it declared |
+| `crypt` | The standard security handler and the ciphers under it; the input is carved into `/Encrypt`'s fields |
 | `content_tokenizer` | The content-stream tokenizer |
 | `render_page` | Open, extract, and render arbitrary bytes end to end |
 
@@ -65,8 +69,8 @@ caught and reported after the fact.
 Every target has a committed seed corpus under `corpus/<target>/`. They are
 the difference between a run that explores and one that spends its hour
 rediscovering the file header, and plan 14 asks for them minimised and small
-enough to review: the whole set is about 22 KB across 50 files, and the
-largest single seed is 2.8 KB.
+enough to review: the whole set is 25 KB across 66 files, and the largest
+single seed is 2.8 KB.
 
 They are built from material this repository already had, so each one is
 something a parser here is known to accept rather than a blob nobody can
@@ -85,6 +89,10 @@ account for:
 | `lzw` | 7.4.4.2's Table 8 example, truncated, and a clear-code stream |
 | `render_page` | The subset of the `cos_document` PDFs that has a page worth rendering |
 | `truetype` | `determinism.rs`'s `curvy_font`, plus a truncated copy and its directory alone |
+| `sfnt` | The same face, plus the `OTTO` program `glyf.rs` builds and a directory pointing past the end |
+| `type1` | `type1.rs`'s `font_with_square`, and a copy cut off inside the eexec section |
+| `cmap` | A `/ToUnicode`, a `cidrange` CMap with two codespaces, a `usecmap`, a predefined name, and one malformed throughout |
+| `crypt` | `build_r6` output laid out in the target's carve order, so one seed authenticates and decrypts; plus R4, R2, and three bytes |
 
 Replaying a corpus without mutating it is the cheapest check that a seed
 still reaches what it was chosen for:

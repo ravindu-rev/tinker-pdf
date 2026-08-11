@@ -93,3 +93,27 @@ name = "render_page"
 path = "fuzz_targets/render_page.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "sfnt"
+path = "fuzz_targets/sfnt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "type1"
+path = "fuzz_targets/type1.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cmap"
+path = "fuzz_targets/cmap.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "crypt"
+path = "fuzz_targets/crypt.rs"
+test = false
+doc = false

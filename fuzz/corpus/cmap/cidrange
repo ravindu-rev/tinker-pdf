@@ -1,0 +1,19 @@
+/CIDInit /ProcSet findresource begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> def
+/CMapName /Custom-H def
+/CMapType 1 def
+/WMode 1 def
+2 begincodespacerange
+<00> <80>
+<8140> <9FFC>
+endcodespacerange
+2 begincidrange
+<20> <7e> 231
+<8140> <817e> 633
+endcidrange
+1 begincidchar
+<8180> 700
+endcidchar
+endcmap
+end
