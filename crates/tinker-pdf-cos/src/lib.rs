@@ -78,7 +78,7 @@ pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
 pub use edit::{annot, DocumentEditor};
-pub use fill::text_appearance;
+pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, Font, FontKind};
 pub use form::{acro_form, fields, Field, FieldKind, FieldValue};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};

@@ -104,6 +104,24 @@ fn escape(out: &mut Vec<u8>, text: &str) {
     }
 }
 
+/// How a text field lays its value out.
+///
+/// A struct rather than five more parameters: the call had grown to eight,
+/// which is the point at which the order of `bool, i64, Option<i64>` stops
+/// being checkable by eye and a transposition compiles.
+pub struct TextLayout<'a> {
+    /// The default appearance string: font, size and colour.
+    pub da: &'a [u8],
+    /// `/Q`: 0 left, 1 centred, 2 right.
+    pub quadding: i64,
+    /// `/Ff` bit 13: the field wraps.
+    pub multiline: bool,
+    /// `/MaxLen`, when `/Ff` bit 25 makes the field a comb.
+    pub comb: Option<i64>,
+    /// The form's `/DR`, where the `/DA` finds its font.
+    pub resources: Option<&'a Dict>,
+}
+
 /// Builds the appearance stream for a text field's widget.
 ///
 /// `rect` is the widget's rectangle; the stream is written in a box of the
@@ -114,11 +132,15 @@ pub fn text_appearance(
     doc: &CosDocument,
     rect: Rect,
     value: &str,
-    da: &[u8],
-    quadding: i64,
-    multiline: bool,
-    resources: Option<&Dict>,
+    layout: &TextLayout<'_>,
 ) -> StreamData {
+    let TextLayout {
+        da,
+        quadding,
+        multiline,
+        comb,
+        resources,
+    } = *layout;
     let (font_name, mut size, colour) = operators(da);
     let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
 
@@ -176,6 +198,32 @@ pub fn text_appearance(
     content.extend_from_slice(&colour);
     content.push(b'\n');
 
+    // 12.7.4.3: a comb field divides its width into /MaxLen equal cells and
+    // centres one character in each. Laid out as ordinary text it drifts out
+    // of the printed boxes it exists to sit inside, character by character,
+    // which is the whole reason the flag is there.
+    if let Some(cells) = comb.filter(|n| *n > 0) {
+        let cell = inner_w / cells as f64;
+        let line = lines.first().copied().unwrap_or("");
+        for (index, ch) in line.chars().take(cells as usize).enumerate() {
+            let mut text = String::new();
+            text.push(ch);
+            let width = width_of(font.as_ref(), &text) / 1000.0 * size;
+            // Centred in its cell, which is what makes the column line up
+            // whatever the character is.
+            let x = PAD + cell * index as f64 + (cell - width) / 2.0;
+            let y = (h - size * 0.72) / 2.0;
+
+            content.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
+            content.push(b'(');
+            escape(&mut content, &text);
+            content.extend_from_slice(b") Tj\n");
+        }
+
+        content.extend_from_slice(b"ET\nQ\nEMC\n");
+        return finish_appearance(doc, content, w, h, resources);
+    }
+
     for (index, line) in lines.iter().enumerate() {
         let line_width = width_of(font.as_ref(), line) / 1000.0 * size;
         // 12.7.4.3: /Q is 0 left, 1 centred, 2 right.
@@ -202,7 +250,17 @@ pub fn text_appearance(
     }
 
     content.extend_from_slice(b"ET\nQ\nEMC\n");
+    finish_appearance(doc, content, w, h, resources)
+}
 
+/// Wraps a field's operators in the form XObject that carries them.
+fn finish_appearance(
+    doc: &CosDocument,
+    content: Vec<u8>,
+    w: f64,
+    h: f64,
+    resources: Option<&Dict>,
+) -> StreamData {
     let mut dict = Dict::new();
     dict.insert(Name::TYPE, Object::Name(doc.intern(b"XObject")));
     dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(b"Form")));
@@ -381,7 +439,18 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
     #[test]
     fn an_appearance_is_marked_as_a_field_appearance() {
         let doc = doc();
-        let stream = text_appearance(&doc, rect(), "Ada", b"/Helv 9 Tf 0 g", 0, false, None);
+        let stream = text_appearance(
+            &doc,
+            rect(),
+            "Ada",
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
+        );
         let content = text_of(&stream);
         assert!(content.starts_with("/Tx BMC"), "got: {content}");
         assert!(content.ends_with("EMC\n"));
@@ -399,7 +468,18 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             x1: 400.0,
             y1: 420.0,
         };
-        let stream = text_appearance(&doc, offset, "x", b"/Helv 9 Tf 0 g", 0, false, None);
+        let stream = text_appearance(
+            &doc,
+            offset,
+            "x",
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
+        );
         let bbox: Vec<f64> = stream
             .dict
             .get_array(doc.intern(b"BBox"))
@@ -417,10 +497,13 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             rect(),
             "a very long value indeed",
-            b"/Helv 9 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         assert!(content.contains(" re W n"), "a clip is set: {content}");
     }
@@ -432,28 +515,37 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             rect(),
             "hi",
-            b"/Helv 9 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         let centre = text_of(&text_appearance(
             &doc,
             rect(),
             "hi",
-            b"/Helv 9 Tf 0 g",
-            1,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 1,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         let right = text_of(&text_appearance(
             &doc,
             rect(),
             "hi",
-            b"/Helv 9 Tf 0 g",
-            2,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 2,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
 
         let x = |content: &str| -> f64 {
@@ -481,10 +573,13 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             tall,
             "one\ntwo\nthree",
-            b"/Helv 9 Tf 0 g",
-            0,
-            true,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: true,
+                comb: None,
+                resources: None,
+            },
         ));
         assert_eq!(content.matches(" Tj").count(), 3);
         assert!(content.contains("(one)") && content.contains("(three)"));
@@ -497,10 +592,13 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             rect(),
             "one\ntwo",
-            b"/Helv 9 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         assert_eq!(content.matches(" Tj").count(), 1);
         assert!(content.contains("(one)") && !content.contains("(two)"));
@@ -515,10 +613,13 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             rect(),
             "Ada",
-            b"/Helv 0 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 0 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         let size: f64 = content
             .lines()
@@ -537,19 +638,25 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             rect(),
             "hi",
-            b"/Helv 0 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 0 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         let long = text_of(&text_appearance(
             &doc,
             rect(),
             "a value far longer than the box it has to fit inside of",
-            b"/Helv 0 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 0 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         let size = |content: &str| -> f64 {
             content
@@ -569,12 +676,96 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             &doc,
             rect(),
             "a (b) \\ c",
-            b"/Helv 9 Tf 0 g",
-            0,
-            false,
-            None,
+            &TextLayout {
+                da: b"/Helv 9 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
         ));
         assert!(content.contains("(a \\(b\\) \\\\ c) Tj"), "got: {content}");
+    }
+
+    /// 12.7.4.3: a comb field divides its width into /MaxLen cells and centres
+    /// one character in each. Laid out as ordinary text it drifts out of the
+    /// printed boxes it exists to sit inside, character by character.
+    #[test]
+    fn a_comb_field_spreads_its_characters_across_cells() {
+        let doc = doc();
+        let wide = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 200.0,
+            y1: 20.0,
+        };
+        let content = text_of(&text_appearance(
+            &doc,
+            wide,
+            "ABCD",
+            &TextLayout {
+                da: b"/Helv 10 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: Some(4),
+                resources: None,
+            },
+        ));
+
+        let xs: Vec<f64> = content
+            .lines()
+            .filter(|l| l.ends_with(" Tm"))
+            .filter_map(|l| l.split_whitespace().nth(4)?.parse().ok())
+            .collect();
+
+        assert_eq!(xs.len(), 4, "one placement per character: {content}");
+        for pair in xs.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                (40.0..=58.0).contains(&gap),
+                "cells are the field width over /MaxLen apart, got {gap}"
+            );
+        }
+    }
+
+    /// More characters than cells cannot be laid out, so the overflow is
+    /// dropped rather than drawn outside the last box.
+    #[test]
+    fn a_comb_field_stops_at_its_cell_count() {
+        let doc = doc();
+        let content = text_of(&text_appearance(
+            &doc,
+            rect(),
+            "ABCDEFGH",
+            &TextLayout {
+                da: b"/Helv 10 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: Some(3),
+                resources: None,
+            },
+        ));
+        assert_eq!(content.matches(" Tj").count(), 3);
+    }
+
+    /// The flag means nothing without /MaxLen, so the field lays out as
+    /// ordinary text rather than as one enormous cell.
+    #[test]
+    fn a_comb_field_without_maxlen_lays_out_normally() {
+        let doc = doc();
+        let content = text_of(&text_appearance(
+            &doc,
+            rect(),
+            "ABCD",
+            &TextLayout {
+                da: b"/Helv 10 Tf 0 g",
+                quadding: 0,
+                multiline: false,
+                comb: None,
+                resources: None,
+            },
+        ));
+        assert_eq!(content.matches(" Tj").count(), 1, "one run, not four");
     }
 
     #[test]

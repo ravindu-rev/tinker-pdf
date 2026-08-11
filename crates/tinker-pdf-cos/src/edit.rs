@@ -745,6 +745,9 @@ impl DocumentEditor {
         let resources = form::default_resources(&self.doc);
         let quadding = fill::quadding(&self.doc, &field);
         let multiline = field.flags & fill::MULTILINE != 0;
+        let comb = (field.flags & fill::COMB != 0)
+            .then_some(field.max_len)
+            .flatten();
 
         for widget in &field.widgets {
             let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
@@ -755,10 +758,13 @@ impl DocumentEditor {
                 &self.doc,
                 rect,
                 value,
-                &da,
-                quadding,
-                multiline,
-                resources.as_ref(),
+                &fill::TextLayout {
+                    da: &da,
+                    quadding,
+                    multiline,
+                    comb,
+                    resources: resources.as_ref(),
+                },
             );
 
             let form_ref = self.allocate();
@@ -922,6 +928,9 @@ impl DocumentEditor {
         let resources = form::default_resources(&self.doc);
         let quadding = fill::quadding(&self.doc, field);
         let multiline = field.flags & fill::MULTILINE != 0;
+        let comb = (field.flags & fill::COMB != 0)
+            .then_some(field.max_len)
+            .flatten();
 
         for widget in &field.widgets {
             let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
@@ -932,10 +941,13 @@ impl DocumentEditor {
                 &self.doc,
                 rect,
                 value,
-                &da,
-                quadding,
-                multiline,
-                resources.as_ref(),
+                &fill::TextLayout {
+                    da: &da,
+                    quadding,
+                    multiline,
+                    comb,
+                    resources: resources.as_ref(),
+                },
             );
             let form_ref = self.allocate();
             self.put_stream(form_ref, stream);
