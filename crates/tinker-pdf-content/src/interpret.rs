@@ -15,6 +15,28 @@ use crate::tokenizer::{Token, Tokenizer};
 /// interpreter knows *which* font or colour space a stream selected, and the
 /// caller says what that name means. Every method has a default, so an
 /// implementation supplies only what it has.
+/// A form XObject the interpreter is about to run (8.10).
+///
+/// The bounding box travels with the content rather than being fetched
+/// separately, and `form` returns this struct rather than a tuple, so that
+/// adding it forced every implementor to supply it. A defaulted accessor
+/// would have compiled everywhere and quietly clipped nothing — which is
+/// exactly how `GlyphSource::image` once stopped drawing every image in every
+/// document with the whole suite green.
+#[derive(Clone, Debug)]
+pub struct Form {
+    /// The decoded content stream.
+    pub content: Vec<u8>,
+    /// `/Matrix`, mapping form space into the space that invoked it.
+    pub matrix: Matrix,
+    /// `/BBox` in form space, as `[x0, y0, x1, y1]`.
+    ///
+    /// 8.10.2 makes it required and says the form is clipped to it. `None`
+    /// means the file omitted it, in which case there is nothing to clip to
+    /// and the form is drawn unclipped rather than dropped.
+    pub bbox: Option<[f64; 4]>,
+}
+
 pub trait FontSource {
     /// Splits a string into `(code, text, advance in 1/1000 em)`.
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)>;
@@ -31,9 +53,9 @@ pub trait FontSource {
         0
     }
 
-    /// The bytes of a form XObject, when the interpreter should recurse into
-    /// one. Returning `None` skips it.
-    fn form(&self, name: &[u8]) -> Option<(Vec<u8>, Matrix)> {
+    /// A form XObject, when the interpreter should recurse into one.
+    /// Returning `None` skips it.
+    fn form(&self, name: &[u8]) -> Option<Form> {
         let _ = name;
         None
     }
@@ -673,7 +695,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     }
 
     fn do_xobject(&mut self, name: &[u8]) {
-        let Some((content, matrix)) = self.fonts.form(name) else {
+        let Some(form) = self.fonts.form(name) else {
             self.device.draw_image(
                 &ImageRef {
                     name: name.to_vec(),
@@ -702,12 +724,42 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let saved_text = self.text_matrix;
         let saved_line = self.line_matrix;
 
-        let combined = matrix.then(&self.gs.ctm);
+        let combined = form.matrix.then(&self.gs.ctm);
         if combined.is_finite() {
             self.gs.ctm = combined;
         }
+
+        // 8.10.2: the form is clipped to its bounding box, which is expressed
+        // in form space — so with `/Matrix` already folded into the CTM, the
+        // rectangle goes in unmodified. Without this a form that draws
+        // outside its box paints across the rest of the page, and forms are
+        // how most producers place repeated content, so it is not a rare
+        // shape. `begin_form` saved the clip and `end_form` restores it.
+        if let Some([x0, y0, x1, y1]) = form.bbox {
+            if [x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x1 > x0 && y1 > y0 {
+                // A `Device` receives paths already in device space — `re`
+                // and friends apply the CTM as they build them — so the
+                // corners are transformed here too. Passing the rectangle in
+                // form space instead clips somewhere else entirely, which
+                // with an identity `/Matrix` happens to look almost right and
+                // with any other matrix erases the form completely.
+                let p0 = self.gs.ctm.apply(x0, y0);
+                let p1 = self.gs.ctm.apply(x1, y0);
+                let p2 = self.gs.ctm.apply(x1, y1);
+                let p3 = self.gs.ctm.apply(x0, y1);
+                let box_path = [
+                    PathSegment::MoveTo { x: p0.0, y: p0.1 },
+                    PathSegment::LineTo { x: p1.0, y: p1.1 },
+                    PathSegment::LineTo { x: p2.0, y: p2.1 },
+                    PathSegment::LineTo { x: p3.0, y: p3.1 },
+                    PathSegment::Close,
+                ];
+                self.device.clip_path(&box_path, &self.gs, false);
+            }
+        }
+
         self.depth += 1;
-        self.run(&content);
+        self.run(&form.content);
         self.depth -= 1;
 
         self.gs = saved_gs;

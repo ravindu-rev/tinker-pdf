@@ -487,7 +487,7 @@ impl FontSource for PageResources {
         Some((content, matrix))
     }
 
-    fn form(&self, name: &[u8]) -> Option<(Vec<u8>, Matrix)> {
+    fn form(&self, name: &[u8]) -> Option<tinker_pdf_content::Form> {
         let (dict, reference) = self.xobject(name)?;
         let subtype = self
             .doc
@@ -517,7 +517,24 @@ impl FontSource for PageResources {
             })
             .unwrap_or(Matrix::IDENTITY);
 
-        Some((content, matrix))
+        // 8.10.2 requires it; a file that omits it gets an unclipped form
+        // rather than no form.
+        let bbox = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"BBox"))
+            .as_array()
+            .and_then(|values| {
+                let n = |i: usize| values.get(i).and_then(|v| self.doc.resolve(v).as_number());
+                // The corners may be given in either order (7.9.5).
+                let (x0, y0, x1, y1) = (n(0)?, n(1)?, n(2)?, n(3)?);
+                Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)])
+            });
+
+        Some(tinker_pdf_content::Form {
+            content,
+            matrix,
+            bbox,
+        })
     }
 
     fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
