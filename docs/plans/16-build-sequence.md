@@ -68,6 +68,21 @@ plan, and it belongs before anything else in the render list.
     regression there.
 12. **Tiling patterns.** Common in real files and currently a documented
     no-op.
+
+    **This depends on item 8, which the survey did not catch.** The obvious
+    implementation — clip to the filled path, then replay the tile's content
+    once per lattice position with a translated CTM — is correct and
+    pathologically slow. Each tile needs its own bounding-box clip, every clip
+    goes through `save_state`, and `save_state` clones a page-sized mask: a
+    hatch with a 10pt step over A4 is some 4,800 tiles and several gigabytes of
+    memcpy. Dropping the per-tile clip to avoid that is precisely the
+    silently-wrong trade this document warns against elsewhere.
+
+    The right shape is the one every real implementation uses: rasterise the
+    tile *once* into a small offscreen buffer and blit it across the lattice.
+    That needs `Canvas::composite` and a settled alpha convention — item 8.
+    Do item 8 first and this becomes straightforward; do it first and it will
+    be rewritten.
 13. **The corpus runner and ratchet, offline half.** Everything but the fetch
     is testable today against `testdata/` and builder output.
 
