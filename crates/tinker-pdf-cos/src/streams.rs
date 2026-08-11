@@ -290,12 +290,79 @@ impl CosDocument {
     pub(crate) fn decrypted_bytes(&self, r: ObjRef, stream: &StreamObj) -> Vec<u8> {
         let range = self.stream_range(r, stream);
         let raw = slice_range(&self.buffer, &range);
-        // 7.6.2: cross-reference streams carry the information needed to find
-        // the /Encrypt dictionary, so they are never encrypted.
-        if !self.encrypted() || stream.dict.get_name(Name::TYPE) == Some(self.names.xref) {
+        if !self.encrypted() || !self.stream_is_encrypted(&stream.dict) {
             return raw.to_vec();
         }
         self.decryptor().decrypt_stream(r, raw)
+    }
+
+    /// Whether a stream's bytes are ciphertext, given what the document says.
+    ///
+    /// Three exemptions, and each of them turns readable bytes into garbage if
+    /// it is missed — a stream decrypted that should not have been comes out
+    /// as noise, which reads as a corrupt file rather than as this mistake.
+    fn stream_is_encrypted(&self, dict: &Dict) -> bool {
+        // 7.6.2: a cross-reference stream carries the information needed to
+        // find the /Encrypt dictionary, so it can never be encrypted itself.
+        if dict.get_name(Name::TYPE) == Some(self.names.xref) {
+            return false;
+        }
+
+        // 7.6.2: with /EncryptMetadata false the metadata stream is left in
+        // the clear, so indexers can read it without the password. Decrypting
+        // it anyway yields noise where the document's identity should be.
+        if dict.get_name(Name::TYPE) == Some(self.names.metadata) && !self.encrypts_metadata() {
+            return false;
+        }
+
+        // 7.4.10: a /Crypt filter names which crypt filter applies to this
+        // stream, and /Identity means none. A stream marked that way is
+        // already plaintext inside an encrypted document — an appearance
+        // stream a signature covers, most often.
+        if self.crypt_filter_is_identity(dict) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Whether a stream's `/Crypt` filter names `/Identity` (7.4.10).
+    ///
+    /// The filter's name lives in `/DecodeParms /Name`, positionally matched
+    /// to the `/Crypt` entry in the filter array, and defaults to `/Identity`
+    /// when absent — which is the case that matters, since that is how a
+    /// producer marks a stream as already-plaintext.
+    fn crypt_filter_is_identity(&self, dict: &Dict) -> bool {
+        let filters = self.resolve_key(dict, Name::FILTER);
+        let index = match filters.as_ref() {
+            Object::Name(name) => (*name == self.names.crypt).then_some(0usize),
+            Object::Array(items) => items
+                .iter()
+                .position(|item| self.resolve(item).as_name() == Some(self.names.crypt)),
+            _ => None,
+        };
+        let Some(index) = index else {
+            return false;
+        };
+
+        let parms = self.resolve_key(dict, Name::DECODE_PARMS);
+        let entry = match parms.as_ref() {
+            Object::Array(items) => items.get(index).map(|o| self.resolve(o)),
+            Object::Dict(_) => Some(parms.clone()),
+            _ => None,
+        };
+
+        // 7.4.10 Table 14: /Name defaults to /Identity.
+        let Some(entry) = entry else {
+            return true;
+        };
+        let Some(dict) = entry.as_dict() else {
+            return true;
+        };
+        match dict.get_name(self.names.name_key) {
+            Some(name) => name == self.names.identity,
+            None => true,
+        }
     }
 
     /// The stream's data extent, computed once per object and remembered.

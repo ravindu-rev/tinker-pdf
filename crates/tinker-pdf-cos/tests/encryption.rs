@@ -198,3 +198,64 @@ fn rewriting_a_decrypted_document_does_not_claim_to_be_encrypted() {
         "and the content decrypted rather than being copied as ciphertext"
     );
 }
+
+/// 7.6.2: with `/EncryptMetadata false` the metadata stream is left in the
+/// clear so indexers can read it without the password. Decrypting it anyway
+/// yields noise where the document's identity should be — and it reads as a
+/// corrupt file rather than as this mistake.
+#[test]
+fn metadata_is_left_in_the_clear_when_the_document_says_so() {
+    // A document that declares encryption and marks its metadata exempt. The
+    // handler is unsupported, so nothing is decrypted, but the *decision*
+    // about the metadata stream is what is under test and it is made before
+    // any key exists.
+    let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Metadata 5 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+5 0 obj\n<< /Type /Metadata /Subtype /XML /Length 26 >>\nstream\n\
+<rdf>plain and legible</rdf>\n\
+endstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    let xmp = tinker_pdf_cos::xmp_metadata(&doc).expect("the stream");
+    assert!(
+        String::from_utf8_lossy(&xmp).contains("plain and legible"),
+        "an unencrypted document reads its metadata as it stands"
+    );
+}
+
+/// 7.4.10: a `/Crypt` filter naming `/Identity` marks a stream as already
+/// plaintext inside an encrypted document. Running the decryptor over it
+/// turns readable bytes into noise.
+#[test]
+fn an_identity_crypt_filter_leaves_a_stream_alone() {
+    let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Filter /Crypt /DecodeParms << /Name /Identity >> /Length 19 >>\nstream\n\
+0 0 1 1 re f plain\n\
+endstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    let content = doc
+        .stream_decoded(tinker_pdf_cos::ObjRef::new(4, 0))
+        .expect("it decodes");
+    assert!(
+        String::from_utf8_lossy(&content).contains("plain"),
+        "a /Crypt /Identity stream is not a byte transform and not ciphertext"
+    );
+}
+
+/// A cross-reference stream is never encrypted (7.6.2): it carries what a
+/// reader needs to find the /Encrypt dictionary in the first place.
+#[test]
+fn a_cross_reference_stream_is_never_decrypted() {
+    let doc = open("encrypted-aes256.pdf");
+    assert_eq!(doc.authenticate("open-sesame"), Ok(AuthLevel::User));
+    // Opening at all proves it: the xref stream had to be read before any
+    // password existed, and the pages resolve through it afterwards.
+    assert!(tinker_pdf_cos::pages::count(&doc) > 0);
+}

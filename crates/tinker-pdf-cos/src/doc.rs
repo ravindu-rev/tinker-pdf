@@ -114,6 +114,12 @@ pub(crate) struct DocNames {
     pub columns: Name,
     pub early_change: Name,
     pub crypt: Name,
+    /// `/Metadata`, whose stream `/EncryptMetadata false` leaves in the clear.
+    pub metadata: Name,
+    /// `/Identity`, the crypt filter that applies no encryption.
+    pub identity: Name,
+    /// `/Name`, the key inside a `/Crypt` filter parameters dictionary.
+    pub name_key: Name,
     flate_decode: Name,
     fl: Name,
     lzw_decode: Name,
@@ -166,6 +172,9 @@ impl DocNames {
             columns: n(b"Columns"),
             early_change: n(b"EarlyChange"),
             crypt: n(b"Crypt"),
+            metadata: n(b"Metadata"),
+            identity: n(b"Identity"),
+            name_key: n(b"Name"),
             flate_decode: n(b"FlateDecode"),
             fl: n(b"Fl"),
             lzw_decode: n(b"LZWDecode"),
@@ -451,6 +460,16 @@ impl CosDocument {
     /// The bytes behind a symbol, or `None` if it came from another document.
     pub fn name_bytes(&self, name: Name) -> Option<Arc<[u8]>> {
         self.names.table.bytes(name)
+    }
+
+    /// Whether `/EncryptMetadata` permits the metadata stream to be encrypted.
+    ///
+    /// True when the document is not encrypted at all, which keeps the
+    /// question answerable without a second one about whether it applies.
+    pub(crate) fn encrypts_metadata(&self) -> bool {
+        self.encrypt
+            .as_ref()
+            .is_none_or(|params| params.encrypt_metadata)
     }
 
     /// Which rung of the ladder this document opened on.
