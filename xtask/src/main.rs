@@ -117,8 +117,15 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-ffi", &["tinker-pdf"]),
 ];
 
-/// Crates outside `crates/` that may depend on the facade.
-const TOOLS: &[&str] = &["pdfcmp", "oracle-diff", "tpdf", "xtask"];
+/// Crates outside `crates/` that may depend on the facade, by path from the
+/// repository root.
+///
+/// Paths rather than bare names because `xtask` does not live under `tools/`.
+/// It was listed as `"xtask"` and looked for at `tools/xtask/Cargo.toml`,
+/// which does not exist, so the manifest read failed, the loop moved on, and
+/// xtask's own dependencies were never checked at all — by a check whose
+/// entire purpose is that the compiler cannot do this.
+const TOOLS: &[&str] = &["tools/pdfcmp", "tools/oracle-diff", "tools/tpdf", "xtask"];
 
 fn repo_root() -> PathBuf {
     // The manifest directory is `<root>/xtask`.
@@ -298,14 +305,24 @@ fn check_dag() -> Result<(), Vec<String>> {
     // The tools and bindings are checked only for the one rule that matters
     // for them: ruling 11 keeps a binding on the facade alone.
     for tool in TOOLS {
-        let manifest = root.join("tools").join(tool).join("Cargo.toml");
-        let Ok(text) = std::fs::read_to_string(&manifest) else {
-            continue;
+        let manifest = root.join(tool).join("Cargo.toml");
+        let text = match std::fs::read_to_string(&manifest) {
+            Ok(text) => text,
+            // Not a skip. A check that quietly passes over what it cannot
+            // find is a check that does not run, and this one already spent
+            // its whole life doing exactly that to `xtask`.
+            Err(error) => {
+                problems.push(format!(
+                    "{tool}/Cargo.toml could not be read ({error}), so its \
+                     dependencies went unchecked"
+                ));
+                continue;
+            }
         };
         for dep in internal_dependencies(&text) {
             if dep != "tinker-pdf" {
                 problems.push(format!(
-                    "tools/{tool} -> {dep}: tools use the facade, so that they \
+                    "{tool} -> {dep}: tools use the facade, so that they \
                      exercise what users get"
                 ));
             }

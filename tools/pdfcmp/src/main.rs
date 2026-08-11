@@ -22,16 +22,27 @@ const USAGE: &str = "\
 pdfcmp — compare two renders perceptually
 
 usage:
-  pdfcmp <a> <b> [--budget F] [--dpi D] [--page N] [--diff FILE] [--quiet]
+  pdfcmp <a> <b> [--budget F] [--threshold N] [--dpi D] [--page N]
+                 [--diff FILE] [--quiet]
 
 <a> and <b> may each be a .pnm image or a .pdf, which is rendered first.
 
 options:
-  --budget F  the largest acceptable difference, 0..1 (default 0.001)
-  --dpi D     resolution when rendering a PDF (default 150)
-  --page N    which page to render, 1-based (default 1)
-  --diff FILE write a difference image, brightest where they disagree
-  --quiet     print only the verdict
+  --budget F     the largest acceptable fraction of changed pixels, 0..1
+                 (default 0.0005, which is Tinker's own tolerance)
+  --threshold N  how far a channel must move for a pixel to count as changed,
+                 0..255 (default 12, likewise). Anti-aliasing differences
+                 between architectures land in the low single digits.
+  --dpi D        resolution when rendering a PDF (default 150)
+  --page N       which page to render, 1-based (default 1)
+  --diff FILE    write a difference image, brightest where they disagree
+  --quiet        print only the verdict
+
+The budget gates on *how many pixels changed*, not on how much they changed
+on average. A page of text is overwhelmingly white, so a glyph landing one
+pixel to the left changes a few hundred pixels completely and barely moves
+the mean — which is why the mean cannot be the gate, and why these defaults
+are the ones Tinker's own visual regression uses.
 
 exit status is 0 when the difference is within budget, 1 when it is not, and
 2 when the inputs could not be compared at all — different sizes, or files
@@ -57,7 +68,10 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<bool, String> {
     let mut inputs = Vec::new();
-    let mut budget = 0.001f64;
+    // Tinker's `visual_regression.rs` constants, so a budget tuned there
+    // means the same thing here.
+    let mut budget = 0.0005f64;
+    let mut threshold = 12u8;
     let mut dpi = 150.0f64;
     let mut page = 0u32;
     let mut diff_path = None;
@@ -77,6 +91,11 @@ fn run(args: &[String]) -> Result<bool, String> {
                 budget = value()?
                     .parse()
                     .map_err(|_| "--budget takes a number".to_string())?;
+            }
+            "--threshold" => {
+                threshold = value()?
+                    .parse()
+                    .map_err(|_| "--threshold takes a number from 0 to 255".to_string())?;
             }
             "--dpi" => {
                 dpi = value()?
@@ -114,25 +133,33 @@ fn run(args: &[String]) -> Result<bool, String> {
         ));
     }
 
-    let report = compare(&a, &b);
+    let report = compare(&a, &b, threshold);
     if let Some(path) = diff_path {
         write_diff(&path, &a, &b)?;
     }
 
     if !quiet {
+        println!(
+            "changed   {:.4}% of pixels by more than {threshold}",
+            report.over * 100.0
+        );
         println!("mean      {:.6}", report.mean);
         println!(
             "worst     {:.6} at ({}, {})",
             report.worst, report.at.0, report.at.1
         );
-        println!("differing {:.4}% of pixels", report.differing * 100.0);
+        println!(
+            "differing {:.4}% of pixels at all",
+            report.differing * 100.0
+        );
     }
 
-    let within = report.mean <= budget;
+    let within = report.over <= budget;
     println!(
-        "{} mean {:.6} against budget {budget:.6}",
+        "{} {:.4}% changed against budget {:.4}%",
         if within { "within" } else { "OVER" },
-        report.mean
+        report.over * 100.0,
+        budget * 100.0
     );
     Ok(within)
 }
@@ -271,13 +298,26 @@ fn read_pnm(bytes: &[u8]) -> Result<Image, String> {
 }
 
 struct Report {
-    /// The mean difference over every pixel, 0 to 1.
+    /// The fraction of pixels where a channel moved by more than the
+    /// threshold. **This is what the budget gates on.**
+    ///
+    /// Mean difference was the gate here first, and it cannot do the job.
+    /// A page of text is overwhelmingly white; a glyph landing one pixel to
+    /// the left changes a few hundred pixels completely and moves the mean by
+    /// a ten-thousandth. The budget passes and the regression ships. Tinker's
+    /// own `visual_regression.rs` counts *changed pixels* for exactly that
+    /// reason, and this file's own header promises budgets transfer between
+    /// the two — which they could not while the metrics disagreed.
+    over: f64,
+    /// The mean difference over every pixel, 0 to 1. Reported, not gated:
+    /// it is a useful summary of how *far* things moved once something has
+    /// moved.
     mean: f64,
     /// The largest single-pixel difference.
     worst: f64,
     /// Where that was.
     at: (u32, u32),
-    /// The fraction of pixels that differ at all.
+    /// The fraction of pixels that differ at all, however slightly.
     differing: f64,
 }
 
@@ -287,11 +327,12 @@ struct Report {
 /// rather than their average: a page that goes red where it should be black
 /// differs badly in one channel and not at all in the others, and averaging
 /// would report a third of the problem.
-fn compare(a: &Image, b: &Image) -> Report {
+fn compare(a: &Image, b: &Image, threshold: u8) -> Report {
     let mut total = 0.0f64;
     let mut worst = 0.0f64;
     let mut at = (0u32, 0u32);
     let mut differing = 0usize;
+    let mut over = 0usize;
 
     for y in 0..a.height {
         for x in 0..a.width {
@@ -304,6 +345,12 @@ fn compare(a: &Image, b: &Image) -> Report {
             if delta > 0.0 {
                 differing += 1;
             }
+            // Compared in whole channel steps rather than against the
+            // normalised delta, so the number means the same thing here as it
+            // does in Tinker.
+            if (0..3).any(|c| pa[c].abs_diff(pb[c]) > threshold) {
+                over += 1;
+            }
             if delta > worst {
                 worst = delta;
                 at = (x, y);
@@ -314,6 +361,7 @@ fn compare(a: &Image, b: &Image) -> Report {
     let count = (a.width as f64) * (a.height as f64);
     let count = if count > 0.0 { count } else { 1.0 };
     Report {
+        over: over as f64 / count,
         mean: total / count,
         worst,
         at,
@@ -348,11 +396,95 @@ mod tests {
         }
     }
 
+    /// The regression this tool exists to catch, and the one the mean could
+    /// not see.
+    ///
+    /// A page of text is overwhelmingly white. Shift a glyph one pixel and a
+    /// few hundred pixels flip between black and white while the mean barely
+    /// moves — under the old gate of `mean <= 0.001`, a whole glyph could
+    /// move and the comparison would report "within budget".
+    #[test]
+    fn a_shifted_glyph_is_caught_even_though_the_mean_barely_moves() {
+        // A 100x100 white page with a 10x10 black mark, and the same page
+        // with the mark one pixel to the right.
+        let mark = |at: u32| -> Image {
+            let mut pixels = vec![255u8; 100 * 100 * 3];
+            for y in 40..50u32 {
+                for x in at..at + 10 {
+                    let i = ((y * 100 + x) * 3) as usize;
+                    pixels[i] = 0;
+                    pixels[i + 1] = 0;
+                    pixels[i + 2] = 0;
+                }
+            }
+            image(100, 100, pixels)
+        };
+
+        let report = compare(&mark(20), &mark(21), 12);
+
+        // Twenty pixels of a ten-thousand-pixel page: the mean is two
+        // thousandths of the way to "completely different".
+        assert!(
+            report.mean < 0.003,
+            "the mean stays tiny, which is the whole problem: {}",
+            report.mean
+        );
+        assert!(
+            report.mean <= 0.001 * 3.0,
+            "and it is the order of a mean budget"
+        );
+
+        // The gate sees it.
+        assert!(
+            report.over > 0.0005,
+            "the changed-pixel fraction is over Tinker's tolerance: {}",
+            report.over
+        );
+        assert_eq!(report.over, 20.0 / 10_000.0, "twenty pixels moved");
+    }
+
+    /// Anti-aliasing noise between architectures lands in the low single
+    /// digits, and must not count. Without a threshold the gate would fire on
+    /// every platform difference and the budget would be meaningless.
+    #[test]
+    fn noise_below_the_threshold_does_not_count_as_changed() {
+        let flat = image(4, 1, vec![200; 12]);
+        let noisy = image(
+            4,
+            1,
+            vec![206, 194, 200, 200, 208, 200, 200, 200, 195, 200, 203, 200],
+        );
+
+        let report = compare(&flat, &noisy, 12);
+        assert_eq!(report.over, 0.0, "nothing moved by more than twelve");
+        assert!(report.differing > 0.0, "though they do differ");
+    }
+
+    #[test]
+    fn a_channel_exactly_at_the_threshold_is_not_yet_changed() {
+        let a = image(1, 1, vec![100, 100, 100]);
+        let at = image(1, 1, vec![112, 100, 100]);
+        let past = image(1, 1, vec![113, 100, 100]);
+
+        assert_eq!(compare(&a, &at, 12).over, 0.0, "twelve is within");
+        assert_eq!(compare(&a, &past, 12).over, 1.0, "thirteen is not");
+    }
+
+    /// The defaults are Tinker's, so a budget tuned in one place means the
+    /// same thing in the other — which this file's own header has always
+    /// promised and could not deliver while the metrics disagreed.
+    #[test]
+    fn the_defaults_match_tinkers_visual_regression() {
+        let usage = USAGE;
+        assert!(usage.contains("default 0.0005"), "the tolerance");
+        assert!(usage.contains("default 12"), "the channel threshold");
+    }
+
     #[test]
     fn identical_images_differ_by_nothing() {
         let a = image(2, 1, vec![10, 20, 30, 40, 50, 60]);
         let b = image(2, 1, vec![10, 20, 30, 40, 50, 60]);
-        let report = compare(&a, &b);
+        let report = compare(&a, &b, 12);
         assert_eq!(report.mean, 0.0);
         assert_eq!(report.worst, 0.0);
         assert_eq!(report.differing, 0.0);
@@ -366,7 +498,7 @@ mod tests {
     fn one_bad_channel_is_not_averaged_away() {
         let black = image(1, 1, vec![0, 0, 0]);
         let red = image(1, 1, vec![255, 0, 0]);
-        let report = compare(&black, &red);
+        let report = compare(&black, &red, 12);
         assert_eq!(report.worst, 1.0, "the red channel is completely wrong");
         assert_eq!(report.mean, 1.0);
     }
@@ -376,7 +508,7 @@ mod tests {
         let mut pixels = vec![0u8; 4 * 3];
         // The third pixel of a 2x2.
         pixels[6] = 255;
-        let report = compare(&image(2, 2, vec![0; 12]), &image(2, 2, pixels));
+        let report = compare(&image(2, 2, vec![0; 12]), &image(2, 2, pixels), 12);
         assert_eq!(report.at, (0, 1));
         assert_eq!(report.differing, 0.25);
     }
@@ -424,7 +556,7 @@ mod tests {
 
     #[test]
     fn an_empty_image_does_not_divide_by_zero() {
-        let report = compare(&image(0, 0, Vec::new()), &image(0, 0, Vec::new()));
+        let report = compare(&image(0, 0, Vec::new()), &image(0, 0, Vec::new()), 12);
         assert!(report.mean.is_finite() && report.mean == 0.0);
     }
 }
