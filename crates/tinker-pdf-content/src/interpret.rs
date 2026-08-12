@@ -173,6 +173,15 @@ pub trait FontSource {
 /// How deep form XObjects may nest before recursion is refused (8.10).
 const MAX_FORM_DEPTH: u32 = 16;
 
+/// How many marked-content scopes may be open at once (14.6.2).
+///
+/// Past the cap a scope is not reported to the device at all, and `EMC`
+/// balances against the same counter so the nesting the device sees stays
+/// correct. Unreported means *visible*, which is the direction a runaway
+/// stream should fail in: the alternative is a file that hides a page by
+/// nesting `BDC` four thousand deep.
+const MAX_MARKED_CONTENT_DEPTH: u32 = 4096;
+
 /// Runs a content stream against a device.
 pub fn interpret<D: Device, F: FontSource>(
     content: &[u8],
@@ -193,8 +202,13 @@ pub fn interpret<D: Device, F: FontSource>(
         start: (0.0, 0.0),
         depth: 0,
         pending_clip: None,
+        marked: 0,
+        marked_over_cap: 0,
     };
     interp.run(content);
+    // 14.6.2: a stream may end with scopes still open, and a device left
+    // inside one would treat everything after it as part of that layer.
+    interp.close_open_marked_content();
 }
 
 struct Interpreter<'d, D: Device, F: FontSource> {
@@ -210,6 +224,12 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     start: (f64, f64),
     depth: u32,
     pending_clip: Option<bool>,
+    /// Marked-content scopes open in the stream being run, and reported to
+    /// the device (14.6.2).
+    marked: u32,
+    /// Scopes refused by [`MAX_MARKED_CONTENT_DEPTH`], so that an `EMC`
+    /// closes the one it belongs to rather than an outer one.
+    marked_over_cap: u32,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -732,7 +752,102 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
 
+            // 14.6.2 marked content, and 8.11.3.2's use of it for optional
+            // content. `BDC` is the only operator in the language that can
+            // stop a page drawing, so it is the only one that looks at its
+            // property list here.
+            b"BDC" => {
+                let layer = self
+                    .optional_content_name()
+                    .and_then(|name| self.fonts.optional_content(&name));
+                self.open_marked_content(layer);
+            }
+            // 14.6.1: `BMC` has a tag and no property list, so it can name
+            // no layer and always paints.
+            b"BMC" => self.open_marked_content(None),
+            b"EMC" => self.close_marked_content(),
+            // 14.6.1's marked-content *points*, which mark a position rather
+            // than open a scope, and 7.8.2's compatibility brackets. All
+            // four do nothing here, and are named rather than left to the
+            // arm below so that a reader can see the difference between `MP`
+            // and `BMC` was considered: reading `DP` as a scope would leave
+            // the device inside a layer with no `EMC` ever to close it.
+            b"MP" | b"DP" | b"BX" | b"EX" => {}
+
             _ => {}
+        }
+    }
+
+    /// The name a `BDC`'s `/OC` property list gave, if it gave one (14.6.2).
+    ///
+    /// `BDC` takes `tag properties`. Only the `/OC` tag selects optional
+    /// content — every other tag, `/Span` and `/Artifact` and the structure
+    /// element names, opens a scope that is structure and nothing else — and
+    /// only the name form of the property list can reach a layer.
+    ///
+    /// **The inline form cannot, and there is nothing to reassemble.**
+    /// 8.11.3.2 makes an `/OC` entry a reference to an optional content
+    /// group or a membership dictionary; 7.3.10 puts indirect references in
+    /// the file structure, where a content stream cannot write one. So an
+    /// inline `<< … >>` property list names no group in any document, and
+    /// this returns `None` for it — which means visible, the direction a
+    /// parse failure must fail in.
+    ///
+    /// The scan that reassembled 7.8.2's flattened `DictOpen`/`DictClose`
+    /// tokens to find the tag before the `<<` was written and then deleted:
+    /// a deliberate defect injection could not make it change a single
+    /// answer, because both it and this produce a visible scope for every
+    /// inline list, well formed or not. `docs/plans/gaps/06-optional-content
+    /// .md` asks for the reassembly; the plan is amended there instead.
+    fn optional_content_name(&self) -> Option<Vec<u8>> {
+        let Some(Token::Name(property)) = self.stack.last() else {
+            return None;
+        };
+        match self.stack.iter().rev().nth(1) {
+            Some(Token::Name(tag)) if tag.as_slice() == b"OC" => Some(property.clone()),
+            _ => None,
+        }
+    }
+
+    /// Opens a marked-content scope and tells the device whether to paint
+    /// what follows.
+    fn open_marked_content(&mut self, layer: Option<Layer>) {
+        if self.marked >= MAX_MARKED_CONTENT_DEPTH {
+            self.marked_over_cap = self.marked_over_cap.saturating_add(1);
+            return;
+        }
+        self.marked += 1;
+        match layer {
+            Some(layer) if !layer.visible => {
+                self.device.begin_marked_content(false, Some(&layer.label));
+            }
+            _ => self.device.begin_marked_content(true, None),
+        }
+    }
+
+    /// Closes the innermost scope, if there is one.
+    ///
+    /// An `EMC` with nothing open is damage, and is dropped. Acting on it
+    /// would let a form XObject — or a stray one halfway down a page — close
+    /// a scope it never opened, which reaches out of the stream that wrote
+    /// it and un-hides a layer somewhere else entirely.
+    fn close_marked_content(&mut self) {
+        if self.marked_over_cap > 0 {
+            self.marked_over_cap -= 1;
+            return;
+        }
+        if self.marked > 0 {
+            self.marked -= 1;
+            self.device.end_marked_content();
+        }
+    }
+
+    /// Closes every scope the stream just run left open.
+    fn close_open_marked_content(&mut self) {
+        self.marked_over_cap = 0;
+        while self.marked > 0 {
+            self.marked -= 1;
+            self.device.end_marked_content();
         }
     }
 
@@ -812,6 +927,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let saved_path = std::mem::take(&mut self.path);
         let saved_text = self.text_matrix;
         let saved_line = self.line_matrix;
+        // 14.6.2: marked content nests within one stream. A form that leaves
+        // a scope open must not leave its caller inside it, and an `EMC` it
+        // has no `BDC` for must not close one of the caller's — so the count
+        // starts at zero here and is emptied below.
+        let saved_marked = std::mem::replace(&mut self.marked, 0);
+        let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
 
         let combined = form.matrix.then(&self.gs.ctm);
         if combined.is_finite() {
@@ -851,6 +972,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.run(&form.content);
         self.depth -= 1;
 
+        self.close_open_marked_content();
+        self.marked = saved_marked;
+        self.marked_over_cap = saved_over_cap;
         self.gs = saved_gs;
         self.saved = saved_stack;
         self.path = saved_path;
@@ -962,15 +1086,22 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     let saved_gs = self.gs.clone();
                     let saved_text = self.text_matrix;
                     let saved_line = self.line_matrix;
+                    // A glyph procedure is a content stream like a form's,
+                    // and 14.6.2's scopes are per stream in the same way.
+                    let saved_marked = std::mem::replace(&mut self.marked, 0);
+                    let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
 
                     self.gs.ctm = font_matrix.then(&transform);
                     self.depth += 1;
                     self.device.save_state();
                     let inner = proc_bytes.clone();
                     self.run(&inner);
+                    self.close_open_marked_content();
                     self.device.restore_state();
                     self.depth -= 1;
 
+                    self.marked = saved_marked;
+                    self.marked_over_cap = saved_over_cap;
                     self.gs = saved_gs;
                     self.text_matrix = saved_text;
                     self.line_matrix = saved_line;
@@ -1547,5 +1678,315 @@ mod tests {
         let state = d.states.first().expect("the stroke reached the device");
         assert_eq!(state.stroke_pattern, None);
         assert_eq!(state.stroke_color, Rgb { r: 0, g: 0, b: 255 });
+    }
+
+    // -----------------------------------------------------------------------
+    // Marked content and optional content (gap 06, 14.6.2 and 8.11.3.2).
+    // -----------------------------------------------------------------------
+
+    /// A device that keeps the nesting the interpreter reports, so a test can
+    /// ask what was in force when something was painted.
+    ///
+    /// The counter is exactly what a drawing device has to keep — each scope's
+    /// *own* visibility arrives, so the enclosing answer is this stack — which
+    /// is the point: a test here fails for the same reason the renderer would.
+    #[derive(Default)]
+    struct Scopes {
+        /// Whether each open scope hid its contents, innermost last.
+        open: Vec<bool>,
+        /// Every `begin`, in order: `(visible, layer)`.
+        begins: Vec<(bool, Option<String>)>,
+        /// How many `end`s arrived.
+        ends: usize,
+        /// One entry per fill: whether any scope was hiding it.
+        fills: Vec<bool>,
+        /// One entry per glyph: its text, and whether any scope was hiding it.
+        glyphs: Vec<(String, bool)>,
+    }
+
+    impl Scopes {
+        fn hidden(&self) -> bool {
+            self.open.iter().any(|h| *h)
+        }
+        /// The fills that were painted with nothing hiding them.
+        fn painted(&self) -> usize {
+            self.fills.iter().filter(|hidden| !**hidden).count()
+        }
+    }
+
+    impl Device for Scopes {
+        fn begin_marked_content(&mut self, visible: bool, hidden_layer: Option<&str>) {
+            self.open.push(!visible);
+            self.begins
+                .push((visible, hidden_layer.map(str::to_string)));
+        }
+        fn end_marked_content(&mut self) {
+            self.ends += 1;
+            // Counted separately from the stack, so a pop with nothing open
+            // is visible as `ends > begins` rather than silently absorbed —
+            // which is what a real device's `saturating_sub` would do.
+            self.open.pop();
+        }
+        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
+            let hidden = self.hidden();
+            self.fills.push(hidden);
+        }
+        fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
+            let hidden = self.hidden();
+            self.glyphs.push((glyph.text.clone(), hidden));
+        }
+    }
+
+    /// `/Off` names a layer the configuration hides, `/On` one it shows, and
+    /// `/Plain` is a property list that is not optional content at all.
+    ///
+    /// Three answers rather than two, because "hidden" and "not a layer" are
+    /// different `None`s and a seam that collapsed them would hide every
+    /// `/Span`.
+    struct Layers;
+
+    impl FontSource for Layers {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn optional_content(&self, name: &[u8]) -> Option<Layer> {
+            match name {
+                b"Off" => Some(Layer {
+                    visible: false,
+                    label: "Construction lines".to_string(),
+                }),
+                b"On" => Some(Layer {
+                    visible: true,
+                    label: "Base".to_string(),
+                }),
+                _ => None,
+            }
+        }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            (name == b"Frm").then(|| Form {
+                // Opens a scope and never closes it, and closes one it never
+                // opened. Both are what a real damaged form does.
+                content: b"EMC /OC /Off BDC 0 0 5 5 re f".to_vec(),
+                matrix: Matrix::IDENTITY,
+                bbox: None,
+            })
+        }
+    }
+
+    fn run_layers(src: &[u8]) -> Scopes {
+        let mut d = Scopes::default();
+        interpret(src, Matrix::IDENTITY, &mut d, &Layers);
+        d
+    }
+
+    /// M2's first exit criterion: a nested `BDC` inside a hidden scope stays
+    /// hidden.
+    ///
+    /// The inner scope names a layer that is *on*, so a build that reported
+    /// only the innermost answer — or that let a nested `BDC` reset the
+    /// state — would paint the middle rectangle. Three rectangles, one
+    /// outside the scopes entirely, so "nothing painted" cannot pass either.
+    #[test]
+    fn a_scope_nested_inside_a_hidden_one_stays_hidden() {
+        let d = run_layers(
+            b"0 0 1 1 re f \
+              /OC /Off BDC \
+                0 0 2 2 re f \
+                /OC /On BDC 0 0 3 3 re f EMC \
+                /Span /Plain BDC 0 0 4 4 re f EMC \
+              EMC \
+              0 0 5 5 re f",
+        );
+
+        assert_eq!(d.fills.len(), 5, "every fill reached the device");
+        assert_eq!(
+            d.fills,
+            vec![false, true, true, true, false],
+            "the three inside the /Off scope are hidden, including the two \
+             nested ones"
+        );
+        assert_eq!(d.painted(), 2);
+        assert_eq!(d.ends, 3, "one EMC per BDC");
+    }
+
+    /// M2's second exit criterion: an unbalanced `EMC` does not underflow.
+    ///
+    /// Four strays before anything opens, and two more after the one scope
+    /// closes. A build that let them through would pop past the bottom of the
+    /// device's stack; one that counted them would report more `end`s than
+    /// `begin`s, which is the same defect one level up.
+    #[test]
+    fn a_stray_emc_is_dropped_rather_than_underflowing() {
+        let d = run_layers(b"EMC EMC EMC EMC /OC /Off BDC 0 0 2 2 re f EMC EMC EMC 0 0 3 3 re f");
+
+        assert_eq!(d.begins.len(), 1);
+        assert_eq!(d.ends, 1, "six of the seven EMCs had nothing to close");
+        assert_eq!(d.fills, vec![true, false]);
+    }
+
+    /// 14.6.2: a stream may end inside a scope, and the device must not be
+    /// left there. The page's own content is the outer case; a form XObject
+    /// is the one that would otherwise reach out of itself.
+    #[test]
+    fn an_unclosed_scope_is_closed_at_the_end_of_its_stream() {
+        let d = run_layers(b"/OC /Off BDC 0 0 2 2 re f");
+        assert_eq!(d.begins.len(), 1);
+        assert_eq!(d.ends, 1, "the page's own trailing scope was closed");
+        assert!(d.open.is_empty());
+
+        // `Frm` opens one scope it never closes and closes one it never
+        // opened. Neither may reach the page: the fill after the form is
+        // outside every layer.
+        let d = run_layers(b"/Frm Do 0 0 9 9 re f");
+        assert_eq!(
+            d.fills,
+            vec![true, false],
+            "the form's own fill is hidden and the page's is not"
+        );
+        assert_eq!(d.begins.len(), 1);
+        assert_eq!(d.ends, 1);
+    }
+
+    /// 8.11.3.2: only an `/OC` tag selects optional content.
+    #[test]
+    fn a_tag_that_is_not_oc_hides_nothing() {
+        // `/Off` is a hidden layer, but the tag here is `/Span`, so the name
+        // is an ordinary property list and the fill paints.
+        let d = run_layers(b"/Span /Off BDC 0 0 2 2 re f EMC");
+        assert_eq!(d.fills, vec![false]);
+        assert_eq!(d.begins, vec![(true, None)]);
+    }
+
+    /// Ruling 10: the scope that hides carries the layer's name, so a device
+    /// can say what it hid rather than only that something was hidden.
+    #[test]
+    fn a_hidden_scope_names_its_layer() {
+        let d = run_layers(b"/OC /Off BDC 0 0 2 2 re f EMC");
+        assert_eq!(
+            d.begins,
+            vec![(false, Some("Construction lines".to_string()))]
+        );
+    }
+
+    /// An inline property list (7.8.2 tokenizes it flat) renders.
+    ///
+    /// 7.3.10 keeps indirect references out of content streams and 8.11.3.2
+    /// makes an `/OC` entry a reference, so an inline list cannot name a
+    /// layer. The tag still has to be found, though — it sits before the
+    /// `<<`, not before the operator — and a malformed one must not turn into
+    /// a hidden scope. Every case here paints.
+    #[test]
+    fn an_inline_property_list_renders() {
+        for src in [
+            b"/OC << /Type /OCMD >> BDC 0 0 2 2 re f EMC".as_slice(),
+            b"/OC << /OCGs [ ] /P /AllOff >> BDC 0 0 2 2 re f EMC",
+            b"/OC << /A << /B 1 >> >> BDC 0 0 2 2 re f EMC",
+            // Unbalanced: no `<<` for the `>>` to match.
+            b"/OC /Type /OCMD >> BDC 0 0 2 2 re f EMC",
+            // No tag at all.
+            b"<< /Type /OCMD >> BDC 0 0 2 2 re f EMC",
+            b"BDC 0 0 2 2 re f EMC",
+        ] {
+            let d = run_layers(src);
+            assert_eq!(
+                d.fills,
+                vec![false],
+                "{} should paint",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    /// The operators that used to fall into the catch-all, in one stream that
+    /// also draws. None of them opens a scope, and none of them may swallow
+    /// the operators after it.
+    #[test]
+    fn the_remaining_marked_content_operators_are_no_ops() {
+        let d = run_layers(
+            b"BX /Weird1 op EX \
+              /Point MP \
+              /Point << /K 1 >> DP \
+              BMC 0 0 2 2 re f EMC \
+              0 0 3 3 re f",
+        );
+
+        assert_eq!(d.begins.len(), 1, "only the BMC opened a scope");
+        assert_eq!(d.begins, vec![(true, None)]);
+        assert_eq!(d.ends, 1);
+        assert_eq!(d.fills, vec![false, false], "both fills painted");
+    }
+
+    /// Hidden content still runs. The pen advances, `q`/`Q` balance, and the
+    /// glyphs reach the device — the whole reason suppression belongs at the
+    /// paint rather than here.
+    #[test]
+    fn a_hidden_scope_still_interprets_everything_inside_it() {
+        let d = run_layers(
+            b"/OC /Off BDC q 2 0 0 2 0 0 cm BT /F0 10 Tf (AB) Tj ET Q EMC \
+              BT /F0 10 Tf (C) Tj ET",
+        );
+
+        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        assert_eq!(text, "ABC", "the hidden glyphs were still shown");
+        assert_eq!(
+            d.glyphs.iter().map(|g| g.1).collect::<Vec<_>>(),
+            vec![true, true, false],
+            "and only their painting was marked hidden"
+        );
+    }
+
+    /// Depth is bounded, and running out of it shows content rather than
+    /// hiding it — the direction a hostile stream should fail in.
+    ///
+    /// The arrangement is the one that can tell a build that *counts* the
+    /// scopes it refused from one that silently drops them. A hidden scope
+    /// is opened first, the cap is then filled with visible ones, and three
+    /// more are opened past it. The three `EMC`s that follow belong to those
+    /// three; a build that let them close reported scopes instead would be
+    /// three short by the time the unwinding reaches the outer hidden one,
+    /// close it early, and paint the last rectangle. Every simpler ordering
+    /// — nest to the cap, then unwind completely — gives the same pixels
+    /// either way, which is how this test came to be written twice.
+    #[test]
+    fn runaway_nesting_is_bounded_and_stays_balanced() {
+        let cap = MAX_MARKED_CONTENT_DEPTH as usize;
+        let mut src = Vec::from(b"/OC /Off BDC ".as_slice());
+        for _ in 0..cap - 1 {
+            src.extend_from_slice(b"/OC /On BDC ");
+        }
+        for _ in 0..3 {
+            src.extend_from_slice(b"/OC /Off BDC ");
+        }
+        src.extend_from_slice(b"0 0 2 2 re f ");
+        // The three that belong to the scopes past the cap.
+        src.extend_from_slice(b"EMC EMC EMC ");
+        // Then the cap's worth, less the outermost.
+        for _ in 0..cap - 1 {
+            src.extend_from_slice(b"EMC ");
+        }
+        src.extend_from_slice(b"0 0 3 3 re f EMC 0 0 4 4 re f");
+
+        let d = run_layers(&src);
+        assert_eq!(d.begins.len(), cap, "the cap held");
+        assert_eq!(d.begins.len(), d.ends, "and every one was closed");
+        assert!(d.open.is_empty());
+        assert_eq!(
+            d.fills,
+            vec![true, true, false],
+            "the fill inside is hidden; so is the one after the unwinding, \
+             because the outermost scope is still open; only the fill after \
+             its own EMC paints"
+        );
+        assert!(
+            d.begins.iter().filter(|(visible, _)| !*visible).count() == 1,
+            "the three scopes past the cap were refused, and a refused scope \
+             is a visible one"
+        );
     }
 }

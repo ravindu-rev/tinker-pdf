@@ -90,6 +90,36 @@ pub trait Device {
         let _ = (name, state);
     }
 
+    /// A marked-content scope began: `BMC`, or `BDC` with its property list
+    /// already resolved (14.6.2).
+    ///
+    /// `visible` is false when the tag was `/OC` and the document's default
+    /// configuration turns that layer off (8.11.3.2). A device that draws
+    /// stops painting until the matching [`Device::end_marked_content`]; the
+    /// text device ignores this entirely, and that asymmetry is the whole
+    /// reason suppression lives here rather than in the interpreter — both
+    /// devices are handed the same operators, and only drawing differs.
+    ///
+    /// Scopes nest, and the visibility reported is each scope's **own**, not
+    /// the enclosing answer. A device that acts on it therefore needs a
+    /// stack rather than a counter: `EMC` has to know whether the scope it
+    /// closes was one of the ones hiding things.
+    ///
+    /// `hidden_layer` names the layer, and is `Some` exactly when `visible`
+    /// is false — ruling 10, so a warning can say which layer it hid rather
+    /// than only that something was hidden.
+    fn begin_marked_content(&mut self, visible: bool, hidden_layer: Option<&str>) {
+        let _ = (visible, hidden_layer);
+    }
+
+    /// `EMC`: the innermost marked-content scope ended.
+    ///
+    /// The interpreter guarantees one of these per accepted
+    /// [`Device::begin_marked_content`], including for a stream that ends
+    /// with scopes still open — so a device may pop without checking, and a
+    /// form XObject cannot leave its caller inside a layer.
+    fn end_marked_content(&mut self) {}
+
     /// A form XObject is about to be interpreted; returning false skips it.
     fn begin_form(&mut self, id: u64) -> bool {
         let _ = id;
