@@ -9,3 +9,10 @@
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.
 fuzz/corpus/** binary
+
+# Adobe's cmap-resources, vendored verbatim (THIRDPARTY.md). `-text` keeps the
+# bytes exactly as published, because BSD-3-Clause asks a redistribution to
+# retain the notice and normalizing line endings is still a modification.
+# `linguist-vendored` collapses eight megabytes of PostScript out of the diff
+# a reviewer has to read, and out of the repository's language statistics.
+crates/tinker-pdf-font/data/** -text linguist-vendored
