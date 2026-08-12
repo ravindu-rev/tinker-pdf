@@ -1,0 +1,12 @@
+/CMapName /Self-H def
+/Self-H usecmap
+begincmap
+/CMapType 1 def
+1 begincodespacerange
+<8140> <9FFC>
+endcodespacerange
+1 begincidrange
+<8140> <817e> 633
+endcidrange
+endcmap
+end

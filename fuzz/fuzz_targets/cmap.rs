@@ -8,9 +8,16 @@
 //! what decide where one code ends and the next begins, so the same bytes are
 //! also split by the CMap they came from and every code that falls out is
 //! queried.
+//!
+//! A CMap may also inherit (9.7.5.3). `cmap::parse` follows a `usecmap` chain
+//! only as far as the predefined set, so the resolver-driven half — a parent
+//! that is a stream, the depth cap, the cycle guard — is unreachable through
+//! it. `parse_embedded` is called with three resolvers that answer out of the
+//! input itself, which is how a hostile chain gets built without a document.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
+use tinker_pdf_font::cmap::{ParentRef, ParentSource};
 use tinker_pdf_font::{cmap, CMap};
 
 fuzz_target!(|data: &[u8]| {
@@ -46,4 +53,43 @@ fuzz_target!(|data: &[u8]| {
             let _ = predefined.to_unicode(*code);
         }
     }
+
+    // A parent that is always the child: the cycle guard, whatever the CMap
+    // called the link and whichever spelling asked for it.
+    let looped = cmap::parse_embedded(data, &mut |_| Some(ParentSource::Source(data.to_vec())));
+    check(&looped);
+
+    // A parent that is a fresh source every time and never repeats, so only
+    // the depth cap can stop it. Dropping one byte per link keeps the chain
+    // finite even if the cap were removed, which is what makes a hang here a
+    // report rather than a timeout in the harness.
+    let mut link = 0usize;
+    let growing = cmap::parse_embedded(data, &mut |_| {
+        link += 1;
+        Some(ParentSource::Source(data.get(link..)?.to_vec()))
+    });
+    check(&growing);
+
+    // Names resolving to names: the indirection loop, and the reason it is a
+    // loop rather than a recursion.
+    let named = cmap::parse_embedded(data, &mut |want| match want {
+        ParentRef::Named(n) => Some(ParentSource::Named(n.to_vec())),
+        ParentRef::Dictionary(_) => Some(ParentSource::Named(name.to_vec())),
+    });
+    check(&named);
 });
+
+/// Everything a caller does with the result, so a merged CMap is queried the
+/// same way a plain one is.
+fn check(parsed: &cmap::Parsed) {
+    for warning in &parsed.warnings {
+        let _ = warning.as_str();
+    }
+    let _ = parsed.cmap.is_vertical();
+    let _ = parsed.cmap.is_approximate();
+    for code in [0u32, 0x20, 0xFF, 0x100, 0xFFFF, 0x1_0000, u32::MAX] {
+        let _ = parsed.cmap.to_unicode(code);
+        let _ = parsed.cmap.to_unicode_string(code);
+        let _ = parsed.cmap.cid(code);
+    }
+}

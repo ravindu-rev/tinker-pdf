@@ -1,0 +1,18 @@
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> def
+/CMapName /Custom-RKSJ-V def
+/CMapType 1 def
+/90ms-RKSJ-H usecmap
+/WMode 1 def
+1 begincidrange
+<8140> <817e> 7887
+endcidrange
+1 begincidchar
+<81b1> 7936
+endcidchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
