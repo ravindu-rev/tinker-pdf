@@ -247,6 +247,15 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// How many of `marked_content` hide, so the question every paint asks
     /// is a comparison rather than a scan.
     hidden_depth: u32,
+    /// Mask pixels rasterized so far, summed over every paint and every clip.
+    ///
+    /// The instrument behind `a_small_fill_on_a_large_page_stays_small`. A
+    /// paint that goes back to asking for the whole canvas is a performance
+    /// defect that no output comparison can see — the pixels are identical,
+    /// which is the entire point of this work — so the only way it fails
+    /// rather than merely costs is if something counts.
+    #[cfg(test)]
+    mask_pixels: u64,
 }
 
 impl<'g, G: GlyphSource> Renderer<'g, G> {
@@ -270,6 +279,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             text_clip_requested: false,
             marked_content: Vec::new(),
             hidden_depth: 0,
+            #[cfg(test)]
+            mask_pixels: 0,
         }
     }
 
@@ -395,19 +406,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return;
         };
 
-        let area = fill(
-            path,
-            rule,
-            0,
-            0,
-            self.canvas.width,
-            self.canvas.height,
-            self.tolerance,
-        );
-        let area = match &self.clip {
-            Some(clip) => area.intersect(clip),
-            None => area,
-        };
+        let area = self.coverage(path, rule);
 
         let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
@@ -431,20 +430,37 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
-    fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
-        let mask = fill(
+    /// The coverage a path contributes, over the pixels it can reach and with
+    /// the current clip already multiplied in.
+    ///
+    /// Every paint and every clip goes through here, and this is the only
+    /// place that decides how large a mask is. A comma used to allocate and
+    /// scan a full page: eight megabytes at 300 dpi, per glyph, twice for
+    /// stroked text. It now costs its own bounding box.
+    fn coverage(&mut self, path: &Path, rule: FillRule) -> Mask {
+        let (x0, y0, width, height) = paint_region(
             path,
-            rule,
-            0,
-            0,
+            self.clip.as_ref(),
             self.canvas.width,
             self.canvas.height,
-            self.tolerance,
         );
-        let mask = match &self.clip {
+        #[cfg(test)]
+        {
+            self.mask_pixels = self
+                .mask_pixels
+                .saturating_add(u64::from(width) * u64::from(height));
+        }
+        let mask = fill(path, rule, x0, y0, width, height, self.tolerance);
+        // 8.5.4: the clip multiplies rather than replaces, so an anti-aliased
+        // edge clipped by another stays soft on both.
+        match &self.clip {
             Some(clip) => mask.intersect(clip),
             None => mask,
-        };
+        }
+    }
+
+    fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
+        let mask = self.coverage(path, rule);
         self.canvas.fill_mask_with(&mask, color, alpha, mode);
     }
 
@@ -573,6 +589,74 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     }
 }
 
+/// One pixel of slack on every side of a path's bounding box.
+///
+/// Not superstition, and not theory either: it was measured. A rasterized
+/// edge can deposit coverage in the pixel *outside* the box its own control
+/// points describe, because the flattener evaluates a Bézier as a float sum
+/// that may round an ulp past the extreme control point, and because the
+/// scanline walks a crossing as `(x * 256) as i64` stepped by a slope
+/// truncated to 1/256 of a pixel. Both are sub-pixel, and both can cross an
+/// integer boundary when the shape's extreme lands exactly on one — which for
+/// glyphs and rectangles is the common case, not the odd one.
+///
+/// Two million random paths over a 20x20 canvas, compared pixel for pixel
+/// against the full-canvas mask: an exact `floor`/`ceil` box lost 24 pixels,
+/// the worst of them 16 levels out of 255. With one pixel of slack, none.
+/// That is the whole justification — a perimeter's worth of work for the
+/// invariant that bounding changes no pixel.
+const SLACK: i64 = 1;
+
+/// The device pixels a path can put ink on: its bounding box widened by
+/// [`SLACK`], clipped to the canvas and to the clip's own rectangle.
+///
+/// Clipping to the clip's rectangle is safe for the same reason the whole
+/// change is: a clip reports zero coverage outside itself, and coverage
+/// multiplies, so nothing outside it could ever have been painted.
+///
+/// A path with no points at all — which is what a text object that selected a
+/// clipping mode and drew nothing produces — yields an empty region, and an
+/// empty mask reads as zero everywhere. That is the same "clip everything
+/// away" a page-sized mask of zeroes gave, at none of the cost.
+fn paint_region(path: &Path, clip: Option<&Mask>, width: u32, height: u32) -> (i32, i32, u32, u32) {
+    let Some((x0, y0, x1, y1)) = path.bounds() else {
+        return (0, 0, 0, 0);
+    };
+
+    // `as` saturates at the integer bounds for floats, and `Path` refuses
+    // non-finite points at construction — but a *finite* 1e300 saturates to
+    // `i64::MAX`, and the slack then has to be added saturating or a form
+    // XObject with an absurd `/BBox` panics where it used to render nothing
+    // (ruling 1).
+    let (mut left, mut top) = (
+        (x0.floor() as i64).saturating_sub(SLACK),
+        (y0.floor() as i64).saturating_sub(SLACK),
+    );
+    let (mut right, mut bottom) = (
+        (x1.ceil() as i64).saturating_add(SLACK),
+        (y1.ceil() as i64).saturating_add(SLACK),
+    );
+
+    if let Some(clip) = clip {
+        left = left.max(i64::from(clip.x0));
+        top = top.max(i64::from(clip.y0));
+        right = right.min(i64::from(clip.x0) + i64::from(clip.width));
+        bottom = bottom.min(i64::from(clip.y0) + i64::from(clip.height));
+    }
+
+    let left = left.clamp(0, i64::from(width));
+    let top = top.clamp(0, i64::from(height));
+    let right = right.clamp(left, i64::from(width));
+    let bottom = bottom.clamp(top, i64::from(height));
+
+    (
+        left as i32,
+        top as i32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    )
+}
+
 fn fill_color(state: &GraphicsState) -> Color {
     Color::rgb(state.fill_color.r, state.fill_color.g, state.fill_color.b)
 }
@@ -634,20 +718,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         };
         // 8.5.4: the new clip is the intersection with whatever is in force,
         // which is a multiply rather than a replacement — an anti-aliased edge
-        // clipped by another must stay soft on both.
-        let mask = fill(
-            &built,
-            rule,
-            0,
-            0,
-            self.canvas.width,
-            self.canvas.height,
-            self.tolerance,
-        );
-        self.clip = Some(match &self.clip {
-            Some(existing) => mask.intersect(existing),
-            None => mask,
-        });
+        // clipped by another must stay soft on both. `coverage` does that, and
+        // the region it picks is the two rectangles' overlap, so a clip stack
+        // shrinks as it nests instead of carrying a page apiece.
+        self.clip = Some(self.coverage(&built, rule));
     }
 
     fn end_text(&mut self) {
@@ -672,19 +746,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             }
             None => return,
         };
-        let mask = fill(
-            &path,
-            FillRule::NonZero,
-            0,
-            0,
-            self.canvas.width,
-            self.canvas.height,
-            self.tolerance,
-        );
-        self.clip = Some(match &self.clip {
-            Some(existing) => mask.intersect(existing),
-            None => mask,
-        });
+        self.clip = Some(self.coverage(&path, FillRule::NonZero));
     }
 
     fn save_state(&mut self) {
@@ -1283,6 +1345,141 @@ mod tests {
             .filter(|&x| canvas.pixel(x, 10).is_some_and(|c| c.r < 200))
             .count();
         assert!(painted > 10, "the stroke covers the line, got {painted}");
+    }
+
+    /// Shapes that between them reach every way a bounding box can be wrong:
+    /// integer coordinates, sub-pixel offsets, curves whose control points sit
+    /// outside the ink, a shape hanging off each edge of the canvas, and one
+    /// that misses the canvas entirely.
+    fn shapes() -> Vec<(&'static str, Path)> {
+        let mut out = Vec::new();
+
+        let mut rect = Path::new();
+        rect.rect(4.0, 6.0, 9.0, 7.0);
+        out.push(("integer rectangle", rect));
+
+        let mut offset = Path::new();
+        offset.rect(4.3, 6.7, 9.4, 7.1);
+        out.push(("sub-pixel rectangle", offset));
+
+        let mut triangle = Path::new();
+        triangle.move_to(2.5, 2.0);
+        triangle.line_to(17.5, 9.25);
+        triangle.line_to(6.0, 18.75);
+        triangle.close();
+        out.push(("triangle", triangle));
+
+        let mut curve = Path::new();
+        curve.move_to(3.0, 10.0);
+        curve.curve_to(3.0, 1.0, 17.0, 1.0, 17.0, 10.0);
+        curve.quad_to(10.0, 19.0, 3.0, 10.0);
+        curve.close();
+        out.push(("curves", curve));
+
+        for (name, (x, y)) in [
+            ("over the left edge", (-6.5, 5.0)),
+            ("over the right edge", (14.5, 5.0)),
+            ("over the top edge", (5.0, -6.5)),
+            ("over the bottom edge", (5.0, 14.5)),
+        ] {
+            let mut path = Path::new();
+            path.rect(x, y, 11.25, 11.25);
+            out.push((name, path));
+        }
+
+        let mut away = Path::new();
+        away.rect(100.0, 100.0, 5.0, 5.0);
+        out.push(("entirely off the canvas", away));
+
+        let mut hairline = Path::new();
+        hairline.move_to(10.0, 0.5);
+        hairline.line_to(10.4, 19.5);
+        hairline.line_to(10.6, 19.5);
+        hairline.line_to(10.2, 0.5);
+        hairline.close();
+        out.push(("a near-vertical sliver", hairline));
+
+        out
+    }
+
+    /// The invariant the whole of gap 14 rests on, at the level that decides
+    /// it: a mask over the path's own rectangle carries the same coverage, at
+    /// every pixel of the canvas, as one over the whole page.
+    ///
+    /// This is what a fingerprint would report as a hash mismatch with no clue
+    /// where; here a failure names the shape, the pixel and both values. A
+    /// bound one pixel short on any single edge fails it.
+    #[test]
+    fn a_bounded_mask_and_a_page_sized_one_agree_everywhere() {
+        const SIDE: u32 = 20;
+        for (name, path) in shapes() {
+            for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                let whole = fill(&path, rule, 0, 0, SIDE, SIDE, 0.2);
+                let (x0, y0, w, h) = paint_region(&path, None, SIDE, SIDE);
+                let bounded = fill(&path, rule, x0, y0, w, h, 0.2);
+
+                for y in 0..SIDE as i32 {
+                    for x in 0..SIDE as i32 {
+                        assert_eq!(
+                            whole.at(x, y),
+                            bounded.at(x, y),
+                            "{name} under {rule:?} differs at ({x}, {y}); \
+                             the bounded mask is {w}x{h} at ({x0}, {y0})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And the region is actually small, or the test above would pass on a
+    /// build that had changed nothing.
+    #[test]
+    fn the_region_is_the_shape_rather_than_the_page() {
+        let mut path = Path::new();
+        path.rect(4.0, 6.0, 9.0, 7.0);
+        assert_eq!(
+            paint_region(&path, None, 2000, 2000),
+            (3, 5, 11, 9),
+            "the bounding box, one pixel of slack on each side"
+        );
+
+        // Clamped to the canvas rather than reaching outside it.
+        let mut over = Path::new();
+        over.rect(-50.0, -50.0, 60.0, 60.0);
+        assert_eq!(paint_region(&over, None, 100, 100), (0, 0, 11, 11));
+
+        // A path that misses the canvas costs nothing at all.
+        let mut away = Path::new();
+        away.rect(500.0, 500.0, 10.0, 10.0);
+        assert_eq!(paint_region(&away, None, 100, 100), (100, 100, 0, 0));
+
+        // Neither does one with no points.
+        assert_eq!(paint_region(&Path::new(), None, 100, 100), (0, 0, 0, 0));
+    }
+
+    /// A clip bounds the region as well, because coverage multiplies and the
+    /// clip is zero outside itself.
+    #[test]
+    fn a_clip_bounds_the_region_it_cannot_paint_outside_of() {
+        let mut path = Path::new();
+        path.rect(10.0, 10.0, 60.0, 60.0);
+        let mut clip_path = Path::new();
+        clip_path.rect(30.0, 40.0, 10.0, 10.0);
+        let clip = fill(&clip_path, FillRule::NonZero, 29, 39, 12, 12, 0.2);
+
+        let (x0, y0, w, h) = paint_region(&path, Some(&clip), 200, 200);
+        assert_eq!((x0, y0, w, h), (29, 39, 12, 12), "the clip is the smaller");
+
+        // And the clipped coverage is unchanged by that: compare against the
+        // full-page mask multiplied by the same clip.
+        let whole = fill(&path, FillRule::NonZero, 0, 0, 200, 200, 0.2).intersect(&clip);
+        let bounded = fill(&path, FillRule::NonZero, x0, y0, w, h, 0.2).intersect(&clip);
+        for y in 0..200 {
+            for x in 0..200 {
+                assert_eq!(whole.at(x, y), bounded.at(x, y), "at ({x}, {y})");
+            }
+        }
     }
 
     #[test]
