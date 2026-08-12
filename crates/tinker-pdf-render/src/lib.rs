@@ -410,11 +410,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
-        for py in 0..self.canvas.height {
+        // The shape's own rectangle. A shading is evaluated per pixel, so a
+        // gradient-filled comma used to run the inverse transform and the
+        // function over every pixel of the page to paint two hundred of them.
+        let (x_start, y_start, x_end, y_end) = area.overlap(self.canvas.width, self.canvas.height);
+        for py in y_start..y_end {
             if self.cancel.is_cancelled() {
                 return;
             }
-            for px in 0..self.canvas.width {
+            for px in x_start..x_end {
                 let coverage = area.at(px as i32, py as i32);
                 if coverage == 0 {
                     continue;
@@ -450,13 +454,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .mask_pixels
                 .saturating_add(u64::from(width) * u64::from(height));
         }
-        let mask = fill(path, rule, x0, y0, width, height, self.tolerance);
+        let mut mask = fill(path, rule, x0, y0, width, height, self.tolerance);
         // 8.5.4: the clip multiplies rather than replaces, so an anti-aliased
-        // edge clipped by another stays soft on both.
-        match &self.clip {
-            Some(clip) => mask.intersect(clip),
-            None => mask,
+        // edge clipped by another stays soft on both. In place, because the
+        // region above is already no larger than the clip: the destination
+        // `intersect` would allocate is the mask that is already here.
+        if let Some(clip) = &self.clip {
+            mask.intersect_in_place(clip);
         }
+        mask
     }
 
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
@@ -1035,11 +1041,20 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
         let alpha = state.fill_alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
-        for py in 0..self.canvas.height {
+        // 8.7.4.2 again: `sh` paints the current clip, so the clip's own
+        // rectangle bounds the sweep. Without one it really is the whole
+        // page, which is what the operator means.
+        let (x_start, y_start, x_end, y_end) = self
+            .clip
+            .as_ref()
+            .map_or((0, 0, self.canvas.width, self.canvas.height), |clip| {
+                clip.overlap(self.canvas.width, self.canvas.height)
+            });
+        for py in y_start..y_end {
             if self.cancel.is_cancelled() {
                 return;
             }
-            for px in 0..self.canvas.width {
+            for px in x_start..x_end {
                 let clip = self
                     .clip
                     .as_ref()

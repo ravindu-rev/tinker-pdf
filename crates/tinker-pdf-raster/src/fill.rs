@@ -48,6 +48,23 @@ impl Mask {
         }
     }
 
+    /// The canvas pixels this mask can put coverage on: its own rectangle,
+    /// clamped to a canvas of `width` by `height`, as `(x0, y0, x1, y1)` with
+    /// the far edges exclusive.
+    ///
+    /// A mask reports zero outside itself, so a consumer that walks the whole
+    /// canvas computes the same answer as one that walks this — it just pays
+    /// the page for a comma. Every consumer walks this.
+    #[must_use]
+    pub fn overlap(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let clamp = |value: i64, limit: u32| value.clamp(0, i64::from(limit)) as u32;
+        let x0 = clamp(i64::from(self.x0), width);
+        let y0 = clamp(i64::from(self.y0), height);
+        let x1 = clamp(i64::from(self.x0) + i64::from(self.width), width);
+        let y1 = clamp(i64::from(self.y0) + i64::from(self.height), height);
+        (x0, y0, x1.max(x0), y1.max(y0))
+    }
+
     /// Coverage at a device pixel, zero outside the mask.
     #[must_use]
     pub fn at(&self, x: i32, y: i32) -> u8 {
@@ -66,18 +83,21 @@ impl Mask {
     /// How clipping composes: a clip stack is the product of its masks, and
     /// multiplying is what makes a clipped anti-aliased edge look right rather
     /// than doubly-hard.
+    ///
+    /// The result covers only the rectangle the two have in common, because
+    /// the product is zero everywhere else by construction — one of the two
+    /// factors is outside itself there and reports zero. A larger mask would
+    /// carry the same answer at a cost proportional to the page.
     #[must_use]
     pub fn intersect(&self, other: &Mask) -> Mask {
-        let mut out = Mask::empty(self.x0, self.y0, self.width, self.height);
-        for row in 0..self.height {
-            for col in 0..self.width {
-                let x = self.x0 + col as i32;
-                let y = self.y0 + row as i32;
-                let a = u32::from(self.at(x, y));
-                let b = u32::from(other.at(x, y));
-                // Rounded rather than truncated, so full coverage stays full.
-                let value = ((a * b + 127) / 255) as u8;
-                let index = (row as usize) * (self.width as usize) + (col as usize);
+        let (x0, y0, width, height) = common_rect(self, other);
+        let mut out = Mask::empty(x0, y0, width, height);
+        for row in 0..height {
+            let y = y0.saturating_add(row as i32);
+            for col in 0..width {
+                let x = x0.saturating_add(col as i32);
+                let value = product(self.at(x, y), other.at(x, y));
+                let index = (row as usize) * (width as usize) + (col as usize);
                 if let Some(slot) = out.data.get_mut(index) {
                     *slot = value;
                 }
@@ -85,6 +105,50 @@ impl Mask {
         }
         out
     }
+
+    /// Multiplies `other`'s coverage into this mask, keeping this one's
+    /// rectangle.
+    ///
+    /// The same arithmetic as [`Mask::intersect`] without the second
+    /// allocation, for the caller that already knows its mask is no larger
+    /// than the clip it is about to be multiplied by — which is every paint,
+    /// since a paint asks for the region its path and the clip have in common
+    /// before it rasterizes anything.
+    pub fn intersect_in_place(&mut self, other: &Mask) {
+        for row in 0..self.height {
+            let y = self.y0.saturating_add(row as i32);
+            let base = (row as usize) * (self.width as usize);
+            for col in 0..self.width {
+                let x = self.x0.saturating_add(col as i32);
+                let Some(slot) = self.data.get_mut(base + col as usize) else {
+                    continue;
+                };
+                *slot = product(*slot, other.at(x, y));
+            }
+        }
+    }
+}
+
+/// Two coverages multiplied, rounded rather than truncated so that full
+/// coverage stays full.
+fn product(a: u8, b: u8) -> u8 {
+    ((u32::from(a) * u32::from(b) + 127) / 255) as u8
+}
+
+/// The rectangle two masks have in common, as `(x0, y0, width, height)`.
+fn common_rect(a: &Mask, b: &Mask) -> (i32, i32, u32, u32) {
+    let span = |x0: i32, width: u32| (i64::from(x0), i64::from(x0) + i64::from(width));
+    let (ax0, ax1) = span(a.x0, a.width);
+    let (bx0, bx1) = span(b.x0, b.width);
+    let (ay0, ay1) = span(a.y0, a.height);
+    let (by0, by1) = span(b.y0, b.height);
+
+    let x0 = ax0.max(bx0);
+    let y0 = ay0.max(by0);
+    let width = (ax1.min(bx1) - x0).max(0);
+    let height = (ay1.min(by1) - y0).max(0);
+    // Both origins came from an `i32`, so the maximum of the two still fits.
+    (x0 as i32, y0 as i32, width as u32, height as u32)
 }
 
 /// One edge, in sub-scanline space.
@@ -372,6 +436,116 @@ mod tests {
         assert_eq!(clipped.at(7, 5), 255, "both cover this");
         assert_eq!(clipped.at(2, 5), 0, "only the first covers this");
         assert_eq!(clipped.at(12, 5), 0, "only the second, and outside a");
+    }
+
+    /// Bounding the result must not change what it reads: a mask that does
+    /// not cover a pixel and one that covers it with zero are the same mask.
+    #[test]
+    fn an_intersection_costs_the_overlap_and_reads_the_same_outside_it() {
+        let mut path = Path::new();
+        path.rect(1.0, 1.0, 14.0, 14.0);
+        let big = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1);
+        let small = fill(&path, FillRule::NonZero, 4, 6, 5, 3, 0.1);
+
+        let clipped = big.intersect(&small);
+        assert_eq!(
+            (clipped.x0, clipped.y0, clipped.width, clipped.height),
+            (4, 6, 5, 3),
+            "the result is the overlap, not the larger of the two"
+        );
+        assert_eq!(clipped.data.len(), 15, "and it allocated only that");
+
+        // Every pixel of the canvas agrees with the unbounded product.
+        for y in -2..18 {
+            for x in -2..18 {
+                let want = u32::from(big.at(x, y)) * u32::from(small.at(x, y));
+                let want = ((want + 127) / 255) as u8;
+                assert_eq!(clipped.at(x, y), want, "at ({x}, {y})");
+            }
+        }
+
+        // And in place, which keeps the destination's rectangle rather than
+        // shrinking to the overlap, agrees with it pixel for pixel.
+        let mut in_place = big.clone();
+        in_place.intersect_in_place(&small);
+        for y in -2..18 {
+            for x in -2..18 {
+                assert_eq!(in_place.at(x, y), clipped.at(x, y), "at ({x}, {y})");
+            }
+        }
+    }
+
+    /// The last row and the last column of an in-place intersection.
+    ///
+    /// Nothing in the workspace caught an `intersect_in_place` that stopped a
+    /// row short — injected and re-run, zero assertions failed. It is invisible
+    /// almost everywhere because a paint's rectangle is already the clip's
+    /// rectangle, and a rectangular clip is fully covered in the middle of
+    /// itself. It is *not* invisible at the rectangle's own edge, which is
+    /// where the clip's coverage falls away: a row skipped there is ink
+    /// outside the clip.
+    ///
+    /// The shape here is larger than the region, so its coverage is 255
+    /// everywhere and the product must equal the clip exactly — at every
+    /// pixel, including the ones a loop bound gets wrong.
+    #[test]
+    fn intersecting_in_place_reaches_the_last_row_and_column() {
+        let mut clip_path = Path::new();
+        clip_path.rect(2.0, 2.0, 6.5, 6.5);
+        let clip = fill(&clip_path, FillRule::NonZero, 1, 1, 10, 10, 0.1);
+
+        let mut path = Path::new();
+        path.rect(-5.0, -5.0, 30.0, 30.0);
+        let mut mask = fill(&path, FillRule::NonZero, 1, 1, 10, 10, 0.1);
+        assert_eq!(mask.at(10, 10), 255, "the shape covers the whole region");
+
+        mask.intersect_in_place(&clip);
+        for y in 0..12 {
+            for x in 0..12 {
+                assert_eq!(
+                    mask.at(x, y),
+                    clip.at(x, y),
+                    "an opaque shape clipped is the clip, at ({x}, {y})"
+                );
+            }
+        }
+        assert_eq!(mask.at(10, 10), 0, "and the last row is outside the clip");
+    }
+
+    /// The rectangle a consumer walks. Every edge is checked independently,
+    /// because a mask hanging off one side of the canvas is exactly what a
+    /// glyph at the margin is.
+    #[test]
+    fn a_mask_reports_the_canvas_pixels_it_can_reach() {
+        let inside = Mask::empty(3, 4, 5, 6);
+        assert_eq!(inside.overlap(100, 100), (3, 4, 8, 10));
+
+        // Hanging off each edge in turn, clamped to the canvas and never past
+        // it.
+        assert_eq!(Mask::empty(-3, 4, 5, 6).overlap(100, 100), (0, 4, 2, 10));
+        assert_eq!(Mask::empty(3, -4, 5, 6).overlap(100, 100), (3, 0, 8, 2));
+        assert_eq!(Mask::empty(97, 4, 5, 6).overlap(100, 100), (97, 4, 100, 10));
+        assert_eq!(Mask::empty(3, 96, 5, 6).overlap(100, 100), (3, 96, 8, 100));
+
+        // Entirely outside, in both directions: an empty range rather than a
+        // reversed one, which would panic a `for` loop or wrap a subtraction.
+        assert_eq!(Mask::empty(-50, -50, 5, 6).overlap(100, 100), (0, 0, 0, 0));
+        assert_eq!(
+            Mask::empty(500, 500, 5, 6).overlap(100, 100),
+            (100, 100, 100, 100)
+        );
+        // And nothing overflows at the extremes. Built by hand rather than
+        // through `empty`, which would try to allocate the square of a `u32`.
+        let huge = Mask {
+            x0: i32::MAX - 1,
+            y0: i32::MIN,
+            width: u32::MAX,
+            height: u32::MAX,
+            data: Vec::new(),
+        };
+        // Its columns are past the right edge and its rows cover everything,
+        // so the x range is empty and the y range is the canvas.
+        assert_eq!(huge.overlap(10, 10), (10, 0, 10, 10));
     }
 
     #[test]

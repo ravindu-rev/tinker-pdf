@@ -162,8 +162,13 @@ impl Canvas {
         let source = self.encode(color);
         let color_alpha = u32::from(color.a);
 
-        for row in 0..self.height {
-            for col in 0..self.width {
+        // The mask's own rectangle, not the canvas. Outside it `Mask::at`
+        // returns zero and every pixel is skipped, so walking the page was
+        // always the same answer at the price of the page: a comma on A4 at
+        // 300 dpi visited 8.4 million pixels to composite about two hundred.
+        let (x0, y0, x1, y1) = mask.overlap(self.width, self.height);
+        for row in y0..y1 {
+            for col in x0..x1 {
                 let coverage = u32::from(mask.at(col as i32, row as i32));
                 if coverage == 0 {
                     continue;
