@@ -28,6 +28,7 @@ use tinker_pdf_raster::{
     canvas::{Canvas, Color, PixelFormat},
     fill::{fill, Mask},
     geom::{FillRule, Path},
+    image::{draw_image, ImageDraw, ImageSource, Transform},
     stroke::{stroke, LineCap, LineJoin, StrokeStyle},
 };
 
@@ -473,88 +474,38 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// Draws a decoded image into the unit square of the current transform.
     ///
     /// 8.9.5.2: an image occupies the unit square in user space whatever its
-    /// pixel dimensions, so the transform carries the placement. Sampling maps
-    /// *backwards* — every destination pixel takes exactly one source lookup —
-    /// which is what avoids the seams and double-writes a forward map leaves
-    /// under rotation or scaling.
+    /// pixel dimensions, so the transform carries the placement. Everything
+    /// after that placement is the rasterizer's: this maps PDF's vocabulary
+    /// onto [`ImageDraw`] and gets out of the way.
+    ///
+    /// The sampling itself used to be twenty lines of loop here, which is why
+    /// it had no filtering — there is nowhere in a bridge crate to put a
+    /// pyramid, and nothing here can be tested without building a page.
     fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
-        let mode = blend_mode(state.blend);
-        if image.width == 0 || image.height == 0 {
-            return;
-        }
+        let unit_to_device = transform(&state.ctm.then(&self.base));
+        // 8.9.6.2: a stencil selects where the *current fill colour* is
+        // painted; it has no colour of its own.
+        let tint = image.stencil.then(|| fill_color(state));
+        // Cloned rather than borrowed: the token is shared state, and this
+        // closure has to outlive the borrow of `self` that the draw needs.
+        let cancel = self.cancel.clone();
+        let stop = move || cancel.is_cancelled();
 
-        let unit_to_device = state.ctm.then(&self.base);
-        let Some(inverse) = invert(&unit_to_device) else {
-            return; // A degenerate transform maps the image to nothing.
+        let draw = ImageDraw {
+            image: ImageSource {
+                width: image.width,
+                height: image.height,
+                rgb: &image.rgb,
+                alpha: &image.alpha,
+            },
+            unit_to_device,
+            alpha: state.fill_alpha,
+            blend: blend_mode(state.blend),
+            clip: self.clip.as_ref(),
+            tint,
+            stop: Some(&stop),
         };
-
-        // Only the pixels the unit square could cover need visiting.
-        let corners = [
-            unit_to_device.apply(0.0, 0.0),
-            unit_to_device.apply(1.0, 0.0),
-            unit_to_device.apply(0.0, 1.0),
-            unit_to_device.apply(1.0, 1.0),
-        ];
-        if corners
-            .iter()
-            .any(|(x, y)| !x.is_finite() || !y.is_finite())
-        {
-            return;
-        }
-        let xs = corners.iter().map(|(x, _)| *x);
-        let ys = corners.iter().map(|(_, y)| *y);
-        let x0 = xs.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
-        let x1 =
-            (xs.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(self.canvas.width);
-        let y0 = ys.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
-        let y1 =
-            (ys.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(self.canvas.height);
-
-        let alpha = state.fill_alpha.clamp(0.0, 1.0);
-        for py in y0..y1 {
-            if self.cancel.is_cancelled() {
-                return;
-            }
-            for px in x0..x1 {
-                // Sample at the pixel's centre.
-                let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
-                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-                    continue;
-                }
-
-                // Image rows run top-down; the unit square's v runs upward.
-                let sx = ((u * f64::from(image.width)) as u32).min(image.width - 1);
-                let sy = (((1.0 - v) * f64::from(image.height)) as u32).min(image.height - 1);
-                let index = (sy as usize)
-                    .saturating_mul(image.width as usize)
-                    .saturating_add(sx as usize);
-
-                let Some(rgb) = image.rgb.get(index * 3..index * 3 + 3) else {
-                    continue;
-                };
-                let coverage = image.alpha.get(index).copied().unwrap_or(255);
-                if coverage == 0 {
-                    continue;
-                }
-                let clip = self
-                    .clip
-                    .as_ref()
-                    .map_or(255, |mask| mask.at(px as i32, py as i32));
-                if clip == 0 {
-                    continue;
-                }
-
-                let effective = alpha * f64::from(coverage) / 255.0 * f64::from(clip) / 255.0;
-                // 8.9.6.2: a stencil selects where the *current fill colour*
-                // is painted; it has no colour of its own.
-                let color = if image.stencil {
-                    fill_color(state)
-                } else {
-                    Color::rgb(rgb[0], rgb[1], rgb[2])
-                };
-                self.canvas.blend_pixel_with(px, py, color, effective, mode);
-            }
-        }
+        draw_image(&mut self.canvas, &draw);
     }
 
     /// Converts interpreter path segments into a rasterizer path.
@@ -1111,6 +1062,22 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 }
 
 /// Inverts an affine transform, or `None` when it is degenerate.
+/// The same six numbers, in the rasterizer's spelling.
+///
+/// Two types for one matrix because the rasterizer may not name a PDF type
+/// (ruling 8) and the interpreter's `Matrix` is one. The conversion is a copy;
+/// nothing is recomputed, so a placement is bit-identical either side of it.
+fn transform(m: &Matrix) -> Transform {
+    Transform {
+        a: m.a,
+        b: m.b,
+        c: m.c,
+        d: m.d,
+        e: m.e,
+        f: m.f,
+    }
+}
+
 fn invert(m: &Matrix) -> Option<Matrix> {
     let determinant = m.a * m.d - m.b * m.c;
     if !determinant.is_finite() || determinant.abs() < 1e-12 {
