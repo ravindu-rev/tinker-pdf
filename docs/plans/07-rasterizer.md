@@ -149,6 +149,23 @@ pub enum Paint { Solid([u8; 4]) } // premultiplied RGBA; Gray targets take the R
 set; it is `Send` but not shared — one per worker, per the architecture's
 concurrency model ([00-architecture](00-architecture.md)).
 
+*Amended, August 2026 (gap [12](gaps/12-image-sampling.md)).* There is no
+`Rasterizer` type, no `Surface` and no `ClipStack`. The crate's entry points
+are free functions — `fill`, `stroke` and now `image::draw_image` — over a
+`Canvas` (which owns its pixels rather than borrowing them) with an optional
+`Mask` as the clip. So `draw_image` is
+
+```rust
+pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyramid)
+```
+
+where `ImageDraw` carries the `ImageSource`, the transform, `interpolate`,
+alpha, blend mode, clip, a tint and a stop predicate. The shape of the sketch
+above — bytes and a transform in, no PDF vocabulary — is what mattered and is
+what shipped; the type names are not the ones written here, and the scratch
+memory the sketch put on a `Rasterizer` is passed in per call instead, which is
+what "levels are returned to the caller" required anyway.
+
 ### Fill pipeline: analytic coverage, not supersampling
 
 The pipeline is transform → flatten → snap to a 24.8 fixed-point grid →
@@ -316,6 +333,27 @@ destination pixels through the inverse transform with a 16.16 fixed-point
 DDA — the inner loop is integer like every other inner loop here. Pyramid
 levels are returned to the caller for caching; 08 owns image caching policy,
 this crate stays stateless between calls.
+
+*Amended, August 2026 (gap [12](gaps/12-image-sampling.md)).* All four rows are
+built, and three details of this section are not what shipped.
+
+`ImageSource` is **straight** alpha, not premultiplied on ingest. `canvas.rs`
+documents straight alpha as the crate's one convention, and it is the
+convention `clear`, `encode` and `pixel` have always had; an image ingesting
+the other way round would have been the only premultiplied thing in the crate.
+
+Rotated and sheared placements do **not** use a 16.16 fixed-point DDA. The
+inverse transform is applied per destination pixel in `f64`, which is `+ - * /`
+only and therefore correctly rounded on every target — the property this
+section wanted, reached by the route the flattener already takes. Fixed point
+appears where this section did not put it: the bilinear weights are integers
+summing to 65 536, and the *policy* branches on a 16.16 ratio rather than on a
+float, which is what keeps the pyramid's level count from coming out one
+different on a 32-bit target.
+
+Levels are handed back through a `&mut Pyramid` the caller owns rather than
+returned by value. Same contract — nothing is retained between calls — with the
+allocation reusable across draws by whoever knows the image's identity.
 
 ### Compositing
 
