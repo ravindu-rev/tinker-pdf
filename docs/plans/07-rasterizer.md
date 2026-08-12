@@ -80,6 +80,14 @@ this document is where they become mechanisms.
   post-parity work in 08. Criterion benches exist from milestone 1 so the
   cost of this stance is measured, not guessed.
 
+  *Amended, August 2026 (gap [14](gaps/14-bounded-painting.md)).* There are no
+  criterion benches, in this crate or any other, and there never were — so
+  nothing measured the cost of anything, which is how three independent
+  O(canvas) layers survived to be found by reading. Gap 14's numbers were taken
+  with a throwaway harness outside the workspace. Standing one up in the
+  repository is not this gap's work, but the sentence above should not be read
+  as evidence that a cost is known.
+
 ## Design
 
 ### Coordinate contract and API shape
@@ -177,6 +185,31 @@ accumulation per cell in one defined order, rather than 16 subsamples whose
 summation an optimizer might be tempted to reorder. This is the same family
 of rasterizer MuPDF and FreeType use, which keeps our output in the visual
 neighborhood Tinker's users already accept.
+
+*Amended, August 2026 (gap [14](gaps/14-bounded-painting.md)).* The crate has
+never had a cell accumulator. `fill` samples each pixel row at **sixteen
+sub-scanlines**, sorts the crossings on each, and adds each span's exact
+overlap with each pixel column into a per-row `u16` accumulator in 1/256
+units — vertical resolution from the sample count, horizontal resolution
+exact. So the paragraph above describes the design that was rejected and the
+one that shipped the other way round, and the determinism argument it makes is
+about a mechanism this crate does not have.
+
+The property still holds, for a reason worth writing down rather than
+inheriting. Every step is integer: crossings are `i64` in 1/256 px, the span
+accumulator is `u16`, and the divide to 8 bits is integer. A span's
+contribution to a pixel is the exact integer measure of an interval, measure
+is additive, and the accumulator cannot saturate — sixteen sub-scanlines of at
+most 256 units each, against a ceiling of 65 535. That is what makes the sum
+independent of the order the spans arrive in, which is the thing gap 14's
+active-edge list needed and gap 14 verified: 400 000 mask comparisons between
+the exhaustive scan and the active list, byte-identical.
+
+The pipeline is also **bounded**. `fill` takes the device rectangle it is to
+produce and sweeps only the rows some edge reaches; the caller passes the
+path's bounding box intersected with the clip's, so a paint costs what it
+covers rather than what the page measures. The rectangle is in absolute device
+coordinates, which is the same mechanism the tile contract below needs.
 
 ### Dropout control
 

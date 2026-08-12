@@ -1497,6 +1497,81 @@ mod tests {
         }
     }
 
+    /// Renders onto a square page and reports how many mask pixels the paints
+    /// between them asked `fill` for.
+    fn mask_cost<G: GlyphSource>(content: &[u8], size: u32, glyphs: &G) -> (Canvas, u64) {
+        let canvas = Canvas::new(size, size, PixelFormat::Rgb8, Color::WHITE);
+        let base = page_transform(f64::from(size), 1.0);
+        let mut renderer = Renderer::new(canvas, base, glyphs);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &OneChar);
+        let cost = renderer.mask_pixels;
+        (renderer.finish().0, cost)
+    }
+
+    /// Milestone 4 of gap 14: the guard that makes a regression *fail*.
+    ///
+    /// Everything else in this gap is invisible to a test, by design — the
+    /// pixels are identical before and after, which is the whole point. So a
+    /// paint that went back to asking for the whole canvas would cost two
+    /// hundred times what it should and pass every assertion in the
+    /// repository, including the fingerprints. It would be found, eventually,
+    /// by somebody wondering why a page was slow.
+    ///
+    /// Each case draws a shape a few tens of pixels across on a page of four
+    /// million, through a different one of the four `fill` call sites, and
+    /// names the pixels it may ask for. A full-canvas call is 4 000 000, so
+    /// the budgets do not need to be tight to be decisive; they are tight
+    /// anyway, because a budget with room in it stops being a statement about
+    /// anything.
+    #[test]
+    fn a_small_fill_on_a_large_page_stays_small() {
+        const SIDE: u32 = 2000;
+        let whole_page = u64::from(SIDE) * u64::from(SIDE);
+
+        // (what it draws, which call site, the region it may ask for)
+        let cases: &[(&str, &[u8], u64)] = &[
+            // A 20 x 20 rectangle: 22 x 22 with the slack.
+            ("a fill", b"0 0 0 rg 10 10 20 20 re f", 484),
+            // A 20 px line stroked 4 wide, butt caps: 20 x 4 of outline plus
+            // the slack, so 22 x 6.
+            ("a stroke", b"4 w 10 10 m 30 10 l S", 140),
+            // The clip is its own fill, and the fill inside it is bounded by
+            // both: 22 x 22 for the clip, and the same again for the paint,
+            // which is why this one is twice the first.
+            (
+                "a clip and a fill inside it",
+                b"q 10 10 20 20 re W n 0 0 0 rg 0 0 2000 2000 re f Q",
+                968,
+            ),
+            // A glyph at 40 pt, filled: about 40 x 40 of em.
+            ("a glyph", b"BT /F0 40 Tf 10 10 Td (A) Tj ET", 1500),
+            // The same glyph filled *and* stroked (9.3.6 mode 2), which is
+            // two masks, the second slightly larger for the pen.
+            (
+                "a glyph filled and stroked",
+                b"BT /F0 40 Tf 2 Tr 1 w 10 10 Td (A) Tj ET",
+                2400,
+            ),
+        ];
+
+        for (name, content, budget) in cases {
+            let (canvas, cost) = mask_cost(content, SIDE, &ClosedThenCurved);
+            let ink = (0..SIDE)
+                .flat_map(|y| (0..SIDE).map(move |x| (x, y)))
+                .filter(|(x, y)| canvas.pixel(*x, *y) != Some(Color::WHITE))
+                .count();
+            assert!(ink > 20, "{name} painted almost nothing: {ink} pixels");
+            assert!(
+                cost <= *budget,
+                "{name} asked `fill` for {cost} mask pixels on a {SIDE}x{SIDE} \
+                 page, more than the {budget} it covers. A full-canvas paint \
+                 is {whole_page}: if this is that, the paint stopped bounding \
+                 itself and nothing else in the workspace will say so, because \
+                 the pixels are identical either way."
+            );
+        }
+    }
+
     #[test]
     fn page_pixels_round_outward() {
         // The A4-at-150-dpi case the previous engine left as folklore.
