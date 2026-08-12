@@ -552,6 +552,96 @@ trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// The samples of the image fixture: 32 x 32, three bytes each.
+///
+/// A ramp across in red and down in green, and a quadratic scramble in blue.
+/// The ramps are what a filter has to interpolate smoothly; the blue is what
+/// it has to *average*, and it is neither periodic nor linear on purpose.
+///
+/// Both of the obvious choices are traps, and the first one was written here
+/// before it was measured. A **linear** ramp is reproduced exactly by box
+/// averaging and by bilinear taps alike, at any pyramid depth, so a page of
+/// gradients cannot tell one depth from another. A **checkerboard** is worse:
+/// every balanced two-tap average of one is its mean, so a pyramid one level
+/// short lands on the same bytes as a correct one. Both were confirmed by
+/// injecting exactly that defect and watching the fingerprint not move.
+///
+/// A quadratic has a different mean over every window, which is the property
+/// that makes the depth visible. No sample is white, so every pixel the image
+/// covers counts as ink.
+fn image_samples() -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(32 * 32 * 3);
+    for y in 0..32u32 {
+        for x in 0..32u32 {
+            let blue = (x * x * 7 + y * y * 13 + x * y * 29) % 256;
+            rgb.extend_from_slice(&[(x * 8) as u8, (y * 8) as u8, blue as u8]);
+        }
+    }
+    rgb
+}
+
+/// Those samples as `ASCIIHexDecode` text, so the whole fixture is a `str`.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2 + 1);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out.push('>');
+    out
+}
+
+/// Image sampling: every row of the policy matrix, on one page.
+///
+/// *Added August 2026, with gap 12.* No fixture here drew an image at all
+/// before this, so none of them would have moved if sampling had changed —
+/// and sampling had never been anything but one truncating tap per
+/// destination pixel. That is the failure mode this file's own documentation
+/// describes: a fingerprint is not evidence about a path no fixture reaches.
+///
+/// Six placements of the same 32 x 32 samples, one per branch the sampler can
+/// take:
+///
+/// - **magnified without `/Interpolate`** — nearest, the row that looks wrong
+///   and is not: 32 samples into 40 pixels, hard sample edges preserved;
+/// - **magnified with it** — bilinear, the same placement of `/Im1`, which
+///   differs from `/Im0` in that one key;
+/// - **shrunk within 2:1** — bilinear whatever the flag says, 32 samples into
+///   20 pixels;
+/// - **shrunk 4:1** — one halving per axis, then the taps;
+/// - **shrunk 8:1** — two, because one pyramid depth cannot demonstrate that
+///   the depth is chosen rather than assumed;
+/// - **rotated and magnified** — a placement whose inverse transform has all
+///   four coefficients, so the `u`/`v` mapping cannot be right by accident of
+///   an axis-aligned test.
+fn image_page() -> Vec<u8> {
+    let content = "q 40 0 0 40 5 75 cm /Im0 Do Q\n\
+                   q 40 0 0 40 50 75 cm /Im1 Do Q\n\
+                   q 20 0 0 20 95 90 cm /Im0 Do Q\n\
+                   q 8 0 0 8 120 92 cm /Im0 Do Q\n\
+                   q 4 0 0 4 140 100 cm /Im0 Do Q\n\
+                   q 28.284271 28.284271 -28.284271 28.284271 40 15 cm /Im1 Do Q";
+    let samples = hex(&image_samples());
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 160 120]\n\
+   /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 32 /Height 32\n\
+   /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode\n\
+   /Length {} >>\nstream\n{samples}\nendstream\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Image /Width 32 /Height 32\n\
+   /ColorSpace /DeviceRGB /BitsPerComponent 8 /Interpolate true\n\
+   /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        samples.len(),
+        samples.len()
+    )
+    .into_bytes()
+}
+
 /// Blend modes, whose integer arithmetic is new and whose whole reason for
 /// being integer is this property.
 fn blend_page() -> Vec<u8> {
@@ -629,6 +719,15 @@ const GOLDEN: &[Fixture] = &[
         build: optional_content_page,
         least_ink: 2400,
     },
+    // 5262 today, out of 19 200. The five placements are disjoint, so this
+    // floor is also a guard against one of them silently drawing nothing:
+    // losing the rotated placement or either of the two magnified ones takes
+    // the page below it.
+    Fixture {
+        name: "image",
+        build: image_page,
+        least_ink: 2600,
+    },
 ];
 
 #[test]
@@ -676,6 +775,14 @@ fn rendering_is_stable_across_targets() {
         (
             "optional",
             "e0f2bc33f56dcb85beb7a1770f9cb33e22a1a2cdba1cbb4b838be656370035a1",
+        ),
+        // Added August 2026 with gap 12. No existing fixture drew an image,
+        // so the whole of image sampling — every row of the policy matrix,
+        // the bilinear weights and the pyramid — was outside what this file
+        // measured.
+        (
+            "image",
+            "8cca4e2c1380f630e1c85da93b3a6add4349156d704adbffca7d45d917244f38",
         ),
     ];
     assert_eq!(
