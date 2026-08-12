@@ -47,7 +47,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 | # | Plan | What goes wrong today | Size |
 | --- | --- | --- | --- |
 | 12 | [Image sampling](12-image-sampling.md) | Nearest-neighbour only, in the wrong crate, `/Interpolate` never read | M |
-| 13 | [Quadratic path verb](13-quadratic-path-verb.md) | TrueType quadratics are up-converted to cubics | S |
+| 13 | [Quadratic path verb](13-quadratic-path-verb.md) | ~~TrueType quadratics are up-converted to cubics~~ **DONE**, see the plan's `As built`: `Verb::QuadTo`, `Path::quad_to`, a quadratic arm in the flattener, and `show_glyph` emitting quadratics with the up-conversion and its current-point helper deleted. The plan's Design paragraph asks for recursive de Casteljau subdivision with a flatness test; the cubic arm is not that and never was, and a termination test on a float comparison is the thing ruling 4 exists to keep off a pixel path, so both this plan and plan 07 are amended. The quadratic's step count is measured through the cubic it is equal to, which is what makes the two arms agree segment for segment rather than merely within tolerance. The latent after-close bug was real and reachable through `GlyphSource`: demonstrated first at **138 of 1600 pixels wrong**, then byte-identical to the same curve drawn as a cubic. **Moves the `text` fingerprint** — 7 of 20 000 pixels, one level each, ink count and bounding box unchanged, and wasm32 agreed with x86_64 on the new value before the table was touched | S |
 | 14 | [Bounded painting](14-bounded-painting.md) | Every paint is O(canvas). One full-page mask per glyph | M |
 | 15 | [Cancellation](15-cancellation.md) | One `fill()` cannot be interrupted, whatever its size | S |
 

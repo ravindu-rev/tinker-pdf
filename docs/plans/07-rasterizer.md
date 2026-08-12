@@ -18,6 +18,21 @@ this document is where they become mechanisms.
   points. Quadratics are first-class, not up-converted — TrueType glyph
   outlines are quadratic and up-conversion adds float work and error for
   nothing.
+
+  *Amended, August 2026 (gap [13](gaps/13-quadratic-path-verb.md)).* The verb
+  set now matches: `Verb::QuadTo` exists, `Path::quad_to` builds one, the
+  flattener has a quadratic arm and `show_glyph` emits quadratics rather than
+  raising them. The cubic verb is spelled `CurveTo` rather than `CubicTo`, and
+  each verb carries its own points instead of indexing a parallel array — a
+  naming and layout difference, not a behavioural one.
+
+  **`Point` is `f64`, not `f32`, and this plan is the thing that is out of
+  date.** Every other piece of geometry in the tree is `f64`, the fill
+  accumulator included, so narrowing the path model alone would add two
+  conversions per point on the hottest path to save memory nothing is short
+  of. Changing it is a decision with consequences for the accumulator and is
+  explicitly out of gap 13's scope; until someone takes it, this line is
+  aspiration and the code is fact.
 - Bezier flattening with adaptive tolerance in device space.
 - Fills under both PDF rules — nonzero winding (32000-1 §8.5.3.3.2) and
   even-odd (§8.5.3.3.3) — via scanline analytic-coverage antialiasing.
@@ -133,6 +148,18 @@ cell accumulation → scanline sweep → composite. Flattening is adaptive
 recursive subdivision with a device-space tolerance of 0.25 px (criterion:
 maximum control-point deviation from the chord), depth-capped so a
 pathological curve cannot recurse unboundedly.
+
+*Amended, August 2026 (gap [13](gaps/13-quadratic-path-verb.md)).* Flattening
+is adaptive but it is not recursive. Both subdividers take a fixed step count
+from the control polygon's length — `ceil(sqrt(polygon / tolerance) * 1.5)`,
+clamped to 512 — and sample the curve at evenly spaced parameters. The
+recursive form was rejected under ruling 4, not on cost: a recursive
+subdivider stops on a floating-point comparison, and a comparison that lands
+differently on a 32-bit target than on a 64-bit one produces a different
+number of segments rather than a slightly different one. A fixed count derived
+from correctly-rounded arithmetic cannot do that, and the step cap replaces
+the depth cap. The quadratic arm measures its polygon through the cubic it is
+equal to, so the same curve gets the same count whichever verb carries it.
 
 Coverage is computed analytically, FreeType-smooth style: each flattened edge
 walks the pixel grid accumulating per-cell `(cover, area)` pairs in `i32` —

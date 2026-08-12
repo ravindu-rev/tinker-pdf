@@ -637,12 +637,21 @@ fn rendering_is_stable_across_targets() {
     // check below is there because an empty table would make this test pass
     // by not looking at anything.
     let expected: &[(&str, &str)] = &[
-        // Moved in August 2026: the old value was the hash of a blank page,
-        // because the fixture named a standard-14 font and embedded no
-        // outlines for the engine to draw.
+        // Moved twice in August 2026. First because the old value was the hash
+        // of a blank page, the fixture having named a standard-14 font and
+        // embedded no outlines for the engine to draw.
+        //
+        // Then with gap 13, which made the quadratic a path verb of its own:
+        // four of this face's six shapes carry off-curve points, and every one
+        // of them used to be raised to a cubic before it was flattened. The
+        // curve is the same curve either way, so the move is small and it is
+        // arithmetic only — 7 of 20 000 pixels, each by exactly one level of
+        // 255 on all three channels, with the ink count and the ink bounding
+        // box unchanged. wasm32 and x86_64 agreed on the new value, which is
+        // what says this is a rendering change and not a determinism bug.
         (
             "text",
-            "98c3e73c83e08654f2d6076aefbe0786be1dd73f3013ca6c9f52fe5d5ed494ee",
+            "b0bc9383d116d84d7a104afc67b3d5dc8e727323ba30262f67121a32b89004c2",
         ),
         (
             "curves",

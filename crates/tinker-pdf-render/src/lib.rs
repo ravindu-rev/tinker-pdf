@@ -827,19 +827,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     path.line_to(x, y);
                 }
                 Segment::QuadTo { cx, cy, x, y } => {
-                    // A quadratic raised to a cubic: the two control points sit
-                    // two thirds of the way from each end toward the control.
-                    let (px, py) = last_point(&path).unwrap_or_else(|| combined.apply(x, y));
+                    // Straight through, as the curve the font wrote. Raising
+                    // it to a cubic here needed the current point, and the
+                    // path is the wrong place to ask: after a `Close` the last
+                    // verb carries no point, and the pen is back at the start
+                    // of the subpath rather than anywhere the verbs say.
                     let (cx, cy) = combined.apply(cx, cy);
                     let (x, y) = combined.apply(x, y);
-                    path.curve_to(
-                        px + 2.0 / 3.0 * (cx - px),
-                        py + 2.0 / 3.0 * (cy - py),
-                        x + 2.0 / 3.0 * (cx - x),
-                        y + 2.0 / 3.0 * (cy - y),
-                        x,
-                        y,
-                    );
+                    path.quad_to(cx, cy, x, y);
                 }
                 Segment::CurveTo {
                     c1x,
@@ -1053,15 +1048,6 @@ fn invert(m: &Matrix) -> Option<Matrix> {
         e: (m.c * m.f - m.d * m.e) * inv,
         f: (m.b * m.e - m.a * m.f) * inv,
     })
-}
-
-fn last_point(path: &Path) -> Option<(f64, f64)> {
-    use tinker_pdf_raster::geom::Verb;
-    match path.verbs().last()? {
-        Verb::MoveTo(p) | Verb::LineTo(p) => Some((p.x, p.y)),
-        Verb::QuadTo(_, p) | Verb::CurveTo(_, _, p) => Some((p.x, p.y)),
-        Verb::Close => None,
-    }
 }
 
 /// The transform from PDF user space to a device of the given size.
@@ -1765,6 +1751,144 @@ mod tests {
             "the lower left arm"
         );
         assert_eq!(canvas.pixel(20, 4), Some(Color::WHITE), "and nothing above");
+    }
+
+    // -----------------------------------------------------------------------
+    // Quadratic glyph outlines (gap 13).
+    // -----------------------------------------------------------------------
+
+    /// A glyph whose second contour opens with a quadratic straight after a
+    /// close, which is the case the deleted current-point helper got wrong.
+    ///
+    /// A close returns the pen to where the subpath began, so the curve runs
+    /// from (0.05, 0.05) through the control at (0.05, 0.95) to (0.95, 0.05):
+    /// an arch leaning hard against the left edge of the em. The tiny triangle
+    /// exists only to put a `Close` in front of the curve; it lies inside the
+    /// arch and is wound the same way, so under the non-zero rule it adds no
+    /// ink and takes none away. Wound the other way it punches a hole, which
+    /// is how the first draft of this fixture was written and what the
+    /// comparison below caught.
+    struct ClosedThenCurved;
+
+    impl GlyphSource for ClosedThenCurved {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            use tinker_pdf_font::Segment;
+            Some(Outline {
+                segments: vec![
+                    Segment::MoveTo { x: 0.05, y: 0.05 },
+                    Segment::LineTo { x: 0.12, y: 0.09 },
+                    Segment::LineTo { x: 0.12, y: 0.05 },
+                    Segment::Close,
+                    Segment::QuadTo {
+                        cx: 0.05,
+                        cy: 0.95,
+                        x: 0.95,
+                        y: 0.05,
+                    },
+                    Segment::Close,
+                ],
+            })
+        }
+    }
+
+    fn glyph_canvas() -> Canvas {
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &ClosedThenCurved);
+        interpret(
+            b"BT /F0 40 Tf 0 0 Td (A) Tj ET",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &OneChar,
+        );
+        renderer.finish().0
+    }
+
+    fn painted(canvas: &Canvas) -> usize {
+        (0..40)
+            .flat_map(|y| (0..40).map(move |x| (x, y)))
+            .filter(|(x, y)| canvas.pixel(*x, *y) != Some(Color::WHITE))
+            .count()
+    }
+
+    /// Milestone 2 of gap 13, and the reason the verb removes a bug rather
+    /// than only some arithmetic.
+    ///
+    /// `show_glyph` used to raise each quadratic to a cubic itself, which
+    /// needs the current point, which it looked up from the last verb already
+    /// on the path. After a `Close` there is no such verb, and it fell back to
+    /// the curve's *own* endpoint — so both control points collapsed onto one
+    /// another and the arch leaned right instead of left.
+    ///
+    /// The probe is where the two shapes are furthest apart — nine pixels, at
+    /// device x = 4. The arch this outline describes tops out there at
+    /// y = 24.3 and the one the fallback produced at y = 33.3, so device
+    /// (4, 28) is four pixels inside the first and five pixels above the
+    /// second. It was white before this change.
+    #[test]
+    fn a_glyph_quadratic_after_a_close_starts_at_the_subpath_start() {
+        let canvas = glyph_canvas();
+
+        assert_ne!(
+            canvas.pixel(4, 28),
+            Some(Color::WHITE),
+            "the arch leans against the left of the em, so this column is \
+             filled from y = 24 down to the baseline"
+        );
+        // Both shapes cover this one, so a glyph that drew nothing at all
+        // cannot pass the assertion above by drawing nothing here either.
+        assert_ne!(
+            canvas.pixel(4, 36),
+            Some(Color::WHITE),
+            "close to the chord, which both readings of the curve fill"
+        );
+        assert_eq!(
+            canvas.pixel(30, 10),
+            Some(Color::WHITE),
+            "and well above the arch, nothing"
+        );
+    }
+
+    /// The same shape written as an explicit cubic in a content stream: start
+    /// (2, 2), control points two thirds of the way toward (2, 38), end
+    /// (38, 2). If the glyph path and this one do not agree, the quadratic arm
+    /// of the flattener and the cubic arm have drifted apart — which is what
+    /// gives one typeface two smoothness characters.
+    #[test]
+    fn a_quadratic_glyph_matches_the_same_curve_drawn_as_a_cubic() {
+        let glyph = glyph_canvas();
+        let (reference, _) = render(b"2 2 m 2 26 14 26 38 2 c h f", 40);
+
+        assert_eq!(
+            painted(&glyph),
+            painted(&reference),
+            "the two cover the same pixels"
+        );
+
+        let mut differing = 0usize;
+        let mut worst = 0u8;
+        for y in 0..40 {
+            for x in 0..40 {
+                let (Some(a), Some(b)) = (glyph.pixel(x, y), reference.pixel(x, y)) else {
+                    continue;
+                };
+                if a != b {
+                    differing += 1;
+                    for (p, q) in [(a.r, b.r), (a.g, b.g), (a.b, b.b)] {
+                        worst = worst.max(p.abs_diff(q));
+                    }
+                }
+            }
+        }
+        // Byte for byte, not within a budget. The two evaluations are the same
+        // algebraic expression over `+ - * /`, which IEEE 754 rounds
+        // identically on every target and which the `mul_add` ban keeps an
+        // optimizer from contracting, so agreeing here means agreeing on all
+        // four. Before the up-conversion was deleted, 138 of these 1600 pixels
+        // differed.
+        assert_eq!(
+            differing, 0,
+            "{differing} of 1600 pixels differ, the worst by {worst} levels"
+        );
     }
 
     #[test]
