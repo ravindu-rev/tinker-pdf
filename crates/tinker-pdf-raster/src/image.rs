@@ -183,6 +183,7 @@ fn fixed_ratio(samples: f64, device: f64) -> u64 {
 /// | --- | --- |
 /// | Scale >= 1 per axis, `interpolate` true | Bilinear |
 /// | Scale >= 1 per axis, `interpolate` false | Nearest |
+/// | Downscale | Bilinear |
 ///
 /// The debatable row is nearest at or above 1:1 without the flag, and it is
 /// deliberate. `/Interpolate` is defined as opt-*in* smoothing for magnified
@@ -190,6 +191,13 @@ fn fixed_ratio(samples: f64, device: f64) -> u64 {
 /// screenshot, an upscaled one-bit mask — and blurring them is a change the
 /// file asked not to have. It also keeps a 1:1 blit byte-preserving, which is
 /// a property the tile contract leans on.
+///
+/// **The flag has no say on the way down.** It is defined for magnification,
+/// and a shrunk image that takes one tap per destination pixel does not keep
+/// hard edges — it keeps whichever of the source pixels the sampling grid
+/// happened to land on and throws the rest away. That is not the sharpness the
+/// author asked for, it is aliasing, and it is a difference against every
+/// other renderer rather than a matter of taste.
 #[must_use]
 pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -> Filter {
     let (across, down) = sample_ratios(image, t);
@@ -201,7 +209,7 @@ pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -
             Filter::Nearest
         };
     }
-    Filter::Nearest
+    Filter::Bilinear
 }
 
 /// One image draw: the pixels, where they go, and how they compose.
@@ -643,6 +651,140 @@ mod tests {
             let sample = bilinear(&image, u, u).expect("on the image");
             assert_eq!(sample, (255, 255, 255, 255), "at u = {u}");
         }
+    }
+
+    /// A horizontal ramp: `steps` samples one row tall, rising by `rise` a
+    /// sample.
+    fn gradient(steps: u32, rise: u8) -> Vec<u8> {
+        let mut rgb = Vec::new();
+        for x in 0..steps {
+            let value = (x as u8).wrapping_mul(rise);
+            rgb.extend_from_slice(&[value, value, value]);
+        }
+        rgb
+    }
+
+    /// The largest jump between neighbouring values.
+    fn max_step(values: &[u8]) -> u8 {
+        values
+            .windows(2)
+            .map(|pair| pair[1].abs_diff(pair[0]))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Milestone 3: an upscaled gradient has no stair-steps.
+    ///
+    /// "No stair-steps" is a measurement, not an impression: the largest jump
+    /// between neighbouring output pixels. Sixteen device pixels per source
+    /// sample, so a filter that interpolates cannot step by more than one
+    /// sixteenth of the source's own step, and one that does not must step by
+    /// the whole of it.
+    #[test]
+    fn magnifying_a_gradient_leaves_no_stair_steps() {
+        let rgb = gradient(8, 32);
+        let image = ImageSource {
+            width: 8,
+            height: 1,
+            rgb: &rgb,
+            alpha: &[],
+        };
+
+        let row = |interpolate: bool| {
+            let mut canvas = Canvas::new(128, 1, PixelFormat::Rgb8, Color::WHITE);
+            let mut draw = ImageDraw::new(
+                image,
+                Transform {
+                    a: 128.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: -1.0,
+                    e: 0.0,
+                    f: 1.0,
+                },
+            );
+            draw.interpolate = interpolate;
+            draw_image(&mut canvas, &draw);
+            canvas.data.iter().step_by(3).copied().collect::<Vec<u8>>()
+        };
+
+        assert_eq!(
+            max_step(&row(false)),
+            32,
+            "nearest steps by the source's whole step: that is the stair"
+        );
+        assert_eq!(
+            max_step(&row(true)),
+            2,
+            "bilinear steps by the source step over the magnification, 32/16"
+        );
+    }
+
+    /// Milestone 3: a 2:1 downscale keeps its midtones.
+    ///
+    /// A one-sample checkerboard halved is the case that makes the point: its
+    /// mean is 127.5 and every pixel of it is 0 or 255, so a sampler that
+    /// takes one tap returns a page of whichever phase its grid landed on and
+    /// reports the mean of *that*.
+    #[test]
+    fn a_two_to_one_downscale_keeps_its_midtones() {
+        let mut rgb = Vec::new();
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+                rgb.extend_from_slice(&[value, value, value]);
+            }
+        }
+        let image = ImageSource {
+            width: 16,
+            height: 16,
+            rgb: &rgb,
+            alpha: &[],
+        };
+
+        // 16 samples into 8 device pixels: exactly 2:1, the last row of the
+        // policy that is still plain bilinear.
+        assert_eq!(sampling_for(&image, &over(8.0), false), Filter::Bilinear);
+
+        let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut canvas, &ImageDraw::new(image, over(8.0)));
+        let values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
+
+        let mean = values.iter().map(|v| u32::from(*v)).sum::<u32>() / values.len() as u32;
+        assert_eq!(mean, 128, "the midtone survives: mean {mean}");
+        let (low, high) = (
+            *values.iter().min().expect("pixels"),
+            *values.iter().max().expect("pixels"),
+        );
+        assert_eq!(
+            (low, high),
+            (128, 128),
+            "and every pixel is that midtone rather than one phase of the \
+             checkerboard: {low}..{high}"
+        );
+    }
+
+    /// The flag is about magnification. On the way down there is no sharpness
+    /// to preserve, only samples to drop, so the policy does not consult it.
+    #[test]
+    fn a_downscale_ignores_the_interpolate_flag() {
+        let rgb = gradient(16, 16);
+        let image = ImageSource {
+            width: 16,
+            height: 1,
+            rgb: &rgb,
+            alpha: &[],
+        };
+        let squash = Transform {
+            a: 8.0,
+            b: 0.0,
+            c: 0.0,
+            d: -1.0,
+            e: 0.0,
+            f: 1.0,
+        };
+        assert_eq!(sampling_for(&image, &squash, false), Filter::Bilinear);
+        assert_eq!(sampling_for(&image, &squash, true), Filter::Bilinear);
     }
 
     #[test]
