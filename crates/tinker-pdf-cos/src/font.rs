@@ -1,9 +1,16 @@
 //! Reading font dictionaries (9.5–9.8).
 //!
 //! This is the join between a PDF font dictionary and the leaf font crate: it
-//! decides, for every byte a content stream shows, which code it is, how wide
-//! that code is, and what character it means. Nothing here parses a font
-//! program — that is `tinker-pdf-font`'s job, and it never sees a COS type.
+//! decides, for every byte a content stream shows, which code it is, which
+//! CID and glyph that code selects, how wide it is, and what character it
+//! means. Nothing here parses a font program — that is `tinker-pdf-font`'s
+//! job, and it never sees a COS type.
+//!
+//! `/CIDToGIDMap` is read here rather than in the leaf crate for the same
+//! reason (ruling 8): it is an entry in a PDF font dictionary, so a font
+//! parser that knew about it would have learned PDF vocabulary. The leaf
+//! crate is handed a glyph index and asked for an outline, which is a
+//! question about a font program and nothing else.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +40,23 @@ pub enum FontKind {
 pub struct DecodedCode {
     /// The character code, as the CMap or byte gave it.
     pub code: u32,
+    /// The CID this code selects, through the encoding CMap (9.7.4).
+    ///
+    /// A composite font's code is a byte sequence its CMap turns into a CID,
+    /// and the CID — not the code — is what selects both the advance and the
+    /// glyph. Until August 2026 only the advance was told: this field exists
+    /// so that a caller holding one holds the other, because the two reading
+    /// different numbers is what made a CJK page lay out perfectly and draw
+    /// the wrong characters.
+    ///
+    /// For a simple font, and for a composite font whose CMap does not map
+    /// the code, this is the code. For `Identity-H` it is *also* the code, by
+    /// definition, which is why carrying it cannot move the common case.
+    ///
+    /// It comes from [`Font::cid_of`], which is the same call
+    /// [`Font::width_of`] makes, so the width and the glyph cannot disagree
+    /// about which CID they are talking about.
+    pub cid: u32,
     /// How many bytes the code occupied.
     pub bytes: u8,
     /// The advance in text-space units (1/1000 em).
@@ -70,6 +94,11 @@ pub struct Font {
     /// Composite fonts: `/W` widths by CID, and `/DW`'s default.
     cid_widths: HashMap<u32, f64>,
     default_width: f64,
+    /// Composite fonts: `/CIDToGIDMap` as a stream of two-byte GIDs (9.7.4.2).
+    ///
+    /// `None` covers `/Identity`, an absent entry, and anything unreadable —
+    /// all three mean the CID is the glyph index.
+    cid_to_gid: Option<Vec<u8>>,
     /// A standard face's built-in metrics, when the font names one and gives
     /// no widths of its own.
     standard: Option<Standard14>,
@@ -121,6 +150,7 @@ impl Font {
                 let (width, exact) = self.width_of(code);
                 DecodedCode {
                     code,
+                    cid: self.cid_of(code),
                     bytes: len,
                     width,
                     text: self.text_of(code),
@@ -140,6 +170,47 @@ impl Font {
             .as_ref()
             .and_then(|c| c.cid(code))
             .unwrap_or(code)
+    }
+
+    /// The glyph a CID selects in a TrueType-backed descendant (9.7.4.2).
+    ///
+    /// `/CIDToGIDMap` is either `/Identity` — where the CID *is* the glyph
+    /// index — or a stream of two-byte big-endian glyph indices indexed by
+    /// CID. A subsetter writes the stream form because subsetting renumbers
+    /// glyphs and the CIDs must not move with them, which is why almost every
+    /// embedded CJK font in the wild has a non-identity map and why reading
+    /// the CID without reading this would draw a *different* wrong glyph.
+    ///
+    /// A CID the stream does not reach is glyph 0, `.notdef`: the map is
+    /// exhaustive by construction, so a CID it does not name is one the font
+    /// does not have. Never a wrap and never a panic — the index is
+    /// document-controlled (ruling 1).
+    ///
+    /// Only a CIDFontType2 has such a map; a CID-keyed CFF resolves its CID
+    /// through the charset instead, and a caller on that path must not ask.
+    #[must_use]
+    pub fn gid_for_cid(&self, cid: u32) -> u16 {
+        let Some(table) = self.cid_to_gid.as_ref() else {
+            // /Identity: a CID past what a glyph index can hold names no
+            // glyph, so it is `.notdef` rather than the low sixteen bits.
+            return u16::try_from(cid).unwrap_or(0);
+        };
+        let at = (cid as usize).saturating_mul(2);
+        match (table.get(at), table.get(at + 1)) {
+            (Some(hi), Some(lo)) => u16::from_be_bytes([*hi, *lo]),
+            _ => 0,
+        }
+    }
+
+    /// Whether `/CIDToGIDMap` was a stream rather than `/Identity`.
+    ///
+    /// Exposed because "the CID is the glyph" and "the CID indexes a table
+    /// that happens to be the identity" are the same picture and different
+    /// documents, and a test that cannot tell them apart proves nothing about
+    /// which one was read.
+    #[must_use]
+    pub fn has_cid_to_gid_map(&self) -> bool {
+        self.cid_to_gid.is_some()
     }
 
     /// The glyph name the *document* gives a code, where it gives one.
@@ -258,6 +329,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         to_unicode: read_to_unicode(doc, dict),
         cid_widths: HashMap::new(),
         default_width: 1000.0,
+        cid_to_gid: None,
         standard: None,
         vertical: false,
         symbolic: false,
@@ -452,6 +524,21 @@ fn read_composite(doc: &CosDocument, dict: &Dict, font: &mut Font) {
                 }
                 None => break,
             }
+        }
+    }
+
+    // 9.7.4.2: /CIDToGIDMap is /Identity or a stream, and only a stream is an
+    // indirect reference — the name form and an absent entry both mean the
+    // identity, which is what `None` here stands for. A reference that does
+    // not decode is the identity too: a font that draws its glyphs off by an
+    // unknown permutation would be worse than one that draws them in order.
+    if let Some(reference) = cid_font.get_ref(doc.intern(b"CIDToGIDMap")) {
+        if let Ok(mut bytes) = doc.stream_decoded(reference) {
+            // The table is indexed by a CID and yields a two-byte glyph
+            // index, so nothing past CID 65535 can ever be looked up. A
+            // hostile stream is truncated rather than held whole.
+            bytes.truncate((usize::from(u16::MAX) + 1) * 2);
+            font.cid_to_gid = Some(bytes);
         }
     }
 
