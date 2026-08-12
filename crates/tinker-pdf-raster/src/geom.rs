@@ -32,6 +32,12 @@ pub enum Verb {
     MoveTo(Point),
     /// A straight segment.
     LineTo(Point),
+    /// A quadratic Bézier, with its single control point and its end.
+    ///
+    /// First class, not raised to a cubic: every TrueType glyph outline is
+    /// quadratic, so the up-conversion would run on the hottest path in the
+    /// engine and pay for a control point the curve does not have.
+    QuadTo(Point, Point),
     /// A cubic Bézier, with its two control points and its end.
     CurveTo(Point, Point, Point),
     /// Close the current subpath.
@@ -73,6 +79,11 @@ impl Path {
         self.push(Verb::LineTo(Point::new(x, y)));
     }
 
+    /// Adds a quadratic Bézier.
+    pub fn quad_to(&mut self, cx: f64, cy: f64, x: f64, y: f64) {
+        self.push(Verb::QuadTo(Point::new(cx, cy), Point::new(x, y)));
+    }
+
     /// Adds a cubic Bézier.
     pub fn curve_to(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) {
         self.push(Verb::CurveTo(
@@ -109,6 +120,7 @@ impl Path {
         // verb keeps the rest of the path usable.
         let finite = match verb {
             Verb::MoveTo(p) | Verb::LineTo(p) => p.is_finite(),
+            Verb::QuadTo(c, p) => c.is_finite() && p.is_finite(),
             Verb::CurveTo(a, b, c) => a.is_finite() && b.is_finite() && c.is_finite(),
             Verb::Close => true,
         };
@@ -130,6 +142,10 @@ impl Path {
         for verb in &self.verbs {
             match *verb {
                 Verb::MoveTo(p) | Verb::LineTo(p) => add(p),
+                Verb::QuadTo(c, p) => {
+                    add(c);
+                    add(p);
+                }
                 Verb::CurveTo(a, b, c) => {
                     add(a);
                     add(b);
@@ -187,6 +203,13 @@ pub fn flatten(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
                 current.push(p);
                 cursor = p;
             }
+            Verb::QuadTo(c, end) => {
+                if current.is_empty() {
+                    current.push(cursor);
+                }
+                subdivide_quadratic(cursor, c, end, tolerance, &mut current);
+                cursor = end;
+            }
             Verb::CurveTo(c1, c2, end) => {
                 if current.is_empty() {
                     current.push(cursor);
@@ -212,19 +235,50 @@ pub fn flatten(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     out
 }
 
+/// How many segments a curve whose control polygon is `polygon` long needs.
+///
+/// The control polygon's length bounds the arc length, and the number of
+/// segments needed grows with its square root. Shared by both subdividers, so
+/// a curve cannot be flattened more finely because of which verb describes it.
+fn steps_for(polygon: f64, tolerance: f64) -> u32 {
+    let steps = ((polygon / tolerance).sqrt() * 1.5).ceil();
+    steps.clamp(1.0, 512.0) as u32
+}
+
+/// Appends a flattened quadratic, excluding its start point.
+fn subdivide_quadratic(p0: Point, p1: Point, p2: Point, tolerance: f64, out: &mut Vec<Point>) {
+    // Measured through the cubic this quadratic is equal to — control points
+    // two thirds of the way from each end toward `p1`. That cubic's polygon is
+    // `2/3` of each leg plus a third of the chord, and using it rather than the
+    // quadratic's own two legs is what makes the two arms agree: the same
+    // curve gets the same step count whichever verb carries it, so a glyph
+    // does not change smoothness where a font happens to switch from
+    // quadratics to cubics.
+    let polygon = 2.0 / 3.0 * (distance(p0, p1) + distance(p1, p2)) + distance(p0, p2) / 3.0;
+    if !polygon.is_finite() || polygon <= tolerance {
+        out.push(p2);
+        return;
+    }
+
+    let steps = steps_for(polygon, tolerance);
+    for i in 1..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        let u = 1.0 - t;
+        let x = u * u * p0.x + 2.0 * u * t * p1.x + t * t * p2.x;
+        let y = u * u * p0.y + 2.0 * u * t * p1.y + t * t * p2.y;
+        out.push(Point::new(x, y));
+    }
+}
+
 /// Appends a flattened cubic, excluding its start point.
 fn subdivide(p0: Point, p1: Point, p2: Point, p3: Point, tolerance: f64, out: &mut Vec<Point>) {
-    // The control polygon's length bounds the arc length, and the number of
-    // segments needed grows with its square root.
     let polygon = distance(p0, p1) + distance(p1, p2) + distance(p2, p3);
     if !polygon.is_finite() || polygon <= tolerance {
         out.push(p3);
         return;
     }
 
-    let steps = ((polygon / tolerance).sqrt() * 1.5).ceil();
-    let steps = steps.clamp(1.0, 512.0) as u32;
-
+    let steps = steps_for(polygon, tolerance);
     for i in 1..=steps {
         let t = f64::from(i) / f64::from(steps);
         let u = 1.0 - t;
@@ -289,6 +343,161 @@ mod tests {
             assert_eq!(poly.first().copied(), Some(Point::new(0.0, 0.0)));
             assert_eq!(poly.last().copied(), Some(Point::new(100.0, 0.0)));
         }
+    }
+
+    /// Every quadratic in these tests, as start, control and end.
+    const QUADRATICS: &[[(f64, f64); 3]] = &[
+        // A symmetric arch, which is what most glyph curves are.
+        [(0.0, 0.0), (50.0, 100.0), (100.0, 0.0)],
+        // Asymmetric, so a subdivider that folded the wrong way shows.
+        [(3.5, 7.25), (90.0, 4.0), (12.0, 60.5)],
+        // The control point on the chord: the curve is a straight line, and
+        // the two arms must still agree about how many pieces it is in.
+        [(0.0, 0.0), (25.0, 25.0), (100.0, 100.0)],
+        // A cusp: the control point behind the start, so the curve doubles
+        // back on itself.
+        [(10.0, 10.0), (-40.0, 10.0), (30.0, 10.0)],
+        // Smaller than any sane tolerance, which takes the early return.
+        [(1.0, 1.0), (1.02, 1.01), (1.04, 1.0)],
+        // Far from the origin, where the absolute float spacing is coarse.
+        [(8000.0, -6000.0), (8300.5, -5800.25), (8600.0, -6000.0)],
+        // Steep enough to need the step cap.
+        [(0.0, 0.0), (4000.0, 9000.0), (8000.0, 0.0)],
+    ];
+
+    /// Milestone 1's exit criterion, and the only thing that stops the two
+    /// subdividers drifting apart.
+    ///
+    /// The comparison is against the exact cubic equivalent, built by the very
+    /// two-thirds rule this verb exists to delete: control points two thirds
+    /// of the way from each end toward the quadratic's own control. The two
+    /// are the same curve, so they must flatten to the same polyline, point
+    /// for point.
+    ///
+    /// `1e-9` is not a fudge factor. The two evaluations are algebraically
+    /// identical and differ only in float rounding, so the real distance is
+    /// nearer 1e-12; the bound is still four orders below the 1/256 unit the
+    /// rasteriser snaps to. A quadratic arm with its own tolerance, or one
+    /// that interpolated at the wrong point, would miss by device-visible
+    /// amounts rather than by this.
+    #[test]
+    fn a_quadratic_flattens_like_its_exact_cubic_equivalent() {
+        for tolerance in [1.0, 0.25, 0.1, 0.01, 0.001] {
+            for curve in QUADRATICS {
+                let [(x0, y0), (cx, cy), (x1, y1)] = *curve;
+
+                let mut quad = Path::new();
+                quad.move_to(x0, y0);
+                quad.quad_to(cx, cy, x1, y1);
+
+                let mut cubic = Path::new();
+                cubic.move_to(x0, y0);
+                cubic.curve_to(
+                    x0 + 2.0 / 3.0 * (cx - x0),
+                    y0 + 2.0 / 3.0 * (cy - y0),
+                    x1 + 2.0 / 3.0 * (cx - x1),
+                    y1 + 2.0 / 3.0 * (cy - y1),
+                    x1,
+                    y1,
+                );
+
+                let flat_quad = flatten(&quad, tolerance);
+                let flat_cubic = flatten(&cubic, tolerance);
+                let from_quad = flat_quad.first().expect("a polyline");
+                let from_cubic = flat_cubic.first().expect("a polyline");
+
+                assert_eq!(
+                    from_quad.len(),
+                    from_cubic.len(),
+                    "{curve:?} at tolerance {tolerance} broke into \
+                     {} pieces as a quadratic and {} as the same cubic",
+                    from_quad.len(),
+                    from_cubic.len(),
+                );
+                for (a, b) in from_quad.iter().zip(from_cubic) {
+                    let off = distance(*a, *b);
+                    assert!(
+                        off <= 1e-9,
+                        "{curve:?} at tolerance {tolerance}: {a:?} against \
+                         {b:?} is {off} apart"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The bug the verb removes, at the level the flattener owns it.
+    ///
+    /// A close returns the pen to where the subpath began, so a curve that
+    /// follows one starts there. The verb carries no start point, which is why
+    /// it cannot get this wrong; the caller that had to look one up could, and
+    /// did.
+    #[test]
+    fn a_quadratic_after_a_close_starts_where_the_subpath_did() {
+        let mut path = Path::new();
+        path.move_to(10.0, 10.0);
+        path.line_to(20.0, 10.0);
+        path.line_to(20.0, 14.0);
+        path.close();
+        path.quad_to(30.0, 60.0, 50.0, 10.0);
+
+        let polys = flatten(&path, 0.1);
+        assert_eq!(polys.len(), 2, "the close ended the first subpath");
+        let arch = polys.get(1).expect("the second subpath");
+        assert_eq!(
+            arch.first().copied(),
+            Some(Point::new(10.0, 10.0)),
+            "the curve begins at the closed subpath's start, not at its own end"
+        );
+        assert_eq!(arch.last().copied(), Some(Point::new(50.0, 10.0)));
+        // The apex of that quadratic is at t = 1/2, a quarter of each end plus
+        // half the control: (30, 35). Raising this to a cubic from the curve's
+        // own end instead — the defect this verb replaces — peaks at (35, 35).
+        let apex = arch
+            .iter()
+            .copied()
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("a highest point");
+        assert!(
+            (apex.x - 30.0).abs() < 0.5 && (apex.y - 35.0).abs() < 0.5,
+            "the curve should peak near (30, 35), not {apex:?}"
+        );
+    }
+
+    #[test]
+    fn a_quadratics_control_point_counts_toward_the_bounds() {
+        let mut path = Path::new();
+        path.move_to(0.0, 0.0);
+        path.quad_to(50.0, 100.0, 100.0, 0.0);
+        assert_eq!(
+            path.bounds(),
+            Some((0.0, 0.0, 100.0, 100.0)),
+            "control points are included, so a bound is never too small"
+        );
+    }
+
+    #[test]
+    fn a_quadratic_with_a_non_finite_point_is_refused_too() {
+        let mut path = Path::new();
+        path.move_to(0.0, 0.0);
+        path.quad_to(f64::INFINITY, 1.0, 2.0, 3.0);
+        path.quad_to(1.0, f64::NAN, 2.0, 3.0);
+        path.quad_to(1.0, 2.0, f64::NAN, 3.0);
+        path.quad_to(5.0, 9.0, 10.0, 0.0);
+        assert_eq!(path.verbs().len(), 2, "only the finite curve survived");
+
+        for poly in flatten(&path, 0.1) {
+            assert!(poly.iter().all(Point::is_finite));
+        }
+    }
+
+    #[test]
+    fn a_quadratic_obeys_the_same_per_curve_point_cap_as_a_cubic() {
+        let mut quad = Path::new();
+        quad.move_to(0.0, 0.0);
+        quad.quad_to(1e6, 1e6, 2e6, 0.0);
+        let points = flatten(&quad, 1e-6).first().map_or(0, Vec::len);
+        assert_eq!(points, 513, "512 steps plus the start point");
     }
 
     #[test]

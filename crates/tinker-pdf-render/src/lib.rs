@@ -1059,7 +1059,7 @@ fn last_point(path: &Path) -> Option<(f64, f64)> {
     use tinker_pdf_raster::geom::Verb;
     match path.verbs().last()? {
         Verb::MoveTo(p) | Verb::LineTo(p) => Some((p.x, p.y)),
-        Verb::CurveTo(_, _, p) => Some((p.x, p.y)),
+        Verb::QuadTo(_, p) | Verb::CurveTo(_, _, p) => Some((p.x, p.y)),
         Verb::Close => None,
     }
 }
