@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**988 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**1011 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit. The fuzz targets
 also *run* on every commit now, briefly, over committed seed corpora. The four
@@ -15,7 +15,7 @@ wasmtime — run locally against native Windows, not yet observed in CI.
 > incomplete: **22 things listed as built are absent or materially thinner
 > than claimed**, seven of them producing silently wrong output or unopenable
 > files. They are written down in [audit-2026-08.md](audit-2026-08.md), with
-> the twelve fixed so far struck through there. A known gap is manageable; a
+> the thirteen fixed so far struck through there. A known gap is manageable; a
 > false claim is not, because nobody goes looking.
 
 > **This file was wrong for a long time.** A 47-agent audit against every plan
@@ -32,6 +32,7 @@ Fixed since, each with tests that would have caught it:
 | --- | --- |
 | **Four of eleven fuzz targets never compiled.** Wrong arity since written; `fuzz/` sits outside the workspace so nothing checked it | Fixed, and `cargo check` on the fuzz crate is a CI job. The bindings, excluded for the same reason, are too |
 | **A `cmap` format 12 group could overflow a glyph id into a panic.** `startGlyphID + (code - startCharCode)` in `u32`, all three from the file — the first thing the fuzzers found, by two targets within thirty seconds of each other. Format 12 is the subtable used past the BMP, so any CJK or emoji face reaches it (ruling 1) | `checked_add` before the `u16::try_from` that was already there and could never run. The 68-byte reproducer is a test in `sfnt.rs` and a seed in two corpora |
+| **A CFF font drew the wrong glyphs, or none.** The character code was used as the glyph index at three sites — the bare `/FontFile3`, the `CFF ` table of an `OTTO` face, and the TrueType fallback. Which symptom a file got depended on its glyph count: a *subset*, which is what a producer embeds, had no glyph at that index and the page came out blank; a full font drew the wrong letter at the right width, silently. Nothing read the charset, the encoding, the string INDEX or `FDSelect`, so no better answer was available | The charset in all three formats and the three predefined ones, the string INDEX and the 391 standard strings, the built-in encoding with supplements, `ROS`/FDArray/FDSelect with per-FD private dicts and matrices, and 9.6.6's fallback order ending in `.notdef` *and a warning*. Twenty-four tests; the fixtures are boxes of different sizes, so the assertion is which glyph drew, not that one did |
 | **Every CFF INDEX was read one byte early**, so no embedded CFF or OpenType/CFF face ever resolved a glyph — `Cff::parse` refused almost every real program, and `resources.rs` read that as a font it could not read. The tests covered DICT operands and subroutine bias, none of which builds an INDEX, so nothing had ever parsed a whole program | The 1-based offset is subtracted once rather than twice. Two tests: the eight-byte reproducer, and a whole three-glyph program that also serves as the `cff` fuzz seed |
 | **`authenticate` failed on any shared document.** `Arc::get_mut` returns None once a `Page` exists, so "look at a page, then supply the password" returned `NotEncrypted` for an encrypted file | Interior mutability; `authenticate(&self)`, as the plan always specified |
 | **`/Rotate` was never applied**, though the canvas *was* sized for it — rotated pages drew upright and clipped | `page_view_transform`, with the crop-box origin as well |
@@ -84,7 +85,7 @@ Fixed since, each with tests that would have caught it:
 | [02 Filters](plans/02-filters.md) | wave 1 + deflate + JPEG + CCITT | Own inflate and deflate, LZW, ASCIIHex/85, RunLength, predictors; JPEG **baseline, extended sequential and progressive**; CCITT G3/G4 |
 | [03 Encryption](plans/03-encryption.md) | reading and **writing** | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits; `/EncryptMetadata` and `/Crypt /Identity` honoured |
 | [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata incl. **`/Trapped`**, the **later** of header and catalog version, page tree with inheritance, geometry, outlines, name/number trees with **`/Limits` descent**, destination enum, page labels, actions, links, **attachments**, **XMP** |
-| [05 Fonts](plans/05-fonts.md) | TrueType + CFF + **Type 1** + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf`, CFF Type 2 **and Type 1** outlines; `FontProvider` for faces a document does not embed |
+| [05 Fonts](plans/05-fonts.md) | TrueType + CFF + **Type 1** + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf`, CFF Type 2 **and Type 1** outlines; **CFF glyph selection: charset, string INDEX, standard strings, built-in encoding, and CID-keyed `ROS`/FDArray/FDSelect**; `FontProvider` for faces a document does not embed |
 | [06 Content & text](plans/06-content-and-text.md) | substantially | Tokenizer, text state machine, `Device` seam, text device with quads and search, **inline images**, **all stroke parameters** |
 | [07 Rasterizer](plans/07-rasterizer.md) | complete | Paths, deterministic anti-aliased fill, stroking with caps/joins/dashes, clipping, compositing |
 | [08 Rendering device](plans/08-rendering-device.md) | broad, see gaps | Colour spaces incl. **Lab, Separation, DeviceN**; all four function types **and function arrays**; clipping incl. **text clip modes**; images with **`/SMask` and `/Decode`**; axial and radial shadings; **shading patterns**; **`/Rotate` and `/CropBox`**; alpha; outward pixel rounding; page-area ceiling |
