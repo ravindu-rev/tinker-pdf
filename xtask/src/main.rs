@@ -75,13 +75,25 @@ fn main() -> ExitCode {
 /// either, because both need them and neither may depend on the other. It has
 /// no dependencies of its own — not even `std` — so it adds a layer below the
 /// leaves rather than an edge between them.
+///
+/// **`font -> filters` is the second amendment, and it is one leaf to
+/// another.** Plan 05's build-time data table says the predefined CMaps ship
+/// "delta-encoded ranges, deflated with our own filter code", and its
+/// dependency section already says the phase "needs ... the filters phase
+/// (FlateDecode for FontFile2/3 **and for the bundled-asset pipeline**)".
+/// This is that edge, arriving where the plan said it would: `build.rs`
+/// deflates with `tinker-pdf-filters` and the crate inflates with it. Ruling 3
+/// is untouched — a sibling workspace crate is not a third-party dependency —
+/// and the graph cannot cycle, because `filters` depends on nothing. The
+/// runtime half is optional and disappears with `cmap-predefined`; the
+/// build-time half is unconditional and never reaches a binary.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
     // Leaves: nothing internal beyond the maths.
     ("tinker-pdf-filters", &[]),
     ("tinker-pdf-crypto", &[]),
-    ("tinker-pdf-font", &[]),
+    ("tinker-pdf-font", &["tinker-pdf-filters"]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.

@@ -131,6 +131,9 @@ version = "0.0.1"
 [[package]]
 name = "tinker-pdf-font"
 version = "0.0.1"
+dependencies = [
+ "tinker-pdf-filters",
+]
 
 [[package]]
 name = "tinker-pdf-fuzz"

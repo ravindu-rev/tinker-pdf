@@ -8,6 +8,7 @@ pub mod cmap;
 pub mod encoding;
 pub mod glyf;
 pub mod outline;
+mod predefined;
 pub mod sfnt;
 pub mod subset;
 pub mod type1;

@@ -7,5 +7,29 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Font-program parsing: TrueType/SFNT, CFF/Type2, Type1, CID, CMap, ToUnicode, AFM metrics"
+# Adobe's cmap-resources is compiled by build.rs, not read at run time, so the
+# 7.5 MB of vendored PostScript has no business in a published crate. The
+# licence text does: THIRDPARTY.md carries it and so must the package.
+exclude = ["data/"]
+
+[features]
+default = ["cmap-predefined"]
+# The predefined CMaps of 9.7.5.2, compiled from the vendored registry. About
+# a megabyte of deflated tables; plan 05 makes it a feature so a wasm host can
+# drop it. Identity-H and Identity-V are built in either way, and every other
+# registry name still splits its strings correctly from the always-compiled
+# codespace table -- it just reports an approximate mapping instead of
+# inventing CIDs.
+cmap-predefined = ["dep:tinker-pdf-filters"]
 
 [dependencies]
+# Inflating the compiled tables. A sibling leaf crate with no dependencies of
+# its own, so this is not a third-party dependency and cannot cycle; plan 05's
+# "needs the filters phase ... for the bundled-asset pipeline" is this edge.
+tinker-pdf-filters = { workspace = true, optional = true }
+
+[build-dependencies]
+# The same crate's deflate encoder, at build time. A build-dependency never
+# reaches a released binary, so this one is unconditional: gating it would
+# mean `build.rs` could not compile with the feature off.
+tinker-pdf-filters = { workspace = true }

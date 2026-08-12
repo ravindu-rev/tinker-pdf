@@ -46,6 +46,18 @@ pub struct CMap {
     ranges: Vec<(u32, u32, Vec<char>)>,
     cid_single: HashMap<u32, u32>,
     cid_ranges: Vec<(u32, u32, u32)>,
+    /// Compiled predefined tables: each block is sorted by low code and
+    /// disjoint, so it is binary-searched rather than scanned.
+    ///
+    /// A separate field rather than more of `cid_ranges`, because the two
+    /// have different shapes. A CMap's own `cidrange`s are in the order the
+    /// file wrote them and the first match wins; a compiled table is sorted,
+    /// which is the only way `UniCNS-UTF8-H`'s 18 568 ranges are affordable
+    /// at all — a linear scan of that per character is tens of milliseconds a
+    /// page. `inherit_from` appends the parent's blocks behind the child's,
+    /// so the same first-match rule holds across a chain, and the depth cap
+    /// keeps the outer vector to a handful of entries.
+    cid_sorted: Vec<Vec<(u32, u32, u32)>>,
     /// True for `Identity-H` and `Identity-V`, where code equals CID.
     identity: bool,
     /// True for `Identity-V` and other vertical CMaps (9.7.4.3).
@@ -80,10 +92,21 @@ impl CMap {
 
     /// One of the predefined CMaps, by name (9.7.5.2).
     ///
-    /// Only the identity pair is built in. The CJK collections are large data
-    /// files; a font using one still lays out, because its codes are two bytes
-    /// and its `/W` array supplies the advances — only the CID mapping is
-    /// approximate, and that is reported by [`CMap::is_approximate`].
+    /// The identity pair is built from nothing, because it is a rule rather
+    /// than a table and because a build that drops `cmap-predefined` still
+    /// has to answer it. Everything else comes out of Adobe's registry,
+    /// compiled by `build.rs` from the vendored `cmap-resources` and read
+    /// back by [`crate::predefined`]: real codespace ranges, real
+    /// code-to-CID ranges, and the registry's own `usecmap` parent merged in
+    /// underneath by the machinery 9.7.5.3 already needed.
+    ///
+    /// **A name the registry does not define answers `None`.** It used to be
+    /// matched against fourteen prefixes and answered with a blanket two-byte
+    /// identity, which is a guess that reads as a working font: the string
+    /// splits in the wrong places, every fragment becomes a CID the file never
+    /// named, and because the CID also drives the `/W` lookup the *advances*
+    /// come out wrong too. Nothing said so. A caller that gets `None` can name
+    /// the CMap it could not find; a caller handed a stub cannot.
     #[must_use]
     pub fn predefined(name: &[u8]) -> Option<CMap> {
         if name == b"Identity-H" {
@@ -92,33 +115,58 @@ impl CMap {
         if name == b"Identity-V" {
             return Some(CMap::identity(true));
         }
-
-        // The CJK collections are recognized by their registry prefixes. Their
-        // real code-to-CID tables are large data files that are not built in,
-        // so this stands in with the one property they all share: two-byte
-        // codes. Advances still come from the font's own `/W` array, so text
-        // positions correctly; only the CID mapping is assumed, and
-        // `is_approximate` says so.
-        const CJK_PREFIXES: [&[u8]; 14] = [
-            b"UniJIS", b"UniGB", b"UniCNS", b"UniKS", b"GBK-", b"GB-", b"ETen", b"90ms", b"90pv",
-            b"B5pc", b"KSC", b"Add-", b"Ext-", b"RKSJ",
-        ];
-        let known =
-            CJK_PREFIXES.iter().any(|p| name.starts_with(p)) || name == b"H" || name == b"V";
-        known.then(|| CMap {
-            codespaces: vec![CodespaceRange {
-                bytes: 2,
-                low: 0,
-                high: 0xFFFF,
-            }],
-            identity: true,
-            vertical: name == b"V" || name.ends_with(b"-V"),
-            approximate: true,
-            ..CMap::default()
-        })
+        CMap::from_registry(name, 0)
     }
 
-    /// Whether this CMap stands in for one whose data is not built in.
+    /// Builds a registry CMap and everything it inherits (9.7.5.3).
+    ///
+    /// `depth` bounds the `usecmap` chain the same way [`Chain`] bounds a
+    /// document's. The vendored registry nests two deep at most and every
+    /// parent in it resolves — `build.rs` fails the build otherwise — so this
+    /// is a guard against a re-vendoring, not against a file.
+    fn from_registry(name: &[u8], depth: usize) -> Option<CMap> {
+        let entry = crate::predefined::entry(name)?;
+        CMap::from_entry(&entry, depth)
+    }
+
+    fn from_entry(entry: &crate::predefined::Entry, depth: usize) -> Option<CMap> {
+        let ranges = crate::predefined::ranges(entry.index);
+        let mut cmap = CMap {
+            codespaces: entry
+                .codespaces
+                .iter()
+                .map(|&(bytes, low, high)| CodespaceRange { bytes, low, high })
+                .collect(),
+            vertical: entry.vertical,
+            wmode_declared: entry.wmode_declared,
+            // No table means this build did not compile the CID half in. The
+            // codespaces are still the registry's own, so the string splits
+            // where it should and the advances are right; what is missing is
+            // which CID each code means, and that is exactly what
+            // `is_approximate` was named for.
+            approximate: ranges.is_none(),
+            cid_sorted: ranges.map(|r| vec![r]).unwrap_or_default(),
+            ..CMap::default()
+        };
+
+        if let Some(parent) = entry.parent {
+            if depth < MAX_USECMAP_DEPTH {
+                if let Some(parent) = crate::predefined::entry_at(parent)
+                    .and_then(|e| CMap::from_entry(&e, depth + 1))
+                {
+                    cmap.inherit_from(&parent);
+                }
+            }
+        }
+        Some(cmap)
+    }
+
+    /// Whether this CMap's code-to-CID mapping is assumed rather than known.
+    ///
+    /// True for a registry CMap whose table this build did not compile in —
+    /// `cmap-predefined` off — where the codespaces are the registry's and the
+    /// CIDs are nobody's. [`CMap::inherit_from`] propagates it, so a
+    /// differential CMap that inherits from one is approximate too.
     #[must_use]
     pub fn is_approximate(&self) -> bool {
         self.approximate
@@ -241,6 +289,11 @@ impl CMap {
     }
 
     /// The CID this CMap's own entries give a code, ignoring `identity`.
+    ///
+    /// Order is precedence, and it is the same order in all three places: a
+    /// single beats a range, a range this CMap declared beats one it
+    /// inherited, and within the compiled tables a child block beats its
+    /// parent's.
     fn cid_mapped(&self, code: u32) -> Option<u32> {
         if let Some(cid) = self.cid_single.get(&code) {
             return Some(*cid);
@@ -248,6 +301,18 @@ impl CMap {
         for (low, high, base) in &self.cid_ranges {
             if (*low..=*high).contains(&code) {
                 return Some(base + (code - low));
+            }
+        }
+        for block in &self.cid_sorted {
+            // `partition_point` finds the first range starting past `code`,
+            // so the one before it is the only candidate — sorted and
+            // disjoint is what makes that true, and `build.rs` asserts both
+            // over the whole registry rather than trusting them.
+            let at = block.partition_point(|(low, _, _)| *low <= code);
+            if let Some((low, high, base)) = at.checked_sub(1).and_then(|i| block.get(i)) {
+                if code <= *high {
+                    return Some(base + (code - low));
+                }
             }
         }
         None
@@ -291,6 +356,9 @@ impl CMap {
 
         self.ranges.extend(parent.ranges.iter().cloned());
         self.cid_ranges.extend(parent.cid_ranges.iter().copied());
+        // Behind the child's blocks, and behind the child's own declared
+        // ranges, which `cid_mapped` consults first.
+        self.cid_sorted.extend(parent.cid_sorted.iter().cloned());
 
         // 9.7.6.2 forbids overlapping codespace ranges, and `decode_codes`
         // asks only whether a value falls inside one, shortest length first
@@ -1271,13 +1339,39 @@ mod tests {
         assert_eq!(parsed.cmap.cid(0x41), Some(200), "what it declared itself");
     }
 
-    /// Inheriting from a stub must not read as inheriting from the real
-    /// thing. Gap 03 replaces the stub; until then this is what says so.
+    /// Gap 04 wrote this against the stub and said the stub was gap 03's to
+    /// remove: "a child inheriting from a stub reports as approximate today
+    /// ... so that flag stops being set on its own as soon as the stub goes".
+    /// It has. `90ms-RKSJ-H` is now the registry's own table, so a child of
+    /// it reports a known mapping, and the assertion is inverted rather than
+    /// deleted — the propagation it was testing still has to work, and with
+    /// `cmap-predefined` off it is what carries the admission.
+    #[test]
+    fn inheriting_from_a_compiled_parent_is_not_approximate() {
+        let parsed = parse_embedded(b"/90ms-RKSJ-H usecmap", &mut |_| None);
+        assert_eq!(
+            parsed.cmap.is_approximate(),
+            cfg!(not(feature = "cmap-predefined")),
+            "approximate exactly when the parent's table is not compiled in"
+        );
+        assert!(!parse(PARENT).is_approximate(), "a hand-built one never is");
+    }
+
+    /// The propagation itself, with a parent that is approximate whatever
+    /// this build compiled in — so the rule gap 04 established stays tested
+    /// on the default feature set rather than only on the one CI runs once.
     #[test]
     fn inheriting_from_an_approximate_parent_stays_approximate() {
-        let parsed = parse_embedded(b"/90ms-RKSJ-H usecmap", &mut |_| None);
-        assert!(parsed.cmap.is_approximate());
-        assert!(!parse(PARENT).is_approximate(), "a real one is not");
+        let mut child = parse(b"1 begincidrange <0041> <005A> 200 endcidrange");
+        assert!(!child.is_approximate());
+
+        let parent = CMap {
+            approximate: true,
+            ..CMap::default()
+        };
+        child.inherit_from(&parent);
+        assert!(child.is_approximate(), "the admission is inherited");
+        assert_eq!(child.cid(0x41), Some(200), "and the child keeps its own");
     }
 
     /// 9.7.5.3: the child's `/WMode` wins where it declares one, and where it

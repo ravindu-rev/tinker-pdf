@@ -57,3 +57,15 @@ tinker-pdf = { path = "crates/tinker-pdf" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Build scripts, optimised. `tinker-pdf-font/build.rs` reads 7.5 MB of vendored
+# PostScript and deflates the result with the engine's own encoder; unoptimised
+# that is most of a minute on every clean build, and it is a *cost paid by
+# everyone* rather than by whoever wrote it. This is the only knob that applies
+# to a build script and its dependencies, and the workspace has no proc macros
+# for it to affect.
+[profile.dev.build-override]
+opt-level = 2
+
+[profile.release.build-override]
+opt-level = 2
