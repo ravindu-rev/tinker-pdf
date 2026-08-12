@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tinker_pdf_color::{ColorSpace, Function};
-use tinker_pdf_content::{FontSource, Matrix, Rgb};
+use tinker_pdf_content::{FontSource, Layer, Matrix, Rgb};
 use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
 use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading};
 
 use crate::fonts::{self, FontProvider, FontRequest};
+use crate::optional::OptionalContent;
 
 /// Extracted glyph outlines, keyed by font identity and character code.
 ///
@@ -39,6 +40,15 @@ pub struct PageResources {
     /// glyphs were being drawn — names whose font resolved no glyph for a
     /// code the page used.
     missing_fonts: Mutex<Vec<String>>,
+    /// Which optional-content layers the document's default configuration
+    /// shows (8.11).
+    ///
+    /// Bound here, once, rather than looked up per `BDC`: the catalog is
+    /// already in reach through `doc`, the answer cannot change during a
+    /// render — this build has no layer-toggle API to change it with — and a
+    /// page that marks every drawing operator would otherwise walk
+    /// `/OCProperties` thousands of times for one constant.
+    optional: OptionalContent,
 }
 
 /// Applies `/Decode [1 0]` to already-decoded samples.
@@ -104,6 +114,7 @@ impl PageResources {
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
+            optional: OptionalContent::bind(doc),
         }
     }
 
@@ -143,6 +154,7 @@ impl PageResources {
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
+            optional: OptionalContent::bind(doc),
         }
     }
 
@@ -638,6 +650,30 @@ impl FontSource for PageResources {
             .collect();
         (!names.is_empty())
             .then(|| tinker_pdf_content::BlendMode::from_names(names.iter().map(Vec::as_slice)))
+    }
+
+    fn optional_content(&self, name: &[u8]) -> Option<Layer> {
+        // 8.11.3.2: `/OC /MC0 BDC` names an entry in the /Properties
+        // sub-dictionary of the current resource dictionary. The entry is an
+        // optional content group or a membership dictionary; anything else is
+        // an ordinary property list and hides nothing.
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"Properties"));
+        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
+        let label = String::from_utf8_lossy(name).into_owned();
+        Some(self.optional.layer_of(&self.doc, &entry, &label))
+    }
+
+    fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {
+        // 8.11.4.4: an /OC entry on a form or image XObject hides the whole
+        // XObject, and is read from the XObject's own dictionary rather than
+        // from /Properties.
+        let (dict, _) = self.xobject(name)?;
+        let entry = dict.get(self.doc.intern(b"OC"))?.clone();
+        let label = String::from_utf8_lossy(name).into_owned();
+        Some(self.optional.layer_of(&self.doc, &entry, &label))
     }
 }
 

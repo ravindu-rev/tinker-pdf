@@ -37,6 +37,25 @@ pub struct Form {
     pub bbox: Option<[f64; 4]>,
 }
 
+/// An optional-content layer, as the resource seam resolved it (8.11).
+///
+/// The interpreter cannot decide this: `/OCProperties` lives in the catalog
+/// and the groups are indirect objects, neither of which this crate can see.
+/// So it asks, and gets back the two things it has any use for — whether to
+/// paint, and what to call the layer if it does not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layer {
+    /// Whether the document's default configuration paints this layer.
+    pub visible: bool,
+    /// What to call it: the group's `/Name`, which is the string a viewer's
+    /// layer panel shows, falling back to the resource name.
+    ///
+    /// Ruling 10 — a warning that cannot say *which* layer it hid is not
+    /// actionable, and a hidden layer is exactly the leniency a reader cannot
+    /// see for themselves.
+    pub label: String,
+}
+
 pub trait FontSource {
     /// Splits a string into `(code, text, advance in 1/1000 em)`.
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)>;
@@ -124,6 +143,29 @@ pub trait FontSource {
     /// operands.
     fn color_components(&self, space: &[u8]) -> Option<usize> {
         let _ = space;
+        None
+    }
+
+    /// The optional-content layer a name in the `/Properties` resource
+    /// sub-dictionary selects (8.11.3.2).
+    ///
+    /// `None` means the name is not optional content at all — an ordinary
+    /// `/Span` or `/Artifact` property list, or a name the resources do not
+    /// define — and that is not the same as a hidden layer. Every `None`
+    /// path here ends in content being painted, which is the direction a
+    /// reader can recover from.
+    fn optional_content(&self, name: &[u8]) -> Option<Layer> {
+        let _ = name;
+        None
+    }
+
+    /// The `/OC` entry on a form or image XObject (8.11.4.4).
+    ///
+    /// Separate from [`FontSource::optional_content`] because the two look in
+    /// different dictionaries: one in `/Properties`, the other on the XObject
+    /// itself.
+    fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {
+        let _ = name;
         None
     }
 }

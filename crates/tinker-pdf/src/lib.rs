@@ -23,6 +23,7 @@
 
 mod annots;
 pub mod fonts;
+mod optional;
 pub mod redact;
 mod resources;
 
