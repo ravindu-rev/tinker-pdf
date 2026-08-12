@@ -380,7 +380,7 @@ mod tests {
     fn square_mask(x: f64, y: f64, w: f64, h: f64, size: u32) -> Mask {
         let mut path = Path::new();
         path.rect(x, y, w, h);
-        fill(&path, FillRule::NonZero, 0, 0, size, size, 0.05)
+        fill(&path, FillRule::NonZero, 0, 0, size, size, 0.05, None)
     }
 
     #[test]

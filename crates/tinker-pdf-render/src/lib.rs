@@ -231,6 +231,20 @@ pub struct Renderer<'g, G: GlyphSource> {
     clip_stack: Vec<Option<Mask>>,
     warnings: Vec<RenderWarning>,
     cancel: CancelToken,
+    /// Whether a cancellation check has ever answered yes — that is, whether
+    /// any work was actually skipped.
+    ///
+    /// Separate from the token because the two answer different questions.
+    /// The token says a caller *asked*; this says the render *obeyed*. A
+    /// caller that cancels after the last operator has run gets a complete
+    /// page, and reporting `Cancelled` for it would make the warning mean
+    /// "somebody pressed the button" rather than "this page is short".
+    ///
+    /// Shared rather than owned, because the predicate handed to the
+    /// rasterizer outlives the borrow of `self` that every rasterizing call
+    /// takes. `Relaxed` for the same reason [`CancelToken`] is: nothing is
+    /// published through this flag, only observed.
+    skipped: Arc<AtomicBool>,
     /// Curve flattening tolerance in device pixels.
     tolerance: f64,
     missing_fonts: u32,
@@ -281,6 +295,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             clip_stack: Vec::new(),
             warnings: Vec::new(),
             cancel: CancelToken::new(),
+            skipped: Arc::new(AtomicBool::new(false)),
             tolerance: 0.2,
             missing_fonts: 0,
             text_clip: None,
@@ -311,13 +326,38 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self
     }
 
+    /// Whether to stop now — and, if so, a record that this check is one that
+    /// fired.
+    ///
+    /// Every check in this crate asks through here rather than the token
+    /// directly, so that `Cancelled` can mean "work was skipped" instead of
+    /// "the token was set". The two come apart at the end of a render: a
+    /// caller that cancels a page which has already finished drawing gets a
+    /// complete page, no check ever answers yes, and nothing is reported —
+    /// which is the truthful answer, and the one a caller can act on.
+    ///
+    /// A check that answers yes always skips something. There is no site
+    /// where the answer is consulted and the work runs anyway: each one
+    /// returns, and the row loops return with what they have.
+    fn stopping(&self) -> bool {
+        if self.cancel.is_cancelled() {
+            self.skipped.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
     /// The canvas and everything the render had to tolerate.
     #[must_use]
     pub fn finish(mut self) -> (Canvas, Vec<RenderWarning>) {
         if self.missing_fonts > 0 {
             self.warnings.push(RenderWarning::UnreadableFont);
         }
-        if self.cancel.is_cancelled() {
+        // The flag, not the token. Asking the token here reports a page that
+        // was drawn in full as cancelled whenever the caller's timeout lost
+        // the race by a millisecond, which is the case where the caller most
+        // wants to keep what it has.
+        if self.skipped.load(Ordering::Relaxed) {
             self.warnings.push(RenderWarning::Cancelled);
         }
         (self.canvas, self.warnings)
@@ -414,7 +454,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return;
         };
 
-        let area = self.coverage(path, rule);
+        let stop = self.stop_predicate();
+        let area = self.coverage(path, rule, Some(&stop));
 
         let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
@@ -423,7 +464,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // function over every pixel of the page to paint two hundred of them.
         let (x_start, y_start, x_end, y_end) = area.overlap(self.canvas.width, self.canvas.height);
         for py in y_start..y_end {
-            if self.cancel.is_cancelled() {
+            if self.stopping() {
                 return;
             }
             for px in x_start..x_end {
@@ -449,7 +490,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// place that decides how large a mask is. A comma used to allocate and
     /// scan a full page: eight megabytes at 300 dpi, per glyph, twice for
     /// stroked text. It now costs its own bounding box.
-    fn coverage(&mut self, path: &Path, rule: FillRule) -> Mask {
+    fn coverage(&mut self, path: &Path, rule: FillRule, stop: Option<&dyn Fn() -> bool>) -> Mask {
         let (x0, y0, width, height) = paint_region(
             path,
             self.clip.as_ref(),
@@ -462,7 +503,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .mask_pixels
                 .saturating_add(u64::from(width) * u64::from(height));
         }
-        let mut mask = fill(path, rule, x0, y0, width, height, self.tolerance);
+        let mut mask = fill(path, rule, x0, y0, width, height, self.tolerance, stop);
         // 8.5.4: the clip multiplies rather than replaces, so an anti-aliased
         // edge clipped by another stays soft on both. In place, because the
         // region above is already no larger than the clip: the destination
@@ -483,11 +524,38 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// whose rasterization is the expensive part. A caller's entry is a
     /// different moment from this one, and this is the moment the work starts.
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
-        if self.cancel.is_cancelled() {
+        if self.stopping() {
             return;
         }
-        let mask = self.coverage(path, rule);
+        let stop = self.stop_predicate();
+        let mask = self.coverage(path, rule, Some(&stop));
         self.canvas.fill_mask_with(&mask, color, alpha, mode);
+    }
+
+    /// The question the rasterizer asks while it is working.
+    ///
+    /// Both handles are **cloned** rather than borrowed, because every
+    /// rasterizing call takes `&mut self` and a closure borrowing them could
+    /// not survive it. What crosses the crate boundary is a bare
+    /// `&dyn Fn() -> bool`: ruling 8 keeps `tinker-pdf-raster` free of PDF and
+    /// of this crate alike, so it may not name `CancelToken`, and this is the
+    /// same seam `ImageDraw::stop` has used since gap 12 rather than a second
+    /// one invented beside it.
+    ///
+    /// It sets the same flag [`Renderer::stopping`] does, and it has to: a
+    /// fill that stopped halfway down a shape skipped work as surely as one
+    /// that never started, and it is the only kind of skipping the layer above
+    /// cannot see for itself.
+    fn stop_predicate(&self) -> impl Fn() -> bool {
+        let cancel = self.cancel.clone();
+        let skipped = Arc::clone(&self.skipped);
+        move || {
+            if cancel.is_cancelled() {
+                skipped.store(true, Ordering::Relaxed);
+                return true;
+            }
+            false
+        }
     }
 
     /// Draws a decoded image into the unit square of the current transform.
@@ -505,10 +573,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // 8.9.6.2: a stencil selects where the *current fill colour* is
         // painted; it has no colour of its own.
         let tint = image.stencil.then(|| fill_color(state));
-        // Cloned rather than borrowed: the token is shared state, and this
-        // closure has to outlive the borrow of `self` that the draw needs.
-        let cancel = self.cancel.clone();
-        let stop = move || cancel.is_cancelled();
+        // The same predicate the fill and the stroker are given. It was a
+        // second hand-rolled closure here until gap 15 gave the other two
+        // hooks one, and two spellings of the same question is how one of them
+        // ends up not recording that it fired.
+        let stop = self.stop_predicate();
 
         let draw = ImageDraw {
             image: ImageSource {
@@ -654,11 +723,11 @@ fn stroke_color(state: &GraphicsState) -> Color {
 
 impl<G: GlyphSource> Device for Renderer<'_, G> {
     fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
+        self.stopping()
     }
 
     fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
-        if self.cancel.is_cancelled() || self.hidden() {
+        if self.stopping() || self.hidden() {
             return;
         }
         let built = self.to_path(path);
@@ -695,7 +764,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // pending still paid for both. Skipping it cannot leak ink: every
         // paint is gated too, so a clip that is never installed is never the
         // reason something is drawn.
-        if self.cancel.is_cancelled() {
+        if self.stopping() {
             return;
         }
         let built = self.to_path(path);
@@ -712,14 +781,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // clipped by another must stay soft on both. `coverage` does that, and
         // the region it picks is the two rectangles' overlap, so a clip stack
         // shrinks as it nests instead of carrying a page apiece.
-        self.clip = Some(self.coverage(&built, rule));
+        let stop = self.stop_predicate();
+        self.clip = Some(self.coverage(&built, rule, Some(&stop)));
     }
 
     fn end_text(&mut self) {
         // Before the accumulated outline is rasterized, for the same reason as
         // `clip_path`: a text clip is a fill over every glyph of the object at
         // once, which is the largest single clip a page can ask for.
-        if self.cancel.is_cancelled() {
+        if self.stopping() {
             return;
         }
         // 9.3.6: text clipping modes accumulate every glyph of the text
@@ -743,7 +813,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             }
             None => return,
         };
-        self.clip = Some(self.coverage(&path, FillRule::NonZero));
+        let stop = self.stop_predicate();
+        self.clip = Some(self.coverage(&path, FillRule::NonZero, Some(&stop)));
     }
 
     fn save_state(&mut self) {
@@ -757,7 +828,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
-        if self.cancel.is_cancelled() || self.hidden() {
+        if self.stopping() || self.hidden() {
             return;
         }
         let built = self.to_path(path);
@@ -789,7 +860,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             dashes: state.dashes.iter().map(|d| d * scale).collect(),
             dash_phase: state.dash_phase * scale,
         };
-        let outline = stroke(&built, &style, self.tolerance);
+        // The dash expansion below is the part of a stroke that can run away:
+        // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
+        // fine array expands into a hundred thousand pieces per segment before
+        // a single row of it is filled.
+        let stop = self.stop_predicate();
+        let outline = stroke(&built, &style, self.tolerance, Some(&stop));
 
         // 8.7.3: a stroke painted with a pattern takes its paint from the
         // pattern, exactly as a fill does — and a stroke *is* a fill, of the
@@ -831,7 +907,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // layer clip away the visible ones -- and must not be counted as an
         // unreadable font, which is a warning about a page that is missing
         // something rather than about one that is doing as it was told.
-        if self.cancel.is_cancelled() || self.hidden() {
+        if self.stopping() || self.hidden() {
             return;
         }
         // 9.3.6: mode 3 paints nothing, which is exactly what a scanned page's
@@ -939,7 +1015,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 width: (state.line_width * scale).max(0.6),
                 ..StrokeStyle::default()
             };
-            let outlined = stroke(&path, &style, self.tolerance);
+            let stop = self.stop_predicate();
+            let outlined = stroke(&path, &style, self.tolerance, Some(&stop));
             if let Some(name) = state.stroke_pattern.clone() {
                 self.fill_with_pattern(
                     &outlined,
@@ -972,7 +1049,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // about the page: decoding first would report `UnsupportedImage` for
         // a JPX nobody was going to see, and paint the grey placeholder that
         // goes with it.
-        if self.cancel.is_cancelled() || self.hidden() {
+        if self.stopping() || self.hidden() {
             return;
         }
 
@@ -1007,7 +1084,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
-        if self.cancel.is_cancelled() || self.hidden() {
+        if self.stopping() || self.hidden() {
             return;
         }
 
@@ -1042,7 +1119,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 clip.overlap(self.canvas.width, self.canvas.height)
             });
         for py in y_start..y_end {
-            if self.cancel.is_cancelled() {
+            if self.stopping() {
                 return;
             }
             for px in x_start..x_end {
@@ -1091,7 +1168,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
     fn begin_form(&mut self, _id: u64) -> bool {
         self.clip_stack.push(self.clip.clone());
-        !self.cancel.is_cancelled()
+        !self.stopping()
     }
 
     fn end_form(&mut self, _id: u64) {
@@ -1436,9 +1513,9 @@ mod tests {
         const SIDE: u32 = 20;
         for (name, path) in shapes() {
             for rule in [FillRule::NonZero, FillRule::EvenOdd] {
-                let whole = fill(&path, rule, 0, 0, SIDE, SIDE, 0.2);
+                let whole = fill(&path, rule, 0, 0, SIDE, SIDE, 0.2, None);
                 let (x0, y0, w, h) = paint_region(&path, None, SIDE, SIDE);
-                let bounded = fill(&path, rule, x0, y0, w, h, 0.2);
+                let bounded = fill(&path, rule, x0, y0, w, h, 0.2, None);
 
                 for y in 0..SIDE as i32 {
                     for x in 0..SIDE as i32 {
@@ -1488,15 +1565,15 @@ mod tests {
         path.rect(10.0, 10.0, 60.0, 60.0);
         let mut clip_path = Path::new();
         clip_path.rect(30.0, 40.0, 10.0, 10.0);
-        let clip = fill(&clip_path, FillRule::NonZero, 29, 39, 12, 12, 0.2);
+        let clip = fill(&clip_path, FillRule::NonZero, 29, 39, 12, 12, 0.2, None);
 
         let (x0, y0, w, h) = paint_region(&path, Some(&clip), 200, 200);
         assert_eq!((x0, y0, w, h), (29, 39, 12, 12), "the clip is the smaller");
 
         // And the clipped coverage is unchanged by that: compare against the
         // full-page mask multiplied by the same clip.
-        let whole = fill(&path, FillRule::NonZero, 0, 0, 200, 200, 0.2).intersect(&clip);
-        let bounded = fill(&path, FillRule::NonZero, x0, y0, w, h, 0.2).intersect(&clip);
+        let whole = fill(&path, FillRule::NonZero, 0, 0, 200, 200, 0.2, None).intersect(&clip);
+        let bounded = fill(&path, FillRule::NonZero, x0, y0, w, h, 0.2, None).intersect(&clip);
         for y in 0..200 {
             for x in 0..200 {
                 assert_eq!(whole.at(x, y), bounded.at(x, y), "at ({x}, {y})");
@@ -1786,6 +1863,124 @@ mod tests {
             ink_after(2),
             (first, 0),
             "the glyph whose own lookup set the token is not painted"
+        );
+    }
+
+    /// Milestone 3, and it is a pair: `Cancelled` has to mean work was
+    /// skipped, not that somebody set the token.
+    ///
+    /// The two halves are one test because either alone is satisfied by a
+    /// wrong answer. Reporting from the token passes the first; reporting
+    /// nothing ever passes the second.
+    ///
+    /// The second half is the case a caller actually meets: a timeout that
+    /// fires a millisecond after the last operator drew. The page is whole,
+    /// and telling its owner it was cancelled makes them throw away a
+    /// complete render — or, worse, teaches them to ignore the warning.
+    #[test]
+    fn cancelled_reports_skipped_work_rather_than_a_token_that_was_set() {
+        let page = |set_before: bool| {
+            let canvas = Canvas::new(20, 20, PixelFormat::Rgb8, Color::WHITE);
+            let cancel = CancelToken::new();
+            if set_before {
+                cancel.cancel();
+            }
+            let mut renderer = Renderer::new(canvas, page_transform(20.0, 1.0), &NoGlyphs)
+                .with_cancel(cancel.clone());
+            interpret(b"0 0 20 20 re f", Matrix::IDENTITY, &mut renderer, &NoFonts);
+            if !set_before {
+                // The render is over; the token arrives too late to stop
+                // anything.
+                cancel.cancel();
+            }
+            let (canvas, warnings) = renderer.finish();
+            (
+                canvas.pixel(10, 10).map(|c| c.r),
+                warnings.contains(&RenderWarning::Cancelled),
+            )
+        };
+
+        assert_eq!(
+            page(true),
+            (Some(255), true),
+            "a render that stopped early: nothing painted, and it says so"
+        );
+        assert_eq!(
+            page(false),
+            (Some(0), false),
+            "a render that finished first: the whole page, and no warning"
+        );
+    }
+
+    /// A source that cancels the render inside the image lookup, and answers
+    /// with an image anyway.
+    ///
+    /// That is the one place a token can be set between `draw_image`'s entry
+    /// check and the pixels: a host decoding an image is where a render spends
+    /// its longest uninterrupted stretch.
+    struct CancelOnImage {
+        cancel: CancelToken,
+    }
+
+    impl GlyphSource for CancelOnImage {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+
+        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+            if name != b"Im0" {
+                return Ok(None);
+            }
+            self.cancel.cancel();
+            Ok(Some(DecodedImage {
+                stencil: false,
+                interpolate: false,
+                width: 2,
+                height: 2,
+                rgb: vec![0; 12],
+                alpha: Vec::new(),
+            }))
+        }
+    }
+
+    /// Milestone 3, from the other side: a stop that fires *inside the
+    /// rasterizer* is reported too.
+    ///
+    /// The predicate handed across the crate boundary is the only thing that
+    /// knows a fill stopped halfway down a shape or a draw stopped halfway
+    /// down an image — this crate cannot see it happen — so the predicate has
+    /// to set the flag itself. One predicate serves the fill, the stroker and
+    /// the image draw, and this is the route that can be triggered without a
+    /// second thread.
+    ///
+    /// `Do` is the **last** token on purpose. The interpreter asks the token
+    /// before every operator it dispatches, so anything after the image would
+    /// set the flag by itself and the test would pass with a predicate that
+    /// recorded nothing.
+    #[test]
+    fn a_stop_inside_the_rasterizer_is_reported_as_cancelled() {
+        let canvas = Canvas::new(20, 20, PixelFormat::Rgb8, Color::WHITE);
+        let source = CancelOnImage {
+            cancel: CancelToken::new(),
+        };
+        let mut renderer = Renderer::new(canvas, page_transform(20.0, 1.0), &source)
+            .with_cancel(source.cancel.clone());
+        interpret(
+            b"20 0 0 20 0 0 cm /Im0 Do",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &NoFonts,
+        );
+        let (canvas, warnings) = renderer.finish();
+
+        assert_eq!(
+            canvas.pixel(10, 10).map(|c| c.r),
+            Some(255),
+            "the draw stopped on its first destination row"
+        );
+        assert!(
+            warnings.contains(&RenderWarning::Cancelled),
+            "and the predicate that stopped it recorded that it had: {warnings:?}"
         );
     }
 

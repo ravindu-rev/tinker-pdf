@@ -21,6 +21,22 @@ use crate::geom::{flatten, FillRule, Path, Point};
 /// combined with exact horizontal spans for 8-bit total coverage.
 const SAMPLES: i32 = 16;
 
+/// Rows of the sweep between one cancellation check and the next.
+///
+/// Asking every row would put a branch in the hottest loop in the engine.
+/// Asking every sixteenth amortises it to a sixteenth of that while keeping
+/// the promise the render layer's documentation makes, which is scanline-band
+/// granularity rather than per-pixel: sixteen rows of a 300 dpi US Letter page
+/// is 40 800 pixels, tens of microseconds between one answer and the next.
+///
+/// A constant, deliberately. **The number cannot change a pixel** — the
+/// predicate decides only *whether the sweep continues*, never what a
+/// continued row computes — so it is free to be tuned without re-baselining
+/// anything, and the seven determinism fingerprints are indifferent to it.
+/// The count is of *iterations*, not of row indices, so the first row of every
+/// fill is checked whatever part of the region the shape starts in.
+const STOP_EVERY: usize = 16;
+
 /// A coverage mask over a rectangular region.
 #[derive(Clone, Debug)]
 pub struct Mask {
@@ -171,6 +187,15 @@ struct Edge {
 ///
 /// The region bounds the work: a path far larger than the page costs only the
 /// pixels that could be seen.
+///
+/// `stop` is asked once every [`STOP_EVERY`] rows, starting with the first,
+/// and the sweep ends as soon as it answers `true`. What comes back then is
+/// the **partial** mask — the rows already swept, and zero below them — rather
+/// than an empty one, because a half-drawn shape is a better progressive frame
+/// than a missing one and the caller is discarding the canvas anyway if the
+/// stop was real. `None` is the whole of the previous behaviour: no predicate
+/// is called and no row is skipped.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn fill(
     path: &Path,
@@ -180,6 +205,7 @@ pub fn fill(
     width: u32,
     height: u32,
     tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
 ) -> Mask {
     let mut mask = Mask::empty(x0, y0, width, height);
     if width == 0 || height == 0 {
@@ -209,7 +235,13 @@ pub fn fill(
     let mut active: Vec<usize> = Vec::new();
     let mut pending = 0usize;
 
-    for row in active_rows(&edges, y0, height) {
+    for (step, row) in active_rows(&edges, y0, height).enumerate() {
+        // Row granularity, not pixel granularity: a row is bounded by the
+        // canvas width, and stopping inside one would leave a half-computed
+        // accumulator to reason about for no promptness anyone can perceive.
+        if step % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
+            return mask;
+        }
         accumulator.iter_mut().for_each(|slot| *slot = 0);
         let row_top = y0.saturating_add(row as i32).saturating_mul(SAMPLES);
 
@@ -410,7 +442,7 @@ mod tests {
     fn rect_mask(x: f64, y: f64, w: f64, h: f64) -> Mask {
         let mut path = Path::new();
         path.rect(x, y, w, h);
-        fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1)
+        fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1, None)
     }
 
     #[test]
@@ -446,8 +478,8 @@ mod tests {
         path.rect(0.0, 0.0, 10.0, 10.0);
         path.rect(3.0, 3.0, 4.0, 4.0);
 
-        let nonzero = fill(&path, FillRule::NonZero, 0, 0, 12, 12, 0.1);
-        let evenodd = fill(&path, FillRule::EvenOdd, 0, 0, 12, 12, 0.1);
+        let nonzero = fill(&path, FillRule::NonZero, 0, 0, 12, 12, 0.1, None);
+        let evenodd = fill(&path, FillRule::EvenOdd, 0, 0, 12, 12, 0.1, None);
 
         assert_eq!(nonzero.at(5, 5), 255, "non-zero fills the inner square");
         assert_eq!(evenodd.at(5, 5), 0, "even-odd leaves it empty");
@@ -461,8 +493,8 @@ mod tests {
         path.curve_to(8.1, 0.4, 9.9, 12.5, 2.2, 11.1);
         path.close();
 
-        let a = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1);
-        let b = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1);
+        let a = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
+        let b = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
         assert_eq!(a.data, b.data, "ruling 4: the same input, the same bytes");
     }
 
@@ -474,7 +506,7 @@ mod tests {
         path.line_to(0.0, 20.0);
         path.close();
 
-        let mask = fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1);
+        let mask = fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
         let total: u64 = mask.data.iter().map(|&v| u64::from(v)).sum();
         let area = total as f64 / 255.0;
         assert!(
@@ -500,8 +532,8 @@ mod tests {
     fn an_intersection_costs_the_overlap_and_reads_the_same_outside_it() {
         let mut path = Path::new();
         path.rect(1.0, 1.0, 14.0, 14.0);
-        let big = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1);
-        let small = fill(&path, FillRule::NonZero, 4, 6, 5, 3, 0.1);
+        let big = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
+        let small = fill(&path, FillRule::NonZero, 4, 6, 5, 3, 0.1, None);
 
         let clipped = big.intersect(&small);
         assert_eq!(
@@ -548,11 +580,11 @@ mod tests {
     fn intersecting_in_place_reaches_the_last_row_and_column() {
         let mut clip_path = Path::new();
         clip_path.rect(2.0, 2.0, 6.5, 6.5);
-        let clip = fill(&clip_path, FillRule::NonZero, 1, 1, 10, 10, 0.1);
+        let clip = fill(&clip_path, FillRule::NonZero, 1, 1, 10, 10, 0.1, None);
 
         let mut path = Path::new();
         path.rect(-5.0, -5.0, 30.0, 30.0);
-        let mut mask = fill(&path, FillRule::NonZero, 1, 1, 10, 10, 0.1);
+        let mut mask = fill(&path, FillRule::NonZero, 1, 1, 10, 10, 0.1, None);
         assert_eq!(mask.at(10, 10), 255, "the shape covers the whole region");
 
         mask.intersect_in_place(&clip);
@@ -633,8 +665,8 @@ mod tests {
         second.rect(a.0, a.1, a.2, a.3);
 
         for rule in [FillRule::NonZero, FillRule::EvenOdd] {
-            let one = fill(&first, rule, 0, 0, 16, 16, 0.1);
-            let two = fill(&second, rule, 0, 0, 16, 16, 0.1);
+            let one = fill(&first, rule, 0, 0, 16, 16, 0.1, None);
+            let two = fill(&second, rule, 0, 0, 16, 16, 0.1, None);
             assert_eq!(one.data, two.data, "ruling 4, under {rule:?}");
         }
 
@@ -648,8 +680,8 @@ mod tests {
         second.rect(1.25, 2.5, 7.75, 6.5);
         for rule in [FillRule::NonZero, FillRule::EvenOdd] {
             assert_eq!(
-                fill(&first, rule, 0, 0, 16, 16, 0.1).data,
-                fill(&second, rule, 0, 0, 16, 16, 0.1).data,
+                fill(&first, rule, 0, 0, 16, 16, 0.1, None).data,
+                fill(&second, rule, 0, 0, 16, 16, 0.1, None).data,
                 "ruling 4 at a fractional overlap, under {rule:?}"
             );
         }
@@ -693,17 +725,17 @@ mod tests {
 
     #[test]
     fn degenerate_geometry_produces_an_empty_mask() {
-        let empty = fill(&Path::new(), FillRule::NonZero, 0, 0, 4, 4, 0.1);
+        let empty = fill(&Path::new(), FillRule::NonZero, 0, 0, 4, 4, 0.1, None);
         assert!(empty.data.iter().all(|&v| v == 0));
 
         // A zero-area region is legal and costs nothing.
-        let none = fill(&Path::new(), FillRule::NonZero, 0, 0, 0, 0, 0.1);
+        let none = fill(&Path::new(), FillRule::NonZero, 0, 0, 0, 0, 0.1, None);
         assert!(none.data.is_empty());
 
         // A path entirely outside the region contributes nothing.
         let mut far = Path::new();
         far.rect(1000.0, 1000.0, 10.0, 10.0);
-        let outside = fill(&far, FillRule::NonZero, 0, 0, 8, 8, 0.1);
+        let outside = fill(&far, FillRule::NonZero, 0, 0, 8, 8, 0.1, None);
         assert!(outside.data.iter().all(|&v| v == 0));
     }
 
@@ -714,7 +746,111 @@ mod tests {
         path.line_to(1e9, -1e9);
         path.line_to(1e9, 1e9);
         path.close();
-        let mask = fill(&path, FillRule::NonZero, 0, 0, 8, 8, 0.1);
+        let mask = fill(&path, FillRule::NonZero, 0, 0, 8, 8, 0.1, None);
         assert_eq!(mask.data.len(), 64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stopping the sweep (gap 15).
+    // -----------------------------------------------------------------------
+
+    /// A predicate that answers `false` until its `at`-th question and `true`
+    /// from then on, counting how many times it was asked.
+    ///
+    /// Deterministic by construction: it fires on the Nth *question*, never on
+    /// a clock. A stop test written against elapsed time is flaky by
+    /// construction — the sweep either reached the row before the deadline or
+    /// it did not — and one in CI fails for reasons nobody can reproduce.
+    struct StopAt {
+        at: u32,
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl StopAt {
+        fn new(at: u32) -> StopAt {
+            StopAt {
+                at,
+                calls: std::cell::Cell::new(0),
+            }
+        }
+
+        fn ask(&self) -> bool {
+            self.calls.set(self.calls.get().saturating_add(1));
+            self.calls.get() >= self.at
+        }
+    }
+
+    /// A tall bar filling every row of a tall region, so the sweep's step
+    /// count and the row index are the same number.
+    fn tall_bar() -> Path {
+        let mut path = Path::new();
+        path.rect(5.0, 0.0, 30.0, 400.0);
+        path
+    }
+
+    /// Milestone 2: the row loop stops when asked, and what comes back is the
+    /// part of the shape it had already drawn.
+    ///
+    /// The partial mask is the point. Returning an empty one would be simpler
+    /// and would pass any test that only asked whether the sweep stopped —
+    /// which is why both halves are asserted here: ink above the cut, none at
+    /// it or below.
+    #[test]
+    fn a_stopped_fill_keeps_the_rows_it_had_already_swept() {
+        let path = tall_bar();
+        let whole = fill(&path, FillRule::NonZero, 0, 0, 40, 400, 0.1, None);
+        assert_eq!(whole.at(20, 399), 255, "the shape reaches the last row");
+
+        // The fourth question is asked at row 3 x STOP_EVERY, and stops there.
+        let stop = StopAt::new(4);
+        let ask = || stop.ask();
+        let partial = fill(&path, FillRule::NonZero, 0, 0, 40, 400, 0.1, Some(&ask));
+
+        let cut = 3 * STOP_EVERY as i32;
+        assert_eq!(partial.at(20, cut - 1), 255, "the rows before the cut drew");
+        assert_eq!(partial.at(20, cut), 0, "the row it stopped on did not");
+        assert_eq!(partial.at(20, 399), 0, "nor did anything below it");
+        assert_eq!(
+            partial.data.iter().filter(|&&v| v != 0).count(),
+            cut as usize * 30,
+            "exactly the rows above the cut, at the bar's own width"
+        );
+    }
+
+    /// The hook is not an input to the coverage: a predicate that never
+    /// answers yes leaves every byte where `None` left it (ruling 4).
+    ///
+    /// And the period is a band rather than a row — the cost the risk row in
+    /// the gap plan is about. Derived from the constant rather than written
+    /// out, so tuning `STOP_EVERY` retunes the assertion with it.
+    #[test]
+    fn a_predicate_that_never_answers_yes_changes_no_pixel() {
+        let path = tall_bar();
+        let stop = StopAt::new(u32::MAX);
+        let ask = || stop.ask();
+
+        let hooked = fill(&path, FillRule::NonZero, 0, 0, 40, 400, 0.1, Some(&ask));
+        let bare = fill(&path, FillRule::NonZero, 0, 0, 40, 400, 0.1, None);
+
+        assert_eq!(hooked.data, bare.data, "the same input, the same bytes");
+        assert_eq!(
+            stop.calls.get() as usize,
+            400usize.div_ceil(STOP_EVERY),
+            "one question per band of {STOP_EVERY} rows, not one per row"
+        );
+    }
+
+    /// A shape that reaches no row is never asked at all, so a page full of
+    /// off-canvas geometry costs no questions either.
+    #[test]
+    fn a_fill_with_nothing_to_sweep_asks_nothing() {
+        let mut far = Path::new();
+        far.rect(1000.0, 1000.0, 10.0, 10.0);
+        let stop = StopAt::new(1);
+        let ask = || stop.ask();
+
+        let mask = fill(&far, FillRule::NonZero, 0, 0, 8, 8, 0.1, Some(&ask));
+        assert!(mask.data.iter().all(|&v| v == 0));
+        assert_eq!(stop.calls.get(), 0, "no rows, no questions");
     }
 }

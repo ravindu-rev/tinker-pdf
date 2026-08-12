@@ -66,6 +66,15 @@ impl Default for StrokeStyle {
 /// How finely round joins and caps are approximated.
 const ARC_STEPS: usize = 16;
 
+/// Dash steps between one cancellation check and the next.
+///
+/// A step is a handful of arithmetic operations and a push, and one segment
+/// may take a hundred thousand of them, so a thousand steps is microseconds
+/// between one answer and the next. Like [`crate::fill`]'s row constant this
+/// number cannot change the outline: the predicate decides only whether the
+/// expansion continues.
+const STOP_EVERY: u32 = 1024;
+
 /// Expands a stroke into a path to fill with the non-zero rule.
 ///
 /// The outline is built per segment — a quad for the body, a shape for each
@@ -73,8 +82,22 @@ const ARC_STEPS: usize = 16;
 /// are exactly what the non-zero rule resolves, and the alternative (a true
 /// offset curve) is where stroking implementations go to die on self-
 /// intersection.
+///
+/// `stop` is asked once per subpath and once every [`STOP_EVERY`] dash steps,
+/// and what comes back when it answers `true` is the partial outline. Dash
+/// expansion is where this matters: a long path under a fine dash array runs
+/// to completion *before* any fill starts, so a stroke with no hook here is
+/// uninterruptible however promptly the fill checks. A solid stroke never
+/// reaches the inner loop at all — 8.4.3.6's empty array returns the polyline
+/// unchanged — so it pays only the per-subpath question. `None` is the whole
+/// of the previous behaviour.
 #[must_use]
-pub fn stroke(path: &Path, style: &StrokeStyle, tolerance: f64) -> Path {
+pub fn stroke(
+    path: &Path,
+    style: &StrokeStyle,
+    tolerance: f64,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Path {
     let mut out = Path::new();
 
     let width = if style.width.is_finite() && style.width > 0.0 {
@@ -87,7 +110,10 @@ pub fn stroke(path: &Path, style: &StrokeStyle, tolerance: f64) -> Path {
     let radius = width / 2.0;
 
     for poly in flatten(path, tolerance) {
-        for piece in apply_dashes(&poly, style) {
+        if stop.is_some_and(|stop| stop()) {
+            return out;
+        }
+        for piece in apply_dashes(&poly, style, stop) {
             stroke_polyline(&piece, radius, style, &mut out);
         }
     }
@@ -96,7 +122,11 @@ pub fn stroke(path: &Path, style: &StrokeStyle, tolerance: f64) -> Path {
 }
 
 /// Splits a polyline into the pieces a dash pattern leaves visible.
-fn apply_dashes(poly: &[Point], style: &StrokeStyle) -> Vec<Vec<Point>> {
+fn apply_dashes(
+    poly: &[Point],
+    style: &StrokeStyle,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Vec<Vec<Point>> {
     let pattern: Vec<f64> = style
         .dashes
         .iter()
@@ -136,6 +166,11 @@ fn apply_dashes(poly: &[Point], style: &StrokeStyle) -> Vec<Vec<Point>> {
         }
     }
 
+    // Counted across the whole polyline rather than per segment, so a path of
+    // ten thousand short segments is asked as often as one long segment that
+    // takes the same number of steps.
+    let mut steps = 0u32;
+
     for pair in poly.windows(2) {
         let (Some(&a), Some(&b)) = (pair.first(), pair.get(1)) else {
             continue;
@@ -151,6 +186,15 @@ fn apply_dashes(poly: &[Point], style: &StrokeStyle) -> Vec<Vec<Point>> {
         // over a long line would otherwise generate millions of pieces.
         let mut guard = 0u32;
         while segment_left > 0.0 && guard < 100_000 {
+            if steps % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
+                // The pieces already measured, and the one in hand, rather
+                // than nothing: the same partial answer `fill` gives.
+                if current.len() > 1 {
+                    pieces.push(current);
+                }
+                return pieces;
+            }
+            steps = steps.wrapping_add(1);
             guard += 1;
             if left <= 0.0 {
                 index += 1;
@@ -437,7 +481,7 @@ mod tests {
     use crate::geom::FillRule;
 
     fn coverage(path: &Path, w: u32, h: u32) -> f64 {
-        let mask = fill(path, FillRule::NonZero, 0, 0, w, h, 0.05);
+        let mask = fill(path, FillRule::NonZero, 0, 0, w, h, 0.05, None);
         mask.data.iter().map(|&v| f64::from(v)).sum::<f64>() / 255.0
     }
 
@@ -454,6 +498,7 @@ mod tests {
                 ..StrokeStyle::default()
             },
             0.05,
+            None,
         );
         let area = coverage(&outline, 24, 24);
         // 16 long, 4 wide, butt caps: 64 square units.
@@ -477,6 +522,7 @@ mod tests {
                 ..StrokeStyle::default()
             },
             0.05,
+            None,
         );
         let square = stroke(
             &path,
@@ -486,6 +532,7 @@ mod tests {
                 ..StrokeStyle::default()
             },
             0.05,
+            None,
         );
 
         let extra = coverage(&square, 24, 24) - coverage(&butt, 24, 24);
@@ -511,6 +558,7 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             ),
             28,
             28,
@@ -524,6 +572,7 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             ),
             28,
             28,
@@ -551,6 +600,7 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             ),
             44,
             20,
@@ -564,6 +614,7 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             ),
             44,
             20,
@@ -594,6 +645,7 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             ),
             40,
             12,
@@ -608,6 +660,7 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             ),
             40,
             12,
@@ -632,6 +685,7 @@ mod tests {
                 ..StrokeStyle::default()
             },
             0.05,
+            None,
         );
         assert!(coverage(&outline, 12, 12) > 5.0);
     }
@@ -650,6 +704,7 @@ mod tests {
                 ..StrokeStyle::default()
             },
             0.05,
+            None,
         );
         assert!(coverage(&round, 12, 12) > 8.0);
 
@@ -666,7 +721,129 @@ mod tests {
                     ..StrokeStyle::default()
                 },
                 0.05,
+                None,
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stopping the expansion (gap 15).
+    // -----------------------------------------------------------------------
+
+    /// A predicate that answers `false` until its `at`-th question and `true`
+    /// from then on, counting how many times it was asked. Deterministic: it
+    /// fires on the Nth question, never on a clock.
+    struct StopAt {
+        at: u32,
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl StopAt {
+        fn new(at: u32) -> StopAt {
+            StopAt {
+                at,
+                calls: std::cell::Cell::new(0),
+            }
+        }
+
+        fn ask(&self) -> bool {
+            self.calls.set(self.calls.get().saturating_add(1));
+            self.calls.get() >= self.at
+        }
+    }
+
+    /// A long line under a fine dash array: the case the gap plan names, where
+    /// the whole expansion runs before a single row is filled.
+    fn dashed_rule() -> (Path, StrokeStyle) {
+        let mut path = Path::new();
+        path.move_to(0.0, 0.0);
+        path.line_to(200_000.0, 0.0);
+        (
+            path,
+            StrokeStyle {
+                width: 1.0,
+                dashes: vec![1.0, 1.0],
+                ..StrokeStyle::default()
+            },
+        )
+    }
+
+    /// Milestone 2: the dash loop stops when asked, and hands back the pieces
+    /// it had already measured rather than nothing.
+    ///
+    /// The first question is the subpath's, asked before the expansion starts;
+    /// the second is the expansion's own at step zero; the third comes
+    /// `STOP_EVERY` steps later and is the one that fires here. So the outline
+    /// carries about a thousand dashes out of the fifty thousand the whole
+    /// expansion produces — enough to prove both that it stopped and that it
+    /// did not throw away what it had.
+    #[test]
+    fn a_stopped_dash_expansion_keeps_the_pieces_it_had_measured() {
+        let (path, style) = dashed_rule();
+        let whole = stroke(&path, &style, 0.05, None);
+
+        let stop = StopAt::new(3);
+        let ask = || stop.ask();
+        let partial = stroke(&path, &style, 0.05, Some(&ask));
+
+        assert!(
+            !partial.verbs().is_empty(),
+            "the dashes already measured, not an empty path"
+        );
+        assert!(
+            partial.verbs().len() * 10 < whole.verbs().len(),
+            "and far short of the whole: {} against {}",
+            partial.verbs().len(),
+            whole.verbs().len()
+        );
+    }
+
+    /// A solid stroke never enters the dash loop — 8.4.3.6's empty array
+    /// returns the polyline unchanged — so the per-subpath question is the
+    /// only one it can be stopped by. Four identical subpaths, stopped at the
+    /// third question, leave exactly two.
+    #[test]
+    fn a_solid_stroke_stops_between_subpaths() {
+        let mut path = Path::new();
+        for i in 0..4 {
+            let y = f64::from(i) * 10.0;
+            path.move_to(0.0, y);
+            path.line_to(40.0, y);
+        }
+        let style = StrokeStyle {
+            width: 2.0,
+            ..StrokeStyle::default()
+        };
+
+        let whole = stroke(&path, &style, 0.05, None);
+        let stop = StopAt::new(3);
+        let ask = || stop.ask();
+        let partial = stroke(&path, &style, 0.05, Some(&ask));
+
+        assert_eq!(
+            partial.verbs().len() * 2,
+            whole.verbs().len(),
+            "two of the four subpaths"
+        );
+    }
+
+    /// The hook is not an input to the outline: a predicate that never answers
+    /// yes leaves the path exactly where `None` left it (ruling 4).
+    #[test]
+    fn a_predicate_that_never_answers_yes_changes_no_outline() {
+        let (path, style) = dashed_rule();
+        let stop = StopAt::new(u32::MAX);
+        let ask = || stop.ask();
+
+        let hooked = stroke(&path, &style, 0.05, Some(&ask));
+        let bare = stroke(&path, &style, 0.05, None);
+
+        assert_eq!(hooked.verbs(), bare.verbs(), "the same verbs");
+        assert!(
+            stop.calls.get() < 200,
+            "one question per subpath and per band of {STOP_EVERY} steps, \
+             not one per step: {}",
+            stop.calls.get()
+        );
     }
 }
