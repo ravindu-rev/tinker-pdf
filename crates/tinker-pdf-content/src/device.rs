@@ -17,7 +17,15 @@ pub struct Glyph {
     /// The transform from glyph space to device space, including the font
     /// size, horizontal scaling and rise.
     pub transform: Matrix,
-    /// The advance in text space, before the transform.
+    /// The displacement to the next glyph, in text space, before the
+    /// transform.
+    ///
+    /// **Signed, and along the writing direction.** Horizontally it is 9.4.4's
+    /// `w0` and runs positive to the right; vertically it is 9.7.4.3's `w1`
+    /// and is normally *negative*, because a column runs down and text space
+    /// has y upward. A consumer wanting a length rather than a displacement
+    /// takes the absolute value; one that assumes a positive number gets a
+    /// column running the wrong way, which looks plausible enough to ship.
     pub advance: f64,
     /// The font size in effect.
     pub size: f64,

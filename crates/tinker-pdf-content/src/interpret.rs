@@ -47,6 +47,22 @@ pub trait FontSource {
         false
     }
 
+    /// The vertical metrics of one code, in 1/1000 em: `(v_x, v_y, w1_y)`.
+    ///
+    /// 9.7.4.3. `w1_y` is the displacement — how far the pen moves along the
+    /// column, negative because text space has y upward — and `(v_x, v_y)` is
+    /// the position vector, which is where within its em box the glyph is
+    /// drawn: a comma belongs in a different corner vertically than
+    /// horizontally, and the offset is what puts it there.
+    ///
+    /// Only consulted when [`FontSource::is_vertical`] is true, and it has no
+    /// default on purpose. A defaulted one would compile in every
+    /// implementation that ever grows a vertical font and quietly advance
+    /// every column by nothing — which is the shape of the bug this method
+    /// exists to close, where the horizontal advance was applied downward
+    /// because nothing else was on offer.
+    fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64);
+
     /// A stable identifier for the named font.
     fn font_id(&self, font: &[u8]) -> u64 {
         let _ = font;
@@ -798,13 +814,34 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             .rev()
             .collect();
 
+        // 9.4.3: the adjustment is subtracted from "the current horizontal or
+        // vertical coordinate, depending on the writing mode" — so which axis
+        // it moves along is a property of the font, not of the operator. A
+        // vertical run whose adjustments went sideways would step out of its
+        // own column, one kern at a time. `Tf` cannot appear inside a `TJ`
+        // array, so the font is fixed for the whole of it.
+        let vertical = self
+            .gs
+            .text
+            .font
+            .as_ref()
+            .is_some_and(|name| self.fonts.is_vertical(name));
+
         for item in items {
             match item {
                 Token::String(s) => self.show(&s),
                 Token::Number(adjust) if adjust.is_finite() => {
                     let ts = &self.gs.text;
-                    let shift = -adjust / 1000.0 * ts.size * ts.horizontal_scale;
-                    self.text_matrix = Matrix::translate(shift, 0.0).then(&self.text_matrix);
+                    // 9.4.4's tx carries Th and its ty does not: Th is a
+                    // horizontal scaling and there is no horizontal motion to
+                    // scale in a vertical run.
+                    self.text_matrix = if vertical {
+                        let shift = -adjust / 1000.0 * ts.size;
+                        Matrix::translate(0.0, shift).then(&self.text_matrix)
+                    } else {
+                        let shift = -adjust / 1000.0 * ts.size * ts.horizontal_scale;
+                        Matrix::translate(shift, 0.0).then(&self.text_matrix)
+                    };
                 }
                 _ => {}
             }
@@ -831,7 +868,31 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 e: 0.0,
                 f: ts.rise,
             };
-            let transform = scale.then(&self.text_matrix).then(&self.gs.ctm);
+
+            // 9.7.4.3: a vertical font displaces the pen by w1 rather than by
+            // the horizontal w0, and draws the glyph at the current point
+            // offset by *minus* the position vector v — v points from the
+            // glyph's horizontal origin to the one vertical setting uses, so
+            // undoing it is what puts the glyph in the column. Both come out
+            // of one call, because a build where the advance and the placement
+            // read different numbers is the failure 9.7.4.3 is easiest to get
+            // half right about.
+            let (v_x, v_y, w1_y) = if vertical {
+                self.fonts.vertical_metrics(&font_name, code)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+
+            // v is in glyph space, so the offset goes *inside* the size
+            // scaling — 9.4.4 sends the position vector through Trm like every
+            // other glyph-space coordinate, which is what makes it scale with
+            // the font size and with Th.
+            let placed = if vertical {
+                Matrix::translate(-v_x / 1000.0, -v_y / 1000.0).then(&scale)
+            } else {
+                scale
+            };
+            let transform = placed.then(&self.text_matrix).then(&self.gs.ctm);
 
             // 9.6.5: a Type 3 glyph is a content stream. Its procedure runs in
             // glyph space, which the font matrix maps into text space — so the
@@ -869,7 +930,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 code,
                 text: text.clone(),
                 transform,
-                advance: width / 1000.0 * ts.size,
+                advance: if vertical { w1_y } else { width } / 1000.0 * ts.size,
                 size: ts.size,
                 vertical,
                 font_id,
@@ -883,12 +944,22 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             } else {
                 0.0
             };
-            let advance = (width / 1000.0 * ts.size + ts.char_spacing + word) * ts.horizontal_scale;
 
+            // 9.4.4, in full:
+            //   tx = ((w0 - Tj/1000) * Tfs + Tc + Tw) * Th
+            //   ty =  (w1 - Tj/1000) * Tfs + Tc + Tw
+            // Two differences, and both of them matter. The displacement is w1
+            // and not w0 — a downward number, already signed, so it is added
+            // rather than subtracted and an engine that negates a negative
+            // runs the column upward. And Th does not appear in ty at all:
+            // horizontal scaling scales horizontal motion, of which a vertical
+            // run has none.
             self.text_matrix = if vertical {
-                Matrix::translate(0.0, -advance).then(&self.text_matrix)
+                let ty = w1_y / 1000.0 * ts.size + ts.char_spacing + word;
+                Matrix::translate(0.0, ty).then(&self.text_matrix)
             } else {
-                Matrix::translate(advance, 0.0).then(&self.text_matrix)
+                let tx = (width / 1000.0 * ts.size + ts.char_spacing + word) * ts.horizontal_scale;
+                Matrix::translate(tx, 0.0).then(&self.text_matrix)
             };
         }
     }
@@ -1002,6 +1073,7 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         glyphs: Vec<(String, f64, f64)>,
+        advances: Vec<f64>,
         fills: usize,
         strokes: usize,
     }
@@ -1010,6 +1082,7 @@ mod tests {
         fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
             self.glyphs
                 .push((glyph.text.clone(), glyph.transform.e, glyph.transform.f));
+            self.advances.push(glyph.advance);
         }
         fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
             self.fills += 1;
@@ -1029,11 +1102,62 @@ mod tests {
                 .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
                 .collect()
         }
+        /// Never vertical, so nothing here is ever asked. Written out because
+        /// the trait has no default for it: 9.7.4.3's metrics have no safe
+        /// one, and a source that grows a vertical font is made to say so.
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+    }
+
+    /// The same font written vertically, with metrics that are all different
+    /// numbers.
+    ///
+    /// Every component is distinct and none is a multiple of another, so an
+    /// assertion below can only hold for one arrangement of them: `w1_y` is
+    /// -800 where the *horizontal* width is 500, so a pen still advancing by
+    /// `w0` — the defect this closes — lands somewhere none of these tests
+    /// accept, and so does one that negates the sign.
+    ///
+    /// `A` and `B` differ from each other as well, so a run of two glyphs
+    /// cannot pass by applying either one's metrics twice.
+    struct Vertical;
+
+    impl Vertical {
+        /// `(v_x, v_y, w1_y)` per code, in 1/1000 em.
+        fn metrics(code: u32) -> (f64, f64, f64) {
+            match code {
+                0x41 => (250.0, 700.0, -800.0),
+                0x42 => (300.0, 650.0, -900.0),
+                _ => (0.0, 880.0, -1000.0),
+            }
+        }
+    }
+
+    impl FontSource for Vertical {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn is_vertical(&self, _font: &[u8]) -> bool {
+            true
+        }
+        fn vertical_metrics(&self, _font: &[u8], code: u32) -> (f64, f64, f64) {
+            Vertical::metrics(code)
+        }
     }
 
     fn run(src: &[u8]) -> Recorder {
         let mut d = Recorder::default();
         interpret(src, Matrix::IDENTITY, &mut d, &Simple);
+        d
+    }
+
+    fn run_vertical(src: &[u8]) -> Recorder {
+        let mut d = Recorder::default();
+        interpret(src, Matrix::IDENTITY, &mut d, &Vertical);
         d
     }
 
@@ -1065,6 +1189,108 @@ mod tests {
         assert_eq!(xs.first(), Some(&0.0), "A");
         assert_eq!(xs.get(1), Some(&5.0), "the space itself is not shifted");
         assert_eq!(xs.get(2), Some(&110.0), "B follows the word space");
+    }
+
+    // -----------------------------------------------------------------------
+    // Vertical writing (gap 05, 9.4.4 and 9.7.4.3).
+    // -----------------------------------------------------------------------
+
+    /// Absolute positions after two glyphs, which is the whole point of the
+    /// assertion: an inverted vertical displacement still draws a tidy column,
+    /// just one running upward, and a test on the *gaps* between glyphs would
+    /// accept it. A test on where the glyphs actually are cannot.
+    ///
+    /// Every number below is hand-computed from 9.4.4 with the pen starting at
+    /// (100, 700) and 10pt text:
+    ///
+    /// - `A` is drawn at the pen offset by -v = (-250, -700)/1000 x 10, so at
+    ///   (100 - 2.5, 700 - 7) = (97.5, 693).
+    /// - the pen then moves by w1 = -800/1000 x 10 = -8, to (100, 692).
+    /// - `B` is drawn at that pen offset by its own -v = (-3, -6.5), so at
+    ///   (97, 685.5).
+    ///
+    /// The horizontal width is 500 for both, so a pen still advancing by `w0`
+    /// puts `B` at y = 688.5 and a sign inversion puts it at 701.5. Neither is
+    /// 685.5.
+    #[test]
+    fn a_vertical_run_advances_by_w1_and_is_placed_by_v() {
+        let d = run_vertical(b"BT /F0 10 Tf 100 700 Td (AB) Tj ET");
+
+        assert_eq!(
+            d.glyphs.first().map(|g| (g.1, g.2)),
+            Some((97.5, 693.0)),
+            "A, at the pen minus its position vector"
+        );
+        assert_eq!(
+            d.glyphs.get(1).map(|g| (g.1, g.2)),
+            Some((97.0, 685.5)),
+            "B, one w1 further down and offset by its own v"
+        );
+
+        // The glyph event carries the same displacement, signed: a consumer
+        // measuring a column reads it rather than recomputing it.
+        assert_eq!(d.advances, vec![-8.0, -9.0]);
+    }
+
+    /// The position vector is the half of 9.7.4.3 that has nothing to do with
+    /// the advance, so it is asserted on its own: two codes with the same
+    /// displacement and different vectors sit in different places.
+    ///
+    /// `A` and `B` are drawn one after another here, and the difference in
+    /// their x is `(250 - 300)/1000 x 10 = -0.5` — a sideways shift inside the
+    /// em box, in a writing mode where nothing else moves sideways at all.
+    #[test]
+    fn the_position_vector_shifts_the_glyph_within_its_em_box() {
+        let d = run_vertical(b"BT /F0 10 Tf 100 700 Td (AB) Tj ET");
+        let xs: Vec<f64> = d.glyphs.iter().map(|g| g.1).collect();
+        assert_eq!(xs, vec![97.5, 97.0]);
+        assert!(
+            xs.iter().all(|x| *x != 100.0),
+            "neither glyph sits at the pen itself, which is what applying no \
+             position vector would look like"
+        );
+    }
+
+    /// 9.4.4's `ty` has no `Th` in it, and its `Tc` is added to a negative
+    /// displacement rather than scaling it. `Tz 200` doubles the *glyph*
+    /// horizontally — so the position vector's x doubles with it, since v is a
+    /// glyph-space coordinate — and leaves the column's step alone.
+    #[test]
+    fn horizontal_scaling_does_not_reach_a_vertical_advance() {
+        let d = run_vertical(b"BT /F0 10 Tf 2 Tc 200 Tz 100 700 Td (AB) Tj ET");
+
+        assert_eq!(
+            d.glyphs.first().map(|g| (g.1, g.2)),
+            Some((95.0, 693.0)),
+            "A: v_x doubled by Tz, v_y untouched by it"
+        );
+        // The step is -8 + 2 = -6, and 9.4.4 does not multiply it by Th.
+        // Character spacing shortens a downward step because the spec adds it
+        // to a negative number; scaling it by 2 would put B at y = 682.
+        assert_eq!(
+            d.glyphs.get(1).map(|g| (g.1, g.2)),
+            Some((94.0, 687.5)),
+            "B: one step of -6 down, not -12"
+        );
+    }
+
+    /// 9.4.3: a `TJ` number is subtracted from "the current horizontal or
+    /// vertical coordinate, depending on the writing mode". It went on the
+    /// horizontal one whatever the mode, so a vertical run drifted sideways by
+    /// every kern in it while the column itself never noticed.
+    #[test]
+    fn tj_adjustments_move_a_vertical_pen_along_its_own_column() {
+        let d = run_vertical(b"BT /F0 10 Tf 100 700 Td [(A) -1000 (B)] TJ ET");
+
+        // A is where it always was; the pen is then at (100, 692), and -1000
+        // thousandths at 10pt subtracts -10 from y, taking it to 702.
+        assert_eq!(d.glyphs.get(1).map(|g| (g.1, g.2)), Some((97.0, 695.5)));
+        assert_eq!(
+            d.glyphs.get(1).map(|g| g.1),
+            Some(97.0),
+            "and the column has not moved sideways, which is what the \
+             adjustment used to do"
+        );
     }
 
     #[test]

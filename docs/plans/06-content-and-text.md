@@ -151,7 +151,20 @@ ty =  (w1 − TJadj/1000)·Tfs + Tc + Tw?            (vertical; no Th)
 
 `Tw?` applies only when the code is the *single-byte* value 32 (9.3.3) — never to a byte 32
 inside a multi-byte code of a composite font. This is the classic CID bug and gets a
-dedicated fixture. The glyph quad is the glyph-space box `[0, descent] × [w0, ascent]`
+dedicated fixture.
+
+*Amended August 2026, gap [05](gaps/05-vertical-metrics.md).* Two things this section left
+implicit, both of which were therefore built wrong. The **position vector** `v` that
+[05-fonts](05-fonts.md) stores alongside `w1` is applied here and nowhere else: a vertical
+glyph is drawn at the current point displaced by *minus* `v`, in glyph space, so the
+translation goes inside `Trm` and scales with `Tfs` and `Th` like any other glyph-space
+coordinate. Without it a comma sits in the horizontal corner of its em box in a vertical
+column. And `TJadj` above is written into both formulae for a reason 9.4.3 states and the
+implementation missed: the adjustment is subtracted from "the current horizontal or
+vertical coordinate, **depending on the writing mode**", so in a vertical run it moves the
+pen down its own column rather than sideways out of it.
+
+The glyph quad is the glyph-space box `[0, descent] × [w0, ascent]`
 mapped through `Trm` — four corners, not an axis-aligned rect, so `Tz`, `Ts`, and rotation
 fall out of the math instead of being special cases. Mode 3 (invisible) glyphs still reach
 the device: OCR text layers are exactly this, and extracting them is the point.

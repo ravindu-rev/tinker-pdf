@@ -181,7 +181,19 @@ fn stream(prefix: &str, data: &[u8]) -> Vec<u8> {
 /// `/W` gives each of the four live CIDs a 1000-unit advance, so the ink of a
 /// two-code string spans one advance plus the second glyph's box and the sum
 /// is arithmetic a reader can check.
+///
+/// The pen sits near the page's corner, which is fine for the horizontal
+/// fixtures and is not for a vertical one: gap 05 applies 9.7.4.3's position
+/// vector, and with no `/W2` here that is `(w0/2, 880)` — 24 points left and
+/// 42 points down at this size. A vertical glyph shown at (20, 30) therefore
+/// lands partly off the page and its ink box measures the clip rather than the
+/// glyph. [`page_at`] is what the vertical fixtures use instead.
 fn page(encoding: &str, bytes: &[u8]) -> Vec<u8> {
+    page_at(encoding, bytes, (20.0, 30.0))
+}
+
+/// The same page with the pen placed explicitly.
+fn page_at(encoding: &str, bytes: &[u8], td: (f64, f64)) -> Vec<u8> {
     let objects: Vec<Vec<u8>> = vec![
         format!(
             "<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /{encoding}\n\
@@ -201,7 +213,8 @@ fn page(encoding: &str, bytes: &[u8]) -> Vec<u8> {
     ];
 
     let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
-    let content = format!("BT /F0 48 Tf 20 30 Td <{hex}> Tj ET");
+    let (x, y) = td;
+    let content = format!("BT /F0 48 Tf {x} {y} Td <{hex}> Tj ET");
 
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.7\n");
@@ -382,12 +395,20 @@ fn a_name_the_registry_does_not_define_draws_nothing() {
 /// with hand-made parents, and said so in every fixture: until this gap
 /// landed, `90ms-RKSJ-H` was a stub and a test inheriting from it would have
 /// been measuring the stub.
+/// The pen is at (40, 60) rather than this file's usual (20, 30). *Amended
+/// August 2026, gap 05:* a vertical glyph is now drawn at the pen displaced by
+/// -v (9.7.4.3), which with no `/W2` in this fixture is 24 points left and 42
+/// down. From (20, 30) that put both boxes over the page's bottom-left corner,
+/// where the clip decided the ink box and the assertion measured the corner
+/// rather than the glyph. The CIDs, the glyphs and the inheritance being
+/// tested are all unchanged; only where the run starts is.
 #[test]
 fn the_vertical_cmap_overrides_its_parent_on_the_page() {
-    let vertical = render(page("90ms-RKSJ-V", &[0x81, 0x41]));
+    let pen = (40.0, 60.0);
+    let vertical = render(page_at("90ms-RKSJ-V", &[0x81, 0x41], pen));
     spans(&vertical, 600.0, 600.0, "<8141> through 90ms-RKSJ-V");
 
-    let horizontal = render(page("90ms-RKSJ-H", &[0x81, 0x41]));
+    let horizontal = render(page_at("90ms-RKSJ-H", &[0x81, 0x41], pen));
     assert_eq!(
         ink(&horizontal),
         0,
@@ -397,7 +418,7 @@ fn the_vertical_cmap_overrides_its_parent_on_the_page() {
     // And what the child did *not* restate still comes from the parent, which
     // is the half a replacement rather than a merge would lose.
     spans(
-        &render(page("90ms-RKSJ-V", &[0x81, 0x40])),
+        &render(page_at("90ms-RKSJ-V", &[0x81, 0x40], pen)),
         900.0,
         900.0,
         "<8140> inherited from 90ms-RKSJ-H",

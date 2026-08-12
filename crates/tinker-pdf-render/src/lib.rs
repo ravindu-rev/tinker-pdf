@@ -1133,6 +1133,12 @@ mod tests {
         fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
             Vec::new()
         }
+        /// Nothing decodes, so nothing is shown and nothing asks. Spelled out
+        /// rather than defaulted because 9.7.4.3's metrics have no safe
+        /// default: the trait makes every source answer.
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
     }
 
     fn render(content: &[u8], size: u32) -> (Canvas, Vec<RenderWarning>) {

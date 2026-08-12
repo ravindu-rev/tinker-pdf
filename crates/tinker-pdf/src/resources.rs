@@ -438,6 +438,20 @@ impl FontSource for PageResources {
         self.fonts.get(font).is_some_and(|f| f.is_vertical())
     }
 
+    fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
+        let Some(found) = self.fonts.get(font) else {
+            // Unreachable in practice: an unresolved font decodes to no codes
+            // at all, so nothing is ever shown to ask about. 9.7.4.3's default
+            // rather than a zero displacement, so that a future caller getting
+            // here still advances.
+            return (0.0, 880.0, -1000.0);
+        };
+        // 9.7.4.3 keys /W2 by CID, and this is the same `cid_of` the advance
+        // goes through — so the displacement and the position vector cannot
+        // end up describing a different CID from the glyph that is drawn.
+        found.vertical_metrics(found.cid_of(code))
+    }
+
     fn font_id(&self, font: &[u8]) -> u64 {
         self.font_ids.get(font).copied().unwrap_or(0)
     }
