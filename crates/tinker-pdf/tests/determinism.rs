@@ -499,6 +499,59 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// Optional content: what a page draws once its `/OCProperties` have been
+/// read.
+///
+/// *Added August 2026, with gap 06.* Every other fixture here would render
+/// identically on a build that had never heard of 8.11, so none of them is
+/// evidence about it. This one is four claims at once, and each is a
+/// different branch of the visibility decision:
+///
+/// - the opaque red rectangle covers the whole page and is in a group `/D`
+///   turns **off**. If suppression ever regresses, this fixture does not
+///   merely change — it becomes a flat red page, which no minimum-ink floor
+///   would catch, because the ink goes *up*;
+/// - the curved wedge is in a group that is **on**, so a build that hid
+///   everything marked rather than everything hidden loses it;
+/// - the stroked rule is behind an OCMD with `/P /AnyOff` over one group that
+///   is off and one that is on, which is the policy a naive reading inverts —
+///   it is visible *because* a group is off;
+/// - the form XObject carries `/OC` on the XObject dictionary itself (8.11.4.4)
+///   rather than in a `BDC`, and would otherwise paint the page black.
+fn optional_content_page() -> Vec<u8> {
+    // Most of the ink is inside layers that are *on*, so the minimum-ink
+    // floor below is an instrument with something to measure: a build that
+    // hid everything marked rather than everything hidden loses three
+    // quarters of the page.
+    let content = "0.2 0.5 0.8 rg 5 5 m 30 45 l 55 5 l h f\n\
+                   /OC /Off BDC 0.9 0.1 0.1 rg 0 0 120 80 re f EMC\n\
+                   /OC /On BDC 0.1 0.7 0.2 rg 8 50 m 40 78 52 46 20 52 c h f\n\
+                     0.5 0.3 0.7 rg 62 8 52 62 re f EMC\n\
+                   /OC /Mixed BDC 0 0 0 RG 3 w 1 J 5 74 m 115 70 l S EMC\n\
+                   q 1 0 0 1 0 0 cm /Frm Do Q";
+    let form = "0 0 0 rg 0 0 120 80 re f";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R\n\
+   /OCProperties << /OCGs [5 0 R 6 0 R] /D << /OFF [5 0 R] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /Properties << /Off 5 0 R /On 6 0 R /Mixed 7 0 R >>\n\
+                 /XObject << /Frm 8 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (Construction lines) >>\nendobj\n\
+6 0 obj\n<< /Type /OCG /Name (Base) >>\nendobj\n\
+7 0 obj\n<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P /AnyOff >>\nendobj\n\
+8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 120 80] /OC 5 0 R\n\
+   /Length {} >>\nstream\n{form}\nendstream\nendobj\n\
+trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        form.len()
+    )
+    .into_bytes()
+}
+
 /// Blend modes, whose integer arithmetic is new and whose whole reason for
 /// being integer is this property.
 fn blend_page() -> Vec<u8> {
@@ -566,6 +619,16 @@ const GOLDEN: &[Fixture] = &[
         build: pattern_page,
         least_ink: 1600,
     },
+    // 4922 today, and most of it is inside layers that are *on*, so this
+    // floor is the guard against over-suppression: hiding the two visible
+    // layers drops the page to about 1300. Under-suppression is the opposite
+    // failure and adds ink — a flat red 9600-pixel page — which no floor can
+    // catch and the hash catches immediately.
+    Fixture {
+        name: "optional",
+        build: optional_content_page,
+        least_ink: 2400,
+    },
 ];
 
 #[test]
@@ -598,6 +661,12 @@ fn rendering_is_stable_across_targets() {
         (
             "pattern",
             "18765f39455bc173f00fc6272449402d0c5db445963b5334e3d511a766199af2",
+        ),
+        // Added August 2026 with gap 06. No existing fixture has an
+        // `/OCProperties`, so none of them would move if 8.11 stopped working.
+        (
+            "optional",
+            "e0f2bc33f56dcb85beb7a1770f9cb33e22a1a2cdba1cbb4b838be656370035a1",
         ),
     ];
     assert_eq!(

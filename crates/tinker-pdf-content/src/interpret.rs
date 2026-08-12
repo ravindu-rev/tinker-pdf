@@ -899,6 +899,27 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     }
 
     fn do_xobject(&mut self, name: &[u8]) {
+        // 8.11.4.4: an `/OC` entry on a form or image XObject hides the whole
+        // XObject, and lives on the XObject's own dictionary rather than in
+        // `/Properties`. It is expressed here as a marked-content scope
+        // around the invocation, so the engine has one suppression mechanism
+        // and not two: a hidden image is left undrawn for exactly the reason
+        // a hidden rectangle is, and a hidden *form* is still run, so its
+        // text still extracts and its state changes still happen.
+        let hidden = match self.fonts.xobject_optional_content(name) {
+            Some(layer) if !layer.visible => {
+                self.open_marked_content(Some(layer));
+                true
+            }
+            _ => false,
+        };
+        self.run_xobject(name);
+        if hidden {
+            self.close_marked_content();
+        }
+    }
+
+    fn run_xobject(&mut self, name: &[u8]) {
         let Some(form) = self.fonts.form(name) else {
             self.device.draw_image(
                 &ImageRef {
@@ -1769,12 +1790,28 @@ mod tests {
             }
         }
         fn form(&self, name: &[u8]) -> Option<Form> {
-            (name == b"Frm").then(|| Form {
+            match name {
                 // Opens a scope and never closes it, and closes one it never
                 // opened. Both are what a real damaged form does.
-                content: b"EMC /OC /Off BDC 0 0 5 5 re f".to_vec(),
-                matrix: Matrix::IDENTITY,
-                bbox: None,
+                b"Frm" => Some(Form {
+                    content: b"EMC /OC /Off BDC 0 0 5 5 re f".to_vec(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                }),
+                // A well-behaved form, used to test the `/OC` on the XObject
+                // itself rather than anything in its content.
+                b"HiddenFrm" | b"PlainFrm" => Some(Form {
+                    content: b"BT /F0 10 Tf (form text) Tj ET 0 0 5 5 re f".to_vec(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                }),
+                _ => None,
+            }
+        }
+        fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {
+            (name == b"HiddenFrm" || name == b"HiddenImg").then(|| Layer {
+                visible: false,
+                label: "Construction lines".to_string(),
             })
         }
     }
@@ -1939,6 +1976,74 @@ mod tests {
             vec![true, true, false],
             "and only their painting was marked hidden"
         );
+    }
+
+    /// 8.11.4.4: an `/OC` on the XObject itself hides it, and does so through
+    /// the same scope machinery a `BDC` uses — so a hidden form is still run
+    /// and its text still reaches the device.
+    ///
+    /// `PlainFrm` is the decoy: the same content, no `/OC`, and it paints.
+    #[test]
+    fn an_oc_entry_on_an_xobject_hides_it_without_skipping_it() {
+        let d = run_layers(b"/PlainFrm Do /HiddenFrm Do 0 0 9 9 re f");
+
+        assert_eq!(
+            d.fills,
+            vec![false, true, false],
+            "the plain form paints, the hidden one does not, and the page \
+             after both does"
+        );
+        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        assert_eq!(
+            text, "form textform text",
+            "the hidden form was still interpreted"
+        );
+        assert_eq!(
+            d.begins,
+            vec![(false, Some("Construction lines".to_string()))],
+            "one scope, opened around the `Do` rather than inside the form"
+        );
+        assert_eq!(d.ends, 1);
+        assert!(d.open.is_empty());
+    }
+
+    /// An image XObject is the branch where `form` returns `None`, so it is
+    /// asserted separately: a hidden one must not even be handed to the
+    /// device, or the device decodes it to find out it cannot.
+    #[test]
+    fn a_hidden_image_xobject_is_not_handed_to_the_device() {
+        #[derive(Default)]
+        struct Images {
+            drawn: Vec<Vec<u8>>,
+            open: Vec<bool>,
+        }
+        impl Device for Images {
+            fn begin_marked_content(&mut self, visible: bool, _layer: Option<&str>) {
+                self.open.push(!visible);
+            }
+            fn end_marked_content(&mut self) {
+                self.open.pop();
+            }
+            fn draw_image(&mut self, image: &ImageRef, _state: &GraphicsState) {
+                // A drawing device suppresses here; this one records whether
+                // it was asked at all, which is the stronger property for a
+                // codec that would otherwise be reported as unsupported.
+                if self.open.iter().any(|hidden| *hidden) {
+                    return;
+                }
+                self.drawn.push(image.name.clone());
+            }
+        }
+
+        let mut d = Images::default();
+        interpret(
+            b"/PlainImg Do /HiddenImg Do",
+            Matrix::IDENTITY,
+            &mut d,
+            &Layers,
+        );
+        assert_eq!(d.drawn, vec![b"PlainImg".to_vec()]);
+        assert!(d.open.is_empty());
     }
 
     /// Depth is bounded, and running out of it shows content rather than

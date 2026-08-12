@@ -333,6 +333,215 @@ fn hidden_text_is_still_extracted_and_still_not_drawn() {
     );
 }
 
+/// Milestone 4, the form half: an `/OC` on a form XObject hides the whole
+/// form (8.11.4.4).
+///
+/// Two identical forms, invoked at different places on the page, differing
+/// only in whether the XObject dictionary carries `/OC`. The plain one is the
+/// decoy: without it, "nothing drew" would pass on a build where forms are
+/// broken generally.
+#[test]
+fn an_oc_entry_on_a_form_xobject_hides_the_form() {
+    let form = "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 40]\n\
+                   /Length 26 >>\nstream\n1 0 0 rg 0 0 10 40 re f\nendstream\nendobj\n\
+                7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 40] /OC 5 0 R\n\
+                   /Length 26 >>\nstream\n1 0 0 rg 0 0 10 40 re f\nendstream\nendobj\n";
+
+    let bitmap = render(build(
+        &properties(false),
+        "/XObject << /Plain 6 0 R /Hidden 7 0 R >>",
+        "q 1 0 0 1 0 0 cm /Plain Do Q\nq 1 0 0 1 20 0 cm /Hidden Do Q",
+        form,
+    ));
+
+    assert_eq!(
+        pixel(&bitmap, 5, 20),
+        vec![255, 0, 0],
+        "the plain form drew"
+    );
+    assert_eq!(
+        ink_bounds(&bitmap),
+        Some((0, 0, 9, 39)),
+        "and the one with /OC drew nothing at all"
+    );
+    assert!(hid_construction_lines(&bitmap), "{:?}", bitmap.warnings);
+
+    // The same file with the group on: both forms draw.
+    let bitmap = render(build(
+        &properties(true),
+        "/XObject << /Plain 6 0 R /Hidden 7 0 R >>",
+        "q 1 0 0 1 0 0 cm /Plain Do Q\nq 1 0 0 1 20 0 cm /Hidden Do Q",
+        form,
+    ));
+    assert_eq!(ink_bounds(&bitmap), Some((0, 0, 29, 39)));
+}
+
+/// Milestone 4, the image half: a hidden image draws nothing **and is not
+/// reported as an unsupported codec**.
+///
+/// The image is `/JPXDecode`, which this build does not decode. Outside a
+/// layer it produces `UnsupportedImage` and ruling 2's grey placeholder —
+/// asserted first, so the second half cannot pass because the image path is
+/// broken. Inside an `/OFF` layer neither happens: the decode is never
+/// attempted, because whether this build could have drawn an image nobody was
+/// going to see is not a fact about the page.
+#[test]
+fn a_hidden_image_draws_nothing_and_reports_no_codec() {
+    let image = |oc: &str| {
+        format!(
+            "6 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+                /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode {oc}\n\
+                /Length 4 >>\nstream\n\x01\x02\x03\x04\nendstream\nendobj\n"
+        )
+    };
+    let content = "0 1 0 rg 0 0 10 40 re f\nq 20 0 0 40 20 0 cm /Im0 Do Q";
+
+    let shown = render(build(
+        &properties(false),
+        "/XObject << /Im0 6 0 R >>",
+        content,
+        &image(""),
+    ));
+    assert!(
+        shown
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })),
+        "an unhidden JPX is reported: {:?}",
+        shown.warnings
+    );
+    assert_eq!(
+        ink_bounds(&shown),
+        Some((0, 0, 39, 39)),
+        "and its placeholder covers the right half"
+    );
+
+    let hidden = render(build(
+        &properties(false),
+        "/XObject << /Im0 6 0 R >>",
+        content,
+        &image("/OC 5 0 R"),
+    ));
+    assert!(
+        !hidden
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })),
+        "a hidden image is not a missing codec: {:?}",
+        hidden.warnings
+    );
+    assert_eq!(
+        ink_bounds(&hidden),
+        Some((0, 0, 9, 39)),
+        "and no placeholder was painted"
+    );
+    assert!(hid_construction_lines(&hidden));
+}
+
+/// An `/OC` on a form hides its painting and not its text: the form is run,
+/// not skipped, for the same reason a `BDC` scope is.
+#[test]
+fn a_hidden_forms_text_is_still_extracted() {
+    // 8.10.2: a form with no `/Resources` of its own inherits the page's, so
+    // the font lives there.
+    let inner = "BT /F0 12 Tf 2 20 Td (inside the form) Tj ET";
+    let form = format!(
+        "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] /OC 5 0 R\n\
+            /Length {} >>\nstream\n{inner}\nendstream\nendobj\n\
+         7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        inner.len()
+    );
+
+    let page = Document::open(build(
+        &properties(false),
+        "/XObject << /Frm 6 0 R >> /Font << /F0 7 0 R >>",
+        "0 1 0 rg 0 0 10 40 re f\n/Frm Do",
+        &form,
+    ))
+    .expect("it opens")
+    .page(0)
+    .expect("a page");
+
+    assert!(
+        page.text().plain_text().contains("inside the form"),
+        "got {:?}",
+        page.text().plain_text()
+    );
+    let bitmap = page.render(&RenderOptions::default());
+    assert_eq!(
+        ink_bounds(&bitmap),
+        Some((0, 0, 9, 39)),
+        "and nothing of the form reached the page"
+    );
+}
+
+/// The seed `fuzz/corpus/render_page/` carries for 8.11, written from the
+/// same helpers as the tests above so the two cannot drift apart.
+///
+/// Worth having because nothing in any corpus had an `/OCProperties` before
+/// it: the group table, the four membership policies, `/VE` evaluation and
+/// the `/OC` lookups on `/Properties` and on an XObject were reachable from
+/// no fuzz target at all, and every one of them walks
+/// attacker-controlled indirect references.
+///
+/// The seed is **reachable by construction rather than measured**: the
+/// assertion below proves this document takes the hidden path before a single
+/// byte is mutated. No campaign has been run against it — gap 24 M5 owns
+/// those, and `cargo-fuzz` needs libFuzzer, which `x86_64-pc-windows-msvc`
+/// does not have.
+///
+/// Run with `--ignored` when the fixture changes; the corpus is committed,
+/// and a run that rewrites it is a diff to look at rather than apply blindly.
+#[test]
+#[ignore = "writes into fuzz/corpus/render_page, which is committed"]
+fn write_the_fuzz_seed() {
+    let bytes = fuzz_seed();
+    // A seed that no longer reaches what it was chosen for is worse than no
+    // seed, because it looks like coverage.
+    let bitmap = render(bytes.clone());
+    assert!(
+        hid_construction_lines(&bitmap),
+        "the seed must still take the hidden path: {:?}",
+        bitmap.warnings
+    );
+
+    let base =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/render_page");
+    std::fs::write(base.join("optional-content.pdf"), bytes)
+        .expect("the corpus directory is there");
+}
+
+/// Every branch of 8.11 this build has, in one small document: a group that
+/// is off and one that is on, a membership dictionary with a `/P`, one with a
+/// nested `/VE`, an `/OC` on a form XObject, and a `BMC`/`EMC` pair with no
+/// property list at all.
+fn fuzz_seed() -> Vec<u8> {
+    let form = "1 0 0 rg 0 0 40 40 re f";
+    let content = "0 1 0 rg 0 0 10 40 re f\n\
+                   /OC /Hidden BDC 0.9 0 0 rg 0 0 40 40 re f EMC\n\
+                   /OC /Shown BDC 0 0 1 rg 12 2 6 36 re f EMC\n\
+                   /OC /Policy BDC 0 0 0 RG 2 w 2 38 m 38 38 l S EMC\n\
+                   /OC /Expression BDC 0.5 g 30 2 8 8 re f EMC\n\
+                   BMC 0.2 g 2 2 4 4 re f EMC\n\
+                   /Span << /Inline 1 >> BDC EMC\n\
+                   /Frm Do";
+    build(
+        "/OCProperties << /OCGs [5 0 R 6 0 R] \
+         /D << /BaseState /ON /ON [6 0 R] /OFF [5 0 R] >> >>",
+        "/Properties << /Hidden 5 0 R /Shown 6 0 R /Policy 7 0 R \
+         /Expression 8 0 R >>\n/XObject << /Frm 9 0 R >>",
+        content,
+        &format!(
+            "6 0 obj\n<< /Type /OCG /Name (Base) >>\nendobj\n\
+             7 0 obj\n<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P /AnyOff >>\nendobj\n\
+             8 0 obj\n<< /Type /OCMD /VE [/And [/Not 5 0 R] 6 0 R] >>\nendobj\n\
+             9 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] /OC 5 0 R\n\
+                /Length {} >>\nstream\n{form}\nendstream\nendobj\n",
+            form.len()
+        ),
+    )
+}
+
 /// Hidden content still *runs*. Only its painting stops.
 ///
 /// The scope sets a colour, saves the state, scales it, fills, and restores.
