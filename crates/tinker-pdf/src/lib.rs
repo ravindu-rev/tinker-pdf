@@ -526,6 +526,16 @@ impl Page {
             annots::draw(&self.doc, &self.inner, self.fonts.as_deref(), &mut renderer);
         }
         let (canvas, mut warnings) = renderer.finish();
+        // A glyph a font could not name is reported here rather than by the
+        // renderer, which counts only the glyphs it was handed nothing for.
+        // `.notdef` *is* an outline, so drawing it — which is what the spec
+        // asks for — never reaches that counter, and the page would come out
+        // blank in that spot with nothing said about why.
+        if !resources.missing_fonts().is_empty()
+            && !warnings.contains(&RenderWarning::UnreadableFont)
+        {
+            warnings.push(RenderWarning::UnreadableFont);
+        }
         if scaled_down {
             warnings.push(RenderWarning::PageScaledDown {
                 requested: scale,

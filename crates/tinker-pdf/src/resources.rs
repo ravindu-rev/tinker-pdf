@@ -11,7 +11,7 @@ use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{FontSource, Matrix, Rgb};
 use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
 use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
-use tinker_pdf_font::{cff::Cff, glyf, Outline, Sfnt, Type1};
+use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading};
 
 use crate::fonts::{self, FontProvider, FontRequest};
@@ -35,7 +35,9 @@ pub struct PageResources {
     images: Mutex<HashMap<Vec<u8>, Option<Arc<DecodedImage>>>>,
     /// Outlines already extracted, keyed by font and code.
     outlines: RwLock<OutlineCache>,
-    /// Resource names that named no font this build could resolve.
+    /// Resource names that named no font this build could resolve, and — when
+    /// glyphs were being drawn — names whose font resolved no glyph for a
+    /// code the page used.
     missing_fonts: Mutex<Vec<String>>,
 }
 
@@ -895,6 +897,23 @@ impl PageResources {
         }
     }
 
+    /// Records that a font resolved no glyph for a code it was asked for.
+    ///
+    /// Step 4 of the fallback order in `docs/plans/gaps/01-cff-glyph-selection
+    /// .md`: the glyph drawn is `.notdef`, and the page says so rather than
+    /// silently drawing something else. Only rendering reaches this — text
+    /// extraction never asks for an outline — so the same list stays exactly
+    /// what its name says for the extraction path, which turns it into
+    /// `TextWarning::UnknownFont`.
+    fn report_unresolved_glyph(&self, font: &[u8]) {
+        if let Ok(mut missing) = self.missing_fonts.lock() {
+            let name = String::from_utf8_lossy(font).into_owned();
+            if missing.len() < 64 && !missing.contains(&name) {
+                missing.push(name);
+            }
+        }
+    }
+
     /// Pulls one glyph's outline out of an embedded font program.
     fn extract_outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         let program = self.programs.get(&font_id)?;
@@ -919,10 +938,7 @@ impl PageResources {
             if sfnt.table(0x676C_7966).is_none() {
                 if let Some(table) = sfnt.table(0x4346_4620) {
                     if let Some(cff) = Cff::parse(table) {
-                        let glyph = u16::try_from(code).ok()?;
-                        let outline = cff.outline(glyph)?;
-                        let factor = cff.font_matrix.first().copied().unwrap_or(0.001);
-                        return Some(scale(&outline, factor));
+                        return self.cff_outline(&cff, font, &name, code);
                     }
                 }
                 return None;
@@ -932,8 +948,21 @@ impl PageResources {
                 Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
                 None => None,
             }
-            // A composite font addresses glyphs directly, and a symbolic one
-            // often has no usable character mapping at all.
+            // 9.6.6.4: a symbolic font's codes go through its `cmap`
+            // directly rather than through a character — the (3,0) subtable
+            // maps the code into the F0xx private-use block, which is what
+            // `glyph_for_char` does with a character it is handed. Without
+            // this a symbolic face fell straight to the last resort below.
+            .or_else(|| {
+                char::from_u32(code)
+                    .and_then(|c| sfnt.glyph_for_char(c))
+                    .filter(|g| *g != 0)
+            })
+            // The last resort, and correct for one case: a composite font
+            // with an identity CID-to-GID map addresses glyphs by number, so
+            // the code *is* the glyph. For a simple font it is a guess, and
+            // it is the guess every reader makes for a subset whose `cmap`
+            // was dropped.
             .or_else(|| u16::try_from(code).ok())?;
 
             let units = f64::from(sfnt.units_per_em.max(1));
@@ -942,11 +971,7 @@ impl PageResources {
         }
 
         if let Some(cff) = Cff::parse(program) {
-            let glyph = u16::try_from(code).ok()?;
-            let outline = cff.outline(glyph)?;
-            // A CFF font matrix is usually 1/1000 but need not be.
-            let scale_factor = cff.font_matrix.first().copied().unwrap_or(0.001);
-            return Some(scale(&outline, scale_factor));
+            return self.cff_outline(&cff, font, &name, code);
         }
 
         // 9.9: a `/FontFile` is a Type 1 program. Until this existed the bytes
@@ -974,6 +999,28 @@ impl PageResources {
         }
 
         None
+    }
+
+    /// One glyph of a CFF program, chosen the way 9.6.6 says to choose it.
+    fn cff_outline(
+        &self,
+        cff: &Cff<'_>,
+        font: &cos_font::Font,
+        resource: &[u8],
+        code: u32,
+    ) -> Option<Outline> {
+        let glyph = cff_glyph(cff, font, code).unwrap_or_else(|| {
+            // Nothing named this glyph. `.notdef` is glyph 0 in every CFF
+            // font — usually empty, sometimes a box — and the page reports
+            // rather than drawing whichever glyph the code happened to number.
+            self.report_unresolved_glyph(resource);
+            0
+        });
+        let outline = cff.outline(glyph)?;
+        // A CFF font matrix is usually 1/1000 but need not be, and a
+        // CID-keyed font may carry a different one per Font DICT.
+        let factor = cff.font_matrix_for(glyph).first().copied().unwrap_or(0.001);
+        Some(scale(&outline, factor))
     }
 
     /// Decodes one image XObject to RGB (8.9).
@@ -1420,6 +1467,59 @@ fn jpeg_to_rgb(image: &tinker_pdf_filters::JpegImage) -> Vec<u8> {
 
     out.resize(count * 3, 255);
     out
+}
+
+/// Which glyph of a CFF program a character code selects.
+///
+/// The character code is not a glyph index and never was. Until August 2026
+/// this function did not exist and its two callers used the code as one, so a
+/// document embedding a Type 1 face as `/FontFile3 /Subtype /Type1C` — how
+/// they have been embedded since PDF 1.2 — drew whatever glyph sat at that
+/// position, or nothing at all when the font was subsetted small enough that
+/// the position did not exist.
+///
+/// The order below is the one real files need, because real files omit
+/// things. Each step is tried in turn and the first that names a glyph in
+/// this font wins:
+///
+/// 1. the document's `/Encoding` gives a name, and the charset gives the
+///    glyph — 9.6.6 makes the PDF's encoding win over the font's;
+/// 2. the font program's own built-in encoding gives the glyph directly;
+/// 3. the standard encoding's name for the code, through the charset;
+/// 4. nothing, which the caller turns into `.notdef` plus a report.
+///
+/// Step 1 is tried whenever the dictionary named an encoding *and* that name
+/// reaches a glyph. A name that reaches nothing falls through to step 2
+/// rather than stopping there: 9.6.6 is about which encoding is authoritative,
+/// not about refusing to look at a font that plainly disagrees with it, and a
+/// subset font whose `/Differences` were written against the unsubsetted
+/// original is a file that exists.
+fn cff_glyph(cff: &Cff<'_>, font: &cos_font::Font, code: u32) -> Option<u16> {
+    if font.kind() == cos_font::FontKind::Type0 {
+        // 9.7.4.2: a composite font addresses its descendant by CID. A
+        // CID-keyed program maps the CID through its charset; a plain CFF
+        // inside a CIDFontType0 has no such map and the CID is the glyph.
+        let cid = font.cid_of(code);
+        return if cff.is_cid() {
+            cff.gid_for_cid(cid)
+        } else {
+            u16::try_from(cid).ok()
+        };
+    }
+    // A CID-keyed program under a simple font dictionary is malformed, and
+    // the only reading of a one-byte code left is as a CID.
+    if cff.is_cid() {
+        return cff.gid_for_cid(code);
+    }
+
+    let byte = u8::try_from(code).ok();
+    font.glyph_name(code)
+        .and_then(|name| cff.gid_for_name(name))
+        .or_else(|| byte.and_then(|c| cff.gid_for_code(c)))
+        .or_else(|| {
+            let name = base_glyph_name(BaseEncoding::Standard, byte?)?;
+            cff.gid_for_name(name)
+        })
 }
 
 /// Scales an outline from font units into em units.

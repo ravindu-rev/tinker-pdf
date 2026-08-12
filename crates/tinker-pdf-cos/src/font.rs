@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tinker_pdf_font::cmap::CMap;
-use tinker_pdf_font::{base_char, glyph_name_to_char, BaseEncoding, Standard14};
+use tinker_pdf_font::{base_char, base_glyph_name, glyph_name_to_char, BaseEncoding, Standard14};
 
 use crate::doc::CosDocument;
 use crate::name::Name;
@@ -55,6 +55,14 @@ pub struct Font {
     /// Simple fonts: the glyph name each code maps to, after `/Differences`.
     differences: HashMap<u32, String>,
     base_encoding: BaseEncoding,
+    /// Whether the dictionary *named* a base encoding, rather than
+    /// `base_encoding` being this struct's default.
+    ///
+    /// 9.6.6 turns on the difference: where the document names an encoding it
+    /// wins, and where it does not the font program's own built-in encoding
+    /// is what applies. A `/Differences` array with no `/BaseEncoding` names
+    /// the codes it lists and leaves every other code to the font.
+    base_encoding_named: bool,
     /// Composite fonts: how bytes become codes, and codes become CIDs.
     encoding_cmap: Option<CMap>,
     /// `/ToUnicode`, when the document supplies one.
@@ -122,16 +130,48 @@ impl Font {
             .collect()
     }
 
+    /// The CID a code selects, through the encoding CMap (9.7.4).
+    ///
+    /// A code the CMap does not map is its own CID, which is what
+    /// `Identity-H` says and what a broken CMap degrades to.
+    #[must_use]
+    pub fn cid_of(&self, code: u32) -> u32 {
+        self.encoding_cmap
+            .as_ref()
+            .and_then(|c| c.cid(code))
+            .unwrap_or(code)
+    }
+
+    /// The glyph name the *document* gives a code, where it gives one.
+    ///
+    /// `/Differences` first, then the base encoding the dictionary named
+    /// (9.6.6). `None` means the document named nothing for this code, which
+    /// is not the same as naming a glyph the font turns out not to have: the
+    /// first sends a caller to the font program's own encoding, the second
+    /// does not.
+    ///
+    /// This is a glyph *name* rather than a character on purpose. Type 1 and
+    /// CFF fonts address their glyphs by name and by nothing else, so going
+    /// through a character — which is what [`Font::text_of`] gives — loses
+    /// every glyph whose name has no Unicode meaning, and that is most of a
+    /// subset font's.
+    #[must_use]
+    pub fn glyph_name(&self, code: u32) -> Option<&str> {
+        if let Some(name) = self.differences.get(&code) {
+            return Some(name);
+        }
+        if !self.base_encoding_named {
+            return None;
+        }
+        base_glyph_name(self.base_encoding, u8::try_from(code).ok()?)
+    }
+
     /// The advance of one code, in 1/1000 em, and whether it is the
     /// document's own number.
     #[must_use]
     pub fn width_of(&self, code: u32) -> (f64, bool) {
         if self.kind == FontKind::Type0 {
-            let cid = self
-                .encoding_cmap
-                .as_ref()
-                .and_then(|c| c.cid(code))
-                .unwrap_or(code);
+            let cid = self.cid_of(code);
             if let Some(w) = self.cid_widths.get(&cid) {
                 return (*w, true);
             }
@@ -213,6 +253,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         missing_width: 0.0,
         differences: HashMap::new(),
         base_encoding: BaseEncoding::Standard,
+        base_encoding_named: false,
         encoding_cmap: None,
         to_unicode: read_to_unicode(doc, dict),
         cid_widths: HashMap::new(),
@@ -245,12 +286,19 @@ fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font) {
     let key = doc.intern(b"Encoding");
 
     let named = |bytes: &[u8], font: &mut Font| match bytes {
-        b"WinAnsiEncoding" => font.base_encoding = BaseEncoding::WinAnsi,
-        b"MacRomanEncoding" => font.base_encoding = BaseEncoding::MacRoman,
+        b"WinAnsiEncoding" => {
+            font.base_encoding = BaseEncoding::WinAnsi;
+            font.base_encoding_named = true;
+        }
+        b"MacRomanEncoding" => {
+            font.base_encoding = BaseEncoding::MacRoman;
+            font.base_encoding_named = true;
+        }
         b"StandardEncoding" | b"MacExpertEncoding" => {
             // MacExpert is a distinct set this engine does not carry; falling
             // back to Standard keeps ASCII right, which is most of it.
             font.base_encoding = BaseEncoding::Standard;
+            font.base_encoding_named = true;
         }
         other => {
             if let Some(cmap) = CMap::predefined(other) {

@@ -21,7 +21,14 @@ pub enum BaseEncoding {
 }
 
 /// Names differing from Latin-1 in StandardEncoding, by code (Annex D.2).
-const STANDARD_HIGH: [(u8, &str); 46] = [
+///
+/// The eight names from `Oslash` on were missing until August 2026, which no
+/// test noticed because the codes they sit at have no Latin-1 meaning either
+/// — the table returned `None` and text extraction reported nothing for them.
+/// Glyph *selection* is what made it visible: a CFF font's standard-encoding
+/// fallback resolves a code to a name and the name to a glyph, so a missing
+/// name is a glyph that draws as `.notdef`.
+const STANDARD_HIGH: [(u8, &str); 54] = [
     (0xA1, "exclamdown"),
     (0xA2, "cent"),
     (0xA3, "sterling"),
@@ -67,7 +74,15 @@ const STANDARD_HIGH: [(u8, &str); 46] = [
     (0xE1, "AE"),
     (0xE3, "ordfeminine"),
     (0xE8, "Lslash"),
+    (0xE9, "Oslash"),
+    (0xEA, "OE"),
+    (0xEB, "ordmasculine"),
     (0xF1, "ae"),
+    (0xF5, "dotlessi"),
+    (0xF8, "lslash"),
+    (0xF9, "oslash"),
+    (0xFA, "oe"),
+    (0xFB, "germandbls"),
 ];
 
 /// WinAnsiEncoding's 0x80..0x9F block; the rest coincides with Latin-1
@@ -407,6 +422,26 @@ mod tests {
         assert_eq!(base_char(BaseEncoding::Standard, 0x27), Some('\u{2019}'));
         assert_eq!(base_char(BaseEncoding::Standard, 0x60), Some('\u{2018}'));
         assert_eq!(base_char(BaseEncoding::WinAnsi, 0x27), Some('\''));
+    }
+
+    /// Annex D.2's StandardEncoding runs to 0xFB, and the last eight names
+    /// were absent. They are the ones a Type 1 or CFF font reaches by name,
+    /// so a code with no name here draws `.notdef` however good the font is.
+    #[test]
+    fn standard_encoding_names_its_whole_high_range() {
+        assert_eq!(
+            base_glyph_name(BaseEncoding::Standard, 0xE9),
+            Some("Oslash")
+        );
+        assert_eq!(
+            base_glyph_name(BaseEncoding::Standard, 0xFB),
+            Some("germandbls")
+        );
+        assert_eq!(base_char(BaseEncoding::Standard, 0xF5), Some('ı'));
+        assert_eq!(base_char(BaseEncoding::Standard, 0xFB), Some('ß'));
+        // A code the encoding genuinely leaves undefined still has no name.
+        assert_eq!(base_glyph_name(BaseEncoding::Standard, 0xFF), None);
+        assert_eq!(base_glyph_name(BaseEncoding::Standard, b'A'), Some("A"));
     }
 
     #[test]

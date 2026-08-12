@@ -15,7 +15,9 @@ pub mod type1;
 pub use base14::Standard14;
 pub use cff::Cff;
 pub use cmap::CMap;
-pub use encoding::{base_char, glyph_name_for_char, glyph_name_to_char, BaseEncoding};
+pub use encoding::{
+    base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding,
+};
 pub use outline::{Outline, Segment};
 pub use sfnt::Sfnt;
 pub use subset::{glyphs_for, subset};
