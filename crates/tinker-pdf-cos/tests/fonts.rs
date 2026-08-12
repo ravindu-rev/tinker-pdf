@@ -13,7 +13,9 @@
 
 use std::path::PathBuf;
 
+use tinker_pdf_cos::warn::WarningKind;
 use tinker_pdf_cos::{font, pages, CosDocument, FontKind, ObjRef, Object};
+use tinker_pdf_font::cmap::{Section as CMapSection, Warning as CMapWarning};
 
 fn open(name: &str) -> CosDocument {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -177,7 +179,13 @@ fn document(objects: &[Vec<u8>]) -> CosDocument {
 
 /// An uncompressed stream object with the bytes given.
 fn stream(data: &[u8]) -> Vec<u8> {
-    let mut out = format!("<< /Length {} >>\nstream\n", data.len()).into_bytes();
+    stream_with("", data)
+}
+
+/// The same, with `prefix` written into the stream dictionary verbatim — a
+/// `/UseCMap` entry, in the tests that need one (Table 120).
+fn stream_with(prefix: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {prefix} /Length {} >>\nstream\n", data.len()).into_bytes();
     out.extend_from_slice(data);
     out.extend_from_slice(b"\nendstream");
     out
@@ -364,5 +372,345 @@ fn an_unreadable_cid_to_gid_map_falls_back_to_the_identity() {
         let font = font_at(&doc, 3);
         assert!(!font.has_cid_to_gid_map(), "{entry} is not a table");
         assert_eq!(font.gid_for_cid(7), 7, "{entry} degrades to the identity");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `usecmap` and `/UseCMap` (gap 04, 9.7.5.3).
+// ---------------------------------------------------------------------------
+
+/// The parent these tests inherit from, written out here.
+///
+/// **Not a predefined CMap, and nothing below is evidence about one.** Gap 03
+/// is what makes `90ms-RKSJ-H` and its family real; until it lands,
+/// `CMap::predefined` answers those names with a two-byte identity stub, so a
+/// fixture inheriting from one would be measuring the stub and would keep
+/// passing when the stub was replaced. What these prove is that a parent,
+/// whatever it turns out to contain, reaches the child intact.
+///
+/// Its `cidrange` is the **decoy**: it covers the codes the child covers and
+/// answers them with different CIDs, so a merge that let the parent win could
+/// not pass by accident.
+const PARENT_CMAP: &[u8] = b"/CIDInit /ProcSet findresource begin\n\
+     begincmap\n\
+     /CMapName /TestParent def\n\
+     1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+     1 begincidrange <0041> <005A> 100 endcidrange\n\
+     1 begincidchar <0061> 900 endcidchar\n\
+     endcmap end";
+
+/// A child declaring one `cidrange` and nothing else — no codespace, so
+/// without inheritance its two-byte codes split into single bytes.
+const CHILD_CMAP: &[u8] = b"/CIDInit /ProcSet findresource begin\n\
+     begincmap\n\
+     1 begincidrange <0041> <005A> 200 endcidrange\n\
+     endcmap end";
+
+/// Milestone 2's exit criterion, name form: a CMap inheriting through the
+/// stream dictionary resolves identically to one inheriting in the body.
+///
+/// The parent is `Identity-H` because that is the only parent *both*
+/// spellings can reach. A body `usecmap` names a CMap, and a name has no
+/// address in a document — 9.7.5.2's predefined set is the only place one can
+/// come from — while the dictionary form is the one that may point at a
+/// stream. So the two spellings are compared over the parent they share.
+#[test]
+fn the_body_and_the_dictionary_spellings_of_usecmap_agree() {
+    let in_body = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[stream(
+            b"/Identity-H usecmap\n1 begincidchar <0041> 7 endcidchar",
+        )],
+    );
+    let in_dict = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[stream_with(
+            "/UseCMap /Identity-H",
+            b"1 begincidchar <0041> 7 endcidchar",
+        )],
+    );
+
+    let body = font_at(&in_body, 3);
+    let dict = font_at(&in_dict, 3);
+    for bytes in [
+        [0x00u8, 0x41].as_slice(),
+        &[0x00, 0x42],
+        &[0x12, 0x34],
+        &[0x00, 0x41, 0x00, 0x42],
+        &[0x41],
+    ] {
+        assert_eq!(
+            body.decode(bytes),
+            dict.decode(bytes),
+            "the two spellings disagree on {bytes:02X?}"
+        );
+    }
+    assert_eq!(
+        body.decode(&[0x00, 0x41])[0].cid,
+        7,
+        "the child's own entry"
+    );
+    assert_eq!(
+        body.decode(&[0x00, 0x42])[0].cid,
+        0x42,
+        "and the parent's identity where the child says nothing"
+    );
+}
+
+/// Milestone 2's exit criterion, stream form. This is the path the resolver
+/// closure exists for: the parent is a document stream, and the leaf crate
+/// that walks the chain cannot fetch one (ruling 8).
+///
+/// The child declares no codespace at all, so a two-byte string splits into
+/// single bytes without the parent's — which is the reported defect.
+#[test]
+fn a_parent_stream_named_by_the_dictionary_is_inherited() {
+    let alone = composite_font("5 0 R", "", "/Identity", &[stream(CHILD_CMAP)]);
+    let decoded = font_at(&alone, 3).decode(&[0x00, 0x41]);
+    assert_eq!(
+        decoded.iter().map(|d| d.bytes).collect::<Vec<_>>(),
+        vec![1, 1],
+        "with no parent the child has no codespace, so it splits one byte at \
+         a time — the defect, stated as an assertion"
+    );
+
+    let inherited = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[
+            stream_with("/UseCMap 6 0 R", CHILD_CMAP),
+            stream(PARENT_CMAP),
+        ],
+    );
+    let decoded = font_at(&inherited, 3).decode(&[0x00, 0x41]);
+    assert_eq!(
+        decoded.len(),
+        1,
+        "the parent's codespace makes this one code"
+    );
+    assert_eq!(decoded[0].bytes, 2);
+    assert_eq!(decoded[0].code, 0x41);
+}
+
+/// The risk this gap's own table calls out: merge order silently wrong, with
+/// the parent overriding the child. Both name `<0041>` to `<005A>` and they
+/// disagree, so no accident produces the right answer.
+#[test]
+fn the_child_s_cid_range_beats_the_parent_s_through_a_document() {
+    let parent_only = composite_font("5 0 R", "", "/Identity", &[stream(PARENT_CMAP)]);
+    assert_eq!(
+        font_at(&parent_only, 3).decode(&[0x00, 0x41])[0].cid,
+        100,
+        "what the parent alone says, which is the decoy"
+    );
+
+    let doc = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[
+            stream_with("/UseCMap 6 0 R", CHILD_CMAP),
+            stream(PARENT_CMAP),
+        ],
+    );
+    let font = font_at(&doc, 3);
+    assert_eq!(
+        font.decode(&[0x00, 0x41])[0].cid,
+        200,
+        "the child's base, not the parent's"
+    );
+    assert_eq!(font.decode(&[0x00, 0x42])[0].cid, 201);
+    assert_eq!(
+        font.decode(&[0x00, 0x61])[0].cid,
+        900,
+        "and the parent survives where the child says nothing"
+    );
+}
+
+/// A parent may itself inherit. The grandparent supplies the codespace, the
+/// parent one mapping and the child another, and all three have to arrive.
+#[test]
+fn a_chain_two_deep_through_the_document_is_followed() {
+    let doc = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[
+            stream_with(
+                "/UseCMap 6 0 R",
+                b"1 begincidrange <0041> <0041> 200 endcidrange",
+            ),
+            stream_with("/UseCMap 7 0 R", b"1 begincidchar <0042> 300 endcidchar"),
+            stream(
+                b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+                  1 begincidchar <0043> 400 endcidchar",
+            ),
+        ],
+    );
+    let font = font_at(&doc, 3);
+    assert_eq!(
+        font.decode(&[0x00, 0x41])[0].bytes,
+        2,
+        "the grandparent's codespace"
+    );
+    assert_eq!(
+        font.decode(&[0x00, 0x41])[0].cid,
+        200,
+        "the child's mapping"
+    );
+    assert_eq!(font.decode(&[0x00, 0x42])[0].cid, 300, "the parent's");
+    assert_eq!(font.decode(&[0x00, 0x43])[0].cid, 400, "the grandparent's");
+}
+
+/// A `/UseCMap` pointing at its own stream must terminate (ruling 1), and it
+/// must say so rather than reading as a CMap that never wanted a parent.
+#[test]
+fn a_use_cmap_pointing_at_its_own_stream_terminates() {
+    let doc = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[stream_with(
+            "/UseCMap 5 0 R",
+            b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+              1 begincidchar <0041> 7 endcidchar",
+        )],
+    );
+    let font = font_at(&doc, 3);
+    assert_eq!(
+        font.decode(&[0x00, 0x41])[0].cid,
+        7,
+        "its own work survives"
+    );
+    assert!(
+        doc.warnings()
+            .iter()
+            .any(|w| w.kind == WarningKind::CMap(CMapWarning::ParentCycle)),
+        "{:?}",
+        doc.warnings()
+    );
+}
+
+/// Two streams that use each other close the loop one link later, which a
+/// guard keyed on the name of the link would not notice.
+#[test]
+fn two_streams_that_use_each_other_terminate() {
+    let doc = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[
+            stream_with("/UseCMap 6 0 R", b"1 begincidchar <0041> 7 endcidchar"),
+            stream_with("/UseCMap 5 0 R", b"1 begincidchar <0042> 8 endcidchar"),
+        ],
+    );
+    let font = font_at(&doc, 3);
+    assert_eq!(font.decode(&[0x41])[0].cid, 7);
+    assert!(doc
+        .warnings()
+        .iter()
+        .any(|w| w.kind == WarningKind::CMap(CMapWarning::ParentCycle)));
+}
+
+/// Milestone 3's provenance half (ruling 10): the warning names the section
+/// that stopped early *and* the stream it was in, so a document with two
+/// CMaps says which one is damaged.
+#[test]
+fn a_truncated_section_warns_against_the_stream_it_was_in() {
+    let doc = composite_font(
+        "5 0 R",
+        "",
+        "/Identity",
+        &[stream(
+            b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+              1 begincidrange <0041> <005A>",
+        )],
+    );
+    let _ = font_at(&doc, 3);
+
+    let warnings = doc.warnings();
+    let mine: Vec<_> = warnings
+        .iter()
+        .filter(|w| matches!(w.kind, WarningKind::CMap(_)))
+        .collect();
+    assert_eq!(mine.len(), 1, "{warnings:?}");
+    assert_eq!(
+        mine[0].kind,
+        WarningKind::CMap(CMapWarning::SectionUnterminated(CMapSection::CidRange))
+    );
+    assert_eq!(
+        mine[0].object,
+        Some(ObjRef::new(5, 0)),
+        "attributed to the CMap stream, not to the font that used it"
+    );
+}
+
+/// A `/UseCMap` naming nothing usable degrades to the child alone and reports
+/// it, rather than reading as a CMap that never wanted a parent.
+#[test]
+fn an_unresolvable_use_cmap_is_reported() {
+    for entry in ["/UseCMap /NotACMapAnybodyHas", "/UseCMap 99 0 R"] {
+        let doc = composite_font(
+            "5 0 R",
+            "",
+            "/Identity",
+            &[stream_with(entry, b"1 begincidchar <0041> 7 endcidchar")],
+        );
+        let font = font_at(&doc, 3);
+        assert_eq!(font.decode(&[0x41])[0].cid, 7, "{entry}");
+        assert!(
+            doc.warnings()
+                .iter()
+                .any(|w| w.kind == WarningKind::CMap(CMapWarning::ParentUnresolved)),
+            "{entry}: {:?}",
+            doc.warnings()
+        );
+    }
+}
+
+/// A `/ToUnicode` CMap goes through the same reader, so it inherits too.
+#[test]
+fn a_to_unicode_cmap_inherits_as_well() {
+    let doc = document(&[
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 4 0 R >>".to_vec(),
+        stream_with("/UseCMap 5 0 R", b"1 beginbfchar <41> <0061> endbfchar"),
+        stream(b"1 beginbfrange <41> <5A> <0391> endbfrange"),
+    ]);
+    let font = font_at(&doc, 3);
+    assert_eq!(font.text_of(0x41), "a", "the child's own entry wins");
+    assert_eq!(
+        font.text_of(0x42),
+        "\u{392}",
+        "and the parent covers what the child did not restate"
+    );
+}
+
+/// Every shape of `/UseCMap` a hostile file can write. None may panic
+/// (ruling 1), and none may leave the font unusable.
+#[test]
+fn a_malformed_use_cmap_degrades() {
+    // The last two point at the font dictionary and at the descendant, which
+    // are objects that exist and are not CMap streams.
+    for entry in [
+        "/UseCMap 42",
+        "/UseCMap [1 2 3]",
+        "/UseCMap << /A /B >>",
+        "/UseCMap null",
+        "/UseCMap 3 0 R",
+        "/UseCMap 4 0 R",
+    ] {
+        let doc = composite_font(
+            "5 0 R",
+            "",
+            "/Identity",
+            &[stream_with(entry, b"1 begincidchar <0041> 7 endcidchar")],
+        );
+        let font = font_at(&doc, 3);
+        assert_eq!(font.decode(&[0x41])[0].cid, 7, "{entry}");
     }
 }

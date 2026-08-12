@@ -30,6 +30,13 @@ equivalent, ever. Dev tooling exemptions (`cargo-fuzz`, `criterion`, `proptest`)
   plus the Symbol and ZapfDingbats builtin encodings.
 - ToUnicode CMap parsing (9.10.3): codespace ranges, bfchar, bfrange including destination
   arrays and UTF-16BE surrogate pairs.
+- CMap inheritance (9.7.5.3): `usecmap` in the body and `/UseCMap` in the stream dictionary,
+  merged so the child overrides the parent where they overlap. *Added August 2026, gap
+  [04](gaps/04-usecmap-and-codespaces.md).* Which side of ruling 8 this falls on is the same
+  answer `/CIDToGIDMap` got: the chain is walked in `tinker-pdf-font`, because it is CMap
+  syntax, and the parent is *fetched* by `tinker-pdf-cos`, because a parent may be a document
+  stream and a leaf crate has no address for one. The seam is a resolver closure, the shape
+  `streams::build_chain` already uses for `/DecodeParms`.
 - Predefined CMaps (9.7.5.2): Identity-H/V compiled in from day one; the full Adobe CMap set
   parsed at build time from Adobe's `cmap-resources` data (BSD-3-Clause — license and size
   handling in Design).
@@ -129,6 +136,15 @@ mappings. Lookup walks the codespace to determine code length (1–4 bytes) — 
 multi-byte string splitting correct and what 06 needs for the Tw rule — then binary-searches
 the mappings. ToUnicode reuses the same parser with bf* destinations decoded as UTF-16BE,
 surrogate pairs included.
+
+*Amended August 2026.* A CMap may also inherit (9.7.5.3), and the codespace ranges are usually
+what it inherits, so a differential CMap read alone splits its strings one byte at a time.
+`parse_embedded` walks the chain, capped at four links, refusing a source already on it; the
+merge keeps the child's ranges ahead of the parent's, drops parent singles a child range
+already answers, and lets the child's `/WMode` win where it declares one. `CMap::cid` tests
+its own entries before the identity fallthrough for the same reason: every unshipped
+predefined CMap is an identity stub, and a child inheriting from one must not lose its own
+mappings to the parent's flag.
 
 ### The binder
 

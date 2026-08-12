@@ -224,6 +224,12 @@ pub enum WarningKind {
     /// One leniency performed by [`tinker_pdf_filters`] while decoding.
     Filter(tinker_pdf_filters::Warning),
 
+    // ---- fonts (9.7) -----------------------------------------------------
+    /// 9.7.5.3: one leniency performed while reading a CMap — a section that
+    /// did not close, or a `usecmap` parent that was refused. The object is
+    /// the CMap stream it was read from.
+    CMap(tinker_pdf_font::cmap::Warning),
+
     // ---- the leniency ladder ---------------------------------------------
     /// No trailer dictionary was found; one was assembled from what the
     /// scanner recovered.
@@ -314,6 +320,7 @@ impl WarningKind {
             WarningKind::FilterParamsBad => "filter-params-bad",
             WarningKind::ImageCodecNotDecoded => "image-codec-not-decoded",
             WarningKind::Filter(_) => "filter",
+            WarningKind::CMap(w) => w.as_str(),
             WarningKind::TrailerSynthesized => "trailer-synthesized",
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
@@ -337,6 +344,7 @@ impl fmt::Display for WarningKind {
                 actual,
             } => write!(f, "stream-length-recovered (undeclared, actual {actual})"),
             WarningKind::Filter(w) => write!(f, "filter: {w}"),
+            WarningKind::CMap(w) => write!(f, "cmap: {w}"),
             WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
             other => f.write_str(other.as_str()),
         }

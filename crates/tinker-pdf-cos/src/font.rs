@@ -21,6 +21,7 @@ use tinker_pdf_font::{base_char, base_glyph_name, glyph_name_to_char, BaseEncodi
 use crate::doc::CosDocument;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
+use crate::warn::{WarningKind, WarningSink};
 
 /// Which of 9.6/9.7's font families a dictionary belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,6 +294,84 @@ impl Font {
     }
 }
 
+/// Parses the CMap stream at `r`, following its `usecmap` chain (9.7.5.3).
+///
+/// The closure is how a chain that starts in a leaf crate reaches a document
+/// stream. `tinker-pdf-font` can see that a CMap wants a parent and can name
+/// it, but it knows no COS types and could not fetch one (ruling 8) — the
+/// same reason `streams::build_chain` is handed a resolver for the indirect
+/// references in `/DecodeParms`.
+///
+/// Every source on the chain is remembered beside the stream it came from, so
+/// a parent's own `/UseCMap` can be answered too, and every leniency comes
+/// back attributed to the CMap stream that caused it rather than to the font.
+fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMap> {
+    let bytes = doc.stream_decoded(r).ok()?;
+
+    use tinker_pdf_font::cmap::{ParentRef, ParentSource, Warning as CMapWarning};
+
+    // Which stream each source came from. Bounded by the chain cap, so this
+    // holds at most a handful of entries however hostile the file is.
+    let mut sources: Vec<(Vec<u8>, ObjRef)> = vec![(bytes.clone(), r)];
+
+    // A `/UseCMap` that names something unfetchable is not the same as no
+    // `/UseCMap` at all, and only this side of the seam can tell them apart:
+    // the closure answers both with `None`, so the reporting happens here.
+    let mut refused: Vec<CMapWarning> = Vec::new();
+
+    let mut resolve = |want: ParentRef<'_>| {
+        let ParentRef::Dictionary(source) = want else {
+            // A name has no address in a document. 9.7.5.2's predefined set
+            // is the only place one can come from, and the leaf crate has
+            // already looked there — gap 03 makes what it finds real.
+            return None;
+        };
+        let at = sources.iter().find(|(s, _)| s == source).map(|(_, r)| *r)?;
+        let object = doc.get(at).ok()?;
+        let stream_dict = object.as_dict()?;
+        let key = doc.intern(b"UseCMap");
+
+        // Table 120: `/UseCMap` is a name or a stream, and only a stream is
+        // an indirect reference.
+        if let Some(parent) = stream_dict.get_ref(key) {
+            let Ok(source) = doc.stream_decoded(parent) else {
+                refused.push(CMapWarning::ParentUnresolved);
+                return None;
+            };
+            sources.push((source.clone(), parent));
+            return Some(ParentSource::Source(source));
+        }
+
+        // 7.3.9: a key whose value is null is a key that is not there.
+        let value = doc.resolve_key(stream_dict, key);
+        if value.is_null() {
+            return None;
+        }
+        match value.as_name().and_then(|n| doc.name_bytes(n)) {
+            Some(name) => Some(ParentSource::Named(name.to_vec())),
+            None => {
+                refused.push(CMapWarning::ParentUnresolved);
+                None
+            }
+        }
+    };
+
+    let parsed = tinker_pdf_font::cmap::parse_embedded(&bytes, &mut resolve);
+
+    // The warning's offset is where the CMap's own bytes begin. It cannot be
+    // the byte inside the CMap that caused the trouble, because those bytes
+    // are decoded and no longer have a position in the file.
+    let at = doc
+        .get(r)
+        .ok()
+        .and_then(|o| o.as_stream().map(|s| s.data_start))
+        .unwrap_or(0);
+    for warning in refused.into_iter().chain(parsed.warnings) {
+        sink.warn_at(at, Some(r), WarningKind::CMap(warning));
+    }
+    Some(parsed.cmap)
+}
+
 /// Reads a font dictionary.
 #[must_use]
 pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
@@ -317,6 +396,11 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
 
+    // Reading a CMap is lenient, and every leniency is a typed warning
+    // against the stream it happened in (ruling 10). The sink is drained into
+    // the document, which is where a caller looks for them.
+    let mut sink = WarningSink::new();
+
     let mut font = Font {
         kind,
         base_font: base_font.clone(),
@@ -326,7 +410,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         base_encoding: BaseEncoding::Standard,
         base_encoding_named: false,
         encoding_cmap: None,
-        to_unicode: read_to_unicode(doc, dict),
+        to_unicode: read_to_unicode(doc, dict, &mut sink),
         cid_widths: HashMap::new(),
         default_width: 1000.0,
         cid_to_gid: None,
@@ -335,26 +419,26 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         symbolic: false,
     };
 
-    read_encoding(doc, dict, &mut font);
+    read_encoding(doc, dict, &mut font, &mut sink);
 
     match kind {
         FontKind::Type0 => read_composite(doc, dict, &mut font),
         _ => read_simple(doc, dict, &mut font, &base_font),
     }
 
+    doc.absorb(sink);
     font
 }
 
-fn read_to_unicode(doc: &CosDocument, dict: &Dict) -> Option<CMap> {
+fn read_to_unicode(doc: &CosDocument, dict: &Dict, sink: &mut WarningSink) -> Option<CMap> {
     let r = dict.get_ref(doc.intern(b"ToUnicode"))?;
-    let bytes = doc.stream_decoded(r).ok()?;
-    Some(tinker_pdf_font::cmap::parse(&bytes))
+    read_cmap(doc, r, sink)
 }
 
 /// `/Encoding` is a name, or a dictionary with `/BaseEncoding` and
 /// `/Differences` (9.6.6), or for a composite font a predefined CMap name or
 /// an embedded CMap stream (9.7.5).
-fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font) {
+fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut WarningSink) {
     let key = doc.intern(b"Encoding");
 
     let named = |bytes: &[u8], font: &mut Font| match bytes {
@@ -382,8 +466,7 @@ fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font) {
 
     // An embedded CMap stream, for a composite font.
     if let Some(r) = dict.get_ref(key) {
-        if let Ok(bytes) = doc.stream_decoded(r) {
-            let cmap = tinker_pdf_font::cmap::parse(&bytes);
+        if let Some(cmap) = read_cmap(doc, r, sink) {
             font.vertical = cmap.is_vertical();
             font.encoding_cmap = Some(cmap);
             return;
