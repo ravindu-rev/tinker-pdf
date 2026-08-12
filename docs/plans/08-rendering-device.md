@@ -294,7 +294,32 @@ the catalog's `/OCProperties` `/D` configuration; the device computes the
 visibility set (`/OFF`, `/BaseState`, OCMD `/P` policies and `/VE`
 expressions) once per document. The interpreter reports `/OC` marked-content
 scopes and `/OC` entries on XObjects; the device suppresses paints inside
-hidden scopes. Annotations render only when `RenderOptions.annotations` is
+hidden scopes.
+
+*Amended, August 2026, on building it — gap
+[06](gaps/06-optional-content.md).* Two corrections, and the second is the
+substantive one.
+
+**The binder computes the visibility set, not the device.** Resolving an
+`/OC` entry means walking indirect references — an OCMD's `/OCGs`, a `/VE`
+expression's operands — and `tinker-pdf-render` sees no COS objects at all.
+The set is computed in `tinker-pdf/src/optional.rs` alongside the rest of the
+resource binding, and the device is handed a resolved `Layer { visible,
+label }` per scope. This is the same division the colour and function binders
+already use, and it is what keeps the render crate free of the object model.
+
+**`/OC` on an XObject is reported as a marked-content scope, not as a
+separate signal.** `Do` brackets the invocation in a hidden scope, so there is
+one suppression mechanism rather than two. That is not only tidier: it is what
+makes a hidden *image* skip its decode — a JBIG2 or JPX image in an off layer
+is not a missing codec and must not get the ruling-2 placeholder, which would
+be ink in a layer that is off — while a hidden *form* is still interpreted, so
+text extraction and rendering keep agreeing about what the page contains
+(ruling 7). Suppression is at the paint throughout: hidden content still
+advances the text pen, still balances `q`/`Q`, and still installs a clip,
+which 8.5.4 makes graphics state rather than a painting operation.
+
+Annotations render only when `RenderOptions.annotations` is
 true — the direct analogue of Tinker's `include_annotations`: each visible
 annotation (Hidden/NoView flags honored, Popups skipped) renders its `/AP`
 `/N` stream, `/AS`-selected when the appearance is a state dictionary, as a

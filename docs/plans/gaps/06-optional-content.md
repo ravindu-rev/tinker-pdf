@@ -71,6 +71,16 @@ the resource seam beside `ext_g_state_blend`. The inline form needs the
 tokenizer's `DictOpen`/`DictClose` reassembled; treat a malformed one as
 visible, because hiding content on a parse failure loses it.
 
+> **Amended, August 2026 — there is nothing to reassemble.** The scan was
+> written and then deleted, because injecting a defect into it could not change
+> a single answer. 8.11.3.2 makes an `/OC` entry a *reference* to an optional
+> content group or a membership dictionary, and 7.3.10 puts indirect references
+> in the file structure, where a content stream cannot write one. So an inline
+> `<< … >>` property list names no group in any document, well formed or not,
+> and both the reassembly and its absence produce a visible scope. What
+> remains is the rule the paragraph above is really about, which is kept and
+> tested: an `/OC` property list that is not a name is visible.
+
 **Suppression, not skipping.** Hidden content still advances the text pen and
 still runs its operators — a `q`/`Q` inside a hidden scope must still balance,
 and text extraction should arguably still see it. Suppress at the *paint*,
@@ -110,3 +120,56 @@ These are common in exactly the professional corpora the engine is aimed at.
 | Hiding content on a misparse is unrecoverable from the reader's side | Default to visible everywhere; the tests assert that a malformed `/VE` and an unknown `/P` both render |
 | The interpreter has no warning channel, so a skipped layer cannot report itself | Route it through the `Device`, which owns `RenderWarning`; a new variant naming the layer |
 | Text extraction and rendering could disagree about what is present | Suppress at the paint rather than at interpretation, so both see the same operators and only drawing differs |
+
+## As built — August 2026
+
+**Done**, five milestones in four commits. All three absences were still real
+when the work started, verified against the code rather than against this
+document: `Interpreter::operator` had no arm for `BMC`, `BDC`, `EMC`, `MP`,
+`DP`, `BX` or `EX`; operands were cleared after every operator; and `/OC`
+appeared nowhere in `crates/` at all. The `Device` trait had no marked-content
+methods and `interpret()` returned `()`.
+
+**Milestone 5 landed first, with milestone 1.** The plan's own ordering puts
+the OCMD policies last, and a tree where `/OC` suppresses and `/P` does not
+exist hides content that should show — which is the failure this document's
+"worse than none" section is about. The whole decision procedure therefore
+lands before the first thing that can act on it.
+
+**Where it went.** `crates/tinker-pdf/src/optional.rs` reads `/OCProperties`
+`/D` once per page bind; `PageResources` answers two new `FontSource`
+questions with a `Layer { visible, label }`; the interpreter tracks 14.6.2's
+nesting and reports each scope through two new `Device` methods; the renderer
+keeps a stack of open scopes and returns early from `fill_path`,
+`stroke_path`, `show_glyph`, `draw_image` and `draw_shading`.
+
+**Three things this document does not describe.**
+
+- *The inline property list cannot hide anything.* See the amendment in
+  Design. The reassembly it asks for is unreachable, was written, was proved
+  dead by injection, and was removed.
+- *`/OC` on an XObject is best expressed as a marked-content scope.* Bracketing
+  the `Do` rather than adding a second suppression mechanism is what makes a
+  hidden image skip its *decode* — so a JPX in an off layer is not reported as
+  an unsupported codec and gets no grey placeholder — while a hidden *form* is
+  still run, so its text still extracts.
+- *Three guards had to be placed, not merely present.* `show_glyph` returns
+  before 9.3.6's clipping mode is recorded, or a text object in modes 4–7
+  inside a hidden layer clips the whole page away; it also returns before the
+  outline lookup, so a hidden glyph is not counted as an unreadable font.
+  `draw_image` returns before the decode. And a clip set inside a hidden
+  layer still applies, because 8.5.4 makes it graphics state rather than a
+  paint.
+
+**Measured.** 1131 tests to 1174. The determinism table grows a sixth
+fingerprint, `optional`, because the other five would render identically on a
+build that had never heard of 8.11; the other five did not move, and
+`wasm32-wasip1` reproduces all six byte for byte. `fuzz/corpus/render_page`
+gains `optional-content.pdf` — reachable by construction, not measured; no
+campaign has been run.
+
+**Not built, and still not:** the layer-toggle API and `/AS`
+usage-application dictionaries, both non-goals above. Annotation `/OC`
+(12.5.3) is also absent: an annotation's appearance stream is run directly
+rather than through `Do`, so it does not reach this path, and the annotation
+model is plan 08's milestone 9 rather than this one's.
