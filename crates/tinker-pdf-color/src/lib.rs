@@ -65,7 +65,17 @@ pub enum ColorSpace {
         range: [f64; 4],
     },
     /// `/Pattern`, which carries no colour of its own (8.7.3).
-    Pattern,
+    Pattern {
+        /// The underlying space of an *uncoloured* pattern space, written
+        /// `[/Pattern base]` (8.7.3.2).
+        ///
+        /// A `PaintType 2` pattern supplies shape and no colour, so the paint
+        /// comes from the components an `scn` gives before the pattern name —
+        /// and those components are in `base`, not in `/Pattern`. Without it
+        /// they cannot be interpreted at all, and the pattern paints whatever
+        /// the slot happened to hold.
+        base: Option<Box<ColorSpace>>,
+    },
 }
 
 impl ColorSpace {
@@ -80,7 +90,11 @@ impl ColorSpace {
             ColorSpace::Separation { components, .. } => *components,
             ColorSpace::Approximated { components } => *components,
             ColorSpace::Lab { .. } => 3,
-            ColorSpace::Pattern => 1,
+            // 8.7.3.2: an uncoloured pattern's operands are counted in the
+            // underlying space. A plain `/Pattern` takes none at all, and 1 is
+            // the answer that keeps callers which size a buffer from this from
+            // sizing it to nothing.
+            ColorSpace::Pattern { base } => base.as_ref().map_or(1, |b| b.components()),
         }
     }
 
@@ -157,8 +171,14 @@ impl ColorSpace {
                 // Three components, or anything unexpected, read as RGB.
                 _ => ColorSpace::DeviceRgb.to_rgb(components),
             },
-            // A pattern's colour comes from the pattern, not from here.
-            ColorSpace::Pattern => (0, 0, 0),
+            // A coloured pattern's colour comes from the pattern, not from
+            // here. An uncoloured one's does come from here: 8.7.3.2 puts the
+            // operands in the underlying space, and they are the only colour a
+            // `PaintType 2` pattern will ever have.
+            ColorSpace::Pattern { base } => match base {
+                Some(base) => base.to_rgb(components),
+                None => (0, 0, 0),
+            },
         }
     }
 }
@@ -255,6 +275,33 @@ mod tests {
             ColorSpace::DeviceRgb.to_rgb(&ColorSpace::DeviceRgb.initial()),
             (0, 0, 0)
         );
+    }
+
+    /// 8.7.3: a plain `/Pattern` space has no colour, and 8.7.3.2's
+    /// `[/Pattern base]` has exactly one — `base`'s reading of the operands
+    /// that precede the pattern name, which is what a `PaintType 2` pattern
+    /// paints with. Answering black for both makes every uncoloured pattern
+    /// black whatever the page asked for.
+    #[test]
+    fn an_uncoloured_pattern_space_reads_its_underlying_space() {
+        let bare = ColorSpace::Pattern { base: None };
+        assert_eq!(bare.to_rgb(&[1.0, 0.0, 0.0]), (0, 0, 0));
+        assert_eq!(bare.components(), 1);
+
+        let over_rgb = ColorSpace::Pattern {
+            base: Some(Box::new(ColorSpace::DeviceRgb)),
+        };
+        assert_eq!(over_rgb.to_rgb(&[1.0, 0.0, 0.0]), (255, 0, 0));
+        assert_eq!(over_rgb.components(), 3);
+
+        // Not merely "three components": a CMYK underlying space reads the
+        // same operand count differently, and full black ink is black where
+        // three zeros in RGB are also black but one ink in CMYK is not.
+        let over_cmyk = ColorSpace::Pattern {
+            base: Some(Box::new(ColorSpace::DeviceCmyk)),
+        };
+        assert_eq!(over_cmyk.components(), 4);
+        assert_eq!(over_cmyk.to_rgb(&[1.0, 0.0, 0.0, 0.0]), (0, 255, 255));
     }
 
     #[test]

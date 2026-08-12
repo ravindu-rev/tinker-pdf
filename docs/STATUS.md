@@ -3,19 +3,20 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**1117 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**1131 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit. The fuzz targets
-also *run* on every commit now, briefly, over committed seed corpora. The four
-determinism fingerprints reproduce byte-for-byte on `wasm32-wasip1` under
-wasmtime — run locally against native Windows, not yet observed in CI.
+also *run* on every commit now, briefly, over committed seed corpora. The
+determinism fingerprints — five since gap 07 added one for the pattern path —
+reproduce byte-for-byte on `wasm32-wasip1` under wasmtime, run locally against
+native Windows, not yet observed in CI.
 
 > **It was wrong again.** A second audit in August 2026 checked this file
 > against the code in *both* directions and found the gap table accurate but
 > incomplete: **22 things listed as built are absent or materially thinner
 > than claimed**, seven of them producing silently wrong output or unopenable
 > files. They are written down in [audit-2026-08.md](audit-2026-08.md), with
-> the thirteen fixed so far struck through there. A known gap is manageable; a
+> the fourteen fixed so far struck through there. A known gap is manageable; a
 > false claim is not, because nobody goes looking.
 
 > **This file was wrong for a long time.** A 47-agent audit against every plan
@@ -40,6 +41,7 @@ Fixed since, each with tests that would have caught it:
 | **`/Rotate` was never applied**, though the canvas *was* sized for it — rotated pages drew upright and clipped | `page_view_transform`, with the crop-box origin as well |
 | **`J j M d` were discarded**, so every stroke was solid, butt-capped, miter-joined, while the rasterizer's tested implementation sat unreachable | Wired through the graphics state |
 | **Pattern fills painted black.** Every gradient from a design tool became an opaque rectangle | Shading patterns paint; tiling patterns are reported, not blacked out |
+| **Pattern *strokes* still painted black, and said nothing.** `gs.stroke_pattern` was recorded by the interpreter and read by nothing, so `stroke_path` and the stroking half of `show_glyph` asked for `stroke_color` — which is `/Pattern`'s nominal black, because 8.7.3 gives a pattern space no colour of its own. A gradient-stroked rule came out solid black with an empty warnings list, and a *tiling* pattern stroked came out black where the same pattern filled correctly warns and paints nothing. That second half falsified this file's own gap row | A stroke is a fill of its outline, so both call sites route the outline `stroke()` already computes into the existing `fill_with_pattern` — no pattern machinery was added, and the warning path is shared rather than duplicated, so the two cannot diverge again. `[/Pattern base]` (8.7.3.2) now parses and an `scn`'s components reach the slot's colour, which they did for neither slot before. Fourteen tests; the two that carry the weight are caught by exactly one assertion each — a stroke under two CTMs asserted byte-identical (8.7.3.1 anchoring), and a self-crossing stroke whose overlap must survive the non-zero rule |
 | **`/Function` arrays truncated to the first element**; **Separation tint transforms were the identity**; **`/Lab` was aliased to RGB** | All three read properly; Lab converts through XYZ |
 | **`/SMask` was never read** — every soft-masked image painted an opaque rectangle. `/Decode` likewise. Stencils were hardcoded black | All three honoured |
 | **Text render modes**: mode 1 filled instead of stroking, modes 4–7 never clipped | Fill, stroke and clip decided independently; clip accumulates to `ET` |
@@ -113,9 +115,9 @@ by value over risk.
 | **Fuzzers run, but no long campaign has happened** | They *have* now been executed: fifteen targets, each with a committed seed corpus, each proved to build and run under `cargo-fuzz` on a nightly toolchain, and wired into a bounded nightly job and a short per-PR one. What has not happened is a real session — the longest run so far is thirty seconds a target, which found nothing and is not evidence that there is nothing. Milestone 5 of the gap plan is the campaign; until it runs, ruling 1 is better measured than it was and still not measured deeply. Building the seed corpora alone found a CFF bug (see above), which is the argument for doing the rest. | [24](plans/gaps/24-fuzz-execution.md) |
 | **Linearization: external validation, and encrypt+linearize** | The layout is written and every offset it declares is checked against the bytes — but `qpdf --check` and `--show-linearization` are the arbiters the plan names and neither has been run, so the hint *tables* are unproven. `linearize` is also silently dropped when encryption is on, rather than combining with it. An *incremental* update still cannot encrypt, since it would need the original file's key. | [19](plans/gaps/19-encrypt-and-linearize.md), [20](plans/gaps/20-linearization-validation.md) |
 | **CCITT `/EndOfLine`, `/EndOfBlock` parameters** | The codes are now recognised wherever they appear, but the two parameters are not consulted, `/K > 0` is not true T.4 mixed mode, and the output is one byte per pixel rather than packed 1-bpp. | [16](plans/gaps/16-ccitt-completion.md) |
-| **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. | [17](plans/gaps/17-jbig2-generic-region.md), [18](plans/gaps/18-jpx-decision.md), [10](plans/gaps/10-mesh-shadings.md), [09](plans/gaps/09-tiling-patterns.md) |
+| **JBIG2, JPX; mesh shadings; tiling patterns** | Reported with a warning rather than half-decoded. Since gap 07 this is true of *strokes* and *text* as well as fills: it was not before, and the row said it was. A tiling pattern used as a stroking colour painted solid black with an empty warnings list, so the one thing this row promises — that a gap is visible as a gap — was the thing that did not hold. | [17](plans/gaps/17-jbig2-generic-region.md), [18](plans/gaps/18-jpx-decision.md), [10](plans/gaps/10-mesh-shadings.md), [09](plans/gaps/09-tiling-patterns.md) |
 | **Transparency groups, soft-mask groups, blend modes** | Constant alpha works; `/SMask` on *images* works; group transparency does not. | [11](plans/gaps/11-transparency-groups.md) |
-| **Determinism: the wasm leg has run, but not in CI** | ~~Written, unverified.~~ It has now been executed. `wasm32-wasip1` under wasmtime 47.0.3 reproduces all four fingerprints byte-for-byte against native Windows, along with the page dimensions and the ink counts they are computed from — 1486, 2363, 9600 and 3600 pixels — so the interesting half of ruling 4's pairing holds: a 64-bit target and a 32-bit one render the same bytes, which is where a `usize` width assumption would have shown. That is **2 of ruling 4's 4 targets**, on one machine. Linux and macOS come only from the CI matrix and no run of the `wasm-determinism` job has been observed, so four-target agreement is not yet a thing anyone has seen. The job is also now guarded against reporting success without running anything, which `cargo test` will otherwise do. Milestone 4, fixture growth, belongs to gaps 09, 10, 11 and 12. | [25](plans/gaps/25-wasm-determinism-leg.md) |
+| **Determinism: the wasm leg has run, but not in CI** | ~~Written, unverified.~~ It has now been executed. `wasm32-wasip1` under wasmtime 47.0.3 reproduces all five fingerprints byte-for-byte against native Windows, along with the page dimensions and the ink counts they are computed from — 1486, 2363, 9600, 3600 and 3230 pixels — so the interesting half of ruling 4's pairing holds: a 64-bit target and a 32-bit one render the same bytes, which is where a `usize` width assumption would have shown. That is **2 of ruling 4's 4 targets**, on one machine. Linux and macOS come only from the CI matrix and no run of the `wasm-determinism` job has been observed, so four-target agreement is not yet a thing anyone has seen. The job is also now guarded against reporting success without running anything, which `cargo test` will otherwise do. Milestone 4, fixture growth, belongs to gaps 09, 10, 11 and 12; gap 07 added one ahead of them, because `fill_with_pattern` had no fingerprint at all and gap 07 is what made a stroke reach it. | [25](plans/gaps/25-wasm-determinism-leg.md) |
 | **Binding packaging** | Nothing published; no wheel or per-RID CI. | [26](plans/gaps/26-binding-packaging.md) |
 | **Forms: calculations** | `/AA` scripts are not run — the open JavaScript question, which is a decision before it is code. Comb fields now lay out in their cells. | [27](plans/gaps/27-form-calculations-decision.md) |
 | **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [28](plans/gaps/28-tinker-integration-decisions.md) |

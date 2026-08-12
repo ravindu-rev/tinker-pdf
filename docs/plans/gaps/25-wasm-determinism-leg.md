@@ -75,6 +75,13 @@ it looks like.
 | 3 | STATUS updated | The row moves out of "Not built" once it has actually run | S |
 | 4 | Fixture growth as pixel paths land | Each of [09](09-tiling-patterns.md), [10](10-mesh-shadings.md), [11](11-transparency-groups.md), [12](12-image-sampling.md) adds a fixture | S |
 
+*Amended, August 2026, by [07](07-stroked-patterns.md).* A fifth fixture,
+`pattern`, landed ahead of the four plans named in milestone 4 and is not owed
+by any of them. It covers `fill_with_pattern`, which had no fingerprint at
+all — the `shading` fixture goes through `sh`, a different loop with a
+different inverse transform — and gap 07 is what made a stroked outline reach
+it. It reproduces on `wasm32-wasip1`. The four above are still owed.
+
 ## Dependencies
 
 **Needs first:** nothing. Needs a runner with the target and wasmtime, which

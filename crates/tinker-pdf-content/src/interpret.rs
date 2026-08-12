@@ -622,9 +622,31 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         _ => None,
                     })
                     .collect();
+                let space = if fill {
+                    self.gs.fill_space.clone()
+                } else {
+                    self.gs.stroke_space.clone()
+                };
+
                 // 8.6.8.2: `scn` may end with a pattern name, with or without
                 // preceding components (an uncoloured pattern takes both).
                 if let Some(Token::Name(name)) = self.stack.last().cloned() {
+                    // 8.7.3.2: those preceding components are the colour a
+                    // `PaintType 2` pattern paints with — it supplies shape
+                    // and nothing else — and they are measured in the
+                    // underlying space of `[/Pattern base]`, which is the
+                    // space this slot is already in. Dropping them, which is
+                    // what happened before, left the slot holding whatever
+                    // `cs` had reset it to and the pattern with no colour to
+                    // take.
+                    if !components.is_empty() {
+                        if let Some(color) = space
+                            .as_ref()
+                            .and_then(|s| self.fonts.resolve_color(s, &components))
+                        {
+                            self.set_color(fill, color, None);
+                        }
+                    }
                     self.set_pattern(fill, name);
                     return;
                 }
@@ -632,11 +654,6 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     return;
                 }
 
-                let space = if fill {
-                    self.gs.fill_space.clone()
-                } else {
-                    self.gs.stroke_space.clone()
-                };
                 let resolved = match &space {
                     Some(space) => self.fonts.resolve_color(space, &components),
                     // Without a named space the component count is the only
@@ -1360,5 +1377,133 @@ mod tests {
         // Without the guard everything after this would be at NaN.
         let d = run(b"BT /F0 10 Tf 0 0 Td (A) Tj 1 0 0 0 0 0 Tm (B) Tj ET");
         assert!(d.glyphs.iter().all(|g| g.1.is_finite() && g.2.is_finite()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Patterns (gap 07, 8.7.3).
+    // -----------------------------------------------------------------------
+
+    /// The state as the device saw it when the path was painted.
+    #[derive(Default)]
+    struct Painted {
+        states: Vec<GraphicsState>,
+    }
+
+    impl Device for Painted {
+        fn fill_path(&mut self, _path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
+            self.states.push(state.clone());
+        }
+        fn stroke_path(&mut self, _path: &[PathSegment], state: &GraphicsState) {
+            self.states.push(state.clone());
+        }
+    }
+
+    /// Two uncoloured pattern spaces (8.7.3.2), over different underlying
+    /// spaces so a test cannot pass by resolving against the wrong one:
+    /// `/Prgb` reads three components as RGB, `/Pgray` reads one as grey.
+    struct PatternSpaces;
+
+    impl FontSource for PatternSpaces {
+        fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            Vec::new()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn color_components(&self, space: &[u8]) -> Option<usize> {
+            match space {
+                b"Prgb" => Some(3),
+                b"Pgray" => Some(1),
+                _ => None,
+            }
+        }
+        fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
+            let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            match (space, components) {
+                (b"Prgb", [r, g, b]) => Some(Rgb {
+                    r: byte(*r),
+                    g: byte(*g),
+                    b: byte(*b),
+                }),
+                (b"Pgray", [v]) => Some(Rgb {
+                    r: byte(*v),
+                    g: byte(*v),
+                    b: byte(*v),
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    fn run_patterned(src: &[u8]) -> Painted {
+        let mut d = Painted::default();
+        interpret(src, Matrix::IDENTITY, &mut d, &PatternSpaces);
+        d
+    }
+
+    /// 8.7.3.2: a `PaintType 2` pattern paints with the colour the operands
+    /// before its name supply, in the pattern space's underlying space. The
+    /// operands were being collected and then dropped, so the slot held
+    /// whatever `cs`/`CS` had reset it to and the pattern had no colour at all
+    /// to take.
+    ///
+    /// The two slots take different spaces *and* different colours here, so
+    /// neither can pass by being written twice from the other's operands.
+    #[test]
+    fn an_uncoloured_pattern_keeps_the_colour_its_operands_gave() {
+        let d = run_patterned(
+            b"/Prgb cs 1 0 0 /P0 scn \
+              /Pgray CS 0.5 /P1 SCN \
+              0 0 m 10 10 l S",
+        );
+
+        let state = d.states.first().expect("the stroke reached the device");
+        assert_eq!(
+            state.fill_color,
+            Rgb { r: 255, g: 0, b: 0 },
+            "the fill slot took its three operands as RGB"
+        );
+        assert_eq!(
+            state.stroke_color,
+            Rgb {
+                r: 128,
+                g: 128,
+                b: 128
+            },
+            "and the stroke slot took its one operand as grey"
+        );
+        assert_eq!(
+            state.fill_pattern.as_deref(),
+            Some(b"P0".as_slice()),
+            "with both patterns still selected"
+        );
+        assert_eq!(state.stroke_pattern.as_deref(), Some(b"P1".as_slice()));
+    }
+
+    /// A coloured pattern names itself and nothing else. Whatever colour the
+    /// slot held stays put — there is nothing to overwrite it with, and the
+    /// pattern supplies its own paint.
+    #[test]
+    fn a_pattern_named_alone_leaves_the_colour_where_it_was() {
+        let d = run_patterned(b"0 1 0 RG /P1 SCN 0 0 m 10 10 l S");
+
+        let state = d.states.first().expect("the stroke reached the device");
+        assert_eq!(
+            state.stroke_color,
+            Rgb { r: 0, g: 255, b: 0 },
+            "no operands, so no new colour"
+        );
+        assert_eq!(state.stroke_pattern.as_deref(), Some(b"P1".as_slice()));
+    }
+
+    /// Choosing an ordinary colour has to clear the pattern on the stroke slot
+    /// as it does on the fill slot, or every later stroke keeps painting it.
+    #[test]
+    fn an_ordinary_stroking_colour_clears_the_stroke_pattern() {
+        let d = run_patterned(b"/P1 SCN 0 0 1 RG 0 0 m 10 10 l S");
+
+        let state = d.states.first().expect("the stroke reached the device");
+        assert_eq!(state.stroke_pattern, None);
+        assert_eq!(state.stroke_color, Rgb { r: 0, g: 0, b: 255 });
     }
 }

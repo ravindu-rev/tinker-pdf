@@ -75,9 +75,38 @@ behaviour.
 | --- | --- | --- | --- |
 | 1 | Tile rasterised to an offscreen canvas | A one-tile pattern fill matches the same content drawn directly at that position | S |
 | 2 | Lattice blitting, clipped to the fill path | A hatch over a rectangle repeats at `/XStep`/`/YStep`; nothing paints outside the path | M |
-| 3 | Anchoring to the parent's default space | The same pattern filled under two different CTMs puts the lattice in the same place | S |
+| 3 | Anchoring to the parent's default space | The same pattern filled under two different CTMs puts the lattice in the same place — **and the same pattern *stroked* under two different CTMs, per the amendment below** | S |
 | 4 | `PaintType 2` | An uncoloured pattern takes the `SCN` colour; colour operators inside it are ignored | S |
 | 5 | Tile cap | A pattern with a one-unit step over a large page warns and terminates rather than hanging | S |
+
+*Amended, August 2026, by [07](07-stroked-patterns.md).* **Milestone 3 must
+assert anchoring on the stroke path as well as the fill path, and milestone 4
+on the stroke slot as well as the fill slot.** Neither is optional and neither
+is covered by what 07 landed.
+
+Gap 07 routed `Renderer::stroke_path` and the stroking half of
+`show_glyph` through `fill_with_pattern`, so a tiling pattern on a stroke
+already reaches the same `PatternPaint` and the same warning as a fill. When
+this plan makes that paint, the stroke path starts painting tiles on the day
+milestone 2 lands, with no separate wiring and therefore no separate test.
+
+That is the problem. 07's anchoring test —
+`a_stroked_pattern_does_not_move_with_the_transform` in
+`crates/tinker-pdf/tests/colour_spaces.rs` — strokes the same pattern under two
+different CTMs and asserts the two renders are byte-identical, but it can only
+use a *shading* pattern, because a tiling pattern warns rather than paints
+today. So the lattice-does-not-slide guarantee currently holds for shadings
+only, and this document's own "worse than none" section names paint-time-CTM
+anchoring as the silent failure mode that turns an honest gap into a false
+capability. Without a tiling copy of that assertion the hole sits exactly where
+this plan says the danger is.
+
+The cheap discharge is to copy that test with `HATCH` in place of `GRADIENT`
+once tiles paint, and to add its stroke-slot twin for `PaintType 2`: 07 stores
+the `SCN` components for the stroke slot as well as the fill slot
+(`an_uncoloured_pattern_keeps_the_colour_its_operands_gave` in
+`interpret.rs`), but nothing has ever rendered them, so milestone 4 is the
+first thing that can prove the stroke slot's colour is the one that paints.
 
 ## Dependencies
 
@@ -94,3 +123,4 @@ rewritten.
 | A tile whose `/BBox` is smaller than its step leaves gaps that must not be filled by the neighbour spilling | The tile canvas is `/BBox`-sized, so spill is impossible by construction rather than by clipping |
 | A tile containing a form XObject or another pattern recurses | Reuse the existing form-recursion depth cap; a pattern that fills with itself terminates |
 | The existing "stays blank" test gets deleted rather than rewritten, losing the anchoring assertion with it | Rewrite it into the anchoring test in milestone 3, in the same commit that makes it fail |
+| Tiles start painting on strokes for free, so nothing forces a stroke-path anchoring test to be written | The milestone 3 amendment above. There are **two** "stays blank" tests to rewrite — `a_tiling_pattern_is_reported_rather_than_blacked_out` and `a_tiling_pattern_stroke_is_reported_rather_than_blacked_out` — and the second is the one that will otherwise be deleted without a replacement |

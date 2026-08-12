@@ -31,7 +31,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 | # | Plan | What goes wrong today | Size |
 | --- | --- | --- | --- |
 | 06 | [Optional content](06-optional-content.md) | A layer marked `/OFF` paints at full strength, with no warning | M |
-| 07 | [Stroked patterns](07-stroked-patterns.md) | A gradient-stroked rule draws solid black, silently | S |
+| 07 | [Stroked patterns](07-stroked-patterns.md) | ~~A gradient-stroked rule draws solid black, silently~~ **DONE**, see the plan's `As built`: all four milestones together, because the hazard the plan names is the shading half landing without the tiling warning. `stroke_path` and the stroking half of `show_glyph` fill the outline `stroke()` already computes through the existing `fill_with_pattern`, so no pattern machinery was added and the `UnsupportedPattern` path is shared rather than duplicated. Three things the plan does not describe: the `scn` components were dropped for the **fill** slot too, not only the stroke slot; `[/Pattern base]` (8.7.3.2) did not parse at all, so those components could not have been read in any space; and `fill_with_pattern` applied `ca` to everything, which is wrong for a stroke. The **filling** half of `show_glyph` had the same defect and is fixed with it — a `2 Tr` glyph would otherwise have painted a black body under a patterned edge. Adds the repository's fifth determinism fingerprint, because `fill_with_pattern` had none. Fourteen tests; injection shows the anchoring test and the fill-rule test are each the **only** assertion that catches their defect | S |
 | 08 | [Inline image filters](08-inline-image-filters.md) | A Flate-with-predictor inline image decodes to noise | S |
 
 ## Rendering — features never built

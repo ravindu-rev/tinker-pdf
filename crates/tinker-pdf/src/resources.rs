@@ -164,7 +164,7 @@ impl PageResources {
             b"DeviceGray" | b"G" | b"CalGray" => return Some(ColorSpace::DeviceGray),
             b"DeviceRGB" | b"RGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
             b"DeviceCMYK" | b"CMYK" => return Some(ColorSpace::DeviceCmyk),
-            b"Pattern" => return Some(ColorSpace::Pattern),
+            b"Pattern" => return Some(ColorSpace::Pattern { base: None }),
             _ => {}
         }
 
@@ -189,7 +189,7 @@ impl PageResources {
                 b"DeviceGray" | b"G" | b"CalGray" => Some(ColorSpace::DeviceGray),
                 b"DeviceRGB" | b"RGB" | b"CalRGB" => Some(ColorSpace::DeviceRgb),
                 b"DeviceCMYK" | b"CMYK" => Some(ColorSpace::DeviceCmyk),
-                b"Pattern" => Some(ColorSpace::Pattern),
+                b"Pattern" => Some(ColorSpace::Pattern { base: None }),
                 _ => None,
             };
         }
@@ -259,6 +259,18 @@ impl PageResources {
                     tint: Box::new(tint),
                 })
             }
+            // 8.7.3.2: `[/Pattern base]` is the *uncoloured* pattern space.
+            // The second element is where the operands of an `scn` that names
+            // a `PaintType 2` pattern are measured; a bare `/Pattern` has no
+            // second element and no colour. Without this branch the array form
+            // resolved to nothing at all, so `cs` left the slot in whatever
+            // space preceded it and the operands were read against that.
+            b"Pattern" => Some(ColorSpace::Pattern {
+                base: items
+                    .get(1)
+                    .and_then(|o| self.parse_space(o, depth + 1))
+                    .map(Box::new),
+            }),
             b"CalGray" => Some(ColorSpace::DeviceGray),
             b"CalRGB" => Some(ColorSpace::DeviceRgb),
             // 8.6.5.4: L runs 0..100 and a/b roughly -128..127. Aliasing Lab
@@ -1606,5 +1618,72 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
                 Segment::Close => Segment::Close,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PageResources;
+    use tinker_pdf_content::FontSource;
+
+    /// A one-page document whose `/ColorSpace` dictionary is given verbatim.
+    fn resources_of(color_spaces: &str) -> PageResources {
+        let content = "0 0 1 1 re f";
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10]\n\
+   /Resources << /ColorSpace << {color_spaces} >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
+            content.len() + 1
+        );
+
+        let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        PageResources::new(&page.doc, &page.inner, None)
+    }
+
+    /// 8.7.3.2: `[/Pattern base]` is the uncoloured pattern space, and `base`
+    /// is where the operands of an `scn` that names a `PaintType 2` pattern
+    /// are measured.
+    ///
+    /// The array form resolved to nothing at all before this, so those
+    /// operands could not be read in any space and an uncoloured pattern had
+    /// no colour to take. The two spaces below read the same three numbers
+    /// differently, so a binder that fell back to RGB for both fails on the
+    /// second.
+    #[test]
+    fn an_uncoloured_pattern_space_resolves_through_its_underlying_space() {
+        let res = resources_of(
+            "/Prgb [ /Pattern /DeviceRGB ] \
+             /Pcmyk [ /Pattern /DeviceCMYK ] \
+             /Pbare /Pattern",
+        );
+
+        assert_eq!(res.color_components(b"Prgb"), Some(3));
+        assert_eq!(
+            res.resolve_color(b"Prgb", &[1.0, 0.0, 0.0]),
+            Some(tinker_pdf_content::Rgb { r: 255, g: 0, b: 0 }),
+        );
+
+        assert_eq!(res.color_components(b"Pcmyk"), Some(4));
+        assert_eq!(
+            res.resolve_color(b"Pcmyk", &[1.0, 0.0, 0.0, 0.0]),
+            Some(tinker_pdf_content::Rgb {
+                r: 0,
+                g: 255,
+                b: 255
+            }),
+            "cyan, not red — the operands are inks here"
+        );
+
+        // 8.7.3.1: a *coloured* pattern space has no underlying space and no
+        // colour of its own, which is the black every pattern used to paint.
+        assert_eq!(
+            res.resolve_color(b"Pbare", &[1.0, 0.0, 0.0]),
+            Some(tinker_pdf_content::Rgb { r: 0, g: 0, b: 0 }),
+        );
     }
 }
