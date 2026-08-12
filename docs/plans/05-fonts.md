@@ -184,6 +184,21 @@ as sorted, non-overlapping ranges with binary search, /DW as the default; /W2//D
 shape for vertical. Exit tolerance is 0.1 pt against the oracle at rendered size — tight
 enough to catch nominalWidthX/defaultWidthX confusion, which is the classic CFF width bug.
 
+*Amended August 2026, gap [05](gaps/05-vertical-metrics.md).* The range structure is not
+what was built. `/W` is expanded at read time into a `HashMap` keyed by CID, and `/W2`
+follows it rather than introducing a second shape — one lookup discipline for both, so the
+horizontal and vertical metrics of a CID cannot be found by two different searches that
+disagree. Table 117's `c_first c_last` form is expanded the same way and bounded to 65 536
+CIDs per entry, which is what keeps a hostile `c_last` from filling memory; that bound is
+also the whole CID space a two-byte glyph index can address, so nothing reachable is lost.
+The one place the range form would have paid — a font declaring a wide uniform range — is
+not a shape real producers write, and measuring it was cheaper than believing it.
+
+`/W2`'s per-CID entries carry **three** numbers where `/W`'s carry one (Table 117): the
+displacement `w1y` and the two-component position vector. `/DW2` is `[v_y w1_y]` with a
+default of `[880 -1000]`, and `v_x` is never defaulted at all — 9.7.4.3 derives it as half
+the glyph's horizontal displacement, so it comes out of `/W` and `/DW`.
+
 ### Build-time data
 
 A build script (`tinker-pdf-font/build.rs`) compiles vendored data into static tables; raw

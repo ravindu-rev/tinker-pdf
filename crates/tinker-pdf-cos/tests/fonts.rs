@@ -376,6 +376,209 @@ fn an_unreadable_cid_to_gid_map_falls_back_to_the_identity() {
 }
 
 // ---------------------------------------------------------------------------
+// Vertical metrics: `/W2` and `/DW2` (gap 05, 9.7.4.3).
+// ---------------------------------------------------------------------------
+
+/// The vertical fixture's metrics, and its decoy.
+///
+/// Three things are deliberate here.
+///
+/// **The CIDs are non-adjacent** — 5 and 6, then 9, then 14. `/W2` carries
+/// *three* numbers per CID where `/W` carries one, and reading it with `/W`'s
+/// stride does not fail: it puts each CID's metrics on some other CID and
+/// keeps going. Entries for CIDs that touch could not show that, because a
+/// shift of one lands on a CID the fixture also names. The gaps between them
+/// are asserted to hold the default, which is the shift showing up directly.
+///
+/// **The two forms alternate**, array then range then array. A wrong stride in
+/// the range form desynchronises everything after it, so CID 14 reading back
+/// correctly is evidence about how many elements the range form consumed.
+///
+/// **`/W` is the decoy.** Every CID `/W2` names is also given a horizontal
+/// width, and none of them resembles its vertical displacement: CID 5 is 1000
+/// wide and advances -400 downward. A reader that reached for the horizontal
+/// number — which is what this engine did until August 2026 — cannot produce
+/// any of the numbers below.
+const VERTICAL_METRICS: &str = "/W [5 [1000 1000] 9 [1000] 14 [1000] 20 [500]]\n\
+     /W2 [5 [-400 250 700 -410 255 705] 9 9 -600 300 800 14 [-900 350 900]]";
+
+/// Milestone 1's exit criterion, first half: a fixture's per-CID vertical
+/// displacements read back exactly, in both of Table 117's forms.
+#[test]
+fn per_cid_vertical_metrics_read_back_in_both_forms() {
+    let doc = composite_font("/Identity-H", VERTICAL_METRICS, "/Identity", &[]);
+    let font = font_at(&doc, 3);
+
+    // (v_x, v_y, w1_y) — the position vector, then the displacement.
+    assert_eq!(
+        font.vertical_metrics(5),
+        (250.0, 700.0, -400.0),
+        "array form"
+    );
+    assert_eq!(
+        font.vertical_metrics(6),
+        (255.0, 705.0, -410.0),
+        "the second triple of the same array, one CID along"
+    );
+    assert_eq!(
+        font.vertical_metrics(9),
+        (300.0, 800.0, -600.0),
+        "range form"
+    );
+    assert_eq!(
+        font.vertical_metrics(14),
+        (350.0, 900.0, -900.0),
+        "an array entry after a range one, so the range consumed five \
+         elements and not three"
+    );
+
+    for cid in [5, 6, 9, 14] {
+        assert!(font.has_vertical_metrics(cid), "/W2 names CID {cid}");
+    }
+}
+
+/// The stride risk, stated as an assertion. `/W2`'s three-number entries read
+/// with `/W`'s one-number stride would leave metrics on CIDs the file never
+/// named — so the CIDs *between* the fixture's entries are checked to be
+/// untouched, which is where a shift lands.
+#[test]
+fn a_cid_between_two_w2_entries_is_not_given_its_neighbour_s_metrics() {
+    let doc = composite_font("/Identity-H", VERTICAL_METRICS, "/Identity", &[]);
+    let font = font_at(&doc, 3);
+
+    for cid in [4, 7, 8, 10, 11, 12, 13, 15, 16] {
+        assert!(
+            !font.has_vertical_metrics(cid),
+            "CID {cid} sits in a gap /W2 does not name, and something put \
+             metrics on it: {:?}",
+            font.vertical_metrics(cid)
+        );
+        let (_, v_y, w1_y) = font.vertical_metrics(cid);
+        assert_eq!((v_y, w1_y), (880.0, -1000.0), "CID {cid} takes the default");
+    }
+}
+
+/// Milestone 1's exit criterion, second half: a font without `/DW2` reports
+/// 9.7.4.3's `[880 -1000]`, not the horizontal fallback.
+///
+/// The fixture's `/DW` is 250 and its `/W` is 1000, so neither of those
+/// numbers nor their negations can be mistaken for the default.
+#[test]
+fn a_font_without_dw2_reports_the_spec_default() {
+    let doc = composite_font("/Identity-H", VERTICAL_METRICS, "/Identity", &[]);
+    let font = font_at(&doc, 3);
+
+    let (_, v_y, w1_y) = font.vertical_metrics(99);
+    assert_eq!(v_y, 880.0, "/DW2's default position vector y");
+    assert_eq!(
+        w1_y, -1000.0,
+        "and its default displacement, which is downward"
+    );
+    assert!(!font.has_vertical_metrics(99));
+
+    // A font with no vertical metrics of any kind still has these.
+    let bare = composite_font("/Identity-H", "", "/Identity", &[]);
+    assert_eq!(font_at(&bare, 3).vertical_metrics(1).1, 880.0);
+    assert_eq!(font_at(&bare, 3).vertical_metrics(1).2, -1000.0);
+}
+
+/// `/DW2` when the file gives one, which must beat the default and must be
+/// read in the order Table 116 writes it: position vector *y* first,
+/// displacement second. Swapping them would make the glyph advance 1234 units
+/// **upward**, which is a column running the wrong way.
+#[test]
+fn dw2_overrides_the_default_in_the_order_the_table_gives() {
+    let doc = composite_font("/Identity-H", "/DW2 [123 -1234]", "/Identity", &[]);
+    let font = font_at(&doc, 3);
+    let (_, v_y, w1_y) = font.vertical_metrics(1);
+    assert_eq!(v_y, 123.0, "the first element is the position vector's y");
+    assert_eq!(w1_y, -1234.0, "the second is the displacement");
+}
+
+/// 9.7.4.3 derives `v_x` from the glyph's own horizontal width rather than
+/// defaulting it, so the horizontal metrics decide where a vertical glyph sits
+/// sideways in its em box even when the file says nothing vertical at all.
+#[test]
+fn v_x_is_half_the_horizontal_width_when_w2_gives_none() {
+    let doc = composite_font("/Identity-H", VERTICAL_METRICS, "/Identity", &[]);
+    let font = font_at(&doc, 3);
+
+    assert_eq!(font.width_of(20).0, 500.0, "the /W entry this derives from");
+    assert_eq!(font.vertical_metrics(20).0, 250.0, "half of it");
+
+    // A CID /W does not name falls back to /DW, and v_x follows it there.
+    assert_eq!(font.width_of(99).0, 250.0, "/DW");
+    assert_eq!(font.vertical_metrics(99).0, 125.0, "half of /DW");
+
+    // Where /W2 *does* give one, it is used as written and not derived: CID 5
+    // is 1000 wide, so a derived v_x would be 500 rather than 250.
+    assert_eq!(font.width_of(5).0, 1000.0);
+    assert_eq!(font.vertical_metrics(5).0, 250.0, "/W2's own v1x");
+}
+
+/// Every shape of `/W2` and `/DW2` a hostile or broken file can write. None
+/// may panic (ruling 1), none may hang, and none may leave a CID with metrics
+/// the file did not give it.
+#[test]
+fn a_malformed_w2_degrades() {
+    for entry in [
+        "/W2 [5]",
+        "/W2 [5 []]",
+        "/W2 [5 [-400]]",
+        "/W2 [5 [-400 250]]",
+        "/W2 [5 [-400 250 700 -410]]",
+        "/W2 [5 5]",
+        "/W2 [5 9 -600]",
+        "/W2 [/Name [1 2 3]]",
+        "/W2 [5 [(text) (more) (still)]]",
+        "/W2 5",
+        "/W2 << /A /B >>",
+        "/W2 [0 2147483647 -1000 0 880]",
+        "/W2 [-5 [-400 250 700]]",
+        "/DW2 [880]",
+        "/DW2 880",
+        "/DW2 [(a) (b)]",
+        "/DW2 [880 -1000 -1000]",
+    ] {
+        let doc = composite_font("/Identity-H", entry, "/Identity", &[]);
+        let font = font_at(&doc, 3);
+        // Reachable for every CID, whatever the file said.
+        let _ = font.vertical_metrics(0);
+        let _ = font.vertical_metrics(5);
+        let _ = font.vertical_metrics(u32::MAX);
+        assert!(
+            !font.has_vertical_metrics(u32::MAX),
+            "{entry} put metrics on a CID no file can address"
+        );
+    }
+
+    // The partial triple is dropped rather than guessed at, and the whole
+    // entry before it survives.
+    let doc = composite_font(
+        "/Identity-H",
+        "/W2 [5 [-400 250 700 -410]]",
+        "/Identity",
+        &[],
+    );
+    let font = font_at(&doc, 3);
+    assert_eq!(font.vertical_metrics(5), (250.0, 700.0, -400.0));
+    assert!(!font.has_vertical_metrics(6), "a lone -410 is not a triple");
+}
+
+/// A simple font has no `/W2` to read and never writes vertically, but the
+/// accessor is on `Font` and a caller may still reach it. It answers the
+/// spec's default rather than zeros, which is the least wrong thing available.
+#[test]
+fn a_simple_font_answers_the_default_vertical_metrics() {
+    let doc = open("simple-text.pdf");
+    let fonts = first_page_fonts(&doc);
+    let font = fonts.first().expect("a font");
+    assert_eq!(font.vertical_metrics(u32::from(b'T')).1, 880.0);
+    assert_eq!(font.vertical_metrics(u32::from(b'T')).2, -1000.0);
+    assert!(!font.has_vertical_metrics(u32::from(b'T')));
+}
+
+// ---------------------------------------------------------------------------
 // `usecmap` and `/UseCMap` (gap 04, 9.7.5.3).
 // ---------------------------------------------------------------------------
 

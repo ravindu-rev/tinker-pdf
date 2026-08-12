@@ -95,6 +95,17 @@ pub struct Font {
     /// Composite fonts: `/W` widths by CID, and `/DW`'s default.
     cid_widths: HashMap<u32, f64>,
     default_width: f64,
+    /// Composite fonts: `/W2`'s per-CID vertical metrics, as
+    /// `(v_x, v_y, w1_y)` — the order [`Font::vertical_metrics`] returns them
+    /// in, so that storing and reading them cannot disagree about which
+    /// component is which.
+    cid_vertical: HashMap<u32, (f64, f64, f64)>,
+    /// `/DW2` as `(v_y, w1_y)`, or 9.7.4.3's `[880 -1000]` default.
+    ///
+    /// Only two components, because the third is not a constant: 9.7.4.3
+    /// derives `v_x` from the glyph's own horizontal width rather than from
+    /// any default, so there is nothing to store for it here.
+    default_vertical: (f64, f64),
     /// Composite fonts: `/CIDToGIDMap` as a stream of two-byte GIDs (9.7.4.2).
     ///
     /// `None` covers `/Identity`, an absent entry, and anything unreadable —
@@ -289,6 +300,54 @@ impl Font {
         (self.missing_width, false)
     }
 
+    /// One CID's vertical metrics, in 1/1000 em: `(v_x, v_y, w1_y)`.
+    ///
+    /// 9.7.4.3. `w1_y` is the vertical displacement — how far down the pen
+    /// moves after this glyph — and is **negative** for text that runs
+    /// downward, because text space has y upward. `(v_x, v_y)` is the position
+    /// vector: it points from the glyph's horizontal origin to the origin
+    /// vertical setting uses, so the glyph is drawn displaced by *minus* v.
+    /// That is what puts a comma in a different corner of the em box
+    /// vertically than horizontally.
+    ///
+    /// All three components rather than the advance alone, deliberately. The
+    /// position vector was the half of 9.7.4.3 this engine had missed
+    /// entirely, and an accessor shaped like `width_of` would have invited
+    /// exactly the same omission a second time.
+    ///
+    /// Keyed by CID rather than by code, unlike [`Font::width_of`], because
+    /// 9.7.4.3 keys `/W2` by CID and [`DecodedCode::cid`] already carries one.
+    ///
+    /// Three fallbacks, in order: `/W2` for this CID; failing that `/DW2`'s
+    /// two components; failing that `[880 -1000]`. `v_x` is never defaulted —
+    /// 9.7.4.3 says it is half the glyph's horizontal displacement, so it is
+    /// derived from `/W` and `/DW`, which is the same pair of numbers
+    /// [`Font::width_of`] answers from.
+    #[must_use]
+    pub fn vertical_metrics(&self, cid: u32) -> (f64, f64, f64) {
+        if let Some(metrics) = self.cid_vertical.get(&cid) {
+            return *metrics;
+        }
+        let (v_y, w1_y) = self.default_vertical;
+        let w0 = self
+            .cid_widths
+            .get(&cid)
+            .copied()
+            .unwrap_or(self.default_width);
+        (w0 / 2.0, v_y, w1_y)
+    }
+
+    /// Whether `/W2` named this CID, rather than the answer coming from
+    /// `/DW2`.
+    ///
+    /// Exposed for the same reason [`Font::has_cid_to_gid_map`] is: "the file
+    /// gave these metrics" and "the file gave nothing and the default happens
+    /// to match" are the same three numbers and different documents.
+    #[must_use]
+    pub fn has_vertical_metrics(&self, cid: u32) -> bool {
+        self.cid_vertical.contains_key(&cid)
+    }
+
     /// The character a code stands for, before `/ToUnicode` is consulted.
     fn char_of(&self, code: u32) -> Option<char> {
         let byte = u8::try_from(code).ok()?;
@@ -443,6 +502,12 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         to_unicode: read_to_unicode(doc, dict, &mut sink),
         cid_widths: HashMap::new(),
         default_width: 1000.0,
+        cid_vertical: HashMap::new(),
+        // 9.7.4.3: the default default, before any /DW2 is read. A simple
+        // font never writes vertically and never reaches it, but a font whose
+        // descendant dictionary could not be read does, and the spec's number
+        // is a better answer there than a zero displacement.
+        default_vertical: (880.0, -1000.0),
         cid_to_gid: None,
         standard: None,
         vertical: false,
@@ -660,7 +725,84 @@ fn read_composite(doc: &CosDocument, dict: &Dict, font: &mut Font) {
                             font.cid_widths.insert(cid, width);
                         }
                     }
-                    i += 3;
+                    i += 5;
+                }
+                None => break,
+            }
+        }
+    }
+
+    // 9.7.4.3 Table 116: /DW2 is [v_y w1_y] — the *y* of the position vector
+    // and the vertical displacement, in that order. Its default is
+    // [880 -1000], which is why a font that gives no vertical metrics at all
+    // still has them: falling back to the horizontal advance is not one of
+    // the options the spec offers.
+    let dw2 = doc.resolve_key(cid_font, doc.intern(b"DW2"));
+    if let Some(items) = dw2.as_array() {
+        let at = |i: usize| {
+            items
+                .get(i)
+                .map(|o| doc.resolve(o))
+                .and_then(|o| o.as_number())
+        };
+        if let (Some(v_y), Some(w1_y)) = (at(0), at(1)) {
+            font.default_vertical = (v_y, w1_y);
+        }
+    }
+
+    // 9.7.4.3 Table 117: /W2 is [ c [w1y v1x v1y ...] ] or
+    // [ cfirst clast w1y v1x v1y ], mixed freely — the same two shapes as /W,
+    // but with **three** numbers per CID where /W has one. Reading it with
+    // /W's stride does not fail; it silently assigns each CID the number
+    // belonging to a third of the way into some later one's entry, and every
+    // CID after the first entry gets metrics that are not its own.
+    let w2 = doc.resolve_key(cid_font, doc.intern(b"W2"));
+    if let Some(items) = w2.as_array() {
+        let values: Vec<Arc<Object>> = items.iter().map(|o| doc.resolve(o)).collect();
+        let mut i = 0usize;
+        while i < values.len() {
+            let Some(start) = values.get(i).and_then(|o| o.as_int()) else {
+                break;
+            };
+            match values.get(i + 1).map(|o| o.as_ref()) {
+                Some(Object::Array(list)) => {
+                    // A trailing partial triple is not a fourth CID's metrics
+                    // and cannot be guessed at, so `chunks_exact` drops it.
+                    for (k, triple) in list.chunks_exact(3).enumerate() {
+                        let at = |i: usize| {
+                            triple
+                                .get(i)
+                                .map(|o| doc.resolve(o))
+                                .and_then(|o| o.as_number())
+                        };
+                        let (Some(w1_y), Some(v_x), Some(v_y)) = (at(0), at(1), at(2)) else {
+                            continue;
+                        };
+                        if let Ok(cid) = u32::try_from(start + k as i64) {
+                            font.cid_vertical.insert(cid, (v_x, v_y, w1_y));
+                        }
+                    }
+                    i += 2;
+                }
+                Some(_) => {
+                    let at = |i: usize| values.get(i).and_then(|o| o.as_number());
+                    let (Some(end), Some(w1_y), Some(v_x), Some(v_y)) = (
+                        values.get(i + 1).and_then(|o| o.as_int()),
+                        at(i + 2),
+                        at(i + 3),
+                        at(i + 4),
+                    ) else {
+                        break;
+                    };
+                    // Bounded exactly as /W's range form is, and for the same
+                    // reason: a hostile `clast` would otherwise fill memory.
+                    let end = end.min(start + 65_535);
+                    for cid in start..=end {
+                        if let Ok(cid) = u32::try_from(cid) {
+                            font.cid_vertical.insert(cid, (v_x, v_y, w1_y));
+                        }
+                    }
+                    i += 5;
                 }
                 None => break,
             }
