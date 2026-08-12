@@ -14,7 +14,7 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 | `ascii_filters` | ASCIIHex, ASCII85, RunLength, and the predictors |
 | `sfnt` | The table directory and everything around the outlines, including the subsetter that rebuilds one |
 | `truetype` | `cmap`, and `glyf` including composites |
-| `cff` | Type 2 charstrings: subrs, `seac`, `flex`, `hintmask` |
+| `cff` | The tables that decide which charstring runs — charset, encoding, string INDEX, FDSelect — and then Type 2 charstrings: subrs, `seac`, `flex`, `hintmask` |
 | `type1` | eexec and charstring decryption, `/CharStrings`, othersubrs |
 | `cmap` | CMap syntax as an embedded stream, then splitting a string by the codespaces it declared |
 | `crypt` | The standard security handler and the ciphers under it; the input is carved into `/Encrypt`'s fields |
@@ -80,7 +80,7 @@ account for:
 | --- | --- |
 | `ascii_filters` | Hand-written hex, ASCII85 and RunLength streams, plus rows shaped for a PNG-Up predictor |
 | `ccitt` | `ccitt.rs`'s own `pack` fixtures, behind the two control bytes the target reads first |
-| `cff` | `cff.rs`'s `three_glyph_program` test — the same bytes, built by the test so the two cannot drift |
+| `cff` | `cff.rs`'s own fixtures — the same bytes, built by the tests so the two cannot drift, and rewritten by `cargo test -p tinker-pdf-font write_the_fuzz_seeds -- --ignored`: a three-glyph program, a format 0 charset with an encoding supplement and a string INDEX name, the same font with a format 2 charset, and a CID-keyed font with `ROS`, an FDArray and a format 3 FDSelect |
 | `content_tokenizer` | Hand-written operator streams: text, paths, an inline image, escapes, comments |
 | `cos_document` | The four `testdata/` PDFs and the four pages `determinism.rs` builds |
 | `cos_object` | Hand-written 7.3 objects: dictionary, stream, nested array, every number form, two unterminated |

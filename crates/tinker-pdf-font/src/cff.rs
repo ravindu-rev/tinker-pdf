@@ -2466,6 +2466,50 @@ mod tests {
     /// The SIDs of `A`, `B` and `C`, which are the standard strings 34 to 36.
     const ABC: [u16; 3] = [34, 35, 36];
 
+    /// Writes the three seeds `fuzz/corpus/cff/` carries for the glyph
+    /// selection tables, so the seeds and the fixtures cannot drift apart.
+    ///
+    /// Run with `--ignored` when a fixture changes; the corpus is committed,
+    /// and a run that rewrites it is a diff to look at rather than to apply
+    /// blindly.
+    #[test]
+    #[ignore = "writes into fuzz/corpus/cff, which is committed"]
+    fn write_the_fuzz_seeds() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/cff");
+        for (name, bytes) in [
+            ("charset_and_encoding.cff", named_glyphs().build()),
+            ("charset_runs.cff", run_charset_glyphs().build()),
+            (
+                "cid_keyed.cff",
+                cid_fixture(vec![3, 0, 2, 0, 0, 0, 0, 2, 1, 0, 4]).build(),
+            ),
+        ] {
+            std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+        }
+    }
+
+    /// `fuzz/corpus/cff/charset_and_encoding.cff`: a format 0 charset, a
+    /// custom encoding with a supplement, and a name from the string INDEX.
+    fn named_glyphs() -> Fixture {
+        let mut encoding = vec![0x80, 3, 0x41, 0x42, 0x43, 1, 0x61];
+        encoding.extend_from_slice(&34u16.to_be_bytes());
+        Fixture {
+            strings: vec![b"uniE000".to_vec()],
+            charset: Table::Bytes(charset_0(&[34, 35, 391])),
+            encoding: Table::Bytes(encoding),
+            ..abc(Table::default())
+        }
+    }
+
+    /// `fuzz/corpus/cff/charset_runs.cff`: the same font with a format 2
+    /// charset, which is the format whose run lengths are two bytes wide.
+    fn run_charset_glyphs() -> Fixture {
+        Fixture {
+            charset: Table::Bytes(charset_runs(2, &[(34, 2)])),
+            ..abc(Table::default())
+        }
+    }
+
     /// A three-letter font: `.notdef`, then `A`, `B` and `C` as boxes of
     /// three different sizes, so which glyph ran can be read off the outline.
     fn abc(charset: Table) -> Fixture {
