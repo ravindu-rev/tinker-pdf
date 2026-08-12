@@ -28,7 +28,7 @@ use tinker_pdf_raster::{
     canvas::{Canvas, Color, PixelFormat},
     fill::{fill, Mask},
     geom::{FillRule, Path},
-    image::{draw_image, ImageDraw, ImageSource, Transform},
+    image::{draw_image, ImageDraw, ImageSource, Pyramid, Transform},
     stroke::{stroke, LineCap, LineJoin, StrokeStyle},
 };
 
@@ -513,7 +513,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             tint,
             stop: Some(&stop),
         };
-        draw_image(&mut self.canvas, &draw);
+        // Built here and dropped here. The levels are the caller's to keep,
+        // and keeping them needs an identity for the image rather than a
+        // shape — two 512 x 512 photographs are indistinguishable to this
+        // function. That identity lives with the resource cache, which is
+        // phase 08's, so this deliberately does not invent one.
+        let mut pyramid = Pyramid::new();
+        draw_image(&mut self.canvas, &draw, &mut pyramid);
     }
 
     /// Converts interpreter path segments into a rasterizer path.

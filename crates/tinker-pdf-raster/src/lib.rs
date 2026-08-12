@@ -13,5 +13,5 @@ pub mod stroke;
 pub use canvas::{Canvas, Color, PixelFormat};
 pub use fill::{fill, Mask};
 pub use geom::{flatten, FillRule, Path, Point, Verb};
-pub use image::{draw_image, ImageDraw, ImageSource, Transform};
+pub use image::{draw_image, Filter, ImageDraw, ImageSource, Pyramid, Sampling, Transform};
 pub use stroke::{stroke, LineCap, LineJoin, StrokeStyle};

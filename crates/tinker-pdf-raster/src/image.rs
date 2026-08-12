@@ -131,8 +131,23 @@ pub enum Filter {
     Bilinear,
 }
 
+/// What the policy decided for one draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sampling {
+    /// How each destination pixel takes its colour.
+    pub filter: Filter,
+    /// How many times each axis is halved before it does.
+    pub halvings: (u32, u32),
+}
+
 /// One in 16.16 fixed point.
 const ONE: u64 = 1 << 16;
+
+/// The most times an axis may be halved.
+///
+/// Sixteen takes any image a decoder will produce down to a single sample, so
+/// the cap is a guard against a nonsensical transform rather than a policy.
+const MAX_HALVINGS: u32 = 16;
 
 /// Source samples per device pixel along each axis, in 16.16 fixed point.
 ///
@@ -183,7 +198,8 @@ fn fixed_ratio(samples: f64, device: f64) -> u64 {
 /// | --- | --- |
 /// | Scale >= 1 per axis, `interpolate` true | Bilinear |
 /// | Scale >= 1 per axis, `interpolate` false | Nearest |
-/// | Downscale | Bilinear |
+/// | Downscale up to 2:1 | Bilinear |
+/// | Downscale beyond 2:1 | Box-filter pyramid to within 2:1, then bilinear |
 ///
 /// The debatable row is nearest at or above 1:1 without the flag, and it is
 /// deliberate. `/Interpolate` is defined as opt-*in* smoothing for magnified
@@ -199,17 +215,216 @@ fn fixed_ratio(samples: f64, device: f64) -> u64 {
 /// author asked for, it is aliasing, and it is a difference against every
 /// other renderer rather than a matter of taste.
 #[must_use]
-pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -> Filter {
+pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -> Sampling {
     let (across, down) = sample_ratios(image, t);
     // At or above 1:1 on both axes.
     if across <= ONE && down <= ONE {
-        return if interpolate {
-            Filter::Bilinear
-        } else {
-            Filter::Nearest
+        return Sampling {
+            filter: if interpolate {
+                Filter::Bilinear
+            } else {
+                Filter::Nearest
+            },
+            halvings: (0, 0),
         };
     }
-    Filter::Bilinear
+    Sampling {
+        filter: Filter::Bilinear,
+        halvings: (halvings(across, image.width), halvings(down, image.height)),
+    }
+}
+
+/// How many times an axis must be halved to bring a downscale within 2:1.
+///
+/// # Why this is a shift rather than a logarithm
+///
+/// The obvious spelling is `ceil(log2(ratio / 2))`, and `log2` is a
+/// transcendental: `cargo xtask libm` refuses it on a pixel path precisely
+/// because no two platforms round it the same way, and a *count* that differs
+/// by one is not a rounding difference in the output — it is a different image,
+/// half the resolution of the other. Gap 13 found the same class of defect in
+/// the flattener, where a float termination test changed the number of
+/// segments rather than their positions.
+///
+/// So the ratio arrives as a 16.16 integer and the loop shifts it. Integer
+/// shifts are exact and identical everywhere, the comparison is between two
+/// integers, and the only float that ever touched the decision was
+/// correctly-rounded `sqrt` and division upstream of the fixed-point cast. The
+/// loop also stops when the axis reaches a single sample, because halving that
+/// again would build fifteen more copies of one pixel.
+fn halvings(ratio: u64, extent: u32) -> u32 {
+    let mut count = 0;
+    // The threshold is doubled rather than the ratio halved: shifting the
+    // ratio down would truncate, and a ratio a hair over 4 would then look
+    // like exactly 2 after one halving and stop one short. Doubling is exact,
+    // and the largest threshold reached is 2^33.
+    while count < MAX_HALVINGS && (extent >> count) > 1 && ratio > (2 * ONE) << count {
+        count += 1;
+    }
+    count
+}
+
+/// One reduced copy of an image.
+#[derive(Clone, Debug)]
+struct Level {
+    /// How many halvings of each axis produced it.
+    halvings: (u32, u32),
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+    /// Always present, even where the original had none: a level is built by
+    /// averaging, and a sample the original did not supply has to average as
+    /// absent rather than as black.
+    alpha: Vec<u8>,
+}
+
+impl Level {
+    fn source(&self) -> ImageSource<'_> {
+        ImageSource {
+            width: self.width,
+            height: self.height,
+            rgb: &self.rgb,
+            alpha: &self.alpha,
+        }
+    }
+}
+
+/// Halved copies of an image, held by whoever asked for the draw.
+///
+/// Four taps cover a 2 x 2 footprint. Beyond 2:1 the footprint of a
+/// destination pixel is larger than that, so bilinear alone steps *over*
+/// source samples and the ones it skips come back as moiré — a fine
+/// checkerboard shrunk sixteen times becomes a coarse one rather than grey.
+/// Exact 2 x 2 area averaging, repeated, is what covers the footprint; the
+/// residual is never worse than 2:1 and bilinear finishes it.
+///
+/// The levels are the **caller's**. `draw_image` fills in the ones it needs
+/// and leaves them here; nothing is retained between calls, so how long a
+/// pyramid lives — and whether a second draw of the same image reuses one — is
+/// a decision phase 08 makes, where an image's lifetime is known. A pyramid
+/// handed an image of different dimensions rebuilds rather than reusing.
+#[derive(Clone, Debug, Default)]
+pub struct Pyramid {
+    source: (u32, u32),
+    levels: Vec<Level>,
+}
+
+impl Pyramid {
+    /// An empty pyramid.
+    #[must_use]
+    pub fn new() -> Pyramid {
+        Pyramid::default()
+    }
+
+    /// How many reduced copies are held.
+    #[must_use]
+    pub fn levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// The dimensions of one held level, the smallest reduction first.
+    #[must_use]
+    pub fn level_size(&self, index: usize) -> Option<(u32, u32)> {
+        self.levels.get(index).map(|l| (l.width, l.height))
+    }
+
+    /// Builds whatever is missing to reach `halvings`, and answers with the
+    /// image to sample.
+    fn reduce<'a>(&'a mut self, source: &ImageSource<'a>, halvings: (u32, u32)) -> ImageSource<'a> {
+        if self.source != (source.width, source.height) {
+            self.levels.clear();
+            self.source = (source.width, source.height);
+        }
+
+        // The canonical path: every halving of x first, then every halving of
+        // y. Averaging is per-axis and rounds, so x-then-y and y-then-x can
+        // differ in the last bit; fixing the order makes the answer a function
+        // of the counts alone, which is what lets a cached level be reused.
+        let wanted: Vec<(u32, u32)> = (1..=halvings.0)
+            .map(|x| (x, 0))
+            .chain((1..=halvings.1).map(|y| (halvings.0, y)))
+            .collect();
+
+        let keep = self
+            .levels
+            .iter()
+            .zip(wanted.iter())
+            .take_while(|(held, want)| held.halvings == **want)
+            .count();
+        self.levels.truncate(keep);
+
+        for (index, step) in wanted.iter().enumerate().skip(keep) {
+            let level = {
+                let previous = if index == 0 {
+                    *source
+                } else {
+                    self.levels[index - 1].source()
+                };
+                halve(&previous, *step)
+            };
+            self.levels.push(level);
+        }
+
+        self.levels.last().map_or(*source, Level::source)
+    }
+}
+
+/// Halves one axis by exact 2 x 2 — or here 2 x 1 — area averaging.
+///
+/// Integer, round half up. An odd extent leaves a last sample with no partner,
+/// which averages with itself and so survives unchanged rather than being
+/// dropped or paired across the edge.
+fn halve(source: &ImageSource<'_>, halvings: (u32, u32)) -> Level {
+    let horizontal = halvings.1 == 0;
+    let width = if horizontal {
+        source.width.div_ceil(2).max(1)
+    } else {
+        source.width
+    };
+    let height = if horizontal {
+        source.height
+    } else {
+        source.height.div_ceil(2).max(1)
+    };
+
+    let samples = (width as usize).saturating_mul(height as usize);
+    let mut rgb = Vec::with_capacity(samples.saturating_mul(3));
+    let mut alpha = Vec::with_capacity(samples);
+
+    for y in 0..height {
+        for x in 0..width {
+            let (first, second) = if horizontal {
+                ((x * 2, y), (x * 2 + 1, y))
+            } else {
+                ((x, y * 2), (x, y * 2 + 1))
+            };
+            let pair = (
+                source.texel(first.0, first.1),
+                source.texel(second.0, second.1),
+            );
+            // A sample the buffer does not supply averages as its partner, so
+            // a truncated image reduces to what it does have rather than to
+            // black. Neither present is transparent, which paints nothing.
+            let (a, b) = match pair {
+                (Some(a), Some(b)) => (a, b),
+                (Some(a), None) => (a, a),
+                (None, Some(b)) => (b, b),
+                (None, None) => ((0, 0, 0, 0), (0, 0, 0, 0)),
+            };
+            // Round half up, which `div_ceil` on the plain sum is exactly.
+            let mean = |p: u8, q: u8| (u16::from(p) + u16::from(q)).div_ceil(2) as u8;
+            rgb.extend_from_slice(&[mean(a.0, b.0), mean(a.1, b.1), mean(a.2, b.2)]);
+            alpha.push(mean(a.3, b.3));
+        }
+    }
+
+    Level {
+        halvings,
+        width,
+        height,
+        rgb,
+        alpha,
+    }
 }
 
 /// One image draw: the pixels, where they go, and how they compose.
@@ -262,7 +477,11 @@ impl<'a> ImageDraw<'a> {
 ///
 /// Nothing outside the image's own placement is visited, so a stamp in a
 /// corner costs the corner rather than the page.
-pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>) {
+///
+/// `pyramid` is scratch space the caller owns: any reduced copies this draw
+/// needs are built into it and left there. Pass a fresh [`Pyramid::new`] to
+/// throw them away, or keep one beside the image to reuse them.
+pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyramid) {
     let image = &draw.image;
     if image.width == 0 || image.height == 0 {
         return;
@@ -276,7 +495,11 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>) {
         return;
     };
 
-    let filter = sampling_for(image, &draw.unit_to_device, draw.interpolate);
+    let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
+    let filter = sampling.filter;
+    // Borrowed for the rest of the draw: the level, or the image itself when
+    // the policy asked for no reduction.
+    let image = &pyramid.reduce(image, sampling.halvings);
 
     let alpha = draw.alpha.clamp(0.0, 1.0);
     for py in y0..y1 {
@@ -443,7 +666,7 @@ mod tests {
     }
 
     fn draw(canvas: &mut Canvas, image: &ImageSource<'_>, t: Transform) {
-        draw_image(canvas, &ImageDraw::new(*image, t));
+        draw_image(canvas, &ImageDraw::new(*image, t), &mut Pyramid::new());
     }
 
     #[test]
@@ -520,7 +743,7 @@ mod tests {
         let mut canvas = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(4.0));
         draw.tint = Some(Color::rgb(255, 0, 0));
-        draw_image(&mut canvas, &draw);
+        draw_image(&mut canvas, &draw, &mut Pyramid::new());
 
         assert_eq!(canvas.pixel(0, 0), Some(Color::WHITE), "still transparent");
         assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)), "tinted");
@@ -559,7 +782,7 @@ mod tests {
         let mut draw = ImageDraw::new(image, over(8.0));
         let stop = || true;
         draw.stop = Some(&stop);
-        draw_image(&mut canvas, &draw);
+        draw_image(&mut canvas, &draw, &mut Pyramid::new());
         assert!(canvas.data.iter().all(|b| *b == 255), "no row was drawn");
     }
 
@@ -575,10 +798,19 @@ mod tests {
             alpha: &[],
         };
         // Eight device pixels per axis for two samples: 4x.
-        assert_eq!(sampling_for(&image, &over(8.0), false), Filter::Nearest);
-        assert_eq!(sampling_for(&image, &over(8.0), true), Filter::Bilinear);
+        assert_eq!(
+            sampling_for(&image, &over(8.0), false).filter,
+            Filter::Nearest
+        );
+        assert_eq!(
+            sampling_for(&image, &over(8.0), true).filter,
+            Filter::Bilinear
+        );
         // And at exactly 1:1, which must stay byte-preserving without the flag.
-        assert_eq!(sampling_for(&image, &over(2.0), false), Filter::Nearest);
+        assert_eq!(
+            sampling_for(&image, &over(2.0), false).filter,
+            Filter::Nearest
+        );
     }
 
     #[test]
@@ -596,7 +828,7 @@ mod tests {
             let mut canvas = Canvas::new(16, 16, PixelFormat::Rgb8, Color::WHITE);
             let mut draw = ImageDraw::new(image, over(16.0));
             draw.interpolate = interpolate;
-            draw_image(&mut canvas, &draw);
+            draw_image(&mut canvas, &draw, &mut Pyramid::new());
             let mut values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
             values.sort_unstable();
             values.dedup();
@@ -625,7 +857,7 @@ mod tests {
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
         let mut draw = ImageDraw::new(image, over(8.0));
         draw.interpolate = true;
-        draw_image(&mut canvas, &draw);
+        draw_image(&mut canvas, &draw, &mut Pyramid::new());
 
         for y in 0..8u32 {
             for x in 0..8u32 {
@@ -704,7 +936,7 @@ mod tests {
                 },
             );
             draw.interpolate = interpolate;
-            draw_image(&mut canvas, &draw);
+            draw_image(&mut canvas, &draw, &mut Pyramid::new());
             canvas.data.iter().step_by(3).copied().collect::<Vec<u8>>()
         };
 
@@ -744,10 +976,17 @@ mod tests {
 
         // 16 samples into 8 device pixels: exactly 2:1, the last row of the
         // policy that is still plain bilinear.
-        assert_eq!(sampling_for(&image, &over(8.0), false), Filter::Bilinear);
+        assert_eq!(
+            sampling_for(&image, &over(8.0), false).filter,
+            Filter::Bilinear
+        );
 
         let mut canvas = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
-        draw_image(&mut canvas, &ImageDraw::new(image, over(8.0)));
+        draw_image(
+            &mut canvas,
+            &ImageDraw::new(image, over(8.0)),
+            &mut Pyramid::new(),
+        );
         let values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
 
         let mean = values.iter().map(|v| u32::from(*v)).sum::<u32>() / values.len() as u32;
@@ -783,8 +1022,162 @@ mod tests {
             e: 0.0,
             f: 1.0,
         };
-        assert_eq!(sampling_for(&image, &squash, false), Filter::Bilinear);
-        assert_eq!(sampling_for(&image, &squash, true), Filter::Bilinear);
+        assert_eq!(
+            sampling_for(&image, &squash, false).filter,
+            Filter::Bilinear
+        );
+        assert_eq!(sampling_for(&image, &squash, true).filter, Filter::Bilinear);
+    }
+
+    /// A one-sample checkerboard: the pattern that aliases worst, because its
+    /// period is exactly two samples.
+    fn checkerboard(size: u32) -> Vec<u8> {
+        let mut rgb = Vec::new();
+        for y in 0..size {
+            for x in 0..size {
+                let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+                rgb.extend_from_slice(&[value, value, value]);
+            }
+        }
+        rgb
+    }
+
+    /// Milestone 4: a 16:1 downscale of a fine checkerboard is flat grey
+    /// rather than moiré.
+    ///
+    /// Four taps cover two samples. At 16:1 the four land on samples eight
+    /// apart, and eight is a whole number of periods of this board, so every
+    /// tap of every pixel reads the *same phase* — bilinear alone returns a
+    /// flat black or a flat white page, not an average of anything. The test
+    /// asserts that directly as well as asserting the pyramid's answer, so it
+    /// cannot pass by the two behaving alike.
+    #[test]
+    fn a_sixteen_to_one_downscale_is_flat_grey_rather_than_moire() {
+        let rgb = checkerboard(256);
+        let image = ImageSource {
+            width: 256,
+            height: 256,
+            rgb: &rgb,
+            alpha: &[],
+        };
+
+        let sampling = sampling_for(&image, &over(16.0), false);
+        assert_eq!(sampling.filter, Filter::Bilinear);
+        assert_eq!(
+            sampling.halvings,
+            (3, 3),
+            "16:1 halves three times, leaving exactly 2:1 for the taps"
+        );
+
+        // What four taps on the unreduced image would have produced.
+        let unreduced: Vec<u8> = (0..16)
+            .map(|px| {
+                let u = (f64::from(px) + 0.5) / 16.0;
+                bilinear(&image, u, u).expect("on the image").0
+            })
+            .collect();
+        assert!(
+            unreduced.iter().all(|v| *v == unreduced[0]),
+            "bilinear alone reads one phase of the board: {unreduced:?}"
+        );
+
+        let mut pyramid = Pyramid::new();
+        let mut canvas = Canvas::new(16, 16, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(
+            &mut canvas,
+            &ImageDraw::new(image, over(16.0)),
+            &mut pyramid,
+        );
+        let values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
+
+        let mean = values.iter().map(|v| u32::from(*v)).sum::<u32>() / values.len() as u32;
+        assert_eq!(mean, 128, "the mean is the board's own: {mean}");
+        let variance = values
+            .iter()
+            .map(|v| i64::from(*v) - i64::from(mean as u8))
+            .map(|d| d * d)
+            .sum::<i64>()
+            / values.len() as i64;
+        assert_eq!(variance, 0, "and it is flat: variance {variance}");
+    }
+
+    /// The levels are the caller's: built into the pyramid handed in, left
+    /// there, and reused by the next draw rather than rebuilt.
+    #[test]
+    fn pyramid_levels_are_handed_back_and_reused() {
+        let rgb = checkerboard(64);
+        let image = ImageSource {
+            width: 64,
+            height: 64,
+            rgb: &rgb,
+            alpha: &[],
+        };
+
+        let mut pyramid = Pyramid::new();
+        let mut first = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut first, &ImageDraw::new(image, over(8.0)), &mut pyramid);
+
+        // 64 samples into 8 pixels is 8:1: two halvings per axis, to 16 x 16.
+        assert_eq!(pyramid.levels(), 4, "two halvings of x, then two of y");
+        assert_eq!(pyramid.level_size(0), Some((32, 64)));
+        assert_eq!(pyramid.level_size(1), Some((16, 64)));
+        assert_eq!(pyramid.level_size(2), Some((16, 32)));
+        assert_eq!(pyramid.level_size(3), Some((16, 16)));
+
+        let mut second = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut second, &ImageDraw::new(image, over(8.0)), &mut pyramid);
+        assert_eq!(first.data, second.data, "the reused levels are the same");
+        assert_eq!(pyramid.levels(), 4, "and nothing was rebuilt");
+
+        // A pyramid offered a different image rebuilds rather than sampling
+        // another picture's levels.
+        let other = checkerboard(32);
+        let smaller = ImageSource {
+            width: 32,
+            height: 32,
+            rgb: &other,
+            alpha: &[],
+        };
+        let mut third = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(
+            &mut third,
+            &ImageDraw::new(smaller, over(8.0)),
+            &mut pyramid,
+        );
+        assert_eq!(pyramid.level_size(0), Some((16, 32)), "rebuilt for 32 x 32");
+    }
+
+    /// The level count is decided by integer shifts, so it cannot come out
+    /// one different on a target whose `log2` rounds the other way.
+    #[test]
+    fn the_level_count_is_decided_on_integers() {
+        // Ratios in 16.16: at and either side of each power of two.
+        assert_eq!(halvings(2 * ONE, 64), 0, "exactly 2:1 needs no reduction");
+        assert_eq!(halvings(2 * ONE + 1, 64), 1, "a hair past it needs one");
+        assert_eq!(halvings(4 * ONE, 64), 1);
+        assert_eq!(halvings(4 * ONE + 1, 64), 2);
+        assert_eq!(halvings(16 * ONE, 64), 3);
+        // An axis of one sample cannot be halved, whatever the ratio claims.
+        assert_eq!(halvings(u64::MAX, 1), 0);
+        // And a nonsense transform is capped rather than looping.
+        assert_eq!(halvings(u64::MAX, 65536), MAX_HALVINGS);
+    }
+
+    /// An odd extent has a last sample with no partner. It must survive, not
+    /// be dropped and not be paired with the sample on the other edge.
+    #[test]
+    fn halving_an_odd_extent_keeps_the_last_sample() {
+        let rgb = vec![10, 10, 10, 20, 20, 20, 30, 30, 30];
+        let image = ImageSource {
+            width: 3,
+            height: 1,
+            rgb: &rgb,
+            alpha: &[],
+        };
+        let level = halve(&image, (1, 0));
+        assert_eq!((level.width, level.height), (2, 1));
+        // (10 + 20 + 1) / 2 = 15, and the odd one averages with itself.
+        assert_eq!(&level.rgb[..], &[15, 15, 15, 30, 30, 30]);
     }
 
     #[test]
