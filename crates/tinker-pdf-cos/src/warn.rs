@@ -8,6 +8,7 @@
 use core::fmt;
 
 use crate::limits;
+use crate::name::Name;
 use crate::object::ObjRef;
 
 /// One leniency action, addressed to the byte that caused it.
@@ -229,6 +230,25 @@ pub enum WarningKind {
     /// did not close, or a `usecmap` parent that was refused. The object is
     /// the CMap stream it was read from.
     CMap(tinker_pdf_font::cmap::Warning),
+    /// 9.7.5.2: a name was used where a predefined CMap was expected and the
+    /// registry does not define it. Nothing was substituted, so the font maps
+    /// no codes at all — which is the point. The alternative, and what this
+    /// engine used to do, is to guess a codespace and hand back the code as
+    /// its own CID: text that lays out and reads as gibberish, indexed by a
+    /// CMap nobody wrote, reported by nothing.
+    ///
+    /// The [`Name`] is the CMap's, resolvable through
+    /// [`crate::CosDocument::name_bytes`] — a warning that cannot say *which*
+    /// CMap is missing is not actionable (ruling 10).
+    PredefinedCMapUnknown(Name),
+    /// 9.7.5.2: the registry defines this CMap and **this build did not
+    /// compile its table in** (`cmap-predefined` off). Its codespace ranges
+    /// are known, so strings still split at the right widths and the advances
+    /// are right; the code-to-CID mapping is not, and no CID is invented for
+    /// it. Distinct from [`WarningKind::PredefinedCMapUnknown`] because "we
+    /// left it out" and "no such CMap" are different problems with different
+    /// fixes.
+    PredefinedCMapApproximate(Name),
 
     // ---- the leniency ladder ---------------------------------------------
     /// No trailer dictionary was found; one was assembled from what the
@@ -321,6 +341,8 @@ impl WarningKind {
             WarningKind::ImageCodecNotDecoded => "image-codec-not-decoded",
             WarningKind::Filter(_) => "filter",
             WarningKind::CMap(w) => w.as_str(),
+            WarningKind::PredefinedCMapUnknown(_) => "predefined-cmap-unknown",
+            WarningKind::PredefinedCMapApproximate(_) => "predefined-cmap-approximate",
             WarningKind::TrailerSynthesized => "trailer-synthesized",
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
@@ -345,6 +367,16 @@ impl fmt::Display for WarningKind {
             } => write!(f, "stream-length-recovered (undeclared, actual {actual})"),
             WarningKind::Filter(w) => write!(f, "filter: {w}"),
             WarningKind::CMap(w) => write!(f, "cmap: {w}"),
+            // The name is an id against the document's own table, so this
+            // side can only print the id. `CosDocument::name_bytes` turns it
+            // back into the CMap's name, which is what a caller reporting
+            // this to a user has to do.
+            WarningKind::PredefinedCMapUnknown(n) => {
+                write!(f, "predefined-cmap-unknown (name #{})", n.id())
+            }
+            WarningKind::PredefinedCMapApproximate(n) => {
+                write!(f, "predefined-cmap-approximate (name #{})", n.id())
+            }
             WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
             other => f.write_str(other.as_str()),
         }

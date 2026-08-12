@@ -107,6 +107,14 @@ pub struct Font {
     vertical: bool,
     /// True when the font is symbolic, which changes how codes are read.
     symbolic: bool,
+    /// 9.7.5.2: the encoding CMap's code-to-CID mapping is assumed rather
+    /// than known — a registry CMap whose table this build did not compile
+    /// in, or an embedded CMap that inherits from one.
+    ///
+    /// Stored rather than derived on demand because the reason it is true can
+    /// be several links up a `usecmap` chain, and because a caller deciding
+    /// whether to trust an extracted string should not have to walk one.
+    encoding_approximate: bool,
 }
 
 impl Font {
@@ -126,6 +134,21 @@ impl Font {
     #[must_use]
     pub fn is_vertical(&self) -> bool {
         self.vertical
+    }
+
+    /// Whether this font's codes reach their CIDs through a mapping that is
+    /// assumed rather than known (9.7.5.2).
+    ///
+    /// False for every font in a default build. True only when the encoding
+    /// is a predefined CMap whose table `cmap-predefined` left out, directly
+    /// or through a `usecmap` chain: the codespaces are the registry's, so
+    /// the string splits correctly and the advances are right, and every code
+    /// maps to no CID at all rather than to a guessed one. A consumer that
+    /// ranks extracted text by confidence wants this; so does anyone asking
+    /// why a CJK page is blank.
+    #[must_use]
+    pub fn encoding_is_approximate(&self) -> bool {
+        self.encoding_approximate
     }
 
     /// Whether the font is marked symbolic in its descriptor (9.8.2).
@@ -317,14 +340,18 @@ fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMa
     // A `/UseCMap` that names something unfetchable is not the same as no
     // `/UseCMap` at all, and only this side of the seam can tell them apart:
     // the closure answers both with `None`, so the reporting happens here.
-    let mut refused: Vec<CMapWarning> = Vec::new();
+    let mut refused: Vec<WarningKind> = Vec::new();
 
     let mut resolve = |want: ParentRef<'_>| {
-        let ParentRef::Dictionary(source) = want else {
+        let source = match want {
+            ParentRef::Dictionary(source) => source,
             // A name has no address in a document. 9.7.5.2's predefined set
             // is the only place one can come from, and the leaf crate has
             // already looked there — gap 03 makes what it finds real.
-            return None;
+            ParentRef::Named(name) => {
+                refused.push(WarningKind::PredefinedCMapUnknown(doc.intern(name)));
+                return None;
+            }
         };
         let at = sources.iter().find(|(s, _)| s == source).map(|(_, r)| *r)?;
         let object = doc.get(at).ok()?;
@@ -335,7 +362,7 @@ fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMa
         // an indirect reference.
         if let Some(parent) = stream_dict.get_ref(key) {
             let Ok(source) = doc.stream_decoded(parent) else {
-                refused.push(CMapWarning::ParentUnresolved);
+                refused.push(WarningKind::CMap(CMapWarning::ParentUnresolved));
                 return None;
             };
             sources.push((source.clone(), parent));
@@ -350,7 +377,7 @@ fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMa
         match value.as_name().and_then(|n| doc.name_bytes(n)) {
             Some(name) => Some(ParentSource::Named(name.to_vec())),
             None => {
-                refused.push(CMapWarning::ParentUnresolved);
+                refused.push(WarningKind::CMap(CMapWarning::ParentUnresolved));
                 None
             }
         }
@@ -366,8 +393,11 @@ fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMa
         .ok()
         .and_then(|o| o.as_stream().map(|s| s.data_start))
         .unwrap_or(0);
-    for warning in refused.into_iter().chain(parsed.warnings) {
-        sink.warn_at(at, Some(r), WarningKind::CMap(warning));
+    for kind in refused
+        .into_iter()
+        .chain(parsed.warnings.into_iter().map(WarningKind::CMap))
+    {
+        sink.warn_at(at, Some(r), kind);
     }
     Some(parsed.cmap)
 }
@@ -417,6 +447,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         standard: None,
         vertical: false,
         symbolic: false,
+        encoding_approximate: false,
     };
 
     read_encoding(doc, dict, &mut font, &mut sink);
@@ -441,7 +472,7 @@ fn read_to_unicode(doc: &CosDocument, dict: &Dict, sink: &mut WarningSink) -> Op
 fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut WarningSink) {
     let key = doc.intern(b"Encoding");
 
-    let named = |bytes: &[u8], font: &mut Font| match bytes {
+    let named = |bytes: &[u8], font: &mut Font, sink: &mut WarningSink| match bytes {
         b"WinAnsiEncoding" => {
             font.base_encoding = BaseEncoding::WinAnsi;
             font.base_encoding_named = true;
@@ -456,18 +487,44 @@ fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut War
             font.base_encoding = BaseEncoding::Standard;
             font.base_encoding_named = true;
         }
-        other => {
-            if let Some(cmap) = CMap::predefined(other) {
+        other => match CMap::predefined(other) {
+            Some(cmap) => {
                 font.vertical = cmap.is_vertical();
+                font.encoding_approximate = cmap.is_approximate();
+                if font.encoding_approximate {
+                    // Offset zero and no object: `read` is handed a
+                    // dictionary rather than a reference, so the address this
+                    // warning carries is the CMap's *name* (ruling 10). That
+                    // is the useful half anyway -- "which CMap" is the
+                    // question, and two fonts naming the same one have the
+                    // same answer.
+                    sink.warn(0, WarningKind::PredefinedCMapApproximate(doc.intern(other)));
+                }
                 font.encoding_cmap = Some(cmap);
             }
-        }
+            // 9.7.5.2's set is closed, and a Type 0 font whose `/Encoding`
+            // names something outside it has said nothing this engine can
+            // act on. Reporting the name is the whole of what can be done —
+            // and it is a great deal more than substituting a codespace and
+            // handing the code back as its own CID, which is what happened
+            // here until this gap. A simple font is not warned about: its
+            // `/Encoding` name space is Annex D's, the three names above are
+            // all of it, and anything else there is a different question.
+            None => {
+                if font.kind == FontKind::Type0 {
+                    sink.warn(0, WarningKind::PredefinedCMapUnknown(doc.intern(other)));
+                }
+            }
+        },
     };
 
     // An embedded CMap stream, for a composite font.
     if let Some(r) = dict.get_ref(key) {
         if let Some(cmap) = read_cmap(doc, r, sink) {
             font.vertical = cmap.is_vertical();
+            // 9.7.5.3 merges the parent's flag in, so an embedded CMap that
+            // inherits from a table this build left out is approximate too.
+            font.encoding_approximate = cmap.is_approximate();
             font.encoding_cmap = Some(cmap);
             return;
         }
@@ -476,7 +533,7 @@ fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut War
     let value = doc.resolve_key(dict, key);
     if let Some(n) = value.as_name() {
         if let Some(bytes) = doc.name_bytes(n) {
-            named(&bytes, font);
+            named(&bytes, font, sink);
         }
         return;
     }
@@ -488,7 +545,7 @@ fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut War
         .as_name()
         .and_then(|n| doc.name_bytes(n))
     {
-        named(&base, font);
+        named(&base, font, sink);
     }
 
     // 9.6.6.1: /Differences is a flat array of numbers and names, where each

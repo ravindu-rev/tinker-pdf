@@ -714,3 +714,81 @@ fn a_malformed_use_cmap_degrades() {
         assert_eq!(font.decode(&[0x41])[0].cid, 7, "{entry}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Predefined CMaps, surfaced (gap 03 milestone 5, 9.7.5.2).
+// ---------------------------------------------------------------------------
+
+/// `Font::encoding_is_approximate` is where `CMap::is_approximate` finally
+/// has a production caller, which it did not from the day it was written.
+///
+/// The flag means one thing: the code-to-CID mapping is assumed rather than
+/// known. In a default build nothing is assumed, because the whole registry
+/// is compiled in — so this asserts *false*, which is the more useful half.
+/// With `cmap-predefined` off the same font reports true and the engine
+/// warns; the two are the same expression here so that the assertion cannot
+/// quietly become vacuous on either side.
+#[test]
+fn a_composite_font_says_whether_its_cid_mapping_is_assumed() {
+    for name in ["/90ms-RKSJ-H", "/UniJIS-UCS2-H", "/ETen-B5-H"] {
+        let doc = composite_font(name, "", "/Identity", &[]);
+        let font = font_at(&doc, 3);
+        assert_eq!(
+            font.encoding_is_approximate(),
+            cfg!(not(feature = "cmap-predefined")),
+            "{name}"
+        );
+    }
+
+    // Identity is a rule rather than a table, so it is exact in every build.
+    let identity = composite_font("/Identity-H", "", "/Identity", &[]);
+    assert!(!font_at(&identity, 3).encoding_is_approximate());
+
+    // And so is a simple font, which has no CMap to be approximate about.
+    let simple = document(&[b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()]);
+    assert!(!font_at(&simple, 3).encoding_is_approximate());
+}
+
+/// The registry reaches the CID through a document, not only through the leaf
+/// crate's own tests: `<8140>` is CID 633 in `90ms-RKSJ-H`, and the string
+/// splits one byte then two.
+#[cfg(feature = "cmap-predefined")]
+#[test]
+fn a_predefined_encoding_name_decodes_through_the_registry() {
+    let doc = composite_font("/90ms-RKSJ-H", "", "/Identity", &[]);
+    let font = font_at(&doc, 3);
+    let codes = font.decode(&[0x41, 0x81, 0x40]);
+    assert_eq!(codes.len(), 2, "one one-byte code and one two-byte one");
+    assert_eq!(
+        (codes[0].code, codes[0].bytes, codes[0].cid),
+        (0x41, 1, 264)
+    );
+    assert_eq!(
+        (codes[1].code, codes[1].bytes, codes[1].cid),
+        (0x8140, 2, 633)
+    );
+}
+
+/// A name outside 9.7.5.2's set is warned about, by name, and nothing is
+/// substituted for it. `WarningKind` carries an interned `Name` because a
+/// warning that cannot say *which* CMap is missing is not actionable.
+#[test]
+fn an_unknown_predefined_name_is_warned_about_by_name() {
+    let doc = composite_font("/90ms-RKSJ-Q", "", "/Identity", &[]);
+    let font = font_at(&doc, 3);
+    let named: Vec<String> = doc
+        .warnings()
+        .iter()
+        .filter_map(|w| match w.kind {
+            WarningKind::PredefinedCMapUnknown(n) => doc.name_bytes(n),
+            _ => None,
+        })
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .collect();
+    assert_eq!(named, vec!["90ms-RKSJ-Q".to_string()]);
+
+    // And with no CMap the font falls back to one byte per code rather than
+    // inventing a codespace, so the codes are honest fragments instead of
+    // plausible CIDs.
+    assert_eq!(font.decode(&[0x41, 0x81, 0x40]).len(), 3);
+}
