@@ -13,6 +13,8 @@
 //! coverage is below one 8-bit level for every angle, so it is invisible and
 //! reproducible, which is the trade worth making.
 
+use core::ops::Range;
+
 use crate::geom::{flatten, FillRule, Path, Point};
 
 /// Sub-scanlines per pixel row. Sixteen gives 4-bit vertical resolution,
@@ -193,22 +195,46 @@ pub fn fill(
         return mask;
     }
 
+    // The active-edge list wants the edges in the order they begin. The sort
+    // is stable, so edges starting on the same sub-scanline keep the order the
+    // path gave them — which changes nothing, because the accumulation below
+    // is order-independent, but it costs nothing to keep.
+    edges.sort_by_key(|edge| edge.top);
+
     // Accumulate coverage per row: each sub-scanline contributes its spans.
     let mut accumulator = vec![0u16; width as usize];
     let mut crossings: Vec<(i64, i32)> = Vec::new();
+    // Indices into `edges` of those crossing the current sub-scanline, and how
+    // far into `edges` the sweep has reached.
+    let mut active: Vec<usize> = Vec::new();
+    let mut pending = 0usize;
 
-    for row in 0..height {
+    for row in active_rows(&edges, y0, height) {
         accumulator.iter_mut().for_each(|slot| *slot = 0);
         let row_top = y0.saturating_add(row as i32).saturating_mul(SAMPLES);
 
         for sample in 0..SAMPLES {
-            let sub = row_top + sample;
+            let sub = row_top.saturating_add(sample);
             crossings.clear();
 
-            for edge in &edges {
-                if sub < edge.top || sub >= edge.bottom {
-                    continue;
+            // Sub-scanlines only ever increase, so an edge joins the list once
+            // and leaves it once and the whole fill is a single pass over the
+            // sorted edges. Testing every edge at every sample cost
+            // `height x 16 x edges`, which is why a page-tall region made a
+            // hundred-edge path expensive whatever it covered.
+            while let Some(edge) = edges.get(pending) {
+                if edge.top > sub {
+                    break;
                 }
+                active.push(pending);
+                pending += 1;
+            }
+            active.retain(|index| edges.get(*index).is_some_and(|edge| edge.bottom > sub));
+
+            for index in &active {
+                let Some(edge) = edges.get(*index) else {
+                    continue;
+                };
                 // Saturating throughout: a path may reach ±1e9, whose
                 // sub-scanline index alone exceeds i32, and the slope times
                 // the height then exceeds i64. Clamping puts the crossing far
@@ -249,6 +275,36 @@ pub fn fill(
     }
 
     mask
+}
+
+/// The rows of the region any edge can reach, as a half-open range of row
+/// indices into the mask.
+///
+/// Rows outside it hold no crossing on any of their sixteen sub-scanlines, so
+/// their coverage is zero and the mask already says zero there. A page-tall
+/// region and a glyph-tall one therefore do the same work, which is what stops
+/// the cost of a fill scaling with the paper rather than with the shape.
+fn active_rows(edges: &[Edge], y0: i32, height: u32) -> Range<u32> {
+    let (Some(first_sub), Some(last_sub)) = (
+        edges.iter().map(|edge| edge.top).min(),
+        edges.iter().map(|edge| edge.bottom).max(),
+    ) else {
+        return 0..0;
+    };
+
+    let samples = i64::from(SAMPLES);
+    // An edge is exclusive at its lower end, so the last sub-scanline it
+    // covers is the one before `bottom`. Rounding that the other way drops the
+    // final row of every shape whose lowest edge ends exactly on a row
+    // boundary — which for an axis-aligned rectangle is all of them.
+    let first = i64::from(first_sub).div_euclid(samples);
+    let last = i64::from(last_sub).saturating_sub(1).div_euclid(samples);
+
+    let origin = i64::from(y0);
+    let limit = i64::from(height);
+    let start = (first - origin).clamp(0, limit) as u32;
+    let end = (last - origin + 1).clamp(0, limit) as u32;
+    start..end.max(start)
 }
 
 fn inside(winding: i32, rule: FillRule) -> bool {
@@ -546,6 +602,93 @@ mod tests {
         // Its columns are past the right edge and its rows cover everything,
         // so the x range is empty and the y range is the canvas.
         assert_eq!(huge.overlap(10, 10), (10, 0, 10, 10));
+    }
+
+    /// Ruling 4's claim under the active-edge list, checked rather than
+    /// assumed: the order edges arrive in cannot change a pixel.
+    ///
+    /// The plan's risk table says integer accumulation is order-independent
+    /// "by construction". It is, but the construction is worth naming, because
+    /// if any of it were floating-point the mitigation would be false. Within
+    /// one sub-scanline the crossings are sorted by x and swept left to right;
+    /// crossings at the *same* x can be swept in either order, and the two
+    /// sweeps can decompose the same interval differently — `[a, x] + [x, b]`
+    /// against `[a, b]`. `add_span` measures each pixel's overlap in exact
+    /// 1/256 units of `i64` and adds them into a `u16` that cannot reach its
+    /// ceiling (sixteen sub-scanlines of at most 256 each), so the two
+    /// decompositions add to the same integer. No float, no saturation, no
+    /// reordering hazard.
+    ///
+    /// These two paths hold the same subpaths in the opposite order, so the
+    /// edge list is a permutation, and the vertical edges are deliberately
+    /// shared so equal-x crossings actually occur.
+    #[test]
+    fn the_order_edges_arrive_in_does_not_change_a_pixel() {
+        let (a, b) = ((2.0, 3.0, 6.0, 9.0), (2.0, 7.0, 6.0, 9.0));
+        let mut first = Path::new();
+        first.rect(a.0, a.1, a.2, a.3);
+        first.rect(b.0, b.1, b.2, b.3);
+        let mut second = Path::new();
+        second.rect(b.0, b.1, b.2, b.3);
+        second.rect(a.0, a.1, a.2, a.3);
+
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let one = fill(&first, rule, 0, 0, 16, 16, 0.1);
+            let two = fill(&second, rule, 0, 0, 16, 16, 0.1);
+            assert_eq!(one.data, two.data, "ruling 4, under {rule:?}");
+        }
+
+        // And with the overlap at a fractional x, where the spans really do
+        // land inside a pixel rather than on its boundary.
+        let mut first = Path::new();
+        first.rect(1.25, 2.5, 7.75, 6.5);
+        first.rect(5.125, 4.75, 4.5, 8.25);
+        let mut second = Path::new();
+        second.rect(5.125, 4.75, 4.5, 8.25);
+        second.rect(1.25, 2.5, 7.75, 6.5);
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            assert_eq!(
+                fill(&first, rule, 0, 0, 16, 16, 0.1).data,
+                fill(&second, rule, 0, 0, 16, 16, 0.1).data,
+                "ruling 4 at a fractional overlap, under {rule:?}"
+            );
+        }
+    }
+
+    /// The row range the sweep runs over, including the boundary case the
+    /// active-edge list is most likely to get wrong: a shape whose last edge
+    /// ends exactly on a row boundary.
+    #[test]
+    fn the_rows_a_shape_reaches_include_the_one_it_ends_on() {
+        let rows = |y: f64, h: f64, y0: i32, height: u32| {
+            let mut path = Path::new();
+            path.rect(2.0, y, 4.0, h);
+            let mut edges = Vec::new();
+            for poly in &flatten(&path, 0.1) {
+                build_edges(poly, &mut edges);
+            }
+            edges.sort_by_key(|edge| edge.top);
+            active_rows(&edges, y0, height)
+        };
+
+        // Exactly on both boundaries: rows 3 through 6 inclusive.
+        assert_eq!(rows(3.0, 4.0, 0, 20), 3..7);
+        // Past them by more than a sub-scanline, so the shape reaches one more
+        // row at each end.
+        assert_eq!(rows(2.9, 4.15, 0, 20), 2..8);
+        // Past them by *less* than a sub-scanline: an edge's top snaps up to
+        // the next sample, so a sliver thinner than 1/16 px contributes to no
+        // row at all — which is what the row loop already did, and the point
+        // of computing the range from the edges rather than from the geometry.
+        assert_eq!(rows(2.99, 4.02, 0, 20), 3..8);
+        // Fractional, and inside a single row.
+        assert_eq!(rows(3.25, 0.5, 0, 20), 3..4);
+        // Clamped to the region, from both directions.
+        assert_eq!(rows(3.0, 4.0, 5, 20), 0..2);
+        assert_eq!(rows(3.0, 4.0, -10, 20), 13..17);
+        assert_eq!(rows(3.0, 4.0, 100, 20), 0..0, "entirely above the region");
+        assert_eq!(rows(300.0, 4.0, 0, 20), 20..20, "entirely below it");
+        assert!(active_rows(&[], 0, 20).is_empty());
     }
 
     #[test]
