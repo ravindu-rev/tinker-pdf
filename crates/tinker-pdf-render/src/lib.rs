@@ -108,6 +108,19 @@ pub enum RenderWarning {
         /// The resource name.
         name: String,
     },
+    /// An optional-content layer the document's default configuration turns
+    /// off was not painted (8.11).
+    ///
+    /// Correct behaviour rather than a degradation, and reported all the
+    /// same, because it is the one leniency a reader cannot see for
+    /// themselves: content that is missing because a layer is off looks
+    /// exactly like content that was never there. Ruling 10 — the layer is
+    /// named, so a caller can say *which* one and offer to turn it on.
+    HiddenOptionalContent {
+        /// The layer's `/Name` (8.11.2.1), which is the string a viewer's
+        /// layer panel shows, falling back to the resource name.
+        layer: String,
+    },
     /// The render stopped because it was cancelled.
     Cancelled,
 }
@@ -223,6 +236,17 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// keying that off the accumulated path alone cannot tell "clipped to
     /// nothing" from "never clipped".
     text_clip_requested: bool,
+    /// Marked-content scopes currently open, innermost last: whether each one
+    /// hides what it encloses (8.11.3.2, 14.6.2).
+    ///
+    /// A stack rather than a counter, because `EMC` has to know whether the
+    /// scope it closes was one of the hiding ones. Bounded by the
+    /// interpreter's own nesting cap, which is why there is no second cap
+    /// here.
+    marked_content: Vec<bool>,
+    /// How many of `marked_content` hide, so the question every paint asks
+    /// is a comparison rather than a scan.
+    hidden_depth: u32,
 }
 
 impl<'g, G: GlyphSource> Renderer<'g, G> {
@@ -244,7 +268,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             missing_fonts: 0,
             text_clip: None,
             text_clip_requested: false,
+            marked_content: Vec::new(),
+            hidden_depth: 0,
         }
+    }
+
+    /// Whether an optional-content layer is currently hiding what is drawn.
+    ///
+    /// 8.11.3.2: hidden content is not *skipped* — every operator inside the
+    /// scope still runs, the text pen still advances, `q` and `Q` still
+    /// balance, and text extraction still sees every glyph. Only painting
+    /// stops, and it stops here, at the paint, so that a device which does
+    /// not draw and one which does cannot disagree about what a page
+    /// contains.
+    fn hidden(&self) -> bool {
+        self.hidden_depth > 0
     }
 
     /// Installs a cancellation token.
@@ -553,7 +591,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
-        if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() || self.hidden() {
             return;
         }
         let built = self.to_path(path);
@@ -660,7 +698,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
-        if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() || self.hidden() {
             return;
         }
         let built = self.to_path(path);
@@ -728,7 +766,13 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
-        if self.cancel.is_cancelled() {
+        // Before the clipping mode is recorded, and before the outline is
+        // looked for. A glyph in a hidden layer must not add to the text
+        // clip -- 9.3.6's modes 4 to 7 would otherwise let an invisible
+        // layer clip away the visible ones -- and must not be counted as an
+        // unreadable font, which is a warning about a page that is missing
+        // something rather than about one that is doing as it was told.
+        if self.cancel.is_cancelled() || self.hidden() {
             return;
         }
         // 9.3.6: mode 3 paints nothing, which is exactly what a scanned page's
@@ -869,7 +913,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn draw_image(&mut self, image: &ImageRef, state: &GraphicsState) {
-        if self.cancel.is_cancelled() {
+        // Before the decode, not after it. An image in a hidden layer is not
+        // drawn, so whether this build could have drawn it is not a fact
+        // about the page: decoding first would report `UnsupportedImage` for
+        // a JPX nobody was going to see, and paint the grey placeholder that
+        // goes with it.
+        if self.cancel.is_cancelled() || self.hidden() {
             return;
         }
 
@@ -904,7 +953,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
-        if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() || self.hidden() {
             return;
         }
 
@@ -950,6 +999,30 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 self.canvas
                     .blend_pixel_with(px, py, Color::rgb(r, g, b), effective, mode);
             }
+        }
+    }
+
+    fn begin_marked_content(&mut self, visible: bool, hidden_layer: Option<&str>) {
+        self.marked_content.push(!visible);
+        if !visible {
+            self.hidden_depth = self.hidden_depth.saturating_add(1);
+        }
+        // Ruling 10. Raised once per layer rather than once per scope: a CAD
+        // drawing marks every construction line, and a hundred identical
+        // warnings say nothing the first one did not.
+        if let Some(layer) = hidden_layer {
+            let warning = RenderWarning::HiddenOptionalContent {
+                layer: layer.to_string(),
+            };
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+    }
+
+    fn end_marked_content(&mut self) {
+        if self.marked_content.pop() == Some(true) {
+            self.hidden_depth = self.hidden_depth.saturating_sub(1);
         }
     }
 
@@ -1700,6 +1773,225 @@ mod tests {
         let (a, _) = render(content, 24);
         let (b, _) = render(content, 24);
         assert_eq!(a.data, b.data, "ruling 4");
+    }
+
+    // -----------------------------------------------------------------------
+    // Optional content (gap 06, 8.11.3.2).
+    // -----------------------------------------------------------------------
+
+    /// `/Off` is hidden, `/On` is not, and `/Plain` is not a layer at all.
+    struct HiddenLayer;
+
+    impl tinker_pdf_content::FontSource for HiddenLayer {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn optional_content(&self, name: &[u8]) -> Option<tinker_pdf_content::Layer> {
+            match name {
+                b"Off" => Some(tinker_pdf_content::Layer {
+                    visible: false,
+                    label: "Construction lines".to_string(),
+                }),
+                b"On" => Some(tinker_pdf_content::Layer {
+                    visible: true,
+                    label: "Base".to_string(),
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    /// Renders against a source that has one hidden layer, one visible one,
+    /// one glyph outline and one image.
+    fn with_layers(content: &[u8]) -> (Canvas, Vec<RenderWarning>) {
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &Patterns);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &HiddenLayer);
+        renderer.finish()
+    }
+
+    /// M3: a rectangle inside an `/OFF` layer paints nothing, and the same
+    /// rectangle outside one paints.
+    ///
+    /// Both halves in one page, because "renders white" is what a render that
+    /// failed outright also produces. The decoy is the green rectangle: a
+    /// build that suppressed everything, or that never painted at all, fails
+    /// on it rather than passing this test by accident.
+    #[test]
+    fn a_hidden_layer_paints_nothing_and_its_neighbour_paints() {
+        let (canvas, warnings) = with_layers(
+            b"0 1 0 rg 0 0 10 40 re f \
+              /OC /Off BDC 1 0 0 rg 20 0 10 40 re f EMC",
+        );
+
+        assert_eq!(
+            canvas.pixel(5, 20),
+            Some(Color::rgb(0, 255, 0)),
+            "the layer-less rectangle painted"
+        );
+        assert_eq!(
+            canvas.pixel(25, 20),
+            Some(Color::WHITE),
+            "and the one in the /OFF layer did not"
+        );
+        assert!(
+            warnings.contains(&RenderWarning::HiddenOptionalContent {
+                layer: "Construction lines".to_string()
+            }),
+            "the layer is named: {warnings:?}"
+        );
+    }
+
+    /// The same content with the layer on. Exit criterion of M3, and the half
+    /// that makes the other half mean something.
+    #[test]
+    fn the_same_content_in_a_visible_layer_paints() {
+        let (canvas, warnings) = with_layers(
+            b"0 1 0 rg 0 0 10 40 re f \
+              /OC /On BDC 1 0 0 rg 20 0 10 40 re f EMC",
+        );
+
+        assert_eq!(canvas.pixel(5, 20), Some(Color::rgb(0, 255, 0)));
+        assert_eq!(
+            canvas.pixel(25, 20),
+            Some(Color::rgb(255, 0, 0)),
+            "an /ON layer paints exactly as if it were not marked at all"
+        );
+        assert!(warnings.is_empty(), "and reports nothing: {warnings:?}");
+    }
+
+    /// The nesting the device has to keep. The inner scope is a layer that is
+    /// *on*, and closing it must not un-hide the outer one — which is the
+    /// defect a counter-free `bool` would have.
+    #[test]
+    fn an_inner_scope_closing_does_not_un_hide_the_outer_one() {
+        let (canvas, _) = with_layers(
+            b"/OC /Off BDC \
+                /OC /On BDC EMC \
+                1 0 0 rg 0 0 40 40 re f \
+              EMC",
+        );
+        assert_eq!(canvas.pixel(20, 20), Some(Color::WHITE));
+    }
+
+    /// Every painting operator, not only `f`. A guard on one of them and not
+    /// the rest is a layer that half disappears, which reads as a rendering
+    /// bug rather than as a hidden layer.
+    #[test]
+    fn every_paint_is_suppressed_inside_a_hidden_layer() {
+        for content in [
+            b"1 0 0 rg 0 0 40 40 re f".as_slice(),
+            b"1 0 0 RG 12 w 0 20 m 40 20 l S",
+            b"/Pattern cs /Grad scn 0 0 40 40 re f",
+            b"BT /F0 40 Tf 1 4 Td (A) Tj ET",
+            b"q 40 0 0 40 0 0 cm /Im0 Do Q",
+        ] {
+            let mut hidden = Vec::from(b"/OC /Off BDC ".as_slice());
+            hidden.extend_from_slice(content);
+            hidden.extend_from_slice(b" EMC");
+
+            let (shown, _) = with_layers(content);
+            let (suppressed, _) = with_layers(&hidden);
+            assert_ne!(
+                shown.pixel(20, 20),
+                Some(Color::WHITE),
+                "{} draws when it is not hidden",
+                String::from_utf8_lossy(content)
+            );
+            assert!(
+                suppressed.data.iter().all(|byte| *byte == 255),
+                "{} put ink on the page inside an /OFF layer",
+                String::from_utf8_lossy(content)
+            );
+        }
+    }
+
+    /// An image in a hidden layer is not reported as an unsupported codec.
+    ///
+    /// The decode never happens, so whether this build could have drawn it is
+    /// not a fact about the page. `/Missing` is a name the source resolves to
+    /// nothing, which outside a layer produces `UnsupportedImage` and a grey
+    /// placeholder — asserted here so the test cannot pass because the image
+    /// path is broken generally.
+    #[test]
+    fn a_hidden_image_neither_draws_nor_reports_a_codec() {
+        let (_, warnings) = with_layers(b"q 40 0 0 40 0 0 cm /Missing Do Q");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })),
+            "the unhidden case reports: {warnings:?}"
+        );
+
+        let (canvas, warnings) = with_layers(b"/OC /Off BDC q 40 0 0 40 0 0 cm /Missing Do Q EMC");
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })),
+            "a hidden image is not a missing codec: {warnings:?}"
+        );
+        assert_eq!(
+            canvas.pixel(20, 20),
+            Some(Color::WHITE),
+            "and no placeholder was painted"
+        );
+    }
+
+    /// 8.5.4: a clip is graphics state, not a paint, so a hidden layer that
+    /// sets one still sets it. Getting this backwards is invisible on the
+    /// page that hid the layer and wrong on every page after it.
+    #[test]
+    fn a_clip_set_inside_a_hidden_layer_still_applies() {
+        let (canvas, _) = with_layers(
+            b"/OC /Off BDC 0 0 20 40 re W n EMC \
+              1 0 0 rg 0 0 40 40 re f",
+        );
+
+        assert_eq!(
+            canvas.pixel(10, 20),
+            Some(Color::rgb(255, 0, 0)),
+            "inside the clip the hidden scope set"
+        );
+        assert_eq!(canvas.pixel(30, 20), Some(Color::WHITE), "outside it");
+    }
+
+    /// 9.3.6: a clipping text mode inside a hidden layer must not clip. The
+    /// glyph is not painted, so it accumulates nothing, and `ET` must not
+    /// then read that as "clipped to nothing" and erase the page.
+    #[test]
+    fn a_clipping_text_mode_inside_a_hidden_layer_clips_nothing() {
+        let (canvas, warnings) = with_layers(
+            b"/OC /Off BDC BT /F0 40 Tf 7 Tr 1 4 Td (A) Tj ET EMC \
+              1 0 0 rg 0 0 40 40 re f",
+        );
+
+        assert_eq!(
+            canvas.pixel(20, 20),
+            Some(Color::rgb(255, 0, 0)),
+            "the page after the hidden text object is not clipped away"
+        );
+        assert!(
+            !warnings.contains(&RenderWarning::EmptyTextClip),
+            "and an empty clip was never requested: {warnings:?}"
+        );
+    }
+
+    /// One warning per layer however many scopes it opens: a CAD drawing
+    /// marks every construction line.
+    #[test]
+    fn a_layer_is_reported_once_however_often_it_is_marked() {
+        let (_, warnings) = with_layers(
+            b"/OC /Off BDC 0 0 4 4 re f EMC \
+              /OC /Off BDC 0 0 5 5 re f EMC \
+              /OC /Off BDC 0 0 6 6 re f EMC",
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]
