@@ -69,7 +69,7 @@ caught and reported after the fact.
 Every target has a committed seed corpus under `corpus/<target>/`. They are
 the difference between a run that explores and one that spends its hour
 rediscovering the file header, and plan 14 asks for them minimised and small
-enough to review: the whole set is 25 KB across 66 files, and the largest
+enough to review: the whole set is 27 KB across 72 files, and the largest
 single seed is 2.8 KB.
 
 They are built from material this repository already had, so each one is
@@ -87,7 +87,7 @@ account for:
 | `inflate` | Our own `zlib_compress` output, including an empty stream and an incompressible one |
 | `jpeg` | `jpeg.rs`'s `tiny_gray`, `sequential_block` and both progressive fixtures |
 | `lzw` | 7.4.4.2's Table 8 example, truncated, and a clear-code stream |
-| `render_page` | The subset of the `cos_document` PDFs that has a page worth rendering |
+| `render_page` | The subset of the `cos_document` PDFs that has a page worth rendering, plus the composite font `composite_fonts.rs` builds — rewritten by `cargo test -p tinker-pdf --test composite_fonts write_the_fuzz_seed -- --ignored`. Nothing else in any corpus carries a Type 0 font, so `/CIDToGIDMap` — a document-controlled table the renderer indexes once per glyph — was reachable from no target at all |
 | `truetype` | `determinism.rs`'s `curvy_font`, plus a truncated copy and its directory alone |
 | `sfnt` | The same face, plus the `OTTO` program `glyf.rs` builds and a directory pointing past the end |
 | `type1` | `type1.rs`'s `font_with_square`, and a copy cut off inside the eexec section |

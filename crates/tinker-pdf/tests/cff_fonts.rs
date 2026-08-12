@@ -286,21 +286,43 @@ fn simple_document(program: &[u8], subtype: &str, encoding: Option<&str>, text: 
 }
 
 /// A composite font over a CID-keyed program, drawing one two-byte code.
-fn composite_document(program: &[u8], code: u16) -> Vec<u8> {
+///
+/// `encoding` is written after `/Encoding` verbatim, so it may be a predefined
+/// name or a reference to one of the `extra` objects, which are numbered from
+/// 9 upward.
+fn composite_document(program: &[u8], encoding: &str, extra: &[Vec<u8>], code: u16) -> Vec<u8> {
+    let mut objects = vec![
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding {encoding}\n\
+             /DescendantFonts [8 0 R] >>"
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /Fixture /Flags 4 /FontFile3 7 0 R >>".to_vec(),
+        font_file("CIDFontType0C", program),
+        b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Fixture /DW 600\n\
+          /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n\
+          /FontDescriptor 6 0 R >>"
+            .to_vec(),
+    ];
+    objects.extend_from_slice(extra);
     document(
-        &[
-            b"<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-H\n\
-              /DescendantFonts [8 0 R] >>"
-                .to_vec(),
-            b"<< /Type /FontDescriptor /FontName /Fixture /Flags 4 /FontFile3 7 0 R >>".to_vec(),
-            font_file("CIDFontType0C", program),
-            b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Fixture /DW 600\n\
-              /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n\
-              /FontDescriptor 6 0 R >>"
-                .to_vec(),
-        ],
+        &objects,
         &format!("BT /F0 48 Tf 20 30 Td <{code:04X}> Tj ET"),
     )
+}
+
+/// An embedded CMap stream mapping one two-byte code to one CID (9.7.5.3).
+fn cid_cmap(code: u16, cid: u16) -> Vec<u8> {
+    let text = format!(
+        "/CIDInit /ProcSet findresource begin\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+         1 begincidchar <{code:04X}> {cid} endcidchar\n\
+         end"
+    );
+    let mut out = format!("<< /Type /CMap /Length {} >>\nstream\n", text.len()).into_bytes();
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(b"\nendstream");
+    out
 }
 
 /// Wraps a CFF program in an `OTTO` sfnt, which is how OpenType carries one.
@@ -588,7 +610,41 @@ fn a_cid_keyed_program_reaches_its_glyph_through_the_charset() {
     assert_eq!(cff.gid_for_cid(11), Some(2));
     assert!(cff.outline(11).is_none(), "there is no glyph 11");
 
-    let page = render(composite_document(&font, 11));
+    let page = render(composite_document(&font, "/Identity-H", &[], 11));
     drew_box(&page, 300.0, "CID 11");
+    assert!(!page.warnings.contains(&RenderWarning::UnreadableFont));
+}
+
+/// The same program under a CMap that is *not* the identity, which is the
+/// check gap 02 owed this half rather than assumed.
+///
+/// The test above uses `Identity-H`, where the code and the CID are the same
+/// number, so it cannot distinguish a reader that resolves the CID from one
+/// that hands the code straight to the charset. Here they are three distinct
+/// numbers: code 0x41 is CID 11 is glyph 2, the 300-unit box. A reader
+/// skipping the CMap would ask the charset for CID 0x41, which this font does
+/// not have, and draw `.notdef`.
+#[test]
+fn a_cid_keyed_program_follows_a_non_identity_cmap() {
+    let font = Program {
+        strings: vec![b"Adobe".to_vec(), b"Identity".to_vec()],
+        charset: vec![10, 11, 12],
+        charstrings: vec![vec![14], box_glyph(600), box_glyph(300), box_glyph(450)],
+        cid: true,
+        ..Program::default()
+    }
+    .build();
+
+    let cff = tinker_pdf_font::Cff::parse(&font).expect("the fixture parses");
+    assert_eq!(cff.gid_for_cid(11), Some(2));
+    assert_eq!(cff.gid_for_cid(0x41), None, "this font has no CID 65");
+
+    let page = render(composite_document(
+        &font,
+        "9 0 R",
+        &[cid_cmap(0x0041, 11)],
+        0x0041,
+    ));
+    drew_box(&page, 300.0, "code 0x41 through CID 11");
     assert!(!page.warnings.contains(&RenderWarning::UnreadableFont));
 }

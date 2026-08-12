@@ -56,7 +56,10 @@ equivalent, ever. Dev tooling exemptions (`cargo-fuzz`, `criterion`, `proptest`)
 - Type3 glyphs: /CharProcs delegated to the content interpreter with /FontMatrix, d0/d1,
   /Resources scoping.
 - CIDFontType0: FDSelect formats 0 and 3, per-FD Private DICTs and local subrs; CIDFontType2:
-  /CIDToGIDMap name or stream.
+  /CIDToGIDMap name or stream. *Amended August 2026:* the first belongs to the leaf crate and
+  the second does not. `/CIDToGIDMap` is an entry in a PDF font dictionary, so by the Design
+  section's own rule — and by ruling 8 — it is read by the binder and the leaf crate is handed
+  the glyph index that falls out. See [gap 02](gaps/02-cid-to-gid.md).
 - Glyph → path → raster through [07-raster](07-rasterizer.md), with a per-(face, glyph, size)
   raster cache; hints parsed for stem darkening only — no hinting engine.
 - Base-14 substitute faces (Liberation), the Symbol/ZapfDingbats gap, and `trait FontProvider`

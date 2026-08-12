@@ -944,26 +944,35 @@ impl PageResources {
                 return None;
             }
 
-            let glyph = match ch {
-                Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
-                None => None,
-            }
-            // 9.6.6.4: a symbolic font's codes go through its `cmap`
-            // directly rather than through a character — the (3,0) subtable
-            // maps the code into the F0xx private-use block, which is what
-            // `glyph_for_char` does with a character it is handed. Without
-            // this a symbolic face fell straight to the last resort below.
-            .or_else(|| {
-                char::from_u32(code)
-                    .and_then(|c| sfnt.glyph_for_char(c))
-                    .filter(|g| *g != 0)
-            })
-            // The last resort, and correct for one case: a composite font
-            // with an identity CID-to-GID map addresses glyphs by number, so
-            // the code *is* the glyph. For a simple font it is a guess, and
-            // it is the guess every reader makes for a subset whose `cmap`
-            // was dropped.
-            .or_else(|| u16::try_from(code).ok())?;
+            let glyph = if font.kind() == cos_font::FontKind::Type0 {
+                self.cid_glyph(font, &name, code)
+            } else {
+                match ch {
+                    Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
+                    None => None,
+                }
+                // 9.6.6.4: a symbolic font's codes go through its `cmap`
+                // directly rather than through a character — the (3,0)
+                // subtable maps the code into the F0xx private-use block,
+                // which is what `glyph_for_char` does with a character it is
+                // handed. Without this a symbolic face fell straight to the
+                // last resort below.
+                .or_else(|| {
+                    char::from_u32(code)
+                        .and_then(|c| sfnt.glyph_for_char(c))
+                        .filter(|g| *g != 0)
+                })
+                // The last resort: a subset font whose `cmap` was dropped,
+                // where the code is the only glyph number on offer, and the
+                // guess every reader makes for it. It used to be correct for
+                // a composite font too — an identity `/CIDToGIDMap` makes the
+                // code the glyph — but that reading only held while every
+                // composite font's CMap was the identity as well. The branch
+                // above owns that case now and indexes by CID, which is the
+                // same number whenever the old reading was right and the
+                // right one whenever it was not.
+                .or_else(|| u16::try_from(code).ok())?
+            };
 
             let units = f64::from(sfnt.units_per_em.max(1));
             let outline = glyf::outline(&sfnt, glyph)?;
@@ -999,6 +1008,32 @@ impl PageResources {
         }
 
         None
+    }
+
+    /// Which glyph of a TrueType program a composite font's code selects
+    /// (9.7.4.2).
+    ///
+    /// A CIDFontType2 addresses its descendant by CID, and `/CIDToGIDMap`
+    /// turns that CID into a glyph index. The font program's own `cmap` is
+    /// **not** consulted on this path and must not be: a `cmap` answers "which
+    /// glyph draws this character", and a composite font's code is not a
+    /// character. Until August 2026 it was the only thing consulted here — the
+    /// code went through `/ToUnicode` to a character and the character through
+    /// the `cmap` — so a document whose CMap was not the identity drew a page
+    /// of real glyphs, correctly spaced, that were not the ones it named.
+    ///
+    /// A CID the map does not name draws `.notdef` and reports, the same way
+    /// an unresolvable CFF glyph does. Without the report it is a space, which
+    /// is the failure that looks like nothing happened.
+    fn cid_glyph(&self, font: &cos_font::Font, resource: &[u8], code: u32) -> u16 {
+        let cid = font.cid_of(code);
+        let glyph = font.gid_for_cid(cid);
+        // CID 0 is `.notdef` by definition and reports nothing; any other CID
+        // resolving to glyph 0 is a CID this font does not carry.
+        if glyph == 0 && cid != 0 {
+            self.report_unresolved_glyph(resource);
+        }
+        glyph
     }
 
     /// One glyph of a CFF program, chosen the way 9.6.6 says to choose it.
