@@ -1170,6 +1170,17 @@ impl PageResources {
         }
         let bpc = int(b"BitsPerComponent").clamp(1, 16) as u32;
 
+        // Table 89: /Interpolate asks for the samples to be smoothed when the
+        // image is magnified. Read here rather than in either codec branch,
+        // because both of those return before the end of this function — which
+        // is how /Decode came to be ignored on exactly the two formats whose
+        // producers use it most.
+        let interpolate = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"Interpolate"))
+            .as_bool()
+            .unwrap_or(false);
+
         // 8.9.5.2: /Decode remaps each component's sample range. Read here
         // rather than after the codec branches, because both of those used to
         // return before reaching it — so `/Decode [1 0]` on a JPEG or a fax
@@ -1219,6 +1230,7 @@ impl PageResources {
                 rgb,
                 alpha: Vec::new(),
                 stencil: false,
+                interpolate,
             });
         }
         // CCITT data likewise arrives still coded, and carries its own
@@ -1266,6 +1278,7 @@ impl PageResources {
                 rgb,
                 alpha: Vec::new(),
                 stencil: false,
+                interpolate,
             });
         }
         if let Some(filter) = last_filter.as_deref() {
@@ -1340,6 +1353,7 @@ impl PageResources {
             rgb,
             alpha,
             stencil: is_mask,
+            interpolate,
         })
     }
 
@@ -1376,6 +1390,14 @@ impl PageResources {
         } else {
             int(b"BitsPerComponent").clamp(1, 16) as u32
         };
+
+        // Table 93 abbreviates /Interpolate to /I, and the caller has already
+        // rewritten the short form, so only the long one is looked for here.
+        let interpolate = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Interpolate"))
+            .as_bool()
+            .unwrap_or(false);
 
         // The filters, in the order they were applied.
         let filters_value = self.doc.resolve_key(dict, Name::FILTER);
@@ -1474,6 +1496,7 @@ impl PageResources {
             rgb,
             alpha,
             stencil: is_mask,
+            interpolate,
         })
     }
 

@@ -253,6 +253,92 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n"
     );
 }
 
+/// Table 89: `/Interpolate` asks for a magnified image to be smoothed.
+///
+/// It was in the inline-image abbreviation table and read by nothing else in
+/// the engine — no field on the decoded image, no branch at the sample site —
+/// so a file that asked for smoothing got the same hard sample edges as one
+/// that asked for none. The two documents below differ in that one key.
+#[test]
+fn interpolate_reaches_the_sampler() {
+    // Two black samples and two mid-grey ones, magnified ten times per axis.
+    // Mid grey rather than white because the whole file is a `str`, and the
+    // samples have to be characters a `str` can hold.
+    let with_flag = |interpolate: &str| -> tinker_pdf::Bitmap {
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+   /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 27 >>\nstream\nq 20 0 0 20 0 0 cm /Im0 Do Q\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+   /ColorSpace /DeviceGray /BitsPerComponent 8 {interpolate} /Length 4 >>\n\
+stream\n\x00\x7f\x7f\x00\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n"
+        );
+        render(bytes.into_bytes())
+    };
+
+    let levels = |bitmap: &tinker_pdf::Bitmap| {
+        let mut values: Vec<u8> = bitmap
+            .data
+            .chunks_exact(bitmap.components())
+            .map(|p| p[0])
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+        values
+    };
+
+    let hard = levels(&with_flag(""));
+    assert_eq!(
+        hard,
+        vec![0, 127],
+        "without the key the samples are copied: a barcode stays sharp"
+    );
+
+    let smooth = levels(&with_flag("/Interpolate true"));
+    assert!(
+        smooth.len() > 20,
+        "with it the magnified samples are blended, got {} levels",
+        smooth.len()
+    );
+}
+
+/// The same key, in an inline image's short spelling (Table 93).
+#[test]
+fn an_inline_images_interpolate_abbreviation_reaches_the_sampler() {
+    let levels = |dict: &[u8]| {
+        let mut content = Vec::new();
+        content.extend_from_slice(b"q 20 0 0 20 0 0 cm BI ");
+        content.extend_from_slice(dict);
+        content.extend_from_slice(b" ID ");
+        content.extend_from_slice(&[0x00, 0x7F, 0x7F, 0x00]);
+        content.extend_from_slice(b" EI Q");
+
+        let bitmap = render(page_with_content(&content));
+        let mut values: Vec<u8> = bitmap
+            .data
+            .chunks_exact(bitmap.components())
+            .map(|p| p[0])
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+        values.len()
+    };
+
+    assert_eq!(
+        levels(b"/W 2 /H 2 /CS /G /BPC 8"),
+        2,
+        "no key, no smoothing"
+    );
+    assert!(
+        levels(b"/W 2 /H 2 /CS /G /BPC 8 /I true") > 20,
+        "`/I` is `/Interpolate`, and it has to survive the rewrite"
+    );
+}
+
 /// 11.6.5.3: an `/SMask` supplies per-sample opacity. Without it every
 /// soft-masked image paints as an opaque rectangle.
 #[test]

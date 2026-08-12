@@ -159,6 +159,13 @@ pub struct DecodedImage {
     /// what happens without this flag — paints every stencil black whatever
     /// the page asked for.
     pub stencil: bool,
+    /// The image dictionary's `/Interpolate` (Table 89).
+    ///
+    /// Opt-*in* smoothing when the image is magnified. It is the file's own
+    /// statement about its content — a photograph says yes, a barcode or a
+    /// screenshot says nothing and means it — so it is carried here rather
+    /// than guessed at from the sample count.
+    pub interpolate: bool,
 }
 
 /// Where glyph outlines and image data come from, supplied by the caller so
@@ -499,6 +506,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 alpha: &image.alpha,
             },
             unit_to_device,
+            interpolate: image.interpolate,
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
             clip: self.clip.as_ref(),
@@ -1692,12 +1700,77 @@ mod tests {
             let (r, g, b) = self.color;
             Ok(Some(DecodedImage {
                 stencil: false,
+                interpolate: false,
                 width: 2,
                 height: 2,
                 rgb: vec![r, g, b, r, g, b, r, g, b, r, g, b],
                 alpha: self.alpha.clone(),
             }))
         }
+    }
+
+    /// A source whose image has four different samples, so a filter change is
+    /// visible, and whose `/Interpolate` the test chooses.
+    struct FourSamples {
+        interpolate: bool,
+    }
+
+    impl GlyphSource for FourSamples {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+            if name != b"Im0" {
+                return Ok(None);
+            }
+            Ok(Some(DecodedImage {
+                stencil: false,
+                interpolate: self.interpolate,
+                width: 2,
+                height: 2,
+                #[rustfmt::skip]
+                rgb: vec![
+                    0, 0, 0,       255, 255, 255,
+                    255, 255, 255, 0, 0, 0,
+                ],
+                alpha: Vec::new(),
+            }))
+        }
+    }
+
+    /// Table 89: `/Interpolate` is the file's own request for smoothing, and
+    /// it must reach the sampler. The two renders differ in nothing else, so
+    /// any difference in the pixels is the flag.
+    #[test]
+    fn interpolate_chooses_a_different_filter() {
+        let render_flag = |interpolate: bool| {
+            let canvas = Canvas::new(20, 20, PixelFormat::Rgb8, Color::WHITE);
+            let source = FourSamples { interpolate };
+            let mut renderer = Renderer::new(canvas, page_transform(20.0, 1.0), &source);
+            interpret(
+                b"q 20 0 0 20 0 0 cm /Im0 Do Q",
+                Matrix::IDENTITY,
+                &mut renderer,
+                &NoFonts,
+            );
+            let (canvas, _) = renderer.finish();
+            let mut values: Vec<u8> = canvas.data.iter().step_by(3).copied().collect();
+            values.sort_unstable();
+            values.dedup();
+            values
+        };
+
+        assert_eq!(
+            render_flag(false),
+            vec![0, 255],
+            "without the key the samples are copied, hard edge and all"
+        );
+        let smoothed = render_flag(true);
+        assert!(
+            smoothed.len() > 20,
+            "with it they are blended: {} distinct values",
+            smoothed.len()
+        );
     }
 
     fn render_with(content: &[u8], size: u32, source: &OneImage) -> (Canvas, Vec<RenderWarning>) {
