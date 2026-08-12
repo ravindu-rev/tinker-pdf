@@ -473,7 +473,19 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         mask
     }
 
+    /// Rasterizes a path and composites it, unless the render has been
+    /// stopped.
+    ///
+    /// The check is here rather than only in the callers, and the difference
+    /// is not pedantry: `show_glyph` checks once and then fills *and* strokes,
+    /// `draw_image` checks before a decode that can take longer than the paint
+    /// that follows it, and every one of them checks before building a path
+    /// whose rasterization is the expensive part. A caller's entry is a
+    /// different moment from this one, and this is the moment the work starts.
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
         let mask = self.coverage(path, rule);
         self.canvas.fill_mask_with(&mask, color, alpha, mode);
     }
@@ -678,6 +690,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
+        // A clip is a full fill of its own path plus an intersect, and it had
+        // no check at all — so a render cancelled while a clip operator was
+        // pending still paid for both. Skipping it cannot leak ink: every
+        // paint is gated too, so a clip that is never installed is never the
+        // reason something is drawn.
+        if self.cancel.is_cancelled() {
+            return;
+        }
         let built = self.to_path(path);
         if built.is_empty() {
             return;
@@ -696,6 +716,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_text(&mut self) {
+        // Before the accumulated outline is rasterized, for the same reason as
+        // `clip_path`: a text clip is a fill over every glyph of the object at
+        // once, which is the largest single clip a page can ask for.
+        if self.cancel.is_cancelled() {
+            return;
+        }
         // 9.3.6: text clipping modes accumulate every glyph of the text
         // object and intersect the result at `ET`, not glyph by glyph —
         // clipping each glyph as it arrived would leave the next one clipped
@@ -1608,6 +1634,159 @@ mod tests {
             "nothing was painted"
         );
         assert!(warnings.contains(&RenderWarning::Cancelled));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation (gap 15).
+    // -----------------------------------------------------------------------
+
+    /// A square, as the interpreter would hand one over.
+    fn square(side: f64) -> Vec<PathSegment> {
+        vec![
+            PathSegment::MoveTo { x: 10.0, y: 10.0 },
+            PathSegment::LineTo { x: side, y: 10.0 },
+            PathSegment::LineTo { x: side, y: side },
+            PathSegment::LineTo { x: 10.0, y: side },
+            PathSegment::Close,
+        ]
+    }
+
+    /// Milestone 1: a clip and a text clip check before they rasterize.
+    ///
+    /// Both are a full fill of a path — a clip is `fill` plus an intersect,
+    /// and a text clip is one fill over every glyph the object accumulated —
+    /// and neither had a check of any kind, on entry or inside.
+    ///
+    /// The instrument is `mask_pixels`, the count of pixels `fill` was *asked
+    /// for*, because the page cannot tell the two cases apart: a clip that ran
+    /// and a clip that did not leave the same canvas, since a clip paints
+    /// nothing. Only the counter says which happened.
+    ///
+    /// The operators are driven directly rather than through `interpret`,
+    /// which is the honest way to reach this: the interpreter checks the token
+    /// before every token it dispatches, so through it these two entries are
+    /// reachable only in the window between that check and the call — which is
+    /// real on a second thread and not reproducible in a test. `Device` is a
+    /// public trait and `Renderer` implements it, so a host can arrive here by
+    /// any route it likes.
+    #[test]
+    fn a_cancelled_clip_and_text_clip_rasterize_nothing() {
+        const SIDE: u32 = 400;
+        let cost = |cancelled: bool| {
+            let canvas = Canvas::new(SIDE, SIDE, PixelFormat::Rgb8, Color::WHITE);
+            let cancel = CancelToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let mut renderer =
+                Renderer::new(canvas, page_transform(400.0, 1.0), &NoGlyphs).with_cancel(cancel);
+            let state = GraphicsState::default();
+
+            renderer.clip_path(&square(300.0), &state, false);
+            let clip = renderer.mask_pixels;
+
+            // A text clip: the glyph outline accumulates and `ET` applies it.
+            renderer.text_clip_requested = true;
+            renderer.text_clip = Some(renderer.to_path(&square(200.0)));
+            renderer.end_text();
+            (clip, renderer.mask_pixels - clip)
+        };
+
+        let (clip, text) = cost(false);
+        assert!(clip > 0, "a clip that is not cancelled rasterizes: {clip}");
+        assert!(text > 0, "and so does a text clip: {text}");
+
+        assert_eq!(
+            cost(true),
+            (0, 0),
+            "a token set before the operator arrived means neither fill runs"
+        );
+    }
+
+    /// A source that cancels the render the first time it is asked for an
+    /// outline, and counts how many times it was asked.
+    ///
+    /// This is the counting token milestone 1 needs, and it is deterministic:
+    /// it fires on the Nth *call*, never on a clock. A time-based cancellation
+    /// test is flaky by construction — the render either got there first or it
+    /// did not — and one in CI would fail for reasons nobody could reproduce.
+    struct CancelOnOutline {
+        cancel: CancelToken,
+        calls: std::cell::Cell<u32>,
+        /// Which call cancels, counting from one.
+        at: u32,
+    }
+
+    impl GlyphSource for CancelOnOutline {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() == self.at {
+                self.cancel.cancel();
+            }
+            use tinker_pdf_font::Segment;
+            Some(Outline {
+                segments: vec![
+                    Segment::MoveTo { x: 0.1, y: 0.0 },
+                    Segment::LineTo { x: 0.6, y: 0.0 },
+                    Segment::LineTo { x: 0.6, y: 0.7 },
+                    Segment::LineTo { x: 0.1, y: 0.7 },
+                    Segment::Close,
+                ],
+            })
+        }
+    }
+
+    /// Milestone 1, and the reason `paint` needed a check of its own: its
+    /// callers check on *their* entry, which is a different moment.
+    ///
+    /// `show_glyph` checks the token, then asks the source for an outline —
+    /// which is where a host reads a file, decompresses a font program or
+    /// waits on a lock — and only then paints. The source here cancels during
+    /// exactly that call, so `show_glyph`'s own check has already passed and
+    /// the token is set by the time the paint begins. Without a check in
+    /// `paint` the glyph is drawn in full.
+    ///
+    /// Two glyphs, and the second is the one that cancels, so the assertion is
+    /// that the page has ink on it and stops — a build that painted nothing at
+    /// all would pass a "nothing after the cancel" test on its own.
+    #[test]
+    fn a_paint_checks_on_its_own_entry_and_not_only_its_callers() {
+        let ink_after = |at: u32| {
+            let canvas = Canvas::new(120, 60, PixelFormat::Rgb8, Color::WHITE);
+            let source = CancelOnOutline {
+                cancel: CancelToken::new(),
+                calls: std::cell::Cell::new(0),
+                at,
+            };
+            let mut renderer = Renderer::new(canvas, page_transform(60.0, 1.0), &source)
+                .with_cancel(source.cancel.clone());
+            interpret(
+                b"BT /F0 40 Tf 2 4 Td (AB) Tj ET",
+                Matrix::IDENTITY,
+                &mut renderer,
+                &OneChar,
+            );
+            let (canvas, _) = renderer.finish();
+            let column = |x: u32| {
+                (0..60)
+                    .filter(|y| canvas.pixel(x, *y) != Some(Color::WHITE))
+                    .count()
+            };
+            (column(10), column(30))
+        };
+
+        // Nothing cancels: both glyphs paint. The second sits half an em past
+        // the first, which for this outline puts its left bar at x = 30.
+        let (first, second) = ink_after(99);
+        assert!(first > 0 && second > 0, "both glyphs: {first}, {second}");
+
+        // The second glyph's outline lookup cancels. The first is already on
+        // the page; the second must not reach it.
+        assert_eq!(
+            ink_after(2),
+            (first, 0),
+            "the glyph whose own lookup set the token is not painted"
+        );
     }
 
     #[test]
