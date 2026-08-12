@@ -9,6 +9,15 @@
 //!
 //! Hints are parsed only far enough to skip them correctly. No hinting is
 //! applied; see `glyf.rs` for why.
+//!
+//! # Which charstring runs
+//!
+//! A CFF font does not number its glyphs the way a document addresses them.
+//! The charset says which *name* each glyph index carries, and everything a
+//! caller can ask for goes through it: [`Cff::gid_for_name`] for a name the
+//! document supplies, and [`Cff::gid_for_code`] for the encoding the font
+//! program carries itself. A caller that used the character code as a glyph
+//! index would draw whatever glyph happened to be at that position.
 
 use crate::outline::{Outline, Segment};
 
@@ -17,9 +26,19 @@ use crate::outline::{Outline, Segment};
 pub struct Cff<'a> {
     charstrings: Index<'a>,
     global_subrs: Index<'a>,
+    strings: Index<'a>,
     local_subrs: Index<'a>,
     default_width: f64,
     nominal_width: f64,
+    /// Which SID each glyph carries.
+    charset: Vec<u16>,
+    /// The charset inverted and sorted, so a name reaches a glyph
+    /// without scanning. Deduplicated on the first glyph that claims a value,
+    /// which is what a reader has to pick when a font names two.
+    by_sid: Vec<(u16, u16)>,
+    /// The font's own encoding: which glyph each of the 256 codes selects,
+    /// zero where the encoding defines none.
+    encoding: Vec<u16>,
     /// The font matrix, which is usually 1/1000 but need not be.
     pub font_matrix: [f64; 6],
 }
@@ -182,13 +201,14 @@ impl<'a> Cff<'a> {
         let header_size = usize::from(*data.get(2)?);
         let (_names, at) = Index::parse(data, header_size)?;
         let (top_dicts, at) = Index::parse(data, at)?;
-        let (_strings, at) = Index::parse(data, at)?;
+        let (strings, at) = Index::parse(data, at)?;
         let (global_subrs, _) = Index::parse(data, at)?;
 
         let top = parse_dict(top_dicts.get(0)?);
 
         let charstrings_at = dict_get(&top, 17).and_then(<[f64]>::first).copied()? as usize;
         let (charstrings, _) = Index::parse(data, charstrings_at)?;
+        let glyphs = charstrings.len();
 
         // The Private DICT gives the local subroutines and the widths.
         let mut local_subrs = Index::default();
@@ -217,6 +237,22 @@ impl<'a> Cff<'a> {
             }
         }
 
+        // 15 is charset. Absent means the ISOAdobe predefined one, whose
+        // offset is also zero.
+        let charset_at = dict_get(&top, 15)
+            .and_then(<[f64]>::first)
+            .copied()
+            .unwrap_or(0.0);
+        let charset = read_charset(data, charset_at, glyphs);
+        let by_sid = invert_charset(&charset);
+
+        // 16 is Encoding: the font's own idea of which code means which glyph.
+        let encoding_at = dict_get(&top, 16)
+            .and_then(<[f64]>::first)
+            .copied()
+            .unwrap_or(0.0);
+        let encoding = read_encoding(data, encoding_at, &by_sid);
+
         // 12 7 is FontMatrix; the default is 1/1000 in both axes.
         let font_matrix = match dict_get(&top, 0x0C07) {
             Some(m) if m.len() >= 6 => [m[0], m[1], m[2], m[3], m[4], m[5]],
@@ -226,9 +262,13 @@ impl<'a> Cff<'a> {
         Some(Cff {
             charstrings,
             global_subrs,
+            strings,
             local_subrs,
             default_width,
             nominal_width,
+            charset,
+            by_sid,
+            encoding,
             font_matrix,
         })
     }
@@ -239,23 +279,34 @@ impl<'a> Cff<'a> {
         self.charstrings.len()
     }
 
+    /// The name a glyph carries, through the charset and the string INDEX.
+    #[must_use]
+    pub fn glyph_name(&self, glyph: u16) -> Option<&'a str> {
+        self.sid_name(*self.charset.get(usize::from(glyph))?)
+    }
+
+    /// The glyph a name selects.
+    #[must_use]
+    pub fn gid_for_name(&self, name: &str) -> Option<u16> {
+        self.gid_for_sid(self.sid_for_name(name)?)
+    }
+
+    /// The glyph the font's *own* encoding gives a code.
+    ///
+    /// This is the built-in encoding of the font program, which 9.6.6 makes
+    /// the fallback: a PDF font dictionary's `/Encoding` wins where it names
+    /// the glyph, and the caller is the one that knows whether it did.
+    #[must_use]
+    pub fn gid_for_code(&self, code: u8) -> Option<u16> {
+        let glyph = *self.encoding.get(usize::from(code))?;
+        (glyph != 0).then_some(glyph)
+    }
+
     /// One glyph's outline, in the font's own units.
     #[must_use]
     pub fn outline(&self, glyph: u16) -> Option<Outline> {
         let charstring = self.charstrings.get(usize::from(glyph))?;
-        let mut ctx = Charstring {
-            cff: self,
-            outline: Outline::default(),
-            stack: Vec::new(),
-            x: 0.0,
-            y: 0.0,
-            stems: 0,
-            width: None,
-            open: false,
-            depth: 0,
-            budget: 64_000,
-            transient: [0.0; 32],
-        };
+        let mut ctx = self.charstring_context(glyph);
         ctx.run(charstring);
         if ctx.open {
             ctx.outline.push(Segment::Close);
@@ -267,7 +318,14 @@ impl<'a> Cff<'a> {
     #[must_use]
     pub fn advance(&self, glyph: u16) -> Option<f64> {
         let charstring = self.charstrings.get(usize::from(glyph))?;
-        let mut ctx = Charstring {
+        let mut ctx = self.charstring_context(glyph);
+        ctx.run(charstring);
+        Some(ctx.width.unwrap_or(self.default_width))
+    }
+
+    fn charstring_context(&self, glyph: u16) -> Charstring<'a, '_> {
+        let _ = glyph;
+        Charstring {
             cff: self,
             outline: Outline::default(),
             stack: Vec::new(),
@@ -279,11 +337,1006 @@ impl<'a> Cff<'a> {
             depth: 0,
             budget: 64_000,
             transient: [0.0; 32],
-        };
-        ctx.run(charstring);
-        Some(ctx.width.unwrap_or(self.default_width))
+        }
+    }
+
+    /// The lowest glyph carrying a SID, through the inverted charset.
+    fn gid_for_sid(&self, sid: u16) -> Option<u16> {
+        let at = self.by_sid.binary_search_by_key(&sid, |(s, _)| *s).ok()?;
+        self.by_sid.get(at).map(|(_, gid)| *gid)
+    }
+
+    /// The SID a name has, from the standard strings or the string INDEX.
+    fn sid_for_name(&self, name: &str) -> Option<u16> {
+        if let Some(sid) = STANDARD_STRINGS.iter().position(|s| *s == name) {
+            return u16::try_from(sid).ok();
+        }
+        // Anything else is a custom string, numbered from 391 upward.
+        let at = (0..self.strings.len()).find(|i| self.strings.get(*i) == Some(name.as_bytes()))?;
+        u16::try_from(at + STANDARD_STRINGS.len()).ok()
+    }
+
+    /// The string a SID names.
+    fn sid_name(&self, sid: u16) -> Option<&'a str> {
+        let sid = usize::from(sid);
+        if let Some(name) = STANDARD_STRINGS.get(sid) {
+            return Some(name);
+        }
+        let bytes = self.strings.get(sid - STANDARD_STRINGS.len())?;
+        core::str::from_utf8(bytes).ok()
     }
 }
+
+/// Reads the charset: the SID, or the CID, that each glyph carries.
+///
+/// Offsets 0, 1 and 2 name the predefined charsets rather than a position in
+/// the file — a font whose charset is ISOAdobe writes no charset at all.
+fn read_charset(data: &[u8], offset: f64, glyphs: usize) -> Vec<u16> {
+    // Every entry is bounded by the glyph count, which the CharStrings INDEX
+    // already capped at 65535: a run length in the file cannot make this
+    // longer than the font has glyphs.
+    let mut out = Vec::with_capacity(glyphs.min(1 << 16));
+    if glyphs == 0 {
+        return out;
+    }
+    // Glyph 0 is `.notdef` in every font and is not written down.
+    out.push(0u16);
+
+    if !(0.0..=(usize::MAX as f64)).contains(&offset) {
+        return out;
+    }
+    let offset = offset as usize;
+
+    match offset {
+        // ISOAdobe: the first 229 standard strings, in order. It stops at 228
+        // rather than running on, so a font with more glyphs than the charset
+        // covers leaves the rest unnamed instead of naming them wrongly.
+        0 => {
+            for gid in 1..glyphs {
+                out.push(u16::try_from(gid).ok().filter(|g| *g <= 228).unwrap_or(0));
+            }
+        }
+        1 | 2 => {
+            let table: &[u16] = if offset == 1 {
+                EXPERT_CHARSET
+            } else {
+                EXPERT_SUBSET_CHARSET
+            };
+            for gid in 1..glyphs {
+                out.push(table.get(gid - 1).copied().unwrap_or(0));
+            }
+        }
+        _ => read_charset_table(data, offset, glyphs, &mut out),
+    }
+    out
+}
+
+/// Reads a charset written into the font, formats 0, 1 and 2.
+///
+/// Format 1 counts a run in one byte and format 2 in two. Confusing them does
+/// not fail: it reads a plausible number and shifts every glyph after the
+/// first run, so the font draws the wrong letters and nothing says why.
+fn read_charset_table(data: &[u8], offset: usize, glyphs: usize, out: &mut Vec<u16>) {
+    let Some(&format) = data.get(offset) else {
+        return;
+    };
+    let mut at = offset + 1;
+    match format {
+        0 => {
+            while out.len() < glyphs {
+                let Some(sid) = be16(data, at) else { return };
+                out.push(sid);
+                at += 2;
+            }
+        }
+        1 | 2 => {
+            let wide = format == 2;
+            while out.len() < glyphs {
+                let Some(first) = be16(data, at) else { return };
+                let left = if wide {
+                    let Some(n) = be16(data, at + 2) else { return };
+                    at += 4;
+                    u32::from(n)
+                } else {
+                    let Some(&n) = data.get(at + 2) else { return };
+                    at += 3;
+                    u32::from(n)
+                };
+                // The run covers `left` glyphs *after* the first.
+                for step in 0..=left {
+                    if out.len() >= glyphs {
+                        return;
+                    }
+                    out.push(first.saturating_add(step.min(0xFFFF) as u16));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Inverts the charset, so a SID or a CID reaches a glyph by binary search.
+///
+/// Sorted by SID and then by glyph, deduplicated on the SID: a font that
+/// names two glyphs the same resolves to the first, which is the only choice
+/// that does not depend on how the table was built.
+fn invert_charset(charset: &[u16]) -> Vec<(u16, u16)> {
+    let mut out: Vec<(u16, u16)> = charset
+        .iter()
+        .enumerate()
+        .filter_map(|(gid, sid)| Some((*sid, u16::try_from(gid).ok()?)))
+        .collect();
+    out.sort_unstable();
+    out.dedup_by_key(|(sid, _)| *sid);
+    out
+}
+
+/// Reads the font's built-in encoding into a glyph per code.
+///
+/// Offsets 0 and 1 name the two predefined encodings; anything else is a
+/// table in the file. Both predefined encodings resolve through the charset,
+/// because the encoding names a glyph and only the charset knows where it is.
+fn read_encoding(data: &[u8], offset: f64, by_sid: &[(u16, u16)]) -> Vec<u16> {
+    let mut out = vec![0u16; 256];
+    let lookup = |sid: u16| -> u16 {
+        by_sid
+            .binary_search_by_key(&sid, |(s, _)| *s)
+            .ok()
+            .and_then(|at| by_sid.get(at).map(|(_, gid)| *gid))
+            .unwrap_or(0)
+    };
+
+    if !(0.0..=(usize::MAX as f64)).contains(&offset) {
+        return out;
+    }
+    let offset = offset as usize;
+
+    match offset {
+        0 | 1 => {
+            let table: &[(u8, u16)] = if offset == 0 {
+                STANDARD_ENCODING
+            } else {
+                EXPERT_ENCODING
+            };
+            for (code, sid) in table {
+                if let Some(slot) = out.get_mut(usize::from(*code)) {
+                    *slot = lookup(*sid);
+                }
+            }
+            return out;
+        }
+        _ => {}
+    }
+
+    let Some(&format) = data.get(offset) else {
+        return out;
+    };
+    let mut at = offset + 1;
+    // The high bit says supplements follow the table itself.
+    match format & 0x7F {
+        0 => {
+            let Some(&count) = data.get(at) else {
+                return out;
+            };
+            at += 1;
+            for i in 0..usize::from(count) {
+                let Some(&code) = data.get(at + i) else { break };
+                // Codes are listed for glyph 1 upward, in order.
+                if let Some(slot) = out.get_mut(usize::from(code)) {
+                    *slot = u16::try_from(i + 1).unwrap_or(0);
+                }
+            }
+            at += usize::from(count);
+        }
+        1 => {
+            let Some(&ranges) = data.get(at) else {
+                return out;
+            };
+            at += 1;
+            let mut glyph = 1u16;
+            for i in 0..usize::from(ranges) {
+                let (Some(&first), Some(&left)) = (data.get(at + i * 2), data.get(at + i * 2 + 1))
+                else {
+                    break;
+                };
+                for step in 0..=u16::from(left) {
+                    let code = u16::from(first).saturating_add(step);
+                    if let Some(slot) = out.get_mut(usize::from(code)) {
+                        *slot = glyph;
+                    }
+                    glyph = glyph.saturating_add(1);
+                }
+            }
+            at += usize::from(ranges) * 2;
+        }
+        _ => return out,
+    }
+
+    if format & 0x80 != 0 {
+        // A supplement maps a further code to the glyph *named* by a SID,
+        // which is how one glyph reaches two codes without being listed twice.
+        let count = data.get(at).copied().unwrap_or(0);
+        at += 1;
+        for i in 0..usize::from(count) {
+            let (Some(&code), Some(sid)) = (data.get(at + i * 3), be16(data, at + i * 3 + 1))
+            else {
+                break;
+            };
+            let glyph = lookup(sid);
+            if glyph != 0 {
+                if let Some(slot) = out.get_mut(usize::from(code)) {
+                    *slot = glyph;
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn be16(data: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([*data.get(at)?, *data.get(at + 1)?]))
+}
+
+/// The 391 standard strings every CFF font shares (CFF specification,
+/// Appendix A).
+///
+/// A SID below 391 names one of these; anything higher indexes the font's own
+/// string INDEX, which is what makes `sid - 391` the only arithmetic between a
+/// charset entry and a glyph name. Compiled in rather than generated: 391
+/// fixed strings are not worth a build step, and four kilobytes is not a
+/// number the wasm budget notices.
+const STANDARD_STRINGS: &[&str; 391] = &[
+    ".notdef",
+    "space",
+    "exclam",
+    "quotedbl",
+    "numbersign",
+    "dollar",
+    "percent",
+    "ampersand",
+    "quoteright",
+    "parenleft",
+    "parenright",
+    "asterisk",
+    "plus",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "less",
+    "equal",
+    "greater",
+    "question",
+    "at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "bracketleft",
+    "backslash",
+    "bracketright",
+    "asciicircum",
+    "underscore",
+    "quoteleft",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "braceleft",
+    "bar",
+    "braceright",
+    "asciitilde",
+    "exclamdown",
+    "cent",
+    "sterling",
+    "fraction",
+    "yen",
+    "florin",
+    "section",
+    "currency",
+    "quotesingle",
+    "quotedblleft",
+    "guillemotleft",
+    "guilsinglleft",
+    "guilsinglright",
+    "fi",
+    "fl",
+    "endash",
+    "dagger",
+    "daggerdbl",
+    "periodcentered",
+    "paragraph",
+    "bullet",
+    "quotesinglbase",
+    "quotedblbase",
+    "quotedblright",
+    "guillemotright",
+    "ellipsis",
+    "perthousand",
+    "questiondown",
+    "grave",
+    "acute",
+    "circumflex",
+    "tilde",
+    "macron",
+    "breve",
+    "dotaccent",
+    "dieresis",
+    "ring",
+    "cedilla",
+    "hungarumlaut",
+    "ogonek",
+    "caron",
+    "emdash",
+    "AE",
+    "ordfeminine",
+    "Lslash",
+    "Oslash",
+    "OE",
+    "ordmasculine",
+    "ae",
+    "dotlessi",
+    "lslash",
+    "oslash",
+    "oe",
+    "germandbls",
+    "onesuperior",
+    "logicalnot",
+    "mu",
+    "trademark",
+    "Eth",
+    "onehalf",
+    "plusminus",
+    "Thorn",
+    "onequarter",
+    "divide",
+    "brokenbar",
+    "degree",
+    "thorn",
+    "threequarters",
+    "twosuperior",
+    "registered",
+    "minus",
+    "eth",
+    "multiply",
+    "threesuperior",
+    "copyright",
+    "Aacute",
+    "Acircumflex",
+    "Adieresis",
+    "Agrave",
+    "Aring",
+    "Atilde",
+    "Ccedilla",
+    "Eacute",
+    "Ecircumflex",
+    "Edieresis",
+    "Egrave",
+    "Iacute",
+    "Icircumflex",
+    "Idieresis",
+    "Igrave",
+    "Ntilde",
+    "Oacute",
+    "Ocircumflex",
+    "Odieresis",
+    "Ograve",
+    "Otilde",
+    "Scaron",
+    "Uacute",
+    "Ucircumflex",
+    "Udieresis",
+    "Ugrave",
+    "Yacute",
+    "Ydieresis",
+    "Zcaron",
+    "aacute",
+    "acircumflex",
+    "adieresis",
+    "agrave",
+    "aring",
+    "atilde",
+    "ccedilla",
+    "eacute",
+    "ecircumflex",
+    "edieresis",
+    "egrave",
+    "iacute",
+    "icircumflex",
+    "idieresis",
+    "igrave",
+    "ntilde",
+    "oacute",
+    "ocircumflex",
+    "odieresis",
+    "ograve",
+    "otilde",
+    "scaron",
+    "uacute",
+    "ucircumflex",
+    "udieresis",
+    "ugrave",
+    "yacute",
+    "ydieresis",
+    "zcaron",
+    "exclamsmall",
+    "Hungarumlautsmall",
+    "dollaroldstyle",
+    "dollarsuperior",
+    "ampersandsmall",
+    "Acutesmall",
+    "parenleftsuperior",
+    "parenrightsuperior",
+    "twodotenleader",
+    "onedotenleader",
+    "zerooldstyle",
+    "oneoldstyle",
+    "twooldstyle",
+    "threeoldstyle",
+    "fouroldstyle",
+    "fiveoldstyle",
+    "sixoldstyle",
+    "sevenoldstyle",
+    "eightoldstyle",
+    "nineoldstyle",
+    "commasuperior",
+    "threequartersemdash",
+    "periodsuperior",
+    "questionsmall",
+    "asuperior",
+    "bsuperior",
+    "centsuperior",
+    "dsuperior",
+    "esuperior",
+    "isuperior",
+    "lsuperior",
+    "msuperior",
+    "nsuperior",
+    "osuperior",
+    "rsuperior",
+    "ssuperior",
+    "tsuperior",
+    "ff",
+    "ffi",
+    "ffl",
+    "parenleftinferior",
+    "parenrightinferior",
+    "Circumflexsmall",
+    "hyphensuperior",
+    "Gravesmall",
+    "Asmall",
+    "Bsmall",
+    "Csmall",
+    "Dsmall",
+    "Esmall",
+    "Fsmall",
+    "Gsmall",
+    "Hsmall",
+    "Ismall",
+    "Jsmall",
+    "Ksmall",
+    "Lsmall",
+    "Msmall",
+    "Nsmall",
+    "Osmall",
+    "Psmall",
+    "Qsmall",
+    "Rsmall",
+    "Ssmall",
+    "Tsmall",
+    "Usmall",
+    "Vsmall",
+    "Wsmall",
+    "Xsmall",
+    "Ysmall",
+    "Zsmall",
+    "colonmonetary",
+    "onefitted",
+    "rupiah",
+    "Tildesmall",
+    "exclamdownsmall",
+    "centoldstyle",
+    "Lslashsmall",
+    "Scaronsmall",
+    "Zcaronsmall",
+    "Dieresissmall",
+    "Brevesmall",
+    "Caronsmall",
+    "Dotaccentsmall",
+    "Macronsmall",
+    "figuredash",
+    "hypheninferior",
+    "Ogoneksmall",
+    "Ringsmall",
+    "Cedillasmall",
+    "questiondownsmall",
+    "oneeighth",
+    "threeeighths",
+    "fiveeighths",
+    "seveneighths",
+    "onethird",
+    "twothirds",
+    "zerosuperior",
+    "foursuperior",
+    "fivesuperior",
+    "sixsuperior",
+    "sevensuperior",
+    "eightsuperior",
+    "ninesuperior",
+    "zeroinferior",
+    "oneinferior",
+    "twoinferior",
+    "threeinferior",
+    "fourinferior",
+    "fiveinferior",
+    "sixinferior",
+    "seveninferior",
+    "eightinferior",
+    "nineinferior",
+    "centinferior",
+    "dollarinferior",
+    "periodinferior",
+    "commainferior",
+    "Agravesmall",
+    "Aacutesmall",
+    "Acircumflexsmall",
+    "Atildesmall",
+    "Adieresissmall",
+    "Aringsmall",
+    "AEsmall",
+    "Ccedillasmall",
+    "Egravesmall",
+    "Eacutesmall",
+    "Ecircumflexsmall",
+    "Edieresissmall",
+    "Igravesmall",
+    "Iacutesmall",
+    "Icircumflexsmall",
+    "Idieresissmall",
+    "Ethsmall",
+    "Ntildesmall",
+    "Ogravesmall",
+    "Oacutesmall",
+    "Ocircumflexsmall",
+    "Otildesmall",
+    "Odieresissmall",
+    "OEsmall",
+    "Oslashsmall",
+    "Ugravesmall",
+    "Uacutesmall",
+    "Ucircumflexsmall",
+    "Udieresissmall",
+    "Yacutesmall",
+    "Thornsmall",
+    "Ydieresissmall",
+    "001.000",
+    "001.001",
+    "001.002",
+    "001.003",
+    "Black",
+    "Bold",
+    "Book",
+    "Light",
+    "Medium",
+    "Regular",
+    "Roman",
+    "Semibold",
+];
+
+/// The Standard encoding, as `(code, SID)` pairs (CFF specification,
+/// Appendix B).
+///
+/// Codes 32 to 126 are the printable ASCII names in order, which is why that
+/// half is arithmetic; the high range is contiguous in SIDs and full of holes
+/// in codes, so it is written out.
+const STANDARD_ENCODING: &[(u8, u16)] = &[
+    (32, 1),
+    (33, 2),
+    (34, 3),
+    (35, 4),
+    (36, 5),
+    (37, 6),
+    (38, 7),
+    (39, 8),
+    (40, 9),
+    (41, 10),
+    (42, 11),
+    (43, 12),
+    (44, 13),
+    (45, 14),
+    (46, 15),
+    (47, 16),
+    (48, 17),
+    (49, 18),
+    (50, 19),
+    (51, 20),
+    (52, 21),
+    (53, 22),
+    (54, 23),
+    (55, 24),
+    (56, 25),
+    (57, 26),
+    (58, 27),
+    (59, 28),
+    (60, 29),
+    (61, 30),
+    (62, 31),
+    (63, 32),
+    (64, 33),
+    (65, 34),
+    (66, 35),
+    (67, 36),
+    (68, 37),
+    (69, 38),
+    (70, 39),
+    (71, 40),
+    (72, 41),
+    (73, 42),
+    (74, 43),
+    (75, 44),
+    (76, 45),
+    (77, 46),
+    (78, 47),
+    (79, 48),
+    (80, 49),
+    (81, 50),
+    (82, 51),
+    (83, 52),
+    (84, 53),
+    (85, 54),
+    (86, 55),
+    (87, 56),
+    (88, 57),
+    (89, 58),
+    (90, 59),
+    (91, 60),
+    (92, 61),
+    (93, 62),
+    (94, 63),
+    (95, 64),
+    (96, 65),
+    (97, 66),
+    (98, 67),
+    (99, 68),
+    (100, 69),
+    (101, 70),
+    (102, 71),
+    (103, 72),
+    (104, 73),
+    (105, 74),
+    (106, 75),
+    (107, 76),
+    (108, 77),
+    (109, 78),
+    (110, 79),
+    (111, 80),
+    (112, 81),
+    (113, 82),
+    (114, 83),
+    (115, 84),
+    (116, 85),
+    (117, 86),
+    (118, 87),
+    (119, 88),
+    (120, 89),
+    (121, 90),
+    (122, 91),
+    (123, 92),
+    (124, 93),
+    (125, 94),
+    (126, 95),
+    (161, 96),
+    (162, 97),
+    (163, 98),
+    (164, 99),
+    (165, 100),
+    (166, 101),
+    (167, 102),
+    (168, 103),
+    (169, 104),
+    (170, 105),
+    (171, 106),
+    (172, 107),
+    (173, 108),
+    (174, 109),
+    (175, 110),
+    (177, 111),
+    (178, 112),
+    (179, 113),
+    (180, 114),
+    (182, 115),
+    (183, 116),
+    (184, 117),
+    (185, 118),
+    (186, 119),
+    (187, 120),
+    (188, 121),
+    (189, 122),
+    (191, 123),
+    (193, 124),
+    (194, 125),
+    (195, 126),
+    (196, 127),
+    (197, 128),
+    (198, 129),
+    (199, 130),
+    (200, 131),
+    (202, 132),
+    (203, 133),
+    (205, 134),
+    (206, 135),
+    (207, 136),
+    (208, 137),
+    (225, 138),
+    (227, 139),
+    (232, 140),
+    (233, 141),
+    (234, 142),
+    (235, 143),
+    (241, 144),
+    (245, 145),
+    (248, 146),
+    (249, 147),
+    (250, 148),
+    (251, 149),
+];
+
+/// The Expert encoding, as `(code, SID)` pairs (CFF specification,
+/// Appendix B).
+///
+/// Its SID column, in this order, is also the Expert charset: the expert
+/// character set is laid out in code order. `the_expert_tables_agree` checks
+/// that, which is the only cross-check available for data no font in this
+/// repository uses.
+const EXPERT_ENCODING: &[(u8, u16)] = &[
+    (32, 1),
+    (33, 229),
+    (34, 230),
+    (36, 231),
+    (37, 232),
+    (38, 233),
+    (39, 234),
+    (40, 235),
+    (41, 236),
+    (42, 237),
+    (43, 238),
+    (44, 13),
+    (45, 14),
+    (46, 15),
+    (47, 99),
+    (48, 239),
+    (49, 240),
+    (50, 241),
+    (51, 242),
+    (52, 243),
+    (53, 244),
+    (54, 245),
+    (55, 246),
+    (56, 247),
+    (57, 248),
+    (58, 27),
+    (59, 28),
+    (60, 249),
+    (61, 250),
+    (62, 251),
+    (63, 252),
+    (65, 253),
+    (66, 254),
+    (67, 255),
+    (68, 256),
+    (69, 257),
+    (73, 258),
+    (76, 259),
+    (77, 260),
+    (78, 261),
+    (79, 262),
+    (82, 263),
+    (83, 264),
+    (84, 265),
+    (86, 266),
+    (87, 109),
+    (88, 110),
+    (89, 267),
+    (90, 268),
+    (91, 269),
+    (93, 270),
+    (94, 271),
+    (95, 272),
+    (96, 273),
+    (97, 274),
+    (98, 275),
+    (99, 276),
+    (100, 277),
+    (101, 278),
+    (102, 279),
+    (103, 280),
+    (104, 281),
+    (105, 282),
+    (106, 283),
+    (107, 284),
+    (108, 285),
+    (109, 286),
+    (110, 287),
+    (111, 288),
+    (112, 289),
+    (113, 290),
+    (114, 291),
+    (115, 292),
+    (116, 293),
+    (117, 294),
+    (118, 295),
+    (119, 296),
+    (120, 297),
+    (121, 298),
+    (122, 299),
+    (123, 300),
+    (124, 301),
+    (125, 302),
+    (126, 303),
+    (161, 304),
+    (162, 305),
+    (163, 306),
+    (166, 307),
+    (167, 308),
+    (168, 309),
+    (169, 310),
+    (170, 311),
+    (172, 312),
+    (175, 313),
+    (178, 314),
+    (179, 315),
+    (182, 316),
+    (183, 317),
+    (184, 318),
+    (188, 158),
+    (189, 155),
+    (190, 163),
+    (191, 319),
+    (192, 320),
+    (193, 321),
+    (194, 322),
+    (195, 323),
+    (196, 324),
+    (197, 325),
+    (200, 326),
+    (201, 150),
+    (202, 164),
+    (203, 169),
+    (204, 327),
+    (205, 328),
+    (206, 329),
+    (207, 330),
+    (208, 331),
+    (209, 332),
+    (210, 333),
+    (211, 334),
+    (212, 335),
+    (213, 336),
+    (214, 337),
+    (215, 338),
+    (216, 339),
+    (217, 340),
+    (218, 341),
+    (219, 342),
+    (220, 343),
+    (221, 344),
+    (222, 345),
+    (223, 346),
+    (224, 347),
+    (225, 348),
+    (226, 349),
+    (227, 350),
+    (228, 351),
+    (229, 352),
+    (230, 353),
+    (231, 354),
+    (232, 355),
+    (233, 356),
+    (234, 357),
+    (235, 358),
+    (236, 359),
+    (237, 360),
+    (238, 361),
+    (239, 362),
+    (240, 363),
+    (241, 364),
+    (242, 365),
+    (243, 366),
+    (244, 367),
+    (245, 368),
+    (246, 369),
+    (247, 370),
+    (248, 371),
+    (249, 372),
+    (250, 373),
+    (251, 374),
+    (252, 375),
+    (253, 376),
+    (254, 377),
+    (255, 378),
+];
+
+/// The Expert charset: the SID each glyph carries, from glyph 1 upward (CFF
+/// specification, Appendix C).
+const EXPERT_CHARSET: &[u16] = &[
+    1, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243,
+    244, 245, 246, 247, 248, 27, 28, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260,
+    261, 262, 263, 264, 265, 266, 109, 110, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277,
+    278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296,
+    297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315,
+    316, 317, 318, 158, 155, 163, 319, 320, 321, 322, 323, 324, 325, 326, 150, 164, 169, 327, 328,
+    329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347,
+    348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366,
+    367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378,
+];
+
+/// The ExpertSubset charset, which is the Expert set with the glyphs an
+/// expert *subset* face does not carry removed (CFF specification, Appendix
+/// C).
+const EXPERT_SUBSET_CHARSET: &[u16] = &[
+    1, 231, 232, 235, 236, 237, 238, 13, 14, 15, 99, 239, 240, 241, 242, 243, 244, 245, 246, 247,
+    248, 27, 28, 249, 250, 251, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
+    266, 109, 110, 267, 268, 269, 270, 272, 300, 301, 302, 305, 314, 315, 158, 155, 163, 320, 321,
+    322, 323, 324, 325, 326, 150, 164, 169, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337,
+    338, 339, 340, 341, 342, 343, 344, 345, 346,
+];
 
 /// The bias applied to subroutine indices (Type 2 charstring specification).
 fn bias(count: usize) -> i32 {
@@ -724,6 +1777,222 @@ impl Charstring<'_, '_> {
 mod tests {
     use super::*;
 
+    /// Wraps `items` as a CFF INDEX with four-byte offsets.
+    ///
+    /// Wide offsets throughout, so a fixture that grows past 255 bytes of
+    /// charstrings does not silently change format halfway through a test.
+    fn wide_index(items: &[Vec<u8>]) -> Vec<u8> {
+        if items.is_empty() {
+            return vec![0, 0];
+        }
+        let mut out = (items.len() as u16).to_be_bytes().to_vec();
+        out.push(4);
+        let mut offset = 1u32;
+        out.extend_from_slice(&offset.to_be_bytes());
+        for item in items {
+            offset += item.len() as u32;
+            out.extend_from_slice(&offset.to_be_bytes());
+        }
+        for item in items {
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    /// One DICT entry: operands in the fixed five-byte integer form, then the
+    /// operator. Fixed width is what lets a fixture compute its own offsets.
+    fn entry(op: u16, operands: &[i32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in operands {
+            out.push(29);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        if op > 0xFF {
+            out.push(12);
+            out.push((op & 0xFF) as u8);
+        } else {
+            out.push(op as u8);
+        }
+        out
+    }
+
+    /// A charstring drawing a box `size` units on a side, at the origin.
+    ///
+    /// Every operand takes the three-byte 16-bit form, so the shape can be
+    /// read off the bytes and the width prefix is unambiguous — a box is
+    /// enough to tell one glyph from another by the ink it puts down.
+    fn box_glyph(size: i16) -> Vec<u8> {
+        let n = |v: i16| {
+            let mut out = vec![28u8];
+            out.extend_from_slice(&v.to_be_bytes());
+            out
+        };
+        let mut out = Vec::new();
+        out.extend(n(0));
+        out.extend(n(0));
+        out.push(21); // rmoveto
+        for (dx, dy) in [(size, 0), (0, size), (-size, 0)] {
+            out.extend(n(dx));
+            out.extend(n(dy));
+            out.push(5); // rlineto
+        }
+        out.push(14); // endchar
+        out
+    }
+
+    /// Where each table landed, so the Top DICT can point at it.
+    #[derive(Default)]
+    struct Offsets {
+        charset: i32,
+        encoding: i32,
+        charstrings: i32,
+        private: (i32, i32),
+    }
+
+    /// A charset or encoding: a predefined number, or a table in the file.
+    enum Table {
+        Predefined(i32),
+        Bytes(Vec<u8>),
+    }
+
+    impl Default for Table {
+        fn default() -> Table {
+            Table::Predefined(0)
+        }
+    }
+
+    /// A CFF font program assembled from its parts.
+    ///
+    /// Hand-built rather than borrowed from a real face: `testdata/` carries
+    /// four PDFs and none embeds a CFF, and a fixture whose every byte is
+    /// known is what makes "the right glyph" checkable by arithmetic rather
+    /// than by eye.
+    #[derive(Default)]
+    struct Fixture {
+        /// Strings beyond the standard 391, numbered from SID 391 upward.
+        strings: Vec<Vec<u8>>,
+        charstrings: Vec<Vec<u8>>,
+        charset: Table,
+        encoding: Table,
+        private: Vec<u8>,
+        subrs: Vec<Vec<u8>>,
+    }
+
+    impl Fixture {
+        fn top_dict(&self, at: &Offsets) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend(entry(15, &[at.charset]));
+            out.extend(entry(16, &[at.encoding]));
+            out.extend(entry(17, &[at.charstrings]));
+            out.extend(entry(18, &[at.private.0, at.private.1]));
+            out
+        }
+
+        fn build(&self) -> Vec<u8> {
+            let header = [1u8, 0, 4, 4];
+            let names = wide_index(&[b"Fixture".to_vec()]);
+            let strings = wide_index(&self.strings);
+            let gsubrs = wide_index(&[]);
+            let charstrings = wide_index(&self.charstrings);
+
+            let table = |t: &Table| match t {
+                Table::Predefined(_) => Vec::new(),
+                Table::Bytes(bytes) => bytes.clone(),
+            };
+            let charset = table(&self.charset);
+            let encoding = table(&self.encoding);
+
+            // The Top DICT's length cannot change when the offsets in it do,
+            // so one pass with zeroes measures it and the second fills it in.
+            let top_len = self.top_dict(&Offsets::default()).len();
+            let mut at = Offsets {
+                charset: 0,
+                encoding: 0,
+                charstrings: 0,
+                private: (self.private.len() as i32, 0),
+            };
+            let mut cursor =
+                header.len() + names.len() + (2 + 1 + 8 + top_len) + strings.len() + gsubrs.len();
+
+            let charset_at = cursor;
+            at.charset = match self.charset {
+                Table::Predefined(n) => n,
+                Table::Bytes(_) => cursor as i32,
+            };
+            cursor += charset.len();
+
+            let encoding_at = cursor;
+            at.encoding = match self.encoding {
+                Table::Predefined(n) => n,
+                Table::Bytes(_) => cursor as i32,
+            };
+            cursor += encoding.len();
+
+            let charstrings_at = cursor;
+            at.charstrings = cursor as i32;
+            cursor += charstrings.len();
+
+            let private_at = cursor;
+            at.private.1 = cursor as i32;
+            cursor += self.private.len();
+
+            let subrs = wide_index(&self.subrs);
+            let subrs_at = cursor;
+
+            let mut out = header.to_vec();
+            out.extend_from_slice(&names);
+            out.extend_from_slice(&wide_index(&[self.top_dict(&at)]));
+            out.extend_from_slice(&strings);
+            out.extend_from_slice(&gsubrs);
+            assert_eq!(out.len(), charset_at, "the charset lands where it was put");
+            out.extend_from_slice(&charset);
+            assert_eq!(out.len(), encoding_at);
+            out.extend_from_slice(&encoding);
+            assert_eq!(out.len(), charstrings_at);
+            out.extend_from_slice(&charstrings);
+            assert_eq!(out.len(), private_at);
+            out.extend_from_slice(&self.private);
+            assert_eq!(out.len(), subrs_at);
+            out.extend_from_slice(&subrs);
+            out
+        }
+    }
+
+    /// A Private DICT declaring both widths, and Subrs when `subrs` is set.
+    fn private_dict(default_width: i32, nominal_width: i32, subrs: bool) -> Vec<u8> {
+        let mut out = entry(20, &[default_width]);
+        out.extend(entry(21, &[nominal_width]));
+        if subrs {
+            // The INDEX follows the DICT immediately, six bytes on.
+            out.extend(entry(19, &[out.len() as i32 + 6]));
+        }
+        out
+    }
+
+    /// A charset in format 0: one SID per glyph after `.notdef`.
+    fn charset_0(sids: &[u16]) -> Vec<u8> {
+        let mut out = vec![0u8];
+        for sid in sids {
+            out.extend_from_slice(&sid.to_be_bytes());
+        }
+        out
+    }
+
+    /// A charset in format 1 or 2: runs of consecutive SIDs, counted in one
+    /// byte or in two.
+    fn charset_runs(format: u8, runs: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = vec![format];
+        for (first, left) in runs {
+            out.extend_from_slice(&first.to_be_bytes());
+            if format == 2 {
+                out.extend_from_slice(&left.to_be_bytes());
+            } else {
+                out.push(*left as u8);
+            }
+        }
+        out
+    }
+
     /// Wraps `items` as a CFF INDEX with one-byte offsets.
     fn index(items: &[&[u8]]) -> Vec<u8> {
         if items.is_empty() {
@@ -893,6 +2162,253 @@ mod tests {
         assert_eq!(bias(33900), 32768);
     }
 
+    /// The SIDs of `A`, `B` and `C`, which are the standard strings 34 to 36.
+    const ABC: [u16; 3] = [34, 35, 36];
+
+    /// A three-letter font: `.notdef`, then `A`, `B` and `C` as boxes of
+    /// three different sizes, so which glyph ran can be read off the outline.
+    fn abc(charset: Table) -> Fixture {
+        Fixture {
+            charstrings: vec![vec![14], box_glyph(600), box_glyph(500), box_glyph(400)],
+            charset,
+            private: private_dict(600, 600, false),
+            ..Fixture::default()
+        }
+    }
+
+    /// The width of the box a glyph draws, which names it as surely as its
+    /// SID does and is what a renderer would actually put on the page.
+    fn box_width(cff: &Cff<'_>, glyph: u16) -> Option<f64> {
+        let outline = cff.outline(glyph)?;
+        let (x0, _, x1, _) = outline.bounds()?;
+        Some(x1 - x0)
+    }
+
+    #[test]
+    fn a_charset_gives_every_glyph_its_name() {
+        let font = abc(Table::Bytes(charset_0(&ABC))).build();
+        let cff = Cff::parse(&font).expect("a CFF font");
+
+        assert_eq!(cff.glyph_name(0), Some(".notdef"));
+        assert_eq!(cff.glyph_name(1), Some("A"));
+        assert_eq!(cff.glyph_name(2), Some("B"));
+        assert_eq!(cff.glyph_name(3), Some("C"));
+
+        assert_eq!(cff.gid_for_name("A"), Some(1));
+        assert_eq!(cff.gid_for_name("B"), Some(2));
+        assert_eq!(cff.gid_for_name("C"), Some(3));
+        assert_eq!(cff.gid_for_name("D"), None, "a name the font does not have");
+
+        // And the glyph that comes back is the one that draws that letter.
+        assert_eq!(box_width(&cff, 1), Some(600.0));
+        assert_eq!(box_width(&cff, 2), Some(500.0));
+    }
+
+    /// Format 1 counts a run in one byte and format 2 in two. Reading one as
+    /// the other does not fail — it reads a plausible length and shifts every
+    /// glyph after the first run, so the font draws the wrong letters and
+    /// nothing anywhere says so. The three formats describing one font is the
+    /// only test that separates them.
+    #[test]
+    fn the_three_charset_formats_describe_the_same_font() {
+        let formats = [
+            Table::Bytes(charset_0(&ABC)),
+            // One run: `A`, and two more after it.
+            Table::Bytes(charset_runs(1, &[(34, 2)])),
+            Table::Bytes(charset_runs(2, &[(34, 2)])),
+        ];
+
+        for (which, charset) in formats.into_iter().enumerate() {
+            let font = abc(charset).build();
+            let cff = Cff::parse(&font).unwrap_or_else(|| panic!("format {which} parses"));
+            assert_eq!(cff.gid_for_name("A"), Some(1), "format {which}");
+            assert_eq!(cff.gid_for_name("B"), Some(2), "format {which}");
+            assert_eq!(cff.gid_for_name("C"), Some(3), "format {which}");
+            assert_eq!(box_width(&cff, 3), Some(400.0), "format {which}");
+        }
+
+        // A format 2 table read as format 1 would take the high byte of the
+        // run length as the length itself, which is zero here.
+        let confused = Fixture {
+            charset: Table::Bytes(charset_runs(1, &[(34, 0), (35, 0), (36, 0)])),
+            ..abc(Table::default())
+        }
+        .build();
+        let cff = Cff::parse(&confused).expect("three one-glyph runs parse");
+        assert_eq!(
+            cff.gid_for_name("C"),
+            Some(3),
+            "runs of one are the same map"
+        );
+    }
+
+    #[test]
+    fn a_name_outside_the_standard_strings_comes_from_the_string_index() {
+        let font = Fixture {
+            strings: vec![b"uniE000".to_vec(), b"threedotleader".to_vec()],
+            // SID 391 is the first custom string.
+            charset: Table::Bytes(charset_0(&[391, 34, 392])),
+            ..abc(Table::default())
+        }
+        .build();
+        let cff = Cff::parse(&font).expect("a CFF font");
+
+        assert_eq!(cff.glyph_name(1), Some("uniE000"));
+        assert_eq!(cff.gid_for_name("uniE000"), Some(1));
+        assert_eq!(
+            cff.gid_for_name("A"),
+            Some(2),
+            "a standard string beside it"
+        );
+        assert_eq!(cff.gid_for_name("threedotleader"), Some(3));
+    }
+
+    #[test]
+    fn the_predefined_charsets_resolve() {
+        // ISOAdobe is the standard strings in order, so glyph 34 is `A`.
+        let mut charstrings = vec![vec![14u8]];
+        charstrings.resize(40, box_glyph(300));
+        let font = Fixture {
+            charstrings: charstrings.clone(),
+            charset: Table::Predefined(0),
+            private: private_dict(600, 600, false),
+            ..Fixture::default()
+        }
+        .build();
+        let cff = Cff::parse(&font).expect("an ISOAdobe font");
+        assert_eq!(cff.glyph_name(34), Some("A"));
+        assert_eq!(cff.gid_for_name("A"), Some(34));
+        assert_eq!(cff.gid_for_name("space"), Some(1));
+
+        // Expert and ExpertSubset are their own orders, and both begin with
+        // the space.
+        let expert = Fixture {
+            charstrings: charstrings.clone(),
+            charset: Table::Predefined(1),
+            private: private_dict(600, 600, false),
+            ..Fixture::default()
+        }
+        .build();
+        let cff = Cff::parse(&expert).expect("an Expert font");
+        assert_eq!(cff.glyph_name(1), Some("space"));
+        assert_eq!(cff.glyph_name(2), Some("exclamsmall"));
+        assert_eq!(cff.gid_for_name("A"), None, "the expert set has no `A`");
+
+        let subset = Fixture {
+            charstrings,
+            charset: Table::Predefined(2),
+            private: private_dict(600, 600, false),
+            ..Fixture::default()
+        }
+        .build();
+        let cff = Cff::parse(&subset).expect("an ExpertSubset font");
+        assert_eq!(cff.glyph_name(1), Some("space"));
+        assert_eq!(cff.glyph_name(2), Some("dollaroldstyle"));
+    }
+
+    #[test]
+    fn the_standard_strings_are_the_specification_s() {
+        assert_eq!(STANDARD_STRINGS.len(), 391);
+        assert_eq!(STANDARD_STRINGS[0], ".notdef");
+        assert_eq!(STANDARD_STRINGS[1], "space");
+        // 1 to 95 are the printable ASCII names in code order, which is what
+        // makes the Standard encoding's first ninety-five entries arithmetic.
+        assert_eq!(STANDARD_STRINGS[34], "A");
+        assert_eq!(STANDARD_STRINGS[95], "asciitilde");
+        assert_eq!(STANDARD_STRINGS[96], "exclamdown");
+        assert_eq!(STANDARD_STRINGS[390], "Semibold");
+    }
+
+    #[test]
+    fn the_expert_tables_agree() {
+        // The expert character set is laid out in code order, so the encoding
+        // and the charset are one table read two ways. Nothing in this
+        // repository uses either, and this is the cross-check that stands in
+        // for a font that would.
+        assert_eq!(EXPERT_ENCODING.len(), EXPERT_CHARSET.len());
+        for (i, (_, sid)) in EXPERT_ENCODING.iter().enumerate() {
+            assert_eq!(Some(sid), EXPERT_CHARSET.get(i), "entry {i}");
+        }
+        let mut codes = EXPERT_ENCODING.iter().map(|(c, _)| *c);
+        let mut previous = codes.next().expect("a first code");
+        for code in codes {
+            assert!(code > previous, "codes ascend: {code} after {previous}");
+            previous = code;
+        }
+        // The subset is a subset.
+        for sid in EXPERT_SUBSET_CHARSET {
+            assert!(
+                EXPERT_CHARSET.contains(sid),
+                "SID {sid} is in the expert set"
+            );
+        }
+        // Every SID in both tables names a standard string.
+        for sid in EXPERT_CHARSET.iter().chain(EXPERT_SUBSET_CHARSET) {
+            assert!(usize::from(*sid) < STANDARD_STRINGS.len());
+        }
+        // The Standard encoding's ASCII half is the arithmetic it claims.
+        assert_eq!(
+            STANDARD_ENCODING.iter().find(|(c, _)| *c == 65),
+            Some(&(65, 34))
+        );
+        assert_eq!(STANDARD_ENCODING.len(), 95 + 54);
+    }
+
+    #[test]
+    fn a_built_in_encoding_maps_codes_to_glyphs() {
+        // Format 0: one code per glyph, glyph 1 upward.
+        let font = Fixture {
+            encoding: Table::Bytes(vec![0, 3, 0x41, 0x42, 0x43]),
+            ..abc(Table::Bytes(charset_0(&ABC)))
+        }
+        .build();
+        let cff = Cff::parse(&font).expect("a CFF font");
+        assert_eq!(cff.gid_for_code(0x41), Some(1));
+        assert_eq!(cff.gid_for_code(0x43), Some(3));
+        assert_eq!(cff.gid_for_code(0x44), None);
+
+        // Format 1: one run of three codes, glyphs assigned in order.
+        let font = Fixture {
+            encoding: Table::Bytes(vec![1, 1, 0x61, 2]),
+            ..abc(Table::Bytes(charset_0(&ABC)))
+        }
+        .build();
+        let cff = Cff::parse(&font).expect("a CFF font");
+        assert_eq!(cff.gid_for_code(0x61), Some(1));
+        assert_eq!(cff.gid_for_code(0x62), Some(2));
+        assert_eq!(cff.gid_for_code(0x63), Some(3));
+        assert_eq!(cff.gid_for_code(0x64), None);
+    }
+
+    #[test]
+    fn a_supplement_gives_a_second_code_to_one_glyph() {
+        // The high bit of the format byte says supplements follow, and a
+        // supplement names its glyph by SID rather than by position.
+        let mut encoding = vec![0x80, 1, 0x41];
+        encoding.extend_from_slice(&[1, 0x61]);
+        encoding.extend_from_slice(&34u16.to_be_bytes());
+        let font = Fixture {
+            encoding: Table::Bytes(encoding),
+            ..abc(Table::Bytes(charset_0(&ABC)))
+        }
+        .build();
+        let cff = Cff::parse(&font).expect("a CFF font");
+        assert_eq!(cff.gid_for_code(0x41), Some(1), "the table itself");
+        assert_eq!(cff.gid_for_code(0x61), Some(1), "and the supplement");
+    }
+
+    #[test]
+    fn the_standard_encoding_is_what_a_font_without_one_uses() {
+        let font = abc(Table::Bytes(charset_0(&ABC))).build();
+        let cff = Cff::parse(&font).expect("a CFF font");
+        // Encoding offset 0 is the Standard encoding, which the fixture
+        // writes because a font that omits the operator means the same thing.
+        assert_eq!(cff.gid_for_code(b'A'), Some(1));
+        assert_eq!(cff.gid_for_code(b'C'), Some(3));
+        assert_eq!(cff.gid_for_code(b'D'), None, "the font has no `D`");
+        assert_eq!(cff.gid_for_code(0), None);
+    }
+
     #[test]
     fn garbage_is_rejected_without_panicking() {
         assert!(Cff::parse(&[]).is_none());
@@ -906,5 +2422,63 @@ mod tests {
             let data: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
             let _ = parse_dict(&data);
         }
+    }
+
+    /// The tables added for glyph selection are all offsets and counts the
+    /// file supplies, which is the shape of every parser bug this repository
+    /// has found. None of them may read past the end, allocate on a count it
+    /// was handed, or take longer than the glyphs it has.
+    #[test]
+    fn hostile_charsets_and_encodings_are_survivable() {
+        // A charset run claiming 65535 glyphs in a font that has four.
+        let font = Fixture {
+            charset: Table::Bytes(charset_runs(2, &[(34, 0xFFFF)])),
+            ..abc(Table::default())
+        }
+        .build();
+        let cff = Cff::parse(&font).expect("it still parses");
+        assert_eq!(cff.glyph_count(), 4, "the run cannot invent glyphs");
+        assert_eq!(cff.gid_for_name("A"), Some(1));
+
+        // A run starting at the top of the SID space, which would overflow.
+        let font = Fixture {
+            charset: Table::Bytes(charset_runs(1, &[(0xFFFF, 255)])),
+            ..abc(Table::default())
+        }
+        .build();
+        assert!(Cff::parse(&font).is_some());
+
+        // A charset, an encoding and an FDSelect pointing past the end of the
+        // file, and at each other.
+        let base = abc(Table::Bytes(charset_0(&ABC))).build();
+        for offset in [0i32, 1, 2, 3, 7, 0x7FFF_FFFF, -1] {
+            for op in [15u16, 16] {
+                let mut font = base.clone();
+                // Rewrite the operand of the first matching operator, which
+                // is at a known place because every operand is five bytes.
+                if let Some(at) = find_operator(&font, op) {
+                    font[at - 4..at].copy_from_slice(&offset.to_be_bytes());
+                }
+                let Some(cff) = Cff::parse(&font) else {
+                    continue;
+                };
+                for glyph in 0..8u16 {
+                    let _ = cff.outline(glyph);
+                    let _ = cff.glyph_name(glyph);
+                }
+                let _ = cff.gid_for_name("A");
+                let _ = cff.gid_for_code(65);
+            }
+        }
+    }
+
+    /// Where the operand of a one-operand Top DICT operator ends, in a
+    /// fixture whose operands are all the fixed five-byte form.
+    fn find_operator(font: &[u8], op: u16) -> Option<usize> {
+        let wanted = entry(op, &[0]);
+        let tail = *wanted.last()?;
+        font.windows(6)
+            .position(|w| w[0] == 29 && w[5] == tail)
+            .map(|at| at + 5)
     }
 }
