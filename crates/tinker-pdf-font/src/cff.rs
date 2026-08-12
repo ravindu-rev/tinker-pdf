@@ -13,11 +13,12 @@
 //! # Which charstring runs
 //!
 //! A CFF font does not number its glyphs the way a document addresses them.
-//! The charset says which *name* each glyph index carries, and everything a
-//! caller can ask for goes through it: [`Cff::gid_for_name`] for a name the
-//! document supplies, and [`Cff::gid_for_code`] for the encoding the font
-//! program carries itself. A caller that used the character code as a glyph
-//! index would draw whatever glyph happened to be at that position.
+//! The charset says which *name* — or, in a CID-keyed font, which CID — each
+//! glyph index carries, and everything a caller can ask for goes through it:
+//! [`Cff::gid_for_name`] for a simple font, [`Cff::gid_for_cid`] for a
+//! CID-keyed one, and [`Cff::gid_for_code`] for the encoding the font program
+//! carries itself. A caller that used the character code as a glyph index
+//! would draw whatever glyph happened to be at that position.
 
 use crate::outline::{Outline, Segment};
 
@@ -27,20 +28,38 @@ pub struct Cff<'a> {
     charstrings: Index<'a>,
     global_subrs: Index<'a>,
     strings: Index<'a>,
-    local_subrs: Index<'a>,
-    default_width: f64,
-    nominal_width: f64,
-    /// Which SID each glyph carries.
+    /// The top-level Private DICT: local subroutines and the two widths.
+    private: Private<'a>,
+    /// Which SID — or, in a CID-keyed font, which CID — each glyph carries.
     charset: Vec<u16>,
-    /// The charset inverted and sorted, so a name reaches a glyph
+    /// The charset inverted and sorted, so a name or a CID reaches a glyph
     /// without scanning. Deduplicated on the first glyph that claims a value,
     /// which is what a reader has to pick when a font names two.
     by_sid: Vec<(u16, u16)>,
     /// The font's own encoding: which glyph each of the 256 codes selects,
     /// zero where the encoding defines none.
     encoding: Vec<u16>,
+    /// Whether the Top DICT carries `ROS`, which is what makes a font
+    /// CID-keyed and its charset a CID map rather than a name map.
+    is_cid: bool,
+    /// CID-keyed fonts: which Font DICT each glyph draws its Private DICT and
+    /// local subroutines from. Empty when the font is not CID-keyed.
+    fd_select: Vec<u8>,
+    /// The FDArray's Private DICTs, and each one's own font matrix.
+    fds: Vec<(Private<'a>, Option<[f64; 6]>)>,
     /// The font matrix, which is usually 1/1000 but need not be.
     pub font_matrix: [f64; 6],
+    /// Whether the Top DICT stated the matrix above, rather than it being the
+    /// default. A CID-keyed font may put the real one in its Font DICTs.
+    top_has_matrix: bool,
+}
+
+/// A Private DICT's contribution to running a charstring.
+#[derive(Clone, Debug, Default)]
+struct Private<'a> {
+    local_subrs: Index<'a>,
+    default_width: f64,
+    nominal_width: f64,
 }
 
 /// A CFF INDEX: a count, offsets, then the data.
@@ -211,31 +230,14 @@ impl<'a> Cff<'a> {
         let glyphs = charstrings.len();
 
         // The Private DICT gives the local subroutines and the widths.
-        let mut local_subrs = Index::default();
-        let mut default_width = 0.0;
-        let mut nominal_width = 0.0;
-        if let Some(private) = dict_get(&top, 18) {
-            let (Some(&size), Some(&offset)) = (private.first(), private.get(1)) else {
-                return None;
-            };
-            let (size, offset) = (size as usize, offset as usize);
-            if let Some(bytes) = data.get(offset..offset.saturating_add(size).min(data.len())) {
-                let private_dict = parse_dict(bytes);
-                default_width = dict_get(&private_dict, 20)
-                    .and_then(<[f64]>::first)
-                    .copied()
-                    .unwrap_or(0.0);
-                nominal_width = dict_get(&private_dict, 21)
-                    .and_then(<[f64]>::first)
-                    .copied()
-                    .unwrap_or(0.0);
-                if let Some(&subrs) = dict_get(&private_dict, 19).and_then(<[f64]>::first) {
-                    if let Some((index, _)) = Index::parse(data, offset + subrs as usize) {
-                        local_subrs = index;
-                    }
-                }
-            }
-        }
+        let private = match dict_get(&top, 18) {
+            Some(operands) => read_private(data, operands)?,
+            None => Private::default(),
+        };
+
+        // 12 30 is ROS: its presence, and nothing else, is what makes a font
+        // CID-keyed, which changes what the charset means.
+        let is_cid = dict_get(&top, 0x0C1E).is_some();
 
         // 15 is charset. Absent means the ISOAdobe predefined one, whose
         // offset is also zero.
@@ -243,33 +245,52 @@ impl<'a> Cff<'a> {
             .and_then(<[f64]>::first)
             .copied()
             .unwrap_or(0.0);
-        let charset = read_charset(data, charset_at, glyphs);
+        let charset = read_charset(data, charset_at, glyphs, is_cid);
         let by_sid = invert_charset(&charset);
 
-        // 16 is Encoding: the font's own idea of which code means which glyph.
-        let encoding_at = dict_get(&top, 16)
-            .and_then(<[f64]>::first)
-            .copied()
-            .unwrap_or(0.0);
-        let encoding = read_encoding(data, encoding_at, &by_sid);
+        // 16 is Encoding, which a CID-keyed font does not have: its glyphs are
+        // reached by CID, and a one-byte code cannot address them.
+        let encoding = if is_cid {
+            Vec::new()
+        } else {
+            let at = dict_get(&top, 16)
+                .and_then(<[f64]>::first)
+                .copied()
+                .unwrap_or(0.0);
+            read_encoding(data, at, &by_sid)
+        };
+
+        // 12 36 FDArray and 12 37 FDSelect: a CID-keyed font's glyphs are
+        // partitioned between Font DICTs, each with its own Private DICT and
+        // its own local subroutines.
+        let fds = match dict_get(&top, 0x0C24).and_then(<[f64]>::first) {
+            Some(&at) => read_fd_array(data, at),
+            None => Vec::new(),
+        };
+        let fd_select = match dict_get(&top, 0x0C25).and_then(<[f64]>::first) {
+            Some(&at) if !fds.is_empty() => read_fd_select(data, at, glyphs),
+            _ => Vec::new(),
+        };
 
         // 12 7 is FontMatrix; the default is 1/1000 in both axes.
-        let font_matrix = match dict_get(&top, 0x0C07) {
-            Some(m) if m.len() >= 6 => [m[0], m[1], m[2], m[3], m[4], m[5]],
-            _ => [0.001, 0.0, 0.0, 0.001, 0.0, 0.0],
+        let (font_matrix, top_has_matrix) = match dict_get(&top, 0x0C07) {
+            Some(m) if m.len() >= 6 => ([m[0], m[1], m[2], m[3], m[4], m[5]], true),
+            _ => ([0.001, 0.0, 0.0, 0.001, 0.0, 0.0], false),
         };
 
         Some(Cff {
             charstrings,
             global_subrs,
             strings,
-            local_subrs,
-            default_width,
-            nominal_width,
+            private,
             charset,
             by_sid,
             encoding,
+            is_cid,
+            fd_select,
+            fds,
             font_matrix,
+            top_has_matrix,
         })
     }
 
@@ -279,16 +300,46 @@ impl<'a> Cff<'a> {
         self.charstrings.len()
     }
 
+    /// Whether the font is CID-keyed, which is what `ROS` declares.
+    ///
+    /// A CID-keyed font's charset maps glyphs to CIDs rather than to names, so
+    /// [`Cff::gid_for_name`] answers nothing for one and [`Cff::gid_for_cid`]
+    /// is the only way in.
+    #[must_use]
+    pub fn is_cid(&self) -> bool {
+        self.is_cid
+    }
+
     /// The name a glyph carries, through the charset and the string INDEX.
+    ///
+    /// `None` for a CID-keyed font, whose glyphs have CIDs and no names.
     #[must_use]
     pub fn glyph_name(&self, glyph: u16) -> Option<&'a str> {
+        if self.is_cid {
+            return None;
+        }
         self.sid_name(*self.charset.get(usize::from(glyph))?)
     }
 
     /// The glyph a name selects.
     #[must_use]
     pub fn gid_for_name(&self, name: &str) -> Option<u16> {
+        if self.is_cid {
+            return None;
+        }
         self.gid_for_sid(self.sid_for_name(name)?)
+    }
+
+    /// The glyph a CID selects, through the inverted charset.
+    #[must_use]
+    pub fn gid_for_cid(&self, cid: u32) -> Option<u16> {
+        // A CID wider than the charset can express names no glyph, rather
+        // than truncating into one that exists.
+        let cid = u16::try_from(cid).ok()?;
+        if !self.is_cid {
+            return None;
+        }
+        self.gid_for_sid(cid)
     }
 
     /// The glyph the font's *own* encoding gives a code.
@@ -300,6 +351,27 @@ impl<'a> Cff<'a> {
     pub fn gid_for_code(&self, code: u8) -> Option<u16> {
         let glyph = *self.encoding.get(usize::from(code))?;
         (glyph != 0).then_some(glyph)
+    }
+
+    /// The matrix that maps one glyph's space into text space.
+    ///
+    /// Almost always the font's own, but a CID-keyed font may leave the Top
+    /// DICT without one and put a different matrix in each Font DICT — an
+    /// Adobe-Japan1 face built from sources drawn at different sizes does
+    /// exactly that, and reading only the top-level default draws those
+    /// glyphs at the wrong scale.
+    #[must_use]
+    pub fn font_matrix_for(&self, glyph: u16) -> [f64; 6] {
+        let Some((_, Some(fd))) = self.fd_for(glyph) else {
+            return self.font_matrix;
+        };
+        if self.top_has_matrix {
+            // Both present: the glyph's space passes through the Font DICT's
+            // matrix and then the Top DICT's.
+            concat(*fd, self.font_matrix)
+        } else {
+            *fd
+        }
     }
 
     /// One glyph's outline, in the font's own units.
@@ -320,13 +392,16 @@ impl<'a> Cff<'a> {
         let charstring = self.charstrings.get(usize::from(glyph))?;
         let mut ctx = self.charstring_context(glyph);
         ctx.run(charstring);
-        Some(ctx.width.unwrap_or(self.default_width))
+        Some(ctx.width.unwrap_or(ctx.private.default_width))
     }
 
     fn charstring_context(&self, glyph: u16) -> Charstring<'a, '_> {
-        let _ = glyph;
         Charstring {
             cff: self,
+            private: match self.fd_for(glyph) {
+                Some((private, _)) => private,
+                None => &self.private,
+            },
             outline: Outline::default(),
             stack: Vec::new(),
             x: 0.0,
@@ -338,6 +413,13 @@ impl<'a> Cff<'a> {
             budget: 64_000,
             transient: [0.0; 32],
         }
+    }
+
+    /// The Font DICT a glyph draws from, in a CID-keyed font.
+    fn fd_for(&self, glyph: u16) -> Option<(&Private<'a>, &Option<[f64; 6]>)> {
+        let fd = *self.fd_select.get(usize::from(glyph))?;
+        let (private, matrix) = self.fds.get(usize::from(fd))?;
+        Some((private, matrix))
     }
 
     /// The lowest glyph carrying a SID, through the inverted charset.
@@ -367,11 +449,45 @@ impl<'a> Cff<'a> {
     }
 }
 
+/// Reads a Private DICT from its `(size, offset)` operand pair.
+fn read_private<'a>(data: &'a [u8], operands: &[f64]) -> Option<Private<'a>> {
+    let (Some(&size), Some(&offset)) = (operands.first(), operands.get(1)) else {
+        return None;
+    };
+    if size < 0.0 || offset < 0.0 {
+        return Some(Private::default());
+    }
+    let (size, offset) = (size as usize, offset as usize);
+    let mut private = Private::default();
+    if let Some(bytes) = data.get(offset..offset.saturating_add(size).min(data.len())) {
+        let dict = parse_dict(bytes);
+        private.default_width = dict_get(&dict, 20)
+            .and_then(<[f64]>::first)
+            .copied()
+            .unwrap_or(0.0);
+        private.nominal_width = dict_get(&dict, 21)
+            .and_then(<[f64]>::first)
+            .copied()
+            .unwrap_or(0.0);
+        // 19 is Subrs, whose offset is measured from the Private DICT rather
+        // than from the start of the font.
+        if let Some(&subrs) = dict_get(&dict, 19).and_then(<[f64]>::first) {
+            if subrs >= 0.0 {
+                if let Some((index, _)) = Index::parse(data, offset.saturating_add(subrs as usize))
+                {
+                    private.local_subrs = index;
+                }
+            }
+        }
+    }
+    Some(private)
+}
+
 /// Reads the charset: the SID, or the CID, that each glyph carries.
 ///
 /// Offsets 0, 1 and 2 name the predefined charsets rather than a position in
 /// the file — a font whose charset is ISOAdobe writes no charset at all.
-fn read_charset(data: &[u8], offset: f64, glyphs: usize) -> Vec<u16> {
+fn read_charset(data: &[u8], offset: f64, glyphs: usize, is_cid: bool) -> Vec<u16> {
     // Every entry is bounded by the glyph count, which the CharStrings INDEX
     // already capped at 65535: a run length in the file cannot make this
     // longer than the font has glyphs.
@@ -388,6 +504,13 @@ fn read_charset(data: &[u8], offset: f64, glyphs: usize) -> Vec<u16> {
     let offset = offset as usize;
 
     match offset {
+        // A CID-keyed font with a predefined charset offset has no name
+        // ordering to borrow, so the identity is the only reading of it.
+        0 if is_cid => {
+            for gid in 1..glyphs {
+                out.push(u16::try_from(gid).unwrap_or(0));
+            }
+        }
         // ISOAdobe: the first 229 standard strings, in order. It stops at 228
         // rather than running on, so a font with more glyphs than the charset
         // covers leaves the rest unnamed instead of naming them wrongly.
@@ -572,6 +695,86 @@ fn read_encoding(data: &[u8], offset: f64, by_sid: &[(u16, u16)]) -> Vec<u16> {
     }
 
     out
+}
+
+/// Reads the FDArray: one Font DICT per set of glyphs, each with its own
+/// Private DICT and possibly its own matrix.
+fn read_fd_array(data: &[u8], offset: f64) -> Vec<(Private<'_>, Option<[f64; 6]>)> {
+    if !(0.0..=(usize::MAX as f64)).contains(&offset) {
+        return Vec::new();
+    }
+    let Some((index, _)) = Index::parse(data, offset as usize) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(index.len().min(1 << 16));
+    for i in 0..index.len() {
+        let Some(bytes) = index.get(i) else { break };
+        let dict = parse_dict(bytes);
+        let private = dict_get(&dict, 18)
+            .and_then(|operands| read_private(data, operands))
+            .unwrap_or_default();
+        let matrix = match dict_get(&dict, 0x0C07) {
+            Some(m) if m.len() >= 6 => Some([m[0], m[1], m[2], m[3], m[4], m[5]]),
+            _ => None,
+        };
+        out.push((private, matrix));
+    }
+    out
+}
+
+/// Reads FDSelect: which Font DICT each glyph belongs to, formats 0 and 3.
+fn read_fd_select(data: &[u8], offset: f64, glyphs: usize) -> Vec<u8> {
+    let mut out = vec![0u8; glyphs.min(1 << 16)];
+    if !(0.0..=(usize::MAX as f64)).contains(&offset) || glyphs == 0 {
+        return out;
+    }
+    let offset = offset as usize;
+    match data.get(offset) {
+        Some(0) => {
+            for (gid, slot) in out.iter_mut().enumerate() {
+                let Some(&fd) = data.get(offset + 1 + gid) else {
+                    break;
+                };
+                *slot = fd;
+            }
+        }
+        Some(3) => {
+            let Some(ranges) = be16(data, offset + 1) else {
+                return out;
+            };
+            let at = offset + 3;
+            // Each range runs to the first glyph of the next one, and the
+            // sentinel two bytes after the last range ends it.
+            for i in 0..usize::from(ranges) {
+                let (Some(first), Some(&fd)) = (be16(data, at + i * 3), data.get(at + i * 3 + 2))
+                else {
+                    break;
+                };
+                let Some(next) = be16(data, at + (i + 1) * 3) else {
+                    break;
+                };
+                for gid in usize::from(first)..usize::from(next).min(out.len()) {
+                    if let Some(slot) = out.get_mut(gid) {
+                        *slot = fd;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// `a` applied first, then `b`.
+fn concat(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
+    [
+        a[0] * b[0] + a[1] * b[2],
+        a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2],
+        a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4],
+        a[4] * b[1] + a[5] * b[3] + b[5],
+    ]
 }
 
 fn be16(data: &[u8], at: usize) -> Option<u16> {
@@ -1351,6 +1554,9 @@ fn bias(count: usize) -> i32 {
 
 struct Charstring<'a, 'b> {
     cff: &'b Cff<'a>,
+    /// The Private DICT this glyph runs under, which in a CID-keyed font is
+    /// its Font DICT's rather than the top-level one.
+    private: &'b Private<'a>,
     outline: Outline,
     stack: Vec<f64>,
     x: f64,
@@ -1378,9 +1584,9 @@ impl Charstring<'_, '_> {
         };
         if odd_extra && !self.stack.is_empty() {
             let extra = self.stack.remove(0);
-            self.width = Some(self.cff.nominal_width + extra);
+            self.width = Some(self.private.nominal_width + extra);
         } else {
-            self.width = Some(self.cff.default_width);
+            self.width = Some(self.private.default_width);
         }
     }
 
@@ -1390,9 +1596,9 @@ impl Charstring<'_, '_> {
         }
         if self.stack.len() > expected && !self.stack.is_empty() {
             let extra = self.stack.remove(0);
-            self.width = Some(self.cff.nominal_width + extra);
+            self.width = Some(self.private.nominal_width + extra);
         } else {
-            self.width = Some(self.cff.default_width);
+            self.width = Some(self.private.default_width);
         }
     }
 
@@ -1628,9 +1834,9 @@ impl Charstring<'_, '_> {
                     let Some(index) = self.stack.pop() else {
                         return;
                     };
-                    let biased = index as i32 + bias(self.cff.local_subrs.len());
+                    let biased = index as i32 + bias(self.private.local_subrs.len());
                     if let Ok(index) = usize::try_from(biased) {
-                        if let Some(code) = self.cff.local_subrs.get(index) {
+                        if let Some(code) = self.private.local_subrs.get(index) {
                             self.depth += 1;
                             self.run(code);
                             self.depth -= 1;
@@ -1840,6 +2046,15 @@ mod tests {
         out
     }
 
+    /// A charstring that draws nothing itself and calls local subroutine 0.
+    ///
+    /// Subroutine numbers are biased, and a font with fewer than 1240 of them
+    /// biases by 107 — so subroutine 0 is called with the operand -107, which
+    /// is the single byte 32.
+    fn subr_glyph() -> Vec<u8> {
+        vec![32, 10, 14]
+    }
+
     /// Where each table landed, so the Top DICT can point at it.
     #[derive(Default)]
     struct Offsets {
@@ -1847,6 +2062,8 @@ mod tests {
         encoding: i32,
         charstrings: i32,
         private: (i32, i32),
+        fd_array: i32,
+        fd_select: i32,
     }
 
     /// A charset or encoding: a predefined number, or a table in the file.
@@ -1876,15 +2093,37 @@ mod tests {
         encoding: Table,
         private: Vec<u8>,
         subrs: Vec<Vec<u8>>,
+        /// `ROS`, which is what makes the font CID-keyed.
+        cid: bool,
+        /// The FDArray, one entry per Font DICT.
+        fds: Vec<FontDict>,
+        /// The FDSelect table, already encoded.
+        fd_select: Vec<u8>,
+        /// A Top DICT `FontMatrix`, for the CID-keyed matrix rules.
+        font_matrix: Option<[i32; 6]>,
     }
 
     impl Fixture {
         fn top_dict(&self, at: &Offsets) -> Vec<u8> {
             let mut out = Vec::new();
+            if self.cid {
+                // The registry and ordering SIDs are the first two custom
+                // strings; the supplement is zero.
+                out.extend(entry(0x0C1E, &[391, 392, 0]));
+            }
+            if let Some(m) = self.font_matrix {
+                out.extend(entry(0x0C07, &m));
+            }
             out.extend(entry(15, &[at.charset]));
-            out.extend(entry(16, &[at.encoding]));
+            if !self.cid {
+                out.extend(entry(16, &[at.encoding]));
+            }
             out.extend(entry(17, &[at.charstrings]));
             out.extend(entry(18, &[at.private.0, at.private.1]));
+            if !self.fds.is_empty() {
+                out.extend(entry(0x0C24, &[at.fd_array]));
+                out.extend(entry(0x0C25, &[at.fd_select]));
+            }
             out
         }
 
@@ -1910,6 +2149,8 @@ mod tests {
                 encoding: 0,
                 charstrings: 0,
                 private: (self.private.len() as i32, 0),
+                fd_array: 0,
+                fd_select: 0,
             };
             let mut cursor =
                 header.len() + names.len() + (2 + 1 + 8 + top_len) + strings.len() + gsubrs.len();
@@ -1928,6 +2169,10 @@ mod tests {
             };
             cursor += encoding.len();
 
+            let fd_select_at = cursor;
+            at.fd_select = cursor as i32;
+            cursor += self.fd_select.len();
+
             let charstrings_at = cursor;
             at.charstrings = cursor as i32;
             cursor += charstrings.len();
@@ -1938,6 +2183,40 @@ mod tests {
 
             let subrs = wide_index(&self.subrs);
             let subrs_at = cursor;
+            cursor += subrs.len();
+
+            // Each Font DICT's Private DICT is laid down before the FDArray
+            // that points at it, and its Subrs offset is measured from the
+            // Private DICT rather than from the file.
+            let mut fd_dicts: Vec<Vec<u8>> = Vec::new();
+            let mut fd_bodies: Vec<(usize, Vec<u8>)> = Vec::new();
+            for fd in &self.fds {
+                let (private, fd_subrs, matrix) = (&fd.private, &fd.subrs, &fd.matrix);
+                let mut body = private.clone();
+                if !fd_subrs.is_empty() {
+                    body.extend(entry(19, &[private.len() as i32 + 6]));
+                    // The Subrs operand above is five bytes plus its operator,
+                    // so the INDEX begins six bytes past the DICT it is in.
+                    assert_eq!(body.len(), private.len() + 6);
+                    body.extend(wide_index(fd_subrs));
+                }
+                // The DICT's declared size covers the Subrs entry too, or the
+                // subroutines are simply not read.
+                let dict_len = if fd_subrs.is_empty() {
+                    private.len()
+                } else {
+                    private.len() + 6
+                };
+                let mut dict = Vec::new();
+                if let Some(m) = matrix {
+                    dict.extend(entry(0x0C07, m));
+                }
+                dict.extend(entry(18, &[dict_len as i32, cursor as i32]));
+                fd_dicts.push(dict);
+                fd_bodies.push((cursor, body.clone()));
+                cursor += body.len();
+            }
+            at.fd_array = cursor as i32;
 
             let mut out = header.to_vec();
             out.extend_from_slice(&names);
@@ -1948,14 +2227,36 @@ mod tests {
             out.extend_from_slice(&charset);
             assert_eq!(out.len(), encoding_at);
             out.extend_from_slice(&encoding);
+            assert_eq!(out.len(), fd_select_at);
+            out.extend_from_slice(&self.fd_select);
             assert_eq!(out.len(), charstrings_at);
             out.extend_from_slice(&charstrings);
             assert_eq!(out.len(), private_at);
             out.extend_from_slice(&self.private);
             assert_eq!(out.len(), subrs_at);
             out.extend_from_slice(&subrs);
+            for (start, body) in &fd_bodies {
+                assert_eq!(out.len(), *start);
+                out.extend_from_slice(body);
+            }
+            if !self.fds.is_empty() {
+                assert_eq!(out.len(), at.fd_array as usize);
+                out.extend_from_slice(&wide_index(&fd_dicts));
+            }
             out
         }
+    }
+
+    /// One member of a CID-keyed font's FDArray.
+    struct FontDict {
+        /// The Private DICT this Font DICT points at.
+        private: Vec<u8>,
+        /// Its local subroutines, which are what make the choice of Font DICT
+        /// visible in the outline a glyph draws.
+        subrs: Vec<Vec<u8>>,
+        /// A font matrix of its own, which a CID-keyed font may carry here
+        /// instead of in the Top DICT.
+        matrix: Option<[i32; 6]>,
     }
 
     /// A Private DICT declaring both widths, and Subrs when `subrs` is set.
@@ -2409,6 +2710,100 @@ mod tests {
         assert_eq!(cff.gid_for_code(0), None);
     }
 
+    /// A CID-keyed font: `ROS`, a charset of CIDs, an FDArray and an
+    /// FDSelect, in the two formats FDSelect has.
+    fn cid_fixture(fd_select: Vec<u8>) -> Fixture {
+        Fixture {
+            strings: vec![b"Adobe".to_vec(), b"Identity".to_vec()],
+            charstrings: vec![vec![14], subr_glyph(), subr_glyph(), subr_glyph()],
+            // CIDs 10, 11 and 12, as one run.
+            charset: Table::Bytes(charset_runs(2, &[(10, 2)])),
+            private: private_dict(600, 600, false),
+            cid: true,
+            fds: vec![
+                FontDict {
+                    private: private_dict(600, 600, false),
+                    subrs: vec![box_glyph(600)],
+                    matrix: None,
+                },
+                FontDict {
+                    private: private_dict(600, 600, false),
+                    subrs: vec![box_glyph(200)],
+                    matrix: None,
+                },
+            ],
+            fd_select,
+            ..Fixture::default()
+        }
+    }
+
+    #[test]
+    fn a_cid_keyed_font_reaches_its_glyphs_by_cid() {
+        // FDSelect format 0: one byte per glyph.
+        let font = cid_fixture(vec![0, 0, 0, 1, 1]).build();
+        let cff = Cff::parse(&font).expect("a CID-keyed font");
+
+        assert!(cff.is_cid());
+        assert_eq!(cff.gid_for_cid(10), Some(1));
+        assert_eq!(cff.gid_for_cid(12), Some(3));
+        assert_eq!(cff.gid_for_cid(13), None, "a CID the font does not carry");
+        assert_eq!(
+            cff.gid_for_cid(0x1_0000),
+            None,
+            "a CID wider than the charset can express names no glyph"
+        );
+        assert_eq!(
+            cff.gid_for_name("A"),
+            None,
+            "a CID-keyed font has CIDs, not names"
+        );
+        assert_eq!(cff.glyph_name(1), None);
+    }
+
+    /// Every glyph in a CID-keyed font calls local subroutine 0, and the two
+    /// Font DICTs define a different subroutine for it. A parser that used
+    /// the top-level Private DICT for all of them would draw one shape.
+    #[test]
+    fn fdselect_picks_the_local_subroutines() {
+        for (which, fd_select) in [
+            // Format 0: glyphs 0 and 1 on Font DICT 0, 2 and 3 on 1.
+            vec![0u8, 0, 0, 1, 1],
+            // Format 3: two ranges and the sentinel, saying the same thing.
+            vec![3, 0, 2, 0, 0, 0, 0, 2, 1, 0, 4],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let font = cid_fixture(fd_select).build();
+            let cff = Cff::parse(&font).unwrap_or_else(|| panic!("format {which}"));
+            assert_eq!(box_width(&cff, 1), Some(600.0), "format {which}, glyph 1");
+            assert_eq!(box_width(&cff, 2), Some(200.0), "format {which}, glyph 2");
+            assert_eq!(box_width(&cff, 3), Some(200.0), "format {which}, glyph 3");
+        }
+    }
+
+    #[test]
+    fn a_font_dict_carries_its_own_matrix() {
+        let mut fixture = cid_fixture(vec![0, 0, 0, 1, 1]);
+        fixture.fds[1].matrix = Some([2, 0, 0, 2, 0, 0]);
+        let font = fixture.build();
+        let cff = Cff::parse(&font).expect("a CID-keyed font");
+
+        // The Top DICT has no matrix, so the Font DICT's is the whole of it.
+        assert_eq!(cff.font_matrix_for(1), [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+        assert_eq!(cff.font_matrix_for(2), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+
+        // With both, the glyph's space passes through the Font DICT's matrix
+        // and then the Top DICT's.
+        let mut fixture = cid_fixture(vec![0, 0, 0, 1, 1]);
+        fixture.fds[1].matrix = Some([2, 0, 0, 2, 0, 0]);
+        fixture.font_matrix = Some([3, 0, 0, 3, 0, 0]);
+        let font = fixture.build();
+        let cff = Cff::parse(&font).expect("a CID-keyed font");
+        assert_eq!(cff.font_matrix_for(1), [3.0, 0.0, 0.0, 3.0, 0.0, 0.0]);
+        assert_eq!(cff.font_matrix_for(2), [6.0, 0.0, 0.0, 6.0, 0.0, 0.0]);
+    }
+
     #[test]
     fn garbage_is_rejected_without_panicking() {
         assert!(Cff::parse(&[]).is_none());
@@ -2429,7 +2824,7 @@ mod tests {
     /// has found. None of them may read past the end, allocate on a count it
     /// was handed, or take longer than the glyphs it has.
     #[test]
-    fn hostile_charsets_and_encodings_are_survivable() {
+    fn hostile_charsets_encodings_and_fdselects_are_survivable() {
         // A charset run claiming 65535 glyphs in a font that has four.
         let font = Fixture {
             charset: Table::Bytes(charset_runs(2, &[(34, 0xFFFF)])),
@@ -2468,6 +2863,27 @@ mod tests {
                 }
                 let _ = cff.gid_for_name("A");
                 let _ = cff.gid_for_code(65);
+            }
+        }
+
+        // An FDSelect format 3 whose ranges run backwards, overlap, and end
+        // past the glyph count.
+        for table in [
+            vec![3u8, 0, 1, 0, 9, 0, 0, 0],
+            vec![3, 0, 2, 0, 3, 0, 0, 0, 1, 0, 0],
+            vec![3, 0xFF, 0xFF, 0, 0, 0],
+            vec![0, 9, 9, 9],
+            vec![7],
+            vec![],
+        ] {
+            let font = cid_fixture(table).build();
+            let Some(cff) = Cff::parse(&font) else {
+                continue;
+            };
+            for glyph in 0..8u16 {
+                let _ = cff.outline(glyph);
+                let _ = cff.advance(glyph);
+                let _ = cff.font_matrix_for(glyph);
             }
         }
     }
