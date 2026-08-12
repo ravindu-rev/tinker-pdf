@@ -458,6 +458,47 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// A shading pattern used as a fill *and* as a stroke.
+///
+/// *Added August 2026, with gap 07.* `fill_with_pattern` had no fingerprint
+/// at all before this. The `shading` fixture above covers `sh`, which is a
+/// different loop over the canvas — the pattern path has its own inverse
+/// transform, its own coverage mask and, since gap 07, a stroked outline
+/// feeding it. Three things here are in no other fixture:
+///
+/// - the pattern's `/Matrix`, whose inverse is what maps a device pixel back
+///   into pattern space, at a rotation so that all four of its coefficients
+///   matter;
+/// - a stroked outline used as the shape a pattern fills, with a curve, so
+///   the stroker's flattening lands inside the pattern's coverage arithmetic;
+/// - a paint-time CTM that is *not* the identity, which is the anchoring
+///   guarantee of 8.7.3.1 expressed as bytes: the fingerprint moves if the
+///   pattern ever starts following it.
+fn pattern_page() -> Vec<u8> {
+    let content = "/Pattern cs /P0 scn\n\
+                   10 10 m 40 70 70 10 110 60 c 110 10 l h f\n\
+                   /Pattern CS /P0 SCN 6 w 1 J 1 j\n\
+                   q 1.5 0 0 1.5 5 5 cm\n\
+                   5 5 m 20 40 40 5 60 28 c S\n\
+                   Q";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /Pattern << /P0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /PatternType 2 /Matrix [0.8 0.6 -0.6 0.8 15 -10]\n\
+   /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 100 0]\n\
+     /Function << /FunctionType 2 /Domain [0 1]\n\
+                  /C0 [0.9 0.1 0] /C1 [0 0.2 0.9] /N 1 >>\n\
+     /Extend [true true] >> >>\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
 /// Blend modes, whose integer arithmetic is new and whose whole reason for
 /// being integer is this property.
 fn blend_page() -> Vec<u8> {
@@ -499,7 +540,7 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
 /// documentation for which of the two failures you are looking at.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
-    // 9600 and 3600 pixels.
+    // 9600, 3600 and 3230 pixels.
     Fixture {
         name: "text",
         build: text_page,
@@ -519,6 +560,11 @@ const GOLDEN: &[Fixture] = &[
         name: "blend",
         build: blend_page,
         least_ink: 1700,
+    },
+    Fixture {
+        name: "pattern",
+        build: pattern_page,
+        least_ink: 1600,
     },
 ];
 
@@ -546,6 +592,12 @@ fn rendering_is_stable_across_targets() {
         (
             "blend",
             "759840c7df7bad4fc49a2d94f763e8b5eca6d9edb64f3af1cdfcd635b2512258",
+        ),
+        // Added August 2026 with gap 07; no existing fixture reached
+        // `fill_with_pattern` at all.
+        (
+            "pattern",
+            "18765f39455bc173f00fc6272449402d0c5db445963b5334e3d511a766199af2",
         ),
     ];
     assert_eq!(

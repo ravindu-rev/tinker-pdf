@@ -323,13 +323,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// 8.7.3.1: a pattern's matrix maps pattern space to the *default* space
     /// of the page, not to the space in force when it is used. The CTM at fill
     /// time is therefore not part of it, which is why `base` appears here and
-    /// `state.ctm` does not.
+    /// `state.ctm` does not. A stroke reaches this through its outline, so
+    /// that guarantee covers strokes too — the stroker's transform never
+    /// enters the pattern.
+    ///
+    /// `alpha` is a parameter rather than a field of `state` because 8.4.5
+    /// gives painting two of them: a fill uses `ca`, a stroke uses `CA`, and
+    /// the callers are the only things that know which they are.
     fn fill_with_pattern(
         &mut self,
         path: &Path,
         rule: FillRule,
         name: &[u8],
         state: &GraphicsState,
+        alpha: f64,
     ) {
         let (shading, matrix) = match self.glyphs.pattern(name) {
             Some(PatternPaint::Shading(shading, matrix)) => (*shading, matrix),
@@ -364,7 +371,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             None => area,
         };
 
-        let alpha = state.fill_alpha.clamp(0.0, 1.0);
+        let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
         for py in 0..self.canvas.height {
             if self.cancel.is_cancelled() {
@@ -563,7 +570,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // at all. Painting it would put `/Pattern`'s nominal black over every
         // gradient in the document.
         if let Some(name) = state.fill_pattern.clone() {
-            self.fill_with_pattern(&built, rule, &name, state);
+            self.fill_with_pattern(&built, rule, &name, state, state.fill_alpha);
             return;
         }
 
@@ -686,6 +693,30 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             dash_phase: state.dash_phase * scale,
         };
         let outline = stroke(&built, &style, self.tolerance);
+
+        // 8.7.3: a stroke painted with a pattern takes its paint from the
+        // pattern, exactly as a fill does — and a stroke *is* a fill, of the
+        // outline just computed. So this needs no pattern machinery of its
+        // own; what it needed was to stop asking for `stroke_color`, which for
+        // `/Pattern` is the nominal black the colour crate reports because a
+        // pattern space has no colour of its own. Every gradient-stroked rule
+        // in every document came out solid black, silently.
+        //
+        // The rule is non-zero and is stated rather than defaulted: a stroked
+        // outline overlaps itself at joins, at caps and wherever a path
+        // crosses, and under even-odd every one of those overlaps would be
+        // punched back out into a hole.
+        if let Some(name) = state.stroke_pattern.clone() {
+            self.fill_with_pattern(
+                &outline,
+                FillRule::NonZero,
+                &name,
+                state,
+                state.stroke_alpha,
+            );
+            return;
+        }
+
         let color = stroke_color(state);
         self.paint(
             &outline,
@@ -786,14 +817,23 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // 9.3.6, Table 106: the mode decides which of fill, stroke and clip
         // happen, and they are independent. Filling regardless — which is what
         // this did — paints stroke-only text solid, in the wrong colour.
+        // A glyph is a shape like any other, so 8.7.3 applies to it unchanged:
+        // a pattern selected as the text colour paints the glyph. Both halves
+        // are routed, because a mode 2 glyph fills *and* strokes and a
+        // half-routed one would paint a black body under a patterned edge —
+        // which reads as a rendering bug rather than as a missing capability.
         if mode.fills() {
-            self.paint(
-                &path,
-                FillRule::NonZero,
-                fill_color(state),
-                state.fill_alpha,
-                blend_mode(state.blend),
-            );
+            if let Some(name) = state.fill_pattern.clone() {
+                self.fill_with_pattern(&path, FillRule::NonZero, &name, state, state.fill_alpha);
+            } else {
+                self.paint(
+                    &path,
+                    FillRule::NonZero,
+                    fill_color(state),
+                    state.fill_alpha,
+                    blend_mode(state.blend),
+                );
+            }
         }
         if mode.strokes() {
             let scale = state.ctm.then(&self.base).expansion();
@@ -802,13 +842,23 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 ..StrokeStyle::default()
             };
             let outlined = stroke(&path, &style, self.tolerance);
-            self.paint(
-                &outlined,
-                FillRule::NonZero,
-                stroke_color(state),
-                state.stroke_alpha,
-                blend_mode(state.blend),
-            );
+            if let Some(name) = state.stroke_pattern.clone() {
+                self.fill_with_pattern(
+                    &outlined,
+                    FillRule::NonZero,
+                    &name,
+                    state,
+                    state.stroke_alpha,
+                );
+            } else {
+                self.paint(
+                    &outlined,
+                    FillRule::NonZero,
+                    stroke_color(state),
+                    state.stroke_alpha,
+                    blend_mode(state.blend),
+                );
+            }
         }
         if mode.clips() {
             // 9.3.6: the glyphs of a text object accumulate into one clip that
@@ -1478,6 +1528,170 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|w| matches!(w, RenderWarning::UnsupportedShading { kind: 4 })));
+    }
+
+    /// A red-to-blue ramp across a 40 pt page, and one glyph shaped like a
+    /// tall box, so a stroked glyph has two vertical bars far enough apart for
+    /// the ramp to have moved between them.
+    ///
+    /// `Tile` stands for everything `PageResources` reports as unpaintable —
+    /// today every tiling pattern, and a mesh inside a shading pattern.
+    struct Patterns;
+
+    impl GlyphSource for Patterns {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            use tinker_pdf_font::Segment;
+            // One em is one unit here, which is the contract of this method.
+            Some(Outline {
+                segments: vec![
+                    Segment::MoveTo { x: 0.1, y: 0.0 },
+                    Segment::LineTo { x: 0.6, y: 0.0 },
+                    Segment::LineTo { x: 0.6, y: 0.7 },
+                    Segment::LineTo { x: 0.1, y: 0.7 },
+                    Segment::Close,
+                ],
+            })
+        }
+
+        fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
+            match name {
+                b"Grad" => Some(PatternPaint::Shading(
+                    Box::new(Shading::Axial {
+                        space: tinker_pdf_color::ColorSpace::DeviceRgb,
+                        function: tinker_pdf_color::Function::Exponential {
+                            domain: (0.0, 1.0),
+                            c0: vec![1.0, 0.0, 0.0],
+                            c1: vec![0.0, 0.0, 1.0],
+                            n: 1.0,
+                        },
+                        coords: [0.0, 0.0, 40.0, 0.0],
+                        extend: (true, true),
+                    }),
+                    Matrix::IDENTITY,
+                )),
+                b"Tile" => Some(PatternPaint::Unsupported),
+                _ => None,
+            }
+        }
+    }
+
+    /// One byte, one code, half an em wide.
+    struct OneChar;
+
+    impl tinker_pdf_content::FontSource for OneChar {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+    }
+
+    fn with_patterns(content: &[u8]) -> (Canvas, Vec<RenderWarning>) {
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &Patterns);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &OneChar);
+        renderer.finish()
+    }
+
+    /// 9.3.6 mode 1 strokes the glyph outline, and 8.7.3 says what with. The
+    /// stroking colour for `/Pattern` is the nominal black the colour crate
+    /// reports, so a fallback to it is unmistakable here: the ramp is red at
+    /// one end and blue at the other, and neither is black.
+    #[test]
+    fn a_pattern_stroked_glyph_shows_the_pattern() {
+        // The box spans 0.1..0.6 em; at 40 pt from x = 2 that puts its two
+        // vertical bars at device x = 6 and x = 26.
+        let (canvas, warnings) =
+            with_patterns(b"/Pattern CS /Grad SCN 4 w BT /F0 40 Tf 1 Tr 2 4 Td (A) Tj ET");
+
+        let left = canvas.pixel(6, 22).expect("a pixel");
+        let right = canvas.pixel(26, 22).expect("a pixel");
+        assert!(
+            left.r > 150 && left.b < 110,
+            "the left bar takes the red end of the ramp, got {left:?} — \
+             black is the stroking colour of a pattern space"
+        );
+        assert!(
+            right.b > 150 && right.r < 110,
+            "and the right bar the blue end, got {right:?}"
+        );
+        assert!(warnings.is_empty(), "nothing to report: {warnings:?}");
+    }
+
+    /// The same glyph with a pattern this build cannot paint. It must degrade
+    /// the way a fill does — nothing painted, and a warning naming it — rather
+    /// than stroking the black that `/Pattern` nominally reports.
+    #[test]
+    fn a_glyph_stroked_with_an_unpaintable_pattern_warns() {
+        let (canvas, warnings) =
+            with_patterns(b"/Pattern CS /Tile SCN 4 w BT /F0 40 Tf 1 Tr 2 4 Td (A) Tj ET");
+
+        assert_eq!(
+            canvas.pixel(6, 22),
+            Some(Color::WHITE),
+            "the glyph is left alone rather than stroked black"
+        );
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                RenderWarning::UnsupportedPattern { name } if name == "Tile"
+            )),
+            "and the gap is named: {warnings:?}"
+        );
+    }
+
+    /// Mode 2 fills *and* strokes one glyph. Routing only the stroke would
+    /// paint a black body under a patterned edge, which reads as a rendering
+    /// bug rather than as a missing capability.
+    #[test]
+    fn a_pattern_filled_and_stroked_glyph_has_no_black_in_it() {
+        let (canvas, _) = with_patterns(
+            b"/Pattern cs /Grad scn /Pattern CS /Grad SCN 4 w \
+              BT /F0 40 Tf 2 Tr 2 4 Td (A) Tj ET",
+        );
+
+        // Inside the box, away from both bars.
+        let body = canvas.pixel(16, 22).expect("a pixel");
+        assert!(
+            body.r + body.b > 150,
+            "the glyph body carries the ramp, got {body:?} — \
+             (0, 0, 0) is the fill colour of a pattern space"
+        );
+    }
+
+    /// A stroked outline is filled non-zero, always. Two subpaths of one path
+    /// crossing at right angles overlap where they meet; under the even-odd
+    /// rule that overlap is a hole, and a wide-stroked cross comes out with a
+    /// white square in the middle of it.
+    ///
+    /// Asserted rather than left to the default, because a default that
+    /// happens to be right is not a guarantee.
+    #[test]
+    fn a_self_crossing_pattern_stroke_fills_its_overlap() {
+        let (canvas, _) = with_patterns(b"/Pattern CS /Grad SCN 8 w 5 5 m 35 35 l 5 35 m 35 5 l S");
+
+        let centre = canvas.pixel(20, 20).expect("a pixel");
+        assert_ne!(
+            centre,
+            Color::WHITE,
+            "the crossing is painted, not punched out"
+        );
+        // The ramp is halfway across at the centre, so both ends contribute.
+        assert!(
+            centre.r > 90 && centre.b > 90,
+            "and it is the pattern that painted it, got {centre:?}"
+        );
+        // The arms too, so a canvas painted edge to edge cannot pass.
+        assert_ne!(
+            canvas.pixel(8, 31),
+            Some(Color::WHITE),
+            "the lower left arm"
+        );
+        assert_eq!(canvas.pixel(20, 4), Some(Color::WHITE), "and nothing above");
     }
 
     #[test]
