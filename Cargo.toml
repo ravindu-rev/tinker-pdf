@@ -42,16 +42,22 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ravindu-rev/tinker-pdf"
 authors = ["tinker-pdf contributors"]
 
+# `default-features = false` on the four crates that carry a feature, because
+# a member writing it for itself is *ignored* unless the workspace entry says
+# so too — cargo's rule, and a quiet one: the manifest reads as though the
+# feature were off and it is on. Each of the four re-declares
+# `default = ["cmap-predefined"]`, so a plain `cargo build` still gets the
+# tables and only `--no-default-features` on the facade drops them.
 [workspace.dependencies]
-tinker-pdf-cos = { path = "crates/tinker-pdf-cos" }
+tinker-pdf-cos = { path = "crates/tinker-pdf-cos", default-features = false }
 tinker-pdf-filters = { path = "crates/tinker-pdf-filters" }
 tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto" }
-tinker-pdf-font = { path = "crates/tinker-pdf-font" }
+tinker-pdf-font = { path = "crates/tinker-pdf-font", default-features = false }
 tinker-pdf-color = { path = "crates/tinker-pdf-color" }
 tinker-pdf-math = { path = "crates/tinker-pdf-math" }
 tinker-pdf-raster = { path = "crates/tinker-pdf-raster" }
-tinker-pdf-content = { path = "crates/tinker-pdf-content" }
-tinker-pdf-render = { path = "crates/tinker-pdf-render" }
+tinker-pdf-content = { path = "crates/tinker-pdf-content", default-features = false }
+tinker-pdf-render = { path = "crates/tinker-pdf-render", default-features = false }
 tinker-pdf = { path = "crates/tinker-pdf" }
 
 [profile.release]

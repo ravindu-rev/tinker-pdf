@@ -8,6 +8,11 @@ repository.workspace = true
 authors.workspace = true
 description = "Content-stream tokenizer and interpreter; the Device trait seam; the text-extraction device"
 
+[features]
+# Forwarded; see `tinker-pdf-font`.
+default = ["cmap-predefined"]
+cmap-predefined = ["tinker-pdf-font/cmap-predefined", "tinker-pdf-cos/cmap-predefined"]
+
 [dependencies]
 tinker-pdf-cos = { workspace = true }
 tinker-pdf-font = { workspace = true }

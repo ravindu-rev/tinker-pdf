@@ -33,6 +33,18 @@ jobs:
       # failure rather than something nobody notices. The wasm leg is the
       # `wasm-determinism` job below.
       - run: cargo test --workspace
+      # `cmap-predefined` off, *run* rather than merely linked: a build
+      # without the CJK tables keeps the codespaces and drops the CIDs, and
+      # `tinker-pdf-font/tests/predefined_cmaps_absent.rs` is the only place
+      # that path is exercised at all.
+      #
+      # Per package rather than at the workspace root, and this is not a
+      # style choice. `tools/` and `tinker-pdf-ffi` depend on the facade with
+      # its default features, cargo unifies features across everything in one
+      # build, so `--workspace --no-default-features` leaves the feature *on*
+      # and passes while proving nothing.
+      - run: cargo test -p tinker-pdf-font --no-default-features
+      - run: cargo test -p tinker-pdf --no-default-features
       # Two design rules the compiler cannot enforce: a new crate edge
       # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan
       # 00 and ruling 8 say what the graph is; ruling 4 says why the platform

@@ -19,6 +19,11 @@
 //! Unlike `cmap_inheritance.rs`, nothing here is hand-built. Every code, CID
 //! and codespace below is quoted from
 //! `crates/tinker-pdf-font/data/cmap-resources/Adobe-Japan1-7/CMap/`.
+//!
+//! The tables are behind `cmap-predefined`, so this whole file is. What a
+//! build without them does instead is
+//! `tinker-pdf-font/tests/predefined_cmaps_absent.rs`.
+#![cfg(feature = "cmap-predefined")]
 
 use tinker_pdf::{Bitmap, Document, RenderOptions, RenderWarning};
 

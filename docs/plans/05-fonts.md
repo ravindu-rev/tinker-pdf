@@ -194,16 +194,46 @@ sources never ship in the crate binary.
 | Annex D encodings, Symbol, ZapfDingbats | spec text | typed tables, trivial size |
 | AGL + AGLFN | BSD-3-Clause (adobe-type-tools) | perfect-hash name→char table |
 | Base-14 AFMs | Adobe's redistribution notice | advances + FontBBox only |
-| Predefined CMaps | BSD-3-Clause (cmap-resources) | delta-encoded ranges, deflated with our own filter code |
+| Predefined CMaps | BSD-3-Clause (cmap-resources) | delta-encoded ranges, deflated with our own filter code — built August 2026, one deflate stream per CMap so a lookup inflates 71 KB at most rather than the whole 1.6 MB |
 | Liberation faces (wave 2) | OFL-1.1 | deflated TTFs, 12 faces |
 
 Licenses ride along in `THIRDPARTY.md`; OFL and BSD data assets do not affect the
-MIT OR Apache-2.0 code license, and CI license checks are taught the distinction. Size is a
-real cost against the wasm budget: the CJK CMap set is ~10 MB of source text, expected to
-compile+deflate to low single-digit MB, and Liberation is ~2 MB deflated — both numbers are
-estimates until measured at M4/M10, and the measured figures get recorded in this file.
-Feature gates: `cmap-predefined` (default on; Identity-H/V are always compiled in regardless)
-and `bundled-fonts` (default on; wasm hosts that supply a `FontProvider` can drop both).
+MIT OR Apache-2.0 code license, and CI license checks are taught the distinction — as of
+August 2026 by `cargo xtask vendor`, which holds every vendored tree to the same `deny.toml`
+allowlist a crate license answers to, since `cargo deny` reads the crate graph and a directory
+of text files is not in it. Feature gates: `cmap-predefined` (default on; Identity-H/V are
+always compiled in regardless) and `bundled-fonts` (default on; wasm hosts that supply a
+`FontProvider` can drop both).
+
+**Measured, August 2026 (gap [03](gaps/03-predefined-cmaps.md) M4).** The estimate was "~10 MB
+of source text, expected to compile+deflate to low single-digit MB". The whole registry — 202
+CMaps, every collection including the deprecated Adobe-Japan2 — is **7.5 MB of source**
+compiling to **1.19 MB** of delta-encoded, deflated tables. The wasm figures are the
+`bindings/js` cdylib for `wasm32-unknown-unknown`, release, which is the artefact a browser
+actually loads:
+
+| `cmap-predefined` | `.wasm` | gzip -9 |
+| --- | --- | --- |
+| on (default) | 2 517 958 B | 1 532 572 B |
+| off | 1 266 317 B | 382 942 B |
+| **delta** | **1 251 641 B** | **1 149 630 B** |
+
+Two things worth reading off that table. The raw delta is within 139 bytes of the compiled
+blob, so the tables ship as themselves and nothing else grew. And the *gzipped* delta is 92 %
+of the raw one — deflating at build time is not redundant with transport compression, it is
+the reason the transport has nothing left to do, and a host that skipped it would pay the
+full 1.6 MB of varint data over the wire.
+
+Shipping the whole registry rather than a common subset was the decision that number bought.
+Plan 03's non-goals permitted "the common subset ... if the wasm budget cannot take it", and
+at 1.19 MB behind a default-on feature it can. The subset would have had to drop the
+Unicode-keyed CMaps, which are three quarters of the bytes and the ones modern producers
+actually emit.
+
+A build with the feature off is not blind: the codespace ranges, writing modes and `usecmap`
+parents are a separate 4.6 KB table that is always compiled in, so strings still split at the
+right widths and the advances stay right. Only the code-to-CID mapping goes, and
+`CMap::is_approximate` reports its absence rather than substituting identity.
 
 ### Wave 2 — outline extraction
 
@@ -333,8 +363,18 @@ in a way table parsing is not, and at least one of the three will run long.
 - **Needs first:** the COS phase (font dictionaries, FontFile stream access with decryption
   and decoding already applied) and the filters phase (FlateDecode for FontFile2/3 and for the
   bundled-asset pipeline) — see [PLAN.md](../PLAN.md) for their numbers. `tinker-pdf-crypto`
-  is only an indirect dependency through COS. The leaf crate itself depends on nothing, which
-  is what keeps its fuzz targets honest.
+  is only an indirect dependency through COS.
+
+  *Amended August 2026.* This section used to end "the leaf crate itself depends on nothing,
+  which is what keeps its fuzz targets honest". It now depends on one crate: `tinker-pdf-filters`,
+  which is what the "bundled-asset pipeline" clause above was always going to mean. `build.rs`
+  deflates the compiled CMap tables with it and the crate inflates them again; ruling 3 is
+  untouched, because a sibling workspace crate implementing the engine's own deflate is not a
+  third-party dependency, and there is no cycle to create, because `filters` depends on
+  nothing. The runtime edge is optional and vanishes with `cmap-predefined`; the build-time
+  edge is unconditional and never reaches a binary. What the original sentence was protecting
+  — the leaf knows no PDF types, so its fuzz targets need no document — is unchanged, and
+  `cargo xtask dag` carries the edge with its reason.
 - **Wave 2 additionally needs:** the path filler from [07-raster](07-rasterizer.md); Type3 needs
   the interpreter from [06-content](06-content-and-text.md) (no crate cycle — the delegating code lives
   in `tinker-pdf-content`).

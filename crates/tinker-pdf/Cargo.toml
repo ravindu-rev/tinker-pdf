@@ -8,6 +8,19 @@ repository.workspace = true
 authors.workspace = true
 description = "A from-scratch, pure-Rust PDF engine: open, authenticate, extract text, render, write. The facade crate - the only one users depend on"
 
+[features]
+# The predefined CMaps of 9.7.5.2, on by default. This is the switch a host
+# actually reaches for -- plan 05 makes it a feature so a wasm build that
+# supplies its own encoding tables, or renders no CJK, need not carry a
+# megabyte of them. `Identity-H` and `Identity-V` work either way.
+default = ["cmap-predefined"]
+cmap-predefined = [
+  "tinker-pdf-font/cmap-predefined",
+  "tinker-pdf-cos/cmap-predefined",
+  "tinker-pdf-content/cmap-predefined",
+  "tinker-pdf-render/cmap-predefined",
+]
+
 [dependencies]
 tinker-pdf-cos = { workspace = true }
 tinker-pdf-font = { workspace = true }

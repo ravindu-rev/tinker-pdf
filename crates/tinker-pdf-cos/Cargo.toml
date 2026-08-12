@@ -8,6 +8,13 @@ repository.workspace = true
 authors.workspace = true
 description = "PDF file syntax: lexer, objects, xref (classic, stream, hybrid), object streams, repair scanner, serializers"
 
+[features]
+# Forwarded, not owned. See `tinker-pdf-font`, which is where the tables are;
+# a feature has to be re-declared at every link of the chain or
+# `--no-default-features` at the workspace root turns nothing off further down.
+default = ["cmap-predefined"]
+cmap-predefined = ["tinker-pdf-font/cmap-predefined"]
+
 [dependencies]
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-crypto = { workspace = true }

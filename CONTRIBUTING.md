@@ -3,7 +3,7 @@
 ## Build
 
 ```bash
-cargo build                    # no C toolchain, no bindgen, no vendored anything
+cargo build                    # no C toolchain, no bindgen, no fetching at build time
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
@@ -12,6 +12,23 @@ cargo fmt --all
 That is the whole prerequisite list: `rustup`, and nothing else. Keeping it
 that way is a feature, not an accident — see [README](README.md) on why this
 engine exists.
+
+One build step is not `rustc`: `tinker-pdf-font/build.rs` compiles Adobe's
+vendored CMap registry (`THIRDPARTY.md`) into static tables. It reads a
+directory that is in the repository — nothing is downloaded, so an offline
+build and a reproducible one both still work — and the workspace sets
+`opt-level = 2` for build scripts so it costs seconds rather than a minute.
+
+Features are a gate leg, and they cannot be run from the workspace root:
+
+```bash
+cargo test -p tinker-pdf-font --no-default-features
+cargo test -p tinker-pdf --no-default-features
+```
+
+`--workspace --no-default-features` turns nothing off, because `tools/` and
+`tinker-pdf-ffi` depend on the facade with its defaults and cargo unifies
+features across everything in one build. It passes, and it proves nothing.
 
 `wasm32-unknown-unknown` is a first-class target and CI builds it on every
 push:

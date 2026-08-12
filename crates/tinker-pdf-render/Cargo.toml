@@ -8,6 +8,14 @@ repository.workspace = true
 authors.workspace = true
 description = "The rasterizing Device: content interpretation drawn through the rasterizer"
 
+[features]
+# Forwarded; see `tinker-pdf-font`.
+default = ["cmap-predefined"]
+cmap-predefined = [
+  "tinker-pdf-font/cmap-predefined",
+  "tinker-pdf-content/cmap-predefined",
+]
+
 [dependencies]
 tinker-pdf-content = { workspace = true }
 tinker-pdf-raster = { workspace = true }
