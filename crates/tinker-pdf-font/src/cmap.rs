@@ -38,6 +38,49 @@ pub struct CodespaceRange {
     pub high: u32,
 }
 
+impl CodespaceRange {
+    /// Whether `code` is in this range, **byte by byte** (9.7.6.2).
+    ///
+    /// The bounds are not one interval on an integer; they are one interval
+    /// per byte position, and every byte of the code has to be inside its
+    /// own. Comparing the whole thing as a number is wrong in a way that
+    /// looks right in the common case and matters in exactly the encodings
+    /// this gap exists for: `90ms-RKSJ-H` declares `<8140> <9FFC>`, and
+    /// 0x9F30 is between those two as a number while its trailing byte is
+    /// nowhere near the 0x40..0xFC a Shift-JIS trail byte may take. The
+    /// UTF-8 CMaps are worse — `<E0A080> <EFBFBF>` as an integer interval
+    /// admits sequences that are not UTF-8 at all.
+    #[must_use]
+    fn contains(&self, code: &[u8]) -> bool {
+        if code.len() != usize::from(self.bytes) {
+            return false;
+        }
+        (0..self.bytes).all(|k| {
+            let b = code.get(usize::from(k)).copied().unwrap_or_default();
+            (self.byte(self.low, k)..=self.byte(self.high, k)).contains(&b)
+        })
+    }
+
+    /// Whether a code in this range may begin with `lead`.
+    ///
+    /// 9.7.6.3 decides how many bytes an *undefined* code consumes from its
+    /// first byte alone, which is what keeps a damaged string in step: the
+    /// byte after a bad two-byte code is the start of the next code, not its
+    /// own second byte.
+    #[must_use]
+    fn covers_lead(&self, lead: u8) -> bool {
+        self.bytes >= 1 && (self.byte(self.low, 0)..=self.byte(self.high, 0)).contains(&lead)
+    }
+
+    /// Byte `index` of a bound, counting from the most significant of the
+    /// `bytes` this range uses.
+    #[must_use]
+    fn byte(&self, value: u32, index: u8) -> u8 {
+        let shift = u32::from(self.bytes.saturating_sub(1).saturating_sub(index)) * 8;
+        ((value >> shift.min(24)) & 0xFF) as u8
+    }
+}
+
 /// A parsed CMap.
 #[derive(Clone, Debug, Default)]
 pub struct CMap {
@@ -178,60 +221,71 @@ impl CMap {
         self.vertical
     }
 
-    /// Splits a string into codes, using the codespace ranges.
+    /// Splits a string into codes, using the codespace ranges (9.7.6.2).
     ///
-    /// A byte sequence matching no range is consumed one byte at a time, which
-    /// is what 9.7.6.3 prescribes and keeps a damaged string from swallowing
-    /// the rest of the text.
+    /// This is the half of a CMap that decides where one code ends and the
+    /// next begins, and getting it wrong is worse than getting a CID wrong.
+    /// A mis-split string has the wrong *number* of codes in it, so every
+    /// glyph after the first mistake is wrong, and because the CID also
+    /// drives the `/W` lookup in the binder, so is every advance. Text that
+    /// is merely mis-mapped still occupies the right space on the page; text
+    /// that is mis-split does not.
     #[must_use]
     pub fn decode_codes(&self, bytes: &[u8]) -> Vec<(u32, u8)> {
         let mut out = Vec::new();
-        let mut i = 0usize;
-
-        // With no codespace at all, a simple font's one-byte default applies.
-        let default_len = if self.codespaces.is_empty() {
-            if self.identity {
-                2
-            } else {
-                1
-            }
-        } else {
-            0
-        };
-
-        while i < bytes.len() {
-            let mut matched = None;
-            if default_len == 0 {
-                for len in 1..=4usize {
-                    let Some(slice) = bytes.get(i..i + len) else {
-                        continue;
-                    };
-                    let value = slice.iter().fold(0u32, |a, &b| (a << 8) | u32::from(b));
-                    if self
-                        .codespaces
-                        .iter()
-                        .any(|r| usize::from(r.bytes) == len && (r.low..=r.high).contains(&value))
-                    {
-                        matched = Some((value, len as u8));
-                        break;
-                    }
-                }
-            }
-
-            let (value, len) = matched.unwrap_or_else(|| {
-                let len = if default_len > 0 { default_len } else { 1 }.min(bytes.len() - i);
-                let slice = bytes.get(i..i + len).unwrap_or_default();
-                (
-                    slice.iter().fold(0u32, |a, &b| (a << 8) | u32::from(b)),
-                    len as u8,
-                )
-            });
-
+        let mut at = 0usize;
+        while let Some(rest) = bytes.get(at..).filter(|r| !r.is_empty()) {
+            let (value, len) = self.next_code(rest);
             out.push((value, len));
-            i += usize::from(len).max(1);
+            // `next_code` never answers zero, so this terminates whatever the
+            // codespace ranges say (ruling 1).
+            at += usize::from(len);
+        }
+        out
+    }
+
+    /// The first code in `rest`, which is never empty, and its byte length.
+    fn next_code(&self, rest: &[u8]) -> (u32, u8) {
+        // No codespace at all: a simple font's `/Encoding` is one byte per
+        // code, and an identity CMap that lost its ranges is still two.
+        if self.codespaces.is_empty() {
+            let want = if self.identity { 2 } else { 1 };
+            let len = want.min(rest.len());
+            return (be(&rest[..len]), len as u8);
         }
 
-        out
+        for len in 1..=4usize {
+            let Some(slice) = rest.get(..len) else {
+                break;
+            };
+            if self.codespaces.iter().any(|r| r.contains(slice)) {
+                return (be(slice), len as u8);
+            }
+        }
+
+        // 9.7.6.3, and the reason this is not simply "consume one byte". An
+        // undefined code still has a *length*, and the length comes from the
+        // first byte: in `90ms-RKSJ-H` a byte in 0x81..0x9F begins a two-byte
+        // code whether or not the pair means anything, so the byte after it
+        // belongs to that code. Consuming one byte instead re-reads a trail
+        // byte as a lead byte, and `81 81 40` splits as one stray byte plus
+        // `8140` -- a real kanji the file never asked for -- instead of the
+        // undefined `8181` plus `40`.
+        //
+        // A first byte no range claims falls back to the shortest length any
+        // range declares, which for every mixed-width registry CMap is one
+        // and is what re-synchronises the string.
+        let lead = rest.first().copied().unwrap_or_default();
+        let len = self
+            .codespaces
+            .iter()
+            .filter(|r| r.covers_lead(lead))
+            .map(|r| r.bytes)
+            .min()
+            .or_else(|| self.codespaces.iter().map(|r| r.bytes).min())
+            .unwrap_or(1);
+        let len = usize::from(len).clamp(1, rest.len());
+        (be(&rest[..len]), len as u8)
     }
 
     /// The text a code maps to, if this CMap is a `/ToUnicode`.

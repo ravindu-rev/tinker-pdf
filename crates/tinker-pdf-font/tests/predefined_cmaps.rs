@@ -1,10 +1,7 @@
 //! The predefined CMaps of 9.7.5.2, checked against Adobe's own text.
 //!
 //! Every test here needs the compiled tables, so the file is compiled only
-//! with `cmap-predefined`. What a build *without* it does is
-//! `tests/predefined_cmaps_absent.rs`, and the two files together are why
-//! `--no-default-features` is a leg of the gate rather than a build that
-//! merely links.
+//! with `cmap-predefined`.
 //!
 //! Gap 03's risk table names the failure this file exists to prevent: "a
 //! generated table is wrong in a way no test notices", mitigated by testing
@@ -75,7 +72,7 @@ fn registry() -> Vec<(String, String)> {
 ///
 /// `notdefrange` is skipped, matching the compiled tables: it names a
 /// substitute CID for codes the CMap maps to nothing, and honouring it would
-/// dress "unmapped" up as an answer. `is_only_notdef` below pins that.
+/// dress "unmapped" up as an answer. `a_notdefrange_maps_nothing` pins that.
 fn declared(source: &str) -> Vec<(u32, u32, u32)> {
     let mut out = Vec::new();
     let mut section = "";
@@ -104,6 +101,37 @@ fn declared(source: &str) -> Vec<(u32, u32, u32)> {
                 out.push((code, code, cid.parse().expect("a CID is a number")));
             }
             _ => {}
+        }
+    }
+    out
+}
+
+/// Every codespace range a CMap source declares, read the second way.
+fn codespaces(source: &str) -> Vec<(usize, u32, u32)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let line = line.split('%').next().unwrap_or("").trim();
+        if let Some(word) = line.split_whitespace().last() {
+            match word {
+                "begincodespacerange" => {
+                    inside = true;
+                    continue;
+                }
+                "endcodespacerange" => {
+                    inside = false;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if let (true, [low, high]) = (
+            inside,
+            line.split_whitespace().collect::<Vec<_>>().as_slice(),
+        ) {
+            // A bound's *written width* is the code's byte length; `<00>` and
+            // `<0000>` are different codespaces.
+            out.push((low.len() / 2 - 1, hex(low), hex(high)));
         }
     }
     out
@@ -291,6 +319,202 @@ fn a_notdefrange_maps_nothing() {
         );
     }
     assert_eq!(cmap.cid(0x20), Some(231), "and 231 is not unreachable");
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 3: codespaces, and mixed-width splitting
+// ---------------------------------------------------------------------------
+
+/// The exit criterion: one-byte and two-byte codes in the same string.
+///
+/// `90ms-RKSJ-H`'s codespace declaration, verbatim:
+///
+/// ```text
+/// 4 begincodespacerange
+///   <00>   <80>
+///   <8140> <9FFC>
+///   <A0>   <DF>
+///   <E040> <FCFC>
+/// endcodespacerange
+/// ```
+///
+/// Four ranges, two of them one byte wide and two of them two — which is
+/// Shift-JIS: ASCII low, half-width katakana at 0xA0..0xDF, and two-byte
+/// kanji either side of them. A blanket `<0000> <FFFF>`, which is what this
+/// engine used, splits every one of those the wrong way.
+#[test]
+fn a_shift_jis_string_splits_at_the_widths_the_registry_declares() {
+    let cmap = CMap::predefined(b"90ms-RKSJ-H").expect("the registry defines it");
+
+    // 'A', kanji lead 0x81 0x40, half-width katakana 0xB1, kanji 0xE0 0x40.
+    // Five glyphs' worth of bytes; four codes.
+    let split = cmap.decode_codes(&[0x41, 0x81, 0x40, 0xB1, 0xE0, 0x40]);
+    assert_eq!(
+        split,
+        vec![(0x41, 1), (0x8140, 2), (0xB1, 1), (0xE040, 2)],
+        "one byte, two bytes, one byte, two bytes"
+    );
+
+    // And the CIDs those four codes carry, from the same file:
+    // `<20> <7d> 231`, `<8140> <817e> 633`, `<a0> <df> 326`,
+    // `<e040> <e07e> 5500`.
+    assert_eq!(cmap.cid(0x41), Some(231 + 0x21));
+    assert_eq!(cmap.cid(0x8140), Some(633));
+    assert_eq!(cmap.cid(0xB1), Some(326 + 0x11));
+    assert_eq!(cmap.cid(0xE040), Some(5500));
+
+    // What the blanket two-byte codespace did instead: three codes, none of
+    // which the file names, and the last one truncated.
+    let blanket = CMap::identity(false);
+    assert_eq!(
+        blanket.decode_codes(&[0x41, 0x81, 0x40, 0xB1, 0xE0, 0x40]),
+        vec![(0x4181, 2), (0x40B1, 2), (0xE040, 2)],
+        "the defect, stated as an assertion"
+    );
+}
+
+/// An undefined code still has a length, and 9.7.6.3 takes it from the first
+/// byte.
+///
+/// This is the half that keeps a damaged string in step. 0x81 begins a
+/// two-byte code in `90ms-RKSJ-H` whether or not the pair means anything, so
+/// `81 30 41` is one undefined two-byte code and then `A`. Consuming a single
+/// byte for the unrecognised lead instead — which is what "a byte sequence
+/// matching no range is consumed one byte at a time" produced — re-reads the
+/// *trail* byte 0x30 as a lead byte, and 0x30 is a perfectly good one-byte
+/// code: CID 247, a glyph this string never contained, followed by `A` in the
+/// wrong place.
+#[test]
+fn an_undefined_code_takes_its_length_from_its_lead_byte() {
+    let cmap = CMap::predefined(b"90ms-RKSJ-H").expect("the registry defines it");
+
+    assert_eq!(
+        cmap.decode_codes(&[0x81, 0x30, 0x41]),
+        vec![(0x8130, 2), (0x41, 1)],
+        "two codes, not three"
+    );
+    assert_eq!(cmap.cid(0x8130), None, "0x30 is not a Shift-JIS trail byte");
+    assert_eq!(cmap.cid(0x41), Some(231 + 0x21));
+    assert_eq!(
+        cmap.cid(0x30),
+        Some(231 + 0x10),
+        "which is the glyph the one-byte-at-a-time split invented"
+    );
+
+    // A lead byte no range claims re-synchronises on the shortest range
+    // declared, which is what keeps one bad byte from eating the line.
+    assert_eq!(
+        cmap.decode_codes(&[0xFD, 0x41]),
+        vec![(0xFD, 1), (0x41, 1)],
+        "0xFD begins nothing in Shift-JIS"
+    );
+}
+
+/// 9.7.6.2 is byte by byte, not one interval on an integer.
+///
+/// `GBK2K-H` is where that stops being pedantry, because GB18030 has two-byte
+/// *and* four-byte codes whose lead bytes overlap. Its codespaces, verbatim:
+///
+/// ```text
+/// 3 begincodespacerange
+///   <00>       <7F>
+///   <81308130> <FE39FE39>
+///   <8140>     <FEFE>
+/// endcodespacerange
+/// ```
+///
+/// A four-byte code's second byte is 0x30..0x39 and a two-byte code's second
+/// byte is 0x40..0xFE, which is the only thing separating them — and it is
+/// exactly the distinction an integer comparison throws away. 0x8235 is
+/// between 0x8140 and 0xFEFE as a number, so a flat test reads
+/// `82 35 87 39` as two two-byte codes. It is one four-byte code, and the
+/// registry says which: `<82358739> 30366`.
+#[test]
+fn a_codespace_bound_is_per_byte() {
+    let cmap = CMap::predefined(b"GBK2K-H").expect("the registry defines it");
+
+    assert_eq!(
+        cmap.decode_codes(&[0x82, 0x35, 0x87, 0x39]),
+        vec![(0x8235_8739, 4)],
+        "one four-byte GB18030 code, not two two-byte ones"
+    );
+    assert_eq!(cmap.cid(0x8235_8739), Some(30366));
+
+    // The two-byte form still works, and its second byte is what says so.
+    // `<8253> 9884`, from the same file.
+    assert_eq!(cmap.decode_codes(&[0x82, 0x53]), vec![(0x8253, 2)]);
+    assert_eq!(cmap.cid(0x8253), Some(9884));
+
+    // Both in one string, which is the shape GB18030 text actually takes.
+    assert_eq!(
+        cmap.decode_codes(&[0x41, 0x82, 0x53, 0x82, 0x35, 0x87, 0x39]),
+        vec![(0x41, 1), (0x8253, 2), (0x8235_8739, 4)]
+    );
+}
+
+/// The UTF-8 CMaps, where a flat comparison is not a subtlety.
+///
+/// `UniJIS-UTF8-H` declares, verbatim:
+///
+/// ```text
+/// 4 begincodespacerange
+///   <00>       <7F>
+///   <C080>     <DFBF>
+///   <E08080>   <EFBFBF>
+///   <F0808080> <F7BFBFBF>
+/// endcodespacerange
+/// ```
+///
+/// which is UTF-8's own shape: a lead byte then continuation bytes that may
+/// only be 0x80..0xBF. As integer intervals those admit `E0 00 00`, which is
+/// not UTF-8 and never was.
+#[test]
+fn a_utf8_codespace_rejects_what_is_not_utf8() {
+    let cmap = CMap::predefined(b"UniJIS-UTF8-H").expect("the registry defines it");
+
+    // U+3042 HIRAGANA A is E3 81 82, and it is one three-byte code.
+    assert_eq!(cmap.decode_codes(&[0xE3, 0x81, 0x82]), vec![(0xE38182, 3)]);
+    assert!(cmap.cid(0xE38182).is_some(), "a real Japanese character");
+
+    // `E0 00 00` is inside the three-byte range as a number. Per byte it is
+    // not: the continuation bytes have to be 0x80..0xBF. It is still read as
+    // three bytes, because its lead byte says so, and it maps to nothing.
+    assert_eq!(cmap.decode_codes(&[0xE0, 0x00, 0x00]), vec![(0xE00000, 3)]);
+    assert_eq!(cmap.cid(0xE00000), None);
+
+    // Mixed widths in one string: ASCII, then three bytes.
+    assert_eq!(
+        cmap.decode_codes(&[0x41, 0xE3, 0x81, 0x82]),
+        vec![(0x41, 1), (0xE38182, 3)]
+    );
+}
+
+/// Every codespace the whole registry declares, checked through the same
+/// second reader the CID tables get.
+///
+/// The bound itself is fed in as bytes and has to come back as one code of
+/// the width it was written at. `<00>` and `<0000>` are different codespaces,
+/// and the width is in how many hex digits Adobe wrote, which is the detail a
+/// parser that turns everything into a `u32` first loses.
+#[test]
+fn every_declared_codespace_splits_at_its_own_width() {
+    let mut checked = 0usize;
+    for (name, source) in registry() {
+        let cmap = CMap::predefined(name.as_bytes()).expect("vendored");
+        for (width, low, high) in codespaces(&source) {
+            for bound in [low, high] {
+                let bytes = &bound.to_be_bytes()[4 - width..];
+                assert_eq!(
+                    cmap.decode_codes(bytes),
+                    vec![(bound, width as u8)],
+                    "{name}: <{bound:0width$X}> at {width} bytes",
+                    width = width * 2
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 474, "both bounds of all 237 declared codespaces");
 }
 
 /// A name the registry does not define is refused rather than guessed.
