@@ -6,6 +6,14 @@
 # that reject (A)GPL), and the hand-rolled policy means the dependency tree is
 # tiny dev-tooling anyway. If something copyleft ever seems necessary, that is a
 # design smell to fix, not an exception to add.
+#
+# The list below covers *crates*. It is also the list vendored **data** is
+# checked against, which cargo-deny cannot do for itself: it reads the crate
+# graph and a directory of text files is not in it. `cargo xtask vendor` closes
+# that half — every tree named in THIRDPARTY.md must declare an SPDX identifier
+# that appears here, so a data license the project could not ship fails the same
+# gate a crate license would. `crates/tinker-pdf-font/data/cmap-resources` is
+# BSD-3-Clause and passes on the entry two lines below this one.
 
 [licenses]
 allow = [
@@ -14,13 +22,22 @@ allow = [
   "MIT",
   "MIT-0",
   "BSD-2-Clause",
-  "BSD-3-Clause",
+  "BSD-3-Clause",   # Adobe's cmap-resources, vendored as data (THIRDPARTY.md)
   "ISC",
   "CC0-1.0",
   "Unicode-3.0",
   "Unlicense",
   "Zlib",
-  "OFL-1.1",   # bundled substitute fonts (Liberation family), an asset not code
+  # OFL-1.1 was here, commented "bundled substitute fonts (Liberation family),
+  # an asset not code". There are none, and there never have been:
+  # `crates/tinker-pdf/tests/substitute_fonts.rs` synthesises its face on the
+  # spot precisely so that "the repository carries no font anyone has to
+  # licence". An allowlist entry describing an asset that does not exist reads
+  # as evidence the engine ships faces, which is the exact false impression the
+  # real font-parity blocker turns on — a document naming Helvetica and
+  # embedding nothing extracts its text and draws none of it. When plan 05's
+  # M10 bundles Liberation, the entry comes back in the same commit as the
+  # faces, the THIRDPARTY.md section and the `bundled-fonts` feature.
 ]
 
 [bans]

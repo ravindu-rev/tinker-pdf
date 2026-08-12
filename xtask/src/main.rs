@@ -13,7 +13,8 @@ xtask — repository chores
 usage:
   cargo xtask dag     check the crate dependency graph against the declared one
   cargo xtask libm    check that no pixel path calls the platform's libm
-  cargo xtask check   both of the above
+  cargo xtask vendor  check vendored data against THIRDPARTY.md and deny.toml
+  cargo xtask check   all three of the above
   cargo xtask help
 ";
 
@@ -24,11 +25,14 @@ fn main() -> ExitCode {
     match task.as_str() {
         "dag" => report("dag", check_dag()),
         "libm" => report("libm", check_libm()),
+        "vendor" => report("vendor", check_vendor()),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
+            let vendor = check_vendor();
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
+            problems.extend(vendor.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
@@ -241,6 +245,176 @@ fn check_libm() -> Result<(), Vec<String>> {
     }
 }
 
+/// Vendored data, checked against the two files that are supposed to describe
+/// it.
+///
+/// `cargo deny check licenses` reads the *crate* graph. A directory of text
+/// files is not in that graph, so an eight-megabyte BSD-3-Clause asset can sit
+/// inside a crate declaring `MIT OR Apache-2.0` and every licence check in the
+/// repository passes. That is the code/data distinction, and this is the half
+/// of it cargo-deny cannot do.
+///
+/// Three rules, each of which has been somebody's incident somewhere:
+///
+/// - a vendored tree that nothing declares — the licence arrives in the
+///   repository and no released artefact mentions it;
+/// - a declared tree with no licence text beside the data, so the copy is not
+///   self-describing once the file it was named in moves;
+/// - an SPDX identifier `deny.toml` does not allow, which is the whole point:
+///   data the project could not ship must fail the same allowlist a crate
+///   licence would.
+fn check_vendor() -> Result<(), Vec<String>> {
+    let root = repo_root();
+    let mut problems = Vec::new();
+
+    let manifest = root.join("THIRDPARTY.md");
+    let text = match std::fs::read_to_string(&manifest) {
+        Ok(text) => text,
+        Err(error) => {
+            return Err(vec![format!(
+                "THIRDPARTY.md could not be read ({error}); vendored data has \
+                 nowhere to be declared"
+            )])
+        }
+    };
+    let allowed = allowed_licenses(&root);
+    let declared = declared_vendor_trees(&text);
+
+    for (path, spdx) in &declared {
+        let dir = root.join(path);
+        if !dir.is_dir() {
+            problems.push(format!(
+                "THIRDPARTY.md declares {path}, which is not a directory"
+            ));
+            continue;
+        }
+        if !has_license_file(&dir) {
+            problems.push(format!(
+                "{path} carries no LICENSE file, so the copy does not describe \
+                 its own terms"
+            ));
+        }
+        if !allowed.contains(spdx) {
+            problems.push(format!(
+                "{path} is {spdx}, which deny.toml does not allow — data is \
+                 held to the same allowlist as a crate"
+            ));
+        }
+    }
+
+    for tree in vendor_trees(&root) {
+        if !declared.iter().any(|(path, _)| *path == tree) {
+            problems.push(format!(
+                "{tree} is vendored and not declared in THIRDPARTY.md"
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// Every `crates/<crate>/data/<tree>` directory: one vendored upstream each.
+fn vendor_trees(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(crates) = std::fs::read_dir(root.join("crates")) else {
+        return out;
+    };
+    for entry in crates.flatten() {
+        let Ok(trees) = std::fs::read_dir(entry.path().join("data")) else {
+            continue;
+        };
+        for tree in trees.flatten() {
+            if !tree.path().is_dir() {
+                continue;
+            }
+            if let Ok(rel) = tree.path().strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn has_license_file(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("LICENSE")
+    })
+}
+
+/// The `| path | upstream | SPDX |` rows of THIRDPARTY.md's table.
+fn declared_vendor_trees(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim().trim_matches('`').trim())
+            .collect();
+        if cells.len() < 3 {
+            continue;
+        }
+        let (path, spdx) = (cells[0], cells[cells.len() - 1]);
+        // The header row and the `---` separator are shaped like data rows.
+        if !path.starts_with("crates/") {
+            continue;
+        }
+        out.push((path.to_string(), spdx.to_string()));
+    }
+    out
+}
+
+/// `deny.toml`'s `allow = [...]`, as identifiers.
+///
+/// Read line by line rather than as TOML for the same reason `package_name`
+/// is: adding a dependency in order to check the dependency rules would be
+/// its own kind of funny. Entries carry trailing comments, so the identifier
+/// is whatever sits inside the quotes.
+fn allowed_licenses(root: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join("deny.toml")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut in_allow = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("allow") && line.contains('[') {
+            in_allow = true;
+            continue;
+        }
+        if !in_allow {
+            continue;
+        }
+        if line.starts_with(']') {
+            break;
+        }
+        // A commented-out entry is not an allowance, and this file has one.
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.split_once('"') {
+            if let Some((id, _)) = rest.1.split_once('"') {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -427,6 +601,49 @@ mod tests {
     fn this_repository_obeys_its_own_graph() {
         if let Err(problems) = check_dag() {
             panic!("the declared graph and the manifests disagree:\n{problems:#?}");
+        }
+    }
+
+    #[test]
+    fn a_vendor_row_yields_its_path_and_licence() {
+        let text = "| Path | Upstream | SPDX |\n\
+                    | --- | --- | --- |\n\
+                    | `crates/tinker-pdf-font/data/cmap-resources` | [x](y) | `BSD-3-Clause` |\n";
+        assert_eq!(
+            declared_vendor_trees(text),
+            vec![(
+                "crates/tinker-pdf-font/data/cmap-resources".to_string(),
+                "BSD-3-Clause".to_string()
+            )]
+        );
+    }
+
+    /// The header and the separator are shaped exactly like data rows, and
+    /// prose tables elsewhere in the file are not vendor declarations at all.
+    #[test]
+    fn only_rows_naming_a_crate_path_are_declarations() {
+        let text = "| Data | Source license | Handling |\n| --- | --- | --- |\n\
+                    | AGL + AGLFN | BSD-3-Clause | table |\n";
+        assert!(declared_vendor_trees(text).is_empty());
+    }
+
+    /// A commented-out allowlist entry is not an allowance. `deny.toml` has
+    /// one — OFL-1.1, kept as prose after the fonts it described turned out
+    /// not to exist — and reading it as live would make this check pass for a
+    /// licence the project has decided it does not currently ship.
+    #[test]
+    fn a_commented_allowlist_entry_does_not_allow() {
+        let root = repo_root();
+        let allowed = allowed_licenses(&root);
+        assert!(allowed.contains(&"BSD-3-Clause".to_string()), "{allowed:?}");
+        assert!(!allowed.contains(&"OFL-1.1".to_string()), "{allowed:?}");
+    }
+
+    /// The same rule as the graph check: it runs against this repository.
+    #[test]
+    fn this_repository_declares_the_data_it_vendors() {
+        if let Err(problems) = check_vendor() {
+            panic!("vendored data and THIRDPARTY.md disagree:\n{problems:#?}");
         }
     }
 }
