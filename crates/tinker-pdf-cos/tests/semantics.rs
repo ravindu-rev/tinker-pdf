@@ -73,7 +73,7 @@ fn every_page_has_reachable_content() {
 #[test]
 fn the_version_string_matches_the_header() {
     let doc = open("simple-text.pdf");
-    assert_eq!(outline::version_string(&doc).as_deref(), Some("PDF 1.7"));
+    assert_eq!(outline::version_string(&doc), "PDF 1.7");
 }
 
 /// The fixture's `/Info` holds `/Producer` and nothing else, so it pins the

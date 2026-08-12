@@ -221,10 +221,7 @@ fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
     let metadata = doc.metadata();
     println!("{path}");
     println!("  pages       {}", doc.page_count());
-    println!(
-        "  version     {}",
-        doc.pdf_version().unwrap_or_else(|| "unknown".to_string())
-    );
+    println!("  version     {}", doc.pdf_version());
     println!("  ladder      {:?}", doc.ladder_level());
     println!("  encrypted   {}", doc.is_encrypted());
     if doc.is_encrypted() {
@@ -249,6 +246,13 @@ fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
         if let Some(value) = value {
             println!("  {label:11} {value}");
         }
+    }
+
+    // Printed only when the document names it: /Trapped absent and /Trapped
+    // /Unknown are different statements, and a line that appeared either way
+    // would collapse them back together.
+    if let Some(trapped) = metadata.trapped {
+        println!("  {:11} {trapped:?}", "trapped");
     }
 
     if let Some(page) = doc.page(0) {

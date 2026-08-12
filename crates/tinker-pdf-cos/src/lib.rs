@@ -87,7 +87,7 @@ pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};
 pub use outline::{
     attachments, metadata, outline, page_labels, xmp_metadata, Attachment, LabelStyle, Metadata,
-    OutlineItem,
+    OutlineItem, Trapped,
 };
 pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};

@@ -36,7 +36,7 @@ fn opens_a_pdf_and_reports_its_shape() {
     assert!(!doc.is_encrypted());
     assert_eq!(doc.auth_level(), AuthLevel::None);
     assert!(doc.permissions().print());
-    assert_eq!(doc.pdf_version().as_deref(), Some("PDF 1.7"));
+    assert_eq!(doc.pdf_version(), "PDF 1.7");
 }
 
 /// Tinker: `page_geometry_covers_every_page`.

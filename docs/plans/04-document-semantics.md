@@ -84,15 +84,15 @@ mangled title must not sink a document.
 ### `/Info` and version
 
 ```rust
-pub struct Info {
+pub struct Metadata {
     pub title: Option<String>,
     pub author: Option<String>,
     pub subject: Option<String>,
     pub keywords: Option<String>,
     pub creator: Option<String>,
     pub producer: Option<String>,
-    pub creation_date: Option<String>, // raw; PdfDate::parse (7.9.4) is a helper
-    pub mod_date: Option<String>,
+    pub creation_date: Option<String>, // raw; parse_date (7.9.4) is a helper
+    pub modification_date: Option<String>,
     pub trapped: Option<Trapped>,      // True | False | Unknown — a name, not a string
 }
 ```
@@ -101,16 +101,40 @@ Absent-not-empty is a contract: a key missing from `/Info` (or `/Info` missing
 entirely) is `None`; a writer that emitted an empty string gets `Some("")`. Tinker's
 UI distinguishes "no title" from "blank title", and collapsing the two on read makes
 the distinction unrecoverable. Dates stay raw strings because that is what the parity
-tests compare; the lenient `PdfDate` parser (missing apostrophes, `Z` offsets — both
+tests compare; the lenient date parser (missing apostrophes, `Z` offsets — both
 common in the wild) is offered alongside, not imposed.
+
+`/Trapped` carries the same distinction one level in. `None` is the key being absent;
+`Some(Unknown)` is the document answering `/Unknown` — Table 349's own default, and
+also what a name outside the three reads as, because a file that said something we did
+not recognise is not a file that said nothing. A `/Trapped` holding a value that is not
+a name at all is absent, which is what the string fields do with a name.
 
 Version: the header found by the COS opener (junk prefixes already handled by repair
 in [01-cos-and-object-model](01-cos-and-object-model.md)), overridden by the
-catalog's `/Version` when that names a *later* version (7.5.2). Rendered by `Display`
-as `"PDF 1.7"` — the exact string `open_documents.rs` asserts. If repair recovered a
-document whose header is unreadable, the version reports the 1.7 baseline with a
-provenance warning: guessing low misleads more than stating the baseline, and the
-warning keeps "we guessed" on the record.
+catalog's `/Version` when that names a *later* version (7.7.2) — the two compared as
+the `M.N` number pair rather than as text, and an unparseable version on either side
+treated as absent rather than as zero. Rendered as `"PDF 1.7"` — the exact string
+`open_documents.rs` asserts. If repair recovered a document whose header is
+unreadable, the version reports the 1.7 baseline with a provenance warning
+(`HeaderMissing`): guessing low misleads more than stating the baseline, and the
+warning keeps "we guessed" on the record. Because the baseline always applies, the
+version is a `String` and not an `Option<String>`: after this rule there is no such
+thing as a document with no version to report.
+
+Reporting a version is not enforcing one. No feature anywhere in the engine is gated
+on it — leniency means reading what the file contains regardless of what it claims to
+be.
+
+*Amended, August 2026.* Three names in the sketch above had drifted from the shipped
+code and are corrected here rather than in the code: the struct is `Metadata`, not
+`Info` — `Info` is the PDF dictionary it reads, and naming the model after the
+dictionary made two different things one word — its date field is
+`modification_date`, and the date helper is the free function `parse_date`. The
+version rules gained the sentences the code needed and this file only implied:
+numeric comparison, unparseable-is-absent, and the `String` return that the baseline
+makes total. Found while closing [gaps 21 and 22](gaps/README.md), whose `As built`
+sections carry the detail.
 
 ### Page tree
 

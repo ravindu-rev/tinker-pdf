@@ -37,7 +37,7 @@ pub use tinker_pdf_content::{
 };
 pub use tinker_pdf_cos::{
     Action, Attachment, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue,
-    LadderLevel, Link, Metadata, OutlineItem, Warning, WarningKind,
+    LadderLevel, Link, Metadata, OutlineItem, Trapped, Warning, WarningKind,
 };
 /// The object model behind [`Document::cos`].
 ///
@@ -370,8 +370,12 @@ impl Document {
     }
 
     /// The version, as "PDF 1.7".
+    ///
+    /// The later of the header's (7.5.2) and the catalog's (7.7.2), never
+    /// absent: a document stating neither reports the 1.7 baseline and says
+    /// so with a `HeaderMissing` warning.
     #[must_use]
-    pub fn pdf_version(&self) -> Option<String> {
+    pub fn pdf_version(&self) -> String {
         cos_outline::version_string(&self.inner)
     }
 

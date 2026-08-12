@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**981 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**988 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit. The fuzz targets
 also *run* on every commit now, briefly, over committed seed corpora. The four
@@ -15,7 +15,7 @@ wasmtime — run locally against native Windows, not yet observed in CI.
 > incomplete: **22 things listed as built are absent or materially thinner
 > than claimed**, seven of them producing silently wrong output or unopenable
 > files. They are written down in [audit-2026-08.md](audit-2026-08.md), with
-> the eleven fixed so far struck through there. A known gap is manageable; a
+> the twelve fixed so far struck through there. A known gap is manageable; a
 > false claim is not, because nobody goes looking.
 
 > **This file was wrong for a long time.** A 47-agent audit against every plan
@@ -73,6 +73,7 @@ Fixed since, each with tests that would have caught it:
 | **Attachments, XMP and `/Limits` descent were unreachable** | All three implemented |
 | **The font seam was Rust-only**, so no binding could draw text for a document embedding no fonts | `set_fonts` across the C ABI, Python, JS and .NET |
 | **`/Info` collapsed blank onto absent.** A field present and empty — or all whitespace — read as `None`, identically to a key the document never wrote, so no caller could tell "the producer left the title blank" from "there is no title" | Present and a string is `Some`, whatever it holds, untrimmed. Plan 04 always called this a contract; the code and the comment on the line both said the opposite |
+| **A stale catalog `/Version` demoted the file it sat in.** 7.7.2 lets the catalog raise the header's version, because that is how an incremental update declares a later one without rewriting header bytes a signature covers; the code let it *set* the version, so a 1.7 file carrying `/Version /1.4` reported 1.4. A repaired file whose header was unreadable reported no version at all rather than the baseline plan 04 specifies, and `/Trapped` — the ninth `/Info` field, and the one a print workflow needs — was not read | The later of the two wins, compared as the `M.N` number pair so `1.10` outranks `1.9`, with an unparseable version on either side treated as absent rather than as zero. No readable version on either side reports the 1.7 baseline and emits `HeaderMissing`, so the guess is on the record. `/Trapped` reads as its three names, with an unrecognised one as `Unknown` and only an absent key as `None` |
 | **The `text` determinism fixture rendered nothing.** It named Helvetica and embedded no program; the engine bundles no faces, so every glyph resolved to nothing and its committed fingerprint was — bit for bit — the hash of a blank 200×100 page. The only pixel baseline in the repository covered no glyph at all, and five gap plans were queued behind "the fingerprints did not move" | The fixture embeds a synthetic TrueType face of curves, diagonals and a hole, built in the test file. Every fixture now asserts a minimum ink count and the absence of `UnreadableFont` before it is hashed, so a fixture that draws nothing fails instead of becoming the baseline |
 
 ## Built
@@ -82,7 +83,7 @@ Fixed since, each with tests that would have caught it:
 | [01 COS](plans/01-cos-and-object-model.md) | milestones 1–4 | Lexer, object model, xref in every flavour, object streams, lazy `Send + Sync` store, repair scanner, leniency ladder, three stream tiers |
 | [02 Filters](plans/02-filters.md) | wave 1 + deflate + JPEG + CCITT | Own inflate and deflate, LZW, ASCIIHex/85, RunLength, predictors; JPEG **baseline, extended sequential and progressive**; CCITT G3/G4 |
 | [03 Encryption](plans/03-encryption.md) | reading and **writing** | Own MD5, RC4, SHA-2, AES-CBC; handlers R2–R6; owner vs user distinguished; `/P` read through its reserved bits; `/EncryptMetadata` and `/Crypt /Identity` honoured |
-| [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata, page tree with inheritance, geometry, outlines, name/number trees with **`/Limits` descent**, destination enum, page labels, actions, links, **attachments**, **XMP** |
+| [04 Document semantics](plans/04-document-semantics.md) | complete | Metadata incl. **`/Trapped`**, the **later** of header and catalog version, page tree with inheritance, geometry, outlines, name/number trees with **`/Limits` descent**, destination enum, page labels, actions, links, **attachments**, **XMP** |
 | [05 Fonts](plans/05-fonts.md) | TrueType + CFF + **Type 1** + host seam | Encodings, CMaps, standard-14 metrics; TrueType `glyf`, CFF Type 2 **and Type 1** outlines; `FontProvider` for faces a document does not embed |
 | [06 Content & text](plans/06-content-and-text.md) | substantially | Tokenizer, text state machine, `Device` seam, text device with quads and search, **inline images**, **all stroke parameters** |
 | [07 Rasterizer](plans/07-rasterizer.md) | complete | Paths, deterministic anti-aliased fill, stroking with caps/joins/dashes, clipping, compositing |

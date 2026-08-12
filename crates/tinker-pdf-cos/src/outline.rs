@@ -150,6 +150,34 @@ pub struct Metadata {
     pub creation_date: Option<String>,
     /// `/ModDate`, as written.
     pub modification_date: Option<String>,
+    /// `/Trapped`. `None` when the key is absent, which is not the same
+    /// answer as [`Trapped::Unknown`] — see that type.
+    pub trapped: Option<Trapped>,
+}
+
+/// Whether the document has been trapped (7.7.2, Table 349).
+///
+/// Trapping is the prepress compensation for press misregistration, and a
+/// print workflow needs to know whether it has already been applied before it
+/// decides to apply it again.
+///
+/// The three variants are the three names the table defines, and the type is
+/// deliberately not an `Option<bool>`: `/Unknown` is a real answer — the
+/// document saying it does not know — as well as the default the table gives
+/// for a document that says nothing. `Option<Trapped>` therefore carries two
+/// different facts. `None` is "the key is absent"; `Some(Unknown)` is "the
+/// document was asked and answered `/Unknown`", which is also what an
+/// unrecognised name reads as, because the file did say something and what it
+/// said was not one of the three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trapped {
+    /// `/True`: the document has been trapped.
+    True,
+    /// `/False`: it has not.
+    False,
+    /// `/Unknown`: partly trapped, or the producer would not say. Table 349's
+    /// default, and what a name outside the three reads as.
+    Unknown,
 }
 
 impl Metadata {
@@ -203,6 +231,22 @@ pub fn metadata(doc: &CosDocument) -> Metadata {
         value.as_string().map(|s| decode_text_string(&s.bytes))
     };
 
+    // /Trapped is a name, not a text string, so it cannot go through the
+    // closure above and needs its own reader. Table 349 defines /True, /False
+    // and /Unknown; anything else is /Unknown, which is also the default.
+    // A value that is not a name at all — a string, a number, a null — is
+    // absent, the same answer the closure gives for a /Title that is not a
+    // string: a key of the wrong type states nothing.
+    let trapped_value = doc.resolve_key(dict, doc.intern(b"Trapped"));
+    let trapped = match &*trapped_value {
+        Object::Name(name) => Some(match doc.name_bytes(*name).as_deref() {
+            Some(b"True") => Trapped::True,
+            Some(b"False") => Trapped::False,
+            _ => Trapped::Unknown,
+        }),
+        _ => None,
+    };
+
     Metadata {
         title: field(b"Title"),
         author: field(b"Author"),
@@ -212,26 +256,95 @@ pub fn metadata(doc: &CosDocument) -> Metadata {
         producer: field(b"Producer"),
         creation_date: field(b"CreationDate"),
         modification_date: field(b"ModDate"),
+        trapped,
     }
 }
 
+/// The version reported by a document that states none this crate can read.
+///
+/// 1.7 rather than anything lower, because guessing low is the guess that
+/// misleads: a caller told "1.0" concludes the file cannot hold what it
+/// plainly holds, while a caller told the baseline reads it as it finds it.
+const BASELINE_VERSION: &str = "1.7";
+
 /// The document's version, as "PDF 1.7".
 ///
-/// 7.5.2 puts it in the header; 7.7.2 lets the catalog's `/Version` override
-/// it, which is how an incremental update raises the version of a file whose
-/// header it must not touch.
+/// 7.5.2 puts the version in the header. 7.7.2 lets the catalog's `/Version`
+/// **raise** it, and only raise it: that entry exists so an incremental update
+/// can declare a later version without rewriting header bytes an existing
+/// signature covers. So the later of the two is the document's version, and a
+/// stale or mistaken `/Version /1.4` cannot demote a file whose header says
+/// 1.7 — reporting 1.4 for it would misdescribe the file.
+///
+/// The two are compared as the `M.N` number pair 7.5.2 spells, never as text:
+/// `1.10` is later than `1.9` and sorts before it. A version that does not
+/// parse is treated as **absent** rather than as zero on either side, so a
+/// catalog holding `/Version /banana` cannot suppress a header that reads
+/// perfectly.
+///
+/// When neither side states a readable version — a repaired file whose header
+/// was lost with the bytes in front of it — this reports [`BASELINE_VERSION`]
+/// and emits [`WarningKind::HeaderMissing`], because a guess that leaves no
+/// trace is indistinguishable from knowledge (ruling 10).
+///
+/// Reporting a version is not enforcing one. Nothing in this engine refuses a
+/// feature for being newer than the version a file claims; leniency requires
+/// reading what is there.
 #[must_use]
-pub fn version_string(doc: &CosDocument) -> Option<String> {
-    let from_catalog = doc
-        .catalog()
-        .and_then(|c| match c.get(doc.intern(b"Version")) {
-            Some(Object::Name(n)) => doc.name_bytes(*n).map(|b| b.to_vec()),
-            _ => None,
-        })
-        .and_then(|b| String::from_utf8(b).ok());
+pub fn version_string(doc: &CosDocument) -> String {
+    let header = doc.header_version();
+    let catalog = catalog_version(doc);
+    let header_number = header.as_deref().and_then(version_number);
+    let catalog_number = catalog.as_deref().and_then(version_number);
 
-    let version = from_catalog.or_else(|| doc.header_version())?;
-    Some(format!("PDF {version}"))
+    let stated = match (header_number, catalog_number) {
+        // The only case where the catalog wins: it names a later version.
+        (Some(h), Some(c)) if c > h => catalog,
+        // A readable header stands otherwise, whether the catalog is older,
+        // equal, malformed or absent.
+        (Some(_), _) => header,
+        (None, Some(_)) => catalog,
+        (None, None) => None,
+    };
+
+    match stated {
+        Some(version) => format!("PDF {version}"),
+        None => {
+            doc.warn(WarningKind::HeaderMissing);
+            format!("PDF {BASELINE_VERSION}")
+        }
+    }
+}
+
+/// The catalog's `/Version` (7.7.2), as the name was written.
+fn catalog_version(doc: &CosDocument) -> Option<String> {
+    let catalog = doc.catalog()?;
+    let Some(Object::Name(name)) = catalog.get(doc.intern(b"Version")) else {
+        return None;
+    };
+    String::from_utf8(doc.name_bytes(*name)?.to_vec()).ok()
+}
+
+/// A version as the `M.N` pair 7.5.2 defines it, for comparison.
+///
+/// `None` for anything that is not that pair — and `None` rather than `(0, 0)`
+/// deliberately, so an unreadable version loses no comparison it should never
+/// have entered.
+fn version_number(text: &str) -> Option<(u32, u32)> {
+    let (major, minor) = text.split_once('.')?;
+    Some((decimal(major)?, decimal(minor)?))
+}
+
+/// A run of ASCII digits as a number.
+///
+/// Stricter than [`str::parse`] alone, which accepts a leading `+`. A run too
+/// long for `u32` is unreadable rather than enormous: saturating it would
+/// invent a version no file states, and win a comparison with it.
+fn decimal(field: &str) -> Option<u32> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    field.parse().ok()
 }
 
 /// How a run of pages is numbered (12.4.2, Table 159).
@@ -531,7 +644,8 @@ trailer\n<< /Size 5 /Root 1 0 R /Info 4 0 R >>\n%%EOF\n"
 
     /// The rule holds for every field the closure serves, not just `/Title` —
     /// one of them being special would be the same bug with a smaller blast
-    /// radius. `/Trapped` is a name rather than a string and is not here.
+    /// radius. `/Trapped` is a name rather than a string, so the closure does
+    /// not serve it; its own reader is exercised below.
     #[test]
     fn every_info_string_field_tells_empty_from_absent() {
         let all = "/Title () /Author () /Subject () /Keywords () \
@@ -585,6 +699,183 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             metadata(&with_info("/Title <FEFF>")).title.as_deref(),
             Some(""),
         );
+    }
+
+    /// A one-page document with `header` as its first line and `catalog`
+    /// spliced into the catalog dictionary, so a test can state a header
+    /// version and a `/Version` entry independently of each other.
+    ///
+    /// An empty `header` produces a file with no `%PDF-` marker at all, which
+    /// is the repaired-file case: the scanner finds the objects and nothing
+    /// states a version.
+    fn with_version(header: &str, catalog: &str) -> CosDocument {
+        let bytes = format!(
+            "{header}\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R {catalog} >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n\
+trailer\n<< /Size 4 /Root 1 0 R >>\n%%EOF\n"
+        );
+        CosDocument::open(bytes.into_bytes()).expect("it opens")
+    }
+
+    /// How many times the document has reported a missing header, which is the
+    /// only provenance the version path emits.
+    fn header_missing_count(doc: &CosDocument) -> usize {
+        doc.warnings()
+            .iter()
+            .filter(|w| w.kind == WarningKind::HeaderMissing)
+            .count()
+    }
+
+    /// 7.7.2: the catalog's `/Version` raises the version, it does not set it.
+    /// A 1.7 file carrying a stale `/Version /1.4` is a 1.7 file, and saying
+    /// 1.4 misdescribes every feature it is allowed to contain.
+    #[test]
+    fn the_later_of_the_header_and_the_catalog_wins() {
+        assert_eq!(
+            version_string(&with_version("%PDF-1.7", "/Version /1.4")),
+            "PDF 1.7",
+            "a stale catalog entry cannot demote the header"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.4", "/Version /1.7")),
+            "PDF 1.7",
+            "an incremental update raising the version is what /Version is for"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.4", "/Version /1.4")),
+            "PDF 1.4",
+            "agreement is not a special case"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.4", "")),
+            "PDF 1.4",
+            "no catalog entry leaves the header alone"
+        );
+    }
+
+    /// The comparison is on the number pair, not the text. No such version
+    /// exists, and that is exactly why a string comparison survives: it is
+    /// wrong only in the release where it first matters.
+    #[test]
+    fn versions_compare_as_numbers_not_as_strings() {
+        assert_eq!(
+            version_string(&with_version("%PDF-1.9", "/Version /1.10")),
+            "PDF 1.10",
+            "1.10 is later than 1.9, though it sorts before it"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.10", "/Version /1.9")),
+            "PDF 1.10",
+            "and the same holds with the two sides swapped"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.7", "/Version /2.0")),
+            "PDF 2.0",
+            "a major-version bump is later than any 1.x"
+        );
+    }
+
+    /// An unreadable version states nothing, and stating nothing is not the
+    /// same as stating zero: a `/Version /banana` read as 0.0 would lose every
+    /// comparison, which is right, but a *header* read as 0.0 would let that
+    /// nonsense win. Neither side may be read as a number it does not hold.
+    #[test]
+    fn an_unparseable_version_is_absent_rather_than_zero() {
+        assert_eq!(
+            version_string(&with_version("%PDF-1.4", "/Version /banana")),
+            "PDF 1.4",
+            "a malformed catalog entry does not suppress a good header"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.4", "/Version 42")),
+            "PDF 1.4",
+            "nor does one that is not a name at all"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-banana", "/Version /1.4")),
+            "PDF 1.4",
+            "and a good catalog entry survives a header that says nothing"
+        );
+        assert_eq!(
+            version_string(&with_version("%PDF-1.4.2", "/Version /1.4")),
+            "PDF 1.4",
+            "7.5.2 spells one major and one minor; a third field is not a version"
+        );
+    }
+
+    /// Plan 04: a repaired file whose header is unreadable reports the
+    /// baseline rather than nothing, and the warning is what keeps "we
+    /// guessed" on the record (ruling 10).
+    #[test]
+    fn a_file_stating_no_version_reports_the_baseline_and_says_so() {
+        // A header that is present but unreadable: the opener finds `%PDF-`
+        // and warns about nothing, so the count below is the version path's.
+        let doc = with_version("%PDF-banana", "");
+        assert_eq!(header_missing_count(&doc), 0, "the opener found a header");
+        assert_eq!(version_string(&doc), "PDF 1.7");
+        assert_eq!(
+            header_missing_count(&doc),
+            1,
+            "the baseline is a guess and the guess is reported"
+        );
+
+        // And with no header at all, where the opener has already warned:
+        // what matters is that the version path adds its own.
+        let doc = with_version("", "");
+        let before = header_missing_count(&doc);
+        assert_eq!(version_string(&doc), "PDF 1.7");
+        assert_eq!(header_missing_count(&doc), before + 1);
+    }
+
+    /// The baseline is a last resort, not an override: a file that states a
+    /// version in the one place it survives is describing itself, and a guess
+    /// must not outrank it.
+    #[test]
+    fn a_readable_version_is_never_a_guess() {
+        let doc = with_version("%PDF-1.4", "");
+        assert_eq!(version_string(&doc), "PDF 1.4");
+        assert_eq!(header_missing_count(&doc), 0, "nothing was guessed");
+    }
+
+    /// 7.7.2 Table 349's three names, and the absence that is not one of them.
+    #[test]
+    fn trapped_reads_the_three_names_it_defines() {
+        for (written, expected) in [
+            ("/Trapped /True", Trapped::True),
+            ("/Trapped /False", Trapped::False),
+            ("/Trapped /Unknown", Trapped::Unknown),
+        ] {
+            assert_eq!(
+                metadata(&with_info(written)).trapped,
+                Some(expected),
+                "{written}"
+            );
+        }
+        assert_eq!(
+            metadata(&with_info("/Title (t)")).trapped,
+            None,
+            "a key the document does not hold is absent"
+        );
+    }
+
+    /// The distinction gap 21 drew for strings, drawn again for this name:
+    /// `Unknown` is the document answering, `None` is the document silent. A
+    /// name outside the three is an answer — an unrecognised one — and Table
+    /// 349 already has the variant for it.
+    #[test]
+    fn an_unrecognised_trapped_name_is_unknown_not_absent() {
+        assert_eq!(
+            metadata(&with_info("/Trapped /Nonsense")).trapped,
+            Some(Trapped::Unknown),
+            "the file said something; what it said was not one of the three"
+        );
+        // A value of the wrong type states nothing at all, which is what the
+        // string fields do with a name and this does with a string.
+        assert_eq!(metadata(&with_info("/Trapped (True)")).trapped, None);
+        assert_eq!(metadata(&with_info("/Trapped 1")).trapped, None);
+        assert_eq!(metadata(&with_info("/Trapped null")).trapped, None);
     }
 
     #[test]
