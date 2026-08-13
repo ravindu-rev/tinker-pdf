@@ -98,3 +98,48 @@ placeholder.
 | The shared MQ decoder is changed for JPX and silently breaks JBIG2 | H.2 is a permanent test, not deleted once generic region works |
 | Adding `Warning` variants is a public API change with exhaustive match sites | The compiler catches the two in the filters crate; check whether any consumer maps `Warning` with a wildcard arm, which would swallow the new ones |
 | Flipping the capability changes what the capability surface means, which plan 02 milestone 4 pins | Update the plan file and the assertion in the same commit, deliberately, rather than editing the test to make CI green |
+
+## Amendment — August 2026: the T.6 seam exists, use it
+
+This plan's MMR path says it reuses "the existing T.6 decoder", and names
+[16](16-ccitt-completion.md) as the prerequisite. At the time that was
+aspirational: `crates/tinker-pdf-filters/src/ccitt.rs` exported only a
+whole-stream `decode(data, params, max_output)` starting at bit zero, which an
+MMR region embedded in a larger segment cannot use. Nothing in either plan
+asked anyone to build the seam, so this plan would have duplicated T.6.
+
+Gap 16 built it. **Use this rather than writing a second one:**
+
+```rust
+pub struct T6Rows<'a> { /* ... */ }
+
+impl<'a> T6Rows<'a> {
+    pub fn new(data: &'a [u8], bit_offset: usize, columns: u32) -> T6Rows<'a>;
+    pub fn next_row(&mut self, row: &mut [u8]) -> bool;
+    pub fn row_bytes(&self) -> usize;
+    pub fn bit_position(&self) -> usize;
+}
+```
+
+It starts wherever the caller says, decodes against an imaginary all-white
+reference line (T.6 2.2.1), writes packed 1-bpp rows most significant bit
+first, takes any buffer at least `row_bytes()` long, and reports where it
+stopped so the caller can carry on with the segment. It shares `decode_row`
+with the whole-stream entry point, so a change to the mode codes must keep both
+correct — and the `ccitt` fuzz target now drives both, asserting that a row
+cannot decode out of no bits and that nothing is written past a row's own
+width.
+
+Two other things from gap 16 that bear on this plan:
+
+- Output is packed 1-bpp everywhere now, which is the shape a JBIG2 region
+  wants anyway. There is no byte-per-pixel conversion left to undo.
+- `ccitt_samples(...)` in `crates/tinker-pdf/src/resources.rs` is the single
+  entry point for decoded fax samples. If a JBIG2 region ever needs to reach
+  the generic sample path, that is the shape to follow.
+
+Unchanged from the original plan, and still the instruction: put the MQ
+arithmetic decoder in **its own module from the first commit**, with T.88
+Annex H.2 as a permanent test rather than scaffolding. [18](18-jpx-decision.md)
+says the MQ decoder "moves to a shared module"; if it starts inside `jbig2.rs`
+that plan begins with a refactor inside an already-large commit.

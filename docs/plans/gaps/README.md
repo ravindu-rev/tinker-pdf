@@ -55,7 +55,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 
 | # | Plan | What goes wrong today | Size |
 | --- | --- | --- | --- |
-| 16 | [CCITT completion](16-ccitt-completion.md) | Two parameters ignored, `/K > 0` is not mixed mode, output is 8× too wide | M |
+| 16 | [CCITT completion](16-ccitt-completion.md) | ~~Two parameters ignored, `/K > 0` is not mixed mode, output is 8× too wide~~ **DONE**, see the plan's `As built`: packed 1-bpp through the generic sample path so `/ImageMask`, `/Decode` and `/ColorSpace` reach a fax at last; all six of Table 11's entries read, `/Rows` among them, which had never been consulted; and true T.4 mixed mode, without which a fax whose rows carry no EOL decoded to a blank page. Two seams other gaps need came out of it — `ccitt_samples` for [08](08-inline-image-filters.md) and `T6Rows` for [17](17-jbig2-generic-region.md)'s MMR path | M |
 | 17 | [JBIG2 generic region](17-jbig2-generic-region.md) | Refused. The refusal path is the feature | L |
 | 18 | [JPX: the decision](18-jpx-decision.md) | Refused. Costed honestly so it can be decided rather than drifted into | S |
 
