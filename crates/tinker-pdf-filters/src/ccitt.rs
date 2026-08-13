@@ -26,7 +26,8 @@ use crate::Warning;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CcittParams {
     /// `/K`: negative is pure two-dimensional (G4), zero pure
-    /// one-dimensional (G3), positive mixed.
+    /// one-dimensional (G3), positive mixed — each line announcing its own
+    /// mode with the tag bit T.4 §4.2.1.3.1 hangs off the EOL.
     pub k: i32,
     /// `/Columns`, the pixels per row.
     pub columns: u32,
@@ -493,6 +494,14 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
     let mut reference: Vec<usize> = vec![columns, columns];
     let mut rows_done = 0u32;
 
+    // 7.4.6: `/K` decides the coding. Negative is pure two-dimensional and
+    // zero pure one-dimensional, so for those the mode is fixed for the whole
+    // stream. Positive is mixed, and a mixed stream *announces* each line's
+    // mode with the tag bit read below; until something announces otherwise
+    // the mode is one-dimensional, which is what T.4 §4.2.1.3.1 requires of
+    // the first line of a page.
+    let mut two_dimensional = params.k < 0;
+
     while !bits.exhausted() {
         // 7.4.6, Table 11: `/EndOfBlock` says whether the data is terminated
         // by an EOFB pattern, "overriding the Rows parameter". Read at its
@@ -523,6 +532,23 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
                 // EOFB/RTC: whatever follows is not image data.
                 break;
             }
+            if params.k > 0 && !bits.exhausted() {
+                // T.4 §4.2.1.3.1: in mixed mode the EOL carries one more bit
+                // — 1 says the line that follows is one-dimensionally coded,
+                // 0 says two-dimensionally. The bit belongs to the EOL, so it
+                // is read here and nowhere else; a row that arrives without
+                // one keeps the mode last announced, because there is nothing
+                // in the data to change it and the alternative is spending a
+                // bit of that row's first code.
+                two_dimensional = bits.bit() == 0;
+                if bits.at_eol() {
+                    // RTC in its mixed-mode shape is six EOL-plus-tag pairs
+                    // (T.4 §4.1.2), so the second EOL only comes into view
+                    // once the first tag is out of the way. Without this the
+                    // terminator was decoded as a row and reported as damage.
+                    break;
+                }
+            }
         } else if params.end_of_line && !bits.only_padding_left() {
             // Table 11 again: `/EndOfLine true` says the encoding carries one
             // before every line. It does not, here — and the bits left are
@@ -536,17 +562,6 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
         if bits.exhausted() || bits.only_padding_left() {
             break;
         }
-
-        // 7.4.6: /K decides the mode. A positive K means each row announces
-        // its own mode with a bit after the EOL, which this reads when the
-        // data provides it and otherwise assumes one-dimensional.
-        let two_dimensional = if params.k < 0 {
-            true
-        } else if params.k > 0 {
-            bits.bit() == 0
-        } else {
-            false
-        };
 
         let Some(changes) = decode_row(&mut bits, &reference, columns, two_dimensional) else {
             // A row that will not decode is one row, not the rest of the page.
@@ -1019,6 +1034,159 @@ mod tests {
         assert!(
             !warnings.contains(&Warning::MissingEndOfLine),
             "nothing is missing when nothing was promised: {warnings:?}"
+        );
+    }
+
+    /// T.4 §4.2.1.3.1: in mixed mode the EOL carries one more bit — 1 for a
+    /// one-dimensionally coded line, 0 for a two-dimensionally coded one.
+    ///
+    /// This is the shape every mixed-mode encoder emits, and it decoded
+    /// correctly before this commit too: with an EOL before every row,
+    /// "the bit after the EOL" and "the bit at the top of the row" are the
+    /// same bit. So this test is the guard rather than the evidence — a fix
+    /// that only moved the tag read into the EOL branch would pass it, and
+    /// the two tests below are the ones that say whether the fix is whole.
+    #[test]
+    fn mixed_mode_rows_are_coded_the_way_their_tag_bit_says() {
+        let data = bits_from(concat!(
+            // Row 0, tagged one-dimensional: white 4 (1011), black 4 (011).
+            "000000000001 1 1011 011 ",
+            // Row 1, tagged two-dimensional: two V(0)s repeat row 0 exactly.
+            "000000000001 0 1 1 ",
+            // Row 2, tagged two-dimensional: VR(1) moves the edge one pixel
+            // right, then V(0) for the end of the row.
+            "000000000001 0 011 1 ",
+            // Row 3, tagged one-dimensional again: white 8 (10011).
+            "000000000001 1 10011",
+        ));
+
+        let params = CcittParams {
+            k: 1,
+            columns: 8,
+            rows: 4,
+            end_of_line: true,
+            ..CcittParams::default()
+        };
+        let (pixels, warnings) = decode(&data, &params, 1 << 20);
+
+        assert_eq!(
+            pixels,
+            vec![0b1111_0000, 0b1111_0000, 0b1111_1000, 0b1111_1111],
+            "each row decodes the way its own tag bit said it was coded"
+        );
+        assert!(
+            warnings.is_empty(),
+            "every line has the EOL it promised: {warnings:?}"
+        );
+    }
+
+    /// The tag bit is part of the EOL, so a row that arrives without an EOL
+    /// has no tag bit to read.
+    ///
+    /// Reading one anyway spends the first bit of that row's first code, and
+    /// the row — and every row after it, since the reference line is now
+    /// wrong too — decodes to noise. `/EndOfLine false` is the default, so
+    /// this is not an exotic stream.
+    #[test]
+    fn a_mixed_mode_row_without_an_end_of_line_keeps_its_first_data_bit() {
+        // One EOL at the head and none after it, which is what an encoder
+        // that opens with a sync and then stops emitting them produces.
+        let data = bits_from(concat!(
+            "000000000001 1 1011 011 ", // row 0: white 4, black 4
+            "0111 0010 ",               // row 1: white 2, black 6
+            "1110 11 ",                 // row 2: white 6, black 2
+            "10011",                    // row 3: white 8
+        ));
+
+        let params = CcittParams {
+            k: 1,
+            columns: 8,
+            rows: 4,
+            ..CcittParams::default()
+        };
+        let (pixels, warnings) = decode(&data, &params, 1 << 20);
+
+        assert_eq!(
+            pixels,
+            vec![0b1111_0000, 0b1100_0000, 0b1111_1100, 0b1111_1111],
+            "the rows after the first are their own runs, not noise"
+        );
+        assert!(warnings.is_empty(), "and nothing was damaged: {warnings:?}");
+
+        // The same four rows with no EOL anywhere, which loses the *first*
+        // row as well. T.4 §4.2.1.3.1 says a page begins one-dimensionally,
+        // and with nothing to announce otherwise it stays that way.
+        let bare = bits_from("1011 011 0111 0010 1110 11 10011");
+        let (pixels, warnings) = decode(&bare, &params, 1 << 20);
+        assert_eq!(
+            pixels,
+            vec![0b1111_0000, 0b1100_0000, 0b1111_1100, 0b1111_1111],
+            "a mixed-mode stream with no EOL at all is one-dimensional"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// What a row without an EOL is coded as, given there is no tag bit to
+    /// tell it: the mode last announced.
+    ///
+    /// This is the half a fix could plausibly leave out. Defaulting an
+    /// untagged row to one-dimensional passes the test above — every row
+    /// there is one-dimensional — and turns a two-dimensionally coded
+    /// continuation into run lengths read from mode codes, which is noise
+    /// again, from a different offset.
+    #[test]
+    fn a_two_dimensional_announcement_outlives_a_row_without_an_end_of_line() {
+        let data = bits_from(concat!(
+            "000000000001 1 1011 011 ", // row 0: EOL, tagged 1D
+            "000000000001 0 1 1 ",      // row 1: EOL, tagged 2D, two V(0)s
+            "011 1 ",                   // row 2: no EOL — still 2D: VR(1), V(0)
+            "1 1",                      // row 3: no EOL — still 2D: two V(0)s
+        ));
+
+        let params = CcittParams {
+            k: 1,
+            columns: 8,
+            rows: 4,
+            ..CcittParams::default()
+        };
+        let (pixels, warnings) = decode(&data, &params, 1 << 20);
+
+        assert_eq!(
+            pixels,
+            vec![0b1111_0000, 0b1111_0000, 0b1111_1000, 0b1111_1000],
+            "rows 2 and 3 are two-dimensional because row 1's EOL said so"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// RTC (T.4 §4.1.2) is six EOL-and-tag pairs, so in mixed mode the second
+    /// EOL only comes into view once the first tag bit is out of the way.
+    /// Looking for it before that read the terminator as a row, failed on it
+    /// and called a perfectly well-formed stream damaged.
+    #[test]
+    fn a_mixed_mode_return_to_control_ends_the_image_without_complaint() {
+        let mut pattern = String::from(concat!(
+            "000000000001 1 1011 011 ", // row 0: white 4, black 4
+            "000000000001 1 10011 ",    // row 1: white 8
+        ));
+        for _ in 0..6 {
+            pattern.push_str("000000000001 1 ");
+        }
+        let data = bits_from(&pattern);
+
+        let params = CcittParams {
+            k: 1,
+            columns: 8,
+            // Nothing declares a height, so only the RTC says where to stop.
+            rows: 0,
+            ..CcittParams::default()
+        };
+        let (pixels, warnings) = decode(&data, &params, 1 << 20);
+
+        assert_eq!(pixels, vec![0b1111_0000, 0b1111_1111], "two rows, then RTC");
+        assert!(
+            warnings.is_empty(),
+            "a terminator is not a damaged row: {warnings:?}"
         );
     }
 
