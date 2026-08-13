@@ -6,8 +6,19 @@
 //! (two-dimensional, T.6) — which is what makes a fax of mostly-blank paper
 //! so small.
 //!
-//! Output is one byte per pixel, 0 for black and 255 for white, which the
-//! caller maps into whatever colour space the image declares.
+//! Output is packed one bit per pixel, most significant bit first, each row
+//! padded out to a byte boundary — the shape `/BitsPerComponent 1` describes,
+//! so the caller reads it with the same sample loop it reads every other
+//! image with, and `/ImageMask`, `/Decode` and `/ColorSpace` apply to a fax
+//! the way they apply to anything else.
+//!
+//! Polarity is a parameter rather than a convention. T.4 codes runs of white
+//! and black with no bit values involved at all; `/BlackIs1` (7.4.6, Table 11)
+//! says which bit value the black ones take, and its default of false means
+//! **0 is black** — which is also what 0 means in a one-bit DeviceGray
+//! sample. So the default composes into an upright image, and a file that
+//! sets `/BlackIs1 true` produces a negative unless it also says
+//! `/Decode [1 0]`, exactly as the specification describes.
 
 use crate::Warning;
 
@@ -399,12 +410,72 @@ fn read_run(bits: &mut Bits, white: bool) -> Option<u32> {
     Some(total)
 }
 
-/// Decodes CCITT data into one byte per pixel.
+/// Records a leniency once. The crate's contract is one entry per condition
+/// per decode, not one per occurrence.
+fn note(warnings: &mut Vec<Warning>, warning: Warning) {
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
+}
+
+/// Bytes in one packed row of `columns` pixels.
+fn row_bytes(columns: usize) -> usize {
+    columns.div_ceil(8)
+}
+
+/// Sets `from..to` to the black bit value.
+fn paint(row: &mut [u8], from: usize, to: usize, black_is_1: bool) {
+    for index in from..to {
+        if let Some(byte) = row.get_mut(index / 8) {
+            let mask = 0x80u8 >> (index % 8);
+            if black_is_1 {
+                *byte |= mask;
+            } else {
+                *byte &= !mask;
+            }
+        }
+    }
+}
+
+/// Packs one row's changing elements into `row`, most significant bit first.
+///
+/// A row starts white and alternates colour at each changing element (T.4
+/// §4.1). `black_is_1` chooses the sense; the padding bits past `columns` in
+/// the final byte take the white value, so a caller re-laying rows at a
+/// different width never picks up a black edge that is not in the image.
+fn pack_row(changes: &[usize], columns: usize, black_is_1: bool, row: &mut [u8]) {
+    let bytes = row_bytes(columns);
+    let white = if black_is_1 { 0x00 } else { 0xFF };
+    for byte in row.iter_mut().take(bytes) {
+        *byte = white;
+    }
+
+    let mut at = 0usize;
+    let mut color_white = true;
+    for &change in changes {
+        let change = change.min(columns);
+        if !color_white {
+            paint(row, at.min(change), change, black_is_1);
+        }
+        at = change;
+        color_white = !color_white;
+    }
+    if !color_white {
+        paint(row, at, columns, black_is_1);
+    }
+}
+
+/// Decodes CCITT data into packed one-bit-per-pixel rows.
+///
+/// Rows are `columns.div_ceil(8)` bytes each, most significant bit first, and
+/// `max_output` bounds the whole result in bytes.
 #[must_use]
 pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>, Vec<Warning>) {
     let mut warnings = Vec::new();
     let columns = params.columns.clamp(1, 1 << 16) as usize;
+    let stride = row_bytes(columns);
     let mut out: Vec<u8> = Vec::new();
+    let mut row = vec![0u8; stride];
     let mut bits = Bits::new(data);
 
     // The row above, as the positions where colour changes. A first row is
@@ -416,8 +487,8 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
         if params.rows > 0 && rows_done >= params.rows {
             break;
         }
-        if out.len().saturating_add(columns) > max_output {
-            warnings.push(Warning::OutputCapHit);
+        if out.len().saturating_add(stride) > max_output {
+            note(&mut warnings, Warning::OutputCapHit);
             break;
         }
 
@@ -451,9 +522,9 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
             // A row that will not decode is one row, not the rest of the page.
             // Repeating the row above is what every fax decoder does with a
             // damaged line: it keeps the image legible and localises the loss.
-            warnings.push(Warning::TruncatedInput);
-            if rows_done > 0 && out.len() >= columns && params.rows > rows_done {
-                let previous: Vec<u8> = out[out.len() - columns..].to_vec();
+            note(&mut warnings, Warning::TruncatedInput);
+            if rows_done > 0 && out.len() >= stride && params.rows > rows_done {
+                let previous: Vec<u8> = out[out.len() - stride..].to_vec();
                 out.extend_from_slice(&previous);
                 rows_done += 1;
                 // Nothing else can be decoded from a broken bit position.
@@ -461,34 +532,7 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
             break;
         };
 
-        // Turn the change positions into pixels: a row starts white and
-        // alternates at each change.
-        let mut row = vec![255u8; columns];
-        let mut color_white = true;
-        let mut at = 0usize;
-        for &change in &changes {
-            let change = change.min(columns);
-            if !color_white {
-                for pixel in row.get_mut(at..change).unwrap_or_default() {
-                    *pixel = 0;
-                }
-            }
-            at = change;
-            color_white = !color_white;
-        }
-        if !color_white {
-            for pixel in row.get_mut(at..).unwrap_or_default() {
-                *pixel = 0;
-            }
-        }
-
-        if params.black_is_1 {
-            // The samples are inverted relative to the default reading.
-            for pixel in &mut row {
-                *pixel = 255 - *pixel;
-            }
-        }
-
+        pack_row(&changes, columns, params.black_is_1, &mut row);
         out.extend_from_slice(&row);
         rows_done += 1;
 
@@ -502,16 +546,94 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
     }
 
     if params.rows > 0 && rows_done < params.rows {
-        warnings.push(Warning::TruncatedInput);
+        note(&mut warnings, Warning::TruncatedInput);
         // A short image is padded white rather than left ragged, so the
         // caller's row arithmetic still works.
-        let missing = (params.rows - rows_done) as usize * columns;
+        let missing = (params.rows - rows_done) as usize * stride;
         if out.len() + missing <= max_output {
-            out.resize(out.len() + missing, if params.black_is_1 { 0 } else { 255 });
+            out.resize(
+                out.len() + missing,
+                if params.black_is_1 { 0x00 } else { 0xFF },
+            );
         }
     }
 
     (out, warnings)
+}
+
+/// A two-dimensional (T.6) row decoder that resumes from a bit offset.
+///
+/// [`decode`] is whole-stream: it owns everything 7.4.6 wraps around the
+/// coding — `/K`, `/Rows`, byte alignment, EOL and EOFB, the padding of a
+/// short image. An MMR-coded region (T.88 6.2.6, which is how JBIG2 codes a
+/// bilevel region without arithmetic coding) is the *same* T.6 coding with
+/// none of that around it: it begins at an arbitrary bit position inside a
+/// larger segment, runs for a height the segment header already gave, and the
+/// reader has to know which bit it ended on to carry on parsing.
+///
+/// So this is the seam, and it is deliberately narrow: construct at a bit
+/// offset, ask for rows one at a time into a caller-owned buffer, read the
+/// bit position back. Rows are packed exactly as [`decode`] packs them,
+/// except that here **1 is black** unconditionally — JBIG2's own sense, so
+/// its caller inverts at the boundary rather than the decoder guessing.
+///
+/// Both this and [`decode`] decode a row through the same `decode_row`, so
+/// the mode codes have one implementation and one set of tests.
+pub struct T6Rows<'a> {
+    bits: Bits<'a>,
+    reference: Vec<usize>,
+    columns: usize,
+}
+
+impl<'a> T6Rows<'a> {
+    /// Starts at `bit_offset` bits into `data`, decoding rows of `columns`
+    /// pixels against an imaginary all-white reference line (T.6 §2.2.1).
+    #[must_use]
+    pub fn new(data: &'a [u8], bit_offset: usize, columns: u32) -> T6Rows<'a> {
+        let columns = columns.clamp(1, 1 << 16) as usize;
+        T6Rows {
+            bits: Bits {
+                data,
+                at: bit_offset,
+            },
+            reference: vec![columns, columns],
+            columns,
+        }
+    }
+
+    /// Bytes one row occupies, which is the least `next_row` will accept.
+    #[must_use]
+    pub fn row_bytes(&self) -> usize {
+        row_bytes(self.columns)
+    }
+
+    /// The bit position after everything decoded so far.
+    #[must_use]
+    pub fn bit_position(&self) -> usize {
+        self.bits.at
+    }
+
+    /// Decodes the next row into `row`, 1 for black, most significant bit
+    /// first.
+    ///
+    /// False means no further row could be read — the data ran out, or the
+    /// bits at the cursor are not a mode code. Nothing is written in that
+    /// case and [`Self::bit_position`] still points at the failure, which is
+    /// what lets a caller report where a region went wrong rather than only
+    /// that it did.
+    pub fn next_row(&mut self, row: &mut [u8]) -> bool {
+        if row.len() < self.row_bytes() || self.bits.exhausted() {
+            return false;
+        }
+        let Some(changes) = decode_row(&mut self.bits, &self.reference, self.columns, true) else {
+            return false;
+        };
+        pack_row(&changes, self.columns, true, row);
+        self.reference = changes;
+        self.reference.push(self.columns);
+        self.reference.push(self.columns);
+        true
+    }
 }
 
 /// Decodes one row, returning the positions where its colour changes.
@@ -707,8 +829,8 @@ mod tests {
             byte_align: false,
         };
         let (out, _) = decode(&data, &params, 1 << 20);
-        assert_eq!(out.len(), 1728 * 2, "both rows decoded");
-        assert!(out.iter().all(|p| *p == 255), "and both are white");
+        assert_eq!(out.len(), (1728 / 8) * 2, "both rows decoded");
+        assert!(out.iter().all(|p| *p == 0xFF), "and both are white");
     }
 
     /// Packs a sequence of `(length, code)` pairs into bytes.
@@ -734,6 +856,12 @@ mod tests {
         out
     }
 
+    /// The output shape, stated as an assertion: one bit per pixel, most
+    /// significant bit first, 0 for black by default (7.4.6, Table 11).
+    ///
+    /// Byte-per-pixel output was the old contract, and the caller compensated
+    /// for it. Both halves changed in one commit; this is the half that says
+    /// what the bytes now mean.
     #[test]
     fn a_one_dimensional_row_decodes_its_runs() {
         // Four white, then four black, in an eight-pixel row.
@@ -746,11 +874,11 @@ mod tests {
         };
         let (pixels, _) = decode(&data, &params, 1 << 20);
 
-        assert_eq!(pixels.len(), 8);
-        assert_eq!(&pixels[..4], &[255, 255, 255, 255], "white first");
-        assert_eq!(&pixels[4..], &[0, 0, 0, 0], "then black");
+        assert_eq!(pixels.len(), 1, "eight pixels is one byte, not eight");
+        assert_eq!(pixels[0], 0b1111_0000, "white is 1, black is 0, MSB first");
     }
 
+    /// `/BlackIs1` chooses the bit value, and nothing else about the image.
     #[test]
     fn black_is_1_inverts_the_result() {
         let data = pack(&[(4, 0x0B), (4, 0x03)]);
@@ -762,8 +890,30 @@ mod tests {
             ..CcittParams::default()
         };
         let (pixels, _) = decode(&data, &params, 1 << 20);
-        assert_eq!(&pixels[..4], &[0, 0, 0, 0], "inverted");
-        assert_eq!(&pixels[4..], &[255, 255, 255, 255]);
+        assert_eq!(pixels[0], 0b0000_1111, "inverted");
+    }
+
+    /// A row that is not a whole number of bytes still ends on a byte
+    /// boundary, and the bits past its width are white rather than whatever
+    /// the last run left there.
+    #[test]
+    fn a_row_is_padded_to_a_byte_boundary() {
+        // Ten pixels: two white, then eight black.
+        let data = pack(&[(4, 0x07), (6, 0x05)]);
+        let params = CcittParams {
+            k: 0,
+            columns: 10,
+            rows: 1,
+            ..CcittParams::default()
+        };
+        let (pixels, _) = decode(&data, &params, 1 << 20);
+
+        assert_eq!(pixels.len(), 2, "ten pixels take two bytes");
+        assert_eq!(pixels[0], 0b1100_0000, "two white then black");
+        assert_eq!(
+            pixels[1], 0b0011_1111,
+            "the last two pixels are black and the six padding bits are white"
+        );
     }
 
     #[test]
@@ -777,8 +927,21 @@ mod tests {
         };
         let (pixels, warnings) = decode(&data, &params, 1 << 20);
 
-        assert_eq!(pixels.len(), 32, "every declared row is present");
+        assert_eq!(pixels.len(), 4, "every declared row is present");
+        assert_eq!(
+            &pixels[1..],
+            &[0xFF, 0xFF, 0xFF],
+            "and the padding is white"
+        );
         assert!(warnings.contains(&Warning::TruncatedInput));
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| **w == Warning::TruncatedInput)
+                .count(),
+            1,
+            "one entry per condition per decode, however many rows were short"
+        );
     }
 
     #[test]
@@ -786,12 +949,13 @@ mod tests {
         let data = pack(&[(4, 0x0B), (4, 0x03)]);
         let params = CcittParams {
             k: 0,
-            columns: 8,
+            columns: 64,
             rows: 0,
             ..CcittParams::default()
         };
-        let (pixels, _) = decode(&data, &params, 4);
-        assert!(pixels.len() <= 8, "the cap bounds the output");
+        let (pixels, warnings) = decode(&data, &params, 4);
+        assert!(pixels.len() <= 4, "the cap bounds the output");
+        assert!(warnings.contains(&Warning::OutputCapHit));
     }
 
     #[test]
@@ -826,6 +990,44 @@ mod tests {
                 let _ = decode(&data, &params, 1 << 16);
             }
         }
+    }
+
+    /// The seam [17](../../../docs/plans/gaps/17-jbig2-generic-region.md)'s
+    /// MMR path decodes through: rows one at a time, from a bit offset that
+    /// is not a byte offset, with the position readable afterwards.
+    #[test]
+    fn two_dimensional_rows_resume_from_a_bit_offset() {
+        // Three bits of something else, then the two G4 rows of the
+        // end-to-end fixture: horizontal white 0 / black 4 then V(0), and
+        // three V(0)s repeating it.
+        let data = bits_from("101 001 00110101 011 1 111");
+        let mut rows = T6Rows::new(&data, 3, 8);
+        assert_eq!(rows.row_bytes(), 1);
+
+        let mut row = [0u8; 1];
+        assert!(rows.next_row(&mut row), "the first row decodes");
+        assert_eq!(
+            row[0], 0b1111_0000,
+            "four black, then four white — 1 is black"
+        );
+        let after_first = rows.bit_position();
+        assert_eq!(after_first, 3 + 15, "and it consumed exactly its own codes");
+
+        assert!(rows.next_row(&mut row), "the second row decodes against it");
+        assert_eq!(row[0], 0b1111_0000, "identically");
+        assert_eq!(rows.bit_position(), after_first + 3, "three V(0) codes");
+
+        assert!(!rows.next_row(&mut row), "and then the data is spent");
+    }
+
+    /// A buffer too small for a row is refused rather than half-filled.
+    #[test]
+    fn a_short_row_buffer_is_refused() {
+        let data = bits_from("001 00110101 011 1");
+        let mut rows = T6Rows::new(&data, 0, 24);
+        let mut row = [0u8; 2];
+        assert!(!rows.next_row(&mut row), "three bytes are needed");
+        assert_eq!(rows.bit_position(), 0, "and nothing was consumed");
     }
 
     #[test]

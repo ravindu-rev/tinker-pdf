@@ -9,8 +9,12 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{FontSource, Layer, Matrix, Rgb};
-use tinker_pdf_cos::{font as cos_font, pages as cos_pages, CosDocument, Dict, Name, Object};
-use tinker_pdf_filters::{ccitt_decode, jpeg_decode, CcittParams, JpegColor};
+use tinker_pdf_cos::{
+    font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name, Object,
+};
+use tinker_pdf_filters::{
+    ccitt_decode, jpeg_decode, CcittParams, JpegColor, Warning as FilterWarning,
+};
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading};
 
@@ -40,6 +44,10 @@ pub struct PageResources {
     /// glyphs were being drawn — names whose font resolved no glyph for a
     /// code the page used.
     missing_fonts: Mutex<Vec<String>>,
+    /// Images that decoded with something tolerated, as `(resource name,
+    /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
+    /// forgave, and this is where the object it happened in gets attached.
+    damaged_images: Mutex<Vec<(String, String)>>,
     /// Which optional-content layers the document's default configuration
     /// shows (8.11).
     ///
@@ -75,6 +83,15 @@ impl PageResources {
         self.missing_fonts
             .lock()
             .map(|names| names.clone())
+            .unwrap_or_default()
+    }
+
+    /// Images that decoded with a leniency, and which leniency (ruling 10).
+    #[must_use]
+    pub fn damaged_images(&self) -> Vec<(String, String)> {
+        self.damaged_images
+            .lock()
+            .map(|images| images.clone())
             .unwrap_or_default()
     }
 
@@ -114,6 +131,7 @@ impl PageResources {
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
+            damaged_images: Mutex::new(Vec::new()),
             optional: OptionalContent::bind(doc),
         }
     }
@@ -154,6 +172,7 @@ impl PageResources {
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
+            damaged_images: Mutex::new(Vec::new()),
             optional: OptionalContent::bind(doc),
         }
     }
@@ -1138,6 +1157,94 @@ impl PageResources {
         Ok(image)
     }
 
+    /// Records that an image decoded with something tolerated (ruling 10).
+    fn report_damaged_image(&self, name: &[u8], warning: FilterWarning) {
+        if let Ok(mut damaged) = self.damaged_images.lock() {
+            let entry = (
+                String::from_utf8_lossy(name).into_owned(),
+                warning.as_str().to_string(),
+            );
+            if damaged.len() < 64 && !damaged.contains(&entry) {
+                damaged.push(entry);
+            }
+        }
+    }
+
+    /// Decodes a CCITT stream into the packed one-bit samples the sample loop
+    /// in [`Self::decode_image_at`] reads (7.4.6).
+    ///
+    /// **The single entry point for fax data in this file.** The XObject path
+    /// reaches it above; gap 08 routes `decode_inline` to this same function
+    /// rather than growing a second copy of Table 11's defaults. That matters
+    /// more than it looks: `ccitt_decode`'s signature does not change when the
+    /// meaning of its bytes changes, so a second call site would be invisible
+    /// to the compiler and would go on producing the old shape in silence.
+    ///
+    /// `/Columns` is the *coding* width and need not be `/Width` — Table 11
+    /// defaults it to 1728 whatever the image is — so the decoded rows are
+    /// re-laid at the image's own width here. The bits past `/Columns` in a
+    /// decoded row are white, so a wider image gains white rather than an edge
+    /// that is not in the fax.
+    fn ccitt_samples(
+        &self,
+        dict: &Dict,
+        coded: &[u8],
+        width: u32,
+        height: u32,
+        name: &[u8],
+    ) -> Vec<u8> {
+        let parms = self.decode_parms(dict);
+        let int = |key: &[u8]| parms.as_ref().and_then(|p| p.get_int(self.doc.intern(key)));
+        let flag = |key: &[u8]| {
+            parms
+                .as_ref()
+                .and_then(|p| p.get_bool(self.doc.intern(key)))
+        };
+
+        // Table 11: `/Rows` is the height of the coded image. It is optional,
+        // and the image's own `/Height` is what it means when it is absent —
+        // which is what this used to pass unconditionally, so a file whose two
+        // heights disagreed was decoded at the wrong one.
+        let rows = int(b"Rows")
+            .filter(|rows| *rows > 0)
+            .unwrap_or(i64::from(height))
+            .clamp(1, 1 << 16) as u32;
+        let params = CcittParams {
+            k: int(b"K").unwrap_or(0) as i32,
+            columns: int(b"Columns").unwrap_or(1728).clamp(1, 1 << 16) as u32,
+            rows,
+            black_is_1: flag(b"BlackIs1").unwrap_or(false),
+            byte_align: flag(b"EncodedByteAlign").unwrap_or(false),
+        };
+
+        // The same ceiling every other stream in the document decodes under.
+        // Every row costs at least one bit of input, so the decode is bounded
+        // by the coded length long before it reaches this.
+        let (packed, warnings) = ccitt_decode(coded, &params, limits::MAX_DECODED_STREAM);
+        for warning in warnings {
+            // Ruling 10. These were discarded, so a fax with half its rows
+            // missing was reported as a clean render of a mostly blank page.
+            self.report_damaged_image(name, warning);
+        }
+
+        let coded_stride = (params.columns as usize).div_ceil(8);
+        let stride = (width as usize).div_ceil(8);
+        let white = if params.black_is_1 { 0x00 } else { 0xFF };
+        let mut samples = vec![white; (height as usize).saturating_mul(stride)];
+        let run = stride.min(coded_stride);
+        for y in 0..height as usize {
+            let from = y * coded_stride;
+            let to = y * stride;
+            let (Some(source), Some(target)) =
+                (packed.get(from..from + run), samples.get_mut(to..to + run))
+            else {
+                break;
+            };
+            target.copy_from_slice(source);
+        }
+        samples
+    }
+
     /// Decodes an image from its dictionary, wherever that came from.
     fn decode_image_at(
         &self,
@@ -1233,65 +1340,40 @@ impl PageResources {
                 interpolate,
             });
         }
-        // CCITT data likewise arrives still coded, and carries its own
-        // parameters in /DecodeParms.
-        if matches!(
-            last_filter.as_deref(),
-            Some(b"CCITTFaxDecode") | Some(b"CCF")
-        ) {
-            let raw = self
-                .doc
-                .stream_image_input(reference)
-                .map_err(|_| "CCITTFaxDecode".to_string())?;
-            let parms = self.decode_parms(&dict);
-            let params = CcittParams {
-                k: parms
-                    .as_ref()
-                    .and_then(|p| p.get_int(self.doc.intern(b"K")))
-                    .unwrap_or(0) as i32,
-                columns: parms
-                    .as_ref()
-                    .and_then(|p| p.get_int(self.doc.intern(b"Columns")))
-                    .unwrap_or(1728)
-                    .clamp(1, 1 << 16) as u32,
-                rows: height,
-                black_is_1: parms
-                    .as_ref()
-                    .and_then(|p| p.get_bool(self.doc.intern(b"BlackIs1")))
-                    .unwrap_or(false),
-                byte_align: parms
-                    .as_ref()
-                    .and_then(|p| p.get_bool(self.doc.intern(b"EncodedByteAlign")))
-                    .unwrap_or(false),
-            };
-
-            let (gray, _) = ccitt_decode(&raw, &params, 1 << 28);
-            let mut rgb = Vec::with_capacity(gray.len() * 3);
-            for value in &gray {
-                rgb.extend_from_slice(&[*value, *value, *value]);
-            }
-            rgb.resize((width as usize) * (height as usize) * 3, 255);
-            invert_if_decode_reverses(&decode, &mut rgb);
-            return Ok(DecodedImage {
-                width,
-                height,
-                rgb,
-                alpha: Vec::new(),
-                stencil: false,
-                interpolate,
-            });
-        }
         if let Some(filter) = last_filter.as_deref() {
             if matches!(filter, b"JPXDecode" | b"JBIG2Decode") {
                 return Err(String::from_utf8_lossy(filter).into_owned());
             }
         }
 
-        // Everything else decodes to raw samples.
-        let data = self
-            .doc
-            .stream_decoded(reference)
-            .map_err(|_| "undecodable".to_string())?;
+        // CCITT data likewise arrives still coded, and carries its own
+        // parameters in /DecodeParms — but unlike a JPEG it decodes to
+        // *samples*, one bit per pixel, which is what the image dictionary
+        // says it is. So it joins the path below rather than returning its own
+        // pixels: `/ImageMask`, `/Decode` and `/ColorSpace` are read once,
+        // where they have always been read, and apply to a fax because a fax
+        // now arrives there like everything else.
+        let fax = matches!(
+            last_filter.as_deref(),
+            Some(b"CCITTFaxDecode") | Some(b"CCF")
+        );
+        let data = if fax {
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "CCITTFaxDecode".to_string())?;
+            self.ccitt_samples(&dict, &raw, width, height, name)
+        } else {
+            // Everything else decodes to raw samples.
+            self.doc
+                .stream_decoded(reference)
+                .map_err(|_| "undecodable".to_string())?
+        };
+        // 7.4.6: fax output is one bit per pixel, whatever the dictionary
+        // claims. Producers that omit `/BitsPerComponent` are common and the
+        // clamp already reads an absent key as 1; one that writes 8 would
+        // otherwise read each row eight times too wide.
+        let bpc = if fax { 1 } else { bpc };
 
         let space = self.doc.resolve_key(&dict, self.doc.intern(b"ColorSpace"));
         let space = self

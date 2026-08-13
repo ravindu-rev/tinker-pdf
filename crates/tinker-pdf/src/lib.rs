@@ -537,6 +537,16 @@ impl Page {
         {
             warnings.push(RenderWarning::UnreadableFont);
         }
+        // Ruling 10: an image that decoded with a damaged row replicated, or
+        // short, is drawn *and* named. The decoders have always returned these
+        // and the image path has always thrown them away, so a scan missing
+        // half its rows rendered identically to a scan of blank paper.
+        for (name, reason) in resources.damaged_images() {
+            let warning = RenderWarning::DamagedImage { name, reason };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
         if scaled_down {
             warnings.push(RenderWarning::PageScaledDown {
                 requested: scale,

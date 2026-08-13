@@ -73,6 +73,20 @@ pub enum RenderWarning {
         /// Which codec.
         codec: String,
     },
+    /// An image decoded, but something had to be tolerated to get it: a
+    /// damaged row replicated, a stream that ended short padded, a decode
+    /// ceiling reached.
+    ///
+    /// Ruling 10 — the image is drawn *and* named, so "the scan decoded" and
+    /// "the scan decoded cleanly" stay distinguishable. Without this a fax
+    /// with half its rows missing looks exactly like a fax of a mostly blank
+    /// page, which is the most common thing a fax is.
+    DamagedImage {
+        /// The resource name the image was drawn under.
+        name: String,
+        /// The decoder's own stable identifier for what it tolerated.
+        reason: String,
+    },
     /// The page was too large to render at the requested resolution, so it
     /// was rendered smaller.
     ///
