@@ -36,6 +36,14 @@ pub struct CcittParams {
     pub black_is_1: bool,
     /// `/EncodedByteAlign`: whether each row starts on a byte boundary.
     pub byte_align: bool,
+    /// `/EndOfLine`: whether the encoding is *required* to carry an EOL
+    /// before every line. An EOL is honoured wherever it appears whatever
+    /// this says; true additionally makes a missing one worth reporting.
+    pub end_of_line: bool,
+    /// `/EndOfBlock`: whether the data ends with an EOFB pattern. True, the
+    /// default, means the pattern terminates the image and `/Rows` does not;
+    /// false means `/Rows` is the authority and nothing past it is read.
+    pub end_of_block: bool,
 }
 
 impl Default for CcittParams {
@@ -46,6 +54,8 @@ impl Default for CcittParams {
             rows: 0,
             black_is_1: false,
             byte_align: false,
+            end_of_line: false,
+            end_of_block: true,
         }
     }
 }
@@ -484,6 +494,18 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
     let mut rows_done = 0u32;
 
     while !bits.exhausted() {
+        // 7.4.6, Table 11: `/EndOfBlock` says whether the data is terminated
+        // by an EOFB pattern, "overriding the Rows parameter". Read at its
+        // most literal that would let a stream with trailing bytes and no
+        // EOFB decode past its own declared height, bounded only by
+        // `max_output` — a quarter of a gigabyte of rows a caller that knows
+        // the image is `/Height` tall will throw away. Ruling 1 asks for
+        // bounded work on untrusted input, so `/Rows` stays a ceiling either
+        // way and the override runs the other direction: an EOFB *before*
+        // `/Rows` ends the image early, which is the case the spec is
+        // actually describing. What `/EndOfBlock false` adds is that nothing
+        // past the last row is read at all, not even looking for a pattern
+        // the file has said is not there.
         if params.rows > 0 && rows_done >= params.rows {
             break;
         }
@@ -491,7 +513,6 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
             note(&mut warnings, Warning::OutputCapHit);
             break;
         }
-
         // T.4 §4.1.2: rows may be separated by an EOL, and a stream may open
         // with one. Two in a row is EOFB (T.6) or RTC (T.4) — the end of the
         // image, not a damaged row. Reading an EOL as data aborted the whole
@@ -502,6 +523,15 @@ pub fn decode(data: &[u8], params: &CcittParams, max_output: usize) -> (Vec<u8>,
                 // EOFB/RTC: whatever follows is not image data.
                 break;
             }
+        } else if params.end_of_line && !bits.only_padding_left() {
+            // Table 11 again: `/EndOfLine true` says the encoding carries one
+            // before every line. It does not, here — and the bits left are
+            // real rather than the zero padding a stream ends with. Decode the
+            // row from the cursor anyway, because leniency is the house
+            // policy, but ruling 10 wants the tolerance named rather than
+            // absorbed: a stream whose EOLs went missing is a stream whose row
+            // boundaries are only as good as its run lengths.
+            note(&mut warnings, Warning::MissingEndOfLine);
         }
         if bits.exhausted() || bits.only_padding_left() {
             break;
@@ -825,8 +855,7 @@ mod tests {
             k: 0,
             columns: 1728,
             rows: 2,
-            black_is_1: false,
-            byte_align: false,
+            ..CcittParams::default()
         };
         let (out, _) = decode(&data, &params, 1 << 20);
         assert_eq!(out.len(), (1728 / 8) * 2, "both rows decoded");
@@ -913,6 +942,83 @@ mod tests {
         assert_eq!(
             pixels[1], 0b0011_1111,
             "the last two pixels are black and the six padding bits are white"
+        );
+    }
+
+    /// 7.4.6 Table 11: `/EndOfBlock false` says the data carries no EOFB, so
+    /// `/Rows` is the authority on where the image ends. Without that, the
+    /// decoder read whatever followed the last row and grew the image past
+    /// its declared height -- and because the extra rows decode from real
+    /// codes rather than from padding, the result is plausible rather than
+    /// obviously wrong.
+    #[test]
+    fn end_of_block_false_stops_at_rows_with_bytes_to_spare() {
+        // Three identical rows of eight black pixels, but /Rows says one.
+        let row = [(4, 0x0Bu32), (6, 0x0Du32)];
+        let mut codes = Vec::new();
+        for _ in 0..3 {
+            codes.extend_from_slice(&row);
+        }
+        let data = pack(&codes);
+
+        let stopping = CcittParams {
+            k: 0,
+            columns: 8,
+            rows: 1,
+            end_of_block: false,
+            ..CcittParams::default()
+        };
+        let (pixels, _) = decode(&data, &stopping, 1 << 20);
+        assert_eq!(
+            pixels.len(),
+            1,
+            "/Rows is the authority, so the trailing rows are never read"
+        );
+
+        // And the trailing bytes really were decodable rows rather than
+        // padding the decoder would have stopped on anyway -- otherwise this
+        // test would pass against a decoder that simply ran out of input.
+        let all_three = CcittParams {
+            rows: 3,
+            ..stopping
+        };
+        let (more, _) = decode(&data, &all_three, 1 << 20);
+        assert_eq!(more.len(), 3, "the bytes past row one decode to two rows");
+    }
+
+    /// Table 11 again: `/EndOfLine true` says the encoding carries an EOL
+    /// before every line. Honouring one wherever it appears is right and
+    /// already worked; what was missing is noticing that a *required* one is
+    /// absent. Ruling 10 wants the tolerance named -- a stream whose EOLs
+    /// went missing has row boundaries only as good as its run lengths.
+    #[test]
+    fn a_missing_required_end_of_line_is_reported_rather_than_absorbed() {
+        let data = pack(&[(4, 0x0B), (6, 0x0D)]);
+        let params = CcittParams {
+            k: 0,
+            columns: 8,
+            rows: 1,
+            end_of_line: true,
+            ..CcittParams::default()
+        };
+        let (pixels, warnings) = decode(&data, &params, 1 << 20);
+
+        assert_eq!(pixels.len(), 1, "the row is still decoded, leniently");
+        assert!(
+            warnings.contains(&Warning::MissingEndOfLine),
+            "and the absent EOL is named: {warnings:?}"
+        );
+
+        // The same bytes without the flag are simply a well-formed stream,
+        // so the warning tracks the declaration rather than the data.
+        let quiet = CcittParams {
+            end_of_line: false,
+            ..params
+        };
+        let (_, warnings) = decode(&data, &quiet, 1 << 20);
+        assert!(
+            !warnings.contains(&Warning::MissingEndOfLine),
+            "nothing is missing when nothing was promised: {warnings:?}"
         );
     }
 

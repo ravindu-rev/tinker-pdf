@@ -1215,6 +1215,15 @@ impl PageResources {
             rows,
             black_is_1: flag(b"BlackIs1").unwrap_or(false),
             byte_align: flag(b"EncodedByteAlign").unwrap_or(false),
+            // Table 11's other two flags, neither of which was consulted.
+            // `/EndOfLine` says an EOL is required before every line, so a
+            // missing one is a leniency worth naming rather than a shape the
+            // decoder silently absorbs. `/EndOfBlock false` says the data
+            // carries no EOFB, which is what makes `/Rows` above the authority
+            // on where the image ends instead of a hint the decoder may run
+            // past.
+            end_of_line: flag(b"EndOfLine").unwrap_or(false),
+            end_of_block: flag(b"EndOfBlock").unwrap_or(true),
         };
 
         // The same ceiling every other stream in the document decodes under.

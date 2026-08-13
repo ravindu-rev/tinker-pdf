@@ -142,6 +142,9 @@ pub enum Warning {
     BadPredictorTag,
     /// A chain entry followed an image codec; the tail was ignored.
     ChainTailIgnored,
+    /// CCITT: `/EndOfLine true` says every line is preceded by an EOL and a
+    /// line was not; it was decoded from the cursor anyway.
+    MissingEndOfLine,
 }
 
 impl Warning {
@@ -169,6 +172,7 @@ impl Warning {
             Self::PredictorRowShort => "predictor-row-short",
             Self::BadPredictorTag => "bad-predictor-tag",
             Self::ChainTailIgnored => "chain-tail-ignored",
+            Self::MissingEndOfLine => "missing-end-of-line",
         }
     }
 }
@@ -194,6 +198,7 @@ impl fmt::Display for Warning {
             Self::PredictorRowShort => "short predictor row",
             Self::BadPredictorTag => "unknown PNG predictor tag",
             Self::ChainTailIgnored => "filters after an image codec ignored",
+            Self::MissingEndOfLine => "expected end-of-line code absent",
         };
         f.write_str(s)
     }
