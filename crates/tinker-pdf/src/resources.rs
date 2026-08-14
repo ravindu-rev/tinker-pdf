@@ -368,6 +368,17 @@ impl PageResources {
             return PatternPaint::Unsupported;
         };
 
+        // 8.7.3.2: `/PaintType` 2 is the uncoloured pattern, which takes the
+        // colour its `SCN` operands supplied. Anything that is not 2 is
+        // coloured -- including a value the file got wrong, because a coloured
+        // cell painted in its own colours is the reading that loses nothing.
+        let uncolored = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"PaintType"))
+            .as_int()
+            .unwrap_or(1)
+            == 2;
+
         PatternPaint::Tiling(Box::new(TilingPattern {
             matrix,
             bbox,
@@ -375,6 +386,7 @@ impl PageResources {
             // own size, which is the only reading that tiles.
             xstep: number(b"XStep").unwrap_or(0.0),
             ystep: number(b"YStep").unwrap_or(0.0),
+            uncolored,
         }))
     }
 
@@ -1076,7 +1088,16 @@ impl GlyphSource for PageResources {
         renderer.clip_path(&box_path, &state, false);
 
         tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
-        let (canvas, warnings) = renderer.finish();
+        let (mut canvas, warnings) = renderer.finish();
+
+        // 8.7.3.3: `PaintType 2`. The cell is a shape and the colour comes
+        // from the `SCN` operands, so whatever the content stream said about
+        // colour is discarded here rather than intercepted at every paint --
+        // which is what makes "colour operators inside it are ignored" true of
+        // operators this engine has not implemented yet as well.
+        if let Some((r, g, b)) = request.color {
+            canvas.recolor(Color::rgb(r, g, b));
+        }
 
         // Ruling 10, and only reachable when the cell had resources of its
         // own: a font the cell could not resolve, or an image it had to

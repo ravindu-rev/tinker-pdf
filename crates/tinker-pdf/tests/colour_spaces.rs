@@ -531,6 +531,116 @@ fn a_tiled_fill_stops_at_its_path() {
     }
 }
 
+/// 8.7.3.3: a `PaintType 2` cell is a *shape*. Colour operators inside it
+/// mean nothing, and the paint is the colour the `SCN` operands supplied.
+///
+/// The cell here paints green, loudly, and the operands say red. Green
+/// anywhere on this page is the cell's own colour surviving.
+#[test]
+fn an_uncoloured_cell_takes_the_operands_colour_and_ignores_its_own() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >> /ColorSpace << /Cs1 [/Pattern /DeviceRGB] >>",
+        "/Cs1 cs 1 0 0 /P0 scn 0 0 40 40 re f",
+        &tiling(
+            "/PaintType 2 /BBox [0 0 8 8] /XStep 16 /YStep 16",
+            "0 1 0 rg 0 0 8 8 re f",
+        ),
+    );
+
+    let (r, g, b) = pixel(&bitmap, 4, 36);
+    assert!(
+        r > 200 && g < 60 && b < 60,
+        "the cell paints in the operands' red, got ({r}, {g}, {b}) — \
+         green is the cell's own `rg` surviving"
+    );
+    assert_eq!(
+        pixel(&bitmap, 12, 36),
+        (255, 255, 255),
+        "and it is still a shape: the step's gap is untouched, which a \
+         recoloured *rectangle* rather than a recoloured shape would fill"
+    );
+}
+
+/// The same on the stroke slot, and this is the assertion nothing in this
+/// engine has ever been able to make.
+///
+/// Gap 07 stored the `SCN` components for the stroking slot as well as the
+/// filling one, and nothing ever rendered them: a shading pattern supplies its
+/// own colour, so the slot's colour was dead data on both routes. An
+/// uncoloured tiling pattern is the first thing that reads it, and a stroke is
+/// the first thing that can read the *wrong* one.
+///
+/// Both slots are set, to different colours, and only one of them is correct
+/// here. Every other pattern assertion in this file is satisfied by a cell
+/// that paints in *some* colour.
+#[test]
+fn an_uncoloured_pattern_stroke_takes_the_stroking_slots_colour() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >> /ColorSpace << /Cs1 [/Pattern /DeviceRGB] >>",
+        "/Cs1 cs 1 0 0 /P0 scn /Cs1 CS 0 0 1 /P0 SCN \
+         16 w 4 20 m 36 20 l S",
+        &tiling(
+            "/PaintType 2 /BBox [0 0 8 8] /XStep 8 /YStep 8",
+            "0 1 0 rg 0 0 8 8 re f",
+        ),
+    );
+
+    let (r, g, b) = pixel(&bitmap, 20, 20);
+    assert!(
+        b > 200 && r < 60,
+        "the rule takes the stroking slot's blue, got ({r}, {g}, {b}) — \
+         red is the fill slot's colour on a stroke, green is the cell's own"
+    );
+}
+
+/// And the fill slot's twin, with both slots set the other way round, so
+/// neither test can pass by reading a slot that happens to hold the right
+/// answer.
+#[test]
+fn an_uncoloured_pattern_fill_takes_the_filling_slots_colour() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >> /ColorSpace << /Cs1 [/Pattern /DeviceRGB] >>",
+        "/Cs1 cs 0 0 1 /P0 scn /Cs1 CS 1 0 0 /P0 SCN 4 4 32 32 re f",
+        &tiling(
+            "/PaintType 2 /BBox [0 0 8 8] /XStep 8 /YStep 8",
+            "0 1 0 rg 0 0 8 8 re f",
+        ),
+    );
+
+    let (r, g, b) = pixel(&bitmap, 20, 20);
+    assert!(
+        b > 200 && r < 60,
+        "the fill takes the filling slot's blue, got ({r}, {g}, {b})"
+    );
+}
+
+/// A `PaintType 1` cell keeps its own colours, which is the other half of the
+/// same decision: recolouring a coloured pattern would flatten every
+/// multi-colour logo watermark in the corpus to one ink.
+#[test]
+fn a_coloured_cell_keeps_the_colours_it_drew_with() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >> /ColorSpace << /Cs1 [/Pattern /DeviceRGB] >>",
+        "/Cs1 cs 1 0 0 /P0 scn 0 0 40 40 re f",
+        &tiling(
+            "/PaintType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8",
+            "0 1 0 rg 0 0 4 8 re f 0 0 1 rg 4 0 4 8 re f",
+        ),
+    );
+
+    let left = pixel(&bitmap, 2, 36);
+    let right = pixel(&bitmap, 6, 36);
+    assert!(
+        left.1 > 200 && left.0 < 60,
+        "the cell's own green survives, got {left:?}"
+    );
+    assert!(
+        right.2 > 200 && right.0 < 60,
+        "and so does its blue, got {right:?} — one flat colour is a coloured \
+         cell being recoloured"
+    );
+}
+
 /// A cell drawn through a pattern `/Matrix` lands where the matrix puts it,
 /// not where the cell's own coordinates would.
 #[test]

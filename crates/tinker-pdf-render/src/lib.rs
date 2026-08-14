@@ -178,6 +178,9 @@ pub struct TilingPattern {
     pub xstep: f64,
     /// `/YStep`, vertically.
     pub ystep: f64,
+    /// `/PaintType 2`: the cell is a shape, and takes the colour the `SCN`
+    /// operands supplied rather than any colour of its own (8.7.3.3).
+    pub uncolored: bool,
 }
 
 /// What one cell of a tiling pattern has to be drawn into.
@@ -206,6 +209,9 @@ pub struct TileRequest {
     /// The buffer's format, always one carrying alpha: a cell is a shape over
     /// nothing, and a format without alpha cannot say where it did not paint.
     pub format: PixelFormat,
+    /// `PaintType 2`'s colour, already resolved to RGB, or `None` for a
+    /// coloured pattern (8.7.3.3).
+    pub color: Option<(u8, u8, u8)>,
     /// The render's cancellation token, so a cell stops with the page.
     pub cancel: CancelToken,
     /// How many tiling patterns are already open above this one, for the
@@ -952,7 +958,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///
     /// `alpha` is a parameter rather than a field of `state` because 8.4.5
     /// gives painting two of them: a fill uses `ca`, a stroke uses `CA`, and
-    /// the callers are the only things that know which they are.
+    /// the callers are the only things that know which they are. `color` is a
+    /// parameter for exactly the same reason, and it is the same mistake
+    /// waiting to be made: 8.7.3.3 gives an uncoloured pattern the colour of
+    /// the slot that named it, and a stroke's slot is not a fill's.
     fn fill_with_pattern(
         &mut self,
         path: &Path,
@@ -960,13 +969,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         name: &[u8],
         state: &GraphicsState,
         alpha: f64,
+        color: Color,
     ) {
         match self.glyphs.pattern(name) {
             Some(PatternPaint::Shading(shading, matrix)) => {
                 self.fill_with_shading(path, rule, &shading, matrix, state, alpha);
             }
             Some(PatternPaint::Tiling(tiling)) => {
-                if !self.fill_with_tiles(path, rule, name, &tiling, state, alpha) {
+                if !self.fill_with_tiles(path, rule, name, &tiling, state, alpha, color) {
                     self.report_unpainted_pattern(name);
                 }
             }
@@ -1057,6 +1067,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// not spill into them. With the buffer sized to the box there is nowhere
     /// for a neighbour's ink to be — the spill is impossible by construction
     /// rather than prevented by a clip that could be forgotten.
+    #[allow(clippy::too_many_arguments)]
     fn fill_with_tiles(
         &mut self,
         path: &Path,
@@ -1065,6 +1076,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         tiling: &TilingPattern,
         state: &GraphicsState,
         alpha: f64,
+        color: Color,
     ) -> bool {
         if self.pattern_depth >= MAX_PATTERN_DEPTH {
             return false;
@@ -1217,6 +1229,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             width,
             height,
             format,
+            color: tiling.uncolored.then_some((color.r, color.g, color.b)),
             cancel: self.cancel.clone(),
             depth: self.pattern_depth + 1,
         };
@@ -1602,7 +1615,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // at all. Painting it would put `/Pattern`'s nominal black over every
         // gradient in the document.
         if let Some(name) = state.fill_pattern.clone() {
-            self.fill_with_pattern(&built, rule, &name, state, state.fill_alpha);
+            self.fill_with_pattern(
+                &built,
+                rule,
+                &name,
+                state,
+                state.fill_alpha,
+                fill_color(state),
+            );
             return;
         }
 
@@ -1743,12 +1763,20 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // crosses, and under even-odd every one of those overlaps would be
         // punched back out into a hole.
         if let Some(name) = state.stroke_pattern.clone() {
+            // The *stroke* slot's colour, and 8.7.3.3 is why that has to be
+            // said out loud: an uncoloured pattern paints in the colour its
+            // `SCN` operands gave, and this operator's operands went to the
+            // stroking slot. Handing the fill slot's colour instead is a
+            // defect nothing else in the engine can see -- every "the pattern
+            // paints" assertion is satisfied by a cell that paints in *some*
+            // colour.
             self.fill_with_pattern(
                 &outline,
                 FillRule::NonZero,
                 &name,
                 state,
                 state.stroke_alpha,
+                stroke_color(state),
             );
             return;
         }
@@ -1861,7 +1889,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // which reads as a rendering bug rather than as a missing capability.
         if mode.fills() {
             if let Some(name) = state.fill_pattern.clone() {
-                self.fill_with_pattern(&path, FillRule::NonZero, &name, state, state.fill_alpha);
+                self.fill_with_pattern(
+                    &path,
+                    FillRule::NonZero,
+                    &name,
+                    state,
+                    state.fill_alpha,
+                    fill_color(state),
+                );
             } else {
                 self.paint(
                     &path,
@@ -1887,6 +1922,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     &name,
                     state,
                     state.stroke_alpha,
+                    stroke_color(state),
                 );
             } else {
                 self.paint(
@@ -3299,6 +3335,7 @@ mod tests {
                     bbox,
                     xstep,
                     ystep,
+                    uncolored: false,
                 },
                 cell: Color::rgb(0, 0, 255),
                 drawn: std::cell::Cell::new(0),
@@ -3383,6 +3420,7 @@ mod tests {
                     bbox: [0.0, 0.0, 8.0, 8.0],
                     xstep: 8.0,
                     ystep: 8.0,
+                    uncolored: false,
                 })))
             }
         }

@@ -741,6 +741,69 @@ trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// Tiling patterns: a lattice of cells rasterised once and blitted, as a fill
+/// and as a stroke, coloured and uncoloured.
+///
+/// *Added August 2026, with gap 09.* The `pattern` fixture above is a
+/// `PatternType 2` shading and reaches none of this — a shading pattern is
+/// evaluated per pixel through an inverse transform, where a tiling pattern is
+/// an offscreen buffer composited at integer offsets. Six things here are in
+/// no other fixture:
+///
+/// - a **lattice**, so the range arithmetic and its rounding to device pixels
+///   are in the hash rather than only the one cell;
+/// - a rotated pattern `/Matrix`, so every lattice offset is a vector with all
+///   four coefficients in it and the cell's own device rectangle is the hull
+///   of a rotated quad;
+/// - a `/XStep` and `/YStep` that are **not** the `/BBox`, one wider and one
+///   narrower, so both the gap and the overlap are measured;
+/// - the cell clipped to its `/BBox` while its content deliberately overshoots
+///   it, which is how a real hatch joins;
+/// - a **stroked** outline filled with a lattice, under a paint-time CTM that
+///   is not the identity, so 8.7.3.1's anchoring is pinned as bytes on the
+///   route gap 07 opened and could not test;
+/// - a `PaintType 2` cell, taking its colour from the `SCN` operands on the
+///   **stroking** slot — the one thing in this engine that had never been
+///   rendered at all.
+fn tiling_page() -> Vec<u8> {
+    let content = "/Pattern cs /P0 scn\n\
+                   6 6 m 108 6 l 108 50 l 40 50 l h f\n\
+                   /Cs1 CS 0.1 0.3 0.9 /P1 SCN 7 w 1 J 1 j\n\
+                   q 1.25 0 0 1.25 4 4 cm\n\
+                   6 46 m 30 60 60 40 86 56 c S\n\
+                   Q";
+    // The cell overshoots its box on every side, which the `/BBox` clip takes
+    // back: without it the overshoot lands in the gap the 11 pt step leaves.
+    let coloured = "0.9 0.2 0.1 rg -2 -2 8 12 re f\n\
+                    0 0.5 0.2 rg 4 4 8 8 re f";
+    // Uncoloured: these colour operators mean nothing (8.7.3.3), and if they
+    // ever start meaning something this hash moves.
+    let uncoloured = "0 1 0 rg 0 0 3 7 re f 1 1 0 rg 3 3 4 4 re f";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /Pattern << /P0 5 0 R /P1 6 0 R >>\n\
+                 /ColorSpace << /Cs1 [/Pattern /DeviceRGB] >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /PatternType 1 /PaintType 1 /TilingType 1\n\
+   /BBox [0 0 10 10] /XStep 11 /YStep 8\n\
+   /Matrix [0.9659 0.2588 -0.2588 0.9659 3 -5]\n\
+   /Resources << >> /Length {} >>\nstream\n{coloured}\nendstream\nendobj\n\
+6 0 obj\n<< /PatternType 1 /PaintType 2 /TilingType 1\n\
+   /BBox [0 0 7 7] /XStep 5 /YStep 6\n\
+   /Matrix [1 0 0 1 -2 1]\n\
+   /Resources << >> /Length {} >>\nstream\n{uncoloured}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        coloured.len(),
+        uncoloured.len()
+    )
+    .into_bytes()
+}
+
 fn page_with(content: &str, width: f64, height: f64) -> Vec<u8> {
     format!(
         "%PDF-1.7\n\
@@ -818,6 +881,17 @@ const GOLDEN: &[Fixture] = &[
         build: transparency_page,
         least_ink: 4000,
     },
+    // 4488 today, of 9600, and most of it is the wedge's lattice. The floor
+    // is the guard against the fill's cells failing to repeat: one row and
+    // one column of them is already under it. It does *not* reach the
+    // uncoloured stroke, which is only about six hundred pixels — that half
+    // is the hash's, and so is the opposite failure of a cell spilling past
+    // its box, which adds ink rather than losing it.
+    Fixture {
+        name: "tiling",
+        build: tiling_page,
+        least_ink: 2200,
+    },
 ];
 
 #[test]
@@ -879,6 +953,13 @@ fn rendering_is_stable_across_targets() {
         (
             "transparency",
             "c120574918fcfadb0b33f3f9faa4f0c10a10cc760cd9e9830bedf31463e3f059",
+        ),
+        // Added August 2026 with gap 09. The `pattern` fixture above is a
+        // shading pattern, evaluated per pixel; nothing here reached a
+        // rasterised cell, a lattice, or `PaintType 2`.
+        (
+            "tiling",
+            "aa7b2df6bd7613fb53c696ed4b9018a00d1aa4dece2ffe82775c40bfaa1a5011",
         ),
     ];
     assert_eq!(

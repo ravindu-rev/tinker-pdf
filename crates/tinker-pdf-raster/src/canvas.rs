@@ -558,6 +558,41 @@ impl Canvas {
         mask
     }
 
+    /// Replaces every pixel's colour with `color`, keeping the alpha each one
+    /// already had (8.7.3.3).
+    ///
+    /// What an uncoloured tiling pattern's cell is: a *shape*, drawn by a
+    /// content stream whose own colour operators mean nothing, painted in a
+    /// colour chosen by whoever used the pattern. Flattening the colour
+    /// afterwards is what makes "colour operators inside the cell are ignored"
+    /// true by construction rather than by intercepting every paint — there is
+    /// no operator, and no path through an interpreter, that can leave a
+    /// colour behind here, including ones not written yet.
+    ///
+    /// A no-op on a format with no alpha channel, where every pixel is opaque
+    /// and the result would be one flat rectangle rather than a shape.
+    pub fn recolor(&mut self, color: Color) {
+        if !self.format.has_alpha() {
+            return;
+        }
+        let components = self.format.components();
+        let channels = color_channels(self.format);
+        let source = self.encode(color);
+        for row in 0..self.height as usize {
+            for col in 0..self.width as usize {
+                let base = row * self.stride + col * components;
+                for i in 0..channels {
+                    let (Some(from), Some(slot)) =
+                        (source.get(i).copied(), self.data.get_mut(base + i))
+                    else {
+                        continue;
+                    };
+                    *slot = from;
+                }
+            }
+        }
+    }
+
     /// The pixel at `(x, y)` as a colour, for tests and readback.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<Color> {
@@ -1148,6 +1183,47 @@ mod tests {
         let before = group.data.clone();
         group.remove_backdrop();
         assert_eq!(group.data, before, "no backdrop, no correction");
+    }
+
+    /// 8.7.3.3: recolouring keeps the shape and replaces the ink. A pixel the
+    /// cell never reached stays at nothing, or an uncoloured pattern becomes a
+    /// solid rectangle in the operands' colour — which paints, looks
+    /// deliberate, and is the whole cell's worth of drawing thrown away.
+    #[test]
+    fn recolouring_replaces_the_ink_and_keeps_the_shape() {
+        let mut cell = Canvas::new(2, 1, PixelFormat::Rgba8, Color::TRANSPARENT);
+        cell.blend_pixel(0, 0, Color::rgb(0, 255, 0), 1.0);
+        cell.blend_pixel(1, 0, Color::rgb(0, 255, 0), 0.5);
+
+        cell.recolor(Color::rgb(255, 0, 0));
+
+        assert_eq!(
+            cell.pixel(0, 0),
+            Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }),
+            "the ink is the new colour"
+        );
+        let soft = cell.pixel(1, 0).expect("a pixel");
+        assert_eq!((soft.r, soft.g, soft.b), (255, 0, 0));
+        assert!(
+            (120..=135).contains(&soft.a),
+            "and a half-covered pixel keeps its coverage, got {}",
+            soft.a
+        );
+    }
+
+    /// A format with no alpha has no shape to keep, so recolouring it would
+    /// paint every pixel — including the ones outside whatever was drawn.
+    #[test]
+    fn recolouring_a_canvas_without_alpha_does_nothing() {
+        let mut canvas = Canvas::new(2, 1, PixelFormat::Rgb8, Color::WHITE);
+        let before = canvas.data.clone();
+        canvas.recolor(Color::rgb(255, 0, 0));
+        assert_eq!(canvas.data, before);
     }
 
     #[test]
