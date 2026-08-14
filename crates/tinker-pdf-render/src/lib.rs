@@ -146,13 +146,82 @@ pub enum PatternPaint {
     /// A shading pattern, and the matrix mapping pattern space to the page's
     /// default space.
     Shading(Box<Shading>, Matrix),
-    /// A pattern this build does not paint — a tiling pattern, or a shading
-    /// pattern over a mesh.
+    /// A tiling pattern's geometry (8.7.3.2). The cell's *pixels* come
+    /// separately, from [`GlyphSource::tile`], because rasterizing them means
+    /// running a content stream and this crate has no interpreter.
+    Tiling(Box<TilingPattern>),
+    /// A pattern this build does not paint — a shading pattern over a mesh, a
+    /// tiling pattern whose cell could not be read.
     ///
     /// The area is left alone and reported, rather than filled with the black
     /// that `/Pattern` nominally reports as its colour: an unpainted area
     /// reads as missing, a black one reads as content.
     Unsupported,
+}
+
+/// A tiling pattern's geometry (8.7.3.2), without its pixels.
+///
+/// Everything here is decided before a single pixel is rasterized, which is
+/// the point of the split: the lattice, and therefore whether the lattice is
+/// affordable at all, is known from these six numbers, so a pathological
+/// `/XStep` costs a division rather than a cell.
+#[derive(Clone, Copy, Debug)]
+pub struct TilingPattern {
+    /// `/Matrix`: pattern space to the *default* space of the pattern's parent
+    /// content stream (8.7.3.1) — not to the CTM in force when it is used.
+    pub matrix: Matrix,
+    /// `/BBox` in pattern space, as `[x0, y0, x1, y1]` with `x0 < x1`.
+    pub bbox: [f64; 4],
+    /// `/XStep`: how far apart neighbouring cells sit horizontally in pattern
+    /// space. May be smaller than the bounding box (cells overlap) or larger
+    /// (cells leave gaps).
+    pub xstep: f64,
+    /// `/YStep`, vertically.
+    pub ystep: f64,
+}
+
+/// What one cell of a tiling pattern has to be drawn into.
+///
+/// The renderer decides all of this — it is the only thing that knows `base`,
+/// the canvas format and the lattice — and the resource layer only runs the
+/// content stream, because that is the half this crate cannot do.
+#[derive(Clone, Debug)]
+pub struct TileRequest {
+    /// Pattern space to the tile buffer's own pixels: `/Matrix`, then the
+    /// page's `base`, then the translation that puts the cell's device
+    /// rectangle at the buffer's origin.
+    ///
+    /// `base` and not the paint-time CTM, which is 8.7.3.1 and the whole
+    /// correctness question in a tiling pattern.
+    pub to_pixels: Matrix,
+    /// `/BBox` in pattern space, so the cell can be clipped to it by the same
+    /// numbers the buffer was sized from. Passed rather than re-read: two
+    /// spellings of one rectangle is how a buffer and its clip come to
+    /// disagree about where the cell ends.
+    pub bbox: [f64; 4],
+    /// The buffer's width in pixels.
+    pub width: u32,
+    /// The buffer's height in pixels.
+    pub height: u32,
+    /// The buffer's format, always one carrying alpha: a cell is a shape over
+    /// nothing, and a format without alpha cannot say where it did not paint.
+    pub format: PixelFormat,
+    /// The render's cancellation token, so a cell stops with the page.
+    pub cancel: CancelToken,
+    /// How many tiling patterns are already open above this one, for the
+    /// recursion cap.
+    pub depth: u32,
+}
+
+/// One rasterized tiling-pattern cell.
+#[derive(Clone, Debug)]
+pub struct Tile {
+    /// The cell's pixels, transparent where it did not paint.
+    pub canvas: Canvas,
+    /// What drawing the cell had to tolerate. Merged into the page's warnings
+    /// rather than dropped — a JPX inside a pattern is exactly as missing as a
+    /// JPX anywhere else, and the page is the only place a caller looks.
+    pub warnings: Vec<RenderWarning>,
 }
 
 /// A decoded image, ready to draw.
@@ -224,6 +293,21 @@ pub trait GlyphSource {
         let _ = name;
         None
     }
+
+    /// Rasterizes one cell of a tiling pattern (8.7.3.2).
+    ///
+    /// Split from [`GlyphSource::pattern`] because a cell is a *content
+    /// stream*: running it needs an interpreter and a resource dictionary,
+    /// neither of which this crate has. The renderer supplies the geometry it
+    /// has already decided; this only has to draw into the buffer described.
+    ///
+    /// `None` declines, and the renderer then reports the pattern as
+    /// unpainted rather than leaving a hole nobody is told about — which is
+    /// what a `GlyphSource` that cannot run content streams should produce.
+    fn tile(&self, name: &[u8], request: &TileRequest) -> Option<Tile> {
+        let _ = (name, request);
+        None
+    }
 }
 
 /// A `GlyphSource` that has nothing, for callers that only want geometry.
@@ -244,6 +328,55 @@ impl GlyphSource for NoGlyphs {
 /// only ever shrinks as groups nest, so the cap is a backstop rather than the
 /// primary bound.
 const MAX_GROUP_DEPTH: usize = 16;
+
+/// How deep tiling patterns may nest before one is declined (8.7.3.2).
+///
+/// A cell is a content stream, so it may fill with a pattern of its own —
+/// including itself. The interpreter's own form-recursion cap does **not**
+/// bound that: each cell is a fresh `interpret` call, so its depth counter
+/// starts at zero again, and a pattern that fills with itself would recurse
+/// until the stack ran out. So the mechanism is the same counter threaded
+/// through, and the number is its own.
+///
+/// Much smaller than the form cap of sixteen, deliberately. A form nested `n`
+/// deep costs `n` renders; a *pattern* nested `n` deep costs the product of
+/// the lattice counts, because every cell of every level draws the whole of
+/// the level below it. Sixteen levels of a four-cell lattice is four billion
+/// cells inside a budget that only ever looks at one level at a time.
+const MAX_PATTERN_DEPTH: u32 = 4;
+
+/// The most lattice positions one tiling-pattern fill will composite
+/// (8.7.3.2).
+///
+/// `/XStep` has no floor in the spec, so a one-unit step across A4 asks for
+/// half a million cells and a step of `1e-6` asks for more than there are
+/// pixels in the universe. Past the cap the fill paints nothing and says so
+/// (ruling 2), which is the same degradation an unpaintable pattern has
+/// always had — a partial lattice would be worse, because a hatch that covers
+/// the top third of a shape reads as a rendering artefact rather than as a
+/// gap.
+///
+/// 65 536 is generous against real files: a 10 pt hatch over A4 at scale 1 is
+/// about 5 000 cells, and a 2 pt one about 125 000, which is over.
+const MAX_TILES: u64 = 1 << 16;
+
+/// The most pixels one cell's offscreen buffer may hold.
+///
+/// The buffer is allocated, so this is a memory bound rather than a time one.
+/// 16.7 Mpx is a full-page cell on A4 at roughly 400 dpi; past that the cell
+/// is not a cell, and the allocation is the thing that would fail rather than
+/// the render.
+const MAX_TILE_AREA: u64 = 1 << 24;
+
+/// The most pixels one tiling-pattern fill will composite across its whole
+/// lattice.
+///
+/// [`MAX_TILES`] alone does not bound the work, because `/XStep` may be much
+/// smaller than `/BBox` — that is a legal, common way to draw an overlapping
+/// weave — and then every cell costs its own area rather than its own step.
+/// The product is what runs away: 65 536 cells each covering a hundredth of
+/// the page is 650 pages' worth of compositing.
+const MAX_TILE_WORK: u64 = 1 << 25;
 
 /// A transparency group being rendered: everything the parent needs back.
 struct GroupFrame {
@@ -372,6 +505,14 @@ pub struct Renderer<'g, G: GlyphSource> {
     soft: Option<Mask>,
     /// Soft-mask groups being rendered, innermost last.
     mask_frames: Vec<MaskFrame>,
+    /// How many tiling-pattern cells this renderer is drawing inside
+    /// (8.7.3.2), so a pattern that fills with itself terminates.
+    ///
+    /// On the renderer rather than on the resource seam because a cell is
+    /// drawn by a `Renderer` of its own, and passing the depth down through
+    /// the request is what makes the two ends agree without either of them
+    /// keeping mutable state a second fill could see.
+    pattern_depth: u32,
     /// Mask pixels rasterized so far, summed over every paint and every clip.
     ///
     /// The instrument behind `a_small_fill_on_a_large_page_stays_small`. A
@@ -408,9 +549,22 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             groups: Vec::new(),
             soft: None,
             mask_frames: Vec::new(),
+            pattern_depth: 0,
             #[cfg(test)]
             mask_pixels: 0,
         }
+    }
+
+    /// Records that this renderer is drawing a tiling pattern's cell, `depth`
+    /// levels inside the page (8.7.3.2).
+    ///
+    /// Set by whoever rasterizes a cell, from [`TileRequest::depth`]. Without
+    /// it the cell's own pattern fills start counting from zero again and a
+    /// pattern that fills with itself never terminates.
+    #[must_use]
+    pub fn with_pattern_depth(mut self, depth: u32) -> Self {
+        self.pattern_depth = depth;
+        self
     }
 
     /// Whether an optional-content layer is currently hiding what is drawn.
@@ -787,18 +941,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         );
     }
 
-    /// Fills a path with a shading pattern, or reports one that cannot be.
-    ///
-    /// The path becomes the clip and the shading is evaluated per pixel inside
-    /// it, which is the same machinery `sh` uses — a shading pattern is `sh`
-    /// bounded by a path rather than by the current clip.
+    /// Fills a path with a pattern, or reports one that cannot be.
     ///
     /// 8.7.3.1: a pattern's matrix maps pattern space to the *default* space
     /// of the page, not to the space in force when it is used. The CTM at fill
-    /// time is therefore not part of it, which is why `base` appears here and
-    /// `state.ctm` does not. A stroke reaches this through its outline, so
-    /// that guarantee covers strokes too — the stroker's transform never
-    /// enters the pattern.
+    /// time is therefore not part of it, which is why `base` appears in both
+    /// branches below and `state.ctm` appears in neither. A stroke reaches
+    /// this through its outline, so that guarantee covers strokes too — the
+    /// stroker's transform never enters the pattern.
     ///
     /// `alpha` is a parameter rather than a field of `state` because 8.4.5
     /// gives painting two of them: a fill uses `ca`, a stroke uses `CA`, and
@@ -811,20 +961,44 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         state: &GraphicsState,
         alpha: f64,
     ) {
-        let (shading, matrix) = match self.glyphs.pattern(name) {
-            Some(PatternPaint::Shading(shading, matrix)) => (*shading, matrix),
-            None => return,
-            Some(PatternPaint::Unsupported) => {
-                let warning = RenderWarning::UnsupportedPattern {
-                    name: String::from_utf8_lossy(name).into_owned(),
-                };
-                if !self.warnings.contains(&warning) {
-                    self.warnings.push(warning);
-                }
-                return;
+        match self.glyphs.pattern(name) {
+            Some(PatternPaint::Shading(shading, matrix)) => {
+                self.fill_with_shading(path, rule, &shading, matrix, state, alpha);
             }
-        };
+            Some(PatternPaint::Tiling(tiling)) => {
+                if !self.fill_with_tiles(path, rule, name, &tiling, state, alpha) {
+                    self.report_unpainted_pattern(name);
+                }
+            }
+            Some(PatternPaint::Unsupported) => self.report_unpainted_pattern(name),
+            None => (),
+        }
+    }
 
+    /// Records that a named pattern was left unpainted (ruling 2, ruling 10).
+    fn report_unpainted_pattern(&mut self, name: &[u8]) {
+        let warning = RenderWarning::UnsupportedPattern {
+            name: String::from_utf8_lossy(name).into_owned(),
+        };
+        if !self.warnings.contains(&warning) {
+            self.warnings.push(warning);
+        }
+    }
+
+    /// Fills a path with a shading pattern.
+    ///
+    /// The path becomes the clip and the shading is evaluated per pixel inside
+    /// it, which is the same machinery `sh` uses — a shading pattern is `sh`
+    /// bounded by a path rather than by the current clip.
+    fn fill_with_shading(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        shading: &Shading,
+        matrix: Matrix,
+        state: &GraphicsState,
+        alpha: f64,
+    ) {
         let to_device = matrix.then(&self.base);
         let Some(inverse) = invert(&to_device) else {
             return;
@@ -860,6 +1034,235 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     .blend_pixel_with(px, py, Color { r, g, b, a: 0xFF }, weight, mode);
             }
         }
+    }
+
+    /// Fills a path with a tiling pattern: one cell, rasterized once, blitted
+    /// across the lattice (8.7.3.2).
+    ///
+    /// Returns false when the pattern could not be painted at all, which the
+    /// caller turns into a warning. Painting *some* of a lattice is not one of
+    /// the answers: a hatch covering part of a shape reads as a rendering
+    /// artefact, and an unpainted area reads as the gap it is.
+    ///
+    /// **Why the cell is rasterized once.** The obvious implementation replays
+    /// the cell's content stream per lattice position with a translated CTM.
+    /// It is correct and it is unusable: each position needs its own bounding
+    /// box clip, every clip goes through `save_state`, and `save_state` clones
+    /// a page-sized mask. A 10 pt hatch over A4 is about 4 800 cells and
+    /// several gigabytes of memcpy. Dropping the per-cell clip to avoid that is
+    /// how the anchoring above gets lost.
+    ///
+    /// **Why the buffer is `/BBox`-sized.** A cell whose bounding box is
+    /// smaller than its step leaves gaps between cells, and a neighbour must
+    /// not spill into them. With the buffer sized to the box there is nowhere
+    /// for a neighbour's ink to be — the spill is impossible by construction
+    /// rather than prevented by a clip that could be forgotten.
+    fn fill_with_tiles(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        name: &[u8],
+        tiling: &TilingPattern,
+        state: &GraphicsState,
+        alpha: f64,
+    ) -> bool {
+        if self.pattern_depth >= MAX_PATTERN_DEPTH {
+            return false;
+        }
+
+        // 8.7.3.1, and the whole of this function's correctness: `base`, the
+        // parent stream's default space, and not `state.ctm`. Anchoring to the
+        // paint-time CTM makes the lattice slide under every transform, which
+        // reads as a small offset rather than as a defect and is therefore
+        // never reported.
+        let to_device = tiling.matrix.then(&self.base);
+        if !to_device.is_finite() {
+            return false;
+        }
+        let Some(inverse) = invert(&to_device) else {
+            return false;
+        };
+
+        let [bx0, by0, bx1, by1] = tiling.bbox;
+        if ![bx0, by0, bx1, by1].iter().all(|v| v.is_finite()) || bx1 <= bx0 || by1 <= by0 {
+            return false;
+        }
+        // 8.7.3.2 makes both steps required and neither may be zero. A file
+        // that says zero anyway gets the cell's own size, which is the only
+        // reading that tiles at all; the alternative is a division by zero and
+        // an infinite lattice.
+        let step = |given: f64, extent: f64| {
+            if given.is_finite() && given.abs() > 1e-9 {
+                given.abs()
+            } else {
+                extent
+            }
+        };
+        let xstep = step(tiling.xstep, bx1 - bx0);
+        let ystep = step(tiling.ystep, by1 - by0);
+        if !xstep.is_finite() || !ystep.is_finite() || xstep <= 0.0 || ystep <= 0.0 {
+            return false;
+        }
+
+        // The device pixels this fill can reach, without rasterizing anything:
+        // the lattice has to be bounded *before* a cell is drawn, or a
+        // pathological `/XStep` has already cost a rasterization by the time it
+        // is refused.
+        let (rx, ry, rw, rh) = paint_region(
+            path,
+            self.clip.as_ref(),
+            self.soft.as_ref(),
+            self.canvas.width,
+            self.canvas.height,
+        );
+        if rw == 0 || rh == 0 {
+            return true;
+        }
+
+        // That rectangle back in pattern space. A rotated or skewed `/Matrix`
+        // turns it into a parallelogram, so the axis-aligned hull of the four
+        // corners is what indexes the lattice — larger than needed, never
+        // smaller, and a cell that lands off the canvas costs nothing because
+        // `composite` walks the overlap.
+        let (rx1, ry1) = (f64::from(rx) + f64::from(rw), f64::from(ry) + f64::from(rh));
+        let corners = [
+            inverse.apply(f64::from(rx), f64::from(ry)),
+            inverse.apply(rx1, f64::from(ry)),
+            inverse.apply(rx1, ry1),
+            inverse.apply(f64::from(rx), ry1),
+        ];
+        if corners
+            .iter()
+            .any(|(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return false;
+        }
+        let hull = |pick: fn(&(f64, f64)) -> f64| {
+            let values = corners.iter().map(pick);
+            let lo = values.clone().fold(f64::INFINITY, f64::min);
+            let hi = values.fold(f64::NEG_INFINITY, f64::max);
+            (lo, hi)
+        };
+        let (px0, px1) = hull(|c| c.0);
+        let (py0, py1) = hull(|c| c.1);
+
+        // Cell `(i, j)` covers `[bx0 + i*xstep, bx1 + i*xstep]`, so it meets
+        // the region exactly when `i` is between these two. The far edge uses
+        // the *near* edge of the box and vice versa, which is the off-by-one
+        // that shows as a missing row of cells down one side of a shape.
+        let Some((i0, i1)) = lattice_range(px0, px1, bx0, bx1, xstep) else {
+            return false;
+        };
+        let Some((j0, j1)) = lattice_range(py0, py1, by0, by1, ystep) else {
+            return false;
+        };
+        let across = i1 - i0 + 1;
+        let down = j1 - j0 + 1;
+        let tiles = (across as u64).saturating_mul(down as u64);
+        if tiles > MAX_TILES {
+            return false;
+        }
+        if tiles == 0 {
+            // The shape sits entirely in a gap between cells, which a step
+            // larger than the box makes legal. Nothing to paint, and nothing
+            // to report.
+            return true;
+        }
+
+        // The cell's own device rectangle, rounded outward. No slack: the
+        // buffer is the bounding box and nothing else, so a neighbour cannot
+        // reach into a gap the file asked for.
+        let cell = [
+            to_device.apply(bx0, by0),
+            to_device.apply(bx1, by0),
+            to_device.apply(bx1, by1),
+            to_device.apply(bx0, by1),
+        ];
+        if cell.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+            return false;
+        }
+        let span = |pick: fn(&(f64, f64)) -> f64| {
+            let values = cell.iter().map(pick);
+            let lo = values.clone().fold(f64::INFINITY, f64::min).floor();
+            let hi = values.fold(f64::NEG_INFINITY, f64::max).ceil();
+            (lo, hi)
+        };
+        let (tx0, tx1) = span(|c| c.0);
+        let (ty0, ty1) = span(|c| c.1);
+        let extent = |lo: f64, hi: f64| -> Option<u32> {
+            let size = hi - lo;
+            (size.is_finite() && size >= 1.0 && size <= f64::from(u32::MAX)).then_some(size as u32)
+        };
+        let (Some(width), Some(height)) = (extent(tx0, tx1), extent(ty0, ty1)) else {
+            return false;
+        };
+        let area = u64::from(width) * u64::from(height);
+        if area > MAX_TILE_AREA {
+            return false;
+        }
+        let canvas_area = u64::from(self.canvas.width) * u64::from(self.canvas.height);
+        if tiles.saturating_mul(area.min(canvas_area.max(1))) > MAX_TILE_WORK {
+            return false;
+        }
+
+        // A cell is a shape over nothing, so its buffer must carry alpha
+        // whatever the page's format is.
+        let format = match self.canvas.format {
+            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+        };
+        let request = TileRequest {
+            to_pixels: to_device.then(&Matrix::translate(-tx0, -ty0)),
+            bbox: tiling.bbox,
+            width,
+            height,
+            format,
+            cancel: self.cancel.clone(),
+            depth: self.pattern_depth + 1,
+        };
+        let Some(tile) = self.glyphs.tile(name, &request) else {
+            return false;
+        };
+        for warning in tile.warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        let tile = tile.canvas;
+
+        let stop = self.stop_predicate();
+        let coverage = self.coverage(path, rule, Some(&stop));
+        if self.in_knockout() {
+            self.knockout_restore(&coverage);
+        }
+        let mode = blend_mode(state.blend);
+
+        // The lattice step as a device *vector*: a translation in pattern
+        // space, so the matrix's translation cancels and only its linear part
+        // survives.
+        let origin = to_device.apply(0.0, 0.0);
+        for j in j0..=j1 {
+            // Gap 15's hook. A large lattice is precisely the long-running
+            // work it exists for, and `composite` is asked again every sixteen
+            // rows inside each cell.
+            if self.stopping() {
+                return true;
+            }
+            for i in i0..=i1 {
+                let (dx, dy) = to_device.apply(i as f64 * xstep, j as f64 * ystep);
+                let (x, y) = (tx0 + dx - origin.0, ty0 + dy - origin.1);
+                if !x.is_finite() || !y.is_finite() {
+                    continue;
+                }
+                let at = (
+                    x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+                    y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+                );
+                self.canvas
+                    .composite(&tile, at, alpha, mode, Some(&coverage), Some(&stop));
+            }
+        }
+        true
     }
 
     /// The coverage a path contributes, over the pixels it can reach and with
@@ -1136,6 +1539,32 @@ fn paint_region(
         (right - left) as u32,
         (bottom - top) as u32,
     )
+}
+
+/// Which lattice indices of a tiling pattern reach `[lo, hi]` (8.7.3.2).
+///
+/// Cell `n` covers `[cell_lo + n*step, cell_hi + n*step]`, so it meets the
+/// range exactly when `cell_lo + n*step <= hi` and `cell_hi + n*step >= lo`.
+/// The two bounds each pair the *opposite* edges, and swapping them is the
+/// off-by-one that drops a row of cells down one side of every shape — which
+/// looks like a margin rather than like a missing cell.
+///
+/// `None` when the arithmetic is not finite. An empty range comes back as
+/// `Some` with `hi < lo` never happening: the caller gets `n1 < n0` only when
+/// the region falls in a gap between cells, which is legal and paints nothing.
+fn lattice_range(lo: f64, hi: f64, cell_lo: f64, cell_hi: f64, step: f64) -> Option<(i64, i64)> {
+    let first = ((lo - cell_hi) / step).ceil();
+    let last = ((hi - cell_lo) / step).floor();
+    if !first.is_finite() || !last.is_finite() {
+        return None;
+    }
+    // Clamped rather than converted: `as` saturates, but a range of
+    // `i64::MIN..=i64::MAX` is a loop nobody survives, and the count below has
+    // to be able to overflow into the cap rather than wrap.
+    const LIMIT: f64 = 1e15;
+    let first = first.clamp(-LIMIT, LIMIT) as i64;
+    let last = last.clamp(-LIMIT, LIMIT) as i64;
+    Some((first, last.max(first - 1)))
 }
 
 fn fill_color(state: &GraphicsState) -> Color {
@@ -2840,6 +3269,146 @@ mod tests {
                 _ => None,
             }
         }
+    }
+
+    /// A tiling pattern whose cell is painted straight into the buffer
+    /// instead of by a content stream.
+    ///
+    /// This crate has no interpreter and cannot run one — that is the whole
+    /// reason [`GlyphSource::tile`] exists — and it is not what these tests
+    /// are about anyway. What they are about is the lattice: which cells are
+    /// asked for, where each one lands, and how many times the cell is drawn.
+    struct Tiles {
+        pattern: TilingPattern,
+        /// The colour the cell fills its whole buffer with, so that a step
+        /// wider than the box leaves a visible gap and a narrower one does
+        /// not.
+        cell: Color,
+        /// How many times the cell was rasterized, which for a whole lattice
+        /// must be one.
+        drawn: std::cell::Cell<u32>,
+        /// The size of the last buffer asked for.
+        size: std::cell::Cell<(u32, u32)>,
+    }
+
+    impl Tiles {
+        fn new(bbox: [f64; 4], xstep: f64, ystep: f64) -> Tiles {
+            Tiles {
+                pattern: TilingPattern {
+                    matrix: Matrix::IDENTITY,
+                    bbox,
+                    xstep,
+                    ystep,
+                },
+                cell: Color::rgb(0, 0, 255),
+                drawn: std::cell::Cell::new(0),
+                size: std::cell::Cell::new((0, 0)),
+            }
+        }
+    }
+
+    impl GlyphSource for Tiles {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+
+        fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
+            (name == b"T0").then(|| PatternPaint::Tiling(Box::new(self.pattern)))
+        }
+
+        fn tile(&self, name: &[u8], request: &TileRequest) -> Option<Tile> {
+            if name != b"T0" {
+                return None;
+            }
+            self.drawn.set(self.drawn.get() + 1);
+            self.size.set((request.width, request.height));
+            Some(Tile {
+                canvas: Canvas::new(request.width, request.height, request.format, self.cell),
+                warnings: Vec::new(),
+            })
+        }
+    }
+
+    fn with_tiles(content: &[u8], tiles: &Tiles) -> (Canvas, Vec<RenderWarning>) {
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), tiles);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &OneChar);
+        renderer.finish()
+    }
+
+    /// The point of the whole design: one rasterization, however many lattice
+    /// positions it lands on.
+    ///
+    /// Replaying the cell's content stream per position is correct and
+    /// unusable — each position needs its own bounding-box clip, every clip
+    /// clones a page-sized mask, and a 10 pt hatch over A4 is about 4 800 of
+    /// them. Nothing about the *pixels* can tell the two apart, so this counts
+    /// instead.
+    #[test]
+    fn a_cell_is_rasterised_once_for_the_whole_lattice() {
+        let tiles = Tiles::new([0.0, 0.0, 4.0, 4.0], 8.0, 8.0);
+        let (canvas, warnings) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        assert_eq!(
+            tiles.drawn.get(),
+            1,
+            "twenty-five lattice positions, one rasterization"
+        );
+        assert_eq!(
+            tiles.size.get(),
+            (4, 4),
+            "and the buffer is the cell's own bounding box, not the page"
+        );
+        assert_eq!(
+            canvas.pixel(2, 37),
+            Some(Color::rgb(0, 0, 255)),
+            "the cell at the pattern origin lands at the page's bottom-left"
+        );
+        assert!(warnings.is_empty(), "nothing to report: {warnings:?}");
+    }
+
+    /// A `GlyphSource` that reports a tiling pattern and cannot draw one is
+    /// the default implementation of [`GlyphSource::tile`], and it has to
+    /// degrade the way an unpaintable pattern always has.
+    #[test]
+    fn a_tiling_pattern_nobody_can_rasterise_is_reported() {
+        struct Geometry;
+        impl GlyphSource for Geometry {
+            fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+                None
+            }
+            fn pattern(&self, _name: &[u8]) -> Option<PatternPaint> {
+                Some(PatternPaint::Tiling(Box::new(TilingPattern {
+                    matrix: Matrix::IDENTITY,
+                    bbox: [0.0, 0.0, 8.0, 8.0],
+                    xstep: 8.0,
+                    ystep: 8.0,
+                })))
+            }
+        }
+
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &Geometry);
+        interpret(
+            b"/Pattern cs /T0 scn 0 0 40 40 re f",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &OneChar,
+        );
+        let (canvas, warnings) = renderer.finish();
+
+        assert_eq!(
+            canvas.pixel(20, 20),
+            Some(Color::WHITE),
+            "the area is left alone"
+        );
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                RenderWarning::UnsupportedPattern { name } if name == "T0"
+            )),
+            "and named: {warnings:?}"
+        );
     }
 
     /// One byte, one code, half an em wide.

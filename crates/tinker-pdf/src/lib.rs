@@ -513,8 +513,7 @@ impl Page {
         let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
 
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let resources =
-            resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_deref());
+        let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
@@ -524,7 +523,7 @@ impl Page {
         if options.annotations {
             // After the content, because an annotation sits on top of the
             // page rather than under it.
-            annots::draw(&self.doc, &self.inner, self.fonts.as_deref(), &mut renderer);
+            annots::draw(&self.doc, &self.inner, self.fonts.as_ref(), &mut renderer);
         }
         let (canvas, mut warnings) = renderer.finish();
         // A glyph a font could not name is reported here rather than by the

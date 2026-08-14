@@ -27,7 +27,7 @@ const NO_VIEW: i64 = 1 << 5;
 pub fn draw<D: Device>(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
-    provider: Option<&dyn FontProvider>,
+    provider: Option<&Arc<dyn FontProvider>>,
     device: &mut D,
 ) {
     let Ok(object) = doc.get(page.reference) else {
@@ -59,7 +59,7 @@ pub fn draw<D: Device>(
 fn draw_one<D: Device>(
     doc: &Arc<CosDocument>,
     annotation: &Dict,
-    provider: Option<&dyn FontProvider>,
+    provider: Option<&Arc<dyn FontProvider>>,
     device: &mut D,
 ) {
     let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);

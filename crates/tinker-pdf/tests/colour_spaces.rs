@@ -16,6 +16,15 @@ use tinker_pdf::{Document, RenderOptions};
 
 /// A one-page document whose content and resources are given verbatim.
 fn page(resources: &str, content: &str) -> tinker_pdf::Bitmap {
+    page_with_objects(resources, content, "")
+}
+
+/// The same, with indirect objects appended after the content stream.
+///
+/// A tiling pattern is a *stream* (8.7.3.2, Table 75) — its cell is the
+/// stream's bytes — so unlike a shading pattern it cannot be written inline in
+/// the resource dictionary. Objects here start at 5.
+fn page_with_objects(resources: &str, content: &str, objects: &str) -> tinker_pdf::Bitmap {
     let bytes = format!(
         "%PDF-1.7\n\
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
@@ -23,7 +32,8 @@ fn page(resources: &str, content: &str) -> tinker_pdf::Bitmap {
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
    /Resources << {resources} >> /Contents 4 0 R >>\nendobj\n\
 4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
-trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
+{objects}\
+trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
         content.len() + 1
     );
 
@@ -32,6 +42,23 @@ trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
         .page(0)
         .expect("a page")
         .render(&RenderOptions::default())
+}
+
+/// A tiling pattern as object 5: the keys that vary, and the cell's content.
+fn tiling(keys: &str, cell: &str) -> String {
+    format!(
+        "5 0 obj\n<< /PatternType 1 /TilingType 1 /Resources << >> {keys}\n\
+   /Length {} >>\nstream\n{cell}\nendstream\nendobj\n",
+        cell.len() + 1
+    )
+}
+
+/// Whether a render reported a pattern it could not paint.
+fn reported_unpainted(bitmap: &tinker_pdf::Bitmap) -> bool {
+    bitmap
+        .warnings
+        .iter()
+        .any(|w| matches!(w, tinker_pdf::RenderWarning::UnsupportedPattern { .. }))
 }
 
 fn pixel(bitmap: &tinker_pdf::Bitmap, x: u32, y: u32) -> (u8, u8, u8) {
@@ -172,28 +199,86 @@ fn a_shading_pattern_paints_its_shading() {
     );
 }
 
-/// A tiling pattern is not painted, and says so. Filling it with black would
-/// hide the gap behind something that reads as content.
+/// 8.7.3.1: a tiling pattern's matrix maps pattern space to the *default*
+/// space of the page, so the CTM in force when the fill happens is not part of
+/// it and the cell does not move with it.
+///
+/// *Rewritten August 2026, with gap 09.* This assertion used to be
+/// `a_tiling_pattern_is_reported_rather_than_blacked_out`, and it was pinning
+/// correct behaviour: the engine warned and left the area blank. Tiles paint
+/// now, so it had to become something, and this is what gap 09's own "worse
+/// than none" section names as the failure to guard against — a lattice
+/// anchored to the paint-time CTM is *there*, just not where it belongs, which
+/// reads as a small offset rather than as a defect and is therefore never
+/// reported. Deleting the test would have left that hole unwatched.
+///
+/// Both pages put the same cell over the same pixels; the second gets there
+/// through a doubled CTM and halved coordinates. Anchoring to the CTM doubles
+/// the cell on the second page, so the bytes are the assertion.
 #[test]
-fn a_tiling_pattern_is_reported_rather_than_blacked_out() {
-    let bitmap = page(
-        "/Pattern << /P0 << /PatternType 1 /PaintType 1 /TilingType 1 \
-           /BBox [0 0 8 8] /XStep 8 /YStep 8 /Resources << >> /Length 0 >> >>",
-        "/Pattern cs /P0 scn 0 0 40 40 re f",
+fn a_tiling_pattern_fill_does_not_move_with_the_transform() {
+    let plain = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 4 4 32 32 re f",
+        &tiling(CELL_KEYS, CELL),
+    );
+    let scaled = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn q 2 0 0 2 0 0 cm 2 2 16 16 re f Q",
+        &tiling(CELL_KEYS, CELL),
     );
 
-    let (r, g, b) = pixel(&bitmap, 20, 20);
+    // Two blank pages would agree and prove nothing, so the cell has to be on
+    // the page first.
     assert!(
-        r > 220 && g > 220 && b > 220,
-        "the area is left alone, got ({r}, {g}, {b})"
+        pixel(&plain, 20, 20).2 > 180,
+        "the cell paints, got {:?}",
+        pixel(&plain, 20, 20)
     );
+    assert!(!reported_unpainted(&plain), "{:?}", plain.warnings);
+
+    assert_eq!(
+        first_difference(&plain, &scaled),
+        None,
+        "the cell sits in the same place under both transforms — \
+         a difference here is the pattern following the CTM"
+    );
+}
+
+/// The same guarantee on a *stroke*, which gap 07 could only assert for a
+/// shading pattern because a tiling one warned rather than painted.
+///
+/// *Rewritten August 2026, with gap 09.* This was
+/// `a_tiling_pattern_stroke_is_reported_rather_than_blacked_out`. Gap 07
+/// routed `stroke_path` through `fill_with_pattern`, so tiles started painting
+/// on strokes the day this gap's cells did, with no separate wiring and
+/// therefore nothing forcing a stroke-side anchoring test to exist. This is
+/// that test.
+#[test]
+fn a_tiling_pattern_stroke_does_not_move_with_the_transform() {
+    let plain = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern CS /P0 SCN 12 w 4 20 m 36 20 l S",
+        &tiling(CELL_KEYS, CELL),
+    );
+    let scaled = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern CS /P0 SCN q 2 0 0 2 0 0 cm 6 w 2 10 m 18 10 l S Q",
+        &tiling(CELL_KEYS, CELL),
+    );
+
     assert!(
-        bitmap
-            .warnings
-            .iter()
-            .any(|w| matches!(w, tinker_pdf::RenderWarning::UnsupportedPattern { .. })),
-        "and the gap is reported: {:?}",
-        bitmap.warnings
+        pixel(&plain, 20, 20).2 > 180,
+        "the rule carries the cell, got {:?}",
+        pixel(&plain, 20, 20)
+    );
+    assert!(!reported_unpainted(&plain), "{:?}", plain.warnings);
+
+    assert_eq!(
+        first_difference(&plain, &scaled),
+        None,
+        "the cell sits in the same place under both transforms — \
+         a difference here is the stroke's transform reaching the pattern"
     );
 }
 
@@ -205,10 +290,114 @@ const GRADIENT: &str = "/Pattern << /P0 << /PatternType 2 /Shading \
           /Function << /FunctionType 2 /Domain [0 1] \
                        /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >>";
 
-/// A tiling pattern, which this build reports rather than paints.
-const HATCH: &str = "/Pattern << /P0 << /PatternType 1 /PaintType 1 \
+/// One cell covering the whole page, so the anchoring tests above measure the
+/// cell's *placement* without a lattice index confusing the picture.
+const CELL_KEYS: &str = "/PaintType 1 /BBox [0 0 40 40] /XStep 40 /YStep 40";
+const CELL: &str = "0 0 1 rg 8 8 24 24 re f";
+
+/// A tiling pattern with a cell that has no readable content stream at all.
+///
+/// It carries the keys and no stream, so there is nothing to rasterize. That
+/// is still a pattern this build cannot paint, and it must still be reported
+/// rather than blacked out — the same degradation, now reached by a different
+/// route.
+const CELLLESS: &str = "/Pattern << /P0 << /PatternType 1 /PaintType 1 \
        /TilingType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8 \
        /Resources << >> /Length 0 >> >>";
+
+/// A pattern whose cell cannot be read is reported, not blacked out. Filling
+/// it with black would hide the gap behind something that reads as content.
+#[test]
+fn a_pattern_with_no_cell_is_reported_rather_than_blacked_out() {
+    let bitmap = page(CELLLESS, "/Pattern cs /P0 scn 0 0 40 40 re f");
+
+    let (r, g, b) = pixel(&bitmap, 20, 20);
+    assert!(
+        r > 220 && g > 220 && b > 220,
+        "the area is left alone, got ({r}, {g}, {b})"
+    );
+    assert!(
+        reported_unpainted(&bitmap),
+        "and the gap is reported: {:?}",
+        bitmap.warnings
+    );
+}
+
+/// The same on a stroke, because gap 07 made the two share one route and this
+/// is the assertion that keeps them from diverging again.
+#[test]
+fn a_pattern_with_no_cell_is_reported_on_a_stroke_too() {
+    let bitmap = page(CELLLESS, "/Pattern CS /P0 SCN 8 w 0 20 m 40 20 l S");
+
+    let (r, g, b) = pixel(&bitmap, 20, 20);
+    assert!(
+        r > 220 && g > 220 && b > 220,
+        "the rule is left alone, got ({r}, {g}, {b}) — black is the defect"
+    );
+    assert!(
+        reported_unpainted(&bitmap),
+        "and the gap is reported: {:?}",
+        bitmap.warnings
+    );
+}
+
+/// Milestone 1: the cell is rasterized once into a buffer of its own, so a
+/// one-cell pattern has to paint exactly what the same content painted
+/// directly.
+///
+/// Byte-for-byte, because that is the only comparison that catches the cell
+/// landing half a pixel out — which is what an offscreen buffer sized or
+/// placed by a different rounding than the page's does, and which reads as
+/// slightly soft edges rather than as a bug.
+#[test]
+fn a_one_cell_pattern_paints_what_its_cell_draws() {
+    let tiled = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &tiling(CELL_KEYS, CELL),
+    );
+    let direct = page("", CELL);
+
+    assert!(
+        pixel(&tiled, 20, 20).2 > 180,
+        "the cell painted, got {:?}",
+        pixel(&tiled, 20, 20)
+    );
+    assert_eq!(
+        first_difference(&tiled, &direct),
+        None,
+        "a cell blitted from its own buffer paints the pixels the same \
+         content painted directly"
+    );
+}
+
+/// A cell drawn through a pattern `/Matrix` lands where the matrix puts it,
+/// not where the cell's own coordinates would.
+#[test]
+fn a_pattern_matrix_moves_the_cell() {
+    let moved = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &tiling(
+            "/PaintType 1 /BBox [0 0 40 40] /XStep 400 /YStep 400 \
+             /Matrix [1 0 0 1 6 6]",
+            CELL,
+        ),
+    );
+
+    // The cell draws 8..32; the matrix shifts it to 14..38 in PDF space, which
+    // is y 2..26 from the top.
+    assert!(
+        pixel(&moved, 20, 20).2 > 180,
+        "inside the moved cell, got {:?}",
+        pixel(&moved, 20, 20)
+    );
+    assert_eq!(
+        pixel(&moved, 10, 34),
+        (255, 255, 255),
+        "and where the cell would have been without the matrix, nothing"
+    );
+}
 
 /// A shading pattern named by `SCN` paints the stroke, not `/Pattern`'s
 /// nominal black.
@@ -260,28 +449,6 @@ fn a_pattern_fills_and_strokes_the_same_band_identically() {
         first_difference(&filled, &stroked),
         None,
         "the same 8 pt band filled and stroked paints the same pixels"
-    );
-}
-
-/// A tiling pattern on a *stroke* must degrade exactly as it does on a fill:
-/// nothing painted, and a warning saying which pattern. Painting `/Pattern`'s
-/// nominal black instead turns a known gap into what reads as content.
-#[test]
-fn a_tiling_pattern_stroke_is_reported_rather_than_blacked_out() {
-    let bitmap = page(HATCH, "/Pattern CS /P0 SCN 8 w 0 20 m 40 20 l S");
-
-    let (r, g, b) = pixel(&bitmap, 20, 20);
-    assert!(
-        r > 220 && g > 220 && b > 220,
-        "the rule is left alone, got ({r}, {g}, {b}) — black is the defect"
-    );
-    assert!(
-        bitmap
-            .warnings
-            .iter()
-            .any(|w| matches!(w, tinker_pdf::RenderWarning::UnsupportedPattern { .. })),
-        "and the gap is reported: {:?}",
-        bitmap.warnings
     );
 }
 

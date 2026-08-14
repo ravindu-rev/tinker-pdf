@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tinker_pdf_color::{ColorSpace, Function};
-use tinker_pdf_content::{FontSource, Layer, Matrix, Rgb};
+use tinker_pdf_content::{Device, FontSource, Layer, Matrix, PathSegment, Rgb};
 use tinker_pdf_cos::{
     font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
 };
@@ -16,7 +16,8 @@ use tinker_pdf_filters::{
     ccitt_decode, jpeg_decode, CcittParams, JpegColor, Warning as FilterWarning,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
-use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading};
+use tinker_pdf_raster::canvas::{Canvas, Color};
+use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading, TilingPattern};
 
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
@@ -48,6 +49,15 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
+    /// The host's substitute faces, kept so a resource dictionary *inside*
+    /// this one can be read with the same configuration.
+    ///
+    /// A tiling pattern's `/Resources` (8.7.3.2) is read into a
+    /// `PageResources` of its own, and without this the cell would be the one
+    /// place in a document where a `FontProvider` the caller installed does
+    /// not apply — text inside a pattern would silently lose its substitute
+    /// face while the same text beside it kept one.
+    provider: Option<Arc<dyn FontProvider>>,
     /// Which optional-content layers the document's default configuration
     /// shows (8.11).
     ///
@@ -201,7 +211,7 @@ impl PageResources {
     pub fn new(
         doc: &Arc<CosDocument>,
         page: &cos_pages::Page,
-        provider: Option<&dyn FontProvider>,
+        provider: Option<&Arc<dyn FontProvider>>,
     ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
@@ -214,7 +224,9 @@ impl PageResources {
                 if let Some(bytes) = doc.name_bytes(name) {
                     let key = bytes.to_vec();
                     let id = u64::from(name.id());
-                    if let Some(program) = program_for(doc, &key, dict, &font, provider) {
+                    if let Some(program) =
+                        program_for(doc, &key, dict, &font, provider.map(|p| &**p))
+                    {
                         programs.insert(id, program);
                     }
                     font_ids.insert(key.clone(), id);
@@ -233,6 +245,7 @@ impl PageResources {
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
     }
@@ -246,7 +259,7 @@ impl PageResources {
     pub fn from_dict(
         doc: &Arc<CosDocument>,
         dict: Dict,
-        provider: Option<&dyn FontProvider>,
+        provider: Option<&Arc<dyn FontProvider>>,
     ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
@@ -256,7 +269,8 @@ impl PageResources {
             if let Some(bytes) = doc.name_bytes(name) {
                 let key = bytes.to_vec();
                 let id = u64::from(name.id());
-                if let Some(program) = program_for(doc, &key, &dict, &font, provider) {
+                if let Some(program) = program_for(doc, &key, &dict, &font, provider.map(|p| &**p))
+                {
                     programs.insert(id, program);
                 }
                 font_ids.insert(key.clone(), id);
@@ -274,8 +288,94 @@ impl PageResources {
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
+    }
+
+    /// A pattern resource: its dictionary, and the object it lives in when it
+    /// is an indirect one (8.7.3).
+    ///
+    /// The reference is what a *tiling* pattern needs and a shading pattern
+    /// does not — type 1 is a stream and its cell is the stream's bytes, type 2
+    /// is a dictionary that may perfectly well be written inline. So both come
+    /// back, and both routes read the dictionary through the same lookup:
+    /// `/PatternType` deciding the kind is the one thing they must agree on.
+    fn pattern_entry(&self, name: &[u8]) -> Option<(Dict, Option<ObjRef>)> {
+        let resources = self.resources.as_ref()?;
+        let table = self.doc.resolve_key(resources, self.doc.intern(b"Pattern"));
+        let table = table.as_dict()?;
+        let key = self.doc.intern(name);
+        let reference = table.get_ref(key);
+        let entry = self.doc.resolve_key(table, key);
+        Some((entry.as_dict()?.clone(), reference))
+    }
+
+    /// A pattern's `/Matrix`, which maps pattern space to the parent content
+    /// stream's default space (8.7.3.1).
+    fn pattern_matrix(&self, dict: &Dict) -> Matrix {
+        self.doc
+            .resolve_key(dict, self.doc.intern(b"Matrix"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .and_then(|v| {
+                (v.len() >= 6 && v.iter().all(|x| x.is_finite())).then(|| Matrix {
+                    a: v[0],
+                    b: v[1],
+                    c: v[2],
+                    d: v[3],
+                    e: v[4],
+                    f: v[5],
+                })
+            })
+            .unwrap_or(Matrix::IDENTITY)
+    }
+
+    /// A tiling pattern's geometry (8.7.3.2, Table 75).
+    ///
+    /// The cell's pixels are not read here: they are a content stream, and the
+    /// renderer decides how large a buffer to draw it into and whether the
+    /// lattice is affordable before anything is rasterized.
+    fn tiling_pattern(&self, dict: &Dict, matrix: Matrix) -> PatternPaint {
+        let number = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_number()
+                .filter(|v| v.is_finite())
+        };
+
+        // Required, and the cell has no extent without it. The corners may be
+        // given in either order (7.9.5), as they may on a form's `/BBox`.
+        let bbox = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"BBox"))
+            .as_array()
+            .and_then(|values| {
+                let n = |i: usize| {
+                    values
+                        .get(i)
+                        .and_then(|v| self.doc.resolve(v).as_number())
+                        .filter(|v| v.is_finite())
+                };
+                let (x0, y0, x1, y1) = (n(0)?, n(1)?, n(2)?, n(3)?);
+                Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)])
+            });
+        let Some(bbox) = bbox.filter(|b| b[2] > b[0] && b[3] > b[1]) else {
+            return PatternPaint::Unsupported;
+        };
+
+        PatternPaint::Tiling(Box::new(TilingPattern {
+            matrix,
+            bbox,
+            // Absent or zero is invalid; the renderer falls back to the cell's
+            // own size, which is the only reading that tiles.
+            xstep: number(b"XStep").unwrap_or(0.0),
+            ystep: number(b"YStep").unwrap_or(0.0),
+        }))
     }
 
     fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
@@ -880,56 +980,126 @@ impl GlyphSource for PageResources {
     }
 
     fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
-        let resources = self.resources.as_ref()?;
-        let table = self.doc.resolve_key(resources, self.doc.intern(b"Pattern"));
-        let table = table.as_dict()?;
-        let entry = self.doc.resolve_key(table, self.doc.intern(name));
-        let dict = entry.as_dict()?;
+        let (dict, _) = self.pattern_entry(name)?;
 
-        // 8.7.3.3: type 2 is a shading pattern, type 1 a tiling pattern. A
-        // tiling pattern needs its content stream replayed into a tile and
-        // repeated, which this build does not do — reported, not painted.
+        // 8.7.3.3: type 1 is a tiling pattern, type 2 a shading pattern.
         let kind = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"PatternType"))
+            .resolve_key(&dict, self.doc.intern(b"PatternType"))
             .as_int()
             .unwrap_or(0);
-        if kind != 2 {
-            return Some(PatternPaint::Unsupported);
-        }
+        // 8.7.3.1: the pattern matrix maps pattern space to the *default*
+        // space of the parent content stream, so the CTM in force at fill time
+        // is not part of it. Shared by both kinds, because two readers of one
+        // key is how the anchoring comes to be right on one route and wrong on
+        // the other.
+        let matrix = self.pattern_matrix(&dict);
 
-        let shading = self.doc.resolve_key(dict, self.doc.intern(b"Shading"));
-        let shading = shading.as_dict()?;
-        // A mesh inside a pattern is as unpaintable as a mesh anywhere else,
-        // and reports as an unpainted pattern rather than as a missing one.
-        let Ok(Some(shading)) = self.read_shading(shading) else {
-            return Some(PatternPaint::Unsupported);
+        match kind {
+            1 => Some(self.tiling_pattern(&dict, matrix)),
+            2 => {
+                let shading = self.doc.resolve_key(&dict, self.doc.intern(b"Shading"));
+                let shading = shading.as_dict()?;
+                // A mesh inside a pattern is as unpaintable as a mesh anywhere
+                // else, and reports as an unpainted pattern rather than as a
+                // missing one.
+                let Ok(Some(shading)) = self.read_shading(shading) else {
+                    return Some(PatternPaint::Unsupported);
+                };
+                Some(PatternPaint::Shading(Box::new(shading), matrix))
+            }
+            _ => Some(PatternPaint::Unsupported),
+        }
+    }
+
+    fn tile(
+        &self,
+        name: &[u8],
+        request: &tinker_pdf_render::TileRequest,
+    ) -> Option<tinker_pdf_render::Tile> {
+        let (dict, reference) = self.pattern_entry(name)?;
+        // A tiling pattern is a *stream* (8.7.3.2, Table 75): its cell is a
+        // content stream. A direct dictionary carrying the keys but no stream
+        // has no cell to draw, and declining here is what turns it back into
+        // the reported gap it was.
+        let content = self.doc.stream_decoded(reference?).ok()?;
+
+        // 8.7.3.2: the cell's own `/Resources`. Gap 11 recorded that a *form*
+        // XObject's `/Resources` are consulted nowhere in this engine; a
+        // pattern's are, because a cell that names `/F0` almost always means a
+        // font the page never heard of — a pattern is a self-contained
+        // drawing, where a form is usually written beside the page that
+        // invokes it.
+        let own = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"Resources"))
+            .as_dict()
+            .cloned();
+        let nested;
+        let resources: &PageResources = match own {
+            Some(dict) => {
+                nested = PageResources::from_dict(&self.doc, dict, self.provider.as_ref());
+                &nested
+            }
+            // Falling back to the page's is what a producer that omits the key
+            // is relying on, and it is what every reader does.
+            None => self,
         };
 
-        // 8.7.3.1: the pattern matrix maps pattern space to the page's
-        // *default* space, so the CTM in force at fill time is not part of it.
-        let matrix = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"Matrix"))
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| self.doc.resolve(o).as_number())
-                    .collect::<Vec<f64>>()
-            })
-            .and_then(|v| {
-                (v.len() >= 6 && v.iter().all(|x| x.is_finite())).then(|| Matrix {
-                    a: v[0],
-                    b: v[1],
-                    c: v[2],
-                    d: v[3],
-                    e: v[4],
-                    f: v[5],
-                })
-            })
-            .unwrap_or(Matrix::IDENTITY);
+        let canvas = Canvas::new(
+            request.width,
+            request.height,
+            request.format,
+            Color::TRANSPARENT,
+        );
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, request.to_pixels, resources)
+            .with_cancel(request.cancel.clone())
+            .with_pattern_depth(request.depth);
 
-        Some(PatternPaint::Shading(Box::new(shading), matrix))
+        // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already
+        // that box rounded outward, so this only takes back the part of a
+        // pixel the rounding gave away -- but a hatch is normally drawn with a
+        // line width that deliberately runs past the box so neighbouring cells
+        // join, and without the clip that overshoot lands in the next cell's
+        // gap.
+        let [x0, y0, x1, y1] = request.bbox;
+        let box_path = [
+            PathSegment::MoveTo { x: x0, y: y0 },
+            PathSegment::LineTo { x: x1, y: y0 },
+            PathSegment::LineTo { x: x1, y: y1 },
+            PathSegment::LineTo { x: x0, y: y1 },
+            PathSegment::Close,
+        ];
+        // Pattern space, because `to_pixels` is the renderer's `base` and the
+        // interpreter's CTM starts at the identity below.
+        let state = tinker_pdf_content::GraphicsState::new(Matrix::IDENTITY);
+        renderer.clip_path(&box_path, &state, false);
+
+        tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
+        let (canvas, warnings) = renderer.finish();
+
+        // Ruling 10, and only reachable when the cell had resources of its
+        // own: a font the cell could not resolve, or an image it had to
+        // tolerate, is a fact about the page and the page is the only place a
+        // caller looks.
+        if !std::ptr::eq(resources, self) {
+            if let (Ok(mut mine), names) = (self.missing_fonts.lock(), resources.missing_fonts()) {
+                for name in names {
+                    if mine.len() < 64 && !mine.contains(&name) {
+                        mine.push(name);
+                    }
+                }
+            }
+            if let Ok(mut mine) = self.damaged_images.lock() {
+                for entry in resources.damaged_images() {
+                    if !mine.contains(&entry) {
+                        mine.push(entry);
+                    }
+                }
+            }
+        }
+
+        Some(tinker_pdf_render::Tile { canvas, warnings })
     }
 
     fn inline_image(&self, dict: &[u8], data: &[u8]) -> Result<Option<DecodedImage>, String> {
