@@ -276,6 +276,43 @@ non-separable blends inside non-isolated knockout groups are where the
 oracle renderers disagree with each other; we implement the spec formulas,
 pin our own fixtures, and let the perceptual budget absorb the rest.
 
+*Amended, August 2026, on building it — gap
+[11](gaps/11-transparency-groups.md).* Three corrections, and the second is
+the substantive one.
+
+**Buffers are straight-alpha, not premultiplied.** The paragraph above says
+premultiplied RGBA; the `Canvas` has never been that. `clear` and `encode`
+write straight colour and `pixel` reads it back, and the compositing formula
+was corrected to 11.3.6's straight-alpha source-over before this gap started.
+Nothing here depends on the choice — the blend formulas unpremultiply locally
+either way — but the sentence was describing a buffer that does not exist.
+
+**A non-isolated group's buffer carries two alphas, not one.** "Non-isolated
+groups copy the backdrop in and remove it again at composite time" is right
+and incomplete: 11.4.7.2's removal is `C = Cn + (Cn - C0)·(a0/agn - a0)`, and
+`agn` is the group's *own* accumulated alpha, which is not the alpha the
+buffer holds once the backdrop has been composited in. With an opaque
+backdrop — every page — the two are related by a division that has already
+lost `agn`. So the compositing function takes the initial backdrop's alpha as
+a separate input: colour renormalises against the union, the alpha channel
+accumulates the group's own. Any implementation that keeps one alpha per
+pixel silently omits backdrop removal, and the result is a page that is
+*slightly more muted*, everywhere there is a group.
+
+**The group buffer is bounded by the clip, not by `/BBox`.** 8.10.2 has
+already installed the `/BBox` clip by the time the group opens, so the clip
+is the box intersected with everything enclosing it — never larger, usually
+smaller, and free. A soft mask's buffer is the exception and is bounded by
+its own group's `/BBox` alone, because the mask applies to paints that have
+not happened yet and may be anywhere.
+
+Two items in the paragraph above remain unbuilt and are not in gap 11's
+scope: the **page group**, and blending in a group's own `/CS`. `/AIS` is
+still recorded and ignored, and knockout's shape/alpha split is the one place
+that would notice — the buffers carry one number, so a knockout restore is
+exact at full coverage and at none and weights between them on an
+anti-aliased edge.
+
 ### ExtGState coverage (8.4.5, Table 58)
 
 | Entries | Policy |
@@ -382,7 +419,7 @@ oracles are CI subprocesses, never dependencies (ruling 9).
 | 5 | Images: XObjects + inline, `/Decode`, SMask, color-key, ImageMask, strip cancellation, decoded-image LRU | Image corpus within budget; JBIG2/JPX fixtures degrade with placeholder + typed warning; mid-decode cancel acknowledged within one strip; cache bounded under adversarial reuse | L |
 | 6 | Shadings 1–3, `sh`, shading patterns; mesh capability flag | Axial/radial fixture matrix (extend on/off, degenerate cones, `r0 = r1`) within budget; mesh fixtures degrade with warning; LUT path and direct eval agree on vectors | M |
 | 7 | Tiling patterns: colored/uncolored, anchoring, step gaps/overlaps, cell budget | Pattern fixtures within budget incl. the anchoring fixture; XStep ≠ BBox width cases correct; adversarial tiny-step file completes under the budget with average-color fallback | S |
-| 8 | Transparency: `ca`/`CA`, separable blends, groups, isolation/knockout, soft masks, page group; then the non-separable set | Per-blend-mode fixture chart within budget vs oracle; isolated/non-isolated/knockout unit fixtures match spec-derived expected images; luminosity soft-mask fixtures pass | L |
+| 8 | Transparency: `ca`/`CA`, separable blends, groups, isolation/knockout, soft masks, page group; then the non-separable set | Per-blend-mode fixture chart within budget vs oracle; isolated/non-isolated/knockout unit fixtures match spec-derived expected images; luminosity soft-mask fixtures pass. **Done except the page group**, gap [11](gaps/11-transparency-groups.md); the oracle chart waits on gap [23](gaps/23-corpus-runner.md), and our own fixtures are the authority in the corners per the risk row below | L |
 | 9 | Annotations `/AP` + `/AS` toggle; OC default visibility | Annotation fixtures differ exactly at annotation rects between toggle states; OCG/OCMD fixtures match oracle visibility incl. `/VE`; hidden-flag handling tested | S |
 | 10 | Parity gate: full `render_pages.rs` port exact; corpus ratchet wired | The seven `render_pages.rs` behaviours pass verbatim (ruling 12); ≥ 95 % of corpus pages under `pdfcmp` budget vs the MuPDF oracle, pass-rate ratchet in CI can only rise; Tinker's `visual_regression.rs` port pixel-locked against our own goldens after one-time review | S |
 

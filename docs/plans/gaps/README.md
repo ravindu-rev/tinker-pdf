@@ -40,7 +40,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 | --- | --- | --- | --- |
 | 09 | [Tiling patterns](09-tiling-patterns.md) | Reported, not painted | M |
 | 10 | [Mesh shadings](10-mesh-shadings.md) | Types 4–7 warn and skip | M |
-| 11 | [Transparency groups](11-transparency-groups.md) | `/Group` and ExtGState `/SMask` are not read at all | L |
+| 11 | [Transparency groups](11-transparency-groups.md) | ~~`/Group` and ExtGState `/SMask` are not read at all~~ **DONE**, see the plan's `As built`: `Canvas::composite` and the group/soft-mask `Device` events, `/Group` with isolation (11.4.4), knockout (11.4.5) and backdrop removal (11.4.7.2), and ExtGState `/SMask` in both kinds with `/BC` and a pre-sampled `/TR`. Both of this gap's failure modes render as plausible pictures, so each is pinned as a number against a control render differing in one key rather than as "it drew something". Two findings worth carrying: 11.4.7.2's backdrop removal is **exactly zero** for a group that painted opaquely, so a fixture with opaque contents cannot see it at all — found by deleting the removal step and watching nothing fail; and a non-isolated group's buffer has to carry *two* alphas, since with an opaque backdrop the group's own alpha divides out of the stored union and is unrecoverable. **Adds the eighth determinism fingerprint**, because no existing one had a group or a mask. `Canvas::composite(&mut self, src: &Canvas, at: (i32, i32), alpha: f64, mode: BlendMode, mask: Option<&Mask>, stop: Option<&dyn Fn() -> bool>)` — the signature gap 09 is blocked on | L |
 
 ## Rasteriser — plan 07 says "complete" and five scope items are absent
 
