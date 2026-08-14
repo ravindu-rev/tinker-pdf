@@ -371,6 +371,91 @@ fn a_one_cell_pattern_paints_what_its_cell_draws() {
     );
 }
 
+/// 8.7.3.2: the cell is clipped to its `/BBox`, and the step is not the box.
+///
+/// The risk this closes is structural rather than arithmetic. A cell whose
+/// box is smaller than its step leaves gaps between cells, and a neighbour
+/// must not fill them — so the buffer is the box and nothing else, which is
+/// what makes spill impossible rather than merely prevented. The cell here
+/// draws a square four points larger than its box on every side, which is how
+/// a real hatch is written: the overshoot is deliberate, so that neighbouring
+/// cells join when the step *is* the box.
+#[test]
+fn a_cell_cannot_spill_into_the_gap_its_step_leaves() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &tiling(
+            "/PaintType 1 /BBox [0 0 8 8] /XStep 16 /YStep 16",
+            "0 0 1 rg -4 -4 16 16 re f",
+        ),
+    );
+
+    assert!(
+        pixel(&bitmap, 4, 36).2 > 180,
+        "the cell itself paints, got {:?}",
+        pixel(&bitmap, 4, 36)
+    );
+    assert_eq!(
+        pixel(&bitmap, 12, 36),
+        (255, 255, 255),
+        "and the 8 pt gap the step asks for stays paper — the overshoot is \
+         clipped to the box rather than landing in the next cell's gap"
+    );
+    assert_eq!(pixel(&bitmap, 4, 28), (255, 255, 255), "vertically too");
+}
+
+/// The lattice repeats end to end, through a real content stream: three
+/// columns and three rows of an 8 pt cell stepped by 16 across a 40 pt page.
+#[test]
+fn a_hatch_repeats_across_what_it_fills() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &tiling(
+            "/PaintType 1 /BBox [0 0 8 8] /XStep 16 /YStep 16",
+            "0 0 1 rg 0 0 8 8 re f",
+        ),
+    );
+
+    for (x, y) in [(4, 36), (20, 36), (36, 36), (4, 20), (20, 20), (36, 4)] {
+        assert!(
+            pixel(&bitmap, x, y).2 > 180,
+            "a cell covers ({x}, {y}), got {:?}",
+            pixel(&bitmap, x, y)
+        );
+    }
+    for (x, y) in [(12, 36), (28, 36), (4, 28), (12, 28)] {
+        assert_eq!(
+            pixel(&bitmap, x, y),
+            (255, 255, 255),
+            "and ({x}, {y}) is between cells"
+        );
+    }
+}
+
+/// Nothing paints outside the filled path, through the same route.
+#[test]
+fn a_tiled_fill_stops_at_its_path() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 10 10 20 20 re f",
+        &tiling(
+            "/PaintType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8",
+            "0 0 1 rg 0 0 8 8 re f",
+        ),
+    );
+
+    assert!(pixel(&bitmap, 20, 20).2 > 180, "inside the rectangle");
+    for (x, y) in [(4, 20), (36, 20), (20, 4), (20, 36)] {
+        assert_eq!(
+            pixel(&bitmap, x, y),
+            (255, 255, 255),
+            "({x}, {y}) is outside the path the pattern filled"
+        );
+    }
+}
+
 /// A cell drawn through a pattern `/Matrix` lands where the matrix puts it,
 /// not where the cell's own coordinates would.
 #[test]

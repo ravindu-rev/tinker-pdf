@@ -3411,6 +3411,119 @@ mod tests {
         );
     }
 
+    /// 8.7.3.2: the lattice steps by `/XStep` and `/YStep`, which are not the
+    /// bounding box. A step wider than the box leaves a gap, and the gap is
+    /// what the file asked for — filling it is the failure a cell sized to its
+    /// step instead of to its box produces.
+    ///
+    /// The page is 40 pt; a 10 pt cell every 20 pt puts cells at device x 0,
+    /// 20 and 40, and at device y 30 and 10 once the y flip is applied.
+    #[test]
+    fn the_lattice_repeats_at_its_steps_and_leaves_their_gaps() {
+        let tiles = Tiles::new([0.0, 0.0, 10.0, 10.0], 20.0, 20.0);
+        let (canvas, _) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        let blue = Some(Color::rgb(0, 0, 255));
+        for (x, y) in [(5, 35), (25, 35), (5, 15), (25, 15)] {
+            assert_eq!(canvas.pixel(x, y), blue, "a cell covers ({x}, {y})");
+        }
+        for (x, y) in [(15, 35), (35, 35), (15, 15), (5, 25)] {
+            assert_eq!(
+                canvas.pixel(x, y),
+                Some(Color::WHITE),
+                "and the step leaves ({x}, {y}) alone"
+            );
+        }
+    }
+
+    /// The opposite arrangement: a step *narrower* than the box, which is how
+    /// a weave or an overlapping scale pattern is drawn. Every pixel of the
+    /// shape is covered, and the cells overlapping does not punch holes.
+    #[test]
+    fn a_step_narrower_than_the_box_overlaps_rather_than_tearing() {
+        let tiles = Tiles::new([0.0, 0.0, 10.0, 10.0], 5.0, 5.0);
+        let (canvas, _) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        for y in 0..40 {
+            for x in 0..40 {
+                assert_eq!(
+                    canvas.pixel(x, y),
+                    Some(Color::rgb(0, 0, 255)),
+                    "({x}, {y}) is covered by an overlapping lattice"
+                );
+            }
+        }
+    }
+
+    /// The lattice is indexed from the *pattern's* origin, which may be
+    /// anywhere — including outside the shape, so the indices run negative.
+    ///
+    /// This is also where an off-by-one in the range shows. Cell zero here
+    /// spans device x -5 to 5, so it only half overlaps the shape; a range
+    /// that pairs the near edge of the shape with the near edge of the cell
+    /// rather than with its far edge starts at cell one instead, and the
+    /// leftmost five columns of every shape in the document go blank. That
+    /// reads as a margin, not as a missing cell.
+    #[test]
+    fn a_cell_that_only_half_overlaps_the_shape_is_still_drawn() {
+        let mut tiles = Tiles::new([0.0, 0.0, 10.0, 10.0], 20.0, 20.0);
+        tiles.pattern.matrix = Matrix::translate(-5.0, -5.0);
+        let (canvas, _) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        let blue = Some(Color::rgb(0, 0, 255));
+        assert_eq!(
+            canvas.pixel(2, 37),
+            blue,
+            "the half of cell zero that is on the page is drawn"
+        );
+        assert_eq!(
+            canvas.pixel(37, 2),
+            blue,
+            "and so is the far corner, five steps out"
+        );
+    }
+
+    /// Nothing paints outside the filled path. The lattice covers the path's
+    /// bounding *box*, so a shape that is not a rectangle is the case that
+    /// matters: the coverage mask is what shapes each blit, and a blit that
+    /// ignored it would paint the box.
+    #[test]
+    fn the_lattice_paints_only_where_the_path_covers() {
+        let tiles = Tiles::new([0.0, 0.0, 8.0, 8.0], 8.0, 8.0);
+        // A triangle across the page: the top-left corner is well outside it.
+        let (canvas, _) = with_tiles(b"/Pattern cs /T0 scn 0 0 m 40 0 l 40 40 l h f", &tiles);
+
+        assert_eq!(
+            canvas.pixel(35, 35),
+            Some(Color::rgb(0, 0, 255)),
+            "inside the triangle"
+        );
+        assert_eq!(
+            canvas.pixel(4, 4),
+            Some(Color::WHITE),
+            "outside it, inside its bounding box — a blit that ignored the \
+             coverage mask would paint here"
+        );
+    }
+
+    /// A clip bounds the lattice exactly as the path does, because both reach
+    /// it through the one coverage mask.
+    #[test]
+    fn a_clip_bounds_the_lattice_too() {
+        let tiles = Tiles::new([0.0, 0.0, 8.0, 8.0], 8.0, 8.0);
+        let (canvas, _) = with_tiles(
+            b"q 0 0 20 20 re W n /Pattern cs /T0 scn 0 0 40 40 re f Q",
+            &tiles,
+        );
+
+        assert_eq!(
+            canvas.pixel(10, 30),
+            Some(Color::rgb(0, 0, 255)),
+            "inside the clip"
+        );
+        assert_eq!(canvas.pixel(30, 10), Some(Color::WHITE), "outside it");
+    }
+
     /// One byte, one code, half an em wide.
     struct OneChar;
 
