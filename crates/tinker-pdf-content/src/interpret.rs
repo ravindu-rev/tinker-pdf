@@ -35,6 +35,25 @@ pub struct Form {
     /// means the file omitted it, in which case there is nothing to clip to
     /// and the form is drawn unclipped rather than dropped.
     pub bbox: Option<[f64; 4]>,
+    /// `/Group` with `/S /Transparency` (11.6.6), when the form is one.
+    pub group: Option<Group>,
+}
+
+/// A transparency group XObject's attributes (11.6.6).
+///
+/// The group's colour space is deliberately absent. 11.6.6 lets `/CS` name
+/// the space the group's contents are composited in; this engine composites
+/// in RGB throughout, and changing that is a separate decision from making
+/// groups exist at all — recorded as a non-goal in the gap plan rather than
+/// half-answered here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Group {
+    /// `/I`: the group composites against a transparent backdrop rather than
+    /// against what is already on the page (11.4.4).
+    pub isolated: bool,
+    /// `/K`: each element composites against the group's *initial* backdrop
+    /// rather than against the elements before it (11.4.5).
+    pub knockout: bool,
 }
 
 /// An optional-content layer, as the resource seam resolved it (8.11).
@@ -989,11 +1008,34 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             }
         }
 
+        // 11.6.6: a transparency group's contents are composited into a buffer
+        // of their own and the result painted as one object, so the alphas and
+        // the blend mode in force at the `Do` belong to the *result*. Inside
+        // the group they are reset — without this a group with `ca 0.5` fades
+        // each element separately and two overlapping opaque shapes inside it
+        // show a seam where they cross, which is the observable difference
+        // between per-element alpha and group alpha.
+        //
+        // The soft mask goes the same way, and the device does that half: it
+        // is pixels, so it lives there (ruling 8).
+        let grouped = match form.group {
+            Some(group) if self.device.begin_group(group, &self.gs) => {
+                self.gs.fill_alpha = 1.0;
+                self.gs.stroke_alpha = 1.0;
+                self.gs.blend = crate::state::BlendMode::Normal;
+                true
+            }
+            _ => false,
+        };
+
         self.depth += 1;
         self.run(&form.content);
         self.depth -= 1;
 
         self.close_open_marked_content();
+        if grouped {
+            self.device.end_group();
+        }
         self.marked = saved_marked;
         self.marked_over_cap = saved_over_cap;
         self.gs = saved_gs;
@@ -1336,6 +1378,148 @@ mod tests {
         fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
             (0.0, 880.0, -1000.0)
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Transparency groups (11.6.6).
+    // -----------------------------------------------------------------------
+
+    /// A source offering one grouped form and one plain one, both drawing a
+    /// rectangle.
+    struct Groups {
+        group: Option<Group>,
+    }
+
+    impl FontSource for Groups {
+        fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            Vec::new()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            (name == b"Fm").then(|| Form {
+                content: b"0 0 5 5 re f".to_vec(),
+                matrix: Matrix::IDENTITY,
+                bbox: None,
+                group: self.group,
+            })
+        }
+        fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
+            (name == b"Half").then_some((Some(0.5), Some(0.25)))
+        }
+        fn ext_g_state_blend(&self, name: &[u8]) -> Option<crate::state::BlendMode> {
+            (name == b"Half").then_some(crate::state::BlendMode::Multiply)
+        }
+    }
+
+    /// Records the group events and the state each paint saw.
+    #[derive(Default)]
+    struct GroupEvents {
+        begins: Vec<Group>,
+        /// The `ca`, `CA` and blend mode in force at `begin_group`.
+        outer: Vec<(f64, f64, crate::state::BlendMode)>,
+        ends: usize,
+        /// The same three, at each fill.
+        fills: Vec<(f64, f64, crate::state::BlendMode)>,
+        /// What `begin_group` answers.
+        accept: bool,
+    }
+
+    impl Device for GroupEvents {
+        fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
+            self.begins.push(group);
+            self.outer
+                .push((state.fill_alpha, state.stroke_alpha, state.blend));
+            self.accept
+        }
+        fn end_group(&mut self) {
+            self.ends += 1;
+        }
+        fn fill_path(&mut self, _path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
+            self.fills
+                .push((state.fill_alpha, state.stroke_alpha, state.blend));
+        }
+    }
+
+    /// 11.6.6: the alphas and the blend mode at the `Do` belong to the group's
+    /// result, so inside the content they are reset. Without this a group at
+    /// `ca 0.5` fades every element separately *and* the result again.
+    #[test]
+    fn a_transparency_group_resets_the_alphas_and_the_blend_mode_inside_it() {
+        let mut device = GroupEvents {
+            accept: true,
+            ..GroupEvents::default()
+        };
+        let fonts = Groups {
+            group: Some(Group {
+                isolated: true,
+                knockout: false,
+            }),
+        };
+        interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
+
+        assert_eq!(
+            device.begins,
+            vec![Group {
+                isolated: true,
+                knockout: false
+            }],
+            "the group's own attributes reach the device"
+        );
+        assert_eq!(
+            device.outer,
+            vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
+            "and it is handed the state at the `Do`, which is the group's own"
+        );
+        assert_eq!(
+            device.fills,
+            vec![(1.0, 1.0, crate::state::BlendMode::Normal)],
+            "while the content inside runs at full strength under Normal"
+        );
+        assert_eq!(device.ends, 1, "and the group is closed exactly once");
+    }
+
+    /// A device that declines the group must not have the state reset
+    /// underneath it — the text device and the recorders keep no buffer, and
+    /// content that was painting at `ca 0.5` would start painting at full
+    /// strength with nothing left to fade it.
+    #[test]
+    fn declining_a_group_leaves_the_state_alone() {
+        let mut device = GroupEvents::default();
+        let fonts = Groups {
+            group: Some(Group::default()),
+        };
+        interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
+
+        assert_eq!(device.begins.len(), 1, "it was still offered");
+        assert_eq!(device.ends, 0, "and not closed, having never opened");
+        assert_eq!(
+            device.fills,
+            vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
+            "the content keeps the alphas the page set"
+        );
+    }
+
+    /// A form that is not a transparency group is not offered at all.
+    #[test]
+    fn a_plain_form_raises_no_group_event() {
+        let mut device = GroupEvents {
+            accept: true,
+            ..GroupEvents::default()
+        };
+        interpret(
+            b"/Half gs /Fm Do",
+            Matrix::IDENTITY,
+            &mut device,
+            &Groups { group: None },
+        );
+        assert!(device.begins.is_empty());
+        assert_eq!(device.ends, 0);
+        assert_eq!(
+            device.fills,
+            vec![(0.5, 0.25, crate::state::BlendMode::Multiply)]
+        );
     }
 
     /// The same font written vertically, with metrics that are all different
@@ -1814,6 +1998,7 @@ mod tests {
                     content: b"EMC /OC /Off BDC 0 0 5 5 re f".to_vec(),
                     matrix: Matrix::IDENTITY,
                     bbox: None,
+                    group: None,
                 }),
                 // A well-behaved form, used to test the `/OC` on the XObject
                 // itself rather than anything in its content.
@@ -1821,6 +2006,7 @@ mod tests {
                     content: b"BT /F0 10 Tf (form text) Tj ET 0 0 5 5 re f".to_vec(),
                     matrix: Matrix::IDENTITY,
                     bbox: None,
+                    group: None,
                 }),
                 _ => None,
             }

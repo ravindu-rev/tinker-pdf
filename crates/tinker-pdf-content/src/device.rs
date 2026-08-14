@@ -5,6 +5,7 @@
 //! The interpreter never knows which it is talking to, which is exactly why
 //! text extraction needs no rasterizer and Checkpoint A can exist.
 
+use crate::interpret::Group;
 use crate::state::{GraphicsState, Matrix};
 
 /// One glyph, as the interpreter resolved it.
@@ -130,6 +131,32 @@ pub trait Device {
     fn end_form(&mut self, id: u64) {
         let _ = id;
     }
+
+    /// A transparency group is about to be interpreted (11.6.6).
+    ///
+    /// `state` is the one in force at the `Do`, because that is where the
+    /// group's own `ca`, `CA` and `/BM` come from: they apply to the group's
+    /// *result*, not to the objects inside it. A device that accepts the
+    /// group says so by returning true, and the interpreter then resets the
+    /// alphas to 1 and the blend mode to Normal for the duration of the
+    /// content, per 11.6.6.
+    ///
+    /// **Declining is the default, and it has to be.** A device that keeps no
+    /// buffer — the text device, a recorder — must not have the alphas reset
+    /// underneath it, or content that was painting at `ca 0.5` starts
+    /// painting at full strength with nothing to fade it afterwards. So the
+    /// reset is conditional on the answer rather than on the operator.
+    fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
+        let _ = (group, state);
+        false
+    }
+
+    /// The group's content stream finished; composite it (11.4.7).
+    ///
+    /// Called exactly once for every [`Device::begin_group`] that answered
+    /// true, including when interpretation was cancelled part-way, so a
+    /// device may restore its buffer here without checking.
+    fn end_group(&mut self) {}
 
     /// Whether interpretation should stop — a cancellation hook checked
     /// between operators.

@@ -707,10 +707,45 @@ impl FontSource for PageResources {
                 Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)])
             });
 
+        // 11.6.6: `/Group` with `/S /Transparency` makes the form a
+        // transparency group, which is composited as a unit rather than
+        // element by element. Any other subtype — 8.10.3's `/S /Reference`
+        // group — is not one, so the name is checked rather than the key's
+        // presence.
+        let group = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"Group"))
+            .as_dict()
+            .and_then(|group| {
+                let subtype = self
+                    .doc
+                    .resolve_key(group, self.doc.intern(b"S"))
+                    .as_name()
+                    .and_then(|n| self.doc.name_bytes(n))?;
+                if subtype.as_ref() != b"Transparency" {
+                    return None;
+                }
+                // 11.6.6 Table 147: both default to false, and a value that is
+                // not a boolean is not a value.
+                Some(tinker_pdf_content::Group {
+                    isolated: self
+                        .doc
+                        .resolve_key(group, self.doc.intern(b"I"))
+                        .as_bool()
+                        .unwrap_or(false),
+                    knockout: self
+                        .doc
+                        .resolve_key(group, self.doc.intern(b"K"))
+                        .as_bool()
+                        .unwrap_or(false),
+                })
+            });
+
         Some(tinker_pdf_content::Form {
             content,
             matrix,
             bbox,
+            group,
         })
     }
 

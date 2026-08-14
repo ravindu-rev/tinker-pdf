@@ -235,6 +235,39 @@ impl GlyphSource for NoGlyphs {
     }
 }
 
+/// How deep transparency groups may nest before one is declined (11.6.6).
+///
+/// The interpreter's form-recursion cap already bounds this, because a group
+/// is a form; the number is restated here because this is where the *memory*
+/// is, and because `Renderer` is public and can be driven by something other
+/// than that interpreter. Each buffer is bounded by the clip in force, which
+/// only ever shrinks as groups nest, so the cap is a backstop rather than the
+/// primary bound.
+const MAX_GROUP_DEPTH: usize = 16;
+
+/// A transparency group being rendered: everything the parent needs back.
+struct GroupFrame {
+    /// The canvas the group will be composited onto.
+    parent: Canvas,
+    /// Where the group's buffer sits on it, in the parent's device pixels.
+    at: (i32, i32),
+    /// `ca` at the `Do`, which applies to the group's result (11.6.6).
+    alpha: f64,
+    /// `/BM` at the `Do`, likewise.
+    blend: RasterBlend,
+    /// The clip in force at the `Do`, in the parent's coordinates.
+    clip: Option<Mask>,
+    /// `base` in the parent's coordinates.
+    base: Matrix,
+    /// How deep the clip stack was when the group opened.
+    ///
+    /// A content stream may leave a `q` unbalanced; the interpreter drops the
+    /// state it saved, but the device has already been told to push. Without
+    /// this the stale entry is popped later by a `Q` from outside the group
+    /// and installs a clip in the wrong coordinate space.
+    clip_depth: usize,
+}
+
 /// The rasterizing device.
 pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
@@ -283,6 +316,13 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// How many of `marked_content` hide, so the question every paint asks
     /// is a comparison rather than a scan.
     hidden_depth: u32,
+    /// Transparency groups open, innermost last (11.6.6).
+    ///
+    /// While one is open `canvas` is the group's own buffer and `base` has
+    /// been translated so that device coordinates land inside it — which is
+    /// what lets the buffer be bounding-box sized rather than page sized
+    /// without a second coordinate system running through every paint.
+    groups: Vec<GroupFrame>,
     /// Mask pixels rasterized so far, summed over every paint and every clip.
     ///
     /// The instrument behind `a_small_fill_on_a_large_page_stays_small`. A
@@ -316,6 +356,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             text_clip_requested: false,
             marked_content: Vec::new(),
             hidden_depth: 0,
+            groups: Vec::new(),
             #[cfg(test)]
             mask_pixels: 0,
         }
@@ -364,6 +405,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// The canvas and everything the render had to tolerate.
     #[must_use]
     pub fn finish(mut self) -> (Canvas, Vec<RenderWarning>) {
+        // A group that was opened and never closed would otherwise hand the
+        // caller the *group's* buffer as the page. The interpreter balances
+        // its own calls, but `Renderer` is public and this is the one failure
+        // that turns a page into a fragment rather than into wrong pixels.
+        while !self.groups.is_empty() {
+            self.close_group();
+        }
         if self.missing_fonts > 0 {
             self.warnings.push(RenderWarning::UnreadableFont);
         }
@@ -375,6 +423,86 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.warnings.push(RenderWarning::Cancelled);
         }
         (self.canvas, self.warnings)
+    }
+
+    /// Opens a transparency group: a buffer of its own, bounded to the
+    /// clip in force (11.6.6).
+    ///
+    /// The clip *is* the bound, and that is not a shortcut. 8.10.2 clips a
+    /// form to its `/BBox`, the interpreter has already installed that clip
+    /// by the time this is called, and the clip in force is the bounding box
+    /// intersected with whatever encloses it — which is tighter than the
+    /// bounding box and never larger. Sizing the buffer to the page instead
+    /// is the memory blowup the plan's risk table names, multiplied by the
+    /// nesting depth.
+    fn open_group(&mut self, state: &GraphicsState) -> bool {
+        if self.groups.len() >= MAX_GROUP_DEPTH {
+            return false;
+        }
+        let (x0, y0, width, height) =
+            self.clip
+                .as_ref()
+                .map_or((0, 0, self.canvas.width, self.canvas.height), |clip| {
+                    let (x0, y0, x1, y1) = clip.overlap(self.canvas.width, self.canvas.height);
+                    (x0 as i32, y0 as i32, x1 - x0, y1 - y0)
+                });
+        if width == 0 || height == 0 {
+            return false;
+        }
+
+        // A group buffer must carry alpha whatever the page format is: it
+        // starts as nothing and accumulates a shape, and a format without an
+        // alpha channel has no way to say where the group did not paint.
+        let format = match self.canvas.format {
+            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+        };
+        let buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
+
+        let frame = GroupFrame {
+            parent: std::mem::replace(&mut self.canvas, buffer),
+            at: (x0, y0),
+            alpha: state.fill_alpha,
+            blend: blend_mode(state.blend),
+            clip: self.clip.clone(),
+            base: self.base,
+            clip_depth: self.clip_stack.len(),
+        };
+
+        // Everything inside the group draws in the buffer's coordinates. The
+        // translation goes into `base`, which every path, glyph, image and
+        // shading already passes through, rather than into a second origin
+        // that each of them would have to remember to apply.
+        self.base = self
+            .base
+            .then(&Matrix::translate(-f64::from(x0), -f64::from(y0)));
+        self.clip = frame.clip.as_ref().map(|clip| shifted(clip, -x0, -y0));
+        self.groups.push(frame);
+        true
+    }
+
+    /// Closes the innermost group and composites it onto its parent.
+    ///
+    /// Restoring comes before compositing, unconditionally, so a cancelled
+    /// render still hands back the page rather than the group's buffer.
+    fn close_group(&mut self) {
+        let Some(frame) = self.groups.pop() else {
+            return;
+        };
+        self.clip_stack.truncate(frame.clip_depth);
+        let buffer = std::mem::replace(&mut self.canvas, frame.parent);
+        self.base = frame.base;
+        self.clip = frame.clip;
+
+        let stop = self.stop_predicate();
+        self.canvas.composite(
+            &buffer,
+            frame.at,
+            frame.alpha,
+            frame.blend,
+            None,
+            Some(&stop),
+        );
     }
 
     /// Fills an undecodable image's area with a neutral grey.
@@ -1189,6 +1317,35 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if let Some(clip) = self.clip_stack.pop() {
             self.clip = clip;
         }
+    }
+
+    fn begin_group(&mut self, _group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
+        // A group inside a layer that is off paints nothing, so there is
+        // nothing to buffer. Declining also leaves the interpreter's 11.6.6
+        // state reset undone, which is right: nothing is going to paint.
+        if self.stopping() || self.hidden() {
+            return false;
+        }
+        self.open_group(state)
+    }
+
+    fn end_group(&mut self) {
+        self.close_group();
+    }
+}
+
+/// The same mask, addressed from a different origin.
+///
+/// Group buffers are bounding-box sized, so a clip that came from outside one
+/// has to be re-addressed on the way in and back again on the way out. The
+/// coverage bytes are untouched; only where they are read from moves.
+fn shifted(mask: &Mask, dx: i32, dy: i32) -> Mask {
+    Mask {
+        x0: mask.x0.saturating_add(dx),
+        y0: mask.y0.saturating_add(dy),
+        width: mask.width,
+        height: mask.height,
+        data: mask.data.clone(),
     }
 }
 
