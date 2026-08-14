@@ -222,6 +222,19 @@ warning. Sub-crate parameters (predictor, `/EarlyChange`) ride on the spec
 rather than on the variant so COS can forward a `/DecodeParms` entry without
 first deciding whether it is meaningful for the named filter.
 
+*Amended, August 2026.* "COS maps `/Filter` … into this" turned out to have a
+second, silent implementation. An inline image (8.9.7) has no object number, so
+its bytes never reach a stream tier, and `decode_inline` in
+`crates/tinker-pdf/src/resources.rs` had grown a chain of its own that passed
+no predictor at all, hardcoded `/EarlyChange`, and refused DCT and CCITT. The
+mapping is therefore no longer private to the COS crate:
+`CosDocument::filter_chain(dict, sink)` exposes it, so Table 10's defaults exist
+in one place and both paths reach the same `apply_chain`. Gap
+[08](gaps/08-inline-image-filters.md) has the measurements. The rule the
+episode leaves behind is that a *second* mapping is the failure mode to watch
+for here, not a wrong one: the specs above are testable, and two callers
+agreeing to differ are not.
+
 ### JPEG (DCTDecode)
 
 ```rust

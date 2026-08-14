@@ -3,7 +3,7 @@
 What is built, what is not, and what the difference means. Updated as phases
 land; the plan files say what *should* exist, this says what *does*.
 
-**1232 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
+**1243 tests**, `cargo fmt --check` and `clippy -D warnings` clean,
 `wasm32-unknown-unknown` builds, the crate graph is enforced, and the fuzz
 targets and language bindings type-check — on every commit. The fuzz targets
 also *run* on every commit now, briefly, over committed seed corpora. The
@@ -45,7 +45,7 @@ Fixed since, each with tests that would have caught it:
 | **`/Function` arrays truncated to the first element**; **Separation tint transforms were the identity**; **`/Lab` was aliased to RGB** | All three read properly; Lab converts through XYZ |
 | **`/SMask` was never read** — every soft-masked image painted an opaque rectangle. `/Decode` likewise. Stencils were hardcoded black | All three honoured |
 | **Text render modes**: mode 1 filled instead of stroking, modes 4–7 never clipped | Fill, stroke and clip decided independently; clip accumulates to `ET` |
-| **Inline images were skipped entirely** | Decoded, with Table 93's abbreviated keys |
+| **Inline images were skipped entirely**, and once they drew they ran a filter chain of their own — no predictor, `/EarlyChange` hardcoded, DCT and CCITT refused. The abbreviation rewrite needed a space after each name, so `/F/Fl` left the whole `/Filter` entry unread | Decoded through `CosDocument::filter_chain`, the same mapping the three stream tiers use, under the same `MAX_DECODED_STREAM` ceiling. Table 93's keys expand name by name, delimiters included. An inline JPEG and an inline fax decode, the fax through the one `ccitt_samples` the XObject path uses |
 | **~2330 lines of `src/semantics/` never compiled** — no `mod` declaration anywhere. Anyone grepping concluded phase 04 was done | Deleted. `link.rs` was the only part describing something the live tree lacked, so links are reimplemented and tested |
 | **No deflate encoder existed**, so `compress` had no reader and every written byte was uncompressed | Implemented; round-tripped against our own inflate |
 | **Object streams produced files that opened with zero pages** — the source trailer's stale `/Size` overwrote the correct one | Fixed. This had been true since the feature landed |
