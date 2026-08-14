@@ -259,6 +259,13 @@ struct GroupFrame {
     clip: Option<Mask>,
     /// `base` in the parent's coordinates.
     base: Matrix,
+    /// `/K`: the buffer as it started, so that each element can be composited
+    /// against it rather than against the elements before it (11.4.5).
+    ///
+    /// `None` for every ordinary group, which is what keeps the second buffer
+    /// off the common path — a knockout group pays for it and nothing else
+    /// does.
+    initial: Option<Canvas>,
     /// How deep the clip stack was when the group opened.
     ///
     /// A content stream may leave a `q` unbalanced; the interpreter drops the
@@ -471,6 +478,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             buffer.adopt_backdrop(backdrop);
         }
 
+        let initial = group.knockout.then(|| buffer.snapshot());
+
         let frame = GroupFrame {
             parent: std::mem::replace(&mut self.canvas, buffer),
             at: (x0, y0),
@@ -478,6 +487,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             blend: blend_mode(state.blend),
             clip: self.clip.clone(),
             base: self.base,
+            initial,
             clip_depth: self.clip_stack.len(),
         };
 
@@ -491,6 +501,35 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self.clip = frame.clip.as_ref().map(|clip| shifted(clip, -x0, -y0));
         self.groups.push(frame);
         true
+    }
+
+    /// Whether the innermost open group is a knockout one (11.4.5).
+    fn in_knockout(&self) -> bool {
+        self.groups
+            .last()
+            .is_some_and(|frame| frame.initial.is_some())
+    }
+
+    /// Discards what earlier elements left where this one is about to paint
+    /// (11.4.5).
+    ///
+    /// Called by every paint that can reach a group buffer, with the coverage
+    /// it is about to composite through. Doing it here rather than inside the
+    /// composite is what makes "each element" mean an operator: a fill, a
+    /// stroke, a glyph, an image, a shading, or a nested group's result.
+    fn knockout_restore(&mut self, mask: &Mask) {
+        let Some(frame) = self.groups.last_mut() else {
+            return;
+        };
+        // Moved out and put back, because the restore needs the canvas and
+        // the frame at once and they are two fields of the same `self`.
+        let Some(initial) = frame.initial.take() else {
+            return;
+        };
+        self.canvas.knock_out(&initial, mask);
+        if let Some(frame) = self.groups.last_mut() {
+            frame.initial = Some(initial);
+        }
     }
 
     /// Closes the innermost group and composites it onto its parent.
@@ -508,6 +547,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         // 11.4.7.2. A no-op on an isolated group, which kept no backdrop.
         buffer.remove_backdrop();
+
+        // 11.4.5: a nested group is one element of whatever encloses it, and
+        // its shape is its own accumulated alpha. This is the only element
+        // whose coverage comes from a buffer rather than from a path.
+        if self.in_knockout() {
+            let area = buffer.to_mask(frame.at, tinker_pdf_raster::MaskKind::Alpha, None);
+            self.knockout_restore(&area);
+        }
 
         let stop = self.stop_predicate();
         self.canvas.composite(
@@ -613,6 +660,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         let stop = self.stop_predicate();
         let area = self.coverage(path, rule, Some(&stop));
+        if self.in_knockout() {
+            self.knockout_restore(&area);
+        }
 
         let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
@@ -686,6 +736,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         let stop = self.stop_predicate();
         let mask = self.coverage(path, rule, Some(&stop));
+        if self.in_knockout() {
+            self.knockout_restore(&mask);
+        }
         self.canvas.fill_mask_with(&mask, color, alpha, mode);
     }
 
@@ -730,6 +783,26 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // 8.9.6.2: a stencil selects where the *current fill colour* is
         // painted; it has no colour of its own.
         let tint = image.stencil.then(|| fill_color(state));
+        // 11.4.5: an image is one element, and its shape is the unit square of
+        // its transform (8.9.5.2). Rasterised only inside a knockout group,
+        // where it is the coverage the restore needs; everywhere else this
+        // costs nothing at all.
+        if self.in_knockout() {
+            let mut quad = Path::new();
+            let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+            let to_device = state.ctm.then(&self.base);
+            for (i, (x, y)) in corners.iter().enumerate() {
+                let (x, y) = to_device.apply(*x, *y);
+                if i == 0 {
+                    quad.move_to(x, y);
+                } else {
+                    quad.line_to(x, y);
+                }
+            }
+            quad.close();
+            let area = self.coverage(&quad, FillRule::NonZero, None);
+            self.knockout_restore(&area);
+        }
         // The same predicate the fill and the stroker are given. It was a
         // second hand-rolled closure here until gap 15 gave the other two
         // hooks one, and two spellings of the same question is how one of them
@@ -1275,6 +1348,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             .map_or((0, 0, self.canvas.width, self.canvas.height), |clip| {
                 clip.overlap(self.canvas.width, self.canvas.height)
             });
+        // 11.4.5: `sh` paints the whole clip, so the clip *is* this element's
+        // coverage — and with no clip in force it really is the whole buffer.
+        if self.in_knockout() {
+            let area = self
+                .clip
+                .clone()
+                .unwrap_or_else(|| Mask::uniform(0, 0, self.canvas.width, self.canvas.height, 255));
+            self.knockout_restore(&area);
+        }
         for py in y_start..y_end {
             if self.stopping() {
                 return;

@@ -326,6 +326,116 @@ fn a_non_isolated_group_does_not_count_its_backdrop_twice() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 4: knockout.
+// ---------------------------------------------------------------------------
+
+/// 11.4.5: in a knockout group each element composites against the group's
+/// *initial* backdrop, so overlapping elements do not accumulate.
+///
+/// Two half-opaque black squares that overlap. In an ordinary group the
+/// crossing accumulates to three quarters and comes out darker; in a knockout
+/// group the second square discards what the first left where they cross, so
+/// the crossing is the same grey as either square on its own.
+///
+/// The far side of the *first* square is asserted too, and it is the assertion
+/// that separates knockout from "the second element erased the group": the
+/// part of the first square the second does not reach must survive untouched.
+#[test]
+fn overlapping_elements_in_a_knockout_group_do_not_accumulate() {
+    let form = "/Half gs 0 0 0 rg 5 5 30 30 re f 25 25 30 30 re f";
+    let gs = "/Half << /ca 0.5 >>";
+
+    let ordinary = render(over_backdrop(
+        "/Group << /S /Transparency /I true /K false >>",
+        "",
+        form,
+        gs,
+    ));
+    let knockout = render(over_backdrop(
+        "/Group << /S /Transparency /I true /K true >>",
+        "",
+        form,
+        gs,
+    ));
+
+    let (first, cross) = ((15.0, 15.0), (30.0, 30.0));
+
+    let ordinary_first = at(&ordinary, first.0, first.1).0;
+    let ordinary_cross = at(&ordinary, cross.0, cross.1).0;
+    assert!(
+        (120..=136).contains(&ordinary_first),
+        "one half-opaque square over white is mid grey, got {ordinary_first}"
+    );
+    assert!(
+        ordinary_cross + 40 < ordinary_first,
+        "without knockout the two accumulate where they cross: {ordinary_cross} \
+         against {ordinary_first}"
+    );
+
+    let knockout_first = at(&knockout, first.0, first.1).0;
+    let knockout_cross = at(&knockout, cross.0, cross.1).0;
+    assert_eq!(
+        knockout_first, ordinary_first,
+        "the part of the first square the second never reaches is untouched"
+    );
+    assert_eq!(
+        knockout_cross, knockout_first,
+        "and where they cross the second knocked the first out rather than \
+         compositing over it"
+    );
+}
+
+/// A knockout group whose elements do not overlap renders identically to an
+/// ordinary one, which is what says the restore is confined to the coverage
+/// of the element that triggers it.
+#[test]
+fn knockout_changes_nothing_where_elements_do_not_overlap() {
+    let form = "/Half gs 0 0 0 rg 5 5 20 20 re f 35 35 20 20 re f";
+    let gs = "/Half << /ca 0.5 >>";
+    let ordinary = render(over_backdrop(
+        "/Group << /S /Transparency /K false >>",
+        "",
+        form,
+        gs,
+    ));
+    let knockout = render(over_backdrop(
+        "/Group << /S /Transparency /K true >>",
+        "",
+        form,
+        gs,
+    ));
+    assert_eq!(ordinary.data, knockout.data);
+}
+
+/// A non-isolated knockout group knocks back to its *backdrop*, not to
+/// transparency — the two initial states 11.4.5 can start from.
+#[test]
+fn a_non_isolated_knockout_group_knocks_back_to_the_page() {
+    let under = "0 0 1 rg 0 0 60 60 re f";
+    let form = "/Half gs 1 0 0 rg 5 5 30 30 re f 25 25 30 30 re f";
+    let gs = "/Half << /ca 0.5 >>";
+    let bitmap = render(over_backdrop(
+        "/Group << /S /Transparency /I false /K true >>",
+        under,
+        form,
+        gs,
+    ));
+
+    let single = at(&bitmap, 15.0, 15.0);
+    let cross = at(&bitmap, 30.0, 30.0);
+    assert!(
+        (120..=136).contains(&single.0) && (120..=136).contains(&single.2),
+        "half-opaque red over blue: {single:?}"
+    );
+    assert!(
+        cross.0.abs_diff(single.0) <= 3 && cross.2.abs_diff(single.2) <= 3,
+        "and the crossing knocked back to the blue rather than to nothing, \
+         which would have left the red at a quarter strength over white: \
+         {cross:?} against {single:?}"
+    );
+}
+
 /// Groups nest, and the inner one's buffer is bounded by the outer one's.
 ///
 /// Both XObjects are named in the *page's* resource dictionary. A form's own

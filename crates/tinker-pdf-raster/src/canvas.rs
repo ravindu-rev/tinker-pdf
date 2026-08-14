@@ -473,6 +473,61 @@ impl Canvas {
         }
     }
 
+    /// A copy of this canvas's pixels, without any stored initial backdrop.
+    ///
+    /// What 11.4.5 keeps: the state a knockout group's buffer starts in, so
+    /// that each element can be composited against it rather than against the
+    /// elements before it. The backdrop is deliberately not carried over —
+    /// this copy is only ever read from.
+    #[must_use]
+    pub fn snapshot(&self) -> Canvas {
+        Canvas {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            stride: self.stride,
+            data: self.data.clone(),
+            backdrop: None,
+        }
+    }
+
+    /// Puts `initial` back where `mask` covers (11.4.5).
+    ///
+    /// A knockout group's elements do not accumulate: each one composites
+    /// against the group's *initial* backdrop, so whatever earlier elements
+    /// left behind is discarded exactly where the new one paints. Full
+    /// coverage is an exact replacement; partial coverage weights between the
+    /// two, which is the usual approximation — the spec separates an object's
+    /// shape from its alpha and this engine, like the buffers it inherits,
+    /// carries only the one number.
+    pub fn knock_out(&mut self, initial: &Canvas, mask: &Mask) {
+        if initial.width != self.width || initial.height != self.height {
+            return;
+        }
+        let components = self.format.components();
+        let (x0, y0, x1, y1) = mask.overlap(self.width, self.height);
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let coverage = u32::from(mask.at(col as i32, row as i32));
+                if coverage == 0 {
+                    continue;
+                }
+                let base = (row as usize) * self.stride + (col as usize) * components;
+                for i in 0..components {
+                    let (Some(from), Some(slot)) = (
+                        initial.data.get(base + i).copied(),
+                        self.data.get_mut(base + i),
+                    ) else {
+                        continue;
+                    };
+                    *slot = (mul255(u32::from(from), coverage)
+                        + mul255(u32::from(*slot), 255 - coverage))
+                    .min(255) as u8;
+                }
+            }
+        }
+    }
+
     /// Reads this buffer as a coverage mask over device pixels (11.6.5.2).
     ///
     /// `at` is where the buffer's top-left sits in device space, so the mask
