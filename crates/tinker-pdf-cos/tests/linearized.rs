@@ -17,8 +17,12 @@
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    pages, CosDocument, DocumentBuilder, DocumentEditor, WriteMode, WriteOptions,
+    pages, AuthLevel, CosDocument, DocumentBuilder, DocumentEditor, Encryption, WriteMode,
+    WriteOptions,
 };
+
+/// The password every encrypted fixture here opens with.
+const PASSWORD: &str = "open-me";
 
 fn document(page_count: usize) -> Arc<CosDocument> {
     let mut builder = DocumentBuilder::new();
@@ -33,6 +37,36 @@ fn document(page_count: usize) -> Arc<CosDocument> {
 }
 
 fn linearized(page_count: usize) -> Vec<u8> {
+    save(page_count, None)
+}
+
+/// Forty-eight deterministic bytes. Real callers pass real randomness; a test
+/// wants the same document every run, and the key derivation cannot tell.
+///
+/// This is also what makes the reproducibility assertion meaningful: the
+/// padding AES adds is a function of the plaintext's length, so the layout is
+/// deterministic exactly when the entropy is.
+fn entropy() -> [u8; 48] {
+    let mut bytes = [0u8; 48];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(7).wrapping_add(11);
+    }
+    bytes
+}
+
+fn encrypted_linearized(page_count: usize) -> Vec<u8> {
+    save(
+        page_count,
+        Some(Encryption {
+            user_password: PASSWORD.to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: entropy(),
+        }),
+    )
+}
+
+fn save(page_count: usize, encryption: Option<Encryption>) -> Vec<u8> {
     let editor = DocumentEditor::new(document(page_count));
     editor.save(&WriteOptions {
         mode: WriteMode::Rewrite,
@@ -41,6 +75,7 @@ fn linearized(page_count: usize) -> Vec<u8> {
         // first page's objects inside the same blob as everything else and
         // defeat the layout entirely.
         object_streams: false,
+        encryption,
         ..WriteOptions::default()
     })
 }
@@ -257,6 +292,70 @@ fn linearization_is_off_by_default() {
         ..WriteOptions::default()
     });
     assert!(!String::from_utf8_lossy(&plain).contains("/Linearized"));
+}
+
+// ---- Encryption and linearization together ---------------------------------
+
+/// The headline.
+///
+/// Asking for both used to give an encrypted file with an ordinary layout:
+/// `rewrite` guarded the linearized path with `encryption.is_none()`, so
+/// encryption won silently and the layout request was discarded with no error
+/// and no warning.
+#[test]
+fn an_encrypted_file_can_also_be_linearized() {
+    let bytes = encrypted_linearized(6);
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).into_owned();
+    assert!(
+        head.contains("/Linearized 1"),
+        "the layout request survived the encryption request: {head}"
+    );
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert!(
+        doc.is_encrypted(),
+        "and the encryption request survived too"
+    );
+    assert_eq!(doc.auth_level(), AuthLevel::None, "it wants a password");
+    assert_eq!(doc.authenticate(PASSWORD), Ok(AuthLevel::User));
+
+    let collected = pages::collect(&doc);
+    assert_eq!(collected.len(), 6, "every page is reachable");
+    for (index, page) in collected.iter().enumerate() {
+        let content = pages::content_bytes(&doc, page);
+        assert!(
+            String::from_utf8_lossy(&content).contains(&format!("page {index}")),
+            "page {index} decrypts back to what it drew"
+        );
+    }
+
+    assert_eq!(
+        tinker_pdf_cos::metadata(&doc).title.as_deref(),
+        Some("linearized"),
+        "and so do the strings"
+    );
+}
+
+/// The round trip above must not be passing through a plaintext file that
+/// merely carries an `/Encrypt` dictionary. Each needle is proved present in
+/// the unencrypted layout first, so an assertion cannot pass because the
+/// needle was never there.
+#[test]
+fn a_linearized_encrypted_file_holds_no_plaintext_content() {
+    let plain = linearized(6);
+    let sealed = encrypted_linearized(6);
+
+    for needle in [&b"(page 0)"[..], b"(page 5)", b"(linearized)"] {
+        let shown = String::from_utf8_lossy(needle).into_owned();
+        assert!(
+            find(&plain, needle).is_some(),
+            "{shown} is in the plaintext layout, so its absence below means something"
+        );
+        assert!(
+            find(&sealed, needle).is_none(),
+            "{shown} must be ciphertext in the encrypted layout"
+        );
+    }
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

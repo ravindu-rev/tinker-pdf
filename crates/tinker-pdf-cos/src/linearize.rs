@@ -28,6 +28,41 @@
 //! one field produces a file that opens fine everywhere except in the reader
 //! the whole feature exists for.
 //!
+//! # Encryption: encrypt first, then measure
+//!
+//! Encryption looks like it breaks that premise. AES-256-CBC prefixes a
+//! 16-byte initialisation vector and pads to the block size, so an encrypted
+//! stream is 17 to 32 bytes longer than its plaintext by an amount that
+//! depends on the plaintext's length — a size that is not known from the
+//! object alone.
+//!
+//! It is only a breakage if the measuring happens first. Every object is
+//! serialised *and encrypted* in one pass, in [`Plan::build`], and the layout
+//! is computed from the lengths of the encrypted bytes. Nothing else changes
+//! and the no-patching property survives. The opposite order is the failure
+//! this arrangement exists to prevent: every offset after the first stream
+//! would be short by the accumulated padding, and the file would open in this
+//! engine — whose reader walks the subsection headers — while failing in any
+//! reader that trusts `/L`, `/H` or `/T`, which is exactly the population
+//! linearization is for.
+//!
+//! Three things stay in the clear, because a reader reaches them before it can
+//! decrypt anything:
+//!
+//! - The `/Encrypt` dictionary (7.6.1), which is object 3 here and the first
+//!   object in part 4.
+//! - Both cross-reference tables and their trailers (7.6.1): a reader finds
+//!   them before it knows there is an `/Encrypt` dictionary to look for.
+//! - The linearization parameter dictionary. 7.6.1 does not exempt it, but a
+//!   reader consults it *before* authenticating. Strings inside it would have
+//!   to be encrypted, and it contains none — every value is an integer or an
+//!   array of integers — so the question is moot. `parameter_dictionary`'s
+//!   own test asserts that rather than assuming it.
+//!
+//! The hint stream is *not* in that list. It is an ordinary stream object and
+//! it is encrypted; `/H` gives its offset and length in the file, which is the
+//! encrypted length.
+//!
 //! # What is not here
 //!
 //! The optional generic hint tables — outlines, threads, named destinations —
@@ -38,7 +73,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object};
-use crate::write::{write_object, ObjectSet, StreamData, WriteOptions, Written};
+use crate::write::{write_object, ObjectSet, StreamCipher, StreamData, WriteOptions, Written};
 
 /// How many digits every patchable integer in the parameter dictionary gets.
 ///
@@ -46,6 +81,19 @@ use crate::write::{write_object, ObjectSet, StreamData, WriteOptions, Written};
 /// fixed width is what removes the need for a patching pass. Leading zeros in
 /// an integer are legal (7.3.3).
 const FIELD_WIDTH: usize = 10;
+
+/// The object number the `/Encrypt` dictionary takes, when there is one.
+///
+/// Objects 1 and 2 are the parameter dictionary and the hint stream. The
+/// third reserved number matters more than it looks: the first-page
+/// cross-reference table declares a single subsection running from zero to
+/// its highest entry, and marks every number in that range it does not carry
+/// as *free*. A free entry in the newer table overrides the main table
+/// reached through `/Prev`, so numbering `/Encrypt` above the ordinary
+/// objects — which is what the unlinearized writer does — would put it in the
+/// front table's range and free everything between. Reserving a low number
+/// keeps the front table's range exactly the front of the file.
+const ENCRYPT_OBJECT: u32 = 3;
 
 /// Writes a linearized file, or returns `None` when the document has no shape
 /// to linearize around.
@@ -60,7 +108,13 @@ pub fn linearize(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Option<Vec<u8>> {
-    let plan = Plan::build(objects, trailer, names, options.compress)?;
+    // The cipher is built before a single object is serialised, because every
+    // length this layout depends on is a length of encrypted bytes.
+    let encryption = match options.encryption.as_ref() {
+        Some(request) => Some(crate::write::build_encryption(request, names)?),
+        None => None,
+    };
+    let plan = Plan::build(objects, trailer, names, options.compress, encryption)?;
     Some(plan.emit(options, names))
 }
 
@@ -94,6 +148,10 @@ struct Plan {
     trailer: Dict,
     /// The highest new object number, plus the two reserved ones.
     size: u32,
+    /// The cipher, when the file is encrypted. Held so the hint stream — an
+    /// ordinary stream object, and encrypted like one — can be built in
+    /// `emit`, where its dictionary is known.
+    crypt: Option<StreamCipher>,
 }
 
 /// One object, renumbered and serialised.
@@ -109,6 +167,7 @@ impl Plan {
         trailer: &Dict,
         names: &NameTable,
         compress: bool,
+        encryption: Option<(Dict, StreamCipher)>,
     ) -> Option<Plan> {
         let root = trailer.get_ref(Name::ROOT)?;
         let catalog = dict_of(objects, root.num)?;
@@ -189,7 +248,11 @@ impl Plan {
         }
 
         let mut mapping: BTreeMap<u32, u32> = BTreeMap::new();
-        let mut next = 3u32;
+        let mut next = if encryption.is_some() {
+            ENCRYPT_OBJECT.saturating_add(1)
+        } else {
+            ENCRYPT_OBJECT
+        };
         for (old, _) in &order {
             mapping.insert(*old, next);
             next = next.saturating_add(1);
@@ -198,14 +261,36 @@ impl Plan {
         // F.3.1: `/O` names the first page's page object.
         let first_page_object = *mapping.get(pages.first()?)?;
 
-        let mut ordered = Vec::with_capacity(order.len());
+        let crypt = encryption.as_ref().map(|(_, cipher)| cipher);
+
+        let mut ordered = Vec::with_capacity(order.len() + 1);
+        // 7.6.1: the `/Encrypt` dictionary is the one object never encrypted,
+        // and it leads part 4 so a reader that has the front of the file can
+        // authenticate before it needs anything else.
+        if let Some((dict, _)) = &encryption {
+            let mut bytes = Vec::new();
+            write_indirect(
+                &mut bytes,
+                ENCRYPT_OBJECT,
+                &Written::Object(Object::Dict(dict.clone())),
+                names,
+                false,
+                None,
+            );
+            ordered.push(Placed {
+                number: ENCRYPT_OBJECT,
+                section: Section::Document,
+                bytes,
+            });
+        }
+
         let mut shared_objects = Vec::new();
         for (old, section) in &order {
             let entry = objects.get(*old)?;
             let renumbered = renumber_entry(entry, &mapping);
             let number = *mapping.get(old)?;
             let mut bytes = Vec::new();
-            write_indirect(&mut bytes, number, &renumbered, names, compress);
+            write_indirect(&mut bytes, number, &renumbered, names, compress, crypt);
 
             if section == &Section::Shared {
                 shared_objects.push(number);
@@ -239,6 +324,9 @@ impl Plan {
 
         let mut trailer = renumber_dict(trailer, &mapping);
         trailer.insert(Name::SIZE, Object::Int(i64::from(next)));
+        if encryption.is_some() {
+            trailer.insert(Name::ENCRYPT, Object::Ref(ObjRef::new(ENCRYPT_OBJECT, 0)));
+        }
 
         Some(Plan {
             ordered,
@@ -249,6 +337,7 @@ impl Plan {
             page_object_counts,
             trailer,
             size: next,
+            crypt: encryption.map(|(_, cipher)| cipher),
         })
     }
 
@@ -277,6 +366,12 @@ impl Plan {
                 // shrinking it after the layout was computed from it would
                 // point every later offset somewhere else.
                 false,
+                // Encrypted, though. The hint stream is an ordinary stream
+                // object and 7.6.1 exempts only the three things a reader
+                // must read before it can decrypt; this is not one of them.
+                // `/H` is measured from these bytes, so it carries the
+                // encrypted length.
+                self.crypt.as_ref(),
             );
             bytes
         };
@@ -844,16 +939,29 @@ fn renumber(object: &Object, mapping: &BTreeMap<u32, u32>, depth: u32) -> Object
 }
 
 /// One indirect object, header to `endobj`.
+///
+/// `crypt` is applied here rather than to the finished file, which is what
+/// makes the layout measurable: the caller takes `out.len()` afterwards and
+/// gets the length of what will actually be in the file.
 fn write_indirect(
     out: &mut Vec<u8>,
     number: u32,
     entry: &Written,
     names: &NameTable,
     compress: bool,
+    crypt: Option<&StreamCipher>,
 ) {
     out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
     match entry {
-        Written::Object(object) => write_object(out, object, names),
+        // 7.6.2: every string in the file is encrypted too, not only the
+        // streams. Leaving them clear puts titles, form values and annotation
+        // contents in plain sight inside a file that claims to be encrypted —
+        // and the ciphertext is longer than the plaintext, so this changes the
+        // object's length as well as its contents.
+        Written::Object(object) => match crypt {
+            Some(cipher) => write_object(out, &cipher.encrypt_strings(object, number), names),
+            None => write_object(out, object, names),
+        },
         Written::Stream(stream) => {
             // `compress` had no effect at all on this path: the ordinary
             // writer compresses inside `write_entry`, which the linearized
@@ -861,6 +969,15 @@ fn write_indirect(
             // and no error — four times the size, measured.
             let mut dict = stream.dict.clone();
             let data = crate::write::maybe_compress(&stream.data, &mut dict, names, compress);
+            // Encryption is the last thing applied and the first thing undone,
+            // so it wraps the compressed bytes rather than the other way
+            // round. /Length is then taken from the encrypted data, which is
+            // both what 7.3.8.2 requires and what keeps every offset derived
+            // below describing the bytes that are written.
+            let data = match crypt {
+                Some(cipher) => cipher.encrypt_stream(&data, number),
+                None => data,
+            };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
             write_object(out, &Object::Dict(dict), names);
             out.extend_from_slice(b"\nstream\n");

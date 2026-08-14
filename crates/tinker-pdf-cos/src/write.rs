@@ -56,7 +56,7 @@ pub struct WriteOptions {
     /// practical win is HTTP range serving and the workflows that check "fast
     /// web view" as a box.
     ///
-    /// It is a request, not a guarantee, and it is quietly dropped in three
+    /// It is a request, not a guarantee, and it is quietly dropped in two
     /// cases — each because the alternative is a file that claims
     /// `/Linearized` and is not, which is worse than an ordinary file because
     /// a reader will believe it:
@@ -65,9 +65,14 @@ pub struct WriteOptions {
     ///   layout the original had. (An incremental update to a linearized file
     ///   also de-linearizes it, by nature rather than by bug: the parameter
     ///   dictionary goes stale and validators say so.)
-    /// - **Encryption**, which this build cannot yet combine with the layout.
     /// - **A document with no catalog or no pages**, which has no first page
     ///   to put first.
+    ///
+    /// Both are definitions rather than limitations. Encryption used to be a
+    /// third case and is not one any more: the linearized writer encrypts each
+    /// object as it serialises it and measures the layout from the ciphertext,
+    /// so the padding AES-256-CBC adds is inside every offset the file
+    /// declares.
     ///
     /// `object_streams` is ignored when this succeeds: packing objects into a
     /// container would put the first page's objects in the same blob as
@@ -351,12 +356,12 @@ impl StreamCipher {
         iv
     }
 
-    fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
+    pub(crate) fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
         tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &self.iv_for(num, 0), data)
     }
 
     /// A copy of `object` with every string inside it encrypted.
-    fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
+    pub(crate) fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
         let mut counter = 1u32;
         self.walk(object, num, &mut counter)
     }
@@ -390,7 +395,10 @@ impl StreamCipher {
 }
 
 /// Builds the `/Encrypt` dictionary and the cipher that goes with it.
-fn build_encryption(encryption: &Encryption, names: &NameTable) -> Option<(Dict, StreamCipher)> {
+pub(crate) fn build_encryption(
+    encryption: &Encryption,
+    names: &NameTable,
+) -> Option<(Dict, StreamCipher)> {
     let built = tinker_pdf_crypto::handler::build_r6(
         encryption.user_password.as_bytes(),
         encryption.owner_password.as_bytes(),
@@ -597,10 +605,14 @@ pub fn rewrite(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Vec<u8> {
-    if options.linearize && options.encryption.is_none() {
+    if options.linearize {
         // A document with no catalog or no pages has no first page to put
         // first; the ordinary layout is then the only honest one, rather than
         // a file claiming /Linearized and not being.
+        //
+        // Encryption used to be a second reason to fall through here, and the
+        // caller was told nothing: they asked for both and got an encrypted
+        // file with an ordinary layout. `linearize` owns the cipher now.
         if let Some(bytes) = crate::linearize::linearize(objects, trailer, options, names) {
             return bytes;
         }
