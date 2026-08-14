@@ -305,6 +305,104 @@ fn an_inline_image_honours_early_change() {
     );
 }
 
+/// A progressive greyscale 8x8 JPEG, DC-only.
+///
+/// The same fixture `images.rs` uses for the XObject path, so the two tests
+/// below compare the two paths on bytes that are known to decode.
+fn progressive_jpeg() -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+
+    // DQT: a large DC quantiser, so the one bit the second scan adds is a
+    // visible difference rather than a rounding one.
+    out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+    let mut quant = [1u8; 64];
+    quant[0] = 255;
+    out.extend_from_slice(&quant);
+
+    // SOF2: progressive, 8-bit, 8x8, one component, no subsampling.
+    out.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x0B, 0x08]);
+    out.extend_from_slice(&[0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00]);
+
+    // DHT, DC table 0: a single two-bit code "00" meaning magnitude size 2.
+    let mut counts = [0u8; 16];
+    counts[1] = 1;
+    let mut dht = vec![0x00];
+    dht.extend_from_slice(&counts);
+    dht.push(0x02);
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((dht.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&dht);
+
+    // First DC scan, band 0..0, Ah 0 Al 1.
+    out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01]);
+    out.push(0b0001_1111);
+
+    // Refining DC scan, Ah 1 Al 0, with the stuffed zero a real encoder writes.
+    out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x10]);
+    out.extend_from_slice(&[0xFF, 0x00]);
+
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+/// 8.9.7 permits DCT inline, and it now decodes there.
+///
+/// It used to reach the catch-all and be reported as a codec this build does
+/// not have — which it has had since the XObject path was fixed. Hex-armoured
+/// so the chain is `[/AHx /DCT]`: a codec behind another filter is the shape
+/// that used to hand the JPEG decoder deflate output on the XObject side, and
+/// there was nothing at all testing it inline.
+#[test]
+fn an_inline_jpeg_decodes_rather_than_reporting_a_codec() {
+    let coded = hex(&progressive_jpeg());
+
+    let inline = render(page_with_inline(
+        "/W 8 /H 8 /CS /G /BPC 8 /F [/AHx /DCT]",
+        &coded,
+    ));
+    let xobject = render(page_with_xobject(
+        "/Width 8 /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 8\n\
+         /Filter [/ASCIIHexDecode /DCTDecode]",
+        &coded,
+    ));
+
+    let (r, g, b) = pixel(&inline, 10, 10);
+    assert_eq!((r, g, b), (r, r, r), "grey, got ({r}, {g}, {b})");
+    assert!(
+        (20..=45).contains(&r),
+        "the JPEG decoded to its own dark grey rather than to a placeholder: {r}"
+    );
+    assert!(
+        !inline
+            .warnings
+            .iter()
+            .any(|w| matches!(w, tinker_pdf::RenderWarning::UnsupportedImage { .. })),
+        "and reports no unsupported codec: {:?}",
+        inline.warnings
+    );
+    assert_eq!(
+        inline.data, xobject.data,
+        "the same JPEG through both paths must produce the same page"
+    );
+}
+
+/// 8.9.5.2's `/Decode [1 0]` reaches an inline JPEG, which returns its own
+/// pixels and so never joins the sample loop that reads the array.
+#[test]
+fn a_decode_array_inverts_an_inline_jpeg() {
+    let coded = hex(&progressive_jpeg());
+    let at = |dict: &str| pixel(&render(page_with_inline(dict, &coded)), 10, 10);
+
+    let plain = at("/W 8 /H 8 /CS /G /BPC 8 /F [/AHx /DCT]");
+    let inverted = at("/W 8 /H 8 /CS /G /BPC 8 /D [1 0] /F [/AHx /DCT]");
+
+    assert!(plain.0 < 60, "the plain image is dark: {plain:?}");
+    assert!(
+        inverted.0 > 195,
+        "and the inverted one is light: {inverted:?}"
+    );
+}
+
 /// A filter name no build knows ends the chain, and is reported rather than
 /// sampled.
 #[test]

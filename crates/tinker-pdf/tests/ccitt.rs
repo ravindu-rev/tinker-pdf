@@ -91,6 +91,33 @@ fn fax_page(coded: &[u8], parms: &str, extra: &str) -> Vec<u8> {
     out
 }
 
+/// The same page and the same coded bytes, as an inline image (8.9.7).
+///
+/// Table 93's short spellings throughout, because that is what a producer
+/// writes and because the abbreviation rewrite is part of what is under test.
+fn inline_fax_page(coded: &[u8], parms: &str, extra: &str) -> Vec<u8> {
+    let mut content = Vec::new();
+    content.extend_from_slice(b"q 20 0 0 20 0 0 cm BI /W 8 /H 4 ");
+    content.extend_from_slice(extra.as_bytes());
+    content.extend_from_slice(format!(" /F /CCF /DP << {parms} >> ID ").as_bytes());
+    content.extend_from_slice(coded);
+    content.extend_from_slice(b" EI Q");
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n");
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+    out.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+          /Resources << >> /Contents 4 0 R >>\nendobj\n",
+    );
+    out.extend_from_slice(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
+    out.extend_from_slice(&content);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n");
+    out
+}
+
 /// An 8x4 checkerboard, two-dimensionally coded (T.6).
 ///
 /// Rows 0 and 1 are four black then four white; rows 2 and 3 are the reverse.
@@ -153,6 +180,114 @@ fn a_group_4_fax_renders_to_known_pixels() {
         bitmap.warnings.is_empty(),
         "a well-formed fax needs no excuses: {:?}",
         bitmap.warnings
+    );
+}
+
+/// 8.9.7 permits a fax inline, and it decodes there to the same four
+/// quadrants — through the same `ccitt_samples`, not a second call site.
+///
+/// It used to hit the inline path's catch-all, report `CCITTFaxDecode` as a
+/// codec this build does not have, and paint the grey placeholder over it.
+///
+/// The quadrants are asserted by position for the reason the file's header
+/// gives, and doubly so here: gap 16 changed what the decoder returns from one
+/// byte per pixel to packed bits without changing its signature, so a second
+/// caller written against the old contract would compile, run, and draw a
+/// negative at one eighth width. That fills the left-hand eighth of this
+/// image, which is where `top_left` and `bottom_left` are read — and it is the
+/// *right*-hand pair that catches it.
+#[test]
+fn an_inline_group_4_fax_renders_to_the_same_pixels_as_the_xobject() {
+    let coded = checkerboard_g4();
+    let parms = "/K -1 /Columns 8 /Rows 4";
+    let extra = "/CS /G /BPC 1";
+
+    let inline = render(inline_fax_page(&coded, parms, extra));
+    let xobject = render(fax_page(
+        &coded,
+        parms,
+        "/ColorSpace /DeviceGray /BitsPerComponent 1",
+    ));
+
+    for (bitmap, what) in [(&xobject, "as an XObject"), (&inline, "inline")] {
+        let top_left = pixel(bitmap, 4, 4);
+        let top_right = pixel(bitmap, 15, 4);
+        let bottom_left = pixel(bitmap, 4, 15);
+        let bottom_right = pixel(bitmap, 15, 15);
+        assert!(
+            is_black(top_left),
+            "{what}: rows 0-1 start black: {top_left:?}"
+        );
+        assert!(
+            is_white(top_right),
+            "{what}: and end white: {top_right:?} — black at one eighth width \
+             is a caller reading the old byte-per-pixel contract"
+        );
+        assert!(
+            is_white(bottom_left),
+            "{what}: rows 2-3 start white: {bottom_left:?}"
+        );
+        assert!(
+            is_black(bottom_right),
+            "{what}: and end black: {bottom_right:?}"
+        );
+    }
+
+    assert_eq!(
+        inline.data, xobject.data,
+        "the same coded bytes must produce the same page either way round"
+    );
+    assert!(
+        inline.warnings.is_empty(),
+        "a well-formed inline fax reports no unsupported codec and needs no \
+         other excuse: {:?}",
+        inline.warnings
+    );
+}
+
+/// What the decoder forgives is named, wherever the fax was written.
+///
+/// Ruling 10. The XObject path collects the decoder's warnings per image and
+/// reports them through `damaged_images`; an inline fax reaches the same
+/// function, so it reports the same way rather than drawing a half-decoded
+/// page in silence.
+#[test]
+fn a_damaged_inline_fax_row_is_reported_the_way_an_xobject_one_is() {
+    let coded = bits(concat!("001 00110101 011 1 ", "111 ", "00000001"));
+    let parms = "/K -1 /Columns 8 /Rows 4";
+
+    let inline = render(inline_fax_page(&coded, parms, "/CS /G /BPC 1"));
+    let xobject = render(fax_page(
+        &coded,
+        parms,
+        "/ColorSpace /DeviceGray /BitsPerComponent 1",
+    ));
+
+    let damaged = |bitmap: &tinker_pdf::Bitmap| -> Vec<String> {
+        bitmap
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                tinker_pdf::RenderWarning::DamagedImage { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    assert!(
+        !damaged(&inline).is_empty(),
+        "the inline fax says what it forgave: {:?}",
+        inline.warnings
+    );
+    assert_eq!(
+        damaged(&inline),
+        damaged(&xobject),
+        "and says the same thing the XObject one does"
+    );
+    assert!(
+        is_black(pixel(&inline, 4, 12)),
+        "the damaged row still carries the row above it: {:?}",
+        pixel(&inline, 4, 12)
     );
 }
 

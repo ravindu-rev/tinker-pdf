@@ -80,6 +80,34 @@ fn invert_if_decode_reverses(decode: &[(f64, f64)], rgb: &mut [u8]) {
 /// called anything else by, which is also why it is not cached.
 const INLINE_NAME: &str = "inline";
 
+/// A JPEG's pixels, ready to blit (7.4.8).
+///
+/// Shared by the XObject path and the inline one so the two differ in nothing
+/// but where the still-coded bytes came from — the ceiling, the colour
+/// conversion and the `/Decode` reversal included.
+///
+/// A JPEG carries its own dimensions and its own colour, so it never joins the
+/// generic sample loop; `/Decode` therefore has to be applied to the converted
+/// output rather than to raw samples, which is what
+/// [`invert_if_decode_reverses`] is for.
+fn jpeg_image(
+    raw: &[u8],
+    decode: &[(f64, f64)],
+    interpolate: bool,
+) -> Result<DecodedImage, String> {
+    let image = jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))?;
+    let mut rgb = jpeg_to_rgb(&image);
+    invert_if_decode_reverses(decode, &mut rgb);
+    Ok(DecodedImage {
+        width: image.width,
+        height: image.height,
+        rgb,
+        alpha: Vec::new(),
+        stencil: false,
+        interpolate,
+    })
+}
+
 /// Rewrites an inline image's dictionary into the long spellings the shared
 /// image path reads (8.9.7, Table 93).
 ///
@@ -1379,17 +1407,7 @@ impl PageResources {
                 .doc
                 .stream_image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
-            let image = jpeg_decode(&raw, 1 << 28).map_err(|e| format!("{e:?}"))?;
-            let mut rgb = jpeg_to_rgb(&image);
-            invert_if_decode_reverses(&decode, &mut rgb);
-            return Ok(DecodedImage {
-                width: image.width,
-                height: image.height,
-                rgb,
-                alpha: Vec::new(),
-                stencil: false,
-                interpolate,
-            });
+            return jpeg_image(&raw, &decode, interpolate);
         }
         if let Some(filter) = last_filter.as_deref() {
             if matches!(filter, b"JPXDecode" | b"JBIG2Decode") {
@@ -1496,7 +1514,7 @@ impl PageResources {
     /// object number: its bytes are in hand rather than behind a stream tier,
     /// so the filter chain is run here instead of by the document.
     fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
-        use tinker_pdf_filters::{apply_chain, ChainOutput, Limits};
+        use tinker_pdf_filters::{apply_chain, ChainOutput, ImageCodec, Limits};
 
         let int = |key: &[u8]| {
             self.doc
@@ -1529,6 +1547,21 @@ impl PageResources {
             .resolve_key(dict, self.doc.intern(b"Interpolate"))
             .as_bool()
             .unwrap_or(false);
+
+        // 8.9.5.2. Read before the chain rather than after it, because the DCT
+        // branch below returns its own pixels and would otherwise never see
+        // this — which is the mistake the XObject path made until gap 16.
+        let decode: Vec<(f64, f64)> = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default();
 
         // The filters, in the order they were applied — read here only to name
         // one in a warning, since the chain itself is built by the document.
@@ -1572,42 +1605,70 @@ impl PageResources {
         }
 
         let limits = Limits::new(1 << 26);
-        let bytes = match apply_chain(data, &chain, &limits) {
-            Ok(ChainOutput::Bytes(decoded)) => {
-                // Ruling 10: what the chain forgave is named, the same way the
-                // XObject path names it. An inline image is one object's worth
-                // of attacker-controlled bytes inside a content stream, so
-                // "it drew" and "it drew cleanly" have to stay apart here too.
-                for warning in decoded.warnings {
-                    self.report_damaged_image(INLINE_NAME.as_bytes(), warning);
-                }
-                decoded.data
+        let report = |warnings: Vec<FilterWarning>| {
+            // Ruling 10: what the chain forgave is named, the same way the
+            // XObject path names it. An inline image is one object's worth of
+            // attacker-controlled bytes inside a content stream, so "it drew"
+            // and "it drew cleanly" have to stay apart here too.
+            for warning in warnings {
+                self.report_damaged_image(INLINE_NAME.as_bytes(), warning);
             }
-            // 8.9.7 permits DCT and CCITT inline too; they arrive still coded
-            // and are reported rather than half-decoded.
+        };
+        // 8.9.7 permits DCT and CCITT inline, and both are ordinary there — a
+        // scanned page pasted into a content stream is a fax, and a photograph
+        // is a JPEG. Both used to hit a catch-all that returned `Err`, so both
+        // drew the grey placeholder and reported a codec this build has in
+        // fact had all along.
+        let (bytes, fax) = match apply_chain(data, &chain, &limits) {
+            Ok(ChainOutput::Bytes(decoded)) => {
+                report(decoded.warnings);
+                (decoded.data, false)
+            }
+            Ok(ChainOutput::EncodedImage {
+                kind: ImageCodec::Dct,
+                data,
+                warnings,
+            }) => {
+                report(warnings);
+                // The same decoder, through the same helper, as an image
+                // XObject: a JPEG returns its own dimensions and its own
+                // colour, so it does not join the sample loop below.
+                return jpeg_image(&data, &decode, interpolate);
+            }
+            Ok(ChainOutput::EncodedImage {
+                kind: ImageCodec::Ccitt,
+                data,
+                warnings,
+            }) => {
+                report(warnings);
+                // Gap 16's single entry point, not a second call site. A fax
+                // decodes to packed one-bit *samples*, so it joins the loop
+                // below and gains `/ImageMask`, `/Decode` and `/ColorSpace`
+                // with it. `ccitt_decode`'s signature says nothing about the
+                // shape of what it returns, so a copy of this made here would
+                // have gone on producing the old byte-per-pixel shape with
+                // nothing in the build able to notice.
+                (
+                    self.ccitt_samples(dict, &data, width, height, INLINE_NAME.as_bytes()),
+                    true,
+                )
+            }
+            // JBIG2 and JPX are gated capabilities wherever they appear
+            // (ruling 2), inline included.
             Ok(ChainOutput::EncodedImage { .. }) => {
                 return Err(named(chain.len().saturating_sub(1)))
             }
             Err(_) => return Err(named(chain.len())),
         };
+        // 7.4.6: fax output is one bit per pixel whatever the dictionary
+        // claims, exactly as on the XObject path.
+        let bpc = if fax { 1 } else { bpc };
 
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
         let space = self
             .parse_space(&space, 0)
             .unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
-
-        let decode: Vec<(f64, f64)> = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"Decode"))
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| self.doc.resolve(o).as_number())
-                    .collect::<Vec<f64>>()
-            })
-            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
-            .unwrap_or_default();
 
         let row_bytes = ((width as usize) * n * (bpc as usize)).div_ceil(8);
         let max = ((1u32 << bpc.min(16)) - 1) as f64;

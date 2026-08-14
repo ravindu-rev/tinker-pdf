@@ -466,10 +466,16 @@ fn an_inline_image_accepts_long_key_names() {
 
 /// An inline image whose filter this build cannot run is reported, and the
 /// placeholder marks where it was.
+///
+/// The codec here is JPX rather than DCT, which it used to be: 8.9.7 permits
+/// DCT inline and this build now decodes it, so a DCT fixture would go on
+/// warning only because four zero bytes are not a JPEG — a green test for a
+/// capability it no longer describes. JPX is a gated codec wherever it appears
+/// (ruling 2), which is what this test is about.
 #[test]
 fn an_undecodable_inline_image_is_reported() {
     let mut content = Vec::new();
-    content.extend_from_slice(b"q 20 0 0 20 0 0 cm BI /W 2 /H 2 /CS /G /BPC 8 /F /DCT ID ");
+    content.extend_from_slice(b"q 20 0 0 20 0 0 cm BI /W 2 /H 2 /CS /G /BPC 8 /F /JPXDecode ID ");
     content.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
     content.extend_from_slice(b" EI Q");
 
