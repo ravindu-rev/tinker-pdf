@@ -662,6 +662,85 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// Transparency groups and a soft mask: what clause 11 does beyond constant
+/// alpha and the blend modes.
+///
+/// *Added August 2026, with gap 11.* Not one fixture above has a `/Group` or
+/// an ExtGState `/SMask`, so every one of them renders identically on a build
+/// that has never heard of 11.4 or 11.6 — which is the failure this file's own
+/// documentation describes, and it applied to the whole of group compositing
+/// while group compositing was being written.
+///
+/// Five things here are in no other fixture, and each is a different branch of
+/// the compositing arithmetic:
+///
+/// - a **non-isolated** group at `ca 0.5` under `Multiply` over a coloured
+///   bar, so the backdrop is composited in, blended against, and removed again
+///   by 11.4.7.2 — the removal term is non-zero only because the group's own
+///   alpha is partial, which is what makes this fixture able to see it;
+/// - two overlapping shapes inside that group, so the seam that per-element
+///   alpha produces would move the hash;
+/// - a **knockout** group whose two half-opaque shapes overlap, so 11.4.5's
+///   restore runs on real coverage rather than on a rectangle;
+/// - a `/Luminosity` soft mask whose group is an axial **shading**, giving a
+///   different mask value in almost every column — a mask made of one flat
+///   grey would be reproduced by a great many wrong implementations;
+/// - a `/TR` on that mask, applied to the backdrop as well as to the group.
+///
+/// The mask's `/BC` is deliberately absent, so the region outside its group's
+/// bounding box is the black default and the red bar is *cut off* there. That
+/// is ink the page does not have: under-suppression adds it back, which no
+/// minimum-ink floor can catch and the hash catches immediately.
+fn transparency_page() -> Vec<u8> {
+    let content = "0.2 0.7 0.4 rg 0 0 120 26 re f\n\
+                   q /GA gs /Grp Do Q\n\
+                   q /GB gs /Knock Do Q\n\
+                   q /GM gs 0.9 0.2 0.1 rg 0 30 120 46 re f Q";
+    // `/GH` inside the group is what makes 11.4.7.2 visible here: the
+    // removal term is `a0/agn - a0`, which is exactly zero when the group
+    // painted opaquely, so a fixture whose contents are opaque cannot see
+    // backdrop removal at all. Measured, not assumed -- the first draft of
+    // this page had no `/GH` here and deleting the removal step did not move
+    // its hash.
+    let grouped = "/GH gs 0 0 0.9 rg 6 4 34 34 re f 0.9 0.6 0 rg 20 14 34 34 re f";
+    let knocked = "/GH gs 0.1 0.1 0.1 rg 62 4 34 34 re f 78 14 34 34 re f";
+    let mask = "q 0 30 120 46 re W n /Sh0 sh Q";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /XObject << /Grp 5 0 R /Knock 6 0 R >>\n\
+                 /Shading << /Sh0 9 0 R >>\n\
+                 /ExtGState << /GA << /ca 0.5 /BM /Multiply >>\n\
+                               /GB << /ca 1 /BM /Normal /SMask /None >>\n\
+                               /GH << /ca 0.5 >>\n\
+                               /GM << /SMask << /S /Luminosity /G 7 0 R\n\
+                                  /TR 8 0 R >> >> >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 58 56]\n\
+   /Group << /S /Transparency /I false /K false >>\n\
+   /Length {} >>\nstream\n{grouped}\nendstream\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [58 0 118 56]\n\
+   /Group << /S /Transparency /I true /K true >>\n\
+   /Length {} >>\nstream\n{knocked}\nendstream\nendobj\n\
+7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [10 30 110 76]\n\
+   /Group << /S /Transparency /CS /DeviceGray >>\n\
+   /Length {} >>\nstream\n{mask}\nendstream\nendobj\n\
+8 0 obj\n<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >>\nendobj\n\
+9 0 obj\n<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [8 0 112 0]\n\
+   /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>\n\
+   /Extend [true true] >>\nendobj\n\
+trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        grouped.len(),
+        knocked.len(),
+        mask.len()
+    )
+    .into_bytes()
+}
+
 fn page_with(content: &str, width: f64, height: f64) -> Vec<u8> {
     format!(
         "%PDF-1.7\n\
@@ -728,6 +807,17 @@ const GOLDEN: &[Fixture] = &[
         build: image_page,
         least_ink: 2600,
     },
+    // 8066 today, of 9600. The floor guards over-suppression: a soft mask
+    // that hides everything, or a group that composites nothing back, takes
+    // the masked band's 4600 pixels off this page and lands under it. The
+    // opposite failure *adds* ink -- a `/BC` defaulted to white uncovers the
+    // twenty columns outside the mask group's box -- which no floor can catch
+    // and the hash catches at once (the same asymmetry gap 06 recorded).
+    Fixture {
+        name: "transparency",
+        build: transparency_page,
+        least_ink: 4000,
+    },
 ];
 
 #[test]
@@ -783,6 +873,12 @@ fn rendering_is_stable_across_targets() {
         (
             "image",
             "8cca4e2c1380f630e1c85da93b3a6add4349156d704adbffca7d45d917244f38",
+        ),
+        // Added August 2026 with gap 11. Groups, isolation, knockout and an
+        // ExtGState soft mask reach no other fixture here at all.
+        (
+            "transparency",
+            "c120574918fcfadb0b33f3f9faa4f0c10a10cc760cd9e9830bedf31463e3f059",
         ),
     ];
     assert_eq!(

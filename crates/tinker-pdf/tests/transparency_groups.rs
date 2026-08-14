@@ -735,6 +735,201 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
     );
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 6: the clip, the blend modes, and `q ... Q`.
+// ---------------------------------------------------------------------------
+
+/// The exit criterion. A soft mask set inside `q ... Q` does not survive the
+/// `Q`.
+///
+/// The mask lives on the device rather than in the graphics state, because it
+/// is pixels (ruling 8), so nothing about `Q` restores it for free — it has to
+/// be stacked beside the clip deliberately. Getting it wrong leaves everything
+/// drawn after the `Q` masked by a mask the file stopped asking for, which is
+/// content quietly missing from the rest of the page.
+#[test]
+fn a_soft_mask_set_inside_q_does_not_survive_the_q() {
+    // Inside the brackets, a red bar across the top; outside them, a second
+    // red bar across the bottom. Only the first should be masked.
+    let content = "q /GS0 gs 1 0 0 rg 0 40 60 20 re f Q\n\
+                   1 0 0 rg 0 0 60 20 re f";
+    let bitmap = render(masked(
+        content,
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    ));
+
+    let inside_lit = at(&bitmap, 15.0, 50.0);
+    assert!(
+        inside_lit.0 > 245 && inside_lit.1 < 10,
+        "inside the brackets and inside the mask: {inside_lit:?}"
+    );
+    assert_eq!(
+        at(&bitmap, 45.0, 50.0),
+        (255, 255, 255),
+        "inside the brackets and outside the mask"
+    );
+
+    // After the `Q` the mask is gone, so both halves of the lower bar paint.
+    let after_left = at(&bitmap, 15.0, 10.0);
+    let after_right = at(&bitmap, 45.0, 10.0);
+    assert!(
+        after_left.0 > 245 && after_left.1 < 10,
+        "after the Q, the left: {after_left:?}"
+    );
+    assert!(
+        after_right.0 > 245 && after_right.1 < 10,
+        "and the right, which the mask would still be hiding if `Q` did not \
+         put it back: {after_right:?}"
+    );
+}
+
+/// The other half of the exit criterion: a masked group under `Multiply`
+/// blends *and* masks.
+///
+/// The two are independent mechanisms — the blend decides how the group's
+/// colour meets the page, the mask decides where — so a build that applied
+/// one and dropped the other would look right on half the page. Four samples,
+/// one per combination of inside/outside the mask and over/off the bar.
+#[test]
+fn a_masked_group_under_multiply_blends_and_masks() {
+    // A green bar across the lower half; then a grouped white-ish square
+    // painted through a left-half mask under Multiply.
+    let content = "0.2 0.8 0.4 rg 0 0 60 30 re f\n\
+                   /GS0 gs /Fm0 Do";
+    let form = "0.5 0.5 0.5 rg 0 0 60 60 re f";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]\n\
+   /Resources << /XObject << /Fm0 6 0 R >>\n\
+                 /ExtGState << /GS0 << /BM /Multiply\n\
+                                       /SMask << /G 5 0 R /S /Luminosity >> >> >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 60]\n\
+   /Group << /S /Transparency /CS /DeviceGray >>\n\
+   /Length {} >>\nstream\n{LEFT_HALF_WHITE}\nendstream\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 60] {TRANSPARENCY}\n\
+   /Length {} >>\nstream\n{form}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        LEFT_HALF_WHITE.len(),
+        form.len()
+    )
+    .into_bytes();
+    let bitmap = render(bytes);
+
+    // Masked in, over the green bar: mid grey multiplied by the green.
+    let blended = at(&bitmap, 15.0, 15.0);
+    assert!(
+        blended.1 > 90 && blended.1 < 130 && blended.0 < 60,
+        "the group both multiplied and showed through: {blended:?}"
+    );
+    // Masked out, over the bar: the bar untouched.
+    let bar = at(&bitmap, 45.0, 15.0);
+    assert!(
+        bar.1 > 195 && bar.0 < 80,
+        "the mask kept the group off this half entirely: {bar:?}"
+    );
+    // Masked in, off the bar: mid grey multiplied by white paper is mid grey.
+    let paper = at(&bitmap, 15.0, 45.0);
+    assert!(
+        (120..=136).contains(&paper.0),
+        "multiplying against the page leaves the group's own grey: {paper:?}"
+    );
+    // Masked out, off the bar: nothing at all.
+    assert_eq!(at(&bitmap, 45.0, 45.0), (255, 255, 255));
+}
+
+/// A clip and a soft mask multiply, rather than one replacing the other.
+#[test]
+fn a_clip_and_a_soft_mask_both_apply() {
+    // The clip keeps the lower half; the mask keeps the left half. Only the
+    // lower-left quarter paints.
+    let content = "q 0 0 60 30 re W n /GS0 gs 1 0 0 rg 0 0 60 60 re f Q";
+    let bitmap = render(masked(
+        content,
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    ));
+
+    let quarter = at(&bitmap, 15.0, 15.0);
+    assert!(
+        quarter.0 > 245 && quarter.1 < 10,
+        "inside both: {quarter:?}"
+    );
+    assert_eq!(
+        at(&bitmap, 45.0, 15.0),
+        (255, 255, 255),
+        "clip yes, mask no"
+    );
+    assert_eq!(
+        at(&bitmap, 15.0, 45.0),
+        (255, 255, 255),
+        "mask yes, clip no"
+    );
+    assert_eq!(at(&bitmap, 45.0, 45.0), (255, 255, 255), "neither");
+}
+
+/// A soft mask reaches every kind of paint, not only path fills.
+///
+/// A mask wired into `fill_path` alone leaves strokes, glyphs, images and
+/// shadings unmasked, and a page whose shadow is right and whose logo is
+/// opaque reads as a font or an image problem rather than as a mask one.
+#[test]
+fn a_soft_mask_reaches_strokes_shadings_and_images() {
+    // A stroke, an inline image and a shading, all through the same mask.
+    let content = "/GS0 gs\n\
+                   0 0 1 RG 12 w 0 50 m 60 50 l S\n\
+                   q 0 0 60 20 re W n /Sh0 sh Q\n\
+                   q 60 0 0 20 0 25 cm BI /W 1 /H 1 /CS /RGB /BPC 8 /F /AHx ID ff0000> EI Q";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]\n\
+   /Resources << /ExtGState << /GS0 << /SMask << /G 5 0 R /S /Luminosity >> >> >>\n\
+                 /Shading << /Sh0 << /ShadingType 2 /ColorSpace /DeviceRGB\n\
+                    /Coords [0 0 60 0] /Extend [true true]\n\
+                    /Function << /FunctionType 2 /Domain [0 1]\n\
+                                 /C0 [0 0.6 0] /C1 [0 0.6 0] /N 1 >> >> >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 60]\n\
+   /Group << /S /Transparency /CS /DeviceGray >>\n\
+   /Length {} >>\nstream\n{LEFT_HALF_WHITE}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        LEFT_HALF_WHITE.len()
+    )
+    .into_bytes();
+    let bitmap = render(bytes);
+
+    for (label, x, y) in [
+        ("stroke", 15.0, 50.0),
+        ("shading", 15.0, 10.0),
+        ("image", 15.0, 35.0),
+    ] {
+        let lit = at(&bitmap, x, y);
+        assert_ne!(lit, (255, 255, 255), "the {label} drew inside the mask");
+    }
+    for (label, x, y) in [
+        ("stroke", 45.0, 50.0),
+        ("shading", 45.0, 10.0),
+        ("image", 45.0, 35.0),
+    ] {
+        assert_eq!(
+            at(&bitmap, x, y),
+            (255, 255, 255),
+            "and the {label} was masked away outside it"
+        );
+    }
+}
+
 /// Groups nest, and the inner one's buffer is bounded by the outer one's.
 ///
 /// Both XObjects are named in the *page's* resource dictionary. A form's own
