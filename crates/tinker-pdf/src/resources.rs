@@ -76,6 +76,79 @@ fn invert_if_decode_reverses(decode: &[(f64, f64)], rgb: &mut [u8]) {
     }
 }
 
+/// What an inline image is called in a warning. It has no resource name to be
+/// called anything else by, which is also why it is not cached.
+const INLINE_NAME: &str = "inline";
+
+/// Rewrites an inline image's dictionary into the long spellings the shared
+/// image path reads (8.9.7, Table 93).
+///
+/// Name by name rather than by text substitution. A search for `"/Fl "` finds
+/// neither `/F/Fl` nor `[/AHx/Fl]`, and both are ordinary PDF — 7.2.2 makes
+/// the `/` its own delimiter, so no producer is obliged to write the space
+/// that search depends on. The consequence was silent and total: the whole
+/// `/Filter` entry stayed a two-letter name nothing matched, so a compressed
+/// inline image was sampled straight out of its compressed bytes, and `/DP`
+/// written tight against its dictionary took the predictor down with it.
+fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
+    // Every abbreviation of Table 93 and of Table 6, keys and values both:
+    // `/CS /G` is a colour space named the short way, and `/F /AHx` a filter.
+    const ABBREVIATIONS: &[(&[u8], &[u8])] = &[
+        (b"BPC", b"BitsPerComponent"),
+        (b"CS", b"ColorSpace"),
+        (b"D", b"Decode"),
+        (b"DP", b"DecodeParms"),
+        (b"F", b"Filter"),
+        (b"H", b"Height"),
+        (b"IM", b"ImageMask"),
+        (b"I", b"Interpolate"),
+        (b"W", b"Width"),
+        (b"G", b"DeviceGray"),
+        (b"RGB", b"DeviceRGB"),
+        (b"CMYK", b"DeviceCMYK"),
+        (b"AHx", b"ASCIIHexDecode"),
+        (b"A85", b"ASCII85Decode"),
+        (b"LZW", b"LZWDecode"),
+        (b"Fl", b"FlateDecode"),
+        (b"RL", b"RunLengthDecode"),
+        (b"CCF", b"CCITTFaxDecode"),
+        (b"DCT", b"DCTDecode"),
+    ];
+    // 7.2.2: everything that ends a name. A regular character is anything
+    // else — `#` included, so an escaped name is read whole, matches no
+    // abbreviation and comes back out exactly as it went in.
+    const DELIMITERS: &[u8] = b"()<>[]{}/%";
+    let is_regular = |b: u8| !b.is_ascii_whitespace() && b != 0 && !DELIMITERS.contains(&b);
+
+    let mut out: Vec<u8> = Vec::with_capacity(dict.len() + 32);
+    out.extend_from_slice(b"<< ");
+    let mut i = 0usize;
+    while let Some(&byte) = dict.get(i) {
+        if byte != b'/' {
+            out.push(byte);
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut end = start;
+        while dict.get(end).copied().is_some_and(&is_regular) {
+            end += 1;
+        }
+        let name = dict.get(start..end).unwrap_or_default();
+        let long = ABBREVIATIONS
+            .iter()
+            .find(|(short, _)| *short == name)
+            .map_or(name, |(_, long)| *long);
+        out.push(b'/');
+        out.extend_from_slice(long);
+        // No separator is added: whatever ended the short name — white space,
+        // a delimiter or the end of the dictionary — ends the long one too.
+        i = end;
+    }
+    out.extend_from_slice(b" >>");
+    out
+}
+
 impl PageResources {
     /// The font resource names that could not be resolved.
     #[must_use]
@@ -784,41 +857,10 @@ impl GlyphSource for PageResources {
     }
 
     fn inline_image(&self, dict: &[u8], data: &[u8]) -> Result<Option<DecodedImage>, String> {
-        // 8.9.7 Table 93: an inline image's keys have short forms. They are
-        // rewritten to the long ones so the shared decoder sees an ordinary
-        // image dictionary rather than learning a second vocabulary.
-        const ABBREVIATIONS: &[(&[u8], &[u8])] = &[
-            (b"/BPC", b"/BitsPerComponent"),
-            (b"/CS", b"/ColorSpace"),
-            (b"/D", b"/Decode"),
-            (b"/DP", b"/DecodeParms"),
-            (b"/F", b"/Filter"),
-            (b"/H", b"/Height"),
-            (b"/IM", b"/ImageMask"),
-            (b"/I", b"/Interpolate"),
-            (b"/W", b"/Width"),
-            (b"/G", b"/DeviceGray"),
-            (b"/RGB", b"/DeviceRGB"),
-            (b"/CMYK", b"/DeviceCMYK"),
-            (b"/AHx", b"/ASCIIHexDecode"),
-            (b"/A85", b"/ASCII85Decode"),
-            (b"/LZW", b"/LZWDecode"),
-            (b"/Fl", b"/FlateDecode"),
-            (b"/RL", b"/RunLengthDecode"),
-            (b"/CCF", b"/CCITTFaxDecode"),
-            (b"/DCT", b"/DCTDecode"),
-        ];
-
-        let mut text = format!("<< {} >>", String::from_utf8_lossy(dict));
-        for (short, long) in ABBREVIATIONS {
-            let short = format!("{} ", String::from_utf8_lossy(short));
-            let long = format!("{} ", String::from_utf8_lossy(long));
-            text = text.replace(&short, &long);
-        }
+        let text = expand_inline_abbreviations(dict);
 
         let mut sink = tinker_pdf_cos::WarningSink::new();
-        let parsed =
-            tinker_pdf_cos::parse_object_at(text.as_bytes(), 0, self.doc.names_table(), &mut sink);
+        let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
         let Some(dict) = parsed.object.as_dict() else {
             return Ok(None);
         };
@@ -1454,9 +1496,7 @@ impl PageResources {
     /// object number: its bytes are in hand rather than behind a stream tier,
     /// so the filter chain is run here instead of by the document.
     fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
-        use tinker_pdf_filters::{
-            ascii85_decode, ascii_hex_decode, flate_decode, lzw_decode, run_length_decode, Limits,
-        };
+        use tinker_pdf_filters::{apply_chain, ChainOutput, Limits};
 
         let int = |key: &[u8]| {
             self.doc
@@ -1490,7 +1530,8 @@ impl PageResources {
             .as_bool()
             .unwrap_or(false);
 
-        // The filters, in the order they were applied.
+        // The filters, in the order they were applied — read here only to name
+        // one in a warning, since the chain itself is built by the document.
         let filters_value = self.doc.resolve_key(dict, Name::FILTER);
         let mut filters: Vec<Vec<u8>> = Vec::new();
         if let Some(name) = filters_value.as_name() {
@@ -1504,29 +1545,51 @@ impl PageResources {
                 }
             }
         }
+        let named = |at: usize| -> String {
+            filters.get(at).or_else(|| filters.last()).map_or_else(
+                || INLINE_NAME.to_string(),
+                |n| String::from_utf8_lossy(n).into_owned(),
+            )
+        };
+
+        // The chain the document would have built had these bytes been an
+        // object. Built there rather than here on purpose: Table 10's
+        // predictor defaults, `/EarlyChange` and the per-filter
+        // `/DecodeParms` array form then have one implementation instead of
+        // two that can drift. This path used to carry the second one, and it
+        // passed no predictor at all and hardcoded `/EarlyChange` true.
+        let mut chain_warnings = tinker_pdf_cos::WarningSink::new();
+        let chain = self.doc.filter_chain(dict, &mut chain_warnings);
+        if chain_warnings
+            .warnings()
+            .iter()
+            .any(|w| w.kind == tinker_pdf_cos::WarningKind::FilterUnknown)
+        {
+            // A filter name this build does not know ends the chain where it
+            // appears, so everything after it is still encoded. Reported,
+            // rather than sampled as though it were pixels.
+            return Err(named(chain.len()));
+        }
 
         let limits = Limits::new(1 << 26);
-        let mut bytes = data.to_vec();
-        for filter in &filters {
-            bytes = match filter.as_slice() {
-                b"FlateDecode" | b"Fl" => {
-                    flate_decode(&bytes, &limits, None)
-                        .map_err(|_| "FlateDecode".to_string())?
-                        .data
+        let bytes = match apply_chain(data, &chain, &limits) {
+            Ok(ChainOutput::Bytes(decoded)) => {
+                // Ruling 10: what the chain forgave is named, the same way the
+                // XObject path names it. An inline image is one object's worth
+                // of attacker-controlled bytes inside a content stream, so
+                // "it drew" and "it drew cleanly" have to stay apart here too.
+                for warning in decoded.warnings {
+                    self.report_damaged_image(INLINE_NAME.as_bytes(), warning);
                 }
-                b"LZWDecode" | b"LZW" => {
-                    lzw_decode(&bytes, &limits, true, None)
-                        .map_err(|_| "LZWDecode".to_string())?
-                        .data
-                }
-                b"ASCIIHexDecode" | b"AHx" => ascii_hex_decode(&bytes, &limits).data,
-                b"ASCII85Decode" | b"A85" => ascii85_decode(&bytes, &limits).data,
-                b"RunLengthDecode" | b"RL" => run_length_decode(&bytes, &limits).data,
-                // 8.9.7 permits DCT and CCITT inline too; they arrive still
-                // coded and are reported rather than half-decoded.
-                other => return Err(String::from_utf8_lossy(other).into_owned()),
-            };
-        }
+                decoded.data
+            }
+            // 8.9.7 permits DCT and CCITT inline too; they arrive still coded
+            // and are reported rather than half-decoded.
+            Ok(ChainOutput::EncodedImage { .. }) => {
+                return Err(named(chain.len().saturating_sub(1)))
+            }
+            Err(_) => return Err(named(chain.len())),
+        };
 
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
         let space = self
@@ -1773,8 +1836,47 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 
 #[cfg(test)]
 mod tests {
-    use super::PageResources;
+    use super::{expand_inline_abbreviations, PageResources};
     use tinker_pdf_content::FontSource;
+
+    fn expand(dict: &str) -> String {
+        String::from_utf8(expand_inline_abbreviations(dict.as_bytes()))
+            .expect("ascii in, ascii out")
+    }
+
+    /// Table 93's short keys expand whatever follows them.
+    ///
+    /// 7.2.2 makes `/` a delimiter in its own right, so a producer is free to
+    /// write `/F/Fl` with nothing between the two names — and the substitution
+    /// this replaced searched for `"/Fl "`, which is not in that string. The
+    /// whole `/Filter` entry then stayed the name `/F`, matched no branch, and
+    /// the compressed bytes were sampled as though they were pixels.
+    #[test]
+    fn an_abbreviation_expands_against_a_delimiter_as_well_as_a_space() {
+        assert_eq!(
+            expand("/W 4/H 4/CS/RGB/BPC 8/F/Fl"),
+            "<< /Width 4/Height 4/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/FlateDecode >>"
+        );
+        assert_eq!(
+            expand("/F[/AHx/Fl]/DP[null<</Predictor 15>>]"),
+            "<< /Filter[/ASCIIHexDecode/FlateDecode]/DecodeParms[null<</Predictor 15>>] >>"
+        );
+    }
+
+    /// A name that is not an abbreviation comes back exactly as it went in,
+    /// including one carrying a `#` escape — which is a regular character in a
+    /// name (7.3.5) and must not end it.
+    #[test]
+    fn a_name_that_is_not_an_abbreviation_is_untouched() {
+        assert_eq!(expand("/Whirlpool"), "<< /Whirlpool >>");
+        assert_eq!(expand("/CS /Sep#20A"), "<< /ColorSpace /Sep#20A >>");
+        // `/D` is `/Decode` and `/DP` is `/DecodeParms`: the longer name is
+        // read whole rather than as the shorter one plus a stray `P`.
+        assert_eq!(
+            expand("/D[1 0]/DP<<>>"),
+            "<< /Decode[1 0]/DecodeParms<<>> >>"
+        );
+    }
 
     /// A one-page document whose `/ColorSpace` dictionary is given verbatim.
     fn resources_of(color_spaces: &str) -> PageResources {

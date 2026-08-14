@@ -1232,6 +1232,12 @@ fn word_spacing(code: u32, ts: &crate::state::TextState) -> f64 {
 /// `ID` is followed by exactly one whitespace byte before the data starts, and
 /// the span ends at `EI`. A span with no `ID` at all is all dictionary and no
 /// data, which is what a truncated stream leaves behind.
+///
+/// The whitespace byte *before* `EI` belongs to the syntax too, and is dropped
+/// for the same reason 7.3.8.2 drops the end-of-line before `endstream`. It
+/// costs nothing on unfiltered samples, whose length the dictionary already
+/// gives — but on a filtered image it is one byte past the end of a complete
+/// zlib or LZW stream, which every decoder here reports as trailing garbage.
 fn split_inline_image(span: &[u8]) -> (&[u8], &[u8]) {
     let mut i = 0usize;
     while i + 1 < span.len() {
@@ -1242,13 +1248,24 @@ fn split_inline_image(span: &[u8]) -> (&[u8], &[u8]) {
                 let dict = &span[..i];
                 // One whitespace byte separates `ID` from the samples.
                 let start = (i + 3).min(span.len());
-                let end = span.len().saturating_sub(2).max(start);
+                let mut end = span.len().saturating_sub(2).max(start);
+                if end > start && span.get(end - 1).is_some_and(is_inline_space) {
+                    end -= 1;
+                }
                 return (dict, &span[start..end]);
             }
         }
         i += 1;
     }
     (span, &[])
+}
+
+/// The white space 8.9.7 allows between an inline image's data and `EI`.
+///
+/// 7.2.3's set, which includes NUL — the byte `skip_inline_image` already
+/// accepts in that position.
+fn is_inline_space(b: &u8) -> bool {
+    b.is_ascii_whitespace() || *b == 0
 }
 
 fn skip_inline_image(rest: &[u8]) -> usize {

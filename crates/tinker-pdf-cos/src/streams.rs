@@ -194,6 +194,35 @@ fn spec(
 }
 
 impl CosDocument {
+    /// The filter chain a dictionary describes, ready for
+    /// [`filters::apply_chain`].
+    ///
+    /// Public because an inline image (8.9.7) keeps its bytes in the content
+    /// stream rather than in an object, so the caller runs the chain itself
+    /// and cannot reach the three tiers above. Everything a chain needs to be
+    /// built correctly — Table 10's predictor defaults, `/EarlyChange`, the
+    /// per-filter `/DecodeParms` array, `/Crypt` skipping, and the Table 6
+    /// abbreviations — is decided in one place here, because a default that
+    /// drifts between two copies is silent: the samples come out as noise and
+    /// nothing errors.
+    ///
+    /// `sink` collects what could not be read. A
+    /// [`WarningKind::FilterUnknown`] in it means a name this build does not
+    /// know ended the chain early, so whatever follows it is still encoded —
+    /// a caller producing pixels wants to refuse rather than draw that.
+    pub fn filter_chain(&self, dict: &Dict, sink: &mut WarningSink) -> Vec<filters::FilterSpec> {
+        let mut ctx = ResolveCtx::new();
+        // The resolver and the chain builder both want a sink; giving the
+        // resolver its own and merging afterwards keeps one `&mut` each.
+        let mut resolved = WarningSink::new();
+        let chain = {
+            let mut resolve = |o: &Object| self.resolve_in(o, &mut ctx, &mut resolved);
+            build_chain(dict, &self.names, &mut resolve, 0, sink)
+        };
+        sink.extend(resolved.take());
+        chain
+    }
+
     /// The exact bytes the file holds for this stream: encrypted if the file
     /// is, never decoded.
     ///
