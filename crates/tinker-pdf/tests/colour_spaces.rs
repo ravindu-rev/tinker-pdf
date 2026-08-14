@@ -480,6 +480,46 @@ fn a_cell_cannot_spill_into_the_gap_its_step_leaves() {
     assert_eq!(pixel(&bitmap, 4, 28), (255, 255, 255), "vertically too");
 }
 
+/// The `/BBox` clip inside the cell's own render, which the test above cannot
+/// see and this one is written for.
+///
+/// With an axis-aligned `/Matrix` the buffer *is* the box, so an overshoot
+/// falls off the buffer's own edge and the clip changes nothing: spill really
+/// is impossible by construction there. Rotate the matrix and it stops being
+/// impossible — the buffer is the axis-aligned hull of a rotated square, which
+/// is half again as large, and the corners of that hull are outside the cell
+/// entirely. Without the clip they fill, and a lattice of diamonds comes out
+/// as a grid of squares.
+///
+/// Measured rather than assumed: deleting the clip fails this and the `tiling`
+/// fingerprint, and nothing else in the workspace.
+#[test]
+fn a_rotated_cell_is_still_clipped_to_its_box() {
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &tiling(
+            "/PaintType 1 /BBox [0 0 8 8] /XStep 40 /YStep 40 \
+             /Matrix [0.7071 0.7071 -0.7071 0.7071 20 10]",
+            "0 0 1 rg -6 -6 20 20 re f",
+        ),
+    );
+
+    // The rotated box is a diamond centred near (20, 24) with half-diagonals
+    // of about 5.7 device pixels; its buffer is the 12 x 12 square around it.
+    assert!(
+        pixel(&bitmap, 20, 24).2 > 180,
+        "the middle of the diamond paints, got {:?}",
+        pixel(&bitmap, 20, 24)
+    );
+    assert_eq!(
+        pixel(&bitmap, 15, 20),
+        (255, 255, 255),
+        "and the corner of the buffer that is outside the box does not — \
+         a square here is the cell painting its whole buffer"
+    );
+}
+
 /// The lattice repeats end to end, through a real content stream: three
 /// columns and three rows of an 8 pt cell stepped by 16 across a 40 pt page.
 #[test]
@@ -638,6 +678,73 @@ fn a_coloured_cell_keeps_the_colours_it_drew_with() {
         right.2 > 200 && right.0 < 60,
         "and so does its blue, got {right:?} — one flat colour is a coloured \
          cell being recoloured"
+    );
+}
+
+/// A pattern that fills with itself terminates.
+///
+/// The plan's risk table says to reuse the form-recursion depth cap. It does
+/// not apply: a cell is run by a *fresh* interpretation, so the interpreter's
+/// own depth counter starts at zero again every time, and this document would
+/// recurse until the stack was gone. The cap the renderer threads through the
+/// tile request is what stops it, and the innermost level that was refused is
+/// reported rather than silently dropped.
+#[test]
+fn a_pattern_that_fills_with_itself_terminates() {
+    let cell = "0 0 1 rg 0 0 3 3 re f\n/Pattern cs /P0 scn 3 3 5 5 re f";
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &format!(
+            "5 0 obj\n<< /PatternType 1 /PaintType 1 /TilingType 1 \
+             /BBox [0 0 8 8] /XStep 8 /YStep 8\n\
+   /Resources << /Pattern << /P0 5 0 R >> >> /Length {} >>\n\
+stream\n{cell}\nendstream\nendobj\n",
+            cell.len() + 1
+        ),
+    );
+
+    assert!(
+        pixel(&bitmap, 1, 39).2 > 180,
+        "the outer levels still paint, got {:?}",
+        pixel(&bitmap, 1, 39)
+    );
+    assert!(
+        reported_unpainted(&bitmap),
+        "and the level that was refused is reported: {:?}",
+        bitmap.warnings
+    );
+}
+
+/// 8.7.3.2: a cell is drawn against the *pattern's* `/Resources`, not the
+/// page's.
+///
+/// Gap 11 recorded that a form XObject's own `/Resources` are consulted
+/// nowhere in this engine. A pattern's are, and this is the assertion that
+/// says so: the `/ExtGState` the cell uses exists only inside the pattern, so
+/// a build that read the page's resources instead paints the cell at full
+/// strength.
+#[test]
+fn a_cell_is_drawn_against_the_patterns_own_resources() {
+    let cell = "/GS0 gs 0 0 1 rg 0 0 8 8 re f";
+    let bitmap = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+        &format!(
+            "5 0 obj\n<< /PatternType 1 /PaintType 1 /TilingType 1 \
+             /BBox [0 0 8 8] /XStep 8 /YStep 8\n\
+   /Resources << /ExtGState << /GS0 << /ca 0.5 >> >> >> /Length {} >>\n\
+stream\n{cell}\nendstream\nendobj\n",
+            cell.len() + 1
+        ),
+    );
+
+    let (r, g, b) = pixel(&bitmap, 20, 20);
+    assert!(
+        b > 200 && (100..=160).contains(&r) && (100..=160).contains(&g),
+        "the cell's own `/ExtGState` halves it over white, got \
+         ({r}, {g}, {b}) — (0, 0, 255) means the pattern's `/Resources` were \
+         not consulted"
     );
 }
 

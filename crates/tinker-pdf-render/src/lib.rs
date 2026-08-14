@@ -3562,6 +3562,89 @@ mod tests {
         assert_eq!(canvas.pixel(30, 10), Some(Color::WHITE), "outside it");
     }
 
+    /// 8.7.3.2 puts no floor under `/XStep`, so a file may ask for a lattice
+    /// nobody can draw. A thousandth-of-a-point step across 40 pt is 1.6
+    /// billion cells; on A4 at 300 dpi it is very much worse.
+    ///
+    /// Past the cap the fill paints nothing and says so (ruling 2). Painting
+    /// *some* of the lattice is not one of the answers: a hatch that covers
+    /// the top third of a shape reads as a rendering artefact, where an
+    /// unpainted area reads as the gap it is.
+    ///
+    /// The cell is never rasterized, which is the half that makes the cap a
+    /// bound rather than a consolation — the lattice is counted from six
+    /// numbers, before anything is drawn.
+    #[test]
+    fn a_step_too_small_to_draw_warns_rather_than_hanging() {
+        let tiles = Tiles::new([0.0, 0.0, 1.0, 1.0], 0.001, 0.001);
+        let (canvas, warnings) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        assert_eq!(tiles.drawn.get(), 0, "no cell was rasterized");
+        assert_eq!(
+            canvas.pixel(20, 20),
+            Some(Color::WHITE),
+            "and nothing was painted"
+        );
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                RenderWarning::UnsupportedPattern { name } if name == "T0"
+            )),
+            "and the pattern is named: {warnings:?}"
+        );
+    }
+
+    /// A cell whose bounding box is enormous is a memory bound rather than a
+    /// time one: the buffer is allocated before a single lattice position is
+    /// composited.
+    #[test]
+    fn a_cell_too_large_to_buffer_warns() {
+        let tiles = Tiles::new([0.0, 0.0, 200_000.0, 200_000.0], 200_000.0, 200_000.0);
+        let (canvas, warnings) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        assert_eq!(tiles.drawn.get(), 0, "the buffer was never allocated");
+        assert_eq!(canvas.pixel(20, 20), Some(Color::WHITE));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, RenderWarning::UnsupportedPattern { .. })),
+            "and it is reported: {warnings:?}"
+        );
+    }
+
+    /// The lattice count alone does not bound the work, and this is the case
+    /// that shows it: a cell as large as the page, stepped a hundredth of a
+    /// point, is about 24 000 positions — comfortably inside the cell cap —
+    /// each of which costs a whole page of compositing rather than a step's
+    /// worth. That is 39 megapixels for one fill, and the file may have
+    /// thousands.
+    #[test]
+    fn a_lattice_inside_the_cell_cap_can_still_be_too_much_work() {
+        let tiles = Tiles::new([0.0, 0.0, 40.0, 40.0], 0.01, 40.0);
+        let (canvas, warnings) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        assert_eq!(tiles.drawn.get(), 0);
+        assert_eq!(canvas.pixel(20, 20), Some(Color::WHITE));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, RenderWarning::UnsupportedPattern { .. })),
+            "the work budget refuses it: {warnings:?}"
+        );
+    }
+
+    /// A lattice just inside the caps still paints, so the guards above are
+    /// not passing by refusing everything.
+    #[test]
+    fn a_lattice_inside_the_caps_still_paints() {
+        let tiles = Tiles::new([0.0, 0.0, 2.0, 2.0], 2.0, 2.0);
+        let (canvas, warnings) = with_tiles(b"/Pattern cs /T0 scn 0 0 40 40 re f", &tiles);
+
+        assert_eq!(tiles.drawn.get(), 1, "441 positions, one rasterization");
+        assert_eq!(canvas.pixel(20, 20), Some(Color::rgb(0, 0, 255)));
+        assert!(warnings.is_empty(), "nothing to report: {warnings:?}");
+    }
+
     /// One byte, one code, half an em wide.
     struct OneChar;
 
