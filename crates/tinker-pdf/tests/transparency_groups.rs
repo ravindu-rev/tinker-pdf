@@ -206,6 +206,126 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
     );
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 3: isolation, and backdrop removal.
+// ---------------------------------------------------------------------------
+
+/// A page painting `under` first and then invoking a grouped form.
+fn over_backdrop(group: &str, under: &str, form: &str, gs: &str) -> Vec<u8> {
+    let content = format!("{under}\n/Fm0 Do");
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> /ExtGState << {gs} >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 60] {group}\n\
+   /Length {} >>\nstream\n{form}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        form.len()
+    )
+    .into_bytes()
+}
+
+/// The isolation half of the exit criterion: a non-isolated group's contents
+/// see the backdrop, an isolated group's do not.
+///
+/// 11.4.4 says the distinction is only observable when something inside the
+/// group uses a blend mode other than Normal, so that is what the fixture
+/// does. The shape multiplies. Against a transparent backdrop `Multiply` has
+/// nothing to multiply by and the source passes through (11.3.6); against the
+/// page's green it does not.
+#[test]
+fn an_isolated_group_ignores_its_backdrop_and_a_non_isolated_one_does_not() {
+    let under = "0.4 0.8 0.4 rg 0 0 60 60 re f";
+    let form = "/Mul gs 0.8 0.4 0.8 rg 10 10 40 40 re f";
+    let gs = "/Mul << /BM /Multiply >>";
+
+    let isolated = render(over_backdrop(
+        "/Group << /S /Transparency /I true >>",
+        under,
+        form,
+        gs,
+    ));
+    let joined = render(over_backdrop(
+        "/Group << /S /Transparency /I false >>",
+        under,
+        form,
+        gs,
+    ));
+
+    let iso = at(&isolated, 30.0, 30.0);
+    assert!(
+        iso.0 > 195 && iso.1 < 115 && iso.2 > 195,
+        "an isolated group multiplies against nothing, so the source survives: {iso:?}"
+    );
+
+    let non = at(&joined, 30.0, 30.0);
+    assert!(
+        non.0 < 100 && non.1 < 100 && non.2 < 100,
+        "a non-isolated one multiplies against the page underneath it: {non:?}"
+    );
+
+    // Outside the square both are the untouched backdrop, which is what says
+    // the difference above is the blend and not the group's extent.
+    assert_eq!(at(&isolated, 55.0, 55.0), at(&joined, 55.0, 55.0));
+}
+
+/// The backdrop-removal half, and the one that catches the failure the plan
+/// calls "darker rather than broken".
+///
+/// A non-isolated group whose contents blend Normally must render *exactly*
+/// as an isolated one does — 11.4.4's own note — and exactly as the same
+/// content drawn with no group at all. The group starts from the backdrop, so
+/// without 11.4.7.2's removal the backdrop is composited in once and then
+/// again underneath, and a half-opaque red over blue arrives at a quarter of
+/// the red instead of half.
+///
+/// The partial alpha inside the group is what makes this visible: at full
+/// opacity the removal term is zero and a build with no removal at all passes.
+/// That was checked by injection, not assumed.
+#[test]
+fn a_non_isolated_group_does_not_count_its_backdrop_twice() {
+    let under = "0 0 1 rg 0 0 60 60 re f";
+    let form = "/Half gs 1 0 0 rg 10 10 40 40 re f";
+    let gs = "/Half << /ca 0.5 >>";
+
+    let isolated = render(over_backdrop(
+        "/Group << /S /Transparency /I true >>",
+        under,
+        form,
+        gs,
+    ));
+    let joined = render(over_backdrop(
+        "/Group << /S /Transparency /I false >>",
+        under,
+        form,
+        gs,
+    ));
+    let ungrouped = render(over_backdrop("", under, form, gs));
+
+    let want = at(&ungrouped, 30.0, 30.0);
+    assert!(
+        (120..=136).contains(&want.0) && (120..=136).contains(&want.2) && want.1 < 8,
+        "half-opaque red over blue is halfway between them: {want:?}"
+    );
+    assert_eq!(
+        at(&isolated, 30.0, 30.0),
+        want,
+        "an isolated group changes nothing under Normal blending"
+    );
+    let non = at(&joined, 30.0, 30.0);
+    assert!(
+        non.0.abs_diff(want.0) <= 2 && non.2.abs_diff(want.2) <= 2,
+        "and neither does a non-isolated one: {non:?} against {want:?}. \
+         A backdrop counted twice pulls this toward the blue -- about \
+         (64, 0, 191) -- which is a plausible picture and not a broken one"
+    );
+}
+
 /// Groups nest, and the inner one's buffer is bounded by the outer one's.
 ///
 /// Both XObjects are named in the *page's* resource dictionary. A form's own

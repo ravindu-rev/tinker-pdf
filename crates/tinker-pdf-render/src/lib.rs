@@ -435,7 +435,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// bounding box and never larger. Sizing the buffer to the page instead
     /// is the memory blowup the plan's risk table names, multiplied by the
     /// nesting depth.
-    fn open_group(&mut self, state: &GraphicsState) -> bool {
+    fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
         if self.groups.len() >= MAX_GROUP_DEPTH {
             return false;
         }
@@ -457,7 +457,19 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
             PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
         };
-        let buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
+        let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
+        // 11.4.4: an isolated group composites against nothing, so its buffer
+        // starts empty; a non-isolated one starts with the backdrop composited
+        // in, which is what lets a blend mode inside it see through to the
+        // page. The backdrop is then taken out again at close (11.4.7.2), or
+        // it is counted twice — once because the group started from it and
+        // once because the group is composited back onto it. That failure
+        // renders as a group that is *weaker* than it should be, pulled
+        // toward whatever was underneath, which is a plausible image.
+        if !group.isolated {
+            let backdrop = self.canvas.extract((x0, y0), width, height, format);
+            buffer.adopt_backdrop(backdrop);
+        }
 
         let frame = GroupFrame {
             parent: std::mem::replace(&mut self.canvas, buffer),
@@ -490,9 +502,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return;
         };
         self.clip_stack.truncate(frame.clip_depth);
-        let buffer = std::mem::replace(&mut self.canvas, frame.parent);
+        let mut buffer = std::mem::replace(&mut self.canvas, frame.parent);
         self.base = frame.base;
         self.clip = frame.clip;
+
+        // 11.4.7.2. A no-op on an isolated group, which kept no backdrop.
+        buffer.remove_backdrop();
 
         let stop = self.stop_predicate();
         self.canvas.composite(
@@ -1319,14 +1334,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
-    fn begin_group(&mut self, _group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
+    fn begin_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
         // A group inside a layer that is off paints nothing, so there is
         // nothing to buffer. Declining also leaves the interpreter's 11.6.6
         // state reset undone, which is right: nothing is going to paint.
         if self.stopping() || self.hidden() {
             return false;
         }
-        self.open_group(state)
+        self.open_group(group, state)
     }
 
     fn end_group(&mut self) {
