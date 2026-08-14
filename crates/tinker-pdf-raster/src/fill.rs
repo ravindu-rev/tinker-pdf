@@ -66,6 +66,49 @@ impl Mask {
         }
     }
 
+    /// A mask holding one value everywhere in its rectangle.
+    ///
+    /// What a soft mask needs outside the region its group covered (11.6.5.2):
+    /// there the result is the luminosity of `/BC` alone, which is *not* zero
+    /// unless `/BC` is black. A mask reports zero outside itself, so a
+    /// bounding-box-sized soft mask would silently mean "`/BC` is black"
+    /// whatever the file said.
+    #[must_use]
+    pub fn uniform(x0: i32, y0: i32, width: u32, height: u32, value: u8) -> Mask {
+        let len = (width as usize).saturating_mul(height as usize);
+        Mask {
+            x0,
+            y0,
+            width,
+            height,
+            data: vec![value; len],
+        }
+    }
+
+    /// Copies `other`'s coverage over this mask's, where the two overlap.
+    ///
+    /// A *replacement*, not the multiply [`Mask::intersect_in_place`] does:
+    /// the caller placing a rendered soft-mask group inside its `/BC` field
+    /// wants the group's answer there, not the product of the two.
+    pub fn overwrite(&mut self, other: &Mask) {
+        for row in 0..self.height {
+            let y = self.y0.saturating_add(row as i32);
+            if y < other.y0 || i64::from(y) >= i64::from(other.y0) + i64::from(other.height) {
+                continue;
+            }
+            let base = (row as usize) * (self.width as usize);
+            for col in 0..self.width {
+                let x = self.x0.saturating_add(col as i32);
+                if x < other.x0 || i64::from(x) >= i64::from(other.x0) + i64::from(other.width) {
+                    continue;
+                }
+                if let Some(slot) = self.data.get_mut(base + col as usize) {
+                    *slot = other.at(x, y);
+                }
+            }
+        }
+    }
+
     /// The canvas pixels this mask can put coverage on: its own rectangle,
     /// clamped to a canvas of `width` by `height`, as `(x0, y0, x1, y1)` with
     /// the far edges exclusive.
