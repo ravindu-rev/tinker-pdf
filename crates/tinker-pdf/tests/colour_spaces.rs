@@ -212,36 +212,55 @@ fn a_shading_pattern_paints_its_shading() {
 /// reads as a small offset rather than as a defect and is therefore never
 /// reported. Deleting the test would have left that hole unwatched.
 ///
-/// Both pages put the same cell over the same pixels; the second gets there
-/// through a doubled CTM and halved coordinates. Anchoring to the CTM doubles
-/// the cell on the second page, so the bytes are the assertion.
+/// All three pages put the same shape over the same device pixels and get
+/// there differently: plainly, through a doubled CTM with halved coordinates,
+/// and through a three-point translation. The scaled one catches a lattice
+/// whose *cells* follow the transform; the translated one catches a lattice
+/// whose **phase** does, which is the subtler and more common half — three
+/// points is not a whole step, so the hatch simply sits three pixels over,
+/// and that reads as a design choice rather than as a defect. The bytes are
+/// the assertion in both.
 #[test]
 fn a_tiling_pattern_fill_does_not_move_with_the_transform() {
     let plain = page_with_objects(
         "/Pattern << /P0 5 0 R >>",
         "/Pattern cs /P0 scn 4 4 32 32 re f",
-        &tiling(CELL_KEYS, CELL),
+        &tiling(HATCH_KEYS, HATCH),
     );
     let scaled = page_with_objects(
         "/Pattern << /P0 5 0 R >>",
         "/Pattern cs /P0 scn q 2 0 0 2 0 0 cm 2 2 16 16 re f Q",
-        &tiling(CELL_KEYS, CELL),
+        &tiling(HATCH_KEYS, HATCH),
+    );
+    let shifted = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn q 1 0 0 1 3 3 cm 1 1 32 32 re f Q",
+        &tiling(HATCH_KEYS, HATCH),
     );
 
-    // Two blank pages would agree and prove nothing, so the cell has to be on
-    // the page first.
+    // Three blank pages would agree and prove nothing, so the lattice has to
+    // be on the page first — and it has to be a lattice rather than one cell,
+    // or "the pattern moved" and "the pattern was scaled" are the same
+    // picture.
     assert!(
-        pixel(&plain, 20, 20).2 > 180,
-        "the cell paints, got {:?}",
-        pixel(&plain, 20, 20)
+        pixel(&plain, 6, 32).2 > 180 && pixel(&plain, 22, 16).2 > 180,
+        "at least two cells paint, got {:?} and {:?}",
+        pixel(&plain, 6, 32),
+        pixel(&plain, 22, 16)
     );
     assert!(!reported_unpainted(&plain), "{:?}", plain.warnings);
 
     assert_eq!(
         first_difference(&plain, &scaled),
         None,
-        "the cell sits in the same place under both transforms — \
-         a difference here is the pattern following the CTM"
+        "the lattice sits in the same place under a scaled CTM — \
+         a difference here is the pattern following it"
+    );
+    assert_eq!(
+        first_difference(&plain, &shifted),
+        None,
+        "and under a translated one, which moves the lattice's phase \
+         rather than its scale"
     );
 }
 
@@ -253,32 +272,83 @@ fn a_tiling_pattern_fill_does_not_move_with_the_transform() {
 /// routed `stroke_path` through `fill_with_pattern`, so tiles started painting
 /// on strokes the day this gap's cells did, with no separate wiring and
 /// therefore nothing forcing a stroke-side anchoring test to exist. This is
-/// that test.
+/// that test, and it is deliberately the twin of the fill one above rather
+/// than a weaker relative: the two routes share a function and the way they
+/// diverge is by one of them growing a transform the other does not have.
 #[test]
 fn a_tiling_pattern_stroke_does_not_move_with_the_transform() {
     let plain = page_with_objects(
         "/Pattern << /P0 5 0 R >>",
-        "/Pattern CS /P0 SCN 12 w 4 20 m 36 20 l S",
-        &tiling(CELL_KEYS, CELL),
+        "/Pattern CS /P0 SCN 16 w 4 20 m 36 20 l S",
+        &tiling(HATCH_KEYS, HATCH),
     );
     let scaled = page_with_objects(
         "/Pattern << /P0 5 0 R >>",
-        "/Pattern CS /P0 SCN q 2 0 0 2 0 0 cm 6 w 2 10 m 18 10 l S Q",
-        &tiling(CELL_KEYS, CELL),
+        "/Pattern CS /P0 SCN q 2 0 0 2 0 0 cm 8 w 2 10 m 18 10 l S Q",
+        &tiling(HATCH_KEYS, HATCH),
+    );
+    let shifted = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern CS /P0 SCN q 1 0 0 1 3 3 cm 16 w 1 17 m 33 17 l S Q",
+        &tiling(HATCH_KEYS, HATCH),
     );
 
     assert!(
-        pixel(&plain, 20, 20).2 > 180,
-        "the rule carries the cell, got {:?}",
-        pixel(&plain, 20, 20)
+        pixel(&plain, 6, 16).2 > 180 && pixel(&plain, 22, 16).2 > 180,
+        "the rule carries at least two cells, got {:?} and {:?}",
+        pixel(&plain, 6, 16),
+        pixel(&plain, 22, 16)
     );
     assert!(!reported_unpainted(&plain), "{:?}", plain.warnings);
 
     assert_eq!(
         first_difference(&plain, &scaled),
         None,
-        "the cell sits in the same place under both transforms — \
+        "the lattice sits in the same place under a scaled CTM — \
          a difference here is the stroke's transform reaching the pattern"
+    );
+    assert_eq!(
+        first_difference(&plain, &shifted),
+        None,
+        "and under a translated one"
+    );
+}
+
+/// The lattice belongs to the *pattern*, not to the shape being filled, so two
+/// shapes filled with one pattern are in phase with each other.
+///
+/// This is what 8.7.3.1's anchoring buys a reader, and it is the assertion an
+/// implementation that indexes the lattice from each shape's own bounding box
+/// fails: each shape looks perfectly reasonable on its own, and the two
+/// together do not line up. That is the failure nobody reports, on a page
+/// where two adjacent panels carry the same hatch.
+#[test]
+fn two_shapes_share_one_pattern_lattice() {
+    let together = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "/Pattern cs /P0 scn 2 2 12 36 re f 21 2 13 36 re f",
+        &tiling(HATCH_KEYS, HATCH),
+    );
+    // The same lattice, painted in one go, then cut to the same two shapes by
+    // the clip. If the lattice is the pattern's, these are the same picture.
+    let whole = page_with_objects(
+        "/Pattern << /P0 5 0 R >>",
+        "q 2 2 12 36 re 21 2 13 36 re W n \
+         /Pattern cs /P0 scn 0 0 40 40 re f Q",
+        &tiling(HATCH_KEYS, HATCH),
+    );
+
+    assert!(
+        pixel(&together, 6, 32).2 > 180,
+        "the first shape carries the hatch, got {:?}",
+        pixel(&together, 6, 32)
+    );
+    assert_eq!(
+        first_difference(&together, &whole),
+        None,
+        "two shapes filled separately are in phase with one lattice cut to \
+         the same two shapes — a lattice indexed from each shape's own box \
+         is not"
     );
 }
 
@@ -290,10 +360,15 @@ const GRADIENT: &str = "/Pattern << /P0 << /PatternType 2 /Shading \
           /Function << /FunctionType 2 /Domain [0 1] \
                        /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >>";
 
-/// One cell covering the whole page, so the anchoring tests above measure the
-/// cell's *placement* without a lattice index confusing the picture.
+/// One cell covering the whole page, so a placement test can measure the
+/// cell's position without a lattice index confusing the picture.
 const CELL_KEYS: &str = "/PaintType 1 /BBox [0 0 40 40] /XStep 40 /YStep 40";
 const CELL: &str = "0 0 1 rg 8 8 24 24 re f";
+
+/// A real lattice: an 8 pt cell with a 4 pt square in one corner, so the phase
+/// of the lattice is visible and not only its scale.
+const HATCH_KEYS: &str = "/PaintType 1 /BBox [0 0 8 8] /XStep 8 /YStep 8";
+const HATCH: &str = "0 0 1 rg 0 0 4 4 re f";
 
 /// A tiling pattern with a cell that has no readable content stream at all.
 ///
