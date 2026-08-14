@@ -56,6 +56,40 @@ pub struct Group {
     pub knockout: bool,
 }
 
+/// An ExtGState `/SMask` (11.6.5.1).
+#[derive(Clone, Debug)]
+pub enum SoftMask {
+    /// `/None`: whatever mask was in force stops applying.
+    None,
+    /// A group to render and read back as a mask.
+    Group(Box<MaskGroup>),
+}
+
+/// The `/SMask` dictionary's group, resolved (11.6.5.2).
+#[derive(Clone, Debug)]
+pub struct MaskGroup {
+    /// `/G`, the transparency group XObject that draws the mask.
+    pub form: Form,
+    /// `/S`: true for `/Luminosity`, false for `/Alpha`.
+    pub luminosity: bool,
+    /// `/BC`, resolved through the group's own colour space.
+    ///
+    /// **`None` means black, which means fully masked.** 11.6.5.2 composites
+    /// the mask group against a fully opaque backdrop of this colour and
+    /// takes the luminosity of the result, and the default is the black of
+    /// the group's space. Defaulting to white or to transparent inverts every
+    /// drop shadow in a corpus and still looks reasonable on a light page —
+    /// the shadow appears where the light should be, which reads as a design
+    /// choice rather than as a bug. Only meaningful for `/Luminosity`.
+    pub backdrop: Option<Rgb>,
+    /// `/TR`, pre-sampled to 256 entries; `None` is `/Identity`.
+    ///
+    /// Sampled rather than carried as a function because it is applied per
+    /// pixel, and a function on a pixel path is both ruinously slow and a
+    /// route back to the platform's `libm` (ruling 4).
+    pub transfer: Option<[u8; 256]>,
+}
+
 /// An optional-content layer, as the resource seam resolved it (8.11).
 ///
 /// The interpreter cannot decide this: `/OCProperties` lives in the catalog
@@ -152,6 +186,18 @@ pub trait FontSource {
     /// mean "unchanged" rather than "Normal" — a `gs` that sets only `/ca`
     /// must not silently reset the blend mode.
     fn ext_g_state_blend(&self, name: &[u8]) -> Option<crate::state::BlendMode> {
+        let _ = name;
+        None
+    }
+
+    /// `/SMask` from a named external graphics state (11.6.5.1).
+    ///
+    /// Separate from the alphas and from `/BM` for the same reason those two
+    /// are separate from each other: a dictionary may set any of the three
+    /// without the others, and `None` here has to mean "unchanged" rather
+    /// than "no mask". A `gs` that sets only `/ca` must not clear a soft mask
+    /// somebody else installed.
+    fn ext_g_state_soft_mask(&self, name: &[u8]) -> Option<SoftMask> {
         let _ = name;
         None
     }
@@ -761,6 +807,13 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     if let Some(blend) = self.fonts.ext_g_state_blend(&name) {
                         self.gs.blend = blend;
                     }
+                    // 11.6.5.1. The group is rendered *here*, at this CTM,
+                    // rather than recorded for the paint that will use it.
+                    match self.fonts.ext_g_state_soft_mask(&name) {
+                        Some(SoftMask::None) => self.device.clear_soft_mask(),
+                        Some(SoftMask::Group(mask)) => self.run_soft_mask(&mask),
+                        None => {}
+                    }
                 }
             }
 
@@ -985,27 +1038,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         // outside its box paints across the rest of the page, and forms are
         // how most producers place repeated content, so it is not a rare
         // shape. `begin_form` saved the clip and `end_form` restores it.
-        if let Some([x0, y0, x1, y1]) = form.bbox {
-            if [x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x1 > x0 && y1 > y0 {
-                // A `Device` receives paths already in device space — `re`
-                // and friends apply the CTM as they build them — so the
-                // corners are transformed here too. Passing the rectangle in
-                // form space instead clips somewhere else entirely, which
-                // with an identity `/Matrix` happens to look almost right and
-                // with any other matrix erases the form completely.
-                let p0 = self.gs.ctm.apply(x0, y0);
-                let p1 = self.gs.ctm.apply(x1, y0);
-                let p2 = self.gs.ctm.apply(x1, y1);
-                let p3 = self.gs.ctm.apply(x0, y1);
-                let box_path = [
-                    PathSegment::MoveTo { x: p0.0, y: p0.1 },
-                    PathSegment::LineTo { x: p1.0, y: p1.1 },
-                    PathSegment::LineTo { x: p2.0, y: p2.1 },
-                    PathSegment::LineTo { x: p3.0, y: p3.1 },
-                    PathSegment::Close,
-                ];
-                self.device.clip_path(&box_path, &self.gs, false);
-            }
+        if let Some(box_path) = self.bbox_quad(form.bbox) {
+            self.device.clip_path(&box_path, &self.gs, false);
         }
 
         // 11.6.6: a transparency group's contents are composited into a buffer
@@ -1044,6 +1078,99 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.text_matrix = saved_text;
         self.line_matrix = saved_line;
         self.device.end_form(id);
+    }
+
+    /// A form's `/BBox` as a quad in the space a `Device` receives paths in.
+    ///
+    /// A `Device` receives paths already transformed by the CTM — `re` and
+    /// friends apply it as they build them — so the corners are transformed
+    /// here too. Passing the rectangle in form space instead clips somewhere
+    /// else entirely, which with an identity `/Matrix` happens to look almost
+    /// right and with any other matrix erases the form completely.
+    ///
+    /// Shared between the clip a form installs (8.10.2) and the bound a soft
+    /// mask's group gives its buffer (11.6.5.2), because two spellings of the
+    /// same rectangle is how the clip and the buffer come to disagree about
+    /// where the mask is.
+    fn bbox_quad(&self, bbox: Option<[f64; 4]>) -> Option<[PathSegment; 5]> {
+        let [x0, y0, x1, y1] = bbox?;
+        if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) || x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let p0 = self.gs.ctm.apply(x0, y0);
+        let p1 = self.gs.ctm.apply(x1, y0);
+        let p2 = self.gs.ctm.apply(x1, y1);
+        let p3 = self.gs.ctm.apply(x0, y1);
+        Some([
+            PathSegment::MoveTo { x: p0.0, y: p0.1 },
+            PathSegment::LineTo { x: p1.0, y: p1.1 },
+            PathSegment::LineTo { x: p2.0, y: p2.1 },
+            PathSegment::LineTo { x: p3.0, y: p3.1 },
+            PathSegment::Close,
+        ])
+    }
+
+    /// Renders an ExtGState `/SMask`'s group, now, at this CTM (11.6.5.2).
+    ///
+    /// **Now** is the whole point. The mask group is rendered with the
+    /// transform in force at the `gs` operator, not with the one in force
+    /// when the masked content is painted. The two are almost always
+    /// different — a `gs` is set once and the content it masks is drawn under
+    /// its own `cm` — and getting it wrong puts the shadow a few points from
+    /// where it belongs, which looks like a slightly misplaced shadow rather
+    /// than like a bug.
+    fn run_soft_mask(&mut self, mask: &MaskGroup) {
+        if self.depth >= MAX_FORM_DEPTH {
+            return;
+        }
+
+        // The state the group runs under, saved exactly as a form's is: the
+        // mask group is a content stream and may do anything one can.
+        let saved_gs = self.gs.clone();
+        let saved_stack = std::mem::take(&mut self.saved);
+        let saved_path = std::mem::take(&mut self.path);
+        let saved_text = self.text_matrix;
+        let saved_line = self.line_matrix;
+        let saved_marked = std::mem::replace(&mut self.marked, 0);
+        let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
+
+        // 8.10.2's `/Matrix`, composed onto the CTM at the `gs`.
+        let combined = mask.form.matrix.then(&self.gs.ctm);
+        if combined.is_finite() {
+            self.gs.ctm = combined;
+        }
+        let bbox = self.bbox_quad(mask.form.bbox);
+
+        let accepted = self.device.begin_soft_mask(
+            mask,
+            bbox.as_ref().map_or(&[], |b| b.as_slice()),
+            &self.gs,
+        );
+        if accepted {
+            // 8.10.2 still clips the group to its box, and 11.6.6 still
+            // resets the alphas and the blend mode inside it — a mask group
+            // is a transparency group, whatever `/G`'s own `/Group` says.
+            if let Some(box_path) = bbox {
+                self.device.clip_path(&box_path, &self.gs, false);
+            }
+            self.gs.fill_alpha = 1.0;
+            self.gs.stroke_alpha = 1.0;
+            self.gs.blend = crate::state::BlendMode::Normal;
+
+            self.depth += 1;
+            self.run(&mask.form.content);
+            self.depth -= 1;
+            self.close_open_marked_content();
+            self.device.end_soft_mask();
+        }
+
+        self.marked = saved_marked;
+        self.marked_over_cap = saved_over_cap;
+        self.gs = saved_gs;
+        self.saved = saved_stack;
+        self.path = saved_path;
+        self.text_matrix = saved_text;
+        self.line_matrix = saved_line;
     }
 
     fn show_array(&mut self) {

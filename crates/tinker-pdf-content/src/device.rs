@@ -5,7 +5,7 @@
 //! The interpreter never knows which it is talking to, which is exactly why
 //! text extraction needs no rasterizer and Checkpoint A can exist.
 
-use crate::interpret::Group;
+use crate::interpret::{Group, MaskGroup};
 use crate::state::{GraphicsState, Matrix};
 
 /// One glyph, as the interpreter resolved it.
@@ -157,6 +157,39 @@ pub trait Device {
     /// true, including when interpretation was cancelled part-way, so a
     /// device may restore its buffer here without checking.
     fn end_group(&mut self) {}
+
+    /// A `gs` set an `/SMask`, and its group is about to be interpreted
+    /// (11.6.5.2).
+    ///
+    /// **This happens at the `gs`, not at the paint the mask will apply to.**
+    /// 11.6.5.2 renders the mask group with the transform in force when the
+    /// external graphics state is set, and `state.ctm` here is that one.
+    /// Taking the CTM at paint time instead produces a mask that is *nearly*
+    /// right — a shadow a few points from where it belongs, which reads as a
+    /// slightly misplaced shadow rather than as a bug.
+    ///
+    /// `bbox` is `/G`'s bounding box as a device-space quad, in the same
+    /// convention [`Device::clip_path`] uses, or empty when the form has
+    /// none. It is what bounds the mask's buffer; the interpreter has it
+    /// already and computing it twice invites the two answers to differ.
+    ///
+    /// Returning false declines, and is the default: nothing that does not
+    /// keep pixels can make a mask out of one.
+    fn begin_soft_mask(
+        &mut self,
+        mask: &MaskGroup,
+        bbox: &[PathSegment],
+        state: &GraphicsState,
+    ) -> bool {
+        let _ = (mask, bbox, state);
+        false
+    }
+
+    /// The mask group finished; read it back and install it (11.6.5.2).
+    fn end_soft_mask(&mut self) {}
+
+    /// `/SMask /None`: whatever mask was in force stops applying.
+    fn clear_soft_mask(&mut self) {}
 
     /// Whether interpretation should stop — a cancellation hook checked
     /// between operators.

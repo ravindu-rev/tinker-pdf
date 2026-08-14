@@ -25,7 +25,7 @@ use tinker_pdf_content::{
 
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
-    canvas::{Canvas, Color, PixelFormat},
+    canvas::{Canvas, Color, MaskKind, PixelFormat},
     fill::{fill, Mask},
     geom::{FillRule, Path},
     image::{draw_image, ImageDraw, ImageSource, Pyramid, Transform},
@@ -257,6 +257,13 @@ struct GroupFrame {
     blend: RasterBlend,
     /// The clip in force at the `Do`, in the parent's coordinates.
     clip: Option<Mask>,
+    /// The soft mask in force at the `Do`, in the parent's coordinates.
+    ///
+    /// 11.6.6 resets it to None inside the group, so it masks the group's
+    /// *result* rather than each element -- which is the whole drop-shadow
+    /// idiom: a mask applied element by element shows the seams the group
+    /// exists to remove.
+    soft: Option<Mask>,
     /// `base` in the parent's coordinates.
     base: Matrix,
     /// `/K`: the buffer as it started, so that each element can be composited
@@ -275,6 +282,31 @@ struct GroupFrame {
     clip_depth: usize,
 }
 
+/// A soft-mask group being rendered (11.6.5.2).
+struct MaskFrame {
+    /// The canvas the render was drawing into.
+    parent: Canvas,
+    /// Where the mask's buffer sits in it.
+    at: (i32, i32),
+    /// Whether the result is read as luminosity or as alpha.
+    kind: MaskKind,
+    /// What the mask reads *outside* the group's bounding box.
+    ///
+    /// For `/Luminosity` that is the luminosity of `/BC` alone, because the
+    /// group painted nothing out there and 11.6.5.2 composites it against a
+    /// fully opaque `/BC` backdrop. It is zero only when `/BC` is black --
+    /// which is the default, and is why the bounding-box-sized mask is the
+    /// common case and the page-sized one the exception.
+    outside: u8,
+    /// `/TR`, pre-sampled.
+    transfer: Option<[u8; 256]>,
+    /// The clip, soft mask and transform to put back afterwards.
+    clip: Option<Mask>,
+    soft: Option<Mask>,
+    base: Matrix,
+    clip_depth: usize,
+}
+
 /// The rasterizing device.
 pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
@@ -282,7 +314,8 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// The transform from PDF user space to device pixels.
     base: Matrix,
     clip: Option<Mask>,
-    clip_stack: Vec<Option<Mask>>,
+    /// The clip and the soft mask, saved together by `q` (8.5.4, 11.6.5).
+    clip_stack: Vec<(Option<Mask>, Option<Mask>)>,
     warnings: Vec<RenderWarning>,
     cancel: CancelToken,
     /// Whether a cancellation check has ever answered yes — that is, whether
@@ -330,6 +363,15 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// what lets the buffer be bounding-box sized rather than page sized
     /// without a second coordinate system running through every paint.
     groups: Vec<GroupFrame>,
+    /// The soft mask in force, in the current canvas's coordinates (11.6.5).
+    ///
+    /// On the device rather than in the graphics state, because it is pixels
+    /// and the graphics state is PDF-level (ruling 8). It follows the clip
+    /// stack's precedent exactly: `save_state` pushes it and `restore_state`
+    /// pops it, so an `/SMask` set inside `q ... Q` does not survive the `Q`.
+    soft: Option<Mask>,
+    /// Soft-mask groups being rendered, innermost last.
+    mask_frames: Vec<MaskFrame>,
     /// Mask pixels rasterized so far, summed over every paint and every clip.
     ///
     /// The instrument behind `a_small_fill_on_a_large_page_stays_small`. A
@@ -364,6 +406,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             marked_content: Vec::new(),
             hidden_depth: 0,
             groups: Vec::new(),
+            soft: None,
+            mask_frames: Vec::new(),
             #[cfg(test)]
             mask_pixels: 0,
         }
@@ -486,6 +530,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
             clip: self.clip.clone(),
+            soft: self.soft.take(),
             base: self.base,
             initial,
             clip_depth: self.clip_stack.len(),
@@ -544,6 +589,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let mut buffer = std::mem::replace(&mut self.canvas, frame.parent);
         self.base = frame.base;
         self.clip = frame.clip;
+        let soft = frame.soft;
 
         // 11.4.7.2. A no-op on an isolated group, which kept no backdrop.
         buffer.remove_backdrop();
@@ -556,15 +602,141 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.knockout_restore(&area);
         }
 
+        // 11.6.6: the soft mask in force at the `Do` shapes the group's
+        // *result*. Applying it to each element instead is what a drop shadow
+        // looks like when it has been done element by element -- the mask
+        // shows through every seam the group exists to remove.
         let stop = self.stop_predicate();
         self.canvas.composite(
             &buffer,
             frame.at,
             frame.alpha,
             frame.blend,
-            None,
+            soft.as_ref(),
             Some(&stop),
         );
+        self.soft = soft;
+    }
+
+    /// Opens a soft-mask group: a buffer filled with `/BC`, to be read back
+    /// as a mask when it closes (11.6.5.2).
+    fn open_soft_mask(
+        &mut self,
+        mask: &tinker_pdf_content::MaskGroup,
+        bbox: &[PathSegment],
+    ) -> bool {
+        if self.mask_frames.len() + self.groups.len() >= MAX_GROUP_DEPTH {
+            return false;
+        }
+        // The group's own bounding box bounds the buffer, and the current
+        // clip deliberately does *not*: the mask applies to whatever is
+        // painted after the `gs`, which may be anywhere, and clipping the
+        // mask to the clip in force when it was made would leave those paints
+        // masked by nothing outside it.
+        let built = self.to_path(bbox);
+        let (x0, y0, width, height) = if built.is_empty() {
+            (0, 0, self.canvas.width, self.canvas.height)
+        } else {
+            paint_region(&built, None, None, self.canvas.width, self.canvas.height)
+        };
+        if width == 0 || height == 0 {
+            return false;
+        }
+
+        // 11.6.5.2. For `/Luminosity` the group is composited against a fully
+        // opaque backdrop of `/BC`, and `/BC` absent is the **black** of the
+        // group's colour space -- fully masked. For `/Alpha` there is no
+        // backdrop at all and `/BC` does not apply.
+        let (kind, background) = if mask.luminosity {
+            let backdrop = mask.backdrop.unwrap_or(tinker_pdf_content::Rgb::BLACK);
+            (
+                MaskKind::Luminosity,
+                Color::rgb(backdrop.r, backdrop.g, backdrop.b),
+            )
+        } else {
+            (MaskKind::Alpha, Color::TRANSPARENT)
+        };
+        // What the mask reads outside the group's box: the backdrop alone,
+        // through `/TR`. Zero for `/Alpha`, and zero for the `/BC` default,
+        // which is why the common mask costs its bounding box.
+        let outside = {
+            let raw = match kind {
+                MaskKind::Luminosity => background.luma(),
+                MaskKind::Alpha => 0,
+            };
+            mask.transfer
+                .as_ref()
+                .map_or(raw, |lut| lut.get(raw as usize).copied().unwrap_or(raw))
+        };
+
+        let format = match self.canvas.format {
+            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+        };
+        let buffer = Canvas::new(width, height, format, background);
+
+        let frame = MaskFrame {
+            parent: std::mem::replace(&mut self.canvas, buffer),
+            at: (x0, y0),
+            kind,
+            outside,
+            transfer: mask.transfer,
+            clip: self.clip.take(),
+            soft: self.soft.take(),
+            base: self.base,
+            clip_depth: self.clip_stack.len(),
+        };
+        // The mask group draws in its own buffer's coordinates, and under no
+        // clip and no mask of its own: it is a picture of a mask, not a
+        // painting on the page.
+        self.base = self
+            .base
+            .then(&Matrix::translate(-f64::from(x0), -f64::from(y0)));
+        self.mask_frames.push(frame);
+        true
+    }
+
+    /// Closes the innermost soft-mask group and installs what it drew.
+    fn close_soft_mask(&mut self) {
+        let Some(frame) = self.mask_frames.pop() else {
+            return;
+        };
+        self.clip_stack.truncate(frame.clip_depth);
+        let buffer = std::mem::replace(&mut self.canvas, frame.parent);
+        self.base = frame.base;
+        self.clip = frame.clip;
+
+        let inner = buffer.to_mask(frame.at, frame.kind, frame.transfer.as_ref());
+        // A `Mask` reads zero outside its own rectangle, which is exactly
+        // right when the backdrop is black and exactly wrong otherwise: with
+        // a pale `/BC` the whole page outside the group's box is *unmasked*,
+        // and a bounding-box-sized mask would hide it. So the field is only
+        // paid for when the file asks for one.
+        self.soft = Some(if frame.outside == 0 {
+            inner
+        } else {
+            let mut field =
+                Mask::uniform(0, 0, self.canvas.width, self.canvas.height, frame.outside);
+            field.overwrite(&inner);
+            field
+        });
+        // The mask the `gs` replaced is gone, not restored: 11.6.5.1 makes
+        // `/SMask` a graphics-state parameter that one `gs` overwrites for
+        // the next, and only `Q` puts an older one back.
+        let _ = frame.soft;
+    }
+
+    /// The clip and the soft mask as one mask, for a consumer that can take
+    /// only one.
+    ///
+    /// Returns an owned product when both are in force and nothing at all
+    /// when neither is; with one of the two the caller uses it directly, so
+    /// the common paths still allocate nothing.
+    fn combined_mask(&self) -> Option<Mask> {
+        match (&self.clip, &self.soft) {
+            (Some(clip), Some(soft)) => Some(clip.intersect(soft)),
+            _ => None,
+        }
     }
 
     /// Fills an undecodable image's area with a neutral grey.
@@ -701,6 +873,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let (x0, y0, width, height) = paint_region(
             path,
             self.clip.as_ref(),
+            self.soft.as_ref(),
             self.canvas.width,
             self.canvas.height,
         );
@@ -717,6 +890,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // `intersect` would allocate is the mask that is already here.
         if let Some(clip) = &self.clip {
             mask.intersect_in_place(clip);
+        }
+        // 11.6.5: the soft mask multiplies exactly as the clip does -- it *is*
+        // a clip with more than two levels -- so it goes through the same
+        // product rather than through a second mechanism beside it. The
+        // region above already excludes everything outside its rectangle,
+        // where it reads zero.
+        if let Some(soft) = &self.soft {
+            mask.intersect_in_place(soft);
         }
         mask
     }
@@ -809,6 +990,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // ends up not recording that it fired.
         let stop = self.stop_predicate();
 
+        // 11.6.5: the sampler takes one mask, and there may be two. The
+        // product is built here rather than passed as a second argument
+        // because a soft mask *is* a clip with more than two levels, and the
+        // rasterizer has no reason to learn the difference (ruling 8).
+        let combined = self.combined_mask();
+        let clip = combined
+            .as_ref()
+            .or(self.clip.as_ref())
+            .or(self.soft.as_ref());
         let draw = ImageDraw {
             image: ImageSource {
                 width: image.width,
@@ -820,7 +1010,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             interpolate: image.interpolate,
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
-            clip: self.clip.as_ref(),
+            clip,
             tint,
             stop: Some(&stop),
         };
@@ -900,7 +1090,13 @@ const SLACK: i64 = 1;
 /// clipping mode and drew nothing produces — yields an empty region, and an
 /// empty mask reads as zero everywhere. That is the same "clip everything
 /// away" a page-sized mask of zeroes gave, at none of the cost.
-fn paint_region(path: &Path, clip: Option<&Mask>, width: u32, height: u32) -> (i32, i32, u32, u32) {
+fn paint_region(
+    path: &Path,
+    clip: Option<&Mask>,
+    soft: Option<&Mask>,
+    width: u32,
+    height: u32,
+) -> (i32, i32, u32, u32) {
     let Some((x0, y0, x1, y1)) = path.bounds() else {
         return (0, 0, 0, 0);
     };
@@ -919,11 +1115,14 @@ fn paint_region(path: &Path, clip: Option<&Mask>, width: u32, height: u32) -> (i
         (y1.ceil() as i64).saturating_add(SLACK),
     );
 
-    if let Some(clip) = clip {
-        left = left.max(i64::from(clip.x0));
-        top = top.max(i64::from(clip.y0));
-        right = right.min(i64::from(clip.x0) + i64::from(clip.width));
-        bottom = bottom.min(i64::from(clip.y0) + i64::from(clip.height));
+    // Both bound the same way and for the same reason: coverage multiplies,
+    // and both report zero outside their own rectangle, so nothing out there
+    // could ever have been painted.
+    for mask in [clip, soft].into_iter().flatten() {
+        left = left.max(i64::from(mask.x0));
+        top = top.max(i64::from(mask.y0));
+        right = right.min(i64::from(mask.x0) + i64::from(mask.width));
+        bottom = bottom.min(i64::from(mask.y0) + i64::from(mask.height));
     }
 
     let left = left.clamp(0, i64::from(width));
@@ -1048,12 +1247,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn save_state(&mut self) {
-        self.clip_stack.push(self.clip.clone());
+        self.clip_stack.push((self.clip.clone(), self.soft.clone()));
     }
 
     fn restore_state(&mut self) {
-        if let Some(clip) = self.clip_stack.pop() {
+        // Ruling 8: the soft mask is pixels and lives here rather than in the
+        // graphics state, so `Q` has to put it back -- otherwise an `/SMask`
+        // set inside `q ... Q` keeps masking everything drawn after the `Q`,
+        // which is content quietly missing from the rest of the page.
+        if let Some((clip, soft)) = self.clip_stack.pop() {
             self.clip = clip;
+            self.soft = soft;
         }
     }
 
@@ -1342,28 +1546,33 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // 8.7.4.2 again: `sh` paints the current clip, so the clip's own
         // rectangle bounds the sweep. Without one it really is the whole
         // page, which is what the operator means.
-        let (x_start, y_start, x_end, y_end) = self
-            .clip
+        // Owned rather than borrowed, because the knockout restore below
+        // needs `self` mutably and this has to outlive it. A clone per `sh`
+        // against a per-pixel sweep over the same rectangle is nothing.
+        let area: Option<Mask> = match (&self.clip, &self.soft) {
+            (Some(clip), Some(soft)) => Some(clip.intersect(soft)),
+            (Some(mask), None) | (None, Some(mask)) => Some(mask.clone()),
+            (None, None) => None,
+        };
+        let (x_start, y_start, x_end, y_end) = area
             .as_ref()
-            .map_or((0, 0, self.canvas.width, self.canvas.height), |clip| {
-                clip.overlap(self.canvas.width, self.canvas.height)
+            .map_or((0, 0, self.canvas.width, self.canvas.height), |mask| {
+                mask.overlap(self.canvas.width, self.canvas.height)
             });
         // 11.4.5: `sh` paints the whole clip, so the clip *is* this element's
         // coverage — and with no clip in force it really is the whole buffer.
         if self.in_knockout() {
-            let area = self
-                .clip
+            let restore = area
                 .clone()
                 .unwrap_or_else(|| Mask::uniform(0, 0, self.canvas.width, self.canvas.height, 255));
-            self.knockout_restore(&area);
+            self.knockout_restore(&restore);
         }
         for py in y_start..y_end {
             if self.stopping() {
                 return;
             }
             for px in x_start..x_end {
-                let clip = self
-                    .clip
+                let clip = area
                     .as_ref()
                     .map_or(255, |mask| mask.at(px as i32, py as i32));
                 if clip == 0 {
@@ -1406,13 +1615,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn begin_form(&mut self, _id: u64) -> bool {
-        self.clip_stack.push(self.clip.clone());
+        self.clip_stack.push((self.clip.clone(), self.soft.clone()));
         !self.stopping()
     }
 
     fn end_form(&mut self, _id: u64) {
-        if let Some(clip) = self.clip_stack.pop() {
+        if let Some((clip, soft)) = self.clip_stack.pop() {
             self.clip = clip;
+            self.soft = soft;
         }
     }
 
@@ -1428,6 +1638,26 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
     fn end_group(&mut self) {
         self.close_group();
+    }
+
+    fn begin_soft_mask(
+        &mut self,
+        mask: &tinker_pdf_content::MaskGroup,
+        bbox: &[PathSegment],
+        _state: &GraphicsState,
+    ) -> bool {
+        if self.stopping() {
+            return false;
+        }
+        self.open_soft_mask(mask, bbox)
+    }
+
+    fn end_soft_mask(&mut self) {
+        self.close_soft_mask();
+    }
+
+    fn clear_soft_mask(&mut self) {
+        self.soft = None;
     }
 }
 
@@ -1782,7 +2012,7 @@ mod tests {
         for (name, path) in shapes() {
             for rule in [FillRule::NonZero, FillRule::EvenOdd] {
                 let whole = fill(&path, rule, 0, 0, SIDE, SIDE, 0.2, None);
-                let (x0, y0, w, h) = paint_region(&path, None, SIDE, SIDE);
+                let (x0, y0, w, h) = paint_region(&path, None, None, SIDE, SIDE);
                 let bounded = fill(&path, rule, x0, y0, w, h, 0.2, None);
 
                 for y in 0..SIDE as i32 {
@@ -1806,7 +2036,7 @@ mod tests {
         let mut path = Path::new();
         path.rect(4.0, 6.0, 9.0, 7.0);
         assert_eq!(
-            paint_region(&path, None, 2000, 2000),
+            paint_region(&path, None, None, 2000, 2000),
             (3, 5, 11, 9),
             "the bounding box, one pixel of slack on each side"
         );
@@ -1814,15 +2044,18 @@ mod tests {
         // Clamped to the canvas rather than reaching outside it.
         let mut over = Path::new();
         over.rect(-50.0, -50.0, 60.0, 60.0);
-        assert_eq!(paint_region(&over, None, 100, 100), (0, 0, 11, 11));
+        assert_eq!(paint_region(&over, None, None, 100, 100), (0, 0, 11, 11));
 
         // A path that misses the canvas costs nothing at all.
         let mut away = Path::new();
         away.rect(500.0, 500.0, 10.0, 10.0);
-        assert_eq!(paint_region(&away, None, 100, 100), (100, 100, 0, 0));
+        assert_eq!(paint_region(&away, None, None, 100, 100), (100, 100, 0, 0));
 
         // Neither does one with no points.
-        assert_eq!(paint_region(&Path::new(), None, 100, 100), (0, 0, 0, 0));
+        assert_eq!(
+            paint_region(&Path::new(), None, None, 100, 100),
+            (0, 0, 0, 0)
+        );
     }
 
     /// A clip bounds the region as well, because coverage multiplies and the
@@ -1835,7 +2068,7 @@ mod tests {
         clip_path.rect(30.0, 40.0, 10.0, 10.0);
         let clip = fill(&clip_path, FillRule::NonZero, 29, 39, 12, 12, 0.2, None);
 
-        let (x0, y0, w, h) = paint_region(&path, Some(&clip), 200, 200);
+        let (x0, y0, w, h) = paint_region(&path, Some(&clip), None, 200, 200);
         assert_eq!((x0, y0, w, h), (29, 39, 12, 12), "the clip is the smaller");
 
         // And the clipped coverage is unchanged by that: compare against the

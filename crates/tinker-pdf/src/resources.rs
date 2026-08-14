@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{FontSource, Layer, Matrix, Rgb};
 use tinker_pdf_cos::{
-    font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name, Object,
+    font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
     ccitt_decode, jpeg_decode, CcittParams, JpegColor, Warning as FilterWarning,
@@ -674,79 +674,7 @@ impl FontSource for PageResources {
         if subtype.as_ref() != b"Form" {
             return None;
         }
-
-        let content = self.doc.stream_decoded(reference).ok()?;
-        // 8.10.2: /Matrix maps the form's space into the one that invoked it.
-        let matrix = self
-            .doc
-            .resolve_key(&dict, self.doc.intern(b"Matrix"))
-            .as_array()
-            .and_then(|values| {
-                let n = |i: usize| values.get(i).and_then(Object::as_number);
-                Some(Matrix {
-                    a: n(0)?,
-                    b: n(1)?,
-                    c: n(2)?,
-                    d: n(3)?,
-                    e: n(4)?,
-                    f: n(5)?,
-                })
-            })
-            .unwrap_or(Matrix::IDENTITY);
-
-        // 8.10.2 requires it; a file that omits it gets an unclipped form
-        // rather than no form.
-        let bbox = self
-            .doc
-            .resolve_key(&dict, self.doc.intern(b"BBox"))
-            .as_array()
-            .and_then(|values| {
-                let n = |i: usize| values.get(i).and_then(|v| self.doc.resolve(v).as_number());
-                // The corners may be given in either order (7.9.5).
-                let (x0, y0, x1, y1) = (n(0)?, n(1)?, n(2)?, n(3)?);
-                Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)])
-            });
-
-        // 11.6.6: `/Group` with `/S /Transparency` makes the form a
-        // transparency group, which is composited as a unit rather than
-        // element by element. Any other subtype — 8.10.3's `/S /Reference`
-        // group — is not one, so the name is checked rather than the key's
-        // presence.
-        let group = self
-            .doc
-            .resolve_key(&dict, self.doc.intern(b"Group"))
-            .as_dict()
-            .and_then(|group| {
-                let subtype = self
-                    .doc
-                    .resolve_key(group, self.doc.intern(b"S"))
-                    .as_name()
-                    .and_then(|n| self.doc.name_bytes(n))?;
-                if subtype.as_ref() != b"Transparency" {
-                    return None;
-                }
-                // 11.6.6 Table 147: both default to false, and a value that is
-                // not a boolean is not a value.
-                Some(tinker_pdf_content::Group {
-                    isolated: self
-                        .doc
-                        .resolve_key(group, self.doc.intern(b"I"))
-                        .as_bool()
-                        .unwrap_or(false),
-                    knockout: self
-                        .doc
-                        .resolve_key(group, self.doc.intern(b"K"))
-                        .as_bool()
-                        .unwrap_or(false),
-                })
-            });
-
-        Some(tinker_pdf_content::Form {
-            content,
-            matrix,
-            bbox,
-            group,
-        })
+        self.form_from(&dict, reference)
     }
 
     fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
@@ -805,6 +733,91 @@ impl FontSource for PageResources {
             .collect();
         (!names.is_empty())
             .then(|| tinker_pdf_content::BlendMode::from_names(names.iter().map(Vec::as_slice)))
+    }
+
+    fn ext_g_state_soft_mask(&self, name: &[u8]) -> Option<tinker_pdf_content::SoftMask> {
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"ExtGState"));
+        let entry = self
+            .doc
+            .resolve_key(table.as_dict()?, self.doc.intern(name));
+        let dict = entry.as_dict()?;
+
+        // 11.6.5.1: `/SMask` is either the name `/None` or a mask dictionary.
+        // The key being absent is *not* the same as `/None` — the first
+        // leaves whatever mask is in force alone, the second removes it —
+        // which is why the whole method returns an `Option` of an enum rather
+        // than an `Option` of a mask.
+        let value = self.doc.resolve_key(dict, self.doc.intern(b"SMask"));
+        if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
+            return (name.as_ref() == b"None").then_some(tinker_pdf_content::SoftMask::None);
+        }
+        let mask = value.as_dict()?;
+
+        // `/G` is required, and is a form XObject with a transparency group.
+        let reference = mask.get_ref(self.doc.intern(b"G"))?;
+        let group_dict = self.doc.get(reference).ok()?.as_dict()?.clone();
+        let form = self.form_from(&group_dict, reference)?;
+
+        // 11.6.5.2: `/S` selects what the rendered group is read as. A name
+        // this build does not know is `/Alpha`'s opposite rather than an
+        // error, because `/Luminosity` is overwhelmingly the one in the wild
+        // and a mask that fails to parse is a mask that hides nothing.
+        let luminosity = self
+            .doc
+            .resolve_key(mask, self.doc.intern(b"S"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))
+            .is_none_or(|s| s.as_ref() != b"Alpha");
+
+        // `/BC` is in the group's own colour space, which is `/Group /CS` on
+        // `/G`. Without one the components are read by count, which is what
+        // every other unnamed space in this engine does.
+        let backdrop = self
+            .doc
+            .resolve_key(mask, self.doc.intern(b"BC"))
+            .as_array()
+            .map(|values| {
+                let components: Vec<f64> = values
+                    .iter()
+                    .filter_map(|v| self.doc.resolve(v).as_number())
+                    .collect();
+                let space = self
+                    .doc
+                    .resolve_key(&group_dict, self.doc.intern(b"Group"))
+                    .as_dict()
+                    .and_then(|g| g.get(self.doc.intern(b"CS")).cloned())
+                    .and_then(|cs| self.parse_space(&cs, 0));
+                let (r, g, b) = match space {
+                    Some(space) => space.to_rgb(&components),
+                    None => by_component_count(&components),
+                };
+                Rgb { r, g, b }
+            });
+
+        // 11.6.5.2: `/TR` is a function, or the name `/Identity`. A name is
+        // the identity whatever it says, because the only alternative a
+        // reader has for an unknown one is to mask nothing.
+        let transfer = self
+            .doc
+            .resolve_key(mask, self.doc.intern(b"TR"))
+            .as_dict()
+            .and_then(|_| {
+                let entry = self.doc.resolve_key(mask, self.doc.intern(b"TR"));
+                self.parse_function(&entry, 0)
+            })
+            .map(|function| sample_transfer(&function));
+
+        Some(tinker_pdf_content::SoftMask::Group(Box::new(
+            tinker_pdf_content::MaskGroup {
+                form,
+                luminosity,
+                backdrop,
+                transfer,
+            },
+        )))
     }
 
     fn optional_content(&self, name: &[u8]) -> Option<Layer> {
@@ -952,6 +965,88 @@ impl GlyphSource for PageResources {
 impl PageResources {
     /// The `/DecodeParms` of a stream, which may be one dictionary or an
     /// array with one entry per filter (7.4.1).
+    /// A form XObject read from its own dictionary.
+    ///
+    /// Split out of [`FontSource::form`] because an ExtGState `/SMask`
+    /// reaches a form through `/G` rather than through the `/XObject`
+    /// resource table, and a second reader for the same dictionary is how
+    /// `/Matrix` or `/BBox` comes to be honoured on one route and not the
+    /// other.
+    fn form_from(&self, dict: &Dict, reference: ObjRef) -> Option<tinker_pdf_content::Form> {
+        let content = self.doc.stream_decoded(reference).ok()?;
+        // 8.10.2: /Matrix maps the form's space into the one that invoked it.
+        let matrix = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Matrix"))
+            .as_array()
+            .and_then(|values| {
+                let n = |i: usize| values.get(i).and_then(Object::as_number);
+                Some(Matrix {
+                    a: n(0)?,
+                    b: n(1)?,
+                    c: n(2)?,
+                    d: n(3)?,
+                    e: n(4)?,
+                    f: n(5)?,
+                })
+            })
+            .unwrap_or(Matrix::IDENTITY);
+
+        // 8.10.2 requires it; a file that omits it gets an unclipped form
+        // rather than no form.
+        let bbox = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"BBox"))
+            .as_array()
+            .and_then(|values| {
+                let n = |i: usize| values.get(i).and_then(|v| self.doc.resolve(v).as_number());
+                // The corners may be given in either order (7.9.5).
+                let (x0, y0, x1, y1) = (n(0)?, n(1)?, n(2)?, n(3)?);
+                Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)])
+            });
+
+        // 11.6.6: `/Group` with `/S /Transparency` makes the form a
+        // transparency group, which is composited as a unit rather than
+        // element by element. Any other subtype — 8.10.3's `/S /Reference`
+        // group — is not one, so the name is checked rather than the key's
+        // presence.
+        let group = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Group"))
+            .as_dict()
+            .and_then(|group| {
+                let subtype = self
+                    .doc
+                    .resolve_key(group, self.doc.intern(b"S"))
+                    .as_name()
+                    .and_then(|n| self.doc.name_bytes(n))?;
+                if subtype.as_ref() != b"Transparency" {
+                    return None;
+                }
+                // 11.6.6 Table 147: both default to false, and a value that is
+                // not a boolean is not a value.
+                Some(tinker_pdf_content::Group {
+                    isolated: self
+                        .doc
+                        .resolve_key(group, self.doc.intern(b"I"))
+                        .as_bool()
+                        .unwrap_or(false),
+                    knockout: self
+                        .doc
+                        .resolve_key(group, self.doc.intern(b"K"))
+                        .as_bool()
+                        .unwrap_or(false),
+                })
+            });
+
+        Some(tinker_pdf_content::Form {
+            content,
+            matrix,
+            bbox,
+            group,
+        })
+    }
+
     fn decode_parms(&self, dict: &Dict) -> Option<Dict> {
         let value = self.doc.resolve_key(dict, Name::DECODE_PARMS);
         if let Some(d) = value.as_dict() {
@@ -1816,6 +1911,40 @@ fn read_bits(data: &[u8], at: usize, bits: u32) -> u32 {
         value = (value << 1) | u32::from(bit);
     }
     value
+}
+
+/// Components read as a colour by how many of them there are.
+///
+/// 11.6.5.2 puts `/BC` in the mask group's own colour space, which a file may
+/// simply not declare. One component is grey, three RGB, four CMYK — the same
+/// reading the interpreter applies to an `sc` whose space it could not
+/// resolve, and the only one available without a declaration.
+fn by_component_count(components: &[f64]) -> (u8, u8, u8) {
+    let space = match components.len() {
+        1 => ColorSpace::DeviceGray,
+        4 => ColorSpace::DeviceCmyk,
+        _ => ColorSpace::DeviceRgb,
+    };
+    space.to_rgb(components)
+}
+
+/// A soft mask's `/TR` sampled to 256 entries (11.6.5.2).
+///
+/// Evaluated once here rather than per pixel: the function may be a Type 4
+/// PostScript calculator, and running one for every pixel of a page-sized
+/// mask is minutes of work. Its domain and range are both `[0 1]` by
+/// definition, so 256 samples reproduce every value an 8-bit mask can hold
+/// with no interpolation at all — the table is exact, not an approximation.
+fn sample_transfer(function: &Function) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let input = f64::from(i as u16) / 255.0;
+        let value = function.eval(&[input]).first().copied().unwrap_or(input);
+        // A function may return anything; the mask cannot.
+        let value = if value.is_finite() { value } else { input };
+        *slot = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    table
 }
 
 fn jpeg_to_rgb(image: &tinker_pdf_filters::JpegImage) -> Vec<u8> {

@@ -436,6 +436,305 @@ fn a_non_isolated_knockout_group_knocks_back_to_the_page() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 5: ExtGState /SMask.
+// ---------------------------------------------------------------------------
+
+/// A 60x60 page whose content is `content`, with one `/ExtGState` `/GS0`
+/// carrying an `/SMask` whose group is `mask_content` inside `mask_bbox`.
+///
+/// `smask` is the mask dictionary's own entries beyond `/G`.
+fn masked(content: &str, smask: &str, mask_bbox: &str, mask_content: &str) -> Vec<u8> {
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]\n\
+   /Resources << /ExtGState << /GS0 << /SMask << /G 5 0 R {smask} >> >> >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox {mask_bbox}\n\
+   /Group << /S /Transparency /CS /DeviceGray >>\n\
+   /Length {} >>\nstream\n{mask_content}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        mask_content.len()
+    )
+    .into_bytes()
+}
+
+/// Red over the whole page, through whatever mask `/GS0` installs.
+const RED_PAGE: &str = "/GS0 gs 1 0 0 rg 0 0 60 60 re f";
+/// A mask group painting white over the left half of the page and nothing
+/// over the right half.
+const LEFT_HALF_WHITE: &str = "1 g 0 0 30 60 re f";
+
+/// **The first test to write.** A `/Luminosity` mask with no `/BC` masks
+/// *fully* where its group painted nothing.
+///
+/// 11.6.5.2 composites the mask group against a fully opaque backdrop of the
+/// colour `/BC` names, and `/BC` absent is the black of the group's colour
+/// space. Black luminosity is zero, so a region the mask group did not reach
+/// is **hidden**.
+///
+/// Defaulting the other way — white, or transparent read as unmasked —
+/// inverts every drop shadow in a corpus, and on a light page the result
+/// still looks reasonable: the shadow appears where the light should be,
+/// which reads as a design choice. So the assertion is that the right half of
+/// this page is the paper it started as, not that the left half is red.
+#[test]
+fn a_luminosity_mask_with_no_backdrop_colour_hides_what_its_group_did_not_reach() {
+    let bitmap = render(masked(
+        RED_PAGE,
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    ));
+
+    let lit = at(&bitmap, 15.0, 30.0);
+    assert!(
+        lit.0 > 245 && lit.1 < 10,
+        "where the mask group painted white the red comes through: {lit:?}"
+    );
+
+    let dark = at(&bitmap, 45.0, 30.0);
+    assert_eq!(
+        dark,
+        (255, 255, 255),
+        "and where it painted nothing the default /BC black hides the red \
+         completely -- if this is red, /BC defaulted to white or the absent \
+         mask was read as no mask at all, and every drop shadow in every \
+         document is inverted"
+    );
+}
+
+/// The same page with `/BC [1]`: white, so the region the group never reached
+/// is fully *un*masked. The pair is what says the default is a default rather
+/// than the only thing implemented.
+#[test]
+fn a_white_backdrop_colour_leaves_the_rest_of_the_page_unmasked() {
+    let bitmap = render(masked(
+        RED_PAGE,
+        "/S /Luminosity /BC [1]",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    ));
+
+    let left = at(&bitmap, 15.0, 30.0);
+    let right = at(&bitmap, 45.0, 30.0);
+    assert!(left.0 > 245 && left.1 < 10, "the painted half: {left:?}");
+    assert!(
+        right.0 > 245 && right.1 < 10,
+        "and the unpainted half, which /BC now lights: {right:?}"
+    );
+}
+
+/// `/BC` applies outside the mask group's **bounding box** as well as inside
+/// it, because there is no group out there either — 11.6.5.2 makes the
+/// backdrop the whole plane, not the box.
+#[test]
+fn the_backdrop_colour_reaches_beyond_the_groups_bounding_box() {
+    // The group's box is the left half of the page and it fills it with white.
+    let dark = render(masked(
+        RED_PAGE,
+        "/S /Luminosity",
+        "[0 0 30 60]",
+        "1 g 0 0 30 60 re f",
+    ));
+    let lit = render(masked(
+        RED_PAGE,
+        "/S /Luminosity /BC [1]",
+        "[0 0 30 60]",
+        "1 g 0 0 30 60 re f",
+    ));
+
+    assert!(
+        at(&dark, 15.0, 30.0).0 > 245,
+        "inside the box, both are lit"
+    );
+    assert!(at(&lit, 15.0, 30.0).0 > 245);
+    assert_eq!(
+        at(&dark, 45.0, 30.0),
+        (255, 255, 255),
+        "outside it, black /BC hides"
+    );
+    let outside = at(&lit, 45.0, 30.0);
+    assert!(
+        outside.0 > 245 && outside.1 < 10,
+        "and white /BC does not: {outside:?}"
+    );
+}
+
+/// An `/Alpha` mask reads the group's coverage rather than its colour, so a
+/// *black* square unmasks exactly as a white one does — which is the whole
+/// difference between the two kinds and the reason `/BC` is meaningless here.
+#[test]
+fn an_alpha_mask_reads_coverage_rather_than_colour() {
+    let luminosity = render(masked(
+        RED_PAGE,
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        "0 g 0 0 30 60 re f",
+    ));
+    let alpha = render(masked(
+        RED_PAGE,
+        "/S /Alpha",
+        "[0 0 60 60]",
+        "0 g 0 0 30 60 re f",
+    ));
+
+    assert_eq!(
+        at(&luminosity, 15.0, 30.0),
+        (255, 255, 255),
+        "a black square has no luminosity, so it masks"
+    );
+    let covered = at(&alpha, 15.0, 30.0);
+    assert!(
+        covered.0 > 245 && covered.1 < 10,
+        "but it is fully opaque, so under /Alpha it unmasks: {covered:?}"
+    );
+    assert_eq!(
+        at(&alpha, 45.0, 30.0),
+        (255, 255, 255),
+        "and where nothing was drawn there is no alpha either"
+    );
+}
+
+/// `/TR` shifts the mask measurably. This one inverts it, which swaps the two
+/// halves of the page.
+#[test]
+fn a_transfer_function_shifts_the_mask() {
+    let plain = render(masked(
+        RED_PAGE,
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    ));
+    // 7.10.3: an exponential with C0 = 1, C1 = 0 and N = 1 is `1 - x`.
+    let inverted = render(masked(
+        RED_PAGE,
+        "/S /Luminosity /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    ));
+
+    assert!(at(&plain, 15.0, 30.0).0 > 245 && at(&plain, 15.0, 30.0).1 < 10);
+    assert_eq!(at(&plain, 45.0, 30.0), (255, 255, 255));
+
+    assert_eq!(
+        at(&inverted, 15.0, 30.0),
+        (255, 255, 255),
+        "the transfer function turned the lit half dark"
+    );
+    let now_lit = at(&inverted, 45.0, 30.0);
+    assert!(
+        now_lit.0 > 245 && now_lit.1 < 10,
+        "and the dark half lit, including outside the group where /BC was \
+         read through it too: {now_lit:?}"
+    );
+}
+
+/// A mask made of grey rather than black or white masks *partially*.
+#[test]
+fn a_grey_mask_group_masks_partially() {
+    let bitmap = render(masked(
+        "/GS0 gs 0 0 0 rg 0 0 60 60 re f",
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        "0.5 g 0 0 30 60 re f",
+    ));
+    let half = at(&bitmap, 15.0, 30.0).0;
+    assert!(
+        (110..=145).contains(&half),
+        "mid-grey luminosity is about half coverage, got {half}"
+    );
+}
+
+/// 11.6.5.2: the mask group is rendered with the transform in force at the
+/// `gs`, not with the one in force when the masked content is painted.
+///
+/// The two documents here differ only in the *order* of `cm` and `gs`. The
+/// transform at paint time is identical in both, so an implementation that
+/// deferred the mask group to the first paint would render them the same
+/// picture. A correct one puts the mask's edge at user x = 30 when the `cm`
+/// comes after the `gs`, and at x = 45 when it comes before.
+///
+/// The failure this catches is a shadow a few points from where it belongs.
+/// Nobody reports that as a bug.
+#[test]
+fn the_mask_group_uses_the_transform_in_force_at_the_gs() {
+    let before = masked(
+        "1 0 0 1 15 0 cm /GS0 gs 1 0 0 rg 0 0 60 60 re f",
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    );
+    let after = masked(
+        "/GS0 gs 1 0 0 1 15 0 cm 1 0 0 rg 0 0 60 60 re f",
+        "/S /Luminosity",
+        "[0 0 60 60]",
+        LEFT_HALF_WHITE,
+    );
+
+    let before = render(before);
+    let after = render(after);
+    assert_ne!(
+        before.data, after.data,
+        "the two orders must not render the same picture -- if they do, the \
+         mask is being rendered at paint time, where both have the same CTM"
+    );
+
+    // With the `cm` first the mask travelled with it: lit out to x = 45.
+    assert!(at(&before, 40.0, 30.0).1 < 10, "lit at 40");
+    assert_eq!(at(&before, 50.0, 30.0), (255, 255, 255), "dark at 50");
+    // With the `cm` after, the mask stayed where the `gs` put it.
+    assert!(at(&after, 25.0, 30.0).1 < 10, "lit at 25");
+    assert_eq!(at(&after, 40.0, 30.0), (255, 255, 255), "dark at 40");
+}
+
+/// `/SMask /None` takes the mask off again (11.6.5.1), and an `/ExtGState`
+/// that says nothing about `/SMask` leaves it alone.
+#[test]
+fn none_clears_the_mask_and_silence_leaves_it() {
+    let content = "/GS0 gs /Off gs 1 0 0 rg 0 0 60 60 re f";
+    let quiet = "/GS0 gs /Quiet gs 1 0 0 rg 0 0 60 60 re f";
+    let build = |content: &str| {
+        format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]\n\
+   /Resources << /ExtGState << /GS0 << /SMask << /G 5 0 R /S /Luminosity >> >>\n\
+                                /Off << /SMask /None >>\n\
+                                /Quiet << /ca 1 >> >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 60]\n\
+   /Group << /S /Transparency /CS /DeviceGray >>\n\
+   /Length {} >>\nstream\n{LEFT_HALF_WHITE}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+            content.len(),
+            LEFT_HALF_WHITE.len()
+        )
+        .into_bytes()
+    };
+
+    let cleared = render(build(content));
+    let right = at(&cleared, 45.0, 30.0);
+    assert!(
+        right.0 > 245 && right.1 < 10,
+        "/SMask /None removed the mask: {right:?}"
+    );
+
+    let kept = render(build(quiet));
+    assert_eq!(
+        at(&kept, 45.0, 30.0),
+        (255, 255, 255),
+        "an /ExtGState with no /SMask key at all leaves the mask in force -- \
+         absent is not /None"
+    );
+}
+
 /// Groups nest, and the inner one's buffer is bounded by the outer one's.
 ///
 /// Both XObjects are named in the *page's* resource dictionary. A form's own
