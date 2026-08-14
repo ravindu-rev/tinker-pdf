@@ -38,7 +38,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 
 | # | Plan | What goes wrong today | Size |
 | --- | --- | --- | --- |
-| 09 | [Tiling patterns](09-tiling-patterns.md) | Reported, not painted | M |
+| 09 | [Tiling patterns](09-tiling-patterns.md) | ~~Reported, not painted~~ **DONE**, see the plan's `As built`: `PatternType 1` in both paint types, `/BBox`, `/XStep`, `/YStep`, `/Matrix` and the pattern's own `/Resources`, on fills, strokes and pattern-stroked text. The cell is rasterised **once** into a `/BBox`-sized buffer and composited across the lattice through gap 11's `Canvas::composite`; replaying the content stream per position, which is the obvious build, clones a page-sized mask per cell and costs gigabytes for one A4 hatch. Three things the plan does not say: the seam had to split in two, because a cell is a content stream and `tinker-pdf-render` has no interpreter — geometry comes back from `pattern`, pixels from a new `tile`, which is what lets every budget be checked before anything is rasterised; the **form-recursion cap does not apply**, because a cell is a fresh interpretation whose depth counter starts at zero, so a pattern that fills with itself needed a cap of its own; and one budget is not enough, since `/XStep` may legally be smaller than `/BBox` and then 24 000 cells inside a 65 536 cap still cost 39 megapixels. Adds the ninth determinism fingerprint. Injection: paint-time-CTM anchoring is caught by **exactly two** assertions in 1 304, the fill one and the stroke one — and a cell spilling past its `/BBox` was caught by *nothing* until a fixture with a **rotated** `/Matrix` was written, because with an axis-aligned one the buffer is the box and the spill really is impossible | M |
 | 10 | [Mesh shadings](10-mesh-shadings.md) | Types 4–7 warn and skip | M |
 | 11 | [Transparency groups](11-transparency-groups.md) | ~~`/Group` and ExtGState `/SMask` are not read at all~~ **DONE**, see the plan's `As built`: `Canvas::composite` and the group/soft-mask `Device` events, `/Group` with isolation (11.4.4), knockout (11.4.5) and backdrop removal (11.4.7.2), and ExtGState `/SMask` in both kinds with `/BC` and a pre-sampled `/TR`. Both of this gap's failure modes render as plausible pictures, so each is pinned as a number against a control render differing in one key rather than as "it drew something". Two findings worth carrying: 11.4.7.2's backdrop removal is **exactly zero** for a group that painted opaquely, so a fixture with opaque contents cannot see it at all — found by deleting the removal step and watching nothing fail; and a non-isolated group's buffer has to carry *two* alphas, since with an opaque backdrop the group's own alpha divides out of the stored union and is unrecoverable. **Adds the eighth determinism fingerprint**, because no existing one had a group or a mask. `Canvas::composite(&mut self, src: &Canvas, at: (i32, i32), alpha: f64, mode: BlendMode, mask: Option<&Mask>, stop: Option<&dyn Fn() -> bool>)` — the signature gap 09 is blocked on | L |
 
@@ -91,7 +91,8 @@ over risk. Four constraints inside it are hard rather than advisory:
 
 - **11 before 09.** Tiling patterns need `Canvas::composite` and a rasterised
   tile. Without it the honest implementation is pathologically slow and the
-  fast one is wrong.
+  fast one is wrong. *Held: both are done, in that order, and 09 used the
+  primitive unchanged.*
 - **23 before 10 and 17.** Ruling 3 schedules deferred capabilities by
   corpus hit-rate. Building either on judgement is building against no
   evidence.

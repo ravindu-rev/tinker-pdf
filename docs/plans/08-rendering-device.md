@@ -230,17 +230,44 @@ painted shape's coverage. Mesh types 4–7 hit the capability path.
 ### Patterns
 
 Tiling patterns re-enter the interpreter with the pattern's content stream
-and resources — the same pipeline, one recursion level, budgeted. The
-pattern matrix anchors to the default space of the pattern's parent content
-stream, not to the CTM at paint time; getting this wrong is the classic
-tiling bug and gets a dedicated fixture. Two replay strategies, chosen per
-paint: when the composed matrix is axis-aligned and the steps land on device
-integers, the cell renders once to an offscreen bitmap and blits; otherwise
-the content replays per visible cell with a translated matrix. A cell-count
-budget guards adversarial tiny steps — over budget, the fill degrades to the
-cell's average color with a warning rather than looping for minutes.
+and resources — the same pipeline, budgeted. The pattern matrix anchors to
+the default space of the pattern's parent content stream, not to the CTM at
+paint time; getting this wrong is the classic tiling bug and gets a dedicated
+fixture.
+
+*Amended, August 2026, on building it (gap [09](gaps/09-tiling-patterns.md)).*
+Three things in the paragraph above were wrong or unaffordable:
+
+- **There is one replay strategy, not two.** The plan chose per paint:
+  offscreen-and-blit when the composed matrix is axis-aligned and the steps
+  land on device integers, per-cell replay otherwise. The second branch is not
+  affordable at all — every replayed cell needs its own bounding-box clip, and
+  a clip goes through `save_state`, which clones a page-sized mask. A 10 pt
+  hatch over A4 is roughly 4 800 cells and several gigabytes of memcpy. So the
+  cell is *always* rasterized once into a `/BBox`-sized buffer and composited
+  at each lattice position, with the position rounded to whole device pixels.
+  A rotated or non-integral lattice therefore carries up to half a pixel of
+  placement error per cell, which is the price of the only strategy that runs.
+  Two strategies would also have meant two sets of rounding, and a file that
+  crossed the threshold would have changed appearance for no reason a reader
+  could see.
+- **Over budget, nothing is painted.** The plan degrades to the cell's average
+  colour. That is a plausible picture of something the engine did not draw: a
+  flat wash where the file asked for a hatch reads as content, and nobody
+  reports it. An unpainted area reads as the gap it is (ruling 2), and the
+  warning names the pattern.
+- **The recursion budget is not shared with the form cap.** The plan says
+  "one recursion level" here and, under Text, that the budget is shared so
+  that "Type 3-in-pattern-in-Type 3 bombs hit one ceiling". A cell is run by a
+  *fresh* interpretation, so the interpreter's form-depth counter starts at
+  zero again and cannot see a pattern nesting inside a pattern at all. The
+  renderer threads its own depth through the tile request, and the number is
+  smaller than the form cap because pattern nesting multiplies by the lattice
+  count at every level where form nesting adds.
+
 Uncolored patterns (paint type 2) render the cell as coverage only and take
-the current fill color at paint time.
+the color of the slot whose `SCN` named the pattern — the *stroking* slot on a
+stroke, which is not the same thing as "the current fill color".
 
 ### Text
 

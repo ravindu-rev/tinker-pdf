@@ -182,3 +182,37 @@ paint-time-CTM anchoring as its silent failure mode, so the guarantee has a
 hole exactly where that document says the danger is until the assertion is
 re-run for tiling. [09](09-tiling-patterns.md) now carries that obligation as
 a dated amendment; it is not enough to leave it here.
+
+## Amendment — August 2026: the tiling half is closed
+
+[09](09-tiling-patterns.md) landed, and with it the two obligations this
+plan handed forward. Both were discharged as assertions rather than as
+wiring, because the wiring was already this plan's: `stroke_path` and the
+stroking half of `show_glyph` reach `fill_with_pattern`, so a tiling pattern
+began painting on strokes the day gap 09's cells did, with nothing new added
+to either call site.
+
+**Milestone 3's amendment.** `a_tiling_pattern_stroke_does_not_move_with_the_transform`
+is the twin of this plan's `a_stroked_pattern_does_not_move_with_the_transform`
+with a hatch in place of the gradient, and it is stronger in one way: it
+compares three renders rather than two, adding a *translated* CTM to the
+scaled one. A translation moves the lattice's phase without changing its
+scale, which is the failure this plan's risk table describes and the gradient
+case could not exhibit. Injecting `matrix.then(&state.ctm).then(&base)` into
+the tiling path fails **exactly two** tests in the workspace: that one and its
+fill twin.
+
+**Milestone 4's amendment.** The `scn` components this plan stored for the
+stroking slot had never been rendered by anything — a shading pattern supplies
+its own colour, so the slot's colour was dead data on both routes. A
+`PaintType 2` tiling pattern is the first thing that reads it.
+`an_uncoloured_pattern_stroke_takes_the_stroking_slots_colour` sets both slots
+to different colours and asserts the stroke takes the stroking one; handing it
+`fill_color(state)` instead fails that test and the `tiling` fingerprint and
+nothing else, because every other pattern assertion in the suite is satisfied
+by a cell that paints in *some* colour.
+
+The `alpha` parameter this plan added to `fill_with_pattern` gained a `color`
+parameter beside it, for the same reason and against the same mistake: 8.4.5
+gives painting two alphas, 8.7.3.3 gives it two colours, and only the caller
+knows which slot its operands went to.
