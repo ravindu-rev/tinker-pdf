@@ -403,6 +403,115 @@ fn a_decode_array_inverts_an_inline_jpeg() {
     );
 }
 
+/// A zlib stream of `size` zero bytes, in about `size / 20000` bytes.
+///
+/// Hand-built rather than compressed, because the point is to reach a ceiling
+/// measured in hundreds of megabytes without holding hundreds of megabytes to
+/// compress. One fixed-Huffman block (RFC 1951 3.2.6): a literal zero, then
+/// the maximum-length match repeated — thirteen bits of input for every 258
+/// bytes of output. Every output byte is zero, which makes the Adler-32 of the
+/// result `(n mod 65521) << 16 | 1` without materialising it.
+fn zlib_bomb(size: usize) -> Vec<u8> {
+    struct Bits {
+        out: Vec<u8>,
+        acc: u32,
+        n: u32,
+    }
+    impl Bits {
+        fn bit(&mut self, b: u32) {
+            self.acc |= b << self.n;
+            self.n += 1;
+            if self.n == 8 {
+                self.out.push(self.acc as u8);
+                self.acc = 0;
+                self.n = 0;
+            }
+        }
+        /// A header field, least significant bit first.
+        fn raw(&mut self, value: u32, bits: u32) {
+            for i in 0..bits {
+                self.bit((value >> i) & 1);
+            }
+        }
+        /// A Huffman code, most significant bit first.
+        fn code(&mut self, value: u32, bits: u32) {
+            for i in (0..bits).rev() {
+                self.bit((value >> i) & 1);
+            }
+        }
+    }
+
+    let matches = size.div_ceil(258);
+    let produced = 1 + matches * 258;
+    let mut bits = Bits {
+        out: Vec::new(),
+        acc: 0,
+        n: 0,
+    };
+    bits.raw(1, 1); // BFINAL
+    bits.raw(1, 2); // BTYPE 01, fixed Huffman
+    bits.code(0x30, 8); // literal 0x00
+    for _ in 0..matches {
+        bits.code(0xC5, 8); // length code 285: 258 bytes, no extra bits
+        bits.code(0, 5); // distance code 0: one byte back
+    }
+    bits.code(0, 7); // end of block
+    if bits.n > 0 {
+        bits.out.push(bits.acc as u8);
+    }
+
+    let mut out = vec![0x78, 0x9C];
+    out.extend_from_slice(&bits.out);
+    out.extend_from_slice(&((((produced % 65521) as u32) << 16) | 1).to_be_bytes());
+    out
+}
+
+/// Milestone 3. The inline path decodes under `limits::MAX_DECODED_STREAM`,
+/// the ceiling every other stream in the document decodes under, rather than
+/// under a private number half its size.
+///
+/// Both halves are needed and neither is enough alone. A stream that stops
+/// short of the shared ceiling must come back whole, or the ceiling is lower
+/// than it claims — that is the half a hardcoded `1 << 26` fails, and the
+/// three-quarter fraction is written as a fraction so it keeps catching any
+/// smaller private ceiling rather than one particular one. A stream that
+/// exceeds it must be capped and must say so, or there is no ceiling at all:
+/// an inline image sits inside a content stream, where nothing has vetted it
+/// and a page may carry as many as it likes.
+#[test]
+fn an_inline_image_decodes_under_the_shared_ceiling() {
+    let cap = tinker_pdf_cos::limits::MAX_DECODED_STREAM;
+    let capped = |bitmap: &tinker_pdf::Bitmap| {
+        bitmap.warnings.iter().any(|w| {
+            matches!(
+                w,
+                tinker_pdf::RenderWarning::DamagedImage { reason, .. }
+                    if reason == "output-cap-hit"
+            )
+        })
+    };
+
+    let under = render(page_with_inline(
+        "/W 2 /H 2 /CS /G /BPC 8 /F /Fl",
+        &zlib_bomb(cap / 4 * 3),
+    ));
+    assert!(
+        !capped(&under),
+        "three quarters of the shared ceiling is under it: {:?}",
+        under.warnings
+    );
+
+    let over = render(page_with_inline(
+        "/W 2 /H 2 /CS /G /BPC 8 /F /Fl",
+        &zlib_bomb(cap + 1024),
+    ));
+    assert!(
+        capped(&over),
+        "and past it the decode stops and says so: {:?}",
+        over.warnings
+    );
+}
+
 /// A filter name no build knows ends the chain, and is reported rather than
 /// sampled.
 #[test]

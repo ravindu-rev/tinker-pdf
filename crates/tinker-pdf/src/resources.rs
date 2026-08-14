@@ -1604,7 +1604,13 @@ impl PageResources {
             return Err(named(chain.len()));
         }
 
-        let limits = Limits::new(1 << 26);
+        // The ceiling every other stream in the document decodes under, not a
+        // second number that happens to be smaller. An inline image is
+        // attacker-controlled bytes inside a content stream, and a page may
+        // hold any number of them, so the bound here is a denial-of-service
+        // question rather than a tidiness one — and one that had drifted to
+        // half the shared value with nothing naming the relationship.
+        let limits = Limits::new(limits::MAX_DECODED_STREAM);
         let report = |warnings: Vec<FilterWarning>| {
             // Ruling 10: what the chain forgave is named, the same way the
             // XObject path names it. An inline image is one object's worth of
