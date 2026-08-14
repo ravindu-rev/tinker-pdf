@@ -102,6 +102,86 @@ fn hint_offset(bytes: &[u8]) -> u64 {
     digits.parse().expect("a number")
 }
 
+/// The offset the file's last line points at, which is the first-page
+/// cross-reference table (F.3.4).
+fn final_startxref(bytes: &[u8]) -> usize {
+    let tail_at = bytes.len().saturating_sub(64);
+    let tail = String::from_utf8_lossy(&bytes[tail_at..]).into_owned();
+    let at = tail.rfind("startxref\n").expect("a startxref");
+    tail[at + 10..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("a number")
+}
+
+/// Parses a classic cross-reference table straight out of the raw bytes.
+///
+/// Byte-level rather than through `from_utf8_lossy`, because a lossy decode
+/// of a file with ciphertext in it changes the byte count and every offset
+/// after that would be measured against the wrong string. It also means the
+/// parse is a genuine claim about the table being in the clear: 7.6.1 exempts
+/// both tables from encryption, and this function cannot succeed on a table
+/// that is not.
+///
+/// Returns the in-use entries only, as (object number, offset).
+fn classic_xref(bytes: &[u8], at: usize) -> Vec<(u32, u64)> {
+    let head = bytes.get(at..).unwrap_or_default();
+    assert!(
+        head.starts_with(b"xref\n"),
+        "a cross-reference table begins at {at}"
+    );
+    let rest = &head[5..];
+    let eol = rest
+        .iter()
+        .position(|b| *b == b'\n')
+        .expect("a subsection header line");
+    let header = std::str::from_utf8(&rest[..eol]).expect("the header is ASCII");
+    let mut parts = header.split(' ');
+    let start: u32 = parts
+        .next()
+        .and_then(|t| t.parse().ok())
+        .expect("a first object number");
+    let count: usize = parts
+        .next()
+        .and_then(|t| t.parse().ok())
+        .expect("an entry count");
+
+    let entries = &rest[eol + 1..];
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        // 7.5.4: exactly twenty bytes, and the field positions are fixed.
+        let entry = entries
+            .get(index * 20..index * 20 + 20)
+            .unwrap_or_else(|| panic!("entry {index} of {count} is missing"));
+        assert_eq!(entry[10], b' ', "entry {index}: {entry:?}");
+        assert_eq!(entry[16], b' ', "entry {index}: {entry:?}");
+        assert_eq!(entry[18], b' ', "entry {index}: {entry:?}");
+        assert!(
+            matches!(entry[17], b'n' | b'f'),
+            "entry {index} has no type: {entry:?}"
+        );
+        if entry[17] == b'f' {
+            continue;
+        }
+        let offset: u64 = std::str::from_utf8(&entry[..10])
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or_else(|| panic!("entry {index} has no offset: {entry:?}"));
+        out.push((start + index as u32, offset));
+    }
+    out
+}
+
+/// The trailer dictionary that follows a table, as text.
+fn trailer_after(bytes: &[u8], at: usize) -> String {
+    let head = bytes.get(at..).unwrap_or_default();
+    let found = find(head, b"trailer\n").expect("a trailer follows the table");
+    let end = find(&head[found..], b">>\n").expect("the trailer ends") + found + 2;
+    String::from_utf8_lossy(&head[found..end]).into_owned()
+}
+
 #[test]
 fn a_linearized_file_still_opens_and_reads() {
     let bytes = linearized(4);
@@ -356,6 +436,104 @@ fn a_linearized_encrypted_file_holds_no_plaintext_content() {
             "{shown} must be ciphertext in the encrypted layout"
         );
     }
+}
+
+// ---- What stays in the clear (7.6.1) ---------------------------------------
+
+/// The parameter dictionary is consulted *before* a reader authenticates, so
+/// it has to be legible without the password. 7.6.1 does not exempt it; what
+/// makes that sound is that it contains nothing encryption would touch, which
+/// `linearize.rs` asserts for itself.
+#[test]
+fn the_parameter_dictionary_is_readable_without_the_password() {
+    let bytes = encrypted_linearized(6);
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).into_owned();
+
+    assert!(head.starts_with("%PDF-"), "the header: {head}");
+    assert!(
+        head.contains("1 0 obj\n<< /Linearized 1"),
+        "then the parameter dictionary, immediately: {head}"
+    );
+
+    // Every field parses out of the raw bytes, with no key involved.
+    for key in ["L", "O", "E", "N", "T"] {
+        assert!(parameter(&bytes, key) > 0, "/{key} is legible and non-zero");
+    }
+    assert!(hint_offset(&bytes) > 0, "and so is /H");
+}
+
+/// Both tables stay clear because a reader finds them before it knows there
+/// is an `/Encrypt` dictionary to look for. `classic_xref` cannot parse a
+/// table that is not, so the parse is the assertion.
+#[test]
+fn both_cross_reference_tables_are_readable_without_the_password() {
+    let bytes = encrypted_linearized(6);
+
+    let front_at = final_startxref(&bytes);
+    let front = classic_xref(&bytes, front_at);
+    assert!(
+        front.len() >= 4,
+        "the first-page table carries its entries: {front:?}"
+    );
+
+    let main_at = parameter(&bytes, "T") as usize;
+    let main = classic_xref(&bytes, main_at);
+    assert!(
+        !main.is_empty(),
+        "and so does the main table: {main:?} at {main_at}"
+    );
+
+    // Their trailers are clear with them; a table a reader cannot follow to
+    // /Root and /Encrypt is no more use than an encrypted one.
+    let front_trailer = trailer_after(&bytes, front_at);
+    assert!(front_trailer.contains("/Root "), "{front_trailer}");
+    assert!(
+        front_trailer.contains("/Encrypt 3 0 R"),
+        "the first trailer names the encryption dictionary: {front_trailer}"
+    );
+    assert!(
+        front_trailer.contains("/Prev "),
+        "and chains to the main table: {front_trailer}"
+    );
+
+    let main_trailer = trailer_after(&bytes, main_at);
+    assert!(main_trailer.contains("/Root "), "{main_trailer}");
+    assert!(
+        main_trailer.contains("/Encrypt 3 0 R"),
+        "the main trailer names it too, for a reader that started at /T: {main_trailer}"
+    );
+}
+
+/// The `/Encrypt` dictionary is the one object that can never be encrypted,
+/// since a reader needs it before it can decrypt anything at all. It leads
+/// part 4, so a reader holding the front of the file already has it.
+#[test]
+fn the_encryption_dictionary_is_readable_without_the_password() {
+    let bytes = encrypted_linearized(6);
+
+    let at = find(&bytes, b"\n3 0 obj\n").expect("object 3 is in the file") + 1;
+    let end = find(&bytes[at..], b"\nendobj\n").expect("and it ends") + at;
+    let dict = String::from_utf8_lossy(&bytes[at..end]).into_owned();
+
+    for needle in [
+        "/Filter /Standard",
+        "/V 5",
+        "/R 6",
+        "/CFM /AESV3",
+        "/StmF /StdCF",
+        "/StrF /StdCF",
+        "/U <",
+        "/O <",
+        "/Perms <",
+    ] {
+        assert!(dict.contains(needle), "{needle} is in the clear: {dict}");
+    }
+
+    // And it is at the front, ahead of everything page one needs.
+    assert!(
+        (at as u64) < parameter(&bytes, "E"),
+        "the /Encrypt dictionary is inside the first /E bytes, at {at}"
+    );
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
