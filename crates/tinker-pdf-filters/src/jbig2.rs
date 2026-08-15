@@ -844,6 +844,7 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mq::encoder::MqEncoder;
 
     /// **ITU-T T.88 Annex H.1, "Datastream example" — the whole file, byte
     /// for byte.** Three pages, twenty-one segments, and the only JBIG2 in
@@ -1037,6 +1038,141 @@ mod tests {
             .iter()
             .map(|row| row[4..58].to_string())
             .collect()
+    }
+
+    /// A picture with something in it for every template to get wrong.
+    ///
+    /// Forty by twenty-four, and deliberately awkward: a diagonal, solid
+    /// blocks, two checkerboards at opposite phases, a run of identical rows
+    /// for typical prediction to collapse, and ink hard against both edges so
+    /// the out-of-region rule of 6.2.5.2 is doing work on every row rather
+    /// than only on the first.
+    #[rustfmt::skip]
+    const SPECIMEN: [&str; 24] = [
+        "........................................",
+        ".#......................................",
+        "..#.....................................",
+        "...#....................................",
+        "....#...................................",
+        ".....#..................................",
+        "......########..........................",
+        "......########..........................",
+        "......########..........................",
+        "..............#.........................",
+        "...............#........................",
+        "....#.#.#.#.#.#.#.#.#.#.................",
+        "...#.#.#.#.#.#.#.#.#.#.#................",
+        "........................................",
+        "........................................",
+        "..............................##########",
+        "..............................##########",
+        "#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.#.",
+        "########################################",
+        "........................................",
+        "...###...###...###...###...###...###....",
+        "..#...#.#...#.#...#.#...#.#...#.#...#...",
+        "...###...###...###...###...###...###....",
+        "........................................",
+    ];
+
+    /// AT positions nowhere near 6.2.5.3's nominal ones, and all causal —
+    /// above the current row, or to its left on it — so a round-trip is
+    /// legal.
+    ///
+    /// Distance from the nominal set is the point. A decoder that read the
+    /// AT bytes but ignored them, or never read them at all, forms different
+    /// contexts from the encoder here and the picture does not come back.
+    const CUSTOM_AT: [(i8, i8); 4] = [(-5, 0), (4, -1), (-4, -2), (5, -2)];
+
+    fn bitmap_from(rows: &[&str]) -> Bitmap {
+        let height = rows.len() as u32;
+        let width = rows.first().map_or(0, |row| row.len()) as u32;
+        let mut bitmap = Bitmap::new(width, height, 1 << 20).expect("a test picture fits");
+        for (y, row) in rows.iter().enumerate() {
+            for (x, cell) in row.chars().enumerate() {
+                bitmap.set(x as u32, y as u32, u32::from(cell == '#'));
+            }
+        }
+        bitmap
+    }
+
+    fn rows_identical(bitmap: &Bitmap, a: u32, b: u32) -> bool {
+        (0..bitmap.width).all(|x| bitmap.get(x as i32, a as i32) == bitmap.get(x as i32, b as i32))
+    }
+
+    /// The exact inverse of [`decode_arithmetic`], through the encoder Annex
+    /// H.2 pins.
+    ///
+    /// Contexts come off the *source* rather than off a partially rebuilt
+    /// bitmap, which is the same thing: every template reads only pixels
+    /// above the current row or left of it on it, so by the time a decoder
+    /// forms a context it holds exactly these values.
+    fn encode_arithmetic(
+        source: &Bitmap,
+        template: u8,
+        tpgdon: bool,
+        at: &[(i8, i8); 4],
+    ) -> Vec<u8> {
+        let mut encoder = MqEncoder::new(1 << template_bits(template));
+        let mut ltp = 0u8;
+        for y in 0..source.height {
+            if tpgdon {
+                let typical = y > 0 && rows_identical(source, y - 1, y);
+                let sltp = u8::from(typical != (ltp == 1));
+                encoder.encode_at(tpgdon_context(template), sltp);
+                ltp ^= sltp;
+                if ltp == 1 {
+                    continue;
+                }
+            }
+            for x in 0..source.width {
+                let cx = context(source, template, at, x as i32, y as i32);
+                encoder.encode_at(cx, source.get(x as i32, y as i32) as u8);
+            }
+        }
+        encoder.flush()
+    }
+
+    /// A one-page embedded stream carrying one generic region at the origin.
+    fn generic_region_stream(
+        rows: &[&str],
+        template: u8,
+        tpgdon: bool,
+        at: [(i8, i8); 4],
+    ) -> Vec<u8> {
+        let source = bitmap_from(rows);
+        let mut data = Vec::new();
+        // 7.4.1, the region segment information field.
+        data.extend_from_slice(&source.width.to_be_bytes());
+        data.extend_from_slice(&source.height.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.push(0); // OR
+                      // 7.4.6.2, the generic region flags.
+        data.push((u8::from(tpgdon) << 3) | (template << 1));
+        for (dx, dy) in at.iter().take(if template == 0 { 4 } else { 1 }) {
+            data.push(*dx as u8);
+            data.push(*dy as u8);
+        }
+        data.extend(encode_arithmetic(&source, template, tpgdon, &at));
+
+        let info = page_info(source.width, source.height, 0);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &info);
+        stream.extend(header(1, kind::IMMEDIATE_GENERIC_REGION, 1, &data));
+        stream
+    }
+
+    fn round_trip(rows: &[&str], template: u8, tpgdon: bool, at: [(i8, i8); 4]) -> Vec<String> {
+        let stream = generic_region_stream(rows, template, tpgdon, at);
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: rows.first().map_or(0, |row| row.len()) as u32,
+            height: rows.len() as u32,
+        };
+        let bits = decode(&stream, &params, 1 << 20, &mut warnings).expect("a region was decoded");
+        assert!(warnings.is_empty(), "a clean stream warned: {warnings:?}");
+        picture(&bits, params.width, params.height)
     }
 
     /// A segment header (T.88 7.2) in its short form: no referred-to
@@ -1435,52 +1571,180 @@ mod tests {
         }
     }
 
-    /// T.88 Figure 8's numbering, transcribed pixel by pixel.
+    /// T.88 Figures 8 to 11, transcribed pixel by pixel, for all four
+    /// templates.
     ///
     /// **No datastream can replace this test, and finding that out is the
     /// reason it is written this way.** Relabelling the context bits is a
     /// bijection on the context array; every state starts identical, so an
     /// encoder's slot histories and a decoder's stay in step under any
-    /// permutation. Transposing bits 0 and 1 was injected here and Annex H.1
-    /// still decoded to its published picture, byte for byte. Only this
-    /// assertion moved.
+    /// permutation. Transposing bits 0 and 1 was injected here: Annex H.1
+    /// still decoded to its published picture byte for byte, and every
+    /// round-trip below still passed. Only this assertion moved.
     ///
     /// That does not make the order cosmetic, because 6.2.5.7's
     /// pseudo-context is a *literal* slot number. Once TPGDON is on, the SLTP
     /// decision shares the array with whichever neighbourhood the numbering
-    /// puts at `0x9B25` — so the numbering stops being a free choice and
+    /// puts at `0x9B25` -- so the numbering stops being a free choice and
     /// becomes part of what the encoder agreed to.
+    ///
+    /// It pins two things a permutation cannot hide as well: *which* pixels a
+    /// template reads at all, and how many bits it forms. Either of those
+    /// wrong destroys any picture at all.
     #[test]
-    fn template_0_context_bits_match_the_figure() {
-        let at = NOMINAL_AT[0];
-        // (dx, dy) of the neighbour, and the bit T.88 Figure 8 puts it in.
-        let places = [
-            ((-1, 0), 0),
-            ((-2, 0), 1),
-            ((-3, 0), 2),
-            ((-4, 0), 3),
-            ((3, -1), 4), // A1
-            ((2, -1), 5),
-            ((1, -1), 6),
-            ((0, -1), 7),
-            ((-1, -1), 8),
-            ((-2, -1), 9),
-            ((-3, -1), 10), // A2
-            ((2, -2), 11),  // A3
-            ((1, -2), 12),
-            ((0, -2), 13),
-            ((-1, -2), 14),
-            ((-2, -2), 15), // A4
+    fn template_context_bits_match_the_figures() {
+        // (dx, dy) of the neighbour, and the bit the figure puts it in. The
+        // AT entries sit at their nominal positions, which is where the
+        // figures draw them.
+        let figures: [&[((i32, i32), u32)]; 4] = [
+            &[
+                ((-1, 0), 0),
+                ((-2, 0), 1),
+                ((-3, 0), 2),
+                ((-4, 0), 3),
+                ((3, -1), 4), // A1
+                ((2, -1), 5),
+                ((1, -1), 6),
+                ((0, -1), 7),
+                ((-1, -1), 8),
+                ((-2, -1), 9),
+                ((-3, -1), 10), // A2
+                ((2, -2), 11),  // A3
+                ((1, -2), 12),
+                ((0, -2), 13),
+                ((-1, -2), 14),
+                ((-2, -2), 15), // A4
+            ],
+            &[
+                ((-1, 0), 0),
+                ((-2, 0), 1),
+                ((-3, 0), 2),
+                ((3, -1), 3), // A1
+                ((2, -1), 4),
+                ((1, -1), 5),
+                ((0, -1), 6),
+                ((-1, -1), 7),
+                ((-2, -1), 8),
+                ((2, -2), 9),
+                ((1, -2), 10),
+                ((0, -2), 11),
+                ((-1, -2), 12),
+            ],
+            &[
+                ((-1, 0), 0),
+                ((-2, 0), 1),
+                ((2, -1), 2), // A1
+                ((1, -1), 3),
+                ((0, -1), 4),
+                ((-1, -1), 5),
+                ((-2, -1), 6),
+                ((1, -2), 7),
+                ((0, -2), 8),
+                ((-1, -2), 9),
+            ],
+            &[
+                ((-1, 0), 0),
+                ((-2, 0), 1),
+                ((-3, 0), 2),
+                ((-4, 0), 3),
+                ((2, -1), 4), // A1
+                ((1, -1), 5),
+                ((0, -1), 6),
+                ((-1, -1), 7),
+                ((-2, -1), 8),
+                ((-3, -1), 9),
+            ],
         ];
-        for ((dx, dy), bit) in places {
-            let mut bitmap = Bitmap::new(16, 16, 1 << 10).expect("small");
-            bitmap.set((8 + dx) as u32, (8 + dy) as u32, 1);
+
+        for (template, places) in figures.iter().enumerate() {
+            let template = template as u8;
+            let at = NOMINAL_AT[template as usize];
             assert_eq!(
-                context(&bitmap, 0, &at, 8, 8),
-                1 << bit,
-                "the pixel at ({dx}, {dy}) belongs in bit {bit}"
+                places.len(),
+                template_bits(template),
+                "template {template} forms {} context bits and its figure                  names {} pixels; one of the two is wrong",
+                template_bits(template),
+                places.len()
+            );
+            for ((dx, dy), bit) in places.iter().copied() {
+                let mut bitmap = Bitmap::new(16, 16, 1 << 10).expect("small");
+                bitmap.set((8 + dx) as u32, (8 + dy) as u32, 1);
+                assert_eq!(
+                    context(&bitmap, template, &at, 8, 8),
+                    1 << bit,
+                    "template {template}: the pixel at ({dx}, {dy}) belongs                      in bit {bit}"
+                );
+            }
+        }
+    }
+
+    /// **The milestone.** Every template puts a hand-built picture back
+    /// exactly as it went in, through the encoder Annex H.2 pins.
+    #[test]
+    fn every_template_round_trips_a_hand_built_region() {
+        for template in 0..4u8 {
+            assert_eq!(
+                round_trip(&SPECIMEN, template, false, NOMINAL_AT[template as usize]),
+                SPECIMEN,
+                "template {template} did not survive a round-trip"
             );
         }
+    }
+
+    /// The same four with typical prediction on.
+    ///
+    /// [`SPECIMEN`] carries three runs of identical rows, so LTP toggles on
+    /// and off several times rather than staying where it started. A decoder
+    /// that read the SLTP bit and never acted on it, or acted on it once,
+    /// gets a different picture rather than a slightly wrong one.
+    #[test]
+    fn every_template_round_trips_with_typical_prediction_on() {
+        for template in 0..4u8 {
+            assert_eq!(
+                round_trip(&SPECIMEN, template, true, NOMINAL_AT[template as usize]),
+                SPECIMEN,
+                "template {template} did not survive TPGDON"
+            );
+        }
+    }
+
+    /// The AT pixels the segment names, rather than the ones 6.2.5.3
+    /// nominates.
+    ///
+    /// This is the assertion that catches an AT pixel left at its default
+    /// when the header said otherwise. The encoder used [`CUSTOM_AT`]; a
+    /// decoder that fell back to [`NOMINAL_AT`], or read the pairs and threw
+    /// them away, forms a different context for every pixel of every row and
+    /// the picture does not come back at all.
+    #[test]
+    fn every_template_round_trips_with_the_at_pixels_the_segment_names() {
+        for template in 0..4u8 {
+            for tpgdon in [false, true] {
+                assert_eq!(
+                    round_trip(&SPECIMEN, template, tpgdon, CUSTOM_AT),
+                    SPECIMEN,
+                    "template {template} ignored its AT pixels (TPGDON {tpgdon})"
+                );
+            }
+        }
+    }
+
+    /// A region one row tall, and one a single column wide.
+    ///
+    /// Every template reads two rows up and as many as four columns either
+    /// side, so almost every context here is 6.2.5.2's outside-the-region
+    /// rule rather than real pixels. A one-column region is also what the
+    /// last stripe of a striped page can degenerate to.
+    #[test]
+    fn a_region_at_the_edge_of_its_own_dimensions_round_trips() {
+        assert_eq!(
+            round_trip(&["#.#.#.#."], 0, false, NOMINAL_AT[0]),
+            ["#.#.#.#."]
+        );
+        assert_eq!(
+            round_trip(&["#", ".", "#", "#", "."], 2, true, NOMINAL_AT[2]),
+            ["#", ".", "#", "#", "."]
+        );
     }
 
     #[test]

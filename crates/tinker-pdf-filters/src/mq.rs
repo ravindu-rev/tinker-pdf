@@ -336,8 +336,157 @@ impl<'a> MqDecoder<'a> {
     }
 }
 
+/// The MQ *encoder* (T.88 E.3.7 and E.3.8), for tests only.
+///
+/// Nothing ships this: the engine reads PDFs, it does not write JBIG2. It
+/// exists so a generic-region test can put a picture in and demand the same
+/// picture back, which is the only way to exercise a template against a
+/// bitmap the standard does not happen to publish.
+///
+/// **It is pinned against published data itself**, in
+/// [`tests::annex_h2_re_encodes_to_the_published_bytes`]: Annex H.2's 256
+/// decisions encode to Annex H.2's thirty bytes. Without that, a round-trip
+/// would only prove the two halves of one misunderstanding agree.
+#[cfg(test)]
+pub(crate) mod encoder {
+    use super::QE;
+
+    pub(crate) struct MqEncoder {
+        /// The output, with one scratch byte in front. E.3.8's `INITENC`
+        /// leaves `BP` pointing one byte *before* the first it will write,
+        /// and `BYTEOUT` reads that byte to decide whether to stuff — so the
+        /// slot has to exist. It is dropped by [`MqEncoder::flush`].
+        out: Vec<u8>,
+        bp: usize,
+        a: u32,
+        c: u32,
+        ct: i32,
+        /// `(index, mps)` per context, the same state the decoder keeps.
+        states: Vec<(u8, u8)>,
+    }
+
+    impl MqEncoder {
+        /// `INITENC` (T.88 E.3.8).
+        pub(crate) fn new(contexts: usize) -> MqEncoder {
+            MqEncoder {
+                out: vec![0],
+                bp: 0,
+                a: 0x8000,
+                c: 0,
+                ct: 12,
+                states: vec![(0, 0); contexts.max(1)],
+            }
+        }
+
+        /// `BYTEOUT` (T.88 E.3.8), including the carry that propagates into
+        /// the byte already written and the 0xFF stuffing that keeps a marker
+        /// from appearing by accident.
+        fn byte_out(&mut self) {
+            if self.out[self.bp] == 0xFF {
+                self.push(self.c >> 20);
+                self.c &= 0x000F_FFFF;
+                self.ct = 7;
+            } else if self.c < 0x0800_0000 {
+                self.push(self.c >> 19);
+                self.c &= 0x0007_FFFF;
+                self.ct = 8;
+            } else {
+                self.out[self.bp] = self.out[self.bp].wrapping_add(1);
+                if self.out[self.bp] == 0xFF {
+                    self.c &= 0x07FF_FFFF;
+                    self.push(self.c >> 20);
+                    self.c &= 0x000F_FFFF;
+                    self.ct = 7;
+                } else {
+                    self.push(self.c >> 19);
+                    self.c &= 0x0007_FFFF;
+                    self.ct = 8;
+                }
+            }
+        }
+
+        fn push(&mut self, byte: u32) {
+            self.out.push(byte as u8);
+            self.bp += 1;
+        }
+
+        /// `RENORME` (T.88 E.3.8).
+        fn renorm(&mut self) {
+            loop {
+                self.a <<= 1;
+                self.c <<= 1;
+                self.ct -= 1;
+                if self.ct == 0 {
+                    self.byte_out();
+                }
+                if self.a & 0x8000 != 0 {
+                    return;
+                }
+            }
+        }
+
+        /// `ENCODE` (T.88 E.3.7): one decision against one context.
+        pub(crate) fn encode_at(&mut self, index: usize, decision: u8) {
+            let Some(&(state, mps)) = self.states.get(index) else {
+                return;
+            };
+            let row = QE[state as usize];
+            let qe = u32::from(row.qe);
+            self.a -= qe;
+            if decision == mps {
+                // CODEMPS.
+                if self.a & 0x8000 == 0 {
+                    if self.a < qe {
+                        self.a = qe;
+                    } else {
+                        self.c = self.c.wrapping_add(qe);
+                    }
+                    self.states[index].0 = row.nmps;
+                    self.renorm();
+                } else {
+                    self.c = self.c.wrapping_add(qe);
+                }
+            } else {
+                // CODELPS.
+                if self.a < qe {
+                    self.c = self.c.wrapping_add(qe);
+                } else {
+                    self.a = qe;
+                }
+                if row.switch {
+                    self.states[index].1 = 1 - mps;
+                }
+                self.states[index].0 = row.nlps;
+                self.renorm();
+            }
+        }
+
+        /// `FLUSH` (T.88 E.3.8), which ends every arithmetically coded
+        /// segment in Annex H.1 with the same `FF AC` this produces.
+        pub(crate) fn flush(mut self) -> Vec<u8> {
+            // SETBITS.
+            let temp = self.c.wrapping_add(self.a);
+            self.c |= 0xFFFF;
+            if self.c >= temp {
+                self.c -= 0x8000;
+            }
+            self.c <<= self.ct;
+            self.byte_out();
+            self.c <<= self.ct;
+            self.byte_out();
+            if self.out[self.bp] != 0xFF {
+                self.push(0xFF);
+            }
+            self.out.push(0xAC);
+            self.out.remove(0);
+            self.out
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::encoder::MqEncoder;
     use super::*;
 
     /// ITU-T T.88 Annex H.2, "Test sequence for arithmetic coder" — the
@@ -394,6 +543,28 @@ mod tests {
             out[bit / 8] |= d << (7 - (bit % 8));
         }
         assert_eq!(out, H2_DECODED);
+    }
+
+    /// The encoder, against the same published data, from the other side.
+    ///
+    /// This is what stops a generic-region round-trip from being circular.
+    /// An encoder written to match a wrong decoder would round-trip
+    /// perfectly and reproduce nothing; these thirty bytes are the standard's
+    /// and they leave it nowhere to hide — the carry propagation, the 0xFF
+    /// stuffing and `FLUSH`'s trailing `FF AC` are all in them.
+    #[test]
+    fn annex_h2_re_encodes_to_the_published_bytes() {
+        let mut encoder = MqEncoder::new(1);
+        for bit in 0..256usize {
+            let d = (H2_DECODED[bit / 8] >> (7 - (bit % 8))) & 1;
+            encoder.encode_at(0, d);
+        }
+        assert_eq!(
+            encoder.flush(),
+            H2_ENCODED.to_vec(),
+            "T.88 Annex H.2 did not re-encode; the test encoder is not the \
+             standard's and no round-trip built on it means anything"
+        );
     }
 
     /// Every NMPS and NLPS names a row that exists, and the three rows with
