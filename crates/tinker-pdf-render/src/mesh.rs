@@ -1114,6 +1114,69 @@ mod tests {
         }
     }
 
+    /// A Coons patch's implied interior follows 8.7.4.5.7's formula rather
+    /// than any plausible interpolation of the corners.
+    ///
+    /// The flat case above cannot tell the two apart, and injection proved it:
+    /// replacing the formula with a bilinear blend of the four corners moved
+    /// nothing in the whole workspace except the determinism fingerprint,
+    /// because a flat patch's interior is the flat grid under either rule.
+    /// What separates them is a **bowed boundary**, whose curvature the
+    /// formula carries into the interior and a corner blend cannot see.
+    ///
+    /// Here the `v = 0` edge is bowed nine units below its two corners. The
+    /// four interior points then land at `y = 4` and `y = 17` where the flat
+    /// grid would put them at 10 and 20 — the numbers are the formula's,
+    /// worked through by hand, so this pins the coefficients rather than
+    /// merely the fact that something moved.
+    #[test]
+    fn a_bowed_coons_edge_moves_the_implied_interior() {
+        let points: [(f64, f64); 16] = [
+            (0.0, 0.0),   // p00
+            (0.0, 10.0),  // p01
+            (0.0, 20.0),  // p02
+            (0.0, 30.0),  // p03
+            (10.0, 30.0), // p13
+            (20.0, 30.0), // p23
+            (30.0, 30.0), // p33
+            (30.0, 20.0), // p32
+            (30.0, 10.0), // p31
+            (30.0, 0.0),  // p30
+            (20.0, -9.0), // p20, bowed
+            (10.0, -9.0), // p10, bowed
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+        ];
+        let net = tensor_net(&points, false);
+        for (u, v, want) in [
+            (1usize, 1usize, (10.0, 4.0)),
+            (1, 2, (10.0, 17.0)),
+            (2, 1, (20.0, 4.0)),
+            (2, 2, (20.0, 17.0)),
+        ] {
+            let got = net[u][v];
+            assert!(
+                (got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9,
+                "p{u}{v} is {got:?}, not 8.7.4.5.7's {want:?}"
+            );
+        }
+
+        // And a tensor patch of the same boundary takes the four points the
+        // stream gave instead, untouched.
+        let mut tensor_points = points;
+        tensor_points[12] = (7.0, 3.0);
+        tensor_points[13] = (8.0, 21.0);
+        tensor_points[14] = (23.0, 22.0);
+        tensor_points[15] = (24.0, 5.0);
+        let net = tensor_net(&tensor_points, true);
+        assert_eq!(net[1][1], (7.0, 3.0));
+        assert_eq!(net[1][2], (8.0, 21.0));
+        assert_eq!(net[2][2], (23.0, 22.0));
+        assert_eq!(net[2][1], (24.0, 5.0));
+    }
+
     /// The subdivision count is a step function of a fixed-point measure, and
     /// it is the same number however the measure was arrived at.
     #[test]

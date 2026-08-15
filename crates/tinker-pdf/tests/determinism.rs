@@ -878,6 +878,264 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// Packs values of a fixed bit width, most significant bit first — the layout
+/// 8.7.4.5.5 gives a mesh shading's vertex stream.
+struct Packed {
+    data: Vec<u8>,
+    bit: u32,
+}
+
+impl Packed {
+    fn new() -> Packed {
+        Packed {
+            data: Vec::new(),
+            bit: 0,
+        }
+    }
+
+    fn push(&mut self, value: u64, bits: u32) -> &mut Packed {
+        for index in (0..bits).rev() {
+            if self.bit == 0 {
+                self.data.push(0);
+            }
+            if let Some(byte) = self.data.last_mut() {
+                *byte |= (((value >> index) & 1) as u8) << (7 - self.bit);
+            }
+            self.bit = (self.bit + 1) % 8;
+        }
+        self
+    }
+
+    /// A fraction of the way through a `/Decode` range, at the given width.
+    fn ratio(&mut self, value: f64, bits: u32) -> &mut Packed {
+        let top = ((1u64 << bits) - 1) as f64;
+        self.push((value.clamp(0.0, 1.0) * top).round() as u64, bits)
+    }
+
+    /// 8.7.4.5.5 pads each vertex of a type 4 stream to a byte boundary, and
+    /// 8.7.4.5.7 each patch of a type 6 or 7 one.
+    fn align(&mut self) -> &mut Packed {
+        self.bit = 0;
+        self
+    }
+}
+
+/// The four mesh streams of [`mesh_page`], as `ASCIIHexDecode` text.
+///
+/// Each is a different corner of 8.7.4.5.5 to 8.7.4.5.8, and between them they
+/// use every packed width class the spec allows: one that is a whole byte, one
+/// that is two, one that is neither (12 bits), and flag widths of 8, 4 and 2.
+struct MeshStreams {
+    free_form: String,
+    lattice: String,
+    coons: String,
+    tensor: String,
+}
+
+fn mesh_streams() -> MeshStreams {
+    // Type 4, 16-bit coordinates, three `/DeviceRGB` components, and all three
+    // edge flags. A fan: the first triangle by flag 0, then two continuations
+    // by flag 2, which keep the *first* and third vertices and so sweep round
+    // a shared corner, and finally one by flag 1, which keeps the second and
+    // third and lands a triangle overlapping the fan. The fan covers its band
+    // exactly; the overlap is there so the non-zero accumulation has somewhere
+    // to reach a winding of two.
+    let mut free_form = Packed::new();
+    let vertices: [(u64, f64, f64, [f64; 3]); 6] = [
+        (0, 0.0, 0.0, [0.90, 0.15, 0.10]),
+        (0, 40.0, 0.0, [0.15, 0.85, 0.25]),
+        (0, 40.0, 40.0, [0.20, 0.30, 0.95]),
+        (2, 40.0, 80.0, [0.95, 0.85, 0.15]),
+        (2, 0.0, 80.0, [0.10, 0.55, 0.60]),
+        (1, 20.0, 60.0, [0.55, 0.10, 0.70]),
+    ];
+    for (flag, x, y, rgb) in vertices {
+        free_form.push(flag, 8);
+        free_form.ratio(x / 120.0, 16).ratio(y / 80.0, 16);
+        for component in rgb {
+            free_form.ratio(component, 8);
+        }
+        free_form.align();
+    }
+
+    // Type 5: no flags at all, 16-bit *components* through a `/Function`, so
+    // each vertex carries one parametric value rather than a colour. The
+    // interior row is deliberately off the grid, so the cells are not
+    // rectangles and the barycentric weights are not axis-aligned.
+    let mut lattice = Packed::new();
+    let rows: [[(f64, f64); 4]; 3] = [
+        [(40.0, 0.0), (53.0, 0.0), (67.0, 0.0), (80.0, 0.0)],
+        [(40.0, 40.0), (56.0, 33.0), (64.0, 46.0), (80.0, 40.0)],
+        [(40.0, 80.0), (53.0, 80.0), (67.0, 80.0), (80.0, 80.0)],
+    ];
+    for (row, columns) in rows.iter().enumerate() {
+        for (column, (x, y)) in columns.iter().enumerate() {
+            // Neither linear nor periodic across the lattice: a linear ramp is
+            // reproduced by almost any wrong interpolation, which is what gap
+            // 12 found the hard way in the image fixture.
+            let t = ((column * 5 + row * 7) % 11) as f64 / 10.0;
+            lattice.ratio(x / 120.0, 8).ratio(y / 80.0, 8).ratio(t, 16);
+        }
+    }
+
+    // Type 6: a Coons patch with two bowed edges, in a `/Separation` whose
+    // tint transform is cubic — so the colour at the middle of the patch is
+    // 87 per cent of the way to one end rather than halfway, and interpolating
+    // in RGB instead moves it a long way. Four-bit flags.
+    let mut coons = Packed::new();
+    coons.push(0, 4);
+    let patch: [(f64, f64); 12] = [
+        (80.0, 0.0),
+        (76.0, 30.0),
+        (84.0, 54.0),
+        (80.0, 80.0),
+        (93.0, 66.0),
+        (107.0, 90.0),
+        (120.0, 80.0),
+        (116.0, 52.0),
+        (124.0, 26.0),
+        (120.0, 0.0),
+        (107.0, 14.0),
+        (93.0, -10.0),
+    ];
+    for (x, y) in patch {
+        coons.ratio(x / 120.0, 8).ratio(y / 80.0, 8);
+    }
+    for tint in [0.05, 0.95, 0.40, 0.70] {
+        coons.ratio(tint, 8);
+    }
+    coons.align();
+
+    // Type 7: a tensor patch whose four internal control points are dragged
+    // well off the flat grid, in `/DeviceCMYK` — four components — at twelve
+    // bits per coordinate, which is the width class that is not a whole number
+    // of bytes, with four-bit components and two-bit flags.
+    let mut tensor = Packed::new();
+    tensor.push(0, 2);
+    let boundary: [(f64, f64); 12] = [
+        (4.0, 4.0),
+        (0.0, 28.0),
+        (8.0, 52.0),
+        (4.0, 76.0),
+        (42.0, 80.0),
+        (78.0, 72.0),
+        (116.0, 76.0),
+        (120.0, 52.0),
+        (112.0, 28.0),
+        (116.0, 4.0),
+        (78.0, 8.0),
+        (42.0, 0.0),
+    ];
+    let interior: [(f64, f64); 4] = [(20.0, 60.0), (36.0, 18.0), (96.0, 62.0), (88.0, 12.0)];
+    for (x, y) in boundary.into_iter().chain(interior) {
+        tensor.ratio(x / 120.0, 12).ratio(y / 80.0, 12);
+    }
+    for cmyk in [
+        [0.10, 0.80, 0.90, 0.00],
+        [0.90, 0.20, 0.10, 0.10],
+        [0.20, 0.10, 0.85, 0.05],
+        [0.75, 0.70, 0.00, 0.20],
+    ] {
+        for component in cmyk {
+            tensor.ratio(component, 4);
+        }
+    }
+    tensor.align();
+
+    MeshStreams {
+        free_form: hex(&free_form.data),
+        lattice: hex(&lattice.data),
+        coons: hex(&coons.data),
+        tensor: hex(&tensor.data),
+    }
+}
+
+/// Mesh shadings: all four types, on one page (8.7.4.5.5 to 8.7.4.5.8).
+///
+/// *Added August 2026, with gap 10.* Not one of the ten fixtures above draws a
+/// mesh — the types were a capability gate until this gap — so every one of
+/// them renders identically on a build that has never heard of a Gouraud
+/// triangle. This file's own documentation names that failure: a fingerprint
+/// is not evidence about a path no fixture reaches.
+///
+/// Seven things here are in no other fixture, and each is a different branch:
+///
+/// - a **type 4** free-form strip carrying all three edge flags, so the
+///   continuation rule of 8.7.4.5.5 is in the hash rather than only the
+///   vertices — a flag read as the other one still draws a mesh, hinged
+///   elsewhere;
+/// - a **type 5** lattice through a `/Function`, so the parametric form and
+///   the direct-component form are both covered, with an interior row off the
+///   grid so no cell is a rectangle;
+/// - a **type 6** Coons patch with bowed boundaries, in a `/Separation` whose
+///   tint transform is **cubic** — which is what makes this fixture able to
+///   see colour interpolated in RGB instead of in the shading's own space. A
+///   linear space could not: the two orders agree everywhere on a straight
+///   line, which is the trap gap 12 recorded for the image fixture;
+/// - a **type 7** tensor patch whose four internal control points are dragged
+///   off the flat grid, so a build that recomputed them by 8.7.4.5.7's Coons
+///   formula would move;
+/// - the **subdivision count**, which is chosen from the device transform, so
+///   the patch grid is in these bytes and a step count that came out one
+///   different on another target would show here and nowhere else;
+/// - a **shading pattern over a mesh**, filling a path under a rotated
+///   `/Matrix`, which is the route an Illustrator gradient mesh actually takes
+///   into a file;
+/// - every packed width class the spec allows: 16 bits per coordinate, 12 bits
+///   (which is not a whole number of bytes), 16 bits per component, 4 bits per
+///   component, and flag widths of 8, 4 and 2.
+fn mesh_page() -> Vec<u8> {
+    let streams = mesh_streams();
+    let content = "q 0 0 40 80 re W n /Sh4 sh Q\n\
+                   q 40 0 40 80 re W n /Sh5 sh Q\n\
+                   q 80 0 40 80 re W n /Sh6 sh Q\n\
+                   /Pattern cs /P0 scn\n\
+                   q 1.1 0 0 1.1 2 2 cm\n\
+                   14 10 m 88 18 l 80 58 l 26 54 l h f\n\
+                   Q";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /Shading << /Sh4 5 0 R /Sh5 6 0 R /Sh6 7 0 R >>\n\
+                 /Pattern << /P0 8 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16\n\
+   /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 120 0 80 0 1 0 1 0 1]\n\
+   /Filter /ASCIIHexDecode /Length {} >>\nstream\n{}\nendstream\nendobj\n\
+6 0 obj\n<< /ShadingType 5 /ColorSpace /DeviceRGB /VerticesPerRow 4\n\
+   /BitsPerCoordinate 8 /BitsPerComponent 16 /Decode [0 120 0 80 0 1]\n\
+   /Function << /FunctionType 2 /Domain [0 1] /C0 [0.05 0.20 0.50]\n\
+                /C1 [0.95 0.60 0.10] /N 2 >>\n\
+   /Filter /ASCIIHexDecode /Length {} >>\nstream\n{}\nendstream\nendobj\n\
+7 0 obj\n<< /ShadingType 6 /BitsPerCoordinate 8 /BitsPerComponent 8\n\
+   /BitsPerFlag 4 /Decode [0 120 0 80 0 1]\n\
+   /ColorSpace [/Separation /Ink /DeviceRGB\n\
+     << /FunctionType 2 /Domain [0 1] /C0 [0.95 0.90 0.80]\n\
+        /C1 [0.10 0.15 0.45] /N 3 >>]\n\
+   /Filter /ASCIIHexDecode /Length {} >>\nstream\n{}\nendstream\nendobj\n\
+8 0 obj\n<< /PatternType 2 /Matrix [0.866 0.5 -0.5 0.866 24 -14]\n\
+   /Shading 9 0 R >>\nendobj\n\
+9 0 obj\n<< /ShadingType 7 /ColorSpace /DeviceCMYK /BitsPerCoordinate 12\n\
+   /BitsPerComponent 4 /BitsPerFlag 2\n\
+   /Decode [0 120 0 80 0 1 0 1 0 1 0 1]\n\
+   /Filter /ASCIIHexDecode /Length {} >>\nstream\n{}\nendstream\nendobj\n\
+trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        streams.free_form.len(),
+        streams.free_form,
+        streams.lattice.len(),
+        streams.lattice,
+        streams.coons.len(),
+        streams.coons,
+        streams.tensor.len(),
+        streams.tensor,
+    )
+    .into_bytes()
+}
+
 fn page_with(content: &str, width: f64, height: f64) -> Vec<u8> {
     format!(
         "%PDF-1.7\n\
@@ -977,6 +1235,17 @@ const GOLDEN: &[Fixture] = &[
         build: jbig2_page,
         least_ink: 900,
     },
+    // 9 311 today, of 9 600: the three `sh` bands cover the page between them
+    // and only the bowed edges of the Coons patch leave any white. The floor
+    // guards the failure a hash cannot describe -- one of the four types
+    // silently painting nothing, which takes a whole third of the page out and
+    // lands well under it. The opposite failure, a mesh spilling past the clip
+    // its `sh` was given, *adds* ink and is the hash's to catch.
+    Fixture {
+        name: "mesh",
+        build: mesh_page,
+        least_ink: 4600,
+    },
 ];
 
 #[test]
@@ -1054,6 +1323,18 @@ fn rendering_is_stable_across_targets() {
         (
             "jbig2",
             "cd20bc1e5c786e245402ba94d700f2a91a267c36e0922d2bc98be5e897839abd",
+        ),
+        // Added August 2026 with gap 10. Nothing above draws a mesh, so the
+        // whole of 8.7.4.5.5 to 8.7.4.5.8 -- the packed vertex stream, the
+        // edge-flag continuation, patch subdivision and the Gouraud
+        // rasteriser -- was outside what this file measured. The patch
+        // subdivision is the part that most needs a cross-target claim: it
+        // picks a *count* from a device-space measure, and a count that comes
+        // out one different on another target is a different mesh rather than
+        // a rounding difference.
+        (
+            "mesh",
+            "546f7f9e61572460b1b76610719e772b69625651d6a6b3b820ab30538be7d693",
         ),
     ];
     assert_eq!(

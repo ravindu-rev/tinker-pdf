@@ -19,11 +19,13 @@
 //!
 //! - **coverage**, from a single [`fill`] over one path holding every
 //!   triangle, under the non-zero rule. The fill accumulates *signed* area, so
-//!   two triangles wound the same way contribute +0.5 and +0.5 at a shared
-//!   edge and the pixel comes out whole. That is what removes the seam, and it
-//!   is why [`draw_mesh`] normalizes each triangle's winding before emitting
-//!   it: two triangles wound opposite ways would cancel to zero there, which is
-//!   the same seam with the sign flipped;
+//!   two triangles meeting along an edge contribute half a pixel each and the
+//!   pixel comes out whole. That is what removes the seam. [`draw_mesh`] also
+//!   normalizes each triangle's winding, which is a narrower guarantee than it
+//!   looks: a shared edge is safe either way, because the two crossings land
+//!   on the same `x` and cancel out of the sweep, but an *overlap* between
+//!   triangles wound opposite ways sums to a winding of zero and punches a
+//!   hole the shape of the smaller one;
 //! - **colour**, from a scanline walk per triangle that interpolates the
 //!   vertex values barycentrically and asks the caller what colour they are.
 //!   Overlapping writes along a shared edge are harmless because the two
@@ -500,23 +502,47 @@ mod tests {
         }
     }
 
-    /// The same square as two triangles wound in *opposite* directions.
+    /// Triangles wound the other way still add rather than cancel.
     ///
-    /// This is the seam with the sign flipped: under the non-zero rule a
-    /// clockwise triangle contributes -1 where its neighbour contributes +1,
-    /// so the shared edge cancels to nothing and a black line runs down the
-    /// diagonal. Normalizing the winding is what removes it, and this is the
-    /// test that would catch its removal.
+    /// The shape of this test was decided by injection, and its first version
+    /// was worthless. Deleting the winding normalization moved **no pixel
+    /// anywhere in the workspace**, and the reason is worth writing down: two
+    /// triangles that merely *share an edge* are disjoint, and their two
+    /// crossings at that edge land on exactly the same `x` — the edge is built
+    /// from the same two points, so the same slope and the same intercept come
+    /// out whichever order the triangle names them. Opposite signs there
+    /// cancel each other out of the sweep and leave the spans contiguous
+    /// either way. The shared edge was never the case that needed normalizing.
+    ///
+    /// The case that does is an **overlap**. A clockwise triangle lying inside
+    /// an anticlockwise one contributes -1 where the other contributes +1, the
+    /// non-zero rule sees a winding of zero, and a hole is punched exactly the
+    /// shape of the smaller triangle. A mesh stream is perfectly free to
+    /// produce that: nothing in 8.7.4.5.5 requires a consistent orientation,
+    /// and a folded gradient mesh overlaps itself by design.
     #[test]
-    fn a_triangle_wound_the_other_way_is_still_seamless() {
-        let positions = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
-        let values = [0.0, 1.0, 1.0, 0.0];
-        // The second triangle is [0, 3, 2] rather than [0, 2, 3]: the same
-        // three corners, the other way round.
-        let buffer = draw(&positions, &values, &[[0, 1, 2], [0, 3, 2]], 20);
+    fn triangles_wound_the_other_way_do_not_punch_holes() {
+        let positions = [
+            (0.0, 0.0),
+            (20.0, 0.0),
+            (20.0, 20.0),
+            (0.0, 20.0),
+            // A smaller triangle well inside the square.
+            (5.0, 5.0),
+            (15.0, 6.0),
+            (9.0, 15.0),
+        ];
+        let values = [0.5; 7];
+        // The square anticlockwise, and the inner triangle the other way.
+        let buffer = draw(&positions, &values, &[[0, 1, 2], [0, 2, 3], [4, 6, 5]], 20);
         for y in 0..20 {
             for x in 0..20 {
-                assert_eq!(buffer.coverage.at(x, y), 255, "at ({x}, {y})");
+                assert_eq!(
+                    buffer.coverage.at(x, y),
+                    255,
+                    "a hole at ({x}, {y}): an overlapping triangle wound the \
+                     other way cancelled the winding underneath it"
+                );
             }
         }
     }

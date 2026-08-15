@@ -1,0 +1,70 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]
+/Resources << /Shading << /Sh4 5 0 R /Sh5 6 0 R /Sh6 7 0 R >>
+/Pattern << /P0 8 0 R >> >>
+/Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 167 >>
+stream
+q 0 0 40 80 re W n /Sh4 sh Q
+q 40 0 40 80 re W n /Sh5 sh Q
+q 80 0 40 80 re W n /Sh6 sh Q
+/Pattern cs /P0 scn
+q 1.1 0 0 1.1 2 2 cm
+14 10 m 88 18 l 80 58 l 26 54 l h f
+Q
+endstream
+endobj
+5 0 obj
+<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16
+/BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 120 0 80 0 1 0 1 0 1]
+/Filter /ASCIIHexDecode /Length 97 >>
+stream
+0000000000e6261a005555000026d9400055558000334df2025555fffff2d926020000ffff1a8c99012aabbfff8c1ab3>
+endstream
+endobj
+6 0 obj
+<< /ShadingType 5 /ColorSpace /DeviceRGB /VerticesPerRow 4
+/BitsPerCoordinate 8 /BitsPerComponent 16 /Decode [0 120 0 80 0 1]
+/Function << /FunctionType 2 /Domain [0 1] /C0 [0.05 0.20 0.50]
+/C1 [0.95 0.60 0.10] /N 2 >>
+/Filter /ASCIIHexDecode /Length 97 >>
+stream
+55000000710080008e00ffffaa0066665580b3337769199a88939999aa80000055ff4ccd71ffcccc8eff3333aaffb333>
+endstream
+endobj
+7 0 obj
+<< /ShadingType 6 /BitsPerCoordinate 8 /BitsPerComponent 8
+/BitsPerFlag 4 /Decode [0 120 0 80 0 1]
+/ColorSpace [/Separation /Ink /DeviceRGB
+<< /FunctionType 2 /Domain [0 1] /C0 [0.95 0.90 0.80]
+/C1 [0.10 0.15 0.45] /N 3 >>]
+/Filter /ASCIIHexDecode /Length 59 >>
+stream
+0aa00a260b3acaaffc6d2e3fffffff7a6ff53ff00e32dc6000df266b30>
+endstream
+endobj
+8 0 obj
+<< /PatternType 2 /Matrix [0.866 0.5 -0.5 0.866 24 -14]
+/Shading 9 0 R >>
+endobj
+9 0 obj
+<< /ShadingType 7 /ColorSpace /DeviceCMYK /BitsPerCoordinate 12
+/BitsPerComponent 4 /BitsPerFlag 2
+/Decode [0 120 0 80 0 1 0 1 0 1 0 1]
+/Filter /ASCIIHexDecode /Length 115 >>
+stream
+0224334001664446998227cc9667ffe99b99bddfccbffe99bbb9667ddc336998669664000aaeffd334e6733319aeec998b3838c88cb46ec0c0>
+endstream
+endobj
+trailer
+<< /Size 10 /Root 1 0 R >>
+%%EOF

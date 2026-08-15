@@ -426,6 +426,7 @@ fn the_edge_flag_decides_where_the_next_triangle_goes() {
         (0, 0, 255, 0),
         (0, 128, 0, 255),
         (1, 255, 255, 255),
+        (2, 247, 8, 128),
     ] {
         stream
             .push(flag, 8)
@@ -445,10 +446,85 @@ fn the_edge_flag_decides_where_the_next_triangle_goes() {
         inside.0 > 180,
         "the continued triangle should cover (50, 14) at its light end, got {inside:?}"
     );
-    // And the far corner is outside both triangles, so the page shows through.
-    // Both are narrow at page y = 5: triangle one reaches x = 27.5 and
-    // triangle two spans 27.5 to 32.5, so nothing covers column 58 there.
-    assert_eq!(pixel(&bitmap, 58, 55), (255, 255, 255), "past the strip");
+
+    // The fifth vertex carries flag **2**, which keeps the previous triangle's
+    // *first* and third vertices — (0, 60) and (60, 60) — where flag 1 would
+    // keep its second and third, (30, 0) and (60, 60). Both readings draw a
+    // triangle, and they overlap, so only a point one covers and the other
+    // does not can tell them apart. Page (40, 10) is that point: the flag 2
+    // triangle reaches down to x = 50 at that height and leaves it alone,
+    // while the flag 1 reading would reach x = 35 and paint it.
+    //
+    // Injecting exactly that confusion is how this assertion came to exist:
+    // with only flag 1 in the fixture, swapping the two arms of the reader
+    // moved no pixel on this page at all.
+    assert_eq!(
+        pixel(&bitmap, 40, 50),
+        (255, 255, 255),
+        "flag 2 shares the first and third vertices, not the second and third"
+    );
+    let covered = pixel(&bitmap, 55, 50).0;
+    assert!(
+        covered < 240,
+        "and the flag 2 triangle does paint its own area, got {covered}"
+    );
+}
+
+/// Each of the three widths is read from its own key, at its own size.
+///
+/// Every other fixture here writes eight bits for a coordinate, a component
+/// and a flag alike, so all three keys hold the same number and a reader that
+/// took the wrong one would be right by accident. This one writes 16, 8 and 4,
+/// which are three different numbers, and asserts it draws the same picture as
+/// the eight-bit spelling of the same mesh.
+///
+/// Injecting `/BitsPerComponent` in place of `/BitsPerCoordinate` is how this
+/// test came to exist: against the fixtures above it moved nothing at all,
+/// because eight equals eight.
+#[test]
+fn each_packed_width_is_read_from_its_own_key() {
+    let mut stream = Packer::new();
+    let corners = [
+        (0u64, 0u64, 0u64),
+        (65535, 0, 255),
+        (65535, 65535, 255),
+        (0, 65535, 0),
+    ];
+    for index in [0usize, 1, 2, 0, 2, 3] {
+        let (x, y, grey) = corners[index];
+        stream
+            .push(0, 4)
+            .push(x, 16)
+            .push(y, 16)
+            .push(grey, 8)
+            .align();
+    }
+
+    let wide = mesh_page(
+        "/ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 16 \
+         /BitsPerComponent 8 /BitsPerFlag 4 /Decode [0 60 0 60 0 1]",
+        &stream,
+        "/Sh0 sh",
+    );
+    let narrow = mesh_page(
+        &format!("/ShadingType 4 {GREY_KEYS}"),
+        &split_square(),
+        "/Sh0 sh",
+    );
+    assert_eq!(unsupported(&wide), None, "16-bit coordinates read");
+
+    let mut worst = 0i32;
+    for y in 0..wide.height {
+        for x in 0..wide.width {
+            worst = worst
+                .max((i32::from(pixel(&wide, x, y).0) - i32::from(pixel(&narrow, x, y).0)).abs());
+        }
+    }
+    assert!(
+        worst <= 2,
+        "the same mesh at 16 bits and at 8 differs by {worst} levels: the \
+         widths are not being read from the keys that hold them"
+    );
 }
 
 // ---------------------------------------------------------------------------
