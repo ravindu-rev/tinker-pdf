@@ -1,0 +1,144 @@
+# One tag, four artefacts.
+#
+# Plan 13 specifies the shape and plan 26 specifies the safety property: every
+# step has a dry-run mode, and **the default is the dry run**. A tag builds
+# every artefact and uploads none of them; publishing needs a deliberate
+# `workflow_dispatch` with `publish: true`. A half-published release cannot be
+# retracted from crates.io, and this repository has never published anything.
+#
+# ## The hazard this file is written against
+#
+# `cargo test` with a filter matching nothing prints `0 passed` and exits 0.
+# The `wasm-determinism` and `qpdf-linearization` jobs in ci.yml are both
+# written to *prove they ran* for that reason. A release job is the same hazard
+# with worse consequences: a job that builds nothing, uploads nothing and
+# reports success is indistinguishable from one that worked, and the thing it
+# is claiming is precisely that four artefacts exist.
+#
+# So every artefact job ends by asserting the artefact is there and is the
+# right shape -- an abi3 tag in the wheel's filename, a `.wasm` in the npm
+# tarball, a `runtimes/<rid>/native/` entry in the `.nupkg` -- and a final job
+# collects all four and fails unless it can count them. `if-no-files-found:
+# error` on every upload, because the default is `warn`, which is a green tick.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # The only way to actually publish, and it is not the default value.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the registries. Cannot be undone on crates.io.'
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Nothing is built until the four manifests agree about the version, and
+  # until the tag agrees with them. This is `cargo xtask versions` plus the
+  # tag comparison, and it is deliberately the cheapest job in the file: a
+  # version mismatch found here costs a minute, and found after the wheel
+  # matrix costs a release.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p xtask -- check
+      - name: The tag and the workspace version are the same number
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cargo run -p xtask -- release --plan --tag "${GITHUB_REF_NAME}"
+
+  # Plan 26 milestone 3: one wheel per platform, not one per interpreter.
+  #
+  # `bindings/python/Cargo.toml` asks pyo3 for `abi3-py39`, which is what makes
+  # maturin emit a single `cp39-abi3` wheel that pip installs on every CPython
+  # from 3.9 up. That was already true and had never been built; what is new is
+  # that it is built, installed and *rendered through* on three platforms.
+  wheels:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: 'off'
+          - os: macos-14
+            target: aarch64-apple-darwin
+            manylinux: 'off'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          # The *build* interpreter. It is deliberately not the floor: an abi3
+          # wheel built by 3.12 must install on 3.9, and building with 3.9
+          # would let a wheel that is secretly version-specific pass.
+          python-version: '3.12'
+      - name: Build an abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --manifest-path bindings/python/Cargo.toml --out dist
+      # The whole point of the milestone, asserted rather than assumed. Without
+      # this the job passes on a per-interpreter wheel, which is what the gap
+      # plan says is wrong with the status quo.
+      - name: The wheel is abi3, and there is exactly one
+        shell: bash
+        run: |
+          set -o pipefail
+          ls -l dist/
+          count=$(ls dist/*.whl | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::$count wheels; an abi3 build produces one per platform"
+            exit 1
+          fi
+          name=$(basename dist/*.whl)
+          case "$name" in
+            *-abi3-*) echo "abi3 wheel: $name" ;;
+            *) echo "::error::$name is not an abi3 wheel, so it covers one interpreter"; exit 1 ;;
+          esac
+      - name: A face to draw with
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      # Installed and rendered through on an interpreter that is NOT the one
+      # that built it, which is the claim "one wheel per platform" makes.
+      - name: Install on 3.9 and 3.13 and render
+        shell: bash
+        run: |
+          set -o pipefail
+          for version in 3.9 3.13; do
+            echo "::group::CPython $version"
+            python -m pip install --quiet --upgrade uv || true
+            uv venv --python "$version" ".venv$version"
+            if [ -d ".venv$version/Scripts" ]; then
+              py=".venv$version/Scripts/python.exe"
+            else
+              py=".venv$version/bin/python"
+            fi
+            "$py" -m ensurepip --upgrade
+            "$py" -m pip install --quiet dist/*.whl
+            "$py" bindings/python/tests/wheel_smoke.py \
+              testdata/simple-text.pdf auto 2>&1 | tee "smoke$version.log"
+            grep -q 'WHEEL-SMOKE: RAN' "smoke$version.log"
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          # The default is `warn`, and a warning is a green tick.
+          if-no-files-found: error
