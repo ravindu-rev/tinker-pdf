@@ -167,10 +167,19 @@ impl PdfBitmap {
     /// The pixels as a view into wasm memory, **invalidated by any later
     /// allocation**.
     ///
-    /// Growing the wasm heap moves it, and every reference JavaScript holds
-    /// into the old memory then points at nothing. Use it to draw immediately
-    /// and drop it; if the pixels must outlive the next engine call, use
-    /// [`PdfBitmap::data`].
+    /// Growing the wasm heap *detaches* the `ArrayBuffer` this array wraps, so
+    /// the view — and every other view anybody is holding — becomes **zero
+    /// length**. It does not throw, and it does not happen on every call: only
+    /// when an allocation crosses a page boundary. A page that holds a view
+    /// across one render therefore works until the day a document is large
+    /// enough that it does not.
+    ///
+    /// That is measured rather than asserted from memory:
+    /// `tests/node_smoke.mjs` takes a view, renders the same page at four
+    /// times the scale, and requires the view's length to have become 0.
+    ///
+    /// Use it to draw immediately and drop it; if the pixels must outlive the
+    /// next engine call, use [`PdfBitmap::data`], which copies.
     ///
     /// # Safety
     ///

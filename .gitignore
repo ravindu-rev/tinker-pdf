@@ -20,6 +20,15 @@ bindings/dotnet/obj/
 bindings/dotnet/runtimes/
 bindings/*/Cargo.lock
 
+# wasm-pack's output. Everything in it is generated from `Cargo.toml` and
+# `src/` -- including `package.json`, which is why the npm package's version
+# cannot drift from the workspace and `cargo xtask versions` has one manifest
+# fewer to police.
+bindings/js/pkg/
+# `maturin build --out` and `dotnet pack -o` land here.
+target/wheels/
+target/nuget/
+
 # The wasm determinism job tees its run here so the step can assert that
 # tests actually executed. Transient, and equally so if you run that step
 # by hand.
