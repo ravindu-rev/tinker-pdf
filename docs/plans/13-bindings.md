@@ -1,7 +1,7 @@
 # Phase 13 — Bindings
 
 When this phase is done, tinker-pdf is installable in four ecosystems —
-`cargo add tinker-pdf`, `npm i @tinker/pdf`, `pip install tinker-pdf`,
+`cargo add tinker-pdf`, `npm i tinker-pdf-js`, `pip install tinker-pdf`,
 `dotnet add package TinkerPdf` — and all four are projections of one facade
 crate. The shape is the whole design: **no binding contains logic**. Every
 language layer is a mechanical translation of `tinker-pdf`'s public API
@@ -90,21 +90,47 @@ in the release CI.
 
 wasm-bindgen directly over the facade; wasm-pack builds the npm package (ESM,
 worker-friendly — the expected consumer is a Web Worker per document, exactly
-Tinker's web plan). Two deliberate calls:
+Tinker's web plan). Three deliberate calls:
 
+- **ESM only, one build, wasm-pack's `web` target, and no CommonJS.** Gap 26
+  required this decision be recorded; it is, at length, in
+  `bindings/js/README.md`. The short of it: a dual package is not two wrappers
+  over one artefact but two artefacts, because the `nodejs` target loads the
+  `.wasm` with a synchronous `readFileSync` at module scope and the `web`
+  target fetches it. Shipping both ships two builds that can diverge, and
+  ruling 11 says a binding has no behaviour of its own to diverge with. Node
+  runs the same file by handing `init` the bytes. `web` over `bundler` because
+  the demo below must load from a plain `<script type="module">` with no build
+  step.
+- **The package is named after the crate.** This plan first sketched
+  `@tinker/pdf`; wasm-pack derives the npm name *and version* from
+  `Cargo.toml`, so taking the derived name means the npm version cannot drift
+  from the workspace and `cargo run -p xtask -- versions` has one manifest
+  fewer to police. A hand-edited `package.json` would be that manifest, and the
+  file is regenerated on every build.
 - **Copy is the default, views are opt-in.** `bitmap.data()` returns a copied
-  `Uint8Array`; `bitmap.view()` returns a view into wasm memory documented as
-  **invalidated by any allocation that grows the memory** — the classic
-  footgun gets the footgun-shaped name, and the safe call gets the short one.
+  `Uint8Array`; `bitmap.viewUnsafeUntilNextAllocation()` returns a view into
+  wasm memory documented as **invalidated by any allocation that grows the
+  memory** — the classic footgun gets the footgun-shaped name, and the safe
+  call gets the short one. Gap 26 measured what "invalidated" means, because
+  the sharper statement is the useful one: growing the heap *detaches* the
+  ArrayBuffer, so the view does not dangle, it becomes **zero length**,
+  silently, and only when an allocation crosses a page boundary.
+  `bindings/js/tests/node_smoke.mjs` takes a view, forces the growth, and
+  asserts the length is 0 — so this paragraph is describing observed
+  behaviour rather than a warning written from memory.
 - **No wasm threads in v1.** The Send+Sync superiority is native-side; wasm
   runs one engine per worker, which sidesteps SharedArrayBuffer/COOP/COEP
   hosting requirements entirely (a constraint Tinker's web plan already
   treats as a feature).
 
 Size budget: **< 2.5 MB gzipped** for the engine wasm including base-14
-substitute *metrics*; the substitute font *programs* (Liberation,
-[05-fonts](05-fonts.md)) ship as a separate lazily-fetched asset so documents
-with fully embedded fonts never pay for them. CI fails the build over budget.
+substitute *metrics*. Measured August 2026, with all 202 predefined CMaps on:
+2.03 MB of wasm, **1.40 MB gzipped**. The budget is now a gate in
+`.github/workflows/release.yml` rather than a number in this file. The
+substitute font *programs* (Liberation, [05-fonts](05-fonts.md)) ship as a
+separate lazily-fetched asset so documents with fully embedded fonts never pay
+for them. CI fails the build over budget.
 
 ### .NET
 
@@ -117,11 +143,24 @@ lifetime tied to the SafeHandle). NuGet layout:
 
 ### Release
 
-One workspace version. `cargo xtask release` from a tag runs, in order:
-`cargo publish` (leaves → facade → ffi), `maturin publish`, `wasm-pack
-publish`, `dotnet pack && dotnet nuget push`. Any step failing halts the
-chain; re-running skips already-published versions so a partial release is
+One workspace version. `cargo run -p xtask -- release` from a tag runs, in
+order: `cargo publish` (leaves → facade → ffi), `maturin publish`, `wasm-pack`
+then `npm publish`, `dotnet pack && dotnet nuget push`. Any step failing halts
+the chain; re-running skips already-published versions so a partial release is
 resumable, not corrupt.
+
+Three amendments from gap 26, which built it:
+
+- **`cargo xtask` is not a command here** — this repository defines no cargo
+  alias. It is `cargo run -p xtask --`, everywhere.
+- **The dry run is the default and `--execute` publishes**, rather than the
+  other way round. A half-published release cannot be retracted from
+  crates.io, so the command typed without arguments must be the harmless one.
+- **The order is computed from the manifests, not written down.** A
+  hand-maintained list goes stale the first time somebody adds an edge, and it
+  fails halfway through an irreversible publish with an error naming the crate
+  *after* the mistake. A topological sort produces it and a separate check
+  validates it before anything uploads.
 
 ## Milestones
 
@@ -132,6 +171,17 @@ resumable, not corrupt.
 | 13.3 | JS/wasm package | `npm i` from CI artifact; browser demo page renders an uploaded PDF in a worker; size budget gate green | M |
 | 13.4 | .NET package | `dotnet add package` from CI feed; render + span test on all three RIDs | S |
 | 13.5 | One-tag release automation + leaf-crate publishing | Dry-run release from a tag produces all four artifacts + crates.io set; resumability tested by killing a step | S |
+
+**State, August 2026 (gap 26).** 13.3's browser demo exists and renders an
+uploaded PDF, observed in headless Chromium; the `Uint8Array` contract below
+is documented *and measured*; the size gate is green. The whole of 13.5 has
+been exercised as a **dry run end to end** — 20 steps, 11 run, 1 skipped, 8
+unprovable without publishing — and **nothing has been published to any
+registry**. The matrix legs of 13.2 and 13.4 (linux, macOS) and the one-tag
+claim itself are written in `.github/workflows/release.yml` and have never
+run: no tag has triggered them. Resumability is read out of cargo's
+duplicate-upload error and that string has never been seen here, so "tested by
+killing a step" is not yet true.
 
 ## Dependencies
 
