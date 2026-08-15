@@ -660,3 +660,237 @@ fn qpdf_finds_a_shared_section_only_where_there_is_one() {
     }
     assert_eq!(with, 1, "the shared-resource fixture was actually tested");
 }
+
+// ---- Milestone 4: the encrypted linearized output --------------------------
+
+/// The password gap 19's fixture opens with.
+const PASSWORD: &str = "open-me";
+
+/// Forty-eight deterministic bytes, as in `linearized.rs`. The padding AES
+/// adds is a function of the plaintext's length, so the layout is
+/// reproducible exactly when the entropy is.
+fn entropy() -> [u8; 48] {
+    let mut bytes = [0u8; 48];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(7).wrapping_add(11);
+    }
+    bytes
+}
+
+/// Gap 19's fixture, byte for byte: `encrypted_linearized(6)` with the
+/// deterministic entropy and the password `linearized.rs` uses.
+fn encrypted_linearized(page_count: usize) -> Vec<u8> {
+    save(
+        document(page_count),
+        Some(Encryption {
+            user_password: PASSWORD.to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: entropy(),
+        }),
+    )
+}
+
+/// The one complaint an encrypted file this engine writes still earns, and
+/// the only one allowed through.
+///
+/// 7.5.5 Table 15 requires an `/ID` whenever `/Encrypt` is present, and
+/// nothing here writes one on any path — so qpdf reports
+/// `invalid /ID in trailer dictionary` on every encrypted file it is shown,
+/// linearized or not. Gap 19 found it and left it as a live audit row rather
+/// than inventing an identifier: R6 does not mix `/ID` into key derivation,
+/// so nothing fails to decrypt, and all forty-eight entropy bytes are already
+/// spoken for.
+///
+/// It costs this milestone one thing and it is worth naming. `--check` on an
+/// encrypted file suppresses its `No syntax or stream encoding errors found`
+/// summary once anything has warned, so that line cannot be asserted here —
+/// which is why the decrypted copy is checked as well, where it can be.
+///
+/// Allowed for by name rather than ignored: a warning that does not mention
+/// `/ID` fails, so this cannot become an amnesty for whatever qpdf says next.
+fn assert_only_the_missing_id_was_reported(text: &str, name: &str) {
+    for warning in text.lines().filter(|line| line.contains("WARNING")) {
+        assert!(
+            warning.contains("/ID"),
+            "{name}: qpdf warned about something other than the missing /ID: {warning}"
+        );
+    }
+
+    // The complaints this gap exists to remove, by the words qpdf uses for
+    // them: a failed hint-table parse arrives wrapped in `error encountered
+    // while checking linearization data`, and every field disagreement is a
+    // `mismatch`. Named rather than matched loosely, because
+    // `--show-linearization` prints the word "linearization" on its first
+    // line whatever happens.
+    for phrase in ["error encountered", "mismatch", "overflow reading"] {
+        assert!(
+            !text.contains(phrase),
+            "{name}: qpdf reported \"{phrase}\":\n{text}"
+        );
+    }
+}
+
+/// Milestone 4, first half: `qpdf --check` on gap 19's encrypted fixture.
+///
+/// Gap 19 predicted that gap 20 would find the *same* hint-table error here
+/// as on the unencrypted file, and said a difference between the two would be
+/// an encryption defect rather than this gap's. There is no error on either
+/// now, which is the same statement with its sign flipped: encryption changes
+/// every length in the file and none of its claims, so the encrypted layout
+/// has to satisfy exactly what the plaintext one does.
+#[test]
+fn qpdf_check_finds_nothing_wrong_with_the_encrypted_linearized_output() {
+    let qpdf = oracle!("--check over the encrypted linearized fixture");
+    let name = "encrypted-check.pdf";
+
+    let bytes = encrypted_linearized(6);
+    let path = fixture(name, &bytes);
+    let file = path.display().to_string();
+    let (_, text) = run(&qpdf, &["--password=open-me", "--check", &file]);
+
+    // The encryption qpdf sees is the encryption gap 19 built; nothing below
+    // this means anything unless qpdf actually authenticated.
+    for needle in [
+        "R = 6",
+        "Supplied password is user password",
+        "stream encryption method: AESv3",
+        "string encryption method: AESv3",
+        "File is linearized",
+    ] {
+        assert!(
+            text.contains(needle),
+            "{name}: {needle} is missing:\n{text}"
+        );
+    }
+    assert_only_the_missing_id_was_reported(&text, name);
+
+    // And the whole-file claim, on a decrypted copy where qpdf will still
+    // make it. `--check` calling this free of syntax and stream encoding
+    // errors means every object offset resolved and every stream decrypted —
+    // which is the strongest single statement available about a layout
+    // measured from ciphertext.
+    let copy = path.with_file_name("encrypted-check-decrypted.pdf");
+    let copy_name = copy.display().to_string();
+    let (_, decrypted) = run(
+        &qpdf,
+        &["--password=open-me", "--decrypt", &file, &copy_name],
+    );
+    assert_only_the_missing_id_was_reported(&decrypted, name);
+
+    let (code, text) = run(&qpdf, &["--check", &copy_name]);
+    assert_eq!(code, 0, "the decrypted copy: qpdf exited {code}:\n{text}");
+    assert!(
+        text.contains("No syntax or stream encoding errors found"),
+        "every offset resolved and every stream decrypted:\n{text}"
+    );
+    assert!(!text.contains("WARNING"), "and cleanly:\n{text}");
+}
+
+/// Milestone 4, second half: `--show-linearization` on the same file, held to
+/// the same assertions the plaintext fixtures are.
+///
+/// Deliberately the *same* function rather than a weaker copy written beside
+/// it, exactly as gap 19 did with its offset assertions. Both cross-reference
+/// tables and the parameter dictionary stay in the clear (7.6.1), so
+/// `assert_the_report_matches_the_file` can recompute every expectation from
+/// the raw bytes with no key involved — and that it can is itself the
+/// assertion that they are clear.
+#[test]
+fn qpdf_reads_the_encrypted_hint_tables_back_as_the_writer_meant_them() {
+    let qpdf = oracle!("--show-linearization over the encrypted linearized fixture");
+    let name = "encrypted-show.pdf";
+
+    let bytes = encrypted_linearized(6);
+    let path = fixture(name, &bytes);
+    let (_, text) = run(
+        &qpdf,
+        &[
+            "--password=open-me",
+            "--show-linearization",
+            &path.display().to_string(),
+        ],
+    );
+    assert_only_the_missing_id_was_reported(&text, name);
+
+    let doc = CosDocument::open(bytes.clone()).expect("it opens");
+    assert_eq!(
+        doc.authenticate(PASSWORD),
+        Ok(tinker_pdf_cos::AuthLevel::User),
+        "the fixture really is encrypted"
+    );
+
+    let report = parse_report(&text);
+    assert_the_report_matches_the_file(&report, &bytes, &page_objects(&bytes), name);
+}
+
+/// The encrypted file describes the same document and different bytes.
+///
+/// The hint tables describe a *layout*, and encryption moves every byte of it
+/// while leaving the document alone. So the structure must come back
+/// identical — the same page count, the same object count for every page, the
+/// same shared entries and identifiers — and every page's declared length
+/// must be strictly larger, because each page owns a content stream and
+/// AES-CBC never returns one the same size.
+///
+/// That is the assertion gap 19's `/H` defect would have failed. A table
+/// measured from the plaintext gives an encrypted file the *unencrypted*
+/// lengths, which is the one shape this comparison forbids.
+#[test]
+fn the_encrypted_hint_tables_describe_the_same_pages_at_greater_length() {
+    let qpdf = oracle!("--show-linearization on both halves of one document");
+
+    let read = |name: &str, bytes: &[u8], password: bool| -> Report {
+        let path = fixture(name, bytes);
+        let mut args: Vec<String> = Vec::new();
+        if password {
+            args.push(format!("--password={PASSWORD}"));
+        }
+        args.push("--show-linearization".to_string());
+        args.push(path.display().to_string());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        parse_report(&run(&qpdf, &borrowed).1)
+    };
+
+    let plain = read("comparison-plain.pdf", &linearized(6), false);
+    let sealed = read("comparison-sealed.pdf", &encrypted_linearized(6), true);
+
+    assert_eq!(plain.get("npages"), sealed.get("npages"));
+    assert_eq!(
+        plain.get("nshared_first_page"),
+        sealed.get("nshared_first_page")
+    );
+    assert_eq!(plain.get("nshared_total"), sealed.get("nshared_total"));
+    assert_eq!(plain.pages.len(), sealed.pages.len());
+
+    let mut compared = 0usize;
+    for (index, (before, after)) in plain.pages.iter().zip(sealed.pages.iter()).enumerate() {
+        assert_eq!(
+            before.nobjects, after.nobjects,
+            "page {index} owns the same objects either way"
+        );
+        assert_eq!(before.nshared, after.nshared, "page {index}");
+        assert_eq!(
+            before.identifiers, after.identifiers,
+            "page {index} shares the same entries"
+        );
+        assert!(
+            after.length > before.length,
+            "page {index} is {} bytes encrypted against {} plain, and a page holding a \
+             content stream cannot fail to grow",
+            after.length,
+            before.length
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 6, "every page was compared");
+
+    // And the file grew by more than one object's worth, so the comparison
+    // above is measuring padding across the whole layout rather than a single
+    // stream at the end.
+    let growth = sealed.get("file_size") - plain.get("file_size");
+    assert!(
+        growth > 150,
+        "the encrypted file is only {growth} bytes longer"
+    );
+}
