@@ -543,6 +543,21 @@ fn the_hint_stream_comes_before_the_first_pages_objects() {
         end_of_first_page > hint_end,
         "part 6 comes after part 5: /E {end_of_first_page} against {hint_end}"
     );
+
+    // Exactly, not merely somewhere sensible. Part 7 begins with page two's
+    // page object, so `/E` is that object's offset and nothing else — an `/E`
+    // measured a little long still satisfies every inequality above, which is
+    // how the old one survived reaching past the hint stream.
+    let second_page = CosDocument::open(bytes.clone())
+        .map(|doc| pages::collect(&doc)[1].reference.num)
+        .expect("it opens");
+    assert_eq!(
+        end_of_first_page,
+        *object_offsets(&bytes)
+            .get(&second_page)
+            .expect("page two is in a table"),
+        "/E is where part 7 begins"
+    );
 }
 
 /// The property F.4.1's per-page entries are read against.
@@ -570,6 +585,20 @@ fn each_page_owns_a_consecutive_run_of_objects_led_by_its_page_object() {
         assert!(
             pair[1] > pair[0],
             "page objects ascend with page order: {numbers:?}"
+        );
+    }
+
+    // F.3.6: part 6 *begins* at the page object, so nothing page one reaches
+    // is numbered below `/O`. The gap checks below cannot see this — an object
+    // placed in front of `/O` is outside every gap between two page objects —
+    // and it is exactly where the defect was: the writer numbered part 6 in
+    // old-object order, the font came first, and a reader taking three
+    // consecutive numbers from `/O` ran a number past the end of the file.
+    for num in reachable(&doc, collected[0].reference) {
+        assert!(
+            num >= numbers[0],
+            "page one reaches object {num}, which is numbered below /O {}",
+            numbers[0]
         );
     }
 

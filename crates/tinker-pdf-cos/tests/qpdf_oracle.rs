@@ -140,8 +140,16 @@ fn linearized(page_count: usize) -> Vec<u8> {
 ///
 /// `CARGO_TARGET_TMPDIR` is cargo's own scratch directory for an integration
 /// test: inside `target/`, never committed, and the same on every platform.
-fn fixture(name: &str, bytes: &[u8]) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("qpdf-oracle");
+///
+/// A directory per test, because cargo runs them on threads and several
+/// point qpdf at the same four documents. Sharing one filename between two
+/// threads means one of them rewriting a file the other has open, which on
+/// Windows fails outright and elsewhere fails worse — qpdf reading half a
+/// file and reporting a defect that is not there.
+fn fixture(test: &str, name: &str, bytes: &[u8]) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("qpdf-oracle")
+        .join(test);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let path = dir.join(name);
     std::fs::write(&path, bytes).expect("the fixture is written");
@@ -184,7 +192,7 @@ fn qpdf_check_finds_nothing_wrong_with_the_linearized_output() {
     let qpdf = oracle!("--check over the linearized fixtures");
 
     for (name, bytes) in unencrypted_fixtures() {
-        let path = fixture(name, &bytes);
+        let path = fixture("check", name, &bytes);
         let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
 
         assert!(
@@ -214,7 +222,7 @@ fn qpdf_says_an_ordinary_file_is_not_linearized() {
         object_streams: false,
         ..WriteOptions::default()
     });
-    let path = fixture("not-linearized.pdf", &bytes);
+    let path = fixture("unlinearized", "not-linearized.pdf", &bytes);
     let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
 
     assert_eq!(code, 0, "the ordinary layout is still valid:\n{text}");
@@ -611,7 +619,7 @@ fn qpdf_reads_the_hint_tables_back_as_the_writer_meant_them() {
     let qpdf = oracle!("--show-linearization over the linearized fixtures");
 
     for (name, bytes) in unencrypted_fixtures() {
-        let path = fixture(name, &bytes);
+        let path = fixture("show", name, &bytes);
         let (code, text) = run(
             &qpdf,
             &["--show-linearization", &path.display().to_string()],
@@ -641,7 +649,7 @@ fn qpdf_finds_a_shared_section_only_where_there_is_one() {
 
     let mut with = 0usize;
     for (name, bytes) in unencrypted_fixtures() {
-        let path = fixture(name, &bytes);
+        let path = fixture("part-eight", name, &bytes);
         let (_, text) = run(
             &qpdf,
             &["--show-linearization", &path.display().to_string()],
@@ -745,7 +753,7 @@ fn qpdf_check_finds_nothing_wrong_with_the_encrypted_linearized_output() {
     let name = "encrypted-check.pdf";
 
     let bytes = encrypted_linearized(6);
-    let path = fixture(name, &bytes);
+    let path = fixture("encrypted-check", name, &bytes);
     let file = path.display().to_string();
     let (_, text) = run(&qpdf, &["--password=open-me", "--check", &file]);
 
@@ -802,7 +810,7 @@ fn qpdf_reads_the_encrypted_hint_tables_back_as_the_writer_meant_them() {
     let name = "encrypted-show.pdf";
 
     let bytes = encrypted_linearized(6);
-    let path = fixture(name, &bytes);
+    let path = fixture("encrypted-show", name, &bytes);
     let (_, text) = run(
         &qpdf,
         &[
@@ -841,7 +849,7 @@ fn the_encrypted_hint_tables_describe_the_same_pages_at_greater_length() {
     let qpdf = oracle!("--show-linearization on both halves of one document");
 
     let read = |name: &str, bytes: &[u8], password: bool| -> Report {
-        let path = fixture(name, bytes);
+        let path = fixture("comparison", name, bytes);
         let mut args: Vec<String> = Vec::new();
         if password {
             args.push(format!("--password={PASSWORD}"));
