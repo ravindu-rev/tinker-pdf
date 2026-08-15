@@ -226,13 +226,17 @@ jobs:
           set -o pipefail
           cargo test -p tinker-pdf-cos --test qpdf_oracle -- --nocapture \
             2>&1 | tee qpdf-oracle.log
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' qpdf-oracle.log
-          grep -q 'qpdf-oracle: RAN' qpdf-oracle.log
+          # The skip is checked first and on its own, so the reason reaches
+          # the log. A bare `grep -q RAN` fails the step too, but under
+          # `bash -e` it fails it *silently* — a red tick with nothing saying
+          # the oracle never ran is only half of what this job is for.
           if grep -q 'qpdf-oracle: SKIPPED' qpdf-oracle.log; then
             echo "::error::qpdf was not found, so the linearization oracle" \
                  "SKIPPED rather than passed"
             exit 1
           fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' qpdf-oracle.log
+          grep -q 'qpdf-oracle: RAN' qpdf-oracle.log
 
   licenses:
     runs-on: ubuntu-latest
