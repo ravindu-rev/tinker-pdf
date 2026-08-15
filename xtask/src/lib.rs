@@ -12,7 +12,12 @@
 use std::path::{Path, PathBuf};
 
 pub mod corpus;
+pub mod fetch;
+pub mod json;
 pub mod lock;
+pub mod ratchet;
+pub mod report;
+pub mod runner;
 
 /// The repository root, from the manifest directory of whichever of the two
 /// targets is asking.

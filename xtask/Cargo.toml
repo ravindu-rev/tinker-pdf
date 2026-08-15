@@ -7,5 +7,17 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Release and maintenance automation: corpus sync, CAVP vector fetch, multi-registry publish"
+# Two binaries live here now: `xtask` itself, and `corpus-stub`, the
+# deliberately misbehaving corpus child the isolation tests point `--child` at.
+# Without this, `cargo run -p xtask` becomes ambiguous and every CI invocation
+# of it breaks.
+default-run = "xtask"
 
 [dependencies]
+# The one dependency, and it is a sibling rather than a third party: gap 23's
+# fetch verifies an archive against the digest in the lock, and this repository
+# already contains a tested SHA-256. Vendoring a second implementation to check
+# a corpus, in a project whose entire premise is that it implements its own
+# primitives, would be the wrong way round. `cargo xtask dag` allows this one
+# edge by name.
+tinker-pdf-crypto = { workspace = true }

@@ -8,10 +8,15 @@
 //! Argument parsing is hand-rolled along with everything else. It is a
 //! sub-command plus flags, which needs no library.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use tinker_pdf::{CosDocument, Document, ObjRef, Object, RenderOptions, StreamObj, XrefEntry};
+use tinker_pdf::{
+    CosDocument, Dict, Document, ObjRef, Object, RenderOptions, SimpleFontProvider, StreamObj,
+    XrefEntry,
+};
 
 const USAGE: &str = "\
 tpdf — inspect and convert PDFs with the tinker-pdf engine
@@ -24,6 +29,7 @@ usage:
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>...
+  tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
 options:
   --page N     one page, 1-based; the default is every page
@@ -32,12 +38,25 @@ options:
   --raw        with --stream, before the filters rather than after
   --dpi D      resolution for render (default 150)
   --out DIR    where render writes its PNMs
+  --fonts PATH a face, or a directory of faces, for documents that embed none
   --password P the password to open an encrypted file with
   --quiet      only report failures
 
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
 corpus.
+
+`probe` is the one the corpus runner spawns, one child process per file. It
+opens the file, renders every page, and writes a line-oriented record of what
+happened to stdout, ending in `done`. That last line is the whole point: a
+child that panicked, aborted or was killed for hanging leaves a record with no
+`done` in it, so the runner can tell a file that failed from a file that never
+finished, which a summary line printed at the end could not.
+
+It exits 0 whenever it finished, including for a file that would not open — a
+file that fails to open is a result to be counted, not an error in the tool,
+and an exit code that conflated them would make every unopenable file look
+like a crashed run.
 
 `objects` is the view underneath every other command: what the engine
 actually parsed, object by object. It is what a corpus failure gets looked
@@ -70,6 +89,7 @@ fn main() -> ExitCode {
         "outline" => run(&options, outline),
         "objects" => run(&options, objects),
         "check" => check(&options),
+        "probe" => probe(&options),
         other => Err(format!("unknown command `{other}`; try --help")),
     };
 
@@ -88,6 +108,7 @@ struct Options {
     object: Option<u32>,
     dpi: f64,
     out: Option<String>,
+    fonts: Option<String>,
     password: Option<String>,
     annotations: bool,
     quiet: bool,
@@ -103,6 +124,7 @@ impl Options {
             object: None,
             dpi: 150.0,
             out: None,
+            fonts: None,
             password: None,
             annotations: true,
             quiet: false,
@@ -151,6 +173,7 @@ impl Options {
                     options.object = Some(n);
                 }
                 "--out" => options.out = Some(value()?),
+                "--fonts" => options.fonts = Some(value()?),
                 "--password" => options.password = Some(value()?),
                 "--no-annotations" => options.annotations = false,
                 "--quiet" => options.quiet = true,
@@ -175,11 +198,104 @@ impl Options {
             None => (0..doc.page_count()).collect(),
         }
     }
+
+    /// The faces `--fonts` names, loaded once rather than per file.
+    ///
+    /// The engine bundles no faces and reads no font directories, so a
+    /// document that embeds nothing draws nothing and reports
+    /// `UnreadableFont`. That is correct and it is also the single largest
+    /// term in any corpus's warning count, which is why the corpus runner
+    /// measures both with and without: a number that is mostly "this build
+    /// ships no fonts" says very little about the engine.
+    fn font_provider(&self) -> Result<Option<Arc<SimpleFontProvider>>, String> {
+        let Some(path) = self.fonts.as_deref() else {
+            return Ok(None);
+        };
+        let path = Path::new(path);
+
+        if path.is_file() {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok(Some(Arc::new(SimpleFontProvider::new(bytes))));
+        }
+        if !path.is_dir() {
+            return Err(format!(
+                "--fonts {}: no such file or directory",
+                path.display()
+            ));
+        }
+
+        // A directory is matched by name — `...Bold`, `...Italic`,
+        // `...BoldItalic` — which is how every font directory on every
+        // platform is laid out. Anything else is ignored rather than guessed
+        // at, and a directory yielding no regular face is an error, because a
+        // silently empty provider is indistinguishable from `--fonts` never
+        // having been passed and would make the two runs report the same
+        // number for different reasons.
+        let mut faces: BTreeMap<&'static str, Vec<u8>> = BTreeMap::new();
+        let entries = std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        for entry in entries.flatten() {
+            let file = entry.path();
+            if !file.is_file() {
+                continue;
+            }
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let extension = file
+                .extension()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !matches!(extension.as_str(), "ttf" | "otf" | "cff") {
+                continue;
+            }
+            let bold = stem.contains("bold");
+            let italic = stem.contains("italic") || stem.contains("oblique");
+            let slot = match (bold, italic) {
+                (true, true) => "bold-italic",
+                (true, false) => "bold",
+                (false, true) => "italic",
+                (false, false) => "regular",
+            };
+            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            // First wins, so a directory holding two regular faces picks the
+            // alphabetically first one every time rather than whichever the
+            // filesystem happened to hand back first.
+            faces.entry(slot).or_insert(bytes);
+        }
+
+        let Some(regular) = faces.remove("regular") else {
+            return Err(format!(
+                "--fonts {}: no regular face found (looked for .ttf, .otf and \
+                 .cff whose name says neither bold nor italic)",
+                path.display()
+            ));
+        };
+        let mut provider = SimpleFontProvider::new(regular);
+        if let Some(bytes) = faces.remove("bold") {
+            provider = provider.with_bold(bytes);
+        }
+        if let Some(bytes) = faces.remove("italic") {
+            provider = provider.with_italic(bytes);
+        }
+        if let Some(bytes) = faces.remove("bold-italic") {
+            provider = provider.with_bold_italic(bytes);
+        }
+        Ok(Some(Arc::new(provider)))
+    }
 }
 
-fn open(path: &str, password: Option<&str>) -> Result<Document, String> {
+fn open(
+    path: &str,
+    password: Option<&str>,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) -> Result<Document, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
     let doc = Document::open(bytes).map_err(|e| format!("{path}: {e:?}"))?;
+    let doc = match fonts {
+        Some(provider) => doc.with_fonts(provider.clone()),
+        None => doc,
+    };
 
     if doc.is_encrypted() {
         // An empty password is the usual case for a file encrypted only to
@@ -200,10 +316,11 @@ fn run(
     options: &Options,
     each: fn(&Options, &str, &Document) -> Result<(), String>,
 ) -> Result<(), String> {
+    let fonts = options.font_provider()?;
     let mut failed = 0usize;
     for path in &options.files {
-        let outcome =
-            open(path, options.password.as_deref()).and_then(|doc| each(options, path, &doc));
+        let outcome = open(path, options.password.as_deref(), fonts.as_ref())
+            .and_then(|doc| each(options, path, &doc));
         if let Err(message) = outcome {
             eprintln!("tpdf: {message}");
             failed += 1;
@@ -640,11 +757,12 @@ fn show_string(string: &tinker_pdf::PdfString) -> String {
 /// opened at all, because a file that opens with warnings is the case the
 /// leniency ladder exists to handle rather than a failure.
 fn check(options: &Options) -> Result<(), String> {
+    let fonts = options.font_provider()?;
     let mut failed = 0usize;
     let mut warned = 0usize;
 
     for path in &options.files {
-        match open(path, options.password.as_deref()) {
+        match open(path, options.password.as_deref(), fonts.as_ref()) {
             Ok(doc) => {
                 let warnings = doc.warnings();
                 let pages = doc.page_count();
@@ -676,6 +794,242 @@ fn check(options: &Options) -> Result<(), String> {
         return Err(format!("{failed} files could not be opened"));
     }
     Ok(())
+}
+
+// ---- probe: the record one corpus child writes ---------------------------
+
+/// The record's format version, bumped when a reader would misread the old
+/// shape. The runner refuses a record whose version it does not know rather
+/// than reading the fields it recognises and inventing the rest.
+const PROBE_VERSION: u32 = 1;
+
+/// Opens and renders one file at a time, writing a record per file.
+///
+/// Never returns `Err` for anything the file did: the runner reads outcomes
+/// from the record, and reserves the exit code for "this process did not
+/// finish", which is the one thing a record cannot say about itself.
+fn probe(options: &Options) -> Result<(), String> {
+    let fonts = options.font_provider()?;
+    for path in &options.files {
+        probe_one(options, path, fonts.as_ref());
+    }
+    Ok(())
+}
+
+fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvider>>) {
+    let started = std::time::Instant::now();
+    println!("probe {PROBE_VERSION}");
+    println!("file {path}");
+
+    let doc = match open(path, options.password.as_deref(), fonts) {
+        Ok(doc) => doc,
+        Err(message) => {
+            // On one line, and last but for the sentinel, so a reason
+            // containing anything at all cannot be mistaken for another key.
+            println!("opened no {}", one_line(&message));
+            println!("ms {}", started.elapsed().as_millis());
+            println!("done");
+            return;
+        }
+    };
+
+    println!("opened yes");
+    println!("ladder {:?}", doc.ladder_level());
+    let pages = doc.page_count();
+    println!("pages {pages}");
+
+    // Counted by kind rather than listed: a damaged file can emit tens of
+    // thousands of warnings, and the report wants to know which kinds a
+    // corpus produces, not to carry every instance of them.
+    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+    for warning in doc.warnings() {
+        *kinds
+            .entry(format!("cos:{}", cos_warning_label(&warning)))
+            .or_default() += 1;
+    }
+
+    for capability in capabilities(doc.cos()) {
+        println!("cap {capability}");
+    }
+
+    let render = RenderOptions {
+        annotations: options.annotations,
+        ..RenderOptions::at_dpi(options.dpi)
+    };
+    let mut rendered = 0u32;
+    for index in options.pages(&doc) {
+        let Some(page) = doc.page(index) else {
+            continue;
+        };
+        let bitmap = page.render(&render);
+        // Ruling 2's definition, and the one the ratchet counts: a bitmap
+        // came back. A page rendered with a JBIG2 placeholder on it rendered.
+        rendered += 1;
+        for warning in &bitmap.warnings {
+            *kinds
+                .entry(format!("render:{}", render_warning_label(warning)))
+                .or_default() += 1;
+        }
+    }
+    println!("rendered {rendered}");
+
+    for (kind, count) in &kinds {
+        println!("warn {kind} {count}");
+    }
+    println!("ms {}", started.elapsed().as_millis());
+    println!("done");
+}
+
+/// Anything that would break the one-record-per-line format, flattened.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// A stable label per COS warning kind.
+///
+/// The variant name only: the payloads are byte offsets and object numbers,
+/// which differ per file and would make every count one.
+fn cos_warning_label(warning: &tinker_pdf::Warning) -> String {
+    let debug = format!("{:?}", warning.kind);
+    debug
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+/// A stable label per render warning.
+///
+/// Spelled out rather than derived from `Debug`, because two of these carry
+/// the payload that matters: which codec was refused and which shading type
+/// was skipped are the hit-rate table's whole content, and a label that
+/// dropped them would count every unsupported image together.
+fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
+    use tinker_pdf::RenderWarning as W;
+    match warning {
+        W::UnsupportedImage { codec } => format!("UnsupportedImage({codec})"),
+        W::DamagedImage { reason, .. } => format!("DamagedImage({reason})"),
+        W::PageScaledDown { .. } => "PageScaledDown".to_string(),
+        W::EmptyTextClip => "EmptyTextClip".to_string(),
+        W::UnreadableFont => "UnreadableFont".to_string(),
+        W::UnsupportedShading { kind } => format!("UnsupportedShading({kind})"),
+        W::UnsupportedPattern { .. } => "UnsupportedPattern".to_string(),
+        W::HiddenOptionalContent { .. } => "HiddenOptionalContent".to_string(),
+        W::Cancelled => "Cancelled".to_string(),
+    }
+}
+
+/// What a file would need in order to render fully, read from its objects.
+///
+/// From the object graph rather than from the render warnings, and the
+/// difference is the point of the table. A warning says "a page that was
+/// rendered wanted JBIG2"; this says "the file contains JBIG2", which is the
+/// question gaps 17 and 18 are asking. They differ for every file whose
+/// JBIG2 image sits on a page behind an optional-content group, inside an
+/// unreferenced object, or on a page a truncated run never reached — and
+/// scheduling work by the warning count would systematically undercount
+/// exactly the features that are hardest to reach.
+fn capabilities(cos: &CosDocument) -> BTreeSet<&'static str> {
+    let mut found = BTreeSet::new();
+    for number in 1..=cos.max_object_number() {
+        let generation = match cos.xref().get(number) {
+            Some(XrefEntry::Offset { gen, .. }) => gen,
+            Some(XrefEntry::InStream { .. }) => 0,
+            Some(XrefEntry::Free { .. }) | None => continue,
+        };
+        let Ok(object) = cos.get(ObjRef::new(number, generation)) else {
+            continue;
+        };
+        scan_capabilities(cos, &object, 0, &mut found);
+    }
+    found
+}
+
+fn scan_capabilities(
+    cos: &CosDocument,
+    object: &Object,
+    depth: u32,
+    found: &mut BTreeSet<&'static str>,
+) {
+    // The object graph is a graph rather than a tree, and a malformed file's
+    // can cycle. Every capability this looks for sits within a few levels of
+    // the object that owns it, so a bound costs nothing real.
+    if depth > 8 {
+        return;
+    }
+    match object {
+        Object::Dict(dict) | Object::Stream(StreamObj { dict, .. }) => {
+            scan_dict(cos, dict, depth, found);
+        }
+        Object::Array(items) => {
+            for item in items {
+                scan_capabilities(cos, item, depth + 1, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'static str>) {
+    for (key, value) in dict.iter() {
+        let key = cos.name_bytes(*key).map(|b| b.to_vec()).unwrap_or_default();
+        match key.as_slice() {
+            b"Filter" | b"F" => {
+                for name in filter_names(cos, value) {
+                    match name.as_slice() {
+                        b"JBIG2Decode" | b"JBIG2" => {
+                            found.insert("jbig2");
+                        }
+                        b"JPXDecode" => {
+                            found.insert("jpx");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            b"ShadingType" => {
+                // 8.7.4.5.5-8: types 4 to 7 are the mesh shadings, which is
+                // exactly gap 10's scope. 1 to 3 are built.
+                if let Some(4..=7) = value.as_int() {
+                    found.insert("mesh-shading");
+                }
+            }
+            _ => {}
+        }
+        scan_capabilities(cos, value, depth + 1, found);
+    }
+}
+
+/// Every filter name a `/Filter` entry mentions, in either of 7.4's two
+/// shapes, resolving one level of indirection.
+fn filter_names(cos: &CosDocument, value: &Object) -> Vec<Vec<u8>> {
+    let resolved;
+    let value = match value {
+        Object::Ref(reference) => match cos.get(*reference) {
+            Ok(object) => {
+                resolved = object;
+                &*resolved
+            }
+            Err(_) => return Vec::new(),
+        },
+        other => other,
+    };
+    match value {
+        Object::Name(name) => cos
+            .name_bytes(*name)
+            .map(|b| vec![b.to_vec()])
+            .unwrap_or_default(),
+        Object::Array(items) => items
+            .iter()
+            .filter_map(Object::as_name)
+            .filter_map(|n| cos.name_bytes(n).map(|b| b.to_vec()))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]

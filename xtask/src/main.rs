@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use xtask::{corpus, repo_root};
+use xtask::{corpus, fetch, repo_root};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -18,7 +18,23 @@ usage:
   cargo xtask vendor  check vendored data against THIRDPARTY.md and deny.toml
   cargo xtask check   all three of the above
 
+  cargo xtask corpus-fetch [--record] [--force] [--corpus NAME]
+                                         fetch and verify the pinned corpora
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
+  cargo xtask corpus-run [options]       open and render every corpus file
+
+corpus-run options:
+  --corpus NAME   only this one; repeatable
+  --timeout N     seconds per file before the child is killed (default 20)
+  --dpi D         render resolution (default 72)
+  --fonts PATH    a face, or directory of faces, for documents embedding none
+  --jobs N        files at once (default: the core count)
+  --sample N      at most N files per corpus, recorded as a limit
+  --child PATH    the program to spawn (default: tpdf beside this binary)
+  --report PATH   write the full per-file report here
+  --check         compare against corpus/ratchet.json; fail on a regression
+  --record        rewrite corpus/ratchet.json from this run
+  --strict        with --check, a rise in the degradation rate also fails
 
   cargo xtask help
 ";
@@ -49,6 +65,8 @@ fn main() -> ExitCode {
             )
         }
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
+        "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
+        "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -163,7 +181,29 @@ const ALLOWED: &[(&str, &[&str])] = &[
 /// xtask's own dependencies were never checked at all — by a check whose
 /// entire purpose is that the compiler cannot do this.
 ///
-const TOOLS: &[&str] = &["tools/pdfcmp", "tools/oracle-diff", "tools/tpdf", "xtask"];
+/// Crates outside `crates/`, and the internal edges each may have.
+///
+/// The rule is "the facade only", and it exists so that a tool exercises what
+/// a user gets rather than reaching past the API into an implementation
+/// detail. `xtask` is the one exception and it is spelled out rather than
+/// waved through: it is not a tool users get, it is repository automation, and
+/// it is the *only* thing here that never touches a PDF. What it needs from
+/// the workspace is a SHA-256 to verify a fetched corpus archive against the
+/// digit string in the lock, and taking a third-party one — or writing a
+/// second one — in a project premised on implementing its own primitives would
+/// be the wrong way round twice over.
+///
+/// It deliberately does not depend on `tinker-pdf`. `cargo xtask check` reads
+/// manifests and counts lines; making it link the engine would put a full
+/// engine build in front of every dependency-graph check, and the corpus
+/// runner does not need it either, because it spawns `tpdf` rather than
+/// opening documents itself.
+const TOOLS: &[(&str, &[&str])] = &[
+    ("tools/pdfcmp", &["tinker-pdf"]),
+    ("tools/oracle-diff", &["tinker-pdf"]),
+    ("tools/tpdf", &["tinker-pdf"]),
+    ("xtask", &["tinker-pdf-crypto"]),
+];
 
 /// Prints a task's outcome and turns it into an exit code.
 fn report(task: &str, outcome: Result<(), Vec<String>>) -> ExitCode {
@@ -504,7 +544,7 @@ fn check_dag() -> Result<(), Vec<String>> {
 
     // The tools and bindings are checked only for the one rule that matters
     // for them: ruling 11 keeps a binding on the facade alone.
-    for tool in TOOLS {
+    for (tool, allowed) in TOOLS {
         let manifest = root.join(tool).join("Cargo.toml");
         let text = match std::fs::read_to_string(&manifest) {
             Ok(text) => text,
@@ -520,10 +560,11 @@ fn check_dag() -> Result<(), Vec<String>> {
             }
         };
         for dep in internal_dependencies(&text) {
-            if dep != "tinker-pdf" {
+            if !allowed.contains(&dep.as_str()) {
                 problems.push(format!(
-                    "{tool} -> {dep}: tools use the facade, so that they \
-                     exercise what users get"
+                    "{tool} -> {dep} is not one of its declared edges ({}); \
+                     tools use the facade, so that they exercise what users get",
+                    allowed.join(", ")
                 ));
             }
         }
