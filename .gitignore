@@ -2,6 +2,12 @@
 # The excluded bindings build into their own target directories.
 target/
 corpus/data/
+# Plan 14: corpora are fetched, pinned and never committed. `corpus-fetch`
+# caches the verified archives in the first and extracts them into the second;
+# `corpus/corpora.lock` is what reproduces both, and is the only part of this
+# that belongs in git.
+corpus/cache/
+corpus/files/
 testdata/golden/actual/
 bindings/dotnet/bin/
 bindings/dotnet/obj/

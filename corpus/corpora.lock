@@ -1,0 +1,59 @@
+# The corpus lock (plan 14, gap 23).
+#
+# Corpora are FETCHED, never committed. Each entry pins two things, because
+# they answer different questions:
+#
+#   commit  the upstream git object id the archive is of. An upstream that
+#           rewrites history or moves a branch cannot change what this names.
+#   sha256  the archive's bytes. This is what a fetch verifies against, and
+#           what a tampered mirror fails.
+#
+# A forge's archive of a fixed commit is not guaranteed byte-stable forever --
+# its compressor may change -- so when the two disagree the difference says
+# which kind of change it was. Re-recording a `sha256` is then a deliberate act
+# with its own commit and its own reason, which is what gap 23's risk table
+# asks for. `cargo xtask corpus-fetch --record` prints what was actually
+# fetched, for preparing exactly that commit.
+#
+# `licence` is upstream's terms. `redistribute` is this project's posture, and
+# it is `no` for every entry regardless of how permissive upstream is: plan 14
+# says nothing from any corpus enters git, so a permissive licence changes what
+# we *could* do and not what we do.
+#
+#   cargo xtask corpus-fetch          fetch and verify all of them
+#   cargo xtask corpus-licences       print the table corpus/README.md carries
+#   cargo xtask corpus-run            run them
+
+[pdfjs]
+url = https://codeload.github.com/mozilla/pdf.js/tar.gz/b96d745c277a5666013359a7272d74d1896fbb9f
+commit = b96d745c277a5666013359a7272d74d1896fbb9f
+sha256 = 255345d9e4dde6c431b9762d5c4df93031cb19455e71e426d6cb92af2b5fc529
+subdir = test/pdfs
+licence = Apache-2.0 (the project); the fixtures are third-party and mixed, and upstream itself links rather than stores many of them
+redistribute = no
+exercises = decades of real-world breakage, reported by users of a browser's viewer
+
+[verapdf]
+url = https://codeload.github.com/veraPDF/veraPDF-corpus/tar.gz/49de56cd987929932c9e4fbbbe67d052bf44ef83
+commit = 49de56cd987929932c9e4fbbbe67d052bf44ef83
+sha256 = 5c1a138e0fd89fafa51d03a23a1a0bf0a9bcb028430e1d5dd125364e19b87f57
+licence = CC-BY-4.0
+redistribute = no
+exercises = atomic spec-conformance cases for PDF/A, PDF/UA, ISO 32000-1 and ISO 32000-2
+
+[qpdf]
+url = https://codeload.github.com/qpdf/qpdf/tar.gz/e8adee327e4ed76f540a40fd674dfb4903e26f3a
+commit = e8adee327e4ed76f540a40fd674dfb4903e26f3a
+sha256 = 43e339386c20b53d6f421bcad2e0eb91c18f1efb2fe2ee77754d2bfc3a83c52b
+subdir = qpdf/qtest/qpdf
+licence = Apache-2.0
+redistribute = no
+exercises = cross-reference, object-stream, linearization and encryption torture
+
+[pdfa-examples]
+url = https://codeload.github.com/pdf-association/pdf20examples/tar.gz/c20f2c17bfcc4baab7cfe62e70fae64caf14d5fa
+commit = c20f2c17bfcc4baab7cfe62e70fae64caf14d5fa
+sha256 = 2a9228f621f59422e70a4ca241093fd37b2ab9c1ea96f8c6eba2663c818573a5
+licence = CC-BY-SA-4.0
+redistribute = no
+exercises = PDF 2.0 features shown deliberately: UTF-8 strings, page-level output intents, incremental saves

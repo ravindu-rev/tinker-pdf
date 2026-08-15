@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use xtask::{corpus, repo_root};
+
 const USAGE: &str = "\
 xtask — repository chores
 
@@ -15,13 +17,17 @@ usage:
   cargo xtask libm    check that no pixel path calls the platform's libm
   cargo xtask vendor  check vendored data against THIRDPARTY.md and deny.toml
   cargo xtask check   all three of the above
+
+  cargo xtask corpus-licences [--check]  the corpus lock's licence table
+
   cargo xtask help
 ";
 
 fn main() -> ExitCode {
-    let task = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "help".to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let task = args.first().cloned().unwrap_or_else(|| "help".to_string());
+    let rest = args.get(1..).unwrap_or_default();
+
     match task.as_str() {
         "dag" => report("dag", check_dag()),
         "libm" => report("libm", check_libm()),
@@ -42,6 +48,7 @@ fn main() -> ExitCode {
                 },
             )
         }
+        "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -50,6 +57,20 @@ fn main() -> ExitCode {
             eprintln!("xtask: unknown task `{other}`");
             print!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// A task whose failure is one message rather than a list of problems.
+fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
+    match outcome {
+        Ok(()) => {
+            println!("{task}: ok");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{task}: {message}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -133,23 +154,16 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-ffi", &["tinker-pdf"]),
 ];
 
-/// Crates outside `crates/` that may depend on the facade, by path from the
-/// repository root.
+/// Crates outside `crates/` and the internal edges each may have, by path from
+/// the repository root.
 ///
 /// Paths rather than bare names because `xtask` does not live under `tools/`.
 /// It was listed as `"xtask"` and looked for at `tools/xtask/Cargo.toml`,
 /// which does not exist, so the manifest read failed, the loop moved on, and
 /// xtask's own dependencies were never checked at all — by a check whose
 /// entire purpose is that the compiler cannot do this.
+///
 const TOOLS: &[&str] = &["tools/pdfcmp", "tools/oracle-diff", "tools/tpdf", "xtask"];
-
-fn repo_root() -> PathBuf {
-    // The manifest directory is `<root>/xtask`.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
 
 /// Prints a task's outcome and turns it into an exit code.
 fn report(task: &str, outcome: Result<(), Vec<String>>) -> ExitCode {
