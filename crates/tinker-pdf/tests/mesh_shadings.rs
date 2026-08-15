@@ -451,6 +451,297 @@ fn the_edge_flag_decides_where_the_next_triangle_goes() {
     assert_eq!(pixel(&bitmap, 58, 55), (255, 255, 255), "past the strip");
 }
 
+// ---------------------------------------------------------------------------
+// Coons and tensor patches (8.7.4.5.7, 8.7.4.5.8).
+// ---------------------------------------------------------------------------
+
+/// 60 units of page, as the raw 8-bit value `/Decode [0 60 ...]` maps it to.
+fn raw(units: f64) -> u64 {
+    (units / 60.0 * 255.0).round() as u64
+}
+
+/// One patch: its flag, the points it carries in the spiral order 8.7.4.5.7
+/// numbers them, and the corner colours it carries.
+///
+/// A flag of 0 carries all twelve points (sixteen for a tensor patch) and four
+/// colours; a flag of 1, 2 or 3 carries eight (or twelve) and two, because the
+/// shared edge comes from the previous patch (Table 85).
+fn patch(stream: &mut Packer, flag: u64, points: &[(f64, f64)], colors: &[f64]) {
+    stream.push(flag, 8);
+    for (x, y) in points {
+        stream.push(raw(*x), 8).push(raw(*y), 8);
+    }
+    for grey in colors {
+        stream.push((grey * 255.0).round() as u64, 8);
+    }
+    stream.align();
+}
+
+/// The twelve boundary points of an axis-aligned patch with straight edges,
+/// evenly spaced, in the spiral order.
+///
+/// `u` runs left to right and `v` bottom to top, so corner `c1` is at
+/// `(x0, y0)`, `c2` at `(x0, y1)`, `c3` at `(x1, y1)` and `c4` at `(x1, y0)`.
+fn flat_patch_points(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(f64, f64)> {
+    let x = |t: f64| x0 + (x1 - x0) * t;
+    let y = |t: f64| y0 + (y1 - y0) * t;
+    let third = 1.0 / 3.0;
+    vec![
+        (x(0.0), y(0.0)),         // p1  = p00
+        (x(0.0), y(third)),       // p2  = p01
+        (x(0.0), y(2.0 * third)), // p3  = p02
+        (x(0.0), y(1.0)),         // p4  = p03
+        (x(third), y(1.0)),       // p5  = p13
+        (x(2.0 * third), y(1.0)), // p6  = p23
+        (x(1.0), y(1.0)),         // p7  = p33
+        (x(1.0), y(2.0 * third)), // p8  = p32
+        (x(1.0), y(third)),       // p9  = p31
+        (x(1.0), y(0.0)),         // p10 = p30
+        (x(2.0 * third), y(0.0)), // p11 = p20
+        (x(third), y(0.0)),       // p12 = p10
+    ]
+}
+
+const PATCH_KEYS: &str = "/ColorSpace /DeviceGray /BitsPerCoordinate 8 \
+     /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 60 0 60 0 1]";
+
+/// **Milestone 4's exit criterion.** A flat Coons patch renders as the
+/// equivalent two triangles do.
+///
+/// The corner colours are chosen so that the two really are equivalent:
+/// 8.7.4.5.7 interpolates a patch's four corners *bilinearly* over the unit
+/// square, and bilinear is only linear when opposite corners agree along one
+/// axis. Here `c1 = c2 = 0` and `c3 = c4 = 1`, so the colour depends on `u`
+/// alone and the patch is exactly the ramp the two triangles paint.
+///
+/// The two routes could hardly be less alike: one is two triangles straight
+/// from the stream, the other is a bicubic surface subdivided into a grid of
+/// several hundred. Getting the same pixels out of both is what says the
+/// subdivision, the Coons interior formula and the corner interpolation all
+/// agree with the triangle path they are supposed to be a front end on.
+#[test]
+fn a_flat_coons_patch_renders_like_the_equivalent_two_triangles() {
+    let mut stream = Packer::new();
+    patch(
+        &mut stream,
+        0,
+        &flat_patch_points(0.0, 0.0, 60.0, 60.0),
+        &[0.0, 0.0, 1.0, 1.0],
+    );
+
+    let patch_form = mesh_page(&format!("/ShadingType 6 {PATCH_KEYS}"), &stream, "/Sh0 sh");
+    let triangle_form = mesh_page(
+        &format!("/ShadingType 4 {GREY_KEYS}"),
+        &split_square(),
+        "/Sh0 sh",
+    );
+    assert_eq!(unsupported(&patch_form), None, "type 6 is painted now");
+
+    let mut worst = 0i32;
+    for y in 1..59 {
+        for x in 1..59 {
+            let difference =
+                i32::from(pixel(&patch_form, x, y).0) - i32::from(pixel(&triangle_form, x, y).0);
+            worst = worst.max(difference.abs());
+        }
+    }
+    assert!(
+        worst <= 2,
+        "a flat Coons patch and the two triangles it is equal to differ by \
+         {worst} levels somewhere inside"
+    );
+}
+
+/// A patch's edges are cubics, not chords: control points off the chord bulge
+/// the boundary, and the bulge is painted.
+#[test]
+fn a_patch_boundary_is_a_curve_rather_than_a_chord() {
+    let mut points = flat_patch_points(10.0, 25.0, 50.0, 55.0);
+    // p11 and p12 are the two interior control points of the v = 0 edge, the
+    // one running from (10, 25) to (50, 25). Dragging both down to y = 0 bows
+    // that edge well below the corners: the cubic's midpoint lands at
+    // (25 + 25) / 8 = 6.25.
+    points[10] = (points[10].0, 0.0);
+    points[11] = (points[11].0, 0.0);
+
+    let mut stream = Packer::new();
+    patch(&mut stream, 0, &points, &[0.3, 0.3, 0.3, 0.3]);
+    let bitmap = mesh_page(&format!("/ShadingType 6 {PATCH_KEYS}"), &stream, "/Sh0 sh");
+
+    // Page y = 12 is fifteen points below the corners, and only the bulge
+    // reaches it. Bitmap rows count from the top, so that is row 48.
+    let inside = pixel(&bitmap, 30, 48).0;
+    assert!(
+        inside < 120,
+        "the middle of the bowed edge should be painted, got {inside}"
+    );
+    // The corners of the same band are not bowed, so the page shows there.
+    assert_eq!(pixel(&bitmap, 12, 48), (255, 255, 255), "beside the bulge");
+    assert_eq!(
+        pixel(&bitmap, 48, 48),
+        (255, 255, 255),
+        "and the other side"
+    );
+}
+
+/// A tensor patch's four internal control points are read and used
+/// (8.7.4.5.8), rather than being recomputed from the boundary as a Coons
+/// patch's are.
+///
+/// The two types share every byte of their boundary, so a build that ignored
+/// the extra four points would paint a type 7 patch as a type 6 one and no
+/// test of the outline could tell. The colours are what shows it: dragging the
+/// interior points does not move the boundary at all, it moves where inside
+/// the patch each parameter lands, so the colour at the centre shifts.
+#[test]
+fn a_tensor_patch_uses_its_internal_control_points() {
+    let boundary = flat_patch_points(0.0, 0.0, 60.0, 60.0);
+    let colors = [0.0, 0.0, 1.0, 1.0];
+
+    // The Coons reading of the same boundary: the four internal points that
+    // 8.7.4.5.7's formula implies, which for a flat patch is the flat grid.
+    let mut flat = Packer::new();
+    let mut points = boundary.clone();
+    for (u, v) in [(1.0, 1.0), (1.0, 2.0), (2.0, 2.0), (2.0, 1.0)] {
+        points.push((u * 20.0, v * 20.0));
+    }
+    patch(&mut flat, 0, &points, &colors);
+
+    // The same boundary with the interior dragged hard towards one corner.
+    let mut pulled = Packer::new();
+    let mut points = boundary;
+    for (u, v) in [(0.0, 0.0), (0.0, 60.0), (12.0, 60.0), (12.0, 0.0)] {
+        points.push((u, v));
+    }
+    patch(&mut pulled, 0, &points, &colors);
+
+    let flat = mesh_page(&format!("/ShadingType 7 {PATCH_KEYS}"), &flat, "/Sh0 sh");
+    let pulled = mesh_page(&format!("/ShadingType 7 {PATCH_KEYS}"), &pulled, "/Sh0 sh");
+    assert_eq!(unsupported(&flat), None, "type 7 is painted");
+    assert_eq!(unsupported(&pulled), None);
+
+    let (a, b) = (pixel(&flat, 30, 30).0, pixel(&pulled, 30, 30).0);
+    assert!(
+        i32::from(a).abs_diff(i32::from(b)) > 25,
+        "the internal control points should move the centre: {a} against {b}"
+    );
+}
+
+/// Patches continue across an edge flag exactly as triangles do, and the join
+/// leaves no seam (8.7.4.5.7, Table 85).
+///
+/// Flag 2 makes the new patch's first edge the previous patch's `p7 p8 p9 p10`
+/// — its `u = 1` side — and its first two colours the previous patch's `c3`
+/// and `c4`. Reading the wrong four points still produces a patch, hinged
+/// somewhere else, which is why the assertion is that the ramp is monotone
+/// across the join rather than merely that something painted.
+#[test]
+fn patches_continue_across_an_edge_flag() {
+    let mut stream = Packer::new();
+    patch(
+        &mut stream,
+        0,
+        &flat_patch_points(0.0, 0.0, 30.0, 60.0),
+        &[0.0, 0.0, 0.5, 0.5],
+    );
+    // The continuation carries eight points: its own p5 to p12. The shared
+    // edge arrives from the previous patch, and it arrives *reversed* — the
+    // new p1 is the old p7, at (30, 60) — so this patch's v axis runs the
+    // other way and its far edge is written top to bottom.
+    patch(
+        &mut stream,
+        2,
+        &[
+            (40.0, 0.0),
+            (50.0, 0.0),
+            (60.0, 0.0),
+            (60.0, 20.0),
+            (60.0, 40.0),
+            (60.0, 60.0),
+            (50.0, 60.0),
+            (40.0, 60.0),
+        ],
+        &[1.0, 1.0],
+    );
+
+    let bitmap = mesh_page(&format!("/ShadingType 6 {PATCH_KEYS}"), &stream, "/Sh0 sh");
+    assert_eq!(unsupported(&bitmap), None);
+
+    // One ramp across the whole page, with the join at x = 30.
+    assert!(pixel(&bitmap, 2, 30).0 < 20, "the dark end");
+    assert!(pixel(&bitmap, 57, 30).0 > 235, "the light end");
+    let mut previous = 0u8;
+    for x in 2..58 {
+        let value = pixel(&bitmap, x, 30).0;
+        assert!(
+            value + 2 >= previous,
+            "the ramp falls back at column {x}: {value} after {previous}"
+        );
+        previous = value;
+    }
+
+    // And nothing at the join is lighter than the page's own ramp, which is
+    // what a seam between two patches would be.
+    for y in 3..57 {
+        for x in 28..33 {
+            let value = pixel(&bitmap, x, y).0;
+            assert!(
+                (100..=160).contains(&value),
+                "({x}, {y}) is {value}, which is a seam at the patch join"
+            );
+        }
+    }
+}
+
+/// A page mixing triangles and patches paints both.
+///
+/// This is the half-implementation the plan calls worse than none: a gradient
+/// mesh exports as patches while its background exports as triangles, so a
+/// build with types 4 and 5 and not 6 and 7 renders half such a page and warns
+/// about the other half, which reads as a corrupt file rather than as a
+/// partial capability.
+#[test]
+fn a_page_mixing_triangles_and_patches_paints_both() {
+    let triangles = split_square().hex();
+    let mut stream = Packer::new();
+    patch(
+        &mut stream,
+        0,
+        &flat_patch_points(20.0, 20.0, 40.0, 40.0),
+        &[1.0, 1.0, 1.0, 1.0],
+    );
+    let patches = stream.hex();
+    let content = "/Sh0 sh q 20 20 20 20 re W n /Sh1 sh Q";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60]\n\
+   /Resources << /Shading << /Sh0 5 0 R /Sh1 6 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /ShadingType 4 {GREY_KEYS} /Filter /ASCIIHexDecode\n\
+   /Length {} >>\nstream\n{triangles}\nendstream\nendobj\n\
+6 0 obj\n<< /ShadingType 6 {PATCH_KEYS} /Filter /ASCIIHexDecode\n\
+   /Length {} >>\nstream\n{patches}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len() + 1,
+        triangles.len() + 1,
+        patches.len() + 1,
+    );
+    let bitmap = render(bytes.into_bytes());
+
+    assert!(
+        bitmap.warnings.is_empty(),
+        "neither half is missing: {:?}",
+        bitmap.warnings
+    );
+    // The triangle mesh shows outside the patch's box.
+    assert!(pixel(&bitmap, 5, 30).0 < 30, "the triangle background");
+    // The white patch covers the middle, over a background that is mid grey
+    // there.
+    assert!(pixel(&bitmap, 30, 30).0 > 250, "the patch on top of it");
+}
+
 /// `/Decode` says what the packed integers mean, and reversing a range
 /// reverses the axis. A reader that ignores it draws a mesh in the wrong
 /// place, which reads as a transform bug rather than as a decoding one.
