@@ -136,6 +136,19 @@ pub enum RenderWarning {
         /// layer panel shows, falling back to the resource name.
         layer: String,
     },
+    /// A page asked for more transparency groups than one render will open,
+    /// and the excess were declined (11.4.7, and `MAX_GROUP_BUFFERS`).
+    ///
+    /// This is a *budget*, not a nesting limit: a group whose soft mask names
+    /// a stream that opens further groups branches rather than descends, so a
+    /// page can stay inside the depth cap and still ask for exponentially
+    /// many buffers. What follows the decline is drawn without the group it
+    /// asked for, which is ruling 2's answer -- the page is a little wrong
+    /// rather than never finishing.
+    GroupBudgetSpent {
+        /// How many buffers were opened before the budget ran out.
+        opened: u32,
+    },
     /// The render stopped because it was cancelled.
     Cancelled,
 }
@@ -335,6 +348,28 @@ impl GlyphSource for NoGlyphs {
 /// primary bound.
 const MAX_GROUP_DEPTH: usize = 16;
 
+/// How many group buffers one page may open in total, at any depth.
+///
+/// [`MAX_GROUP_DEPTH`] bounds how deep the nesting goes and not how much work
+/// it is, which are different numbers the moment the recursion *branches*.
+/// The first real fuzzing campaign found the difference in forty-seven
+/// seconds: an 1 851-byte page whose ExtGState `/SMask` names `/G 4 0 R`,
+/// where object 4 is the page's own content stream — so every mask group runs
+/// the three `gs` operators that each open another one. Depth stays inside
+/// sixteen the whole time and the count of buffers is three to the sixteenth.
+/// It rendered in 19.3 seconds at 120 by 80 points, which is 9 600 pixels.
+///
+/// [`MAX_TILE_WORK`] exists for exactly this reason one layer down, and its
+/// comment says the same thing: a per-item cap is not a total. This is the
+/// group lineage's version, and like that one it is a budget rather than a
+/// depth — spent, never refunded, so a page cannot recover budget by
+/// unwinding and going again.
+///
+/// Two thousand is far above any real document. A page that genuinely wants
+/// more gets its excess groups declined and reported, which is ruling 2's
+/// answer rather than a hang.
+const MAX_GROUP_BUFFERS: u32 = 2000;
+
 /// How deep tiling patterns may nest before one is declined (8.7.3.2).
 ///
 /// A cell is a content stream, so it may fill with a pattern of its own —
@@ -501,6 +536,15 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// been translated so that device coordinates land inside it — which is
     /// what lets the buffer be bounding-box sized rather than page sized
     /// without a second coordinate system running through every paint.
+    /// Group buffers opened so far, at any depth, against
+    /// [`MAX_GROUP_BUFFERS`]. Spent and never refunded: unwinding a group
+    /// returns its memory but not its budget, because the cost this bounds
+    /// is the work already done rather than the memory still held.
+    group_buffers: u32,
+    /// Whether the budget above ever declined a group, reported once at
+    /// `finish` rather than per decline: a page that has run out asks
+    /// repeatedly, and forty thousand identical warnings is not a report.
+    group_budget_spent: bool,
     groups: Vec<GroupFrame>,
     /// The soft mask in force, in the current canvas's coordinates (11.6.5).
     ///
@@ -552,6 +596,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             text_clip_requested: false,
             marked_content: Vec::new(),
             hidden_depth: 0,
+            group_buffers: 0,
+            group_budget_spent: false,
             groups: Vec::new(),
             soft: None,
             mask_frames: Vec::new(),
@@ -613,6 +659,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         false
     }
 
+    /// Record that the group budget declined one, for a single report at
+    /// `finish`.
+    fn note_group_budget(&mut self) {
+        self.group_budget_spent = true;
+    }
+
     /// The canvas and everything the render had to tolerate.
     #[must_use]
     pub fn finish(mut self) -> (Canvas, Vec<RenderWarning>) {
@@ -625,6 +677,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         if self.missing_fonts > 0 {
             self.warnings.push(RenderWarning::UnreadableFont);
+        }
+        if self.group_budget_spent {
+            self.warnings.push(RenderWarning::GroupBudgetSpent {
+                opened: self.group_buffers,
+            });
         }
         // The flag, not the token. Asking the token here reports a page that
         // was drawn in full as cancelled whenever the caller's timeout lost
@@ -650,6 +707,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.groups.len() >= MAX_GROUP_DEPTH {
             return false;
         }
+        // Depth is not work once the recursion branches. See
+        // `MAX_GROUP_BUFFERS`.
+        if self.group_buffers >= MAX_GROUP_BUFFERS {
+            self.note_group_budget();
+            return false;
+        }
+        self.group_buffers = self.group_buffers.saturating_add(1);
         let (x0, y0, width, height) =
             self.clip
                 .as_ref()
@@ -788,6 +852,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.mask_frames.len() + self.groups.len() >= MAX_GROUP_DEPTH {
             return false;
         }
+        // A mask group is a group buffer and spends from the same budget --
+        // and it is the one the campaign's timeout actually recursed through.
+        if self.group_buffers >= MAX_GROUP_BUFFERS {
+            self.note_group_budget();
+            return false;
+        }
+        self.group_buffers = self.group_buffers.saturating_add(1);
         // The group's own bounding box bounds the buffer, and the current
         // clip deliberately does *not*: the mask applies to whatever is
         // painted after the `gs`, which may be anywhere, and clipping the

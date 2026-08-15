@@ -970,3 +970,47 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
     let outside = at(&bitmap, 45.0, 45.0);
     assert_eq!(outside, (255, 255, 255), "and nothing leaked out of either");
 }
+
+/// A soft mask whose `/G` names the page's own content stream.
+///
+/// Found by the first real fuzzing campaign (gap 24 milestone 5) in
+/// forty-seven seconds, as a libFuzzer timeout rather than a panic. The page
+/// is 1 851 bytes and 120 by 80 points -- 9 600 pixels -- and it took 19.3
+/// seconds to render.
+///
+/// The mechanism is worth stating, because the nesting cap that was already
+/// there does not stop it. `MAX_GROUP_DEPTH` bounds how *deep* groups nest.
+/// This page's ExtGState `/SMask` names `/G 4 0 R`, and object 4 is the page
+/// content stream itself, which runs three `gs` operators that each open
+/// another mask group. So the recursion **branches** rather than descends:
+/// depth stays inside sixteen the whole way down while the number of buffers
+/// is three to the sixteenth. A depth cap is not a work cap, which is the
+/// same lesson `MAX_TILE_WORK` records one layer down for tiling patterns.
+///
+/// The assertion is the warning rather than a clock. A timing test would fail
+/// on a slow machine and pass on a fast one with the budget removed; the
+/// warning says the budget was reached, which is the thing that bounds the
+/// work.
+#[test]
+fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
+    let bytes = include_bytes!("../../../fuzz/corpus/render_page/soft-mask-names-its-own-page.pdf");
+    let doc = tinker_pdf::Document::open(bytes.to_vec()).expect("it opens, damaged as it is");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&tinker_pdf::RenderOptions::default());
+
+    assert!(
+        bitmap
+            .warnings
+            .iter()
+            .any(|w| matches!(w, tinker_pdf::RenderWarning::GroupBudgetSpent { .. })),
+        "the budget is what stops this page, so it has to say it stopped: {:?}",
+        bitmap.warnings
+    );
+
+    // And it is still a page rather than a refusal: ruling 2 degrades.
+    assert_eq!((bitmap.width, bitmap.height), (120, 80));
+    assert!(
+        bitmap.data.iter().any(|&b| b != bitmap.data[0]),
+        "something was drawn"
+    );
+}
