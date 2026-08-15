@@ -49,3 +49,10 @@ fuzz/coverage/
 bindings/dotnet/tests/Smoke/packages/
 bindings/dotnet/tests/Smoke/bin/
 bindings/dotnet/tests/Smoke/obj/
+
+# The browser demo's headless driver. Playwright is build tooling (rule 1's
+# documented exception), installed on demand and never shipped.
+bindings/js/demo/node_modules/
+bindings/js/demo/package-lock.json
+# Playwright MCP scratch, and the screenshots a manual demo run leaves behind.
+.playwright-mcp/

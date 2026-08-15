@@ -1,0 +1,178 @@
+<!doctype html>
+<!--
+  Plan 13's exit criterion for the JavaScript binding: a page that renders an
+  uploaded PDF.
+
+  It is deliberately one file with no build step. `wasm-pack build --target
+  web` produces ESM that a plain `<script type="module">` can import, so the
+  whole demo is:
+
+      wasm-pack build --release --target web --out-dir pkg bindings/js
+      python -m http.server -d bindings/js 8080   # then open /demo/
+
+  A file:// URL will not work — the module fetches its own `.wasm`, and
+  browsers refuse cross-origin fetches from `file:`. That is a property of the
+  loader, not of this page.
+
+  Everything the page does that is not obvious is a consequence of something in
+  the engine's contract, and each is commented where it happens: the font
+  upload exists because the engine bundles no faces, and the pixels are copied
+  rather than viewed because a view into wasm memory is invalidated by the next
+  allocation.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tinker-pdf in the browser</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+    margin: 0 auto; padding: 2rem 1.5rem; max-width: 60rem;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  p.lede { margin: 0 0 1.5rem; opacity: .75; }
+  fieldset { border: 1px solid currentColor; border-radius: 6px; opacity: .95; margin: 0 0 1rem; }
+  legend { padding: 0 .4rem; font-weight: 600; }
+  label { display: block; margin: .4rem 0; }
+  #status { font-family: ui-monospace, monospace; white-space: pre-wrap; min-height: 3em; }
+  #pages { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 1rem; }
+  canvas { border: 1px solid currentColor; max-width: 100%; height: auto; background: #fff; }
+  .warn { opacity: .8; }
+</style>
+</head>
+<body>
+
+<h1>tinker-pdf in the browser</h1>
+<p class="lede">
+  A from-scratch, pure-Rust PDF engine compiled to WebAssembly. Nothing is
+  uploaded anywhere: the file is read into wasm memory in this tab.
+</p>
+
+<fieldset>
+  <legend>Render a PDF</legend>
+  <label>PDF <input type="file" id="pdf" accept="application/pdf"></label>
+  <label>
+    Font face (optional) <input type="file" id="face" accept=".ttf,.otf,font/*">
+    <br>
+    <small class="warn">
+      The engine bundles no font faces and a browser has no font directory it
+      can read, so a document that does not embed its fonts extracts its text
+      perfectly and <em>draws none of it</em>. Supply any TrueType or
+      OpenType file to see that text. A document with embedded fonts needs
+      nothing here.
+    </small>
+  </label>
+  <label>Scale <input type="range" id="scale" min="0.5" max="3" step="0.25" value="1.5">
+    <output id="scaleOut">1.5</output>&times;</label>
+</fieldset>
+
+<div id="status">Loading the engine…</div>
+<div id="pages"></div>
+
+<script type="module">
+import init, { PdfDocument, version } from '../pkg/tinker_pdf_js.js';
+
+const status = document.getElementById('status');
+const pagesEl = document.getElementById('pages');
+const pdfInput = document.getElementById('pdf');
+const faceInput = document.getElementById('face');
+const scaleInput = document.getElementById('scale');
+const scaleOut = document.getElementById('scaleOut');
+
+const say = (text) => { status.textContent = text; };
+
+await init();
+say(`engine ${version()} ready. Choose a PDF.`);
+
+let pdfBytes = null;
+let faceBytes = null;
+
+const read = (file) => file.arrayBuffer().then((b) => new Uint8Array(b));
+
+async function render() {
+  if (!pdfBytes) return;
+  pagesEl.replaceChildren();
+
+  let doc;
+  try {
+    doc = new PdfDocument(pdfBytes);
+  } catch (error) {
+    say(`could not open: ${error}`);
+    return;
+  }
+
+  if (doc.isEncrypted) {
+    // Permissions in PDF are advisory and the engine treats them as such;
+    // an encrypted file still needs a password before anything can be read.
+    say('this file is encrypted; this demo does not ask for a password.');
+    return;
+  }
+
+  if (faceBytes) {
+    doc.setFonts(faceBytes, undefined, undefined, undefined);
+  }
+
+  const scale = Number(scaleInput.value);
+  const count = doc.pageCount;
+  say(`${count} page(s), rendering at ${scale}×…`);
+
+  const started = performance.now();
+  let inked = 0;
+  for (let index = 0; index < count; index += 1) {
+    const bitmap = doc.renderPage(index, scale);
+
+    // `data()` copies out of wasm memory. `viewUnsafeUntilNextAllocation()`
+    // would hand back a Uint8Array aliasing that memory, and the very next
+    // `renderPage` may grow the heap -- which DETACHES the buffer, so the
+    // view silently becomes zero length. Copying costs one allocation per
+    // page and removes the entire class of bug. See bindings/js/README.md.
+    const pixels = bitmap.data();
+
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.title = `page ${index + 1}`;
+    // The engine renders RGBA8 here, which is exactly ImageData's layout.
+    canvas.getContext('2d').putImageData(
+      new ImageData(new Uint8ClampedArray(pixels), bitmap.width, bitmap.height),
+      0, 0,
+    );
+    pagesEl.append(canvas);
+
+    for (let i = 0; i < pixels.length; i += 4) {
+      if (pixels[i] !== 0xff) inked += 1;
+    }
+  }
+  const elapsed = Math.round(performance.now() - started);
+
+  // The ink count is on the page rather than in a console log because it is
+  // the one number that separates "a canvas appeared" from "the engine drew
+  // something". A document with no embedded fonts and no uploaded face
+  // renders to a blank canvas of exactly the right size.
+  say(
+    `${count} page(s) in ${elapsed} ms, ${inked} non-white pixels.` +
+    (inked === 0
+      ? '\nNothing was drawn. If this document embeds no fonts, upload a font face above.'
+      : ''),
+  );
+}
+
+pdfInput.addEventListener('change', async () => {
+  const file = pdfInput.files?.[0];
+  if (!file) return;
+  pdfBytes = await read(file);
+  await render();
+});
+faceInput.addEventListener('change', async () => {
+  const file = faceInput.files?.[0];
+  faceBytes = file ? await read(file) : null;
+  await render();
+});
+scaleInput.addEventListener('input', () => { scaleOut.textContent = scaleInput.value; });
+scaleInput.addEventListener('change', render);
+</script>
+
+</body>
+</html>

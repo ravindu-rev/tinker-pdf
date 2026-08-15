@@ -215,8 +215,13 @@ pub fn publish_order(graph: &[(String, Vec<String>)]) -> Result<Vec<String>, Str
             .collect();
         if ready.is_empty() {
             let stuck: Vec<&str> = remaining.iter().map(|(n, _)| n.as_str()).collect();
+            // Two causes, and naming only the first sends the reader looking
+            // for a cycle that is not there. Injection found this: dropping a
+            // crate from the emitted order strands everything above it, and
+            // the first draft of this message called that a cycle.
             return Err(format!(
-                "the crate graph has a cycle through {}; crates.io cannot publish any of them",
+                "no crate is ready to publish and these are left: {}. Either the graph has a \
+                 cycle through them, or the order dropped something they all depend on",
                 stuck.join(", ")
             ));
         }
@@ -479,8 +484,26 @@ pub fn plan(root: &Path, options: &Options) -> Result<Vec<Step>, String> {
     steps.push(Step {
         stage: Stage::Preflight,
         label: "the manifests agree with the workspace version, and the graph is legal".into(),
-        live: vec!["cargo".into(), "xtask".into(), "check".into()],
-        dry: Some(vec!["cargo".into(), "xtask".into(), "check".into()]),
+        // `cargo run -p xtask --` rather than `cargo xtask`: this repository
+        // defines no cargo alias, so the short form is `no such command:
+        // xtask` — which the first end-to-end dry run duly reported, at
+        // step 1 of 20.
+        live: vec![
+            "cargo".into(),
+            "run".into(),
+            "-p".into(),
+            "xtask".into(),
+            "--".into(),
+            "check".into(),
+        ],
+        dry: Some(vec![
+            "cargo".into(),
+            "run".into(),
+            "-p".into(),
+            "xtask".into(),
+            "--".into(),
+            "check".into(),
+        ]),
         publishes: false,
         cwd: ".".into(),
         registry_note: None,
@@ -631,8 +654,22 @@ pub fn plan(root: &Path, options: &Options) -> Result<Vec<Step>, String> {
     steps.push(Step {
         stage: Stage::NuGet,
         label: "the cdylib into bindings/dotnet/runtimes/<rid>/native/".into(),
-        live: vec!["cargo".into(), "xtask".into(), "nuget-stage".into()],
-        dry: Some(vec!["cargo".into(), "xtask".into(), "nuget-stage".into()]),
+        live: vec![
+            "cargo".into(),
+            "run".into(),
+            "-p".into(),
+            "xtask".into(),
+            "--".into(),
+            "nuget-stage".into(),
+        ],
+        dry: Some(vec![
+            "cargo".into(),
+            "run".into(),
+            "-p".into(),
+            "xtask".into(),
+            "--".into(),
+            "nuget-stage".into(),
+        ]),
         publishes: false,
         cwd: ".".into(),
         registry_note: Some(
@@ -853,18 +890,33 @@ fn invoke(
         return Outcome::Failed("empty command".into());
     };
     let directory: PathBuf = root.join(cwd);
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(&directory)
-        .output();
-    let output = match output {
-        Ok(output) => output,
-        Err(error) => {
-            return Outcome::Failed(format!(
-                "{program} could not be started ({error}). It is build tooling, not a \
-                 dependency, so it is installed separately"
-            ))
+    let mut output = None;
+    let mut last_error = None;
+    // Windows does not resolve `wasm-pack` to `wasm-pack.cmd`, and every tool
+    // npm installs is a `.cmd` shim. `std::process::Command` appends `.exe`
+    // and nothing else, so the first end-to-end dry run halted at step 15 of
+    // 20 with "program not found" for a program that was plainly on PATH.
+    for candidate in program_candidates(program) {
+        match Command::new(&candidate)
+            .args(args)
+            .current_dir(&directory)
+            .output()
+        {
+            Ok(got) => {
+                output = Some(got);
+                break;
+            }
+            Err(error) => last_error = Some(error),
         }
+    }
+    let Some(output) = output else {
+        return Outcome::Failed(format!(
+            "{program} could not be started ({}). It is build tooling, not a dependency, so \
+             it is installed separately",
+            last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "no candidate ran".into())
+        ));
     };
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -886,6 +938,23 @@ fn invoke(
         }
     }
     Outcome::Failed(format!("{program} exited with {}", output.status))
+}
+
+/// The names to try for one program, in order.
+///
+/// One on every platform but Windows. There, an npm-installed tool is a
+/// `.cmd` shim and a Rust toolchain component may be a `.exe`, and
+/// `std::process::Command` tries the bare name and the `.exe` only — so
+/// `wasm-pack`, which is on `PATH` as `wasm-pack.cmd`, is "not found".
+pub fn program_candidates(program: &str) -> Vec<String> {
+    if !cfg!(windows) || program.contains('.') {
+        return vec![program.to_string()];
+    }
+    vec![
+        program.to_string(),
+        format!("{program}.cmd"),
+        format!("{program}.bat"),
+    ]
 }
 
 /// The crate cargo could not find, if it is one this release publishes.
@@ -1130,6 +1199,25 @@ mod tests {
             bytes < CRATES_IO_CEILING * 4,
             "{bytes} bytes uncompressed is close enough to the ceiling to want measuring"
         );
+    }
+
+    /// Found by the first end-to-end dry run, at step 15 of 20: `wasm-pack`
+    /// was on `PATH` as `wasm-pack.cmd`, and `Command::new` reported "program
+    /// not found".
+    #[test]
+    fn a_windows_shim_is_looked_for_and_a_plain_name_is_not_mangled() {
+        let candidates = program_candidates("wasm-pack");
+        if cfg!(windows) {
+            assert_eq!(
+                candidates,
+                vec!["wasm-pack", "wasm-pack.cmd", "wasm-pack.bat"]
+            );
+        } else {
+            assert_eq!(candidates, vec!["wasm-pack"]);
+        }
+        // A name that already carries an extension is taken as written, so a
+        // deliberate `foo.exe` is not turned into `foo.exe.cmd`.
+        assert_eq!(program_candidates("tool.exe"), vec!["tool.exe"]);
     }
 
     /// The RID is a NuGet concept and cargo has never heard of it, so the

@@ -78,6 +78,41 @@ So: **draw from the view immediately and drop it.** If the pixels must outlive
 the next engine call, use `data()`. The safe call has the short name; the
 dangerous one has the warning in its name, its doc comment and here.
 
+## The browser demo
+
+Plan 13's exit criterion for this binding: a page that renders an uploaded PDF.
+
+```bash
+wasm-pack build --release --target web --out-dir pkg bindings/js
+python -m http.server -d bindings/js 8080     # then open /demo/
+```
+
+It is one HTML file with no build step, which is the `web` target paying off.
+A `file://` URL will not work — the module fetches its own `.wasm` and browsers
+refuse cross-origin fetches from `file:`.
+
+The page reports a **non-white pixel count** beside the canvases, and that is
+not decoration. A canvas created at the right size and never painted is
+indistinguishable from a rendered one at a glance, and `testdata/simple-text.pdf`
+produces exactly that until a font face is uploaded. The number is what tells
+the two apart, so the page says it rather than leaving it to be noticed.
+
+`demo/verify.mjs` drives the page in headless Chromium and asserts it:
+
+```bash
+cd bindings/js/demo && npm install && npx playwright install chromium
+node verify.mjs ../../../testdata/simple-text.pdf /path/to/face.ttf
+```
+
+It renders **twice** — blank without a face, inked with one — reads the ink
+back off the canvas with `getImageData` rather than trusting the status line,
+and checks the ink's *bounding box* is the shape of a line of text rather than
+a full-page smear or one stray pixel. Observed on Windows: 2385 non-white
+pixels in a box of 108,130–412,155 on an 893×1263 canvas.
+
+Playwright is build tooling (rule 1's documented exception) and is installed on
+demand; `demo/package.json` is `"private": true` and is never published.
+
 ## Size
 
 The `.wasm` is 2.03 MB, **1.40 MB gzipped**, with `cmap-predefined` on — that

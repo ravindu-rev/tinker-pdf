@@ -295,3 +295,82 @@ jobs:
           name: nuget-package
           path: target/nuget/*.nupkg
           if-no-files-found: error
+
+  # Plan 13's exit criterion for the JavaScript binding, executed: "a page that
+  # renders an uploaded PDF". The Node smoke test cannot cover this — neither
+  # the module fetching its own `.wasm` over HTTP nor the pixels reaching a
+  # `<canvas>` exists outside a browser.
+  demo:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - run: wasm-pack build --release --target web --out-dir pkg bindings/js
+      - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      - name: Render an uploaded PDF in a real browser
+        working-directory: bindings/js/demo
+        run: |
+          set -o pipefail
+          npm install
+          npx playwright install --with-deps chromium
+          node verify.mjs ../../../testdata/simple-text.pdf \
+            /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee demo.log
+          grep -q 'DEMO-RENDER: RAN' demo.log
+
+  # Plan 26 milestone 6: **one tag produces all four artefacts.**
+  #
+  # This job exists because the four above can each pass while producing
+  # nothing anybody can install, and because a workflow with four green ticks
+  # and no artefacts looks exactly like a working release. It downloads
+  # everything and counts it. `wc -l` on a `find` is not elegant; it is the
+  # assertion, and it is the only thing in this file that checks the claim the
+  # milestone actually makes.
+  artefacts:
+    needs: [wheels, npm, nuget, demo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: All four, counted
+        run: |
+          set -o pipefail
+          find artefacts -type f | sort
+          wheels=$(find artefacts -name '*.whl' | wc -l)
+          wasm=$(find artefacts -name '*.wasm' | wc -l)
+          nupkg=$(find artefacts -name '*.nupkg' | wc -l)
+          abi3=$(find artefacts -name '*-abi3-*.whl' | wc -l)
+          echo "wheels=$wheels (abi3=$abi3) wasm=$wasm nupkg=$nupkg"
+          test "$wheels" -eq 3 || { echo "::error::$wheels wheels, expected 3"; exit 1; }
+          test "$abi3"   -eq 3 || { echo "::error::$abi3 abi3 wheels, expected 3"; exit 1; }
+          test "$wasm"   -eq 1 || { echo "::error::$wasm wasm files, expected 1"; exit 1; }
+          test "$nupkg"  -eq 1 || { echo "::error::$nupkg nupkg files, expected 1"; exit 1; }
+          echo "RELEASE-ARTEFACTS: ALL FOUR PRESENT"
+
+  # The only job in this file that can publish, and it does not run on a tag.
+  #
+  # `cargo xtask release --execute` is one command because the ordering,
+  # the version check and the resumability all live in xtask, where they are
+  # tested. A workflow re-expressing them in YAML would be a second
+  # implementation of the rule that decides which crate uploads first, and the
+  # consequence of the two disagreeing is not recoverable.
+  publish:
+    needs: artefacts
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: registries
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish, in dependency order, halting on the first failure
+        run: cargo run -p xtask -- release --execute --tag "${GITHUB_REF_NAME}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          MATURIN_PYPI_TOKEN: ${{ secrets.MATURIN_PYPI_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
