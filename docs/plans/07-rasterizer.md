@@ -62,10 +62,24 @@ this document is where they become mechanisms.
   [08-rendering-device](08-rendering-device.md) from this crate's primitives
   (render to `Rgba8`/`GrayA8`, mask-weighted composite). This crate ships
   SrcOver and nothing else.
-- Shading paints. Axial/radial/mesh shadings are decomposed by 08 into filled
-  geometry with solid colors; if that proves to band, a vertex-interpolated
-  triangle primitive is added *here* but scheduled *there*. Named as a seam,
-  not silently assumed away.
+- Shading paints. Axial/radial shadings are evaluated per pixel by 08; a mesh
+  shading was to be decomposed by 08 into filled geometry with solid colors,
+  "if that proves to band, a vertex-interpolated triangle primitive is added
+  *here* but scheduled *there*. Named as a seam, not silently assumed away."
+
+  *Amended, August 2026 (gap [10](gaps/10-mesh-shadings.md)).* **The seam was
+  taken.** `mesh.rs` is that primitive, and the reason is worse than banding: a
+  mesh decomposed into separately filled triangles anti-aliases every *shared*
+  edge against the backdrop, so two neighbours contribute about half coverage
+  each, source-over composites them to about three quarters, and the result is
+  a lattice of pale seams over the whole mesh — measured at 192 of 255 along a
+  shared edge, and at 79 levels of divergence across a subdivided Coons patch.
+  `draw_mesh` rasterises a whole mesh into one buffer instead: coverage from a
+  single non-zero `fill` over every triangle, whose signed-area accumulation is
+  what makes the shared edge whole, and colour from a per-triangle scanline
+  walk. Ruling 8 still holds — the mesh arrives as positions, opaque colour
+  *inputs* and indices, and the conversion to a device colour is a `&dyn Fn`
+  the caller supplies, so no colour space enters this crate.
 - Color conversion and color management — `tinker-pdf-color`'s problem; this
   crate receives device-format pixels and composites them.
 - Image decoding — [02-filters](02-filters.md). This crate receives decoded

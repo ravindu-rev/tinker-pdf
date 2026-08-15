@@ -45,6 +45,15 @@ Device (`tinker-pdf-render`):
   degenerate-cone cases (8.7.4.5.2–4) — day one; mesh types 4–7 ship as a
   `Capability` flag with the ruling-3 corpus hit-rate gate deciding if and
   when they are implemented.
+
+  *Amended, August 2026 (gap [10](gaps/10-mesh-shadings.md)).* **All four mesh
+  types paint.** The ruling-3 gate did not open — the corpus put them at 10
+  files of 4 525, 0.2 % — and the work was scheduled by an explicit decision
+  over that evidence, on the argument that the three pinned corpora sample no
+  design or CAD output at all. Gap 10's `As built` records that plainly rather
+  than implying the number asked for it. What still hits the capability path is
+  a mesh that cannot be *read*: illegal packed widths, no stream, or geometry
+  past the caps.
 - Patterns (8.7.3): tiling patterns, colored and uncolored paint types, with
   correct pattern-space anchoring, `/XStep`/`/YStep` gaps and overlaps;
   shading patterns.
@@ -82,7 +91,9 @@ Device (`tinker-pdf-render`):
   integration — a locked decision, restated here, not reopened.
 - **Mesh shadings 4–7 as implementations.** The capability flag, placeholder
   and warning ship day one; the decoders are built only if the hit-rate
-  report says real documents need them.
+  report says real documents need them. *Amended, August 2026: no longer a
+  non-goal — gap [10](gaps/10-mesh-shadings.md) built them, over the hit rate
+  rather than because of it.*
 - **A layer-toggle API.** Default OC visibility only; per-render layer
   overrides are a later facade addition once a consumer exists.
 - **Appearance generation.** Annotations without `/AP` render nothing here;
@@ -226,6 +237,22 @@ anti-aliased anyway. Type 1 inverse-maps each pixel through the shading
 matrix and evaluates the 2-in function (LUT-free — it is the rare case).
 The `sh` operator fills the current clip; shading patterns fill through the
 painted shape's coverage. Mesh types 4–7 hit the capability path.
+
+*Amended, August 2026 (gap [10](gaps/10-mesh-shadings.md)).* Mesh types 4–7
+paint. They are *geometry* rather than a function of position, so they do not
+join the per-pixel loop above at all: the packed vertex stream is decoded into
+triangles (types 4 and 5) or into Coons and tensor patches (6 and 7, the
+patches subdivided to triangles at a fixed step count chosen from a
+fixed-point measure of the **device**-space control net), and the whole mesh is
+rasterised into one buffer by `tinker-pdf-raster`'s mesh primitive and
+composited once. `sh` with a mesh therefore paints the mesh's own coverage
+rather than the whole clip, which is also what its knockout restore uses.
+Colour is interpolated per vertex **in the shading's own space** — or in the
+parametric value where a `/Function` is present — and converted per pixel
+after interpolation, never before. Two things in the paragraph above are still
+unbuilt for every shading type: `/Background`, and `/BBox` intersecting the
+clip. There is also no colour LUT on any shading path; every type evaluates
+its function per pixel.
 
 ### Patterns
 
@@ -444,7 +471,7 @@ oracles are CI subprocesses, never dependencies (ruling 9).
 | 3 | Device skeleton: fills/strokes via 07, gstate/clip stacks, `RenderOptions`/`Bitmap` with rounding, tiles, cancellation, degrade plumbing | Geometry/options ports of `render_pages.rs` green on vector fixtures: 595×842 @ 1.0, 1190×1684 @ 2.0, 1240×1755 @ 150 dpi, `Gray8` one component, tile rows byte-equal to full-page subregion, repeat renders identical, invalid scale/clip rejected | M |
 | 4 | Text: modes 0–7 with clip accumulation, Type 3 recursion, glyph mask compositing | Text corpus within `pdfcmp` budget vs MuPDF oracle at 72/150/300 dpi; text-clip and Type 3 fixtures pass; shared recursion budget tested at the cap | M |
 | 5 | Images: XObjects + inline, `/Decode`, SMask, color-key, ImageMask, strip cancellation, decoded-image LRU | Image corpus within budget; JBIG2/JPX fixtures degrade with placeholder + typed warning; mid-decode cancel acknowledged within one strip; cache bounded under adversarial reuse | L |
-| 6 | Shadings 1–3, `sh`, shading patterns; mesh capability flag | Axial/radial fixture matrix (extend on/off, degenerate cones, `r0 = r1`) within budget; mesh fixtures degrade with warning; LUT path and direct eval agree on vectors | M |
+| 6 | Shadings 1–3, `sh`, shading patterns; mesh capability flag | Axial/radial fixture matrix (extend on/off, degenerate cones, `r0 = r1`) within budget; mesh fixtures degrade with warning; LUT path and direct eval agree on vectors. **Amended August 2026, gap [10](gaps/10-mesh-shadings.md): mesh fixtures now *paint*, and only an unreadable mesh degrades with a warning. There is no LUT path — every shading evaluates its function per pixel — so the third criterion has nothing to compare** | M |
 | 7 | Tiling patterns: colored/uncolored, anchoring, step gaps/overlaps, cell budget | Pattern fixtures within budget incl. the anchoring fixture; XStep ≠ BBox width cases correct; adversarial tiny-step file completes under the budget with average-color fallback | S |
 | 8 | Transparency: `ca`/`CA`, separable blends, groups, isolation/knockout, soft masks, page group; then the non-separable set | Per-blend-mode fixture chart within budget vs oracle; isolated/non-isolated/knockout unit fixtures match spec-derived expected images; luminosity soft-mask fixtures pass. **Done except the page group**, gap [11](gaps/11-transparency-groups.md); the oracle chart waits on gap [23](gaps/23-corpus-runner.md), and our own fixtures are the authority in the corners per the risk row below | L |
 | 9 | Annotations `/AP` + `/AS` toggle; OC default visibility | Annotation fixtures differ exactly at annotation rects between toggle states; OCG/OCMD fixtures match oracle visibility incl. `/VE`; hidden-flag handling tested | S |
@@ -482,7 +509,7 @@ renderer's estimate goes to die.
 | Naive per-pixel function/color evaluation makes renders minutes long | LUT quantization with pinned error bounds; fused decode+convert passes; criterion benchmarks from M3 with a budget against `mutool draw` timings on the benchmark corpus, profiled before optimized |
 | Memory blowups: group buffers, clip masks, pattern cells, decoded images on adversarial files | Everything bbox-sized and byte-budgeted; cell-count and allocation budgets with degrade-not-die fallbacks; fuzz targets run with allocation caps (ruling 1) |
 | ICC-less color shifts eat the corpus-wide perceptual budget and mask real regressions | Per-fixture budgets rather than one global number; oracle-diff records shift statistics separately so a codec regression moves a different needle than a color-policy shift |
-| Mesh-shading hit rate turns out high and the placeholder is ugly at scale | Ruling 3 gate schedules the implementation on evidence; placeholder honors `/Background` where present, halving the visual damage in the common styled-report case |
+| Mesh-shading hit rate turns out high and the placeholder is ugly at scale | Ruling 3 gate schedules the implementation on evidence; placeholder honors `/Background` where present, halving the visual damage in the common styled-report case. **Resolved differently, August 2026.** The hit rate came out *low* — 10 files of 4 525 — and the implementation was built anyway, by an explicit decision recorded in gap [10](gaps/10-mesh-shadings.md), on the argument that the pinned corpora sample no design or CAD output. So the risk is retired by the feature rather than by the gate. The `/Background` half of the mitigation was never built and still is not |
 | Cancellation checks throttle throughput, or too-coarse cadence makes cancel laggy | Relaxed atomic loads at band/op/strip granularity only; a latency test pins acknowledgment within one band so cadence regressions fail CI |
 | `pdfcmp` budget mis-tuned: too loose hides regressions, too tight blocks honest divergence | Per-page scores recorded, not just pass/fail; the CI ratchet fails on any worsening rather than on absolutes; thresholds tightened deliberately, as commits |
 | Blend-mode math on premultiplied buffers accumulates rounding error | Blends computed on locally unpremultiplied values with committed per-mode vectors; per-mode fixture chart diffed against the oracle at M8 |
