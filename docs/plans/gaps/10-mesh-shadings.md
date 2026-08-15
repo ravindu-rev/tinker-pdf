@@ -88,3 +88,30 @@ warning must name the type, as it already does.
 | Adaptive subdivision that depends on floating-point comparisons can differ across targets | Fixed depth chosen from a fixed-point flatness measure; the determinism fixtures are milestone 5 and not optional |
 | Per-triangle anti-aliasing produces a seam lattice that looks like a rendering bug and is very hard to attribute | One buffer, stated as milestone 2's exit criterion rather than left as an implementation note |
 | Vertex streams are attacker-sized | The existing `Limits` ceiling; vertex count bounded before allocation, as the CCITT and JBIG2 paths do |
+
+## Amendment — August 2026: the corpus evidence ruling 3 asked for
+
+[23](23-corpus-runner.md) has run. Across 4 525 documents from pdf.js,
+veraPDF, qpdf's qtest and the PDF Association:
+
+**Mesh shadings: 10 files, 0.2 %** — the lowest of the three deferred
+capabilities, against JBIG2 at 2.3 % and JPX at 0.4 %.
+
+All ten are in `pdfjs`; `verapdf` and `qpdf` contain none. This document is
+sized M and is five milestones of triangle rasterisation, patch subdivision and
+packed vertex decoding — for ten files in the corpora this project pins.
+
+Ruling 3 says a deferred capability is built when the corpus says real
+documents need it. **The corpus does not say that yet.** What it says is that
+the honest degradation this plan replaces — a named `UnsupportedShading`
+warning carrying the type number — is what 0.2 % of files get, and that is
+working as designed.
+
+The counter-argument, which is real: the corpora pinned here are a browser's
+regression suite, a conformance suite and a writer's test suite. None is a
+sample of design or CAD output, which is exactly where gradient meshes live. A
+corpus of Illustrator or AutoCAD exports would very likely move this number a
+long way. Adding one is [23](23-corpus-runner.md)'s lock file, not this plan.
+
+So: the work below stays ready, and the trigger is a corpus that represents the
+documents this capability exists for — not the count above.

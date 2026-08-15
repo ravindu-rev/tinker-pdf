@@ -1,0 +1,71 @@
+{
+  "complete": true,
+  "corpora": [
+    {
+      "capabilities": {
+        "jbig2": 103,
+        "jpx": 12,
+        "mesh-shading": 10
+      },
+      "degraded": 464,
+      "name": "pdfjs",
+      "outcomes": {
+        "crashed": 0,
+        "failed": 11,
+        "passed": 963,
+        "timed_out": 0
+      },
+      "passed": 963,
+      "total": 974
+    },
+    {
+      "capabilities": {
+        "jpx": 7
+      },
+      "degraded": 92,
+      "name": "verapdf",
+      "outcomes": {
+        "crashed": 0,
+        "failed": 0,
+        "passed": 2906,
+        "timed_out": 1
+      },
+      "passed": 2906,
+      "total": 2907
+    },
+    {
+      "capabilities": {},
+      "degraded": 530,
+      "name": "qpdf",
+      "outcomes": {
+        "crashed": 0,
+        "failed": 29,
+        "passed": 608,
+        "timed_out": 0
+      },
+      "passed": 608,
+      "total": 637
+    },
+    {
+      "capabilities": {},
+      "degraded": 6,
+      "name": "pdfa-examples",
+      "outcomes": {
+        "crashed": 0,
+        "failed": 0,
+        "passed": 7,
+        "timed_out": 0
+      },
+      "passed": 7,
+      "total": 7
+    }
+  ],
+  "limits": [],
+  "note": "Pass rate per corpus. `passed` means a bitmap came back for every page without crashing or timing out (ruling 2) — a placeholder counts. `degraded` is the second axis: files that rendered with something reported. Measured WITHOUT font faces: this engine bundles none, so `degraded` here is dominated by documents that embed no font and therefore draw no text. It is a fact about this build's font policy as much as about the engine. Re-measure with --fonts to see the other number. Compared by integer cross-multiplication, never as floats: passed_now * total_before >= passed_before * total_now.",
+  "schema": 1,
+  "settings": {
+    "dpi": 72,
+    "fonts": "none",
+    "timeout_seconds": 20
+  }
+}

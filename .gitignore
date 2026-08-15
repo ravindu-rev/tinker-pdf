@@ -8,6 +8,12 @@ corpus/data/
 # that belongs in git.
 corpus/cache/
 corpus/files/
+
+# `corpus-run --report` writes a per-file record of one run: ~1 MB of JSON
+# describing whichever corpora were on this machine at the time. It is a run
+# artefact, not a baseline -- `corpus/ratchet.json` is the committed bar, and
+# it is three orders of magnitude smaller.
+corpus/report.json
 testdata/golden/actual/
 bindings/dotnet/bin/
 bindings/dotnet/obj/

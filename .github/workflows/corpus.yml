@@ -1,0 +1,84 @@
+name: corpus
+
+# Scheduled, not per pull request. Fetching four upstream corpora is a few
+# hundred megabytes and running 4 500 documents one child process at a time is
+# minutes, neither of which belongs on the path between a push and a review.
+# A regression here is a real regression, but it is one worth learning about
+# once a night rather than once a commit.
+on:
+  schedule:
+    # 04:00 UTC. Nothing depends on the hour; it is off the top of the hour so
+    # this run does not queue behind everything else scheduled at midnight.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    # The fetch is network-bound and the run is CPU-bound over thousands of
+    # files. The default six hours would let a hang burn a runner for an
+    # afternoon before anyone noticed; the per-file timeout inside `corpus-run`
+    # is the real guard, and this is the backstop behind it.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `corpus-run` spawns `tpdf probe`, one process per file, and finds it as
+      # a sibling of its own executable rather than on PATH — so that the child
+      # is provably the same revision and the same profile as the runner. Both
+      # must therefore be built, and built the same way. This is not a
+      # convenience: a corpus measured against whatever `tpdf` happened to be
+      # installed is worse than no measurement.
+      - name: Build the runner and the child it spawns
+        run: cargo build --release -p xtask -p tpdf
+
+      - name: Fetch the pinned corpora
+        run: cargo run --release -p xtask -- corpus-fetch
+
+      # `--check` compares against the committed bar and fails on a regression.
+      # It refuses outright if the run is incomplete, so a fetch that quietly
+      # returned three corpora out of four cannot be read as an improvement.
+      #
+      # The bar in `corpus/ratchet.json` was recorded WITHOUT font faces, and
+      # `corpus-run` refuses to compare a `--fonts` run against it. Adding
+      # faces here therefore needs a re-recorded bar in the same commit, which
+      # is the point: the two numbers answer different questions and mixing
+      # them silently would make the ratchet meaningless.
+      - name: Run the corpus and hold the bar
+        run: |
+          set -o pipefail
+          cargo run --release -p xtask -- corpus-run \
+            --timeout 20 --dpi 72 --report corpus/report.json --check \
+            2>&1 | tee corpus-run.log
+
+          # A corpus job whose corpora are missing exits 0 having measured
+          # nothing, which reads exactly like a clean run. The same hazard the
+          # wasm-determinism and qpdf-linearization jobs were fixed for: check
+          # the bad outcome first and by name, so the log says why.
+          if grep -q 'INCOMPLETE' corpus-run.log; then
+            echo "::error::the corpus run did not describe the whole corpus," \
+                 "so it proves nothing about a regression"
+            exit 1
+          fi
+          # And prove positively that files were seen, rather than trusting an
+          # exit status that a zero-file run would also produce.
+          grep -Eq '^all +[1-9][0-9]* files' corpus-run.log
+
+      # Kept whatever the outcome: when the bar moves, the per-file record is
+      # the only thing that says which files moved and why.
+      - name: Keep the per-file report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-report
+          path: corpus/report.json
+          if-no-files-found: warn
+          retention-days: 14

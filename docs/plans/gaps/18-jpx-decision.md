@@ -120,3 +120,44 @@ evidence, and the evidence is one corpus run away.
 | Option A is started incrementally without a decision and consumes weeks before anyone notices | This document; the size is stated up front so the choice is explicit |
 | Option B is described as support | Milestone 3 is the reporting, not an afterthought |
 | The 9/7 fixed-point choice is made implicitly by whoever writes the wavelet | Named above as the first decision of option A, before any code |
+
+## Amendment — August 2026: the corpus evidence, and what it says about option A
+
+[23](23-corpus-runner.md) has run — the report this document's decision was
+always supposed to wait for. Across 4 525 documents from pdf.js, veraPDF,
+qpdf's qtest and the PDF Association:
+
+**JPX: 19 files, 0.4 %.** JBIG2 is 2.3 % over the same corpus; mesh shadings
+are 0.2 %.
+
+Set that against this document's own costing of option A: **3 500 to 4 500
+lines and five to seven engine-weeks**, for a wavelet, an MQ coder, tier-1 and
+tier-2 coding, and a colour pipeline — the largest single item in the whole gap
+set, larger than the entire font lane that was just closed.
+
+That is roughly 200 lines of hand-rolled, security-sensitive decoder per file
+in the corpora this project pins, and every one of those lines is parsing
+attacker-controlled input under ruling 1.
+
+The evidence therefore argues for **option B**: the JP2 box walk, colour-space
+inference from the boxes rather than the codestream, and honest reporting of
+what a file needs and this build cannot decode. Option B is S-sized, its
+milestones are already written in the table above, and it leaves the file
+saying precisely what it is instead of a generic refusal.
+
+Three qualifications, because a decision made on one number deserves them:
+
+- The 19 hits are split `pdfjs` 12 and `verapdf` 7 — unlike JBIG2 and meshes,
+  JPX appears in more than one corpus, including the conformance one.
+- None of these corpora samples the domains where JPEG 2000 actually
+  concentrates: geospatial imagery, medical DICOM, and digital preservation
+  masters. A corpus of any of those would move this number sharply.
+- The test-material problem this document already names is unchanged and is
+  independent of the hit rate: ISO/IEC 15444-4 conformance codestreams are not
+  freely redistributable, and a fixed-point wavelet will differ from every
+  float-based reference decoder, so option A would have to define its own
+  oracle before writing `dwt.rs`.
+
+If option A is chosen anyway, the decision record and milestone table it needs
+still do not exist — see the preamble note about a plan being written *after*
+the decision, not before.

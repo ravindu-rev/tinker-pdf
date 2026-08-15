@@ -143,3 +143,28 @@ arithmetic decoder in **its own module from the first commit**, with T.88
 Annex H.2 as a permanent test rather than scaffolding. [18](18-jpx-decision.md)
 says the MQ decoder "moves to a shared module"; if it starts inside `jbig2.rs`
 that plan begins with a refactor inside an already-large commit.
+
+## Amendment — August 2026: the corpus evidence ruling 3 asked for
+
+[23](23-corpus-runner.md) has run. Across 4 525 documents from pdf.js,
+veraPDF, qpdf's qtest and the PDF Association:
+
+**JBIG2: 103 files, 2.3 % — the highest hit rate of the three deferred
+capabilities**, against JPX at 0.4 % and mesh shadings at 0.2 %.
+
+So of the three plans ruling 3 defers to corpus evidence, this is the one the
+evidence most supports, and by an order of magnitude over JPX.
+
+Two things temper it, and both belong in the record rather than in a footnote.
+**Every one of the 103 is in `pdfjs`** — a browser's regression suite, weighted
+towards files that once broke a browser. `verapdf` (2 907 files, a conformance
+corpus) and `qpdf` (637, a writer's test suite) contain **no JBIG2 at all**. A
+2.3 % rate drawn entirely from one corpus of known-awkward documents is not the
+same claim as 2.3 % of documents in the world. And scanned-document corpora,
+which is where JBIG2 actually lives, are not represented here at all — so this
+number is as likely to be an under-count for real-world archival material as an
+over-count.
+
+The other prerequisite is also discharged: [16](16-ccitt-completion.md) landed
+and left `T6Rows::new(data, bit_offset, columns)` for this plan's MMR path — see
+the amendment above.
