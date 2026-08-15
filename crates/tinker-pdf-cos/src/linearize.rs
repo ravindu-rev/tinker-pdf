@@ -19,14 +19,33 @@
 //! - A classic cross-reference table has fixed-width entries, so its length
 //!   follows from the entry count alone.
 //! - The hint tables' bit widths are derived from object counts and object
-//!   lengths — never from an absolute position — so the hint stream's length
-//!   is known once the objects are serialised.
+//!   lengths — never from an absolute position — and the two *offsets* the
+//!   tables carry occupy fixed 32-bit fields, so the hint stream's length is
+//!   known once the objects are serialised, before its contents are.
 //!
 //! So the writer serialises every object, computes every length, derives
 //! every offset, and only then emits. A two-pass writer with a patch-up phase
 //! is the usual approach and this deliberately avoids it: a patch that misses
 //! one field produces a file that opens fine everywhere except in the reader
-//! the whole feature exists for.
+//! the whole feature exists for. The parameter dictionary and the hint stream
+//! are each *built twice* — once to measure, once with the values — which is
+//! not a patch: no byte of the emitted buffer is ever revisited, and both
+//! builds are asserted to be the same length.
+//!
+//! # How a reader finds a page, and what the layout owes it
+//!
+//! The page-offset hint table (F.4.1) does not name the objects a page is
+//! made of. It gives a *count*, and the reader takes that many **consecutive
+//! object numbers beginning with the page's own page object**. So the
+//! numbering is not free: each page's objects are emitted as one run led by
+//! the page object, and the first page's run begins at `/O`. Numbering them
+//! any other way produces a file whose hint tables point a reader at objects
+//! that belong to some other page, or at numbers no table carries at all.
+//!
+//! For the same reason the primary hint stream sits in part 5, *ahead* of the
+//! first page's objects rather than after them: `/E` is the end of part 6,
+//! the first-page section, and the hint stream is the one thing a reader
+//! needs before it can use any of it.
 //!
 //! # Encryption: encrypt first, then measure
 //!
@@ -118,18 +137,23 @@ pub fn linearize(
     Some(plan.emit(options, names))
 }
 
-/// Which section of the file an object belongs to.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Which part of the file an object belongs to (F.3.1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Section {
     /// Part 4: the catalog, the page tree, and the rest of the document-level
     /// objects a reader needs before it can do anything at all.
     Document,
-    /// Part 5: the first page and everything only it uses.
+    /// Part 6: the first page's section — its page object, everything only it
+    /// uses, and everything it shares with a later page. F.3.8 keeps a shared
+    /// object here when the first page needs it, because a reader holding the
+    /// front of the file must not have to reach past `/E` to draw page one.
     FirstPage,
-    /// Part 8: objects more than one page needs.
-    Shared,
-    /// Parts 7 and 9: later pages and everything else.
+    /// Part 7: the remaining pages, one consecutive run each.
     Rest,
+    /// Part 8: objects more than one page needs and the first page does not.
+    Shared,
+    /// Part 9: everything no page reaches.
+    Other,
 }
 
 struct Plan {
@@ -139,12 +163,23 @@ struct Plan {
     first_page_object: u32,
     /// How many pages the document has, which is `/N`.
     page_count: u32,
-    /// New numbers of the objects in part 8.
-    shared_objects: Vec<u32>,
-    /// Serialised lengths of each page's own objects, for the hint tables.
+    /// Serialised lengths of each page's run of objects, for the hint tables.
     page_lengths: Vec<u32>,
-    /// How many objects each page owns.
+    /// How many objects are in each page's run.
     page_object_counts: Vec<u32>,
+    /// Which shared-table entries each page references (F.4.1 items 3 and 4).
+    /// Page one's list is empty: F.4.2 makes its objects the first entries of
+    /// the shared table, so a reader already has them.
+    page_shared: Vec<Vec<u32>>,
+    /// The shared-object table's entries, in order: part 6's objects first
+    /// (Table F.5 item 3 counts them), then part 8's.
+    shared_entries: Vec<u32>,
+    /// Each entry's serialised length, which is its group length (Table F.6).
+    shared_lengths: Vec<u32>,
+    /// How many of `shared_entries` belong to part 6.
+    shared_first_page: u32,
+    /// Part 8's first object number, or zero when part 8 is empty.
+    first_shared_object: u32,
     trailer: Dict,
     /// The highest new object number, plus the two reserved ones.
     size: u32,
@@ -209,7 +244,7 @@ impl Plan {
 
         let mut section: BTreeMap<u32, Section> = BTreeMap::new();
         for num in objects.numbers() {
-            section.insert(num, Section::Rest);
+            section.insert(num, Section::Other);
         }
         for num in &document {
             section.insert(*num, Section::Document);
@@ -218,13 +253,16 @@ impl Plan {
             if document.contains(num) {
                 continue;
             }
-            let shared = *count > 1;
+            // F.3.8: part 8 is for objects *several* pages need and the first
+            // page does not. An object the first page needs travels with it
+            // whether or not later pages need it too, because a reader that
+            // has only the front of the file has to be able to draw page one.
             let first = per_page.first().is_some_and(|set| set.contains(num));
             section.insert(
                 *num,
-                match (shared, first) {
-                    (true, _) => Section::Shared,
-                    (false, true) => Section::FirstPage,
+                match (first, *count > 1) {
+                    (true, _) => Section::FirstPage,
+                    (false, true) => Section::Shared,
                     (false, false) => Section::Rest,
                 },
             );
@@ -233,18 +271,77 @@ impl Plan {
         // Output order, and with it the new numbering. Object 1 is the
         // parameter dictionary and object 2 the hint stream; both are
         // reserved here and written by `emit`.
+        //
+        // The order is not a preference. F.4.1's per-page entry gives a
+        // reader a count and nothing else, and the reader takes that many
+        // consecutive object numbers starting at the page's own page object —
+        // so each page's objects go out as one run, page object first, or the
+        // hint table describes objects that belong to another page.
         let mut order: Vec<(u32, Section)> = Vec::new();
-        for want in [
-            Section::Document,
-            Section::FirstPage,
-            Section::Rest,
-            Section::Shared,
-        ] {
+        let mut placed: BTreeSet<u32> = BTreeSet::new();
+        let mut push = |num: u32, want: Section, order: &mut Vec<(u32, Section)>| {
+            if placed.insert(num) {
+                order.push((num, want));
+                return true;
+            }
+            false
+        };
+
+        // Part 4. F.3.4 puts the catalog first; a reader that has the front of
+        // the file reaches it without a search.
+        push(root.num, Section::Document, &mut order);
+        for num in objects.numbers() {
+            if section.get(&num) == Some(&Section::Document) {
+                push(num, Section::Document, &mut order);
+            }
+        }
+
+        // Part 6: the first page's run, its page object leading.
+        let mut runs: Vec<Vec<u32>> = Vec::with_capacity(pages.len());
+        let mut first_run = Vec::new();
+        if let Some(first) = pages.first() {
+            if push(*first, Section::FirstPage, &mut order) {
+                first_run.push(*first);
+            }
+        }
+        for num in objects.numbers() {
+            if section.get(&num) == Some(&Section::FirstPage)
+                && push(num, Section::FirstPage, &mut order)
+            {
+                first_run.push(num);
+            }
+        }
+        runs.push(first_run);
+
+        // Part 7: the remaining pages, a run each.
+        for (index, page) in pages.iter().enumerate().skip(1) {
+            let mut run = Vec::new();
+            if push(*page, Section::Rest, &mut order) {
+                run.push(*page);
+            }
+            let reached = per_page.get(index);
             for num in objects.numbers() {
-                if section.get(&num) == Some(&want) {
-                    order.push((num, want));
+                if section.get(&num) == Some(&Section::Rest)
+                    && reached.is_some_and(|set| set.contains(&num))
+                    && push(num, Section::Rest, &mut order)
+                {
+                    run.push(num);
                 }
             }
+            runs.push(run);
+        }
+
+        // Part 8, then part 9 — which is everything no page reached, plus any
+        // object the walk above could not attribute to a page.
+        let mut shared_run: Vec<u32> = Vec::new();
+        for num in objects.numbers() {
+            if section.get(&num) == Some(&Section::Shared) && push(num, Section::Shared, &mut order)
+            {
+                shared_run.push(num);
+            }
+        }
+        for num in objects.numbers() {
+            push(num, Section::Other, &mut order);
         }
 
         let mut mapping: BTreeMap<u32, u32> = BTreeMap::new();
@@ -284,7 +381,6 @@ impl Plan {
             });
         }
 
-        let mut shared_objects = Vec::new();
         for (old, section) in &order {
             let entry = objects.get(*old)?;
             let renumbered = renumber_entry(entry, &mapping);
@@ -292,9 +388,6 @@ impl Plan {
             let mut bytes = Vec::new();
             write_indirect(&mut bytes, number, &renumbered, names, compress, crypt);
 
-            if section == &Section::Shared {
-                shared_objects.push(number);
-            }
             ordered.push(Placed {
                 number,
                 section: *section,
@@ -303,23 +396,58 @@ impl Plan {
         }
 
         // Per-page sizes, for the page-offset hint table. A page's "length"
-        // is the bytes of the objects it owns, which is what a reader needs
-        // to have received before it can draw the page.
-        let mut page_lengths = Vec::with_capacity(pages.len());
-        let mut page_object_counts = Vec::with_capacity(pages.len());
+        // is the bytes of its run, which is what a reader must have received
+        // before it can draw the page.
         let sizes: BTreeMap<u32, u32> = ordered
             .iter()
             .map(|placed| (placed.number, placed.bytes.len() as u32))
             .collect();
-        for set in &per_page {
-            let owned: Vec<u32> = set
+        let length_of = |run: &[u32]| -> u32 {
+            run.iter()
+                .filter_map(|old| mapping.get(old))
+                .filter_map(|new| sizes.get(new))
+                .sum()
+        };
+        let page_object_counts: Vec<u32> = runs.iter().map(|run| run.len() as u32).collect();
+        let page_lengths: Vec<u32> = runs.iter().map(|run| length_of(run)).collect();
+
+        // F.4.2: the shared-object table describes part 6's objects first —
+        // that is what Table F.5's "entries for the first page" counts — and
+        // then part 8's. A reader walks it positionally, from the first page's
+        // page object and then from `first_shared_obj`, so the order is the
+        // structure and not a convention.
+        let shared_first_page = runs.first().map_or(0, |run| run.len() as u32);
+        let shared_old: Vec<u32> = runs
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .chain(shared_run.iter().copied())
+            .collect();
+        let shared_entries: Vec<u32> = shared_old
+            .iter()
+            .filter_map(|old| mapping.get(old).copied())
+            .collect();
+        let shared_lengths: Vec<u32> = shared_entries
+            .iter()
+            .map(|num| sizes.get(num).copied().unwrap_or(0))
+            .collect();
+        let first_shared_object = shared_run
+            .first()
+            .and_then(|old| mapping.get(old).copied())
+            .unwrap_or(0);
+
+        // Which of those entries each page needs. Page one's list stays empty:
+        // its objects *are* the first entries, so a reader that has page one
+        // has them already.
+        let mut page_shared: Vec<Vec<u32>> = vec![Vec::new(); pages.len()];
+        for (index, reached) in per_page.iter().enumerate().skip(1) {
+            page_shared[index] = shared_old
                 .iter()
-                .filter(|num| !document.contains(num))
-                .filter(|num| section.get(num) != Some(&Section::Shared))
-                .filter_map(|num| mapping.get(num).copied())
+                .enumerate()
+                .filter(|(_, old)| reached.contains(old))
+                .map(|(at, _)| at as u32)
                 .collect();
-            page_object_counts.push(owned.len() as u32);
-            page_lengths.push(owned.iter().filter_map(|n| sizes.get(n)).sum());
         }
 
         let mut trailer = renumber_dict(trailer, &mapping);
@@ -332,9 +460,13 @@ impl Plan {
             ordered,
             first_page_object,
             page_count: pages.len() as u32,
-            shared_objects,
             page_lengths,
             page_object_counts,
+            page_shared,
+            shared_entries,
+            shared_lengths,
+            shared_first_page,
+            first_shared_object,
             trailer,
             size: next,
             crypt: encryption.map(|(_, cipher)| cipher),
@@ -347,20 +479,21 @@ impl Plan {
         let mut header = format!("%PDF-{major}.{minor}\n").into_bytes();
         header.extend_from_slice(&[b'%', 0xE2, 0xE3, 0xCF, 0xD3, b'\n']);
 
-        // The hint stream's bytes depend only on counts and lengths, so they
-        // can be built now and their size relied on below.
-        let (hint_data, shared_at) = self.hint_tables();
-        let mut hint_dict = Dict::new();
-        hint_dict.insert(names.intern(b"S"), Object::Int(shared_at as i64));
-        let hint_bytes = {
+        // The hint stream carries two file offsets, and neither can be known
+        // until its own length is — so it is built once with zeros to measure
+        // it, and once more with the values. Both offsets sit in fixed 32-bit
+        // fields and every bit width below is derived from counts and object
+        // lengths, so the second build is the same size as the first. That is
+        // asserted rather than assumed.
+        let hint_object = |first_page_offset: u32, first_shared_offset: u32| -> Vec<u8> {
+            let (data, shared_at) = self.hint_tables(first_page_offset, first_shared_offset);
+            let mut dict = Dict::new();
+            dict.insert(names.intern(b"S"), Object::Int(shared_at as i64));
             let mut bytes = Vec::new();
             write_indirect(
                 &mut bytes,
                 2,
-                &Written::Stream(StreamData {
-                    dict: hint_dict,
-                    data: hint_data,
-                }),
+                &Written::Stream(StreamData { dict, data }),
                 names,
                 // Never compressed: `/H` measures this object's length, and
                 // shrinking it after the layout was computed from it would
@@ -375,18 +508,24 @@ impl Plan {
             );
             bytes
         };
+        let hint_len = hint_object(0, 0).len();
 
         // Part 2 is a fixed size because every integer in it is written to a
         // fixed width, which is the whole reason this needs no second pass.
         let parameters = self.parameter_dictionary(0, 0, 0, 0, 0, names);
         let part2_len = parameters.len();
 
-        // Part 3 covers the objects in parts 4 to 6: the document-level
-        // objects, the first page, and the hint stream itself.
-        let front: Vec<&Placed> = self
+        // Part 3 covers everything ahead of part 7: the document-level
+        // objects, the hint stream, and the first page.
+        let document: Vec<&Placed> = self
             .ordered
             .iter()
-            .filter(|p| matches!(p.section, Section::Document | Section::FirstPage))
+            .filter(|p| p.section == Section::Document)
+            .collect();
+        let first_page: Vec<&Placed> = self
+            .ordered
+            .iter()
+            .filter(|p| p.section == Section::FirstPage)
             .collect();
         let back: Vec<&Placed> = self
             .ordered
@@ -396,8 +535,9 @@ impl Plan {
 
         // Every entry is twenty bytes, so the table's size follows from the
         // count alone (7.5.4).
+        let front_count = document.len() + first_page.len();
         let first_xref_len =
-            subsection_len(front.len() + 2) + self.trailer_bytes(Some(0), names).len();
+            subsection_len(front_count + 2) + self.trailer_bytes(Some(0), names).len();
 
         let part1 = header.len();
         let part2_at = part1;
@@ -406,16 +546,25 @@ impl Plan {
 
         let mut at = part4_at;
         let mut offsets: BTreeMap<u32, u64> = BTreeMap::new();
-        for placed in &front {
+        for placed in &document {
             offsets.insert(placed.number, at as u64);
             at += placed.bytes.len();
         }
+
+        // Part 5. It comes before the first page's objects and not after, so
+        // that a reader receiving the file in order has the tables that say
+        // what to ask for next before it has the thing they describe.
         let hint_at = at;
         offsets.insert(2, hint_at as u64);
-        at += hint_bytes.len();
+        at += hint_len;
 
-        // `/E` is where the first page's material ends, which is the end of
-        // the hint stream: everything before it is what page one needs.
+        let first_page_at = at;
+        for placed in &first_page {
+            offsets.insert(placed.number, at as u64);
+            at += placed.bytes.len();
+        }
+
+        // `/E` is the end of part 6, the first-page section (Table F.1).
         let end_of_first_page = at;
 
         for placed in &back {
@@ -433,12 +582,34 @@ impl Plan {
         let tail = format!("startxref\n{part3_at}\n%%EOF\n");
         let total = at + tail.len();
 
+        // F.4: an offset inside a hint table is measured as though the primary
+        // hint stream were not in the file at all, because the tables are
+        // built before their own length is known. Everything after the hint
+        // stream is therefore short by that length. `first_page_at` sits
+        // immediately behind it, so this comes out equal to `hint_at`.
+        let without_hint = |offset: u64| -> u32 {
+            u32::try_from(offset.saturating_sub(hint_len as u64)).unwrap_or(u32::MAX)
+        };
+        let hint_bytes = hint_object(
+            without_hint(first_page_at as u64),
+            match self.first_shared_object {
+                0 => 0,
+                num => offsets.get(&num).copied().map_or(0, without_hint),
+            },
+        );
+        debug_assert_eq!(hint_bytes.len(), hint_len, "the hint stream is fixed width");
+
+        // Table F.1: `/T` is the offset of the *first entry* of the main
+        // cross-reference table — the free entry for object zero — not of the
+        // `xref` keyword above it.
+        let xref_zero_at = main_xref_at + first_entry_offset(&main_xref);
+
         let parameters = self.parameter_dictionary(
             total as u64,
             hint_at as u64,
-            hint_bytes.len() as u64,
+            hint_len as u64,
             end_of_first_page as u64,
-            main_xref_at as u64,
+            xref_zero_at as u64,
             names,
         );
         debug_assert_eq!(parameters.len(), part2_len, "the dictionary is fixed width");
@@ -447,8 +618,9 @@ impl Plan {
         out.extend_from_slice(&header);
         out.extend_from_slice(&parameters);
 
-        let mut front_offsets: Vec<(u32, u64)> = front
+        let mut front_offsets: Vec<(u32, u64)> = document
             .iter()
+            .chain(first_page.iter())
             .filter_map(|p| offsets.get(&p.number).map(|at| (p.number, *at)))
             .collect();
         front_offsets.push((1, part1 as u64));
@@ -457,10 +629,13 @@ impl Plan {
         self.write_first_xref(&mut out, &front_offsets, main_xref_at as u64, names);
         debug_assert_eq!(out.len(), part4_at, "part 4 begins where it was placed");
 
-        for placed in &front {
+        for placed in &document {
             out.extend_from_slice(&placed.bytes);
         }
         out.extend_from_slice(&hint_bytes);
+        for placed in &first_page {
+            out.extend_from_slice(&placed.bytes);
+        }
         for placed in &back {
             out.extend_from_slice(&placed.bytes);
         }
@@ -476,7 +651,7 @@ impl Plan {
         hint_at: u64,
         hint_len: u64,
         end_of_first_page: u64,
-        main_xref_at: u64,
+        xref_zero_at: u64,
         names: &NameTable,
     ) -> Vec<u8> {
         let _ = names;
@@ -494,7 +669,7 @@ impl Plan {
         out.extend_from_slice(b" /N ");
         pad(&mut out, u64::from(self.page_count));
         out.extend_from_slice(b" /T ");
-        pad(&mut out, main_xref_at);
+        pad(&mut out, xref_zero_at);
         out.extend_from_slice(b" >>\nendobj\n");
         out
     }
@@ -564,11 +739,30 @@ impl Plan {
     }
 
     /// The primary hint stream's data, and where the shared-object table
-    /// starts within it (F.4).
-    fn hint_tables(&self) -> (Vec<u8>, usize) {
+    /// starts within it, which is `/S` (F.4).
+    ///
+    /// Both offsets are passed in already measured as though this stream were
+    /// not in the file; see `emit`.
+    ///
+    /// # The packing is by column, not by row
+    ///
+    /// Tables F.4 and F.6 list the items of *one* entry, which reads as though
+    /// the entries were written one after another. They are not. Every
+    /// entry's item 1 is written first, for all entries, then every entry's
+    /// item 2, and so on — and each of those runs is padded to a byte
+    /// boundary before the next begins.
+    ///
+    /// That is not a reading of the table layout; it is a measurement.
+    /// qpdf's own linearized output declares `/S 52` with a thirty-six byte
+    /// page-offset header and six pages, and only the column packing accounts
+    /// for the sixteen bytes between: 6x1 bit padded to 1, 6x7 padded to 6,
+    /// 6x1 padded to 1, 5x2 padded to 2, then two empty runs and 6x7 padded
+    /// to 6. Row packing of the same values needs thirteen.
+    fn hint_tables(&self, first_page_offset: u32, first_shared_offset: u32) -> (Vec<u8>, usize) {
         let mut bits = BitWriter::default();
+        let pages = self.page_count as usize;
 
-        // ---- Page offset hint table (F.4.1) ----
+        // ---- Page offset hint table (F.4.1, Table F.3) ----
         let least_objects = self.page_object_counts.iter().copied().min().unwrap_or(0);
         let most_objects = self.page_object_counts.iter().copied().max().unwrap_or(0);
         let object_bits = bits_for(most_objects.saturating_sub(least_objects));
@@ -577,53 +771,112 @@ impl Plan {
         let most_length = self.page_lengths.iter().copied().max().unwrap_or(0);
         let length_bits = bits_for(most_length.saturating_sub(least_length));
 
-        let shared_bits = bits_for(self.shared_objects.len() as u32);
+        let most_shared = self
+            .page_shared
+            .iter()
+            .map(|ids| ids.len() as u32)
+            .max()
+            .unwrap_or(0);
+        let count_bits = bits_for(most_shared);
+        let identifier_bits = bits_for(
+            self.page_shared
+                .iter()
+                .flatten()
+                .copied()
+                .max()
+                .unwrap_or(0),
+        );
 
-        bits.write(least_objects, 32); // 1
-        bits.write(self.first_page_object, 32); // 2
+        bits.write(least_objects, 32); // 1: least objects in a page
+        bits.write(first_page_offset, 32); // 2: where page one's page object is
         bits.write(u32::from(object_bits), 16); // 3
-        bits.write(least_length, 32); // 4
+        bits.write(least_length, 32); // 4: least page length
         bits.write(u32::from(length_bits), 16); // 5
         bits.write(0, 32); // 6: least content-stream offset
         bits.write(0, 16); // 7
         bits.write(0, 32); // 8: least content-stream length
         bits.write(0, 16); // 9
-        bits.write(u32::from(shared_bits), 16); // 10
-        bits.write(u32::from(shared_bits), 16); // 11
+        bits.write(u32::from(count_bits), 16); // 10: shared-reference count
+        bits.write(u32::from(identifier_bits), 16); // 11: shared identifier
         bits.write(0, 16); // 12: fractional position numerator
         bits.write(1, 16); // 13: its denominator
 
-        for index in 0..self.page_count as usize {
+        // Table F.4, item by item.
+        for index in 0..pages {
             let objects = self.page_object_counts.get(index).copied().unwrap_or(0);
-            let length = self.page_lengths.get(index).copied().unwrap_or(0);
             bits.write(objects.saturating_sub(least_objects), object_bits);
-            bits.write(length.saturating_sub(least_length), length_bits);
-            // No per-page shared references are recorded: the shared section
-            // is described by its own table below, and F.4.1 allows a page to
-            // declare none. A reader uses this to prefetch, never to resolve.
-            bits.write(0, shared_bits);
-            bits.write(0, 0);
-            bits.write(0, 0);
         }
+        bits.align();
+        for index in 0..pages {
+            let length = self.page_lengths.get(index).copied().unwrap_or(0);
+            bits.write(length.saturating_sub(least_length), length_bits);
+        }
+        bits.align();
+        for index in 0..pages {
+            let count = self
+                .page_shared
+                .get(index)
+                .map_or(0, |ids| ids.len() as u32);
+            bits.write(count, count_bits);
+        }
+        bits.align();
+        for ids in &self.page_shared {
+            for id in ids {
+                bits.write(*id, identifier_bits);
+            }
+        }
+        bits.align();
+        // Item 5, the fractional-position numerators: item 12 above makes them
+        // zero bits wide, so this run is empty and only its padding remains.
+        bits.align();
+        // Items 6 and 7, the content-stream offset and length deltas: items 7
+        // and 9 make both zero bits wide. F.4.1 permits it and Acrobat writes
+        // them so.
         bits.align();
         let shared_at = bits.len();
 
-        // ---- Shared object hint table (F.4.2) ----
-        let first_shared = self.shared_objects.first().copied().unwrap_or(0);
-        bits.write(first_shared, 32); // 1: first shared object number
-        bits.write(0, 32); // 2: its location, relative and unused here
-        bits.write(0, 32); // 3: entries for the first page
-        bits.write(self.shared_objects.len() as u32, 32); // 4: entries in all
+        // ---- Shared object hint table (F.4.2, Table F.5) ----
+        let least_group = self.shared_lengths.iter().copied().min().unwrap_or(0);
+        let most_group = self.shared_lengths.iter().copied().max().unwrap_or(0);
+        let group_bits = bits_for(most_group.saturating_sub(least_group));
+
+        bits.write(self.first_shared_object, 32); // 1: part 8's first object
+        bits.write(first_shared_offset, 32); // 2: and where it is
+        bits.write(self.shared_first_page, 32); // 3: entries for the first page
+        bits.write(self.shared_entries.len() as u32, 32); // 4: entries in all
         bits.write(0, 16); // 5: bits for the group-object count
-        bits.write(0, 32); // 6: least group length
-        bits.write(0, 16); // 7: bits for the group-length delta
-        for _ in &self.shared_objects {
-            bits.write(0, 0);
+        bits.write(least_group, 32); // 6: least group length
+        bits.write(u32::from(group_bits), 16); // 7: bits for the delta
+
+        // Table F.6, item by item. Item 2 is a one-bit flag saying whether a
+        // 128-bit MD5 signature follows; it is never optional, and writing it
+        // at zero width is what made a reader run off the end of the stream
+        // before it had read a single entry. None of ours carry a signature,
+        // so no digest follows, and item 4's width is zero because every group
+        // here is exactly one object.
+        for length in &self.shared_lengths {
+            bits.write(length.saturating_sub(least_group), group_bits);
         }
+        bits.align();
+        for _ in &self.shared_lengths {
+            bits.write(0, 1);
+        }
+        bits.align();
+        // Item 4, the object count in each group, at item 5's zero width.
         bits.align();
 
         (bits.finish(), shared_at)
     }
+}
+
+/// Where the first entry of a classic cross-reference table sits inside it:
+/// past `xref\n` and past the subsection header line.
+fn first_entry_offset(table: &[u8]) -> usize {
+    table
+        .iter()
+        .skip(5)
+        .position(|byte| *byte == b'\n')
+        .map_or(0, |at| 5 + at + 1)
 }
 
 /// Writes an integer right-aligned in a fixed field, so its value cannot
@@ -998,9 +1251,13 @@ mod tests {
             ordered: Vec::new(),
             first_page_object: 7,
             page_count: 6,
-            shared_objects: Vec::new(),
             page_lengths: Vec::new(),
             page_object_counts: Vec::new(),
+            page_shared: Vec::new(),
+            shared_entries: Vec::new(),
+            shared_lengths: Vec::new(),
+            shared_first_page: 0,
+            first_shared_object: 0,
             trailer: Dict::new(),
             size: 20,
             crypt,

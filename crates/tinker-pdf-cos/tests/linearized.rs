@@ -189,6 +189,83 @@ fn classic_xref(bytes: &[u8], at: usize) -> Vec<(u32, u64)> {
     out
 }
 
+/// Where the main cross-reference table's `xref` keyword is.
+///
+/// `/T` no longer answers this: Table F.1 defines it as the offset of the
+/// table's *first entry*, past the keyword and the subsection header. The
+/// front trailer's `/Prev` is the offset of the table itself, and a reader
+/// following the chain uses that.
+fn main_xref_offset(bytes: &[u8]) -> usize {
+    let trailer = trailer_after(bytes, final_startxref(bytes));
+    let at = trailer
+        .rfind("/Prev ")
+        .expect("the front trailer chains onward");
+    trailer[at + 6..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("a number")
+}
+
+/// Every in-use entry from both cross-reference tables, merged.
+fn object_offsets(bytes: &[u8]) -> std::collections::BTreeMap<u32, u64> {
+    classic_xref(bytes, main_xref_offset(bytes))
+        .into_iter()
+        .chain(classic_xref(bytes, final_startxref(bytes)))
+        .collect()
+}
+
+/// Every object number reachable from `start`, not counting the walk back up
+/// the page tree through `/Parent`.
+fn reachable(doc: &CosDocument, start: ObjRef) -> std::collections::BTreeSet<u32> {
+    let mut live = std::collections::BTreeSet::new();
+    let mut queue = vec![start.num];
+    while let Some(num) = queue.pop() {
+        if !live.insert(num) {
+            continue;
+        }
+        let Ok(object) = doc.get(ObjRef::new(num, 0)) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        collect_refs(object.as_ref(), &mut found, 0);
+        for r in found {
+            if !live.contains(&r) {
+                queue.push(r);
+            }
+        }
+    }
+    live
+}
+
+fn collect_refs(object: &Object, out: &mut Vec<u32>, depth: u32) {
+    if depth > 32 {
+        return;
+    }
+    let dict = match object {
+        Object::Ref(r) => {
+            out.push(r.num);
+            return;
+        }
+        Object::Array(items) => {
+            for item in items {
+                collect_refs(item, out, depth + 1);
+            }
+            return;
+        }
+        Object::Dict(dict) => dict,
+        Object::Stream(stream) => &stream.dict,
+        _ => return,
+    };
+    for (key, value) in dict.iter() {
+        if *key == tinker_pdf_cos::Name::PARENT {
+            continue;
+        }
+        collect_refs(value, out, depth + 1);
+    }
+}
+
 /// The trailer dictionary that follows a table, as text.
 fn trailer_after(bytes: &[u8], at: usize) -> String {
     let head = bytes.get(at..).unwrap_or_default();
@@ -266,25 +343,53 @@ fn assert_the_hint_stream_is_where_the_dictionary_says(bytes: &[u8]) {
     );
 }
 
-/// `/T` points at the main cross-reference table, and `/E` at the end of the
-/// first page's material — which must come before it.
+/// `/T` points into the main cross-reference table, and `/E` at the end of
+/// the first page's section — which must come before it.
+///
+/// Table F.1 makes `/T` the offset of the table's **first entry**, the free
+/// entry for object zero, not of the `xref` keyword above it. Pointing it at
+/// the keyword is what this did first; qpdf reads it as
+/// `space before first xref item (/T) mismatch` and every other test in this
+/// file passed anyway, because nothing else in the repository reads `/T` at
+/// all.
 fn assert_the_declared_offsets_are_ordered(bytes: &[u8]) {
     let end_of_first_page = parameter(bytes, "E");
-    let main_xref = parameter(bytes, "T");
+    let xref_zero = parameter(bytes, "T");
+    let table = main_xref_offset(bytes);
     let hint = hint_offset(bytes);
 
-    assert!(hint < end_of_first_page, "the hint stream is inside part 6");
+    assert!(hint < end_of_first_page, "the hint stream is inside part 5");
     assert!(
-        end_of_first_page <= main_xref,
-        "the first page ends before the main table begins: {end_of_first_page} vs {main_xref}"
+        end_of_first_page <= table as u64,
+        "the first page ends before the main table begins: {end_of_first_page} vs {table}"
     );
-    assert!(main_xref < bytes.len() as u64);
+    assert!(table < bytes.len());
 
-    let there = String::from_utf8_lossy(
-        &bytes[main_xref as usize..bytes.len().min(main_xref as usize + 8)],
-    )
-    .into_owned();
-    assert!(there.starts_with("xref"), "/T points at a table: {there}");
+    let there = String::from_utf8_lossy(&bytes[table..bytes.len().min(table + 8)]).into_owned();
+    assert!(
+        there.starts_with("xref"),
+        "/Prev points at a table: {there}"
+    );
+
+    // 7.5.4: an entry is twenty bytes, `0000000000 65535 f \n` for a free one,
+    // and object zero's is always free and always first.
+    let entry = bytes
+        .get(xref_zero as usize..xref_zero as usize + 20)
+        .expect("/T points inside the file");
+    assert_eq!(
+        String::from_utf8_lossy(entry),
+        "0000000000 65535 f \n",
+        "/T names the first entry of the main table, not the keyword above it"
+    );
+
+    // And it is that table's first entry, not some other twenty bytes that
+    // happen to read the same: the keyword and one subsection header line are
+    // all that separate them.
+    let header = String::from_utf8_lossy(&bytes[table + 5..xref_zero as usize]).into_owned();
+    assert!(
+        header.starts_with("0 ") && header.ends_with('\n'),
+        "only a subsection header stands between them: {header:?}"
+    );
 }
 
 /// F.3.4: the last line points back at the *first-page* table near the front.
@@ -314,7 +419,7 @@ fn assert_the_final_startxref_points_at_the_front(bytes: &[u8]) {
 /// first exceeds one object's length and at every object after it.
 fn assert_every_cross_reference_entry_points_at_its_object(bytes: &[u8]) {
     let mut checked = 0usize;
-    for at in [final_startxref(bytes), parameter(bytes, "T") as usize] {
+    for at in [final_startxref(bytes), main_xref_offset(bytes)] {
         for (number, offset) in classic_xref(bytes, at) {
             let want = format!("{number} 0 obj\n");
             let there = bytes
@@ -349,7 +454,7 @@ fn assert_the_trailer_size_covers_every_object(bytes: &[u8]) {
 
     let highest = classic_xref(bytes, front_at)
         .into_iter()
-        .chain(classic_xref(bytes, parameter(bytes, "T") as usize))
+        .chain(classic_xref(bytes, main_xref_offset(bytes)))
         .map(|(number, _)| number)
         .max()
         .expect("some entries");
@@ -400,6 +505,112 @@ fn the_first_pages_objects_precede_everything_else() {
         (found as u64) > end_of_first_page,
         "and the last page's content is after it, at {found}"
     );
+}
+
+/// F.3.1: the primary hint stream is part 5 and the first page's objects are
+/// part 6, in that order.
+///
+/// It was the other way round, with `/E` reaching past the hint stream to
+/// cover it. That reads as generous — everything page one needs, inside `/E`
+/// — and it is the wrong claim twice over: Table F.1 defines `/E` as the end
+/// of part 6, and a reader streaming the file wants the table that says what
+/// to fetch *before* the thing it describes, not after it.
+#[test]
+fn the_hint_stream_comes_before_the_first_pages_objects() {
+    let bytes = linearized(6);
+    let hint = hint_offset(&bytes);
+    let hint_end = hint + hint_length(&bytes);
+    let end_of_first_page = parameter(&bytes, "E");
+
+    let first_page_object = parameter(&bytes, "O") as u32;
+    let at = *object_offsets(&bytes)
+        .get(&first_page_object)
+        .expect("/O is in a cross-reference table");
+
+    assert!(
+        hint_end <= at,
+        "the hint stream ends at {hint_end}, before page one's first object at {at}"
+    );
+    assert!(
+        at < end_of_first_page,
+        "which is itself inside part 6, before /E at {end_of_first_page}"
+    );
+
+    // And `/E` stops at the end of part 6 rather than swallowing the hint
+    // stream, which is only visible because the hint stream now sits ahead of
+    // it: the two claims are independent.
+    assert!(
+        end_of_first_page > hint_end,
+        "part 6 comes after part 5: /E {end_of_first_page} against {hint_end}"
+    );
+}
+
+/// The property F.4.1's per-page entries are read against.
+///
+/// A page-offset hint table gives a reader a *count*, not a list: it takes
+/// that many consecutive object numbers starting at the page's own page
+/// object. So the numbering is load-bearing, and nothing in this repository
+/// depended on it before — the writer numbered by section in old-object
+/// order, which put page one's font *ahead* of page one's page object and
+/// sent qpdf looking for an object number the file does not contain.
+#[test]
+fn each_page_owns_a_consecutive_run_of_objects_led_by_its_page_object() {
+    let bytes = linearized(6);
+    let doc = CosDocument::open(bytes.clone()).expect("it opens");
+    let collected = pages::collect(&doc);
+    assert_eq!(collected.len(), 6);
+
+    let numbers: Vec<u32> = collected.iter().map(|page| page.reference.num).collect();
+    assert_eq!(
+        u64::from(numbers[0]),
+        parameter(&bytes, "O"),
+        "/O leads the first run"
+    );
+    for pair in numbers.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "page objects ascend with page order: {numbers:?}"
+        );
+    }
+
+    // Every number between one page object and the next belongs to the page
+    // above it. A run that swept in a neighbour's object would still be
+    // consecutive; this is what says it is the *right* run.
+    //
+    // For a later page the claim is exclusive — anything a second page needed
+    // would have gone to part 6 or part 8 (F.3.8) rather than travelling with
+    // one page. Page one's run is deliberately not exclusive: that is where a
+    // shared object the first page uses belongs, so a reader holding the front
+    // of the file never has to reach past `/E`.
+    let reach: Vec<std::collections::BTreeSet<u32>> = collected
+        .iter()
+        .map(|page| reachable(&doc, page.reference))
+        .collect();
+    let highest = doc.max_object_number();
+    let mut checked = 0usize;
+    for (index, start) in numbers.iter().enumerate() {
+        let end = numbers.get(index + 1).copied().unwrap_or(highest + 1);
+        assert!(
+            end > *start + 1,
+            "page {index} owns more than its page object"
+        );
+        for num in *start..end {
+            assert!(
+                reach[index].contains(&num),
+                "object {num} sits in page {index}'s run without belonging to it"
+            );
+            if index > 0 {
+                for (other, set) in reach.iter().enumerate() {
+                    assert!(
+                        other == index || !set.contains(&num),
+                        "object {num} travels with page {index} and page {other} needs it too"
+                    );
+                }
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 12, "only {checked} objects were checked");
 }
 
 #[test]
@@ -674,7 +885,7 @@ fn both_cross_reference_tables_are_readable_without_the_password() {
         "the first-page table carries its entries: {front:?}"
     );
 
-    let main_at = parameter(&bytes, "T") as usize;
+    let main_at = main_xref_offset(&bytes);
     let main = classic_xref(&bytes, main_at);
     assert!(
         !main.is_empty(),
@@ -698,7 +909,7 @@ fn both_cross_reference_tables_are_readable_without_the_password() {
     assert!(main_trailer.contains("/Root "), "{main_trailer}");
     assert!(
         main_trailer.contains("/Encrypt 3 0 R"),
-        "the main trailer names it too, for a reader that started at /T: {main_trailer}"
+        "the main trailer names it too, for a reader that started at the back: {main_trailer}"
     );
 }
 
