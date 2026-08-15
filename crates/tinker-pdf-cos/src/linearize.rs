@@ -1336,4 +1336,525 @@ mod tests {
             "the cipher never touches part 2"
         );
     }
+
+    // ---- The hint tables, read back -------------------------------------
+    //
+    // The tables are the one structure here that this repository writes and
+    // nothing reads, which is why they were entirely wrong for as long as they
+    // existed while every test passed. What follows is a reader for them,
+    // built from Tables F.3 to F.6 and checked against the values `Plan::build`
+    // computed, so a field at the wrong width, an item in the wrong order or a
+    // delta against the wrong base fails here without an external tool.
+    //
+    // Its limit is worth stating, because it is the reason the qpdf oracle in
+    // `tests/qpdf_oracle.rs` is not optional: a reader that misunderstands the
+    // format in the same way the writer does agrees with it perfectly. This
+    // half catches arithmetic; that half catches meaning.
+
+    /// Unpacks fields of arbitrary bit width, most significant bit first —
+    /// [`BitWriter`] backwards.
+    struct BitReader<'a> {
+        bytes: &'a [u8],
+        at: usize,
+    }
+
+    impl BitReader<'_> {
+        fn read(&mut self, width: u16) -> u32 {
+            let mut value = 0u32;
+            for _ in 0..width {
+                let byte = self.bytes.get(self.at / 8).copied().unwrap_or(0);
+                let bit = (byte >> (7 - self.at % 8)) & 1;
+                value = (value << 1) | u32::from(bit);
+                self.at += 1;
+            }
+            value
+        }
+
+        fn align(&mut self) {
+            self.at = self.at.div_ceil(8) * 8;
+        }
+
+        /// How many bytes have been consumed. Only meaningful when aligned.
+        fn byte(&self) -> usize {
+            self.at / 8
+        }
+
+        /// Bits asked for beyond the end of the data, which is what a reader
+        /// reports as an overflow.
+        fn overran(&self) -> bool {
+            self.at > self.bytes.len() * 8
+        }
+    }
+
+    /// The page-offset hint table, as Table F.3's thirteen header items and
+    /// Table F.4's per-page entries.
+    struct PageOffsets {
+        least_objects: u32,
+        first_page_offset: u32,
+        object_bits: u16,
+        least_length: u32,
+        length_bits: u16,
+        least_content_offset: u32,
+        content_offset_bits: u16,
+        least_content_length: u32,
+        content_length_bits: u16,
+        count_bits: u16,
+        identifier_bits: u16,
+        numerator_bits: u16,
+        denominator: u32,
+        objects: Vec<u32>,
+        lengths: Vec<u32>,
+        shared: Vec<Vec<u32>>,
+    }
+
+    /// The shared-object hint table, as Table F.5's seven header items and
+    /// Table F.6's entries.
+    struct SharedObjects {
+        first_object: u32,
+        first_offset: u32,
+        first_page_entries: u32,
+        total_entries: u32,
+        group_object_bits: u16,
+        least_group: u32,
+        group_bits: u16,
+        groups: Vec<u32>,
+        signatures: Vec<u32>,
+    }
+
+    fn read_page_offsets(reader: &mut BitReader, pages: usize) -> PageOffsets {
+        let mut table = PageOffsets {
+            least_objects: reader.read(32),
+            first_page_offset: reader.read(32),
+            object_bits: reader.read(16) as u16,
+            least_length: reader.read(32),
+            length_bits: reader.read(16) as u16,
+            least_content_offset: reader.read(32),
+            content_offset_bits: reader.read(16) as u16,
+            least_content_length: reader.read(32),
+            content_length_bits: reader.read(16) as u16,
+            count_bits: reader.read(16) as u16,
+            identifier_bits: reader.read(16) as u16,
+            numerator_bits: reader.read(16) as u16,
+            denominator: reader.read(16),
+            objects: Vec::new(),
+            lengths: Vec::new(),
+            shared: Vec::new(),
+        };
+        assert_eq!(reader.byte(), 36, "Table F.3 is thirteen items, 36 bytes");
+
+        // Item by item across all the pages, not page by page.
+        table.objects = (0..pages)
+            .map(|_| table.least_objects + reader.read(table.object_bits))
+            .collect();
+        reader.align();
+        table.lengths = (0..pages)
+            .map(|_| table.least_length + reader.read(table.length_bits))
+            .collect();
+        reader.align();
+        let counts: Vec<u32> = (0..pages).map(|_| reader.read(table.count_bits)).collect();
+        reader.align();
+        table.shared = counts
+            .iter()
+            .map(|count| {
+                (0..*count)
+                    .map(|_| reader.read(table.identifier_bits))
+                    .collect()
+            })
+            .collect();
+        reader.align();
+        for count in &counts {
+            for _ in 0..*count {
+                assert_eq!(reader.read(table.numerator_bits), 0, "no numerators");
+            }
+        }
+        reader.align();
+        for _ in 0..pages {
+            assert_eq!(reader.read(table.content_offset_bits), 0);
+        }
+        reader.align();
+        for _ in 0..pages {
+            assert_eq!(reader.read(table.content_length_bits), 0);
+        }
+        reader.align();
+        table
+    }
+
+    fn read_shared_objects(reader: &mut BitReader) -> SharedObjects {
+        let start = reader.byte();
+        let mut table = SharedObjects {
+            first_object: reader.read(32),
+            first_offset: reader.read(32),
+            first_page_entries: reader.read(32),
+            total_entries: reader.read(32),
+            group_object_bits: reader.read(16) as u16,
+            least_group: reader.read(32),
+            group_bits: reader.read(16) as u16,
+            groups: Vec::new(),
+            signatures: Vec::new(),
+        };
+        assert_eq!(
+            reader.byte() - start,
+            24,
+            "Table F.5 is seven items, 24 bytes"
+        );
+
+        let entries = table.total_entries as usize;
+        table.groups = (0..entries)
+            .map(|_| table.least_group + reader.read(table.group_bits))
+            .collect();
+        reader.align();
+        // Table F.6 item 2, one bit an entry and never omitted. Writing it at
+        // zero width is what made a reader overflow before it had read one
+        // entry; reading it here at any other width would put every group
+        // count below out of step.
+        table.signatures = (0..entries).map(|_| reader.read(1)).collect();
+        reader.align();
+        for _ in 0..entries {
+            assert_eq!(
+                reader.read(table.group_object_bits),
+                0,
+                "one object a group"
+            );
+        }
+        reader.align();
+        table
+    }
+
+    /// One fixture: a catalog, a page tree, one or two fonts, and a page with
+    /// a content stream each.
+    ///
+    /// Built by hand rather than through `DocumentBuilder` so the object
+    /// numbering is deliberately *unhelpful* — the fonts come before the
+    /// pages, so a writer that numbered its output in input order would put
+    /// page one's font ahead of page one's page object, which is the defect
+    /// this fixture has to be able to express.
+    fn a_document(page_count: usize, second_font: bool) -> (ObjectSet, Dict, NameTable) {
+        let names = NameTable::new();
+        let mut objects = ObjectSet::new();
+
+        let font_a = 3u32;
+        let font_b = 4u32;
+        let first_page = if second_font { 5 } else { 4 };
+
+        let mut catalog = Dict::new();
+        catalog.insert(Name::TYPE, Object::Name(names.intern(b"Catalog")));
+        catalog.insert(Name::PAGES, Object::Ref(ObjRef::new(2, 0)));
+        objects.insert(1, Object::Dict(catalog));
+
+        let mut kids = Vec::new();
+        for index in 0..page_count {
+            kids.push(Object::Ref(ObjRef::new(first_page + 2 * index as u32, 0)));
+        }
+        let mut tree = Dict::new();
+        tree.insert(Name::TYPE, Object::Name(names.intern(b"Pages")));
+        tree.insert(Name::KIDS, Object::Array(kids));
+        tree.insert(Name::COUNT, Object::Int(page_count as i64));
+        objects.insert(2, Object::Dict(tree));
+
+        for (num, base) in [(font_a, &b"Helvetica"[..]), (font_b, b"Courier")] {
+            if num == font_b && !second_font {
+                continue;
+            }
+            let mut font = Dict::new();
+            font.insert(Name::TYPE, Object::Name(names.intern(b"Font")));
+            font.insert(names.intern(b"BaseFont"), Object::Name(names.intern(base)));
+            objects.insert(num, Object::Dict(font));
+        }
+
+        for index in 0..page_count {
+            let page = first_page + 2 * index as u32;
+            let content = page + 1;
+
+            // The first page always uses font A. When there is a second font
+            // the later pages use it instead, which is what puts an object in
+            // part 8: several pages need it and page one does not.
+            let font = if second_font && index > 0 {
+                font_b
+            } else {
+                font_a
+            };
+            let mut fonts = Dict::new();
+            fonts.insert(names.intern(b"F0"), Object::Ref(ObjRef::new(font, 0)));
+            let mut resources = Dict::new();
+            resources.insert(names.intern(b"Font"), Object::Dict(fonts));
+
+            let mut dict = Dict::new();
+            dict.insert(Name::TYPE, Object::Name(names.intern(b"Page")));
+            dict.insert(Name::PARENT, Object::Ref(ObjRef::new(2, 0)));
+            dict.insert(Name::RESOURCES, Object::Dict(resources));
+            dict.insert(Name::CONTENTS, Object::Ref(ObjRef::new(content, 0)));
+            dict.insert(
+                Name::MEDIA_BOX,
+                Object::Array(vec![
+                    Object::Int(0),
+                    Object::Int(0),
+                    Object::Int(200),
+                    Object::Int(100),
+                ]),
+            );
+            objects.insert(page, Object::Dict(dict));
+
+            // Deliberately different lengths per page, so a length delta
+            // written against the wrong base cannot come out zero anyway.
+            let text = format!("BT /F0 12 Tf 10 50 Td ({}) Tj ET", "x".repeat(index + 1));
+            objects.insert_stream(
+                content,
+                StreamData {
+                    dict: Dict::new(),
+                    data: text.into_bytes(),
+                },
+            );
+        }
+
+        let mut trailer = Dict::new();
+        trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
+        (objects, trailer, names)
+    }
+
+    fn a_built_plan(page_count: usize, second_font: bool) -> Plan {
+        let (objects, trailer, names) = a_document(page_count, second_font);
+        Plan::build(&objects, &trailer, &names, false, None).expect("it linearizes")
+    }
+
+    /// Milestone 1: every field the writer computed comes back out.
+    ///
+    /// Two offsets are passed in rather than derived, because `hint_tables`
+    /// takes them from the layout; any two distinct values prove they land in
+    /// the fields they are meant to and not in each other's.
+    #[test]
+    fn every_hint_table_field_reads_back_as_the_writer_computed_it() {
+        for (pages, second_font) in [(1usize, false), (6, false), (6, true)] {
+            let plan = a_built_plan(pages, second_font);
+            let (data, shared_at) = plan.hint_tables(0x0BAD_F00D, 0x0DEF_ACED);
+
+            let mut reader = BitReader {
+                bytes: &data,
+                at: 0,
+            };
+            let offsets = read_page_offsets(&mut reader, pages);
+            let case = format!("{pages} pages, second font {second_font}");
+
+            assert_eq!(
+                reader.byte(),
+                shared_at,
+                "/S names where the shared table starts ({case})"
+            );
+
+            // Table F.3, item by item.
+            assert_eq!(
+                offsets.least_objects,
+                plan.page_object_counts.iter().copied().min().unwrap(),
+                "item 1 ({case})"
+            );
+            assert_eq!(offsets.first_page_offset, 0x0BAD_F00D, "item 2 ({case})");
+            assert_eq!(
+                offsets.least_length,
+                plan.page_lengths.iter().copied().min().unwrap(),
+                "item 4 ({case})"
+            );
+            assert_eq!(offsets.least_content_offset, 0, "item 6 ({case})");
+            assert_eq!(offsets.content_offset_bits, 0, "item 7 ({case})");
+            assert_eq!(offsets.least_content_length, 0, "item 8 ({case})");
+            assert_eq!(offsets.content_length_bits, 0, "item 9 ({case})");
+            assert_eq!(offsets.numerator_bits, 0, "item 12 ({case})");
+            assert_eq!(offsets.denominator, 1, "item 13 ({case})");
+
+            // Table F.4, entry by entry. The deltas are checked by their sum
+            // with the header's minimum, which is what a reader does, so a
+            // delta against the wrong base cannot survive.
+            assert_eq!(offsets.objects, plan.page_object_counts, "item 1 ({case})");
+            assert_eq!(offsets.lengths, plan.page_lengths, "item 2 ({case})");
+            assert_eq!(offsets.shared, plan.page_shared, "items 3 and 4 ({case})");
+
+            // And the widths are wide enough for the values they carry, which
+            // is the other way a field goes wrong: a width one bit short
+            // truncates silently and the sum above would still add up if the
+            // truncation happened to land on a zero.
+            for (index, count) in plan.page_object_counts.iter().enumerate() {
+                let delta = count - offsets.least_objects;
+                assert!(
+                    u32::from(offsets.object_bits) >= 32 - delta.leading_zeros(),
+                    "item 3 is {} bits for a delta of {delta} on page {index} ({case})",
+                    offsets.object_bits
+                );
+            }
+            for (index, length) in plan.page_lengths.iter().enumerate() {
+                let delta = length - offsets.least_length;
+                assert!(
+                    u32::from(offsets.length_bits) >= 32 - delta.leading_zeros(),
+                    "item 5 is {} bits for a delta of {delta} on page {index} ({case})",
+                    offsets.length_bits
+                );
+            }
+            for ids in &plan.page_shared {
+                assert!(
+                    u32::from(offsets.count_bits) >= 32 - (ids.len() as u32).leading_zeros(),
+                    "item 10 is {} bits for {} references ({case})",
+                    offsets.count_bits,
+                    ids.len()
+                );
+                for id in ids {
+                    assert!(
+                        u32::from(offsets.identifier_bits) >= 32 - id.leading_zeros(),
+                        "item 11 is {} bits for identifier {id} ({case})",
+                        offsets.identifier_bits
+                    );
+                }
+            }
+
+            // Table F.5 and Table F.6.
+            let shared = read_shared_objects(&mut reader);
+            assert_eq!(
+                shared.first_object, plan.first_shared_object,
+                "item 1 ({case})"
+            );
+            assert_eq!(shared.first_offset, 0x0DEF_ACED, "item 2 ({case})");
+            assert_eq!(
+                shared.first_page_entries, plan.shared_first_page,
+                "item 3 ({case})"
+            );
+            assert_eq!(
+                shared.total_entries as usize,
+                plan.shared_entries.len(),
+                "item 4 ({case})"
+            );
+            assert_eq!(shared.group_object_bits, 0, "item 5 ({case})");
+            assert_eq!(
+                shared.least_group,
+                plan.shared_lengths.iter().copied().min().unwrap(),
+                "item 6 ({case})"
+            );
+            assert_eq!(
+                shared.groups, plan.shared_lengths,
+                "Table F.6 item 1 ({case})"
+            );
+            assert!(
+                shared.signatures.iter().all(|flag| *flag == 0),
+                "Table F.6 item 2 is present and clear ({case})"
+            );
+            for length in &plan.shared_lengths {
+                let delta = length - shared.least_group;
+                assert!(
+                    u32::from(shared.group_bits) >= 32 - delta.leading_zeros(),
+                    "item 7 is {} bits for a delta of {delta} ({case})",
+                    shared.group_bits
+                );
+            }
+
+            // Nothing was read past the end, and nothing was left over: the
+            // reader lands on the last byte of the stream. A table whose
+            // entries occupy no bits at all -- which is what the shared table
+            // did -- passes every assertion above and fails this one.
+            assert!(
+                !reader.overran(),
+                "the reader stayed inside the data ({case})"
+            );
+            assert_eq!(reader.byte(), data.len(), "and consumed all of it ({case})");
+        }
+    }
+
+    /// The counts and lengths the reader agreed with are the *right* counts
+    /// and lengths.
+    ///
+    /// The test above proves the packing round-trips; both halves of it read
+    /// `plan`, so a page length computed from the wrong objects would satisfy
+    /// it perfectly. This measures them against the serialised bytes instead.
+    #[test]
+    fn the_page_and_group_lengths_are_the_bytes_that_will_be_written() {
+        for (pages, second_font) in [(1usize, false), (6, false), (6, true)] {
+            let plan = a_built_plan(pages, second_font);
+            let case = format!("{pages} pages, second font {second_font}");
+
+            let sizes: BTreeMap<u32, u32> = plan
+                .ordered
+                .iter()
+                .map(|placed| (placed.number, placed.bytes.len() as u32))
+                .collect();
+
+            // A page's run is `count` consecutive numbers from its first
+            // object, exactly as F.4.1 has a reader take them. Page one's
+            // starts at `/O`; each later page's starts where the last ended.
+            let mut start = plan.first_page_object;
+            for (index, count) in plan.page_object_counts.iter().enumerate() {
+                let run: Vec<u32> = (start..start + count).collect();
+                let measured: u32 = run.iter().filter_map(|num| sizes.get(num)).sum();
+                assert_eq!(
+                    run.iter().filter(|num| sizes.contains_key(num)).count(),
+                    *count as usize,
+                    "page {index}'s run names objects that exist ({case})"
+                );
+                assert_eq!(
+                    plan.page_lengths[index], measured,
+                    "page {index}'s declared length is its run's bytes ({case})"
+                );
+                start += count;
+            }
+
+            // The shared table's entries are part 6's objects and then part
+            // 8's, and each group is one object long.
+            assert_eq!(
+                plan.shared_first_page, plan.page_object_counts[0],
+                "the first page's objects are the first shared entries ({case})"
+            );
+            for (index, num) in plan.shared_entries.iter().enumerate() {
+                assert_eq!(
+                    plan.shared_lengths[index],
+                    sizes.get(num).copied().unwrap_or(0),
+                    "shared entry {index} is object {num}'s bytes ({case})"
+                );
+            }
+            if second_font {
+                assert!(
+                    plan.first_shared_object != 0
+                        && plan.shared_entries.len() > plan.shared_first_page as usize,
+                    "the shared-resource fixture really has a part 8 ({case})"
+                );
+                assert_eq!(
+                    plan.shared_entries.last().copied(),
+                    Some(plan.first_shared_object),
+                    "and its one object is the last entry ({case})"
+                );
+            } else {
+                assert_eq!(
+                    plan.first_shared_object, 0,
+                    "and the others do not ({case})"
+                );
+            }
+        }
+    }
+
+    /// The three fixtures are three different shapes, not the same one three
+    /// times.
+    ///
+    /// A round-trip test passes just as happily on a degenerate fixture, and
+    /// a one-page document exercises none of the per-page arithmetic: every
+    /// delta is zero because there is nothing to differ from.
+    #[test]
+    fn the_hint_table_fixtures_differ_where_the_arithmetic_lives() {
+        let one = a_built_plan(1, false);
+        assert_eq!(one.page_count, 1);
+        assert!(one.page_shared.iter().all(|ids| ids.is_empty()));
+
+        let six = a_built_plan(6, false);
+        assert_eq!(six.page_count, 6);
+        let lengths: BTreeSet<u32> = six.page_lengths.iter().copied().collect();
+        assert!(lengths.len() > 1, "the page lengths differ: {lengths:?}");
+        assert!(
+            six.page_object_counts[0] > six.page_object_counts[1],
+            "and so do the object counts: {:?}",
+            six.page_object_counts
+        );
+        assert!(
+            six.page_shared[1..].iter().all(|ids| !ids.is_empty()),
+            "later pages reference the shared font: {:?}",
+            six.page_shared
+        );
+
+        let shared = a_built_plan(6, true);
+        assert!(shared.first_shared_object != 0, "there is a part 8");
+        assert!(
+            shared.shared_entries.len() > shared.shared_first_page as usize,
+            "with an entry of its own"
+        );
+    }
 }
