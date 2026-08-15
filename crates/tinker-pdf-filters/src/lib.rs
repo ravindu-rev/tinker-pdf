@@ -23,6 +23,7 @@ pub mod deflate;
 mod inflate;
 mod jpeg;
 mod lzw;
+pub mod mq;
 mod predictors;
 mod runlength;
 
@@ -31,6 +32,7 @@ use core::fmt;
 pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
 pub use deflate::{deflate, zlib_compress};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
+pub use mq::{MqContext, MqContexts, MqDecoder};
 pub use predictors::PredictorParams;
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
