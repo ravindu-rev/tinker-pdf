@@ -7,16 +7,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use xtask::{corpus, fetch, repo_root};
+use xtask::{corpus, fetch, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
 
 usage:
-  cargo xtask dag     check the crate dependency graph against the declared one
-  cargo xtask libm    check that no pixel path calls the platform's libm
-  cargo xtask vendor  check vendored data against THIRDPARTY.md and deny.toml
-  cargo xtask check   all three of the above
+  cargo xtask dag       check the crate dependency graph against the declared one
+  cargo xtask libm      check that no pixel path calls the platform's libm
+  cargo xtask vendor    check vendored data against THIRDPARTY.md and deny.toml
+  cargo xtask versions  check every manifest against the workspace version, and
+                        `publish = false` where publishing would be wrong
+  cargo xtask check     all four of the above
 
   cargo xtask corpus-fetch [--record] [--force] [--corpus NAME]
                                          fetch and verify the pinned corpora
@@ -48,13 +50,16 @@ fn main() -> ExitCode {
         "dag" => report("dag", check_dag()),
         "libm" => report("libm", check_libm()),
         "vendor" => report("vendor", check_vendor()),
+        "versions" => report("versions", version::check(&repo_root())),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
             let vendor = check_vendor();
+            let versions = version::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(vendor.err().unwrap_or_default());
+            problems.extend(versions.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {

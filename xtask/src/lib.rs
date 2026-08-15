@@ -18,6 +18,7 @@ pub mod lock;
 pub mod ratchet;
 pub mod report;
 pub mod runner;
+pub mod version;
 
 /// The repository root, from the manifest directory of whichever of the two
 /// targets is asking.

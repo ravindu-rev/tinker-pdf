@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Differential test runner: invokes mutool, pdftoppm or pdfium_test as subprocess oracles and compares"
+# Never crates.io: a test harness that shells out to other engines.
+# `cargo xtask check` fails if this line goes missing.
+publish = false
 
 [dependencies]
 tinker-pdf = { workspace = true }

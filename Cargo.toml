@@ -48,17 +48,25 @@ authors = ["tinker-pdf contributors"]
 # feature were off and it is on. Each of the four re-declares
 # `default = ["cmap-predefined"]`, so a plain `cargo build` still gets the
 # tables and only `--no-default-features` on the facade drops them.
+#
+# Every entry carries a `version` beside its `path`, and it is not decoration:
+# `cargo publish` refuses a crate whose dependency has only a path, because a
+# path means nothing to anybody who downloads the result. Cargo builds from the
+# path here and resolves the version from the registry there, so the number is
+# invisible in this checkout — which is exactly why `cargo xtask check`
+# compares all ten against `[workspace.package] version` rather than trusting
+# that a release remembered them.
 [workspace.dependencies]
-tinker-pdf-cos = { path = "crates/tinker-pdf-cos", default-features = false }
-tinker-pdf-filters = { path = "crates/tinker-pdf-filters" }
-tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto" }
-tinker-pdf-font = { path = "crates/tinker-pdf-font", default-features = false }
-tinker-pdf-color = { path = "crates/tinker-pdf-color" }
-tinker-pdf-math = { path = "crates/tinker-pdf-math" }
-tinker-pdf-raster = { path = "crates/tinker-pdf-raster" }
-tinker-pdf-content = { path = "crates/tinker-pdf-content", default-features = false }
-tinker-pdf-render = { path = "crates/tinker-pdf-render", default-features = false }
-tinker-pdf = { path = "crates/tinker-pdf" }
+tinker-pdf-cos = { path = "crates/tinker-pdf-cos", version = "0.0.1", default-features = false }
+tinker-pdf-filters = { path = "crates/tinker-pdf-filters", version = "0.0.1" }
+tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto", version = "0.0.1" }
+tinker-pdf-font = { path = "crates/tinker-pdf-font", version = "0.0.1", default-features = false }
+tinker-pdf-color = { path = "crates/tinker-pdf-color", version = "0.0.1" }
+tinker-pdf-math = { path = "crates/tinker-pdf-math", version = "0.0.1" }
+tinker-pdf-raster = { path = "crates/tinker-pdf-raster", version = "0.0.1" }
+tinker-pdf-content = { path = "crates/tinker-pdf-content", version = "0.0.1", default-features = false }
+tinker-pdf-render = { path = "crates/tinker-pdf-render", version = "0.0.1", default-features = false }
+tinker-pdf = { path = "crates/tinker-pdf", version = "0.0.1" }
 
 [profile.release]
 lto = "thin"

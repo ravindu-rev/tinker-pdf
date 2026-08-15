@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Release and maintenance automation: corpus sync, CAVP vector fetch, multi-registry publish"
+# Never crates.io. This is repository automation: it reads this checkout's
+# own manifests, and it is the program that drives the release, so publishing
+# it would be an entry nobody outside could use.
+# `cargo xtask check` fails if this line goes missing.
+publish = false
 # Two binaries live here now: `xtask` itself, and `corpus-stub`, the
 # deliberately misbehaving corpus child the isolation tests point `--child` at.
 # Without this, `cargo run -p xtask` becomes ambiguous and every CI invocation
