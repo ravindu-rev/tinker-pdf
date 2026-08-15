@@ -65,6 +65,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "jbig2"
+path = "fuzz_targets/jbig2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "ascii_filters"
 path = "fuzz_targets/ascii_filters.rs"
 test = false
