@@ -987,3 +987,96 @@ fn write_indirect(
     }
     out.extend_from_slice(b"\nendobj\n");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::write::Encryption;
+
+    fn a_plan(crypt: Option<StreamCipher>) -> Plan {
+        Plan {
+            ordered: Vec::new(),
+            first_page_object: 7,
+            page_count: 6,
+            shared_objects: Vec::new(),
+            page_lengths: Vec::new(),
+            page_object_counts: Vec::new(),
+            trailer: Dict::new(),
+            size: 20,
+            crypt,
+        }
+    }
+
+    fn a_cipher() -> StreamCipher {
+        let request = Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: [7u8; 48],
+        };
+        crate::write::build_encryption(&request, &NameTable::new())
+            .expect("R6 builds from any entropy")
+            .1
+    }
+
+    /// The one genuinely awkward point in 7.6.1, settled rather than assumed.
+    ///
+    /// 7.6.1 exempts the `/Encrypt` dictionary and the cross-reference
+    /// streams from encryption. It does *not* exempt the linearization
+    /// parameter dictionary, and this writer leaves it in the clear anyway,
+    /// because a reader consults it before it has authenticated — before it
+    /// has even found `/Encrypt`.
+    ///
+    /// What makes that sound is that there is nothing in it for encryption to
+    /// touch. 7.6.2 encrypts strings and streams; every value here is an
+    /// integer or an array of integers, so the question is moot. Asserted
+    /// here so that a field added later which *does* carry a string fails
+    /// this test rather than being written in plain sight inside a file that
+    /// claims to be encrypted.
+    #[test]
+    fn the_parameter_dictionary_carries_no_strings() {
+        let bytes =
+            a_plan(None).parameter_dictionary(3288, 1416, 133, 1549, 2801, &NameTable::new());
+        let text = String::from_utf8(bytes).expect("the parameter dictionary is ASCII");
+
+        // 7.3.4: a string is written `(...)` or `<...>`. The dictionary's own
+        // `<<` and `>>` are the only angle brackets allowed to appear.
+        let stripped = text.replace("<<", "").replace(">>", "");
+        for delimiter in ['(', ')', '<', '>'] {
+            assert!(
+                !stripped.contains(delimiter),
+                "a {delimiter} means a string is in there: {text}"
+            );
+        }
+
+        // And positively, so that something neither a number nor a string
+        // cannot slip through the scan above: every token is a name, a
+        // bracket, an integer, or the indirect-object syntax.
+        for token in text.split_ascii_whitespace() {
+            let known = token.starts_with('/')
+                || matches!(token, "<<" | ">>" | "[" | "]" | "obj" | "endobj")
+                || token.bytes().all(|b| b.is_ascii_digit());
+            assert!(known, "unexpected token {token:?} in: {text}");
+        }
+    }
+
+    /// The other half of the same claim, from the writer's side: the cipher
+    /// does not reach the parameter dictionary at all.
+    ///
+    /// The test above says there is nothing in it to encrypt. This says
+    /// nothing encrypts it, which is a different statement and the one that
+    /// would fail if a future change routed part 2 through `write_indirect`
+    /// like every other object.
+    #[test]
+    fn the_parameter_dictionary_is_the_same_bytes_encrypted_or_not() {
+        let names = NameTable::new();
+        let clear = a_plan(None).parameter_dictionary(3288, 1416, 133, 1549, 2801, &names);
+        let sealed =
+            a_plan(Some(a_cipher())).parameter_dictionary(3288, 1416, 133, 1549, 2801, &names);
+        assert_eq!(
+            String::from_utf8_lossy(&clear),
+            String::from_utf8_lossy(&sealed),
+            "the cipher never touches part 2"
+        );
+    }
+}
