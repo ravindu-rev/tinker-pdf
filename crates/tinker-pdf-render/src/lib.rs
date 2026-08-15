@@ -31,6 +31,7 @@ use tinker_pdf_raster::{
     fill::{fill, Mask},
     geom::{FillRule, Path},
     image::{draw_image, ImageDraw, ImageSource, Pyramid, Transform},
+    mesh::{draw_mesh, MeshDraw},
     stroke::{stroke, LineCap, LineJoin, StrokeStyle},
 };
 
@@ -165,8 +166,8 @@ pub enum PatternPaint {
     /// separately, from [`GlyphSource::tile`], because rasterizing them means
     /// running a content stream and this crate has no interpreter.
     Tiling(Box<TilingPattern>),
-    /// A pattern this build does not paint — a shading pattern over a mesh, a
-    /// tiling pattern whose cell could not be read.
+    /// A pattern this build does not paint — a tiling pattern whose cell could
+    /// not be read, a shading whose dictionary says nothing usable.
     ///
     /// The area is left alone and reported, rather than filled with the black
     /// that `/Pattern` nominally reports as its colour: an unpainted area
@@ -1046,7 +1047,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ) {
         match self.glyphs.pattern(name) {
             Some(PatternPaint::Shading(shading, matrix)) => {
-                self.fill_with_shading(path, rule, &shading, matrix, state, alpha);
+                // A mesh too large to paint is reported as the unpainted
+                // pattern it is, exactly as an unreadable tiling cell is: the
+                // area is left alone rather than filled with black.
+                if !self.fill_with_shading(path, rule, &shading, matrix, state, alpha) {
+                    self.report_unpainted_pattern(name);
+                }
             }
             Some(PatternPaint::Tiling(tiling)) => {
                 if !self.fill_with_tiles(path, rule, name, &tiling, state, alpha, color) {
@@ -1073,6 +1079,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// The path becomes the clip and the shading is evaluated per pixel inside
     /// it, which is the same machinery `sh` uses — a shading pattern is `sh`
     /// bounded by a path rather than by the current clip.
+    ///
+    /// False means nothing was painted and the caller should say so: a mesh
+    /// past its work budget is the only way that happens.
     fn fill_with_shading(
         &mut self,
         path: &Path,
@@ -1081,27 +1090,33 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         matrix: Matrix,
         state: &GraphicsState,
         alpha: f64,
-    ) {
+    ) -> bool {
         let to_device = matrix.then(&self.base);
-        let Some(inverse) = invert(&to_device) else {
-            return;
-        };
-
         let stop = self.stop_predicate();
         let area = self.coverage(path, rule, Some(&stop));
+        let alpha = alpha.clamp(0.0, 1.0);
+        let mode = blend_mode(state.blend);
+
+        // A mesh is geometry rather than a function of position, so it takes
+        // the other route entirely — and it does its own knockout restore,
+        // with its own coverage rather than the shape's.
+        if let Some(mesh) = shading.mesh() {
+            return self.paint_mesh(mesh, to_device, Some(&area), alpha, mode);
+        }
+
+        let Some(inverse) = invert(&to_device) else {
+            return true;
+        };
         if self.in_knockout() {
             self.knockout_restore(&area);
         }
-
-        let alpha = alpha.clamp(0.0, 1.0);
-        let mode = blend_mode(state.blend);
         // The shape's own rectangle. A shading is evaluated per pixel, so a
         // gradient-filled comma used to run the inverse transform and the
         // function over every pixel of the page to paint two hundred of them.
         let (x_start, y_start, x_end, y_end) = area.overlap(self.canvas.width, self.canvas.height);
         for py in y_start..y_end {
             if self.stopping() {
-                return;
+                return true;
             }
             for px in x_start..x_end {
                 let coverage = area.at(px as i32, py as i32);
@@ -1117,6 +1132,113 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     .blend_pixel_with(px, py, Color { r, g, b, a: 0xFF }, weight, mode);
             }
         }
+        true
+    }
+
+    /// Paints a mesh shading through a coverage mask (8.7.4.5.5 to 8.7.4.5.8).
+    ///
+    /// False means the mesh was refused: the caller reports it, naming the
+    /// shading type. The two ways that happens are a tessellation larger than
+    /// `MAX_MESH_TRIANGLES` and a rasterisation past `MAX_MESH_WORK`, and both
+    /// paint nothing at all rather than part of a mesh — the same answer
+    /// `fill_with_tiles` gives to a lattice that will not fit, and for the same
+    /// reason: a fragment reads as an artefact where a gap reads as a gap.
+    ///
+    /// **The whole mesh goes through one buffer.** Compositing per triangle
+    /// would anti-alias every shared edge against the canvas and leave a
+    /// lattice of pale seams; `draw_mesh` returns colour and coverage over one
+    /// rectangle and this composites that rectangle once.
+    fn paint_mesh(
+        &mut self,
+        mesh: &Mesh,
+        to_device: Matrix,
+        area: Option<&Mask>,
+        alpha: f64,
+        mode: RasterBlend,
+    ) -> bool {
+        let Some(tessellation) = mesh.tessellate(&to_device) else {
+            return false;
+        };
+        if tessellation.triangles.is_empty() {
+            return true; // An empty mesh paints nothing, and that is not a refusal.
+        }
+
+        // The mesh's own device rectangle, bounded by the clip exactly as a
+        // fill's is: a mesh written far off the page must cost the page rather
+        // than the coordinates.
+        let mut bbox = Path::new();
+        for (x, y) in &tessellation.positions {
+            if bbox.is_empty() {
+                bbox.move_to(*x, *y);
+            } else {
+                bbox.line_to(*x, *y);
+            }
+        }
+        let (x0, y0, width, height) =
+            paint_region(&bbox, area, None, self.canvas.width, self.canvas.height);
+        if width == 0 || height == 0 {
+            return true;
+        }
+        #[cfg(test)]
+        {
+            self.mask_pixels = self
+                .mask_pixels
+                .saturating_add(u64::from(width) * u64::from(height));
+        }
+
+        let stop = self.stop_predicate();
+        // 8.7.4.5.5: the vertex values are interpolated and *then* converted,
+        // which is what this closure is. Handing the rasteriser RGB at the
+        // vertices instead would interpolate in device space and move the
+        // midpoint of every non-linear colour space and every non-linear
+        // `/Function`.
+        let convert = |inputs: &[f64]| {
+            let (r, g, b) = mesh.color(inputs);
+            Color { r, g, b, a: 0xFF }
+        };
+        let draw = MeshDraw {
+            positions: &tessellation.positions,
+            values: &tessellation.values,
+            components: mesh.components,
+            triangles: &tessellation.triangles,
+            color: &convert,
+            stop: Some(&stop),
+        };
+        let Some(mut buffer) = draw_mesh(&draw, x0, y0, width, height) else {
+            return false;
+        };
+
+        // The element's coverage is the mesh's own, not the clip's: 11.4.5's
+        // restore has to know where this element actually painted, and `sh`
+        // with a mesh does not paint the whole clip the way `sh` with a
+        // gradient does.
+        if let Some(area) = area {
+            buffer.coverage.intersect_in_place(area);
+        }
+        if self.in_knockout() {
+            self.knockout_restore(&buffer.coverage);
+        }
+
+        let (x_start, y_start, x_end, y_end) = buffer
+            .coverage
+            .overlap(self.canvas.width, self.canvas.height);
+        for py in y_start..y_end {
+            if self.stopping() {
+                return true;
+            }
+            for px in x_start..x_end {
+                let coverage = buffer.coverage.at(px as i32, py as i32);
+                if coverage == 0 {
+                    continue;
+                }
+                let Some(color) = buffer.at(px as i32, py as i32) else {
+                    continue;
+                };
+                let weight = alpha * f64::from(coverage) / 255.0;
+                self.canvas.blend_pixel_with(px, py, color, weight, mode);
+            }
+        }
+        true
     }
 
     /// Fills a path with a tiling pattern: one cell, rasterized once, blitted
@@ -2075,9 +2197,6 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // 8.7.4.2: `sh` fills the current clip, so a page without one paints
         // everywhere — and the shading's own extent decides the rest.
         let to_device = state.ctm.then(&self.base);
-        let Some(inverse) = invert(&to_device) else {
-            return;
-        };
 
         let alpha = state.fill_alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
@@ -2091,6 +2210,22 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             (Some(clip), Some(soft)) => Some(clip.intersect(soft)),
             (Some(mask), None) | (None, Some(mask)) => Some(mask.clone()),
             (None, None) => None,
+        };
+
+        // A mesh paints its own geometry rather than the whole clip, so it
+        // brings its own coverage and its own knockout restore with it.
+        if let Some(mesh) = shading.mesh() {
+            if !self.paint_mesh(mesh, to_device, area.as_ref(), alpha, mode) {
+                let warning = RenderWarning::UnsupportedShading { kind: mesh.kind };
+                if !self.warnings.contains(&warning) {
+                    self.warnings.push(warning);
+                }
+            }
+            return;
+        }
+
+        let Some(inverse) = invert(&to_device) else {
+            return;
         };
         let (x_start, y_start, x_end, y_end) = area
             .as_ref()

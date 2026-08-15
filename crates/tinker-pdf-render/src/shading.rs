@@ -1,11 +1,15 @@
-//! Shadings: axial and radial gradients (8.7.4.5).
+//! Shadings: gradients and meshes (8.7.4.5).
 //!
-//! A shading paints a colour that varies with position, so it is evaluated
-//! per pixel rather than composited from a mask. Types 1 to 3 are here; the
-//! mesh types (4 to 7) are behind a capability, because they are a large
-//! amount of geometry for a construct almost nothing produces.
+//! Types 1 to 3 paint a colour that varies with position, so they are
+//! evaluated per pixel rather than composited from a mask, and
+//! [`Shading::color_at`] is the whole of them. Types 4 to 7 are *geometry* —
+//! triangles and patches — and cannot answer that question at a point, so they
+//! carry a [`Mesh`] and are painted by the mesh rasteriser instead. That is why
+//! `color_at` returns `None` for them rather than growing a branch that guesses.
 
 use tinker_pdf_color::{ColorSpace, Function};
+
+use crate::mesh::Mesh;
 
 /// A shading, reduced to what painting needs.
 #[derive(Clone, Debug)]
@@ -41,11 +45,27 @@ pub enum Shading {
         /// Whether the gradient continues past each end.
         extend: (bool, bool),
     },
+    /// Types 4 to 7: a mesh of Gouraud triangles or of Coons or tensor
+    /// patches (8.7.4.5.5 to 8.7.4.5.8).
+    Mesh(Box<Mesh>),
 }
 
 impl Shading {
+    /// The mesh a type 4 to 7 shading paints, if this is one.
+    #[must_use]
+    pub fn mesh(&self) -> Option<&Mesh> {
+        match self {
+            Shading::Mesh(mesh) => Some(mesh),
+            _ => None,
+        }
+    }
+
     /// The colour at a point in shading space, or `None` where the shading
     /// paints nothing.
+    ///
+    /// Always `None` for a mesh: a mesh is not a function of position, and
+    /// answering "what colour is here" would mean locating the containing
+    /// triangle per pixel, which is the search the rasteriser exists to avoid.
     #[must_use]
     pub fn color_at(&self, x: f64, y: f64) -> Option<(u8, u8, u8)> {
         if !x.is_finite() || !y.is_finite() {
@@ -53,6 +73,7 @@ impl Shading {
         }
 
         match self {
+            Shading::Mesh(_) => None,
             Shading::FunctionBased {
                 space,
                 function,

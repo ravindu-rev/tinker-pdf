@@ -18,7 +18,9 @@ use tinker_pdf_filters::{
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
-use tinker_pdf_render::{DecodedImage, GlyphSource, PatternPaint, Shading, TilingPattern};
+use tinker_pdf_render::{
+    DecodedImage, GlyphSource, Mesh, MeshParams, PatternPaint, Shading, TilingPattern,
+};
 
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
@@ -544,7 +546,12 @@ impl PageResources {
     /// Split out of [`GlyphSource::shading`] so a shading *pattern* can reuse
     /// it on the dictionary it resolved itself, rather than duplicating the
     /// nine entries a shading is made of.
-    fn read_shading(&self, dict: &Dict) -> Result<Option<Shading>, i64> {
+    ///
+    /// `reference` is what the mesh types need and the gradient types do not:
+    /// a type 4 to 7 shading is a **stream** (8.7.4.5.5), and its vertices are
+    /// the stream's bytes. A mesh written as a direct dictionary has no
+    /// vertices at all, which is reported rather than drawn as an empty area.
+    fn read_shading(&self, dict: &Dict, reference: Option<ObjRef>) -> Result<Option<Shading>, i64> {
         let kind = self
             .doc
             .resolve_key(dict, self.doc.intern(b"ShadingType"))
@@ -608,10 +615,82 @@ impl PageResources {
                 ],
                 extend,
             })),
-            // The mesh types are behind a capability (ruling 3).
-            4..=7 => Err(kind),
+            4..=7 => match self.read_mesh(dict, reference, kind, space, function) {
+                Some(mesh) => Ok(Some(Shading::Mesh(Box::new(mesh)))),
+                // Ruling 2 and ruling 10: nothing is painted and the type is
+                // named, which is the degradation this path has always had.
+                None => Err(kind),
+            },
             _ => Ok(None),
         }
+    }
+
+    /// A mesh shading's vertex stream and the six keys that say how it is
+    /// packed (8.7.4.5.5 to 8.7.4.5.8, Tables 79 to 82).
+    fn read_mesh(
+        &self,
+        dict: &Dict,
+        reference: Option<ObjRef>,
+        kind: i64,
+        space: ColorSpace,
+        function: Function,
+    ) -> Option<Mesh> {
+        let data = self.doc.stream_decoded(reference?).ok()?;
+
+        let integer = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_int()
+                .unwrap_or(0)
+        };
+        let width = |key: &[u8]| u32::try_from(integer(key)).unwrap_or(0);
+
+        // 8.7.4.5.5: with a `/Function` each vertex carries one parametric
+        // value and the function turns it into a colour, so the component
+        // count is 1 rather than the space's. Reading the space's count
+        // instead cuts the stream up wrongly from the first vertex on.
+        let has_function = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Function"))
+            .as_dict()
+            .is_some()
+            || self
+                .doc
+                .resolve_key(dict, self.doc.intern(b"Function"))
+                .as_array()
+                .is_some();
+        let components = if has_function { 1 } else { space.components() };
+
+        let decode = self.doc.resolve_key(dict, self.doc.intern(b"Decode"));
+        let decode: Vec<(f64, f64)> = decode
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .filter(|v| v.is_finite())
+                    .collect::<Vec<f64>>()
+            })
+            .unwrap_or_default()
+            .chunks_exact(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+
+        let params = MeshParams {
+            kind,
+            bits_per_coordinate: width(b"BitsPerCoordinate"),
+            bits_per_component: width(b"BitsPerComponent"),
+            bits_per_flag: width(b"BitsPerFlag"),
+            decode,
+            vertices_per_row: width(b"VerticesPerRow"),
+            components,
+        };
+        let mesh = tinker_pdf_render::mesh::read_mesh(
+            &params,
+            &data,
+            space,
+            has_function.then_some(function),
+        )?;
+        (!mesh.is_empty()).then_some(mesh)
     }
 }
 
@@ -984,12 +1063,14 @@ impl GlyphSource for PageResources {
         let Some(table) = table.as_dict() else {
             return Ok(None);
         };
-        let entry = self.doc.resolve_key(table, self.doc.intern(name));
+        let key = self.doc.intern(name);
+        let reference = table.get_ref(key);
+        let entry = self.doc.resolve_key(table, key);
         let Some(dict) = entry.as_dict() else {
             return Ok(None);
         };
 
-        self.read_shading(dict)
+        self.read_shading(dict, reference)
     }
 
     fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
@@ -1011,12 +1092,14 @@ impl GlyphSource for PageResources {
         match kind {
             1 => Some(self.tiling_pattern(&dict, matrix)),
             2 => {
-                let shading = self.doc.resolve_key(&dict, self.doc.intern(b"Shading"));
+                let key = self.doc.intern(b"Shading");
+                let reference = dict.get_ref(key);
+                let shading = self.doc.resolve_key(&dict, key);
                 let shading = shading.as_dict()?;
-                // A mesh inside a pattern is as unpaintable as a mesh anywhere
-                // else, and reports as an unpainted pattern rather than as a
-                // missing one.
-                let Ok(Some(shading)) = self.read_shading(shading) else {
+                // A mesh that cannot be read at all is as unpaintable inside a
+                // pattern as anywhere else, and reports as an unpainted
+                // pattern rather than as a missing one.
+                let Ok(Some(shading)) = self.read_shading(shading, reference) else {
                     return Some(PatternPaint::Unsupported);
                 };
                 Some(PatternPaint::Shading(Box::new(shading), matrix))
