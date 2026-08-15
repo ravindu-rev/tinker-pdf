@@ -12,11 +12,13 @@
 
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
+pub mod mesh;
 pub mod shading;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub use mesh::{Mesh, MeshParams};
 pub use shading::Shading;
 use tinker_pdf_content::{
     Device, Glyph, GraphicsState, ImageRef, LineCap as ContentCap, LineJoin as ContentJoin, Matrix,
