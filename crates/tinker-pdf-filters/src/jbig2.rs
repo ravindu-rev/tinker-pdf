@@ -44,6 +44,7 @@
 //! already uses. A region declaring 2^32 pixels is refused rather than
 //! attempted (ruling 1).
 
+use crate::mq::{MqContexts, MqDecoder};
 use crate::{Capability, FilterError, Warning};
 
 /// Segment types (T.88 7.3, Table 34) this decoder distinguishes by name.
@@ -141,6 +142,18 @@ impl<'a> Reader<'a> {
     fn skip(&mut self, n: usize) -> Option<()> {
         self.at = self.at.checked_add(n).filter(|a| *a <= self.data.len())?;
         Some(())
+    }
+
+    /// A signed byte. The AT pixel coordinates of 7.4.6.2 are the only place
+    /// this codec has one, and they are routinely negative.
+    fn i8(&mut self) -> Option<i8> {
+        self.u8().map(|b| b as i8)
+    }
+
+    /// Everything from the cursor on: a region segment's coded data, which
+    /// runs to the end of the segment rather than carrying its own length.
+    fn rest(&self) -> &'a [u8] {
+        self.data.get(self.at..).unwrap_or(&[])
     }
 
     /// The next `n` bytes, or everything left when the segment claims more
@@ -277,8 +290,7 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
 fn understood(kind: u8) -> bool {
     matches!(
         kind,
-        kind::INTERMEDIATE_GENERIC_REGION
-            | kind::IMMEDIATE_GENERIC_REGION
+        kind::IMMEDIATE_GENERIC_REGION
             | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
             | kind::PAGE_INFORMATION
             | kind::END_OF_PAGE
@@ -296,10 +308,18 @@ fn understood(kind: u8) -> bool {
 /// optional unless a necessity bit says otherwise); a text region is a
 /// picture that will be missing from the page. Only the second kind is worth
 /// a warning naming a lineage.
+///
+/// An **intermediate** generic region (type 36) is here rather than in
+/// [`understood`] even though its bits decode perfectly well. 7.4.6.1 says an
+/// intermediate result goes to an auxiliary buffer for a later segment to
+/// refer to, and the only thing that refers to one is a refinement region,
+/// which this build refuses. Compositing it onto the page would draw a
+/// working buffer as if it were finished content.
 fn carries_content(kind: u8) -> bool {
     matches!(
         kind,
-        kind::SYMBOL_DICTIONARY
+        kind::INTERMEDIATE_GENERIC_REGION
+            | kind::SYMBOL_DICTIONARY
             | kind::INTERMEDIATE_TEXT_REGION
             | kind::IMMEDIATE_TEXT_REGION
             | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
@@ -333,6 +353,352 @@ fn packed_size(width: u32, height: u32, ceiling: usize) -> Option<usize> {
     (bytes <= ceiling).then_some(bytes)
 }
 
+/// A bilevel bitmap: packed one bit per pixel, most significant bit first,
+/// **1 = black** (T.88 6.2.2).
+///
+/// The page is one of these and every region decodes into another, which is
+/// what makes 6.2.2's composition a single operation rather than a special
+/// case per caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Bitmap {
+    bits: Vec<u8>,
+    width: u32,
+    height: u32,
+    stride: usize,
+}
+
+impl Bitmap {
+    /// An all-white bitmap, or `None` if it would exceed `ceiling` — the
+    /// checked multiply of [`packed_size`], before any allocation.
+    fn new(width: u32, height: u32, ceiling: usize) -> Option<Bitmap> {
+        let bytes = packed_size(width, height, ceiling)?;
+        Some(Bitmap {
+            bits: vec![0u8; bytes],
+            width,
+            height,
+            stride: (width as usize).div_ceil(8),
+        })
+    }
+
+    /// The pixel at `(x, y)`, or 0 outside.
+    ///
+    /// 6.2.5.2: a template reaches above the first row and to either side of
+    /// every row, and every pixel it reaches outside the region is 0. That
+    /// rule is why this takes signed coordinates and answers rather than
+    /// refusing — the out-of-range case is the *common* one on row zero, not
+    /// an error.
+    fn get(&self, x: i32, y: i32) -> u32 {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return 0;
+        }
+        let at = (y as usize) * self.stride + (x as usize >> 3);
+        let byte = self.bits.get(at).copied().unwrap_or(0);
+        u32::from((byte >> (7 - (x as usize & 7))) & 1)
+    }
+
+    fn set(&mut self, x: u32, y: u32, value: u32) {
+        let at = (y as usize) * self.stride + (x as usize >> 3);
+        let mask = 0x80u8 >> (x as usize & 7);
+        if let Some(byte) = self.bits.get_mut(at) {
+            if value & 1 != 0 {
+                *byte |= mask;
+            } else {
+                *byte &= !mask;
+            }
+        }
+    }
+
+    /// Copies row `from` over row `to`. TPGDON's whole purpose (6.2.5.7).
+    fn copy_row(&mut self, from: u32, to: u32) {
+        let (Some(f), Some(t)) = (
+            (from as usize).checked_mul(self.stride),
+            (to as usize).checked_mul(self.stride),
+        ) else {
+            return;
+        };
+        if f + self.stride <= self.bits.len() && t + self.stride <= self.bits.len() {
+            self.bits.copy_within(f..f + self.stride, t);
+        }
+    }
+
+    /// Composites `source` at `(x, y)` under one of 7.4.1.5's external
+    /// combination operators, clipped to this bitmap.
+    ///
+    /// A region whose placement puts it partly off the page is not an error —
+    /// a striped page composites regions that overhang by design — so the
+    /// clip is silent.
+    fn composite(&mut self, source: &Bitmap, x: u32, y: u32, op: u8) {
+        for sy in 0..source.height {
+            let Some(dy) = y.checked_add(sy) else { return };
+            if dy >= self.height {
+                return;
+            }
+            for sx in 0..source.width {
+                let Some(dx) = x.checked_add(sx) else { break };
+                if dx >= self.width {
+                    break;
+                }
+                let s = source.get(sx as i32, sy as i32);
+                let d = self.get(dx as i32, dy as i32);
+                let value = match op {
+                    1 => s & d,
+                    2 => s ^ d,
+                    3 => !(s ^ d),
+                    4 => s,
+                    // 0 is OR, and so is anything 7.4.1.5 leaves undefined:
+                    // a region drawn with an operator nobody defined should
+                    // still appear rather than erase what is under it.
+                    _ => s | d,
+                };
+                self.set(dx, dy, value);
+            }
+        }
+    }
+}
+
+/// A region segment information field (T.88 7.4.1): seventeen bytes that
+/// every region segment, of every kind, opens with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RegionInfo {
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    /// 7.4.1.5, the low three bits of the flags: OR, AND, XOR, XNOR, REPLACE.
+    op: u8,
+}
+
+impl RegionInfo {
+    fn read(reader: &mut Reader<'_>) -> Option<RegionInfo> {
+        Some(RegionInfo {
+            width: reader.u32()?,
+            height: reader.u32()?,
+            x: reader.u32()?,
+            y: reader.u32()?,
+            op: reader.u8()? & 0x07,
+        })
+    }
+}
+
+/// The nominal AT pixel positions of T.88 6.2.5.3, per template.
+///
+/// A file that uses these still writes them into the segment, so this is not
+/// a default the wire format leans on — it is the answer to "what did the
+/// figure in the standard show", and having it here is what lets a test say
+/// that a custom AT pixel actually changed something.
+const NOMINAL_AT: [[(i8, i8); 4]; 4] = [
+    [(3, -1), (-3, -1), (2, -2), (-2, -2)],
+    [(3, -1), (0, 0), (0, 0), (0, 0)],
+    [(2, -1), (0, 0), (0, 0), (0, 0)],
+    [(2, -1), (0, 0), (0, 0), (0, 0)],
+];
+
+/// How many bits of context a template forms, which is how many adaptive
+/// states the region needs (T.88 6.2.5.7, Figures 8 to 11).
+const fn template_bits(template: u8) -> usize {
+    match template {
+        0 => 16,
+        1 => 13,
+        _ => 10,
+    }
+}
+
+/// T.88 6.2.5.7's pseudo-context for the typical-prediction decision.
+///
+/// These are **fixed by the standard**, not chosen: the SLTP bit shares the
+/// context array with real neighbourhoods, so an encoder and a decoder have
+/// to agree on which slot it uses.
+///
+/// Getting one wrong is quieter than it sounds, and the quiet is the danger.
+/// A wrong slot that no neighbourhood in a particular picture happens to
+/// reach behaves identically to the right one — every context starts in the
+/// same state, so an unused slot is an unused slot. Changing template 0's to
+/// `0x9B24` decodes Annex H.1 perfectly. It only breaks on a file whose
+/// pixels reach the aliased neighbourhood, which is why the value is asserted
+/// against the standard directly rather than inferred from a picture.
+const fn tpgdon_context(template: u8) -> usize {
+    match template {
+        0 => 0x9B25,
+        1 => 0x0795,
+        2 => 0x00E5,
+        _ => 0x0195,
+    }
+}
+
+/// The context value for the pixel at `(x, y)` (T.88 6.2.5.7, Figures 8-11).
+///
+/// **Transcribed from the figures, bit by bit.** The templates are pictures
+/// in the standard and the numbering is the reading order of those pictures,
+/// so there is nothing to derive: the current row's nearest neighbour is bit
+/// 0 and the count runs leftwards, then outwards through the rows above, with
+/// each AT pixel in the slot its nominal position would have occupied.
+///
+/// Every template is written out rather than folded into a loop. A loop over
+/// a table of offsets would be shorter and would make the four layouts look
+/// interchangeable, which is exactly the thing that is not true about them.
+fn context(bitmap: &Bitmap, template: u8, at: &[(i8, i8); 4], x: i32, y: i32) -> usize {
+    let p = |dx: i32, dy: i32| bitmap.get(x + dx, y + dy);
+    let a = |i: usize| bitmap.get(x + i32::from(at[i].0), y + i32::from(at[i].1));
+    let value = match template {
+        0 => {
+            (a(3) << 15)
+                | (p(-1, -2) << 14)
+                | (p(0, -2) << 13)
+                | (p(1, -2) << 12)
+                | (a(2) << 11)
+                | (a(1) << 10)
+                | (p(-2, -1) << 9)
+                | (p(-1, -1) << 8)
+                | (p(0, -1) << 7)
+                | (p(1, -1) << 6)
+                | (p(2, -1) << 5)
+                | (a(0) << 4)
+                | (p(-4, 0) << 3)
+                | (p(-3, 0) << 2)
+                | (p(-2, 0) << 1)
+                | p(-1, 0)
+        }
+        1 => {
+            (p(-1, -2) << 12)
+                | (p(0, -2) << 11)
+                | (p(1, -2) << 10)
+                | (p(2, -2) << 9)
+                | (p(-2, -1) << 8)
+                | (p(-1, -1) << 7)
+                | (p(0, -1) << 6)
+                | (p(1, -1) << 5)
+                | (p(2, -1) << 4)
+                | (a(0) << 3)
+                | (p(-3, 0) << 2)
+                | (p(-2, 0) << 1)
+                | p(-1, 0)
+        }
+        2 => {
+            (p(-1, -2) << 9)
+                | (p(0, -2) << 8)
+                | (p(1, -2) << 7)
+                | (p(-2, -1) << 6)
+                | (p(-1, -1) << 5)
+                | (p(0, -1) << 4)
+                | (p(1, -1) << 3)
+                | (a(0) << 2)
+                | (p(-2, 0) << 1)
+                | p(-1, 0)
+        }
+        // Template 3 is the only one that reads a single row above (Figure
+        // 11), which is what makes it the cheap template for a striped page.
+        _ => {
+            (p(-3, -1) << 9)
+                | (p(-2, -1) << 8)
+                | (p(-1, -1) << 7)
+                | (p(0, -1) << 6)
+                | (p(1, -1) << 5)
+                | (a(0) << 4)
+                | (p(-4, 0) << 3)
+                | (p(-3, 0) << 2)
+                | (p(-2, 0) << 1)
+                | p(-1, 0)
+        }
+    };
+    value as usize
+}
+
+/// Decodes a generic region's pixels with the MQ coder (T.88 6.2.5.7).
+///
+/// The decision order is the standard's: every pixel of every row in raster
+/// order, each against the context its already-decoded neighbours form. The
+/// coder never runs out — past the end of the data it reads `0xFF`, which
+/// E.3.4 treats as a marker — so a truncated region fills with whatever the
+/// terminated coder yields rather than stopping short of its own height.
+fn decode_arithmetic(
+    data: &[u8],
+    template: u8,
+    tpgdon: bool,
+    at: &[(i8, i8); 4],
+    into: &mut Bitmap,
+) {
+    let mut coder = MqDecoder::new(data);
+    let mut contexts = MqContexts::new(1 << template_bits(template));
+    let mut ltp = 0u8;
+
+    for y in 0..into.height {
+        if tpgdon {
+            // 6.2.5.7: one decision per row against a context the standard
+            // fixes, toggling "this row is the same as the last one".
+            ltp ^= coder.decode_at(&mut contexts, tpgdon_context(template));
+            if ltp == 1 {
+                if y > 0 {
+                    into.copy_row(y - 1, y);
+                }
+                continue;
+            }
+        }
+        for x in 0..into.width {
+            let cx = context(into, template, at, x as i32, y as i32);
+            let pixel = coder.decode_at(&mut contexts, cx);
+            into.set(x, y, u32::from(pixel));
+        }
+    }
+}
+
+/// One generic region segment (T.88 7.4.6), decoded onto its own bitmap.
+///
+/// `None` means nothing was drawn and the caller must not count a region —
+/// which is the whole refusal contract, so it is a return value rather than a
+/// flag somebody could forget to read.
+fn generic_region(
+    segment: &Segment<'_>,
+    ceiling: usize,
+    warnings: &mut Vec<Warning>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut reader = Reader::new(segment.data);
+    let Some(info) = RegionInfo::read(&mut reader) else {
+        note(warnings, Warning::TruncatedInput);
+        return None;
+    };
+    // 7.4.6.2. Bit 0 selects MMR, bits 1-2 the template, bit 3 TPGDON.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Warning::TruncatedInput);
+        return None;
+    };
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let tpgdon = flags & 0x08 != 0;
+
+    // 7.4.6.3: the AT pixels are in the segment whenever it is not MMR —
+    // four pairs for template 0, one for the others. Reading the wrong number
+    // of them puts the coded data at the wrong offset, so a file with custom
+    // AT pixels would decode as noise rather than as a slightly wrong
+    // picture.
+    let mut at = NOMINAL_AT[template as usize];
+    if !mmr {
+        let pairs = if template == 0 { 4 } else { 1 };
+        for slot in at.iter_mut().take(pairs) {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Warning::TruncatedInput);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+
+    if mmr {
+        // MMR generic regions arrive in the next milestone. Refusing here
+        // rather than compositing an undecoded bitmap is deliberate: a blank
+        // region counted as a region would turn the refusal into a blank page
+        // reported as success.
+        note(warnings, Warning::Jbig2SegmentSkipped);
+        return None;
+    }
+
+    let Some(mut bitmap) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Warning::Jbig2RegionTooLarge);
+        return None;
+    };
+    decode_arithmetic(reader.rest(), template, tpgdon, &at, &mut bitmap);
+    Some((info, bitmap))
+}
+
 /// Decodes an embedded JBIG2 stream into packed one-bit-per-pixel rows.
 ///
 /// Rows are `params.width.div_ceil(8)` bytes each, most significant bit
@@ -356,14 +722,12 @@ pub fn decode(
     max_output: usize,
     warnings: &mut Vec<Warning>,
 ) -> Result<Vec<u8>, FilterError> {
-    let Some(size) = packed_size(params.width, params.height, max_output) else {
+    let Some(bitmap) = Bitmap::new(params.width, params.height, max_output) else {
         note(warnings, Warning::Jbig2RegionTooLarge);
         return Err(FilterError::Unsupported(Capability::Jbig2));
     };
     let mut page = Page {
-        bits: vec![0u8; size],
-        width: params.width,
-        height: params.height,
+        bitmap,
         number: None,
         regions: 0,
     };
@@ -383,8 +747,12 @@ pub fn decode(
         if !page.owns(segment) {
             continue;
         }
-        if segment.kind == kind::PAGE_INFORMATION {
-            page.begin(segment, warnings);
+        match segment.kind {
+            kind::PAGE_INFORMATION => page.begin(segment, warnings),
+            kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION => {
+                page.draw_generic(segment, max_output, warnings);
+            }
+            _ => {}
         }
     }
 
@@ -393,16 +761,14 @@ pub fn decode(
         note(warnings, Warning::Jbig2SegmentSkipped);
         return Err(FilterError::Unsupported(Capability::Jbig2));
     }
-    Ok(page.bits)
+    Ok(page.bitmap.bits)
 }
 
 /// The page bitmap regions are composited onto, and what the page
 /// information segment said about it.
 struct Page {
     /// Packed 1-bpp rows, most significant bit first, 1 = black.
-    bits: Vec<u8>,
-    width: u32,
-    height: u32,
+    bitmap: Bitmap,
     /// The page association of the page information segment, once one has
     /// been seen. A multi-page JBIG2 file pasted into a PDF stream carries
     /// segments for pages this image is not, and compositing those would
@@ -433,7 +799,7 @@ impl Page {
             return;
         };
         self.number = Some(segment.page);
-        if width != self.width || (height != u32::MAX && height != self.height) {
+        if width != self.bitmap.width || (height != u32::MAX && height != self.bitmap.height) {
             // Not fatal and not repaired: the region segments carry their own
             // placement, so a page that disagrees with the dictionary still
             // composites at the coordinates it names. Worth recording,
@@ -445,8 +811,23 @@ impl Page {
         // black page is coded as black-by-default with white regions on it,
         // and ignoring this bit renders it as its own negative.
         if flags & 0x04 != 0 {
-            self.bits.fill(0xFF);
+            self.bitmap.bits.fill(0xFF);
         }
+    }
+
+    /// Decodes a generic region segment and composites it (T.88 7.4.6).
+    ///
+    /// `regions` only moves when a bitmap actually arrived. A region that was
+    /// refused — too large, truncated, or coded a way this build does not
+    /// decode — leaves the count alone, so a file whose only region could not
+    /// be decoded still reaches the refusal instead of returning the blank
+    /// page it was composited onto.
+    fn draw_generic(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+        let Some((info, region)) = generic_region(segment, ceiling, warnings) else {
+            return;
+        };
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
     }
 
     /// Whether a segment's page association names this page.
@@ -463,6 +844,200 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **ITU-T T.88 Annex H.1, "Datastream example" — the whole file, byte
+    /// for byte.** Three pages, twenty-one segments, and the only JBIG2 in
+    /// this repository that somebody else wrote.
+    ///
+    /// This is the artefact the plan's risk table calls the highest-value
+    /// single thing in the effort, and it is worth saying what it buys.
+    /// Pages 1 and 2 are **the same picture coded two different ways** — page
+    /// 1's generic region is MMR (segment 4), page 2's is arithmetic with
+    /// template 0 and TPGDON (segment 11) — so the two decoders in this file
+    /// share no code at all and must still agree pixel for pixel. A
+    /// round-trip against an encoder written here could not say that; nor
+    /// could it say that the context numbering matches the numbering the rest
+    /// of the world encodes against.
+    ///
+    /// Transcribed from the copy in SerenityOS's test corpus, which is
+    /// published under BSD-2-Clause and states that it reproduces the annex's
+    /// bitstream exactly; the bytes themselves are the standard's. Every
+    /// field was re-derived from clause 7.2 before it was trusted, which is
+    /// where the segment offsets below come from.
+    #[rustfmt::skip]
+    const ANNEX_H: [u8; 860] = [
+        0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x00, 0x00, 0x00,
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x18,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0xE9, 0xCB,
+        0xF4, 0x00, 0x26, 0xAF, 0x04, 0xBF, 0xF0, 0x78, 0x2F, 0xE0, 0x00, 0x40,
+        0x00, 0x00, 0x00, 0x01, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x13, 0x00,
+        0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x00, 0x1C, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00,
+        0x00, 0x00, 0x02, 0xE5, 0xCD, 0xF8, 0x00, 0x79, 0xE0, 0x84, 0x10, 0x81,
+        0xF0, 0x82, 0x10, 0x86, 0x10, 0x79, 0xF0, 0x00, 0x80, 0x00, 0x00, 0x00,
+        0x03, 0x07, 0x42, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00,
+        0x00, 0x25, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x0C, 0x09, 0x00, 0x10, 0x00, 0x00, 0x00, 0x05, 0x01,
+        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0C, 0x40, 0x07, 0x08, 0x70, 0x41, 0xD0, 0x00,
+        0x00, 0x00, 0x04, 0x27, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
+        0x00, 0x36, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+        0x00, 0x0B, 0x00, 0x01, 0x26, 0xA0, 0x71, 0xCE, 0xA7, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xF8, 0xF0, 0x00, 0x00, 0x00, 0x05, 0x10, 0x01,
+        0x01, 0x00, 0x00, 0x00, 0x2D, 0x01, 0x04, 0x04, 0x00, 0x00, 0x00, 0x0F,
+        0x20, 0xD1, 0x84, 0x61, 0x18, 0x45, 0xF2, 0xF9, 0x7C, 0x8F, 0x11, 0xC3,
+        0x9E, 0x45, 0xF2, 0xF9, 0x7D, 0x42, 0x85, 0x0A, 0xAA, 0x84, 0x62, 0x2F,
+        0xEE, 0xEC, 0x44, 0x62, 0x22, 0x35, 0x2A, 0x0A, 0x83, 0xB9, 0xDC, 0xEE,
+        0x77, 0x80, 0x00, 0x00, 0x00, 0x06, 0x17, 0x20, 0x05, 0x01, 0x00, 0x00,
+        0x00, 0x57, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00,
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x01, 0x00, 0x00, 0x00, 0x08,
+        0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0x80, 0x08, 0x00, 0x80,
+        0x36, 0xD5, 0x55, 0x6B, 0x5A, 0xD4, 0x00, 0x40, 0x04, 0x2E, 0xE9, 0x52,
+        0xD2, 0xD2, 0xD2, 0x8A, 0xA5, 0x4A, 0x00, 0x20, 0x02, 0x23, 0xE0, 0x95,
+        0x24, 0xB4, 0x92, 0x8A, 0x4A, 0x92, 0x54, 0x92, 0xD2, 0x4A, 0x29, 0x2A,
+        0x49, 0x40, 0x04, 0x00, 0x40, 0x00, 0x00, 0x00, 0x07, 0x31, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x30, 0x00, 0x02, 0x00,
+        0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x38, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x09, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x1B, 0x08, 0x00, 0x02,
+        0xFF, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x4F, 0xE7, 0x8C,
+        0x20, 0x0E, 0x1D, 0xC7, 0xCF, 0x01, 0x11, 0xC4, 0xB2, 0x6F, 0xFF, 0xAC,
+        0x00, 0x00, 0x00, 0x0A, 0x07, 0x40, 0x00, 0x09, 0x02, 0x00, 0x00, 0x00,
+        0x1F, 0x00, 0x00, 0x00, 0x25, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0C, 0x08, 0x00, 0x00, 0x00, 0x05,
+        0x8D, 0x6E, 0x5A, 0x12, 0x40, 0x85, 0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0B,
+        0x27, 0x00, 0x02, 0x00, 0x00, 0x00, 0x23, 0x00, 0x00, 0x00, 0x36, 0x00,
+        0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0B, 0x00,
+        0x08, 0x03, 0xFF, 0xFD, 0xFF, 0x02, 0xFE, 0xFE, 0xFE, 0x04, 0xEE, 0xED,
+        0x87, 0xFB, 0xCB, 0x2B, 0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0C, 0x10, 0x01,
+        0x02, 0x00, 0x00, 0x00, 0x1C, 0x06, 0x04, 0x04, 0x00, 0x00, 0x00, 0x0F,
+        0x90, 0x71, 0x6B, 0x6D, 0x99, 0xA7, 0xAA, 0x49, 0x7D, 0xF2, 0xE5, 0x48,
+        0x1F, 0xDC, 0x68, 0xBC, 0x6E, 0x40, 0xBB, 0xFF, 0xAC, 0x00, 0x00, 0x00,
+        0x0D, 0x17, 0x20, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x3E, 0x00, 0x00, 0x00,
+        0x20, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+        0x0F, 0x00, 0x02, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x09, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x87,
+        0xCB, 0x82, 0x1E, 0x66, 0xA4, 0x14, 0xEB, 0x3C, 0x4A, 0x15, 0xFA, 0xCC,
+        0xD6, 0xF3, 0xB1, 0x6F, 0x4C, 0xED, 0xBF, 0xA7, 0xBF, 0xFF, 0xAC, 0x00,
+        0x00, 0x00, 0x0E, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x0F, 0x30, 0x00, 0x03, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
+        0x25, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x16, 0x08, 0x00, 0x02, 0xFF, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x01, 0x4F, 0xE7, 0x8D, 0x68, 0x1B, 0x14, 0x2F, 0x3F, 0xFF,
+        0xAC, 0x00, 0x00, 0x00, 0x11, 0x00, 0x21, 0x10, 0x03, 0x00, 0x00, 0x00,
+        0x20, 0x08, 0x02, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00,
+        0x03, 0x00, 0x00, 0x00, 0x02, 0x4F, 0xE9, 0xD7, 0xD5, 0x90, 0xC3, 0xB5,
+        0x26, 0xA7, 0xFB, 0x6D, 0x14, 0x98, 0x3F, 0xFF, 0xAC, 0x00, 0x00, 0x00,
+        0x12, 0x07, 0x20, 0x11, 0x03, 0x00, 0x00, 0x00, 0x25, 0x00, 0x00, 0x00,
+        0x25, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x8C, 0x12, 0x00, 0x00, 0x00, 0x04, 0xA9, 0x5C, 0x8B, 0xF4,
+        0xC3, 0x7D, 0x96, 0x6A, 0x28, 0xE5, 0x76, 0x8F, 0xFF, 0xAC, 0x00, 0x00,
+        0x00, 0x13, 0x31, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x14, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// Where each of Annex H.1's pages begins and ends inside [`ANNEX_H`],
+    /// derived by walking clause 7.2's headers.
+    ///
+    /// Slicing the file this way rather than transcribing three shorter
+    /// fixtures keeps one authoritative copy of the annex: a sub-stream that
+    /// disagreed with the whole would be a transcription error nothing could
+    /// catch.
+    ///
+    /// The first thirteen bytes are D.4's file header and page count, which
+    /// the embedded organisation a PDF uses (D.3) does not carry.
+    const PAGE_1: std::ops::Range<usize> = 13..400;
+    const PAGE_2: std::ops::Range<usize> = 400..682;
+
+    /// **The picture T.88 Annex H.1 publishes for its generic region.**
+    ///
+    /// Fifty-four by forty-four, a frame two pixels thick, drawn at (4, 11)
+    /// on both of the annex's first two pages. `#` is a 1, which is black
+    /// (6.2.2).
+    #[rustfmt::skip]
+    const ANNEX_H_REGION: [&str; 44] = [
+        "######################################################",
+        "######################################################",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "##..................................................##",
+        "######################################################",
+        "######################################################",
+    ];
+
+    /// Packed rows as one string per row, `#` for black.
+    ///
+    /// Every bitmap assertion in this file goes through this rather than
+    /// comparing byte vectors, because the failure of a wrong template is a
+    /// *picture* — a frame that lost its right edge, a page that went to
+    /// noise on row three — and a hex diff of 448 bytes says none of that.
+    fn picture(bits: &[u8], width: u32, height: u32) -> Vec<String> {
+        let stride = (width as usize).div_ceil(8);
+        (0..height as usize)
+            .map(|y| {
+                (0..width as usize)
+                    .map(|x| {
+                        let byte = bits.get(y * stride + (x >> 3)).copied().unwrap_or(0);
+                        if (byte >> (7 - (x & 7))) & 1 == 1 {
+                            '#'
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The 54 by 44 window Annex H.1 places its generic region in, lifted
+    /// back off the 64 by 56 page it was composited onto.
+    fn region_window(page: &[String]) -> Vec<String> {
+        page[11..55]
+            .iter()
+            .map(|row| row[4..58].to_string())
+            .collect()
+    }
 
     /// A segment header (T.88 7.2) in its short form: no referred-to
     /// segments, one-byte page association.
@@ -655,9 +1230,7 @@ mod tests {
     #[test]
     fn the_page_default_pixel_value_starts_the_page_black() {
         let mut page = Page {
-            bits: vec![0u8; 8],
-            width: 8,
-            height: 8,
+            bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
         };
@@ -669,7 +1242,7 @@ mod tests {
         };
         let mut warnings = Vec::new();
         page.begin(&segment, &mut warnings);
-        assert_eq!(page.bits, vec![0xFF; 8], "1 is black (6.2.2)");
+        assert_eq!(page.bitmap.bits, vec![0xFF; 8], "1 is black (6.2.2)");
         assert_eq!(page.number, Some(1));
         assert!(warnings.is_empty());
     }
@@ -678,9 +1251,7 @@ mod tests {
     fn a_segment_for_another_page_is_not_composited_onto_this_one() {
         let data = page_info(8, 8, 0);
         let mut page = Page {
-            bits: vec![0u8; 8],
-            width: 8,
-            height: 8,
+            bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
         };
@@ -741,6 +1312,175 @@ mod tests {
         );
         #[cfg(target_pointer_width = "32")]
         assert_eq!(packed_size(u32::MAX, u32::MAX, usize::MAX), None);
+    }
+
+    /// **The milestone.** T.88 Annex H.1's arithmetically coded generic
+    /// region — template 0, TPGDON on, the nominal AT pixels written out in
+    /// full — against the picture the annex publishes for it.
+    ///
+    /// Nine bytes of coded data for 2 376 pixels, which is what makes this
+    /// worth having: almost every row runs through 6.2.5.7's
+    /// typical-prediction path, so the picture only appears at all if the
+    /// coder, the template's pixel *set*, the AT positions, TPGDON's row copy
+    /// and the composition coordinates are all right at once.
+    ///
+    /// Measured, by injection, against what it does and does not catch:
+    /// inverting the polarity, dropping a row of the Qe table and ignoring
+    /// the TPGDON flag each fail it. Transposing two context bits and moving
+    /// the pseudo-context to `0x9B24` do not — see
+    /// [`Self::template_0_context_bits_match_the_figure`]. Knowing which is
+    /// which is the difference between a fixture and a fixture one believes.
+    #[test]
+    fn annex_h_generic_region_decodes_to_its_published_bitmap() {
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 64,
+            height: 56,
+        };
+        let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings)
+            .expect("the page carries a generic region, so it is not refused");
+
+        let page = picture(&bits, 64, 56);
+        assert_eq!(region_window(&page), ANNEX_H_REGION);
+
+        // And nothing outside the region was touched: the rest of Annex H.1's
+        // page is a text region and a halftone region, neither of which this
+        // build draws.
+        assert!(
+            page[0..11].iter().all(|row| !row.contains('#')),
+            "a region composited above the coordinates its segment named"
+        );
+        assert!(
+            page[11..55].iter().all(|row| !row[0..4].contains('#')),
+            "a region composited left of the coordinates its segment named"
+        );
+        assert!(
+            warnings.contains(&Warning::Jbig2SegmentSkipped),
+            "the symbol dictionary, text region and halftone region on this \
+             page are all missing from it, and ruling 10 wants that recorded"
+        );
+    }
+
+    /// The region lands where 7.4.1 says, not at the origin.
+    #[test]
+    fn a_region_is_composited_at_the_coordinates_its_segment_names() {
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 64,
+            height: 56,
+        };
+        let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings).expect("decodes");
+        let page = picture(&bits, 64, 56);
+        assert_eq!(
+            page[11], "....######################################################......",
+            "the frame's first row starts at x = 4 and is 54 wide"
+        );
+        assert_eq!(page[10], ".".repeat(64), "row 10 is above the region");
+        assert_eq!(page[55], ".".repeat(64), "row 55 is below it");
+    }
+
+    /// Until MMR arrives, an MMR region must refuse rather than composite the
+    /// blank bitmap it allocated.
+    ///
+    /// This is the refusal's sharpest edge: a region that *was* recognised,
+    /// *was* sized, and produced nothing is the one case where counting a
+    /// region before decoding it would hand back a plausible blank page.
+    #[test]
+    fn an_undecoded_mmr_region_does_not_count_as_a_region() {
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 64,
+            height: 56,
+        };
+        assert_eq!(
+            decode(&ANNEX_H[PAGE_1], &params, 1 << 20, &mut warnings),
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            "Annex H.1's first page codes its region with MMR"
+        );
+        assert!(warnings.contains(&Warning::Jbig2SegmentSkipped));
+    }
+
+    /// 6.2.5.3's nominal AT positions, which Annex H.1 writes out explicitly
+    /// and every other test here relies on.
+    #[test]
+    fn nominal_at_pixels_are_the_ones_the_standard_draws() {
+        assert_eq!(NOMINAL_AT[0], [(3, -1), (-3, -1), (2, -2), (-2, -2)]);
+        assert_eq!(NOMINAL_AT[1][0], (3, -1));
+        assert_eq!(NOMINAL_AT[2][0], (2, -1));
+        assert_eq!(NOMINAL_AT[3][0], (2, -1));
+    }
+
+    /// 6.2.5.7's pseudo-contexts, and that each fits the template it belongs
+    /// to.
+    ///
+    /// The second half is what makes this more than a transcription check: a
+    /// pseudo-context outside its own template's context array would index
+    /// past the end, and [`MqDecoder::decode_at`] answers 0 there rather than
+    /// panicking — so the failure would be a decoder that quietly never sees
+    /// a typical row.
+    #[test]
+    fn tpgdon_pseudo_contexts_are_the_values_the_standard_fixes() {
+        assert_eq!(tpgdon_context(0), 0x9B25);
+        assert_eq!(tpgdon_context(1), 0x0795);
+        assert_eq!(tpgdon_context(2), 0x00E5);
+        assert_eq!(tpgdon_context(3), 0x0195);
+        for template in 0..4u8 {
+            assert!(
+                tpgdon_context(template) < (1 << template_bits(template)),
+                "template {template}'s pseudo-context is outside its own array"
+            );
+        }
+    }
+
+    /// T.88 Figure 8's numbering, transcribed pixel by pixel.
+    ///
+    /// **No datastream can replace this test, and finding that out is the
+    /// reason it is written this way.** Relabelling the context bits is a
+    /// bijection on the context array; every state starts identical, so an
+    /// encoder's slot histories and a decoder's stay in step under any
+    /// permutation. Transposing bits 0 and 1 was injected here and Annex H.1
+    /// still decoded to its published picture, byte for byte. Only this
+    /// assertion moved.
+    ///
+    /// That does not make the order cosmetic, because 6.2.5.7's
+    /// pseudo-context is a *literal* slot number. Once TPGDON is on, the SLTP
+    /// decision shares the array with whichever neighbourhood the numbering
+    /// puts at `0x9B25` — so the numbering stops being a free choice and
+    /// becomes part of what the encoder agreed to.
+    #[test]
+    fn template_0_context_bits_match_the_figure() {
+        let at = NOMINAL_AT[0];
+        // (dx, dy) of the neighbour, and the bit T.88 Figure 8 puts it in.
+        let places = [
+            ((-1, 0), 0),
+            ((-2, 0), 1),
+            ((-3, 0), 2),
+            ((-4, 0), 3),
+            ((3, -1), 4), // A1
+            ((2, -1), 5),
+            ((1, -1), 6),
+            ((0, -1), 7),
+            ((-1, -1), 8),
+            ((-2, -1), 9),
+            ((-3, -1), 10), // A2
+            ((2, -2), 11),  // A3
+            ((1, -2), 12),
+            ((0, -2), 13),
+            ((-1, -2), 14),
+            ((-2, -2), 15), // A4
+        ];
+        for ((dx, dy), bit) in places {
+            let mut bitmap = Bitmap::new(16, 16, 1 << 10).expect("small");
+            bitmap.set((8 + dx) as u32, (8 + dy) as u32, 1);
+            assert_eq!(
+                context(&bitmap, 0, &at, 8, 8),
+                1 << bit,
+                "the pixel at ({dx}, {dy}) belongs in bit {bit}"
+            );
+        }
     }
 
     #[test]
