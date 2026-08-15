@@ -13,11 +13,49 @@
     <Description>A from-scratch, pure-Rust PDF engine</Description>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/ravindu-rev/tinker-pdf</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
   <!--
-    The native library is built by cargo and dropped into runtimes/<rid>/native
-    before packing. Each RID carries its own build of tinker-pdf-ffi.
+    `tests/Smoke` is a project of its own inside this project's directory, and
+    the SDK's implicit globs do not know that: `**/*.cs` swallows its
+    `Program.cs` *and* its generated `obj/**/*.AssemblyInfo.cs`, which fails
+    the build with `CS0579: Duplicate AssemblyTitleAttribute` — a message that
+    says nothing about the cause. This is not hypothetical; it broke
+    `dotnet build bindings/dotnet/TinkerPdf.csproj`, the check ci.yml has run
+    since the binding was written, the moment the smoke project appeared.
+
+    It stays nested rather than moving out, because `bindings/<language>/tests/`
+    is where the Python and JavaScript smoke tests live and one layout is worth
+    more than one fewer line here.
+  -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+    <EmbeddedResource Remove="tests/**" />
+  </ItemGroup>
+
+  <!--
+    The native library per RID. `cargo xtask nuget-stage` puts this machine's
+    cdylib at runtimes/<rid>/native/, and the release workflow gathers one from
+    each leg of its matrix into the same layout before packing; the directory
+    is a build product and is gitignored.
+
+    `PackagePath="runtimes"` with a recursive `Include` keeps the directory
+    structure, which is the whole point: the .NET host looks up
+    runtimes/<rid>/native/ by name at run time and finds nothing if the files
+    are flattened.
+
+    This element was here before anything filled the directory, so `dotnet
+    pack` produced a valid *managed-only* package: it restores, it compiles,
+    and every P/Invoke in TinkerPdf.cs throws DllNotFoundException on the
+    consumer's machine. bindings/dotnet/tests/Smoke consumes the package rather
+    than this project for exactly that reason, and the release workflow greps
+    the .nupkg for all three RIDs.
   -->
   <ItemGroup>
     <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes" />

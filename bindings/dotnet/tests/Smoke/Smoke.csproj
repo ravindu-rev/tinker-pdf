@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A consumer of the *package*, not of the project.
+
+    It deliberately does not `ProjectReference` ../../TinkerPdf.csproj. The
+    thing under test is whether `dotnet add package TinkerPdf` gives somebody a
+    working engine, and the half that can be wrong is the part a project
+    reference skips entirely: whether the native library was packed under
+    `runtimes/<rid>/native/` and whether the .NET runtime therefore finds it.
+    A project reference resolves the managed assembly and leaves the cdylib
+    wherever cargo put it, so it passes on a package that carries no native
+    library at all.
+
+    `nuget.config` beside this file points at a local folder feed, which
+    `cargo xtask release` and the release workflow fill with `dotnet pack -o`.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Smoke</AssemblyName>
+    <RootNamespace>Smoke</RootNamespace>
+    <RestorePackagesPath>packages</RestorePackagesPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TinkerPdf" Version="0.0.1" />
+  </ItemGroup>
+
+</Project>

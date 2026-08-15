@@ -377,6 +377,94 @@ pub fn vendored_data_reaches_the_package(root: &Path) -> Result<(), Vec<String>>
     }
 }
 
+/// This machine's .NET runtime identifier, and what a cdylib is called on it.
+///
+/// A RID is how NuGet carries platform binaries: a package holds
+/// `runtimes/<rid>/native/<library>` for every platform it supports, and the
+/// .NET host picks one at run time. Nothing in cargo knows the word "RID", so
+/// the mapping lives here.
+pub fn host_rid() -> Result<(&'static str, String), String> {
+    let rid = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "win-x64",
+        ("windows", "aarch64") => "win-arm64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("macos", "x86_64") => "osx-x64",
+        ("macos", "aarch64") => "osx-arm64",
+        (os, arch) => {
+            return Err(format!(
+                "no .NET runtime identifier is mapped for {os}/{arch}; add one rather than \
+                 guessing, because a wrong RID packs a library the host will never load"
+            ))
+        }
+    };
+    let library = format!(
+        "{}tinker_pdf_ffi{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    Ok((rid, library))
+}
+
+/// Where a RID's native library belongs, relative to the repository root.
+pub fn native_path(rid: &str, library: &str) -> String {
+    format!("bindings/dotnet/runtimes/{rid}/native/{library}")
+}
+
+/// Copies this machine's freshly built cdylib into the per-RID layout.
+///
+/// The layout is the whole of what makes a NuGet package carry a native
+/// library, and until this existed `dotnet pack` produced a perfectly valid
+/// managed-only package: `TinkerPdf.dll` resolves, every `DllImport` in it
+/// names `tinker_pdf_ffi`, and the first call throws `DllNotFoundException` at
+/// run time on the consumer's machine. That is why
+/// `bindings/dotnet/tests/Smoke` consumes the *package* rather than the
+/// project — a `ProjectReference` finds the cdylib wherever cargo left it and
+/// passes on a package that has none.
+pub fn stage_native_library(root: &Path) -> Result<String, String> {
+    let (rid, library) = host_rid()?;
+    let built = root.join("target/release").join(&library);
+    if !built.is_file() {
+        return Err(format!(
+            "{} does not exist; build it with `cargo build --release -p tinker-pdf-ffi` first",
+            built.display()
+        ));
+    }
+    let destination = root.join(native_path(rid, &library));
+    let directory = destination
+        .parent()
+        .ok_or_else(|| "the native path has no directory".to_string())?;
+    std::fs::create_dir_all(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+    std::fs::copy(&built, &destination).map_err(|e| format!("{}: {e}", destination.display()))?;
+    let bytes = std::fs::metadata(&destination)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    Ok(format!(
+        "{} ({bytes} bytes) — this machine's RID only; the others come from the release \
+         workflow's matrix",
+        native_path(rid, &library)
+    ))
+}
+
+/// Every RID directory that currently holds a native library.
+pub fn staged_rids(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("bindings/dotnet/runtimes")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let native = entry.path().join("native");
+        let populated = std::fs::read_dir(&native)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if populated {
+            out.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The whole pipeline, as the list of commands it is.
 pub fn plan(root: &Path, options: &Options) -> Result<Vec<Step>, String> {
     let workspace = version::workspace_version(root)?;
@@ -538,11 +626,19 @@ pub fn plan(root: &Path, options: &Options) -> Result<Vec<Step>, String> {
         ]),
         publishes: false,
         cwd: ".".into(),
+        registry_note: None,
+    });
+    steps.push(Step {
+        stage: Stage::NuGet,
+        label: "the cdylib into bindings/dotnet/runtimes/<rid>/native/".into(),
+        live: vec!["cargo".into(), "xtask".into(), "nuget-stage".into()],
+        dry: Some(vec!["cargo".into(), "xtask".into(), "nuget-stage".into()]),
+        publishes: false,
+        cwd: ".".into(),
         registry_note: Some(
             "a real run gathers one cdylib per RID from the release workflow's matrix into \
-             bindings/dotnet/runtimes/<rid>/native/ before packing. A single machine can build \
-             only its own, so a package packed here carries one RID and is not the package \
-             that ships"
+             this layout before packing. A single machine can build only its own, so a package \
+             packed here carries one RID and is not the package that ships"
                 .into(),
         ),
     });
@@ -1033,6 +1129,41 @@ mod tests {
         assert!(
             bytes < CRATES_IO_CEILING * 4,
             "{bytes} bytes uncompressed is close enough to the ceiling to want measuring"
+        );
+    }
+
+    /// The RID is a NuGet concept and cargo has never heard of it, so the
+    /// mapping is the thing that can be wrong — and a wrong RID packs a
+    /// library the .NET host will simply never look at, which is a package
+    /// that builds, restores, and throws `DllNotFoundException` on first use.
+    #[test]
+    fn the_host_rid_names_a_library_that_could_exist() {
+        let (rid, library) = host_rid().expect("this platform is mapped");
+        assert!(
+            [
+                "win-x64",
+                "win-arm64",
+                "linux-x64",
+                "linux-arm64",
+                "osx-x64",
+                "osx-arm64"
+            ]
+            .contains(&rid),
+            "{rid}"
+        );
+        assert!(library.contains("tinker_pdf_ffi"), "{library}");
+        // The three platforms use three different shapes, and getting this
+        // from `std::env::consts` rather than from an `if cfg!` is what keeps
+        // them right.
+        match std::env::consts::OS {
+            "windows" => assert_eq!(library, "tinker_pdf_ffi.dll"),
+            "linux" => assert_eq!(library, "libtinker_pdf_ffi.so"),
+            "macos" => assert_eq!(library, "libtinker_pdf_ffi.dylib"),
+            other => panic!("unmapped OS {other}"),
+        }
+        assert_eq!(
+            native_path(rid, &library),
+            format!("bindings/dotnet/runtimes/{rid}/native/{library}")
         );
     }
 

@@ -42,3 +42,10 @@ fuzz/artifacts/
 # `cargo fuzz coverage` merges a profile here, which is a build product of
 # whichever binary and corpus it was pointed at.
 fuzz/coverage/
+
+# The .NET smoke project restores the packed TinkerPdf into its own folder so
+# the restore cannot silently succeed against a global cache entry from an
+# earlier run.
+bindings/dotnet/tests/Smoke/packages/
+bindings/dotnet/tests/Smoke/bin/
+bindings/dotnet/tests/Smoke/obj/

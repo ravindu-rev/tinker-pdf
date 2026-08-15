@@ -196,3 +196,102 @@ jobs:
           name: npm-package
           path: bindings/js/pkg/
           if-no-files-found: error
+
+  # Plan 26 milestone 5, first half: one cdylib per RID. A NuGet package
+  # carries platform binaries as `runtimes/<rid>/native/`, and no single
+  # machine can build more than its own — so the libraries are built on the
+  # matrix and gathered by the job below.
+  natives:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-14
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p tinker-pdf-ffi
+      # `cargo xtask nuget-stage` reads this machine's OS and architecture and
+      # puts the library where NuGet expects it. Doing it in xtask rather than
+      # in three `cp` lines here is what makes the RID mapping testable, and
+      # the mapping is the part that can be wrong: a package built with the
+      # wrong RID restores perfectly and throws DllNotFoundException on first
+      # use.
+      - run: cargo run -p xtask -- nuget-stage
+      - name: The library is where the RID says
+        shell: bash
+        run: |
+          test -n "$(ls bindings/dotnet/runtimes/${{ matrix.rid }}/native/)" \
+            || { echo "::error::nothing under runtimes/${{ matrix.rid }}/native/"; exit 1; }
+          ls -l bindings/dotnet/runtimes/${{ matrix.rid }}/native/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: bindings/dotnet/runtimes/${{ matrix.rid }}/native/*
+          if-no-files-found: error
+
+  # Plan 26 milestone 5, second half: one package carrying all three.
+  nuget:
+    needs: natives
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: natives
+      - name: Gather every RID into the layout
+        shell: bash
+        run: |
+          set -o pipefail
+          for dir in natives/native-*; do
+            rid="${dir#natives/native-}"
+            mkdir -p "bindings/dotnet/runtimes/$rid/native"
+            cp "$dir"/* "bindings/dotnet/runtimes/$rid/native/"
+          done
+          find bindings/dotnet/runtimes -type f | sort
+          count=$(find bindings/dotnet/runtimes -type f | wc -l)
+          if [ "$count" -ne 3 ]; then
+            echo "::error::$count native libraries, expected 3 (linux-x64, win-x64, osx-arm64)"
+            exit 1
+          fi
+      - run: dotnet pack bindings/dotnet/TinkerPdf.csproj -c Release -o target/nuget
+      # Without this the job passes on a managed-only package, which is exactly
+      # what `dotnet pack` produced before `runtimes/` existed: it restores, it
+      # compiles, and every call throws at run time on the consumer's machine.
+      - name: The package carries all three natives
+        shell: bash
+        run: |
+          set -o pipefail
+          unzip -l target/nuget/TinkerPdf.*.nupkg | tee nupkg.log
+          for rid in linux-x64 win-x64 osx-arm64; do
+            grep -q "runtimes/$rid/native/" nupkg.log \
+              || { echo "::error::no native library for $rid in the package"; exit 1; }
+          done
+      # `dotnet add package` from a folder feed, then a render. The smoke
+      # project consumes the package rather than the project on purpose: a
+      # ProjectReference finds the cdylib wherever cargo left it and would
+      # pass on a package that carries none.
+      - name: Install the package and render
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet run --project bindings/dotnet/tests/Smoke -c Release -- \
+            testdata/simple-text.pdf C:/Windows/Fonts/arial.ttf 2>&1 | tee dotnet-smoke.log
+          grep -q 'DOTNET-SMOKE: RAN' dotnet-smoke.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: target/nuget/*.nupkg
+          if-no-files-found: error

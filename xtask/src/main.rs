@@ -32,6 +32,9 @@ release options:
   --only STAGE    preflight | crates | wheel | npm | nuget; repeatable
   --tag vX.Y.Z    fail unless the tag matches the workspace version
 
+  cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
+                                 bindings/dotnet/runtimes/<rid>/native/
+
   cargo xtask corpus-fetch [--record] [--force] [--corpus NAME]
                                          fetch and verify the pinned corpora
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
@@ -82,6 +85,16 @@ fn main() -> ExitCode {
             )
         }
         "release" => one("release", release::run(&repo_root(), rest)),
+        "nuget-stage" => one(
+            "nuget-stage",
+            release::stage_native_library(&repo_root()).map(|what| {
+                println!("nuget-stage: {what}");
+                println!(
+                    "nuget-stage: RIDs now staged: {}",
+                    release::staged_rids(&repo_root()).join(", ")
+                );
+            }),
+        ),
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
