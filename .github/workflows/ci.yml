@@ -198,6 +198,42 @@ jobs:
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
 
+  qpdf-linearization:
+    # The external arbiter plan 09 names for Annex F. `tests/linearized.rs`
+    # checks everything the engine can check about its own output; it cannot
+    # check whether the format was understood, and the hint tables are exactly
+    # where that mattered — bit-packed structures this repository wrote and
+    # nothing here read, wrong in five ways with every test green.
+    #
+    # Ruling 9: qpdf is invoked, never linked and never vendored, and its
+    # output is a transient comparison reference.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y qpdf
+      - run: qpdf --version
+      # The same shape as `wasm-determinism` above, for the same reason. These
+      # tests skip when qpdf is absent, and a skip exits 0 and looks exactly
+      # like a pass — so the job reads its own output and fails unless it can
+      # see that the oracle ran. `pipefail` because the pipe would otherwise
+      # return `tee`'s status and hide a real failure; `--nocapture` because a
+      # passing test's stdout is swallowed otherwise and there would be
+      # nothing to read.
+      - name: Validate linearized output against qpdf
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-cos --test qpdf_oracle -- --nocapture \
+            2>&1 | tee qpdf-oracle.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' qpdf-oracle.log
+          grep -q 'qpdf-oracle: RAN' qpdf-oracle.log
+          if grep -q 'qpdf-oracle: SKIPPED' qpdf-oracle.log; then
+            echo "::error::qpdf was not found, so the linearization oracle" \
+                 "SKIPPED rather than passed"
+            exit 1
+          fi
+
   licenses:
     runs-on: ubuntu-latest
     steps:
