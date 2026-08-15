@@ -344,6 +344,67 @@ pub fn is_publish_false(manifest: &str) -> bool {
     false
 }
 
+/// The `name = "..."` of the `[package]` table.
+///
+/// Hand-rolled rather than parsed with a TOML crate: this reads two shapes of
+/// line out of manifests this repository writes, and adding a dependency to
+/// check the dependency rules would be its own kind of funny.
+pub fn package_name(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(value) = line.strip_prefix("name") {
+                let value = value.trim_start().strip_prefix('=')?.trim();
+                return Some(value.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Every `tinker-pdf*` dependency named in any dependency table.
+///
+/// Lives here rather than beside the graph check because two things read it
+/// and they must not disagree: `cargo xtask dag` enforces which edges may
+/// exist, and `release::publish_order` decides what that means for the order
+/// crates reach crates.io in. Two parsers would let the declared graph and the
+/// published order describe different repositories.
+pub fn internal_dependencies(manifest: &str) -> Vec<String> {
+    let mut in_deps = false;
+    let mut out = Vec::new();
+
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`
+            // and their target-specific forms all count: a dev-dependency edge
+            // is still an edge for the purpose of "who knows about whom", and
+            // for publishing it is a hard one — `cargo publish` builds the
+            // tests, so a dev-dependency must be on the registry too.
+            in_deps = line.contains("dependencies]");
+            continue;
+        }
+        if !in_deps || line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let Some(name) = line.split('=').next().map(str::trim) else {
+            continue;
+        };
+        if name.starts_with("tinker-pdf") {
+            out.push(name.to_string());
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// `[workspace.dependencies]`'s `tinker-pdf*` entries and the version each
 /// names, if any.
 pub fn internal_dependency_versions(manifest: &str) -> Vec<(String, Option<String>)> {

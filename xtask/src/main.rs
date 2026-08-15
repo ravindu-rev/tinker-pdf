@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use xtask::{corpus, fetch, repo_root, version};
+use xtask::version::{internal_dependencies, package_name};
+use xtask::{corpus, fetch, release, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -19,6 +20,17 @@ usage:
   cargo xtask versions  check every manifest against the workspace version, and
                         `publish = false` where publishing would be wrong
   cargo xtask check     all four of the above
+
+  cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
+
+release options:
+  (none)          a DRY RUN. Every step is reported in dependency order and
+                  the tools are invoked in whatever harmless form each has
+  --dry-run       the same thing, said out loud
+  --execute       actually publish. This cannot be undone on crates.io
+  --plan          print the steps and run nothing at all
+  --only STAGE    preflight | crates | wheel | npm | nuget; repeatable
+  --tag vX.Y.Z    fail unless the tag matches the workspace version
 
   cargo xtask corpus-fetch [--record] [--force] [--corpus NAME]
                                          fetch and verify the pinned corpora
@@ -69,6 +81,7 @@ fn main() -> ExitCode {
                 },
             )
         }
+        "release" => one("release", release::run(&repo_root(), rest)),
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
@@ -582,91 +595,9 @@ fn check_dag() -> Result<(), Vec<String>> {
     }
 }
 
-/// The `name = "..."` of the `[package]` table.
-///
-/// Hand-rolled rather than parsed with a TOML crate: this reads two shapes of
-/// line out of manifests this repository writes, and adding a dependency to
-/// check the dependency rules would be its own kind of funny.
-fn package_name(manifest: &str) -> Option<String> {
-    let mut in_package = false;
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_package = line == "[package]";
-            continue;
-        }
-        if in_package {
-            if let Some(value) = line.strip_prefix("name") {
-                let value = value.trim_start().strip_prefix('=')?.trim();
-                return Some(value.trim_matches('"').to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Every `tinker-pdf*` dependency named in any dependency table.
-fn internal_dependencies(manifest: &str) -> Vec<String> {
-    let mut in_deps = false;
-    let mut out = Vec::new();
-
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            // `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`
-            // and their target-specific forms all count: a dev-dependency edge
-            // is still an edge for the purpose of "who knows about whom".
-            in_deps = line.contains("dependencies]");
-            continue;
-        }
-        if !in_deps || line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        let Some(name) = line.split('=').next().map(str::trim) else {
-            continue;
-        };
-        if name.starts_with("tinker-pdf") {
-            out.push(name.to_string());
-        }
-    }
-
-    out.sort();
-    out.dedup();
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_package_name_is_read() {
-        let manifest = "[package]\nname = \"tinker-pdf-cos\"\nversion = \"0.1.0\"\n";
-        assert_eq!(package_name(manifest).as_deref(), Some("tinker-pdf-cos"));
-    }
-
-    /// A `name` key in some other table is not the package's.
-    #[test]
-    fn a_name_outside_the_package_table_is_ignored() {
-        let manifest = "[lib]\nname = \"wrong\"\n\n[package]\nname = \"right\"\n";
-        assert_eq!(package_name(manifest).as_deref(), Some("right"));
-    }
-
-    #[test]
-    fn internal_dependencies_are_found_in_every_table() {
-        let manifest = "[dependencies]\ntinker-pdf-cos = { workspace = true }\n\
-                        serde = \"1\"\n\n[dev-dependencies]\ntinker-pdf-font = \"0.1\"\n";
-        assert_eq!(
-            internal_dependencies(manifest),
-            vec!["tinker-pdf-cos".to_string(), "tinker-pdf-font".to_string()]
-        );
-    }
-
-    #[test]
-    fn external_dependencies_are_not_edges() {
-        let manifest = "[dependencies]\nproptest = \"1\"\nlibfuzzer-sys = \"0.4\"\n";
-        assert!(internal_dependencies(manifest).is_empty());
-    }
 
     /// The check runs against this repository, which is the point of it.
     #[test]

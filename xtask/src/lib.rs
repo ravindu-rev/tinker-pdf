@@ -16,6 +16,7 @@ pub mod fetch;
 pub mod json;
 pub mod lock;
 pub mod ratchet;
+pub mod release;
 pub mod report;
 pub mod runner;
 pub mod version;

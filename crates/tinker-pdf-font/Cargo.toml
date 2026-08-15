@@ -7,10 +7,22 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Font-program parsing: TrueType/SFNT, CFF/Type2, Type1, CID, CMap, ToUnicode, AFM metrics"
-# Adobe's cmap-resources is compiled by build.rs, not read at run time, so the
-# 7.5 MB of vendored PostScript has no business in a published crate. The
-# licence text does: THIRDPARTY.md carries it and so must the package.
-exclude = ["data/"]
+# `exclude = ["data/"]` was here, on the reasoning that Adobe's cmap-resources
+# is compiled by build.rs rather than read at run time and so has no business
+# in a published crate. The reasoning is half right and the conclusion was
+# wrong: build time is *the consumer's* build time. `build.rs` asserts the
+# registry is present -- "no CMaps under ... the vendored data is missing" --
+# so an excluded `data/` publishes a crate that cannot be built by anybody who
+# downloads it, and every crate above it in the graph inherits the failure.
+# Measured by moving the directory aside, which reproduces exactly that panic.
+#
+# So it ships. 8.0 MB of PostScript is 2.4 MB compressed, against crates.io's
+# 10 MiB ceiling, and `cargo xtask release` measures it every run rather than
+# leaving that margin to be rediscovered.
+#
+# `target/` would otherwise be swept in by the `data/`-less default on a
+# machine that has built here.
+exclude = ["target/"]
 
 [features]
 default = ["cmap-predefined"]
