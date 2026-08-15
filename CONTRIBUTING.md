@@ -126,6 +126,14 @@ pdfium_test, qpdf) are CI subprocesses, never dependencies. The reasoning is
 recorded once in
 [`docs/plans/14-testing-and-corpora.md`](docs/plans/14-testing-and-corpora.md).
 
+One oracle runs today: `crates/tinker-pdf-cos/tests/qpdf_oracle.rs` puts
+`qpdf --check` and `qpdf --show-linearization` over the linearized writer's
+output. Without qpdf on `PATH` those tests **skip**, and a skip exits 0 and
+reads exactly like a pass — so the CI job greps its own output for
+`qpdf-oracle: RAN` and fails if it finds `qpdf-oracle: SKIPPED` instead. Set
+`TINKER_QPDF` to an absolute path if your install is somewhere `PATH` does not
+reach; quote it if the path has spaces.
+
 ## Commits and licensing
 
 Conventional Commits. Contributions are accepted under the project's dual

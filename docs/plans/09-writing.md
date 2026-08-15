@@ -247,6 +247,29 @@ stream carries the two required tables — page-offset hints and shared-object h
 bit-packed per F.4; the optional generic hint tables (outlines, threads) are omitted,
 which the spec permits and qpdf accepts.
 
+*Amended, August 2026 (gap 20).* The paragraph above is the layout and it is
+right, but it leaves out four things the hint tables cannot be written without,
+each of which was got wrong because nothing here read them back:
+
+- **The entries are packed by column, not by row.** Tables F.4 and F.6 list the
+  items of *one* entry; every entry's item 1 is written first, for all entries,
+  then every entry's item 2, and each run is padded to a byte boundary.
+- **A page is a run of consecutive object numbers led by its page object.**
+  F.4.1 gives a reader a count and nothing else, so the numbering carries the
+  membership. "Numbered in output order" is necessary and not sufficient: the
+  order has to group each page and lead each group with the page object.
+- **An offset inside a hint table omits the primary hint stream's length**,
+  because the tables are built before their own size is known, so everything
+  behind the hint stream is short by it.
+- **`/T` is the offset of the main table's first entry** — the free entry for
+  object zero — and **`/E` is the end of part 6**, the first-page section,
+  which is why the hint stream belongs in part 5 ahead of it rather than
+  behind it (Table F.1).
+
+Table F.6 item 2, the one-bit signature flag on every shared-object entry, is
+not optional either; a zero-width entry is what `overflow reading bit stream`
+was.
+
 Layout is two-pass with patch-after-layout, deliberately the same machinery as the
 signature seams: the hint stream's own length changes every subsequent offset, so the
 writer reserves a padded gap for it (padding is legal; qpdf does the same), lays out the
@@ -331,6 +354,15 @@ with a warning.
 | 4 | Encrypt-on-save: R6 write path, R4/AESV2 interop, `permissions_only`, `EntropySource` wiring, incremental-keep | R6 output reopens with user password → `AuthLevel::User`, owner → `Owner`, permissions round-trip with reserved bits 1 and `/Perms` validating; mutool and qpdf (subprocess oracles, ruling 9) both open the outputs; ObjStm-strings-encrypted-once fixture round-trips; incremental save on an encrypted base encrypts new objects with the held key | S |
 | 5 | Linearization: Annex F layout, page-offset + shared-object hint tables, padded hint gap, parameter-dict patching | `qpdf --check` and `qpdf --show-linearization` report no errors across the linearized corpus subset; first-page objects verifiably precede part 7 (offset assertion); linearize+encrypt output validates; de-linearization by later incremental update documented and fixture-pinned | M |
 
+*Amended, August 2026 (gap 20).* Milestone 5's oracle criterion is met on
+fixtures rather than on a corpus, which is the only part still owed: there is
+no corpus here until [gap 23](gaps/23-corpus-runner.md). `qpdf --check` and
+`qpdf --show-linearization` are clean and warning-free on one-page, two-page,
+six-page and shared-resource fixtures, encrypted and not, in a CI job that
+fails rather than passes when qpdf is absent. "Padded hint gap" and
+"parameter-dict patching" describe a design that was never built; see the
+no-patching amendment under *Linearization* above.
+
 Total sits at the top of the L band. Linearization is the named descope lever
 ([PLAN.md](../PLAN.md)) if reality presses past it; nothing downstream depends on it.
 
@@ -359,7 +391,7 @@ Total sits at the top of the L band. Linearization is the named descope lever
 | --- | --- |
 | A subtle prefix mutation (EOL normalization, BOM handling, off-by-one at append) silently invalidates every signature built on the incremental writer | `starts_with(original)` asserted in every incremental test without exception; the append begins with its own newline so the prefix is never inspected or repaired; fixtures include a no-trailing-EOL base; Tinker's signing CI (pyHanko cross-validation) becomes a second, external guard once integration lands |
 | Own deflate compresses worse than the source, making every rewrite grow the file | The 1.2×-of-zlib-6 gate is [02-filters](02-filters.md)'s exit criterion; the `Keep` profile passes original encoded bytes untouched as the guaranteed non-regression path; milestone 2 tracks corpus size delta so growth is measured, not assumed |
-| Hint tables are the least-exercised structure in the format — readers ignore them, so bugs survive | qpdf is the arbiter: `--check` plus `--show-linearization` on every linearized output; only the two required tables are emitted; the whole feature is a descope lever, so it can never hold the phase hostage |
+| Hint tables are the least-exercised structure in the format — readers ignore them, so bugs survive | qpdf is the arbiter: `--check` plus `--show-linearization` on every linearized output; only the two required tables are emitted; the whole feature is a descope lever, so it can never hold the phase hostage. **This risk happened.** The tables were written for months with five separate faults and 1 316 tests green, because nothing in the repository read them; gap 20 stood the arbiter up in CI, and a round-trip reader beside it so the arithmetic is checked offline too |
 | Generic GC still over-collects — an object reachable only via a mechanism that is not a key walk (e.g., a reference embedded in content-stream text) | Mark-from-trailer walks every key of every dict and array with no schema; content-stream references go through `/Resources` names, which the walk covers; a fixture with `/PieceInfo`, extension dicts, and a deliberately odd reachable object pins the behavior; `garbage_collect: false` is the escape hatch |
 | Rewrite of a signed document destroys signatures without the user understanding why | Structured `WillInvalidateSignatures` warning with provenance (ruling 10); Tinker's UI decides whether to force incremental mode; the warning is fixture-pinned so it cannot rot |
 | A host wires a weak `EntropySource` and every "encrypted" file shares predictable keys | The trait contract documents the CSPRNG requirement; facade native hosts wire OS RNGs, wasm bridges `crypto.getRandomValues`; the deterministic test source is `cfg(test)`-gated so it cannot ship; `SECURITY.md` names the responsibility split |
