@@ -682,21 +682,60 @@ fn generic_region(
         }
     }
 
-    if mmr {
-        // MMR generic regions arrive in the next milestone. Refusing here
-        // rather than compositing an undecoded bitmap is deliberate: a blank
-        // region counted as a region would turn the refusal into a blank page
-        // reported as success.
-        note(warnings, Warning::Jbig2SegmentSkipped);
-        return None;
-    }
-
     let Some(mut bitmap) = Bitmap::new(info.width, info.height, ceiling) else {
         note(warnings, Warning::Jbig2RegionTooLarge);
         return None;
     };
-    decode_arithmetic(reader.rest(), template, tpgdon, &at, &mut bitmap);
+    if mmr {
+        if !decode_mmr(reader.rest(), &mut bitmap, warnings) {
+            // Not one row came out, so this is not T.6 data and there is no
+            // region here. Compositing the blank bitmap that was just sized
+            // would count as a region and turn the refusal into a blank page
+            // reported as success.
+            note(warnings, Warning::Jbig2SegmentSkipped);
+            return None;
+        }
+    } else {
+        decode_arithmetic(reader.rest(), template, tpgdon, &at, &mut bitmap);
+    }
     Some((info, bitmap))
+}
+
+/// Decodes a generic region's pixels with MMR (T.88 6.2.6).
+///
+/// 6.2.6 is one sentence of substance: the region is coded exactly as a T.6
+/// image of its own width, against an imaginary all-white line above its
+/// first row. That is [`T6Rows`], which gap 16 left behind for this — so
+/// there is one implementation of the T.6 mode codes in this crate and one
+/// set of tests over them, and a change to either has to keep a fax and a
+/// JBIG2 region both correct.
+///
+/// The polarity is already right and that is not a coincidence:
+/// [`T6Rows`] packs **1 for black**, which is JBIG2's sense (6.2.2) rather
+/// than PDF's, precisely so this caller has nothing to convert.
+///
+/// Returns whether any row decoded at all.
+fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Warning>) -> bool {
+    let mut rows = crate::T6Rows::new(data, 0, into.width);
+    let stride = into.stride;
+    let mut decoded = 0u32;
+    for y in 0..into.height {
+        let start = (y as usize) * stride;
+        let Some(row) = into.bits.get_mut(start..start + stride) else {
+            break;
+        };
+        if !rows.next_row(row) {
+            break;
+        }
+        decoded += 1;
+    }
+    if decoded < into.height {
+        // A region whose coding ran out part way is still a region: the rows
+        // that decoded are on the page and the rest stay white, which is the
+        // same bargain the fax path strikes. Only "not one row" is a refusal.
+        note(warnings, Warning::TruncatedInput);
+    }
+    decoded > 0
 }
 
 /// Decodes an embedded JBIG2 stream into packed one-bit-per-pixel rows.
@@ -1517,24 +1556,93 @@ mod tests {
         assert_eq!(page[55], ".".repeat(64), "row 55 is below it");
     }
 
-    /// Until MMR arrives, an MMR region must refuse rather than composite the
-    /// blank bitmap it allocated.
+    /// **The cross-check the annex was chosen for.** Annex H.1 codes one
+    /// picture twice — page 1 with MMR, page 2 with the arithmetic coder —
+    /// and the two decoders share no code whatsoever.
     ///
-    /// This is the refusal's sharpest edge: a region that *was* recognised,
-    /// *was* sized, and produced nothing is the one case where counting a
-    /// region before decoding it would hand back a plausible blank page.
+    /// One goes through [`T6Rows`] and the T.6 mode codes; the other through
+    /// the MQ coder and template 0. For them to agree on 2 376 pixels by
+    /// accident is not a thing that happens. This is the strongest single
+    /// assertion in the file, and it exists because the standard was thorough
+    /// enough to code its example both ways.
     #[test]
-    fn an_undecoded_mmr_region_does_not_count_as_a_region() {
+    fn annex_h_codes_one_picture_twice_and_both_ways_agree() {
+        let params = Jbig2Params {
+            globals: &[],
+            width: 64,
+            height: 56,
+        };
+        let mut mmr_warnings = Vec::new();
+        let mmr = decode(&ANNEX_H[PAGE_1], &params, 1 << 20, &mut mmr_warnings)
+            .expect("page 1 carries an MMR generic region");
+        let mut arithmetic_warnings = Vec::new();
+        let arithmetic = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut arithmetic_warnings)
+            .expect("page 2 carries an arithmetically coded one");
+
+        assert_eq!(
+            region_window(&picture(&mmr, 64, 56)),
+            ANNEX_H_REGION,
+            "the MMR region does not match the annex's published picture"
+        );
+        assert_eq!(
+            mmr, arithmetic,
+            "T.6 and the MQ coder disagree about the same picture"
+        );
+        assert!(!mmr_warnings.contains(&Warning::TruncatedInput));
+    }
+
+    /// The whole file, file header and all, the way a producer that pasted a
+    /// standalone JBIG2 into a PDF stream would deliver it.
+    ///
+    /// D.4's sequential organisation puts page 1 first, so this is the MMR
+    /// page again — reached this time through the eight-byte identifier and
+    /// the page count rather than by slicing.
+    #[test]
+    fn the_whole_annex_h_file_decodes_its_first_page() {
         let mut warnings = Vec::new();
         let params = Jbig2Params {
             globals: &[],
             width: 64,
             height: 56,
         };
+        let bits = decode(&ANNEX_H, &params, 1 << 20, &mut warnings).expect("page 1 decodes");
+        assert_eq!(region_window(&picture(&bits, 64, 56)), ANNEX_H_REGION);
+        assert!(
+            warnings.contains(&Warning::Jbig2SegmentSkipped),
+            "pages 2 and 3, and this page's text and halftone regions, are \
+             all missing from the result"
+        );
+    }
+
+    /// An MMR region whose data is not T.6 at all decodes no row, so it is
+    /// not a region.
+    ///
+    /// The refusal's sharpest edge: a region that *was* recognised and *was*
+    /// sized and produced nothing is the one case where counting it before
+    /// decoding it hands back a plausible blank page.
+    #[test]
+    fn an_mmr_region_that_decodes_no_row_is_not_a_region() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&16u32.to_be_bytes()); // width
+        data.extend_from_slice(&16u32.to_be_bytes()); // height
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.push(0); // OR
+        data.push(0x01); // MMR
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(16, 16, 0));
+        stream.extend(header(1, kind::IMMEDIATE_GENERIC_REGION, 1, &data));
+
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 16,
+            height: 16,
+        };
         assert_eq!(
-            decode(&ANNEX_H[PAGE_1], &params, 1 << 20, &mut warnings),
-            Err(FilterError::Unsupported(Capability::Jbig2)),
-            "Annex H.1's first page codes its region with MMR"
+            decode(&stream, &params, 1 << 20, &mut warnings),
+            Err(FilterError::Unsupported(Capability::Jbig2))
         );
         assert!(warnings.contains(&Warning::Jbig2SegmentSkipped));
     }
