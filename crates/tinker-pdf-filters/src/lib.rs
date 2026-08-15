@@ -21,6 +21,7 @@ mod ascii;
 mod ccitt;
 pub mod deflate;
 mod inflate;
+mod jbig2;
 mod jpeg;
 mod lzw;
 pub mod mq;
@@ -31,6 +32,7 @@ use core::fmt;
 
 pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
 pub use deflate::{deflate, zlib_compress};
+pub use jbig2::{decode as jbig2_decode, Jbig2Params};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use mq::{MqContext, MqContexts, MqDecoder};
 pub use predictors::PredictorParams;
@@ -147,6 +149,17 @@ pub enum Warning {
     /// CCITT: `/EndOfLine true` says every line is preceded by an EOL and a
     /// line was not; it was decoded from the cursor anyway.
     MissingEndOfLine,
+    /// JBIG2: a segment this build does not decode was skipped, and anything
+    /// it would have drawn is missing from the page.
+    ///
+    /// Overwhelmingly the symbol-dictionary and text-region lineage (T.88
+    /// 6.4, 6.5), which is what OCR pipelines emit. A page that ends with no
+    /// region on it is refused outright — this warning is what says *why*,
+    /// since the refusal itself is an error and carries no detail.
+    Jbig2SegmentSkipped,
+    /// JBIG2: a region or page declared more pixels than the output ceiling
+    /// allows, so it was refused rather than allocated.
+    Jbig2RegionTooLarge,
 }
 
 impl Warning {
@@ -175,6 +188,8 @@ impl Warning {
             Self::BadPredictorTag => "bad-predictor-tag",
             Self::ChainTailIgnored => "chain-tail-ignored",
             Self::MissingEndOfLine => "missing-end-of-line",
+            Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
+            Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
         }
     }
 }
@@ -201,6 +216,8 @@ impl fmt::Display for Warning {
             Self::BadPredictorTag => "unknown PNG predictor tag",
             Self::ChainTailIgnored => "filters after an image codec ignored",
             Self::MissingEndOfLine => "expected end-of-line code absent",
+            Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
+            Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
         };
         f.write_str(s)
     }
