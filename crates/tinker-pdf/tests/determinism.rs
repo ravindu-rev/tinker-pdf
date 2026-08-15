@@ -642,6 +642,80 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// A JBIG2 scan: the arithmetic coder, a generic region and the polarity
+/// inversion at the PDF boundary.
+///
+/// *Added August 2026, with gap 17.* Not one fixture above decodes a JBIG2
+/// stream — the codec was a capability gate until this gap — so this is the
+/// first that would move if the MQ coder, T.88's templates or the 1-is-black
+/// inversion changed. That matters more here than for most paths, because the
+/// MQ decoder is *shared*: gap 18 would use the same coder for JPEG 2000, and
+/// a change made there that shifted a row of the Qe table would otherwise
+/// have to be caught by the filter crate alone.
+///
+/// The bytes are ITU-T T.88 Annex H.1's second page, embedded as Annex D.3's
+/// organisation is — page information segment, an arithmetically coded generic
+/// region using template 0 with typical prediction, and four segments this
+/// build refuses. It draws a frame two pixels thick, and it is drawn three
+/// ways so the fixture covers more than one row of the sampling policy: at
+/// 1:1, at a non-integer magnification, and as an `/ImageMask` in colour,
+/// which is the shape a scanned page is most often given.
+fn jbig2_page() -> Vec<u8> {
+    let content = "q 64 0 0 56 0 64 cm /Im0 Do Q\n\
+                   0.85 0.1 0.2 rg\n\
+                   q 64 0 0 56 64 64 cm /Im1 Do Q\n\
+                   q 101 0 0 57 13 3 cm /Im0 Do Q";
+    let coded = hex(&ANNEX_H_PAGE_2);
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 128 120]\n\
+   /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 64 /Height 56\n\
+   /ColorSpace /DeviceGray /BitsPerComponent 1\n\
+   /Filter [/ASCIIHexDecode /JBIG2Decode] /Length {} >>\nstream\n{coded}\nendstream\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Image /Width 64 /Height 56 /ImageMask true\n\
+   /Filter [/ASCIIHexDecode /JBIG2Decode] /Length {} >>\nstream\n{coded}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        coded.len(),
+        coded.len()
+    )
+    .into_bytes()
+}
+
+/// ITU-T T.88 Annex H.1's second page, bytes 400 to 681 of the annex's
+/// datastream.
+#[rustfmt::skip]
+const ANNEX_H_PAGE_2: [u8; 282] = [
+    0x00, 0x00, 0x00, 0x08, 0x30, 0x00, 0x02, 0x00, 0x00, 0x00, 0x13, 0x00,
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01,
+    0x02, 0x00, 0x00, 0x00, 0x1B, 0x08, 0x00, 0x02, 0xFF, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x02, 0x4F, 0xE7, 0x8C, 0x20, 0x0E, 0x1D, 0xC7,
+    0xCF, 0x01, 0x11, 0xC4, 0xB2, 0x6F, 0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0A,
+    0x07, 0x40, 0x00, 0x09, 0x02, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00,
+    0x25, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x0C, 0x08, 0x00, 0x00, 0x00, 0x05, 0x8D, 0x6E, 0x5A, 0x12,
+    0x40, 0x85, 0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0B, 0x27, 0x00, 0x02, 0x00,
+    0x00, 0x00, 0x23, 0x00, 0x00, 0x00, 0x36, 0x00, 0x00, 0x00, 0x2C, 0x00,
+    0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x08, 0x03, 0xFF, 0xFD,
+    0xFF, 0x02, 0xFE, 0xFE, 0xFE, 0x04, 0xEE, 0xED, 0x87, 0xFB, 0xCB, 0x2B,
+    0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0C, 0x10, 0x01, 0x02, 0x00, 0x00, 0x00,
+    0x1C, 0x06, 0x04, 0x04, 0x00, 0x00, 0x00, 0x0F, 0x90, 0x71, 0x6B, 0x6D,
+    0x99, 0xA7, 0xAA, 0x49, 0x7D, 0xF2, 0xE5, 0x48, 0x1F, 0xDC, 0x68, 0xBC,
+    0x6E, 0x40, 0xBB, 0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0D, 0x17, 0x20, 0x0C,
+    0x02, 0x00, 0x00, 0x00, 0x3E, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+    0x24, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x02, 0x00,
+    0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x87, 0xCB, 0x82, 0x1E, 0x66,
+    0xA4, 0x14, 0xEB, 0x3C, 0x4A, 0x15, 0xFA, 0xCC, 0xD6, 0xF3, 0xB1, 0x6F,
+    0x4C, 0xED, 0xBF, 0xA7, 0xBF, 0xFF, 0xAC, 0x00, 0x00, 0x00, 0x0E, 0x31,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// Blend modes, whose integer arithmetic is new and whose whole reason for
 /// being integer is this property.
 fn blend_page() -> Vec<u8> {
@@ -892,6 +966,17 @@ const GOLDEN: &[Fixture] = &[
         build: tiling_page,
         least_ink: 2200,
     },
+    // The frame is thin, so this page paints little relative to its area and
+    // the floor sits close to what it draws. That is the point: a JBIG2
+    // decode that lost typical prediction, or a refusal that started firing,
+    // returns *no* image at all and this drops to zero. The opposite failure
+    // — the polarity inverted — fills almost the whole page instead, and the
+    // hash catches that at once.
+    Fixture {
+        name: "jbig2",
+        build: jbig2_page,
+        least_ink: 900,
+    },
 ];
 
 #[test]
@@ -960,6 +1045,15 @@ fn rendering_is_stable_across_targets() {
         (
             "tiling",
             "aa7b2df6bd7613fb53c696ed4b9018a00d1aa4dece2ffe82775c40bfaa1a5011",
+        ),
+        // Added August 2026 with gap 17. Nothing above decodes a JBIG2
+        // stream, and the MQ arithmetic coder underneath it is shared with
+        // whatever gap 18 decides about JPEG 2000 -- so a change made for one
+        // codec that shifted a row of the Qe table would, until now, have had
+        // only the filter crate's own tests standing in front of it.
+        (
+            "jbig2",
+            "cd20bc1e5c786e245402ba94d700f2a91a267c36e0922d2bc98be5e897839abd",
         ),
     ];
     assert_eq!(

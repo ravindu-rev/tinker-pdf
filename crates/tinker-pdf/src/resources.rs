@@ -13,7 +13,8 @@ use tinker_pdf_cos::{
     font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
-    ccitt_decode, jpeg_decode, CcittParams, JpegColor, Warning as FilterWarning,
+    ccitt_decode, jbig2_decode, jpeg_decode, CcittParams, Jbig2Params, JpegColor,
+    Warning as FilterWarning,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
@@ -1645,6 +1646,73 @@ impl PageResources {
         samples
     }
 
+    /// Decodes a JBIG2 stream into the packed one-bit samples the sample loop
+    /// in [`Self::decode_image_at`] reads (ISO 32000-1 7.4.7).
+    ///
+    /// **The polarity inversion lives here, and nowhere else.** T.88 6.2.2
+    /// codes 1 for black; a 1-bit DeviceGray sample is 0 for black. The
+    /// decoder returns JBIG2's own sense unconverted — as [`T6Rows`] does for
+    /// a fax — so exactly one place in the build knows which convention it is
+    /// translating between, and it is the place that also reads `/Decode`,
+    /// `/ImageMask` and `/ColorSpace`. A decoder that inverted for itself
+    /// would be guessing what its caller wanted, and a second caller would
+    /// invert again.
+    ///
+    /// **It joins the generic sample path deliberately**, for the reason gap
+    /// 16 gave when it moved the fax onto it: an image that returns its own
+    /// pixels has to reimplement `/Decode`, `/ImageMask` and the colour space
+    /// to compose correctly, and a JBIG2 scan is an image mask about as often
+    /// as it is a DeviceGray image. Coming out as *samples* means those three
+    /// keys are read once, where they have always been read.
+    ///
+    /// `None` is the refusal: no region decoded, so the caller draws the
+    /// placeholder rather than a blank page (ruling 2).
+    fn jbig2_samples(
+        &self,
+        dict: &Dict,
+        coded: &[u8],
+        width: u32,
+        height: u32,
+        name: &[u8],
+    ) -> Option<Vec<u8>> {
+        // 7.4.7: `/JBIG2Globals` is a *stream*, in this image's own
+        // `/DecodeParms`, holding the segments shared by every image that
+        // names it. It is the ordinary shape for the symbol dictionary of a
+        // scanned book, so a build that ignored it would refuse a file whose
+        // whole payload is in one place and say nothing about why.
+        let globals = self
+            .decode_parms(dict)
+            .and_then(|parms| match parms.get(self.doc.intern(b"JBIG2Globals")) {
+                Some(Object::Ref(r)) => self.doc.stream_decoded(*r).ok(),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &globals,
+            width,
+            height,
+        };
+        let decoded = jbig2_decode(coded, &params, limits::MAX_DECODED_STREAM, &mut warnings);
+        for warning in &warnings {
+            // Ruling 10, and it carries most of the information here: the
+            // refusal below is one error with no detail, and "no region,
+            // because this is a symbol dictionary" and "no region, because
+            // the stream was truncated" are different failures.
+            self.report_damaged_image(name, *warning);
+        }
+
+        let mut samples = decoded.ok()?;
+        // The inversion, stated once. Padding bits past the image's width sit
+        // in the same byte and flip with it, which is correct: they were 0 for
+        // white in JBIG2 and become 1 for white here.
+        for byte in &mut samples {
+            *byte = !*byte;
+        }
+        Some(samples)
+    }
+
     /// Decodes an image from its dictionary, wherever that came from.
     fn decode_image_at(
         &self,
@@ -1731,7 +1799,7 @@ impl PageResources {
             return jpeg_image(&raw, &decode, interpolate);
         }
         if let Some(filter) = last_filter.as_deref() {
-            if matches!(filter, b"JPXDecode" | b"JBIG2Decode") {
+            if matches!(filter, b"JPXDecode") {
                 return Err(String::from_utf8_lossy(filter).into_owned());
             }
         }
@@ -1747,7 +1815,25 @@ impl PageResources {
             last_filter.as_deref(),
             Some(b"CCITTFaxDecode") | Some(b"CCF")
         );
-        let data = if fax {
+        // JBIG2 takes the same road, and for the same reason (gap 17). Both
+        // are bilevel codecs that produce samples rather than pixels, and a
+        // scanned page is an `/ImageMask` about as often as it is a DeviceGray
+        // image — so composing correctly means arriving where those keys are
+        // read, not reimplementing them.
+        let jbig2 = matches!(last_filter.as_deref(), Some(b"JBIG2Decode"));
+        let data = if jbig2 {
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "JBIG2Decode".to_string())?;
+            // The refusal. A stream whose regions this build cannot decode —
+            // the symbol-dictionary lineage an OCR pipeline emits — comes back
+            // `None`, and the caller draws the neutral placeholder. Returning
+            // the blank page it was composited onto would be indistinguishable
+            // from a correct decode of a blank scan.
+            self.jbig2_samples(&dict, &raw, width, height, name)
+                .ok_or_else(|| "JBIG2Decode".to_string())?
+        } else if fax {
             let raw = self
                 .doc
                 .stream_image_input(reference)
@@ -1759,11 +1845,12 @@ impl PageResources {
                 .stream_decoded(reference)
                 .map_err(|_| "undecodable".to_string())?
         };
-        // 7.4.6: fax output is one bit per pixel, whatever the dictionary
-        // claims. Producers that omit `/BitsPerComponent` are common and the
-        // clamp already reads an absent key as 1; one that writes 8 would
-        // otherwise read each row eight times too wide.
-        let bpc = if fax { 1 } else { bpc };
+        // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
+        // whatever the dictionary claims. Producers that omit
+        // `/BitsPerComponent` are common and the clamp already reads an absent
+        // key as 1; one that writes 8 would otherwise read each row eight
+        // times too wide.
+        let bpc = if fax || jbig2 { 1 } else { bpc };
 
         let space = self.doc.resolve_key(&dict, self.doc.intern(b"ColorSpace"));
         let space = self
