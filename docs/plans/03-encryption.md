@@ -36,6 +36,15 @@ This phase is built so neither bug is expressible.
   never-encrypted set: the `/Encrypt` dictionary's own strings, the trailer `/ID`,
   cross-reference streams (7.5.8.2), and strings inside object streams (7.5.7 — the
   container was encrypted, its contents must not be decrypted twice).
+
+  *Amended, August 2026 (gap 19).* The write side has two more members, both only
+  reachable on the linearized path and one of them outside 7.6.1. **Classic**
+  cross-reference tables, alongside the streams: a linearized file has two tables and a
+  reader finds both before it knows there is an `/Encrypt` dictionary. And the
+  **linearization parameter dictionary**, which 7.6.1 does not exempt — a reader consults
+  it before authenticating, and it is sound only because part 2 carries no strings, which
+  `linearize.rs` asserts rather than assumes. Nothing on the read side changes: a
+  decryptor is never handed any of these, and never was.
 - Authentication level surfaced as `AuthLevel::{None, User, Owner}` from the Algorithm
   2.A / Algorithm 7 checks — kills MuPDF limitation #3 (owner/user collapsed to `bool`).
 - Permissions as raw `i32` plus typed accessors that read only spec-defined bits — kills

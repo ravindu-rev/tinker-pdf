@@ -63,7 +63,7 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 
 | # | Plan | What goes wrong today | Size |
 | --- | --- | --- | --- |
-| 19 | [Encrypt and linearize](19-encrypt-and-linearize.md) | Linearization is silently dropped when encryption is on | M |
+| 19 | [Encrypt and linearize](19-encrypt-and-linearize.md) | ~~Linearization is silently dropped when encryption is on~~ **DONE**, see the plan's `As built`: the guard is gone, objects are serialised and encrypted in one pass so the layout is measured from the ciphertext, `/Encrypt` takes a reserved low object number to keep the first-page table's range over the front of the file, the hint stream is encrypted and `/H` carries its encrypted length, and the parameter dictionary, both tables and `/Encrypt` are proved legible in the raw bytes. qpdf reads, authenticates and fully decrypts the output. Two findings handed on: the hint tables fail `qpdf --show-linearization` identically with and without encryption, which is gap 20's, and no encrypted file this engine writes carries an `/ID`, which 7.5.5 Table 15 requires | M |
 | 20 | [Linearization validation](20-linearization-validation.md) | The hint tables have never been checked by anything | S |
 | 21 | [Metadata: absent versus empty](21-metadata-absent-vs-empty.md) | ~~A title that is present and blank reads as absent~~ **DONE**, see the plan's `As built` | S |
 | 22 | [PDF version and /Trapped](22-pdf-version-and-trapped.md) | ~~The catalog overrides the header unconditionally; `/Trapped` is absent~~ **DONE**, see the plan's `As built`: the later of the two wins, compared numerically; an unreadable header reports the 1.7 baseline with a `HeaderMissing` warning; `/Trapped` reads as its three names | S |

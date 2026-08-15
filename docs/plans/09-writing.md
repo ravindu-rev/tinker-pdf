@@ -211,6 +211,26 @@ never-encrypted set (the `/Encrypt` dictionary's strings, trailer `/ID`, cross-r
 streams) stays clear; strings inside object streams are not individually encrypted —
 the container is (7.5.7); metadata follows `/EncryptMetadata`.
 
+*Amended, August 2026 (gap 19).* The never-encrypted set has two more members on the
+linearized path, and one of them is not in 7.6.1 at all. **Classic** cross-reference
+tables join the cross-reference streams already named — a linearized file has two of
+them and a reader finds both before it knows there is an `/Encrypt` dictionary to look
+for. And the **linearization parameter dictionary** stays clear, which 7.6.1 does not
+license: a reader consults it before it has authenticated. What makes that sound is that
+part 2 contains no strings, every value being an integer or an array of integers, so
+there is nothing 7.6.2 would encrypt. That is asserted in `linearize.rs` rather than
+assumed, so a field added later which does carry a string fails a test instead of being
+written in plain sight inside a file that claims to be encrypted.
+
+Two things this section describes are **not** built. Trailer `/ID` is listed above as
+never-encrypted, and no `/ID` is written at all — on any encrypted save, linearized or
+not. 7.5.5 Table 15 requires one whenever `/Encrypt` is present, and `qpdf --check`
+reports `invalid /ID in trailer dictionary` on every encrypted file this engine writes.
+R6 does not mix `/ID` into its key derivation, so nothing fails to decrypt; it is a
+conformance defect, not a functional one, and it predates gap 19 rather than arriving
+with it. Incremental encrypt-keep is likewise unbuilt: `incremental_update` writes new
+objects in the clear and the option is refused rather than pretended.
+
 On incremental saves, `encryption: None` (keep) encrypts new objects with the held file
 key and the base file's `/StmF`/`/StrF` methods — which requires the document to have been
 authenticated. Changing or removing encryption incrementally is structurally impossible
@@ -233,6 +253,28 @@ writer reserves a padded gap for it (padding is legal; qpdf does the same), lays
 file, then fills the hint stream and patches `/L`, `/H`, `/E`, `/T`, and the first-page
 xref in place. Objects are numbered in output order, which keeps the hint tables' deltas
 compact and is what real linearizers do.
+
+*Amended, August 2026.* **There is no patching pass and there never was one.** The
+writer serialises every object, measures, derives every offset and emits once, because
+nothing whose *size* matters depends on an offset: the parameter dictionary's integers
+are written to a fixed width so their values cannot change its length, a classic table's
+entries are twenty bytes each so its length follows from the count, and the hint tables'
+bit widths come from object counts and lengths rather than positions. That is a stronger
+property than patching and it was chosen for the reason the paragraph above gives as its
+own risk — a patch that misses one field produces a file that opens everywhere except in
+the reader the feature exists for. Objects *are* numbered in output order, as stated.
+
+*Amended, August 2026 (gap 19).* Encryption is the one thing that looks like it breaks
+the premise: AES-256-CBC prefixes a 16-byte initialisation vector and pads to the block
+size, so an encrypted stream is 17 to 32 bytes longer than its plaintext by an amount
+that depends on the plaintext's length. The resolution is **encrypt first, then
+measure** — objects are serialised and encrypted in one pass and the layout is computed
+from the encrypted lengths, so the no-patching property survives untouched. The hint
+stream is encrypted with everything else and `/H` carries its encrypted length. The
+`/Encrypt` dictionary is object 3, beside the parameter dictionary and the hint stream,
+because the first-page table declares one subsection from zero to its highest entry and
+frees everything in that range it does not carry: numbering `/Encrypt` above the ordinary
+objects, as the unlinearized writer does, would free the whole back of the file.
 
 Honesty about value: hints are advisory and most viewers ignore them; the practical win is
 HTTP range serving plus the workflows that validate "fast web view" as a checkbox. It is
