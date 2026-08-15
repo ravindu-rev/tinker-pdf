@@ -168,3 +168,177 @@ over-count.
 The other prerequisite is also discharged: [16](16-ccitt-completion.md) landed
 and left `T6Rows::new(data, bit_offset, columns)` for this plan's MMR path — see
 the amendment above.
+
+## As built — 15 August 2026
+
+Milestones 1 to 7, all seven. The generic-region lineage decodes and
+everything else is refused by name.
+
+### The MQ module's public shape, for gap 18
+
+`crates/tinker-pdf-filters/src/mq.rs`, its own module from the first commit
+because T.88 Annex E and T.800 Annex C are the same coder and
+[18](18-jpx-decision.md) says the decoder "moves to a shared module" —
+starting it anywhere else would have opened that plan with a refactor. It is
+`pub mod mq`, re-exported from the crate root as `MqContext`, `MqContexts`
+and `MqDecoder`:
+
+```rust
+pub struct MqContext;                     // Clone + Copy + Debug + Default + PartialEq + Eq
+pub struct MqContexts { /* ... */ }
+impl MqContexts {
+    pub fn new(len: usize) -> MqContexts; // every context at E.3.6's initial state
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+    pub fn reset(&mut self);              // between regions, without reallocating
+}
+pub struct MqDecoder<'a> { /* ... */ }
+impl<'a> MqDecoder<'a> {
+    pub fn new(data: &'a [u8]) -> MqDecoder<'a>;        // INITDEC (E.3.5)
+    pub fn position(&self) -> usize;                    // saturating; for a caller that parses on
+    pub fn decode(&mut self, cx: &mut MqContext) -> u8; // DECODE (E.3.2)
+    pub fn decode_at(&mut self, cx: &mut MqContexts, index: usize) -> u8;
+}
+```
+
+It follows Annex E's formulation rather than Annex G's software conventions:
+`C` is a 32-bit register whose top sixteen bits are the `Chigh` the figures
+compare against `Qe`, so the code reads next to E.3.2's flowcharts instead of
+next to a transformation of them. JPEG 2000 would want nineteen contexts where
+JBIG2 wants up to 65 536, and nothing in the module knows which — context
+*numbering* is the caller's business, which is the property that lets the two
+codecs share it.
+
+There is a test-only `mq::encoder::MqEncoder` beside it (E.3.7, E.3.8). It is
+not part of the shipped surface; it exists so that a generic-region round-trip
+means something, and it is itself pinned by re-encoding Annex H.2's 256
+published decisions back into Annex H.2's thirty published bytes.
+
+Two ruling-1 edges are closed by construction rather than by a check. Reading
+past the end of the data yields `0xFF`, which is E.3.4's marker convention, so
+`BYTEIN` stops advancing and a truncated stream terminates rather than running
+off the buffer. `RENORMD` shifts a register that is provably non-zero, so it
+converges within fifteen turns, and carries a hard bound anyway for the state
+that cannot happen.
+
+### What the refusal covers
+
+`jbig2_decode` returns `Err(FilterError::Unsupported(Capability::Jbig2))`
+whenever **no region was composited onto the page**, and `resources.rs` turns
+that into the neutral placeholder and a named codec. That covers, by name:
+symbol dictionaries and text regions (6.4, 6.5); pattern dictionaries and
+halftone regions; refinement regions; an *intermediate* generic region, which
+decodes perfectly well but which 7.4.6.1 sends to an auxiliary buffer for a
+refinement segment to refer to rather than onto the page; a region larger than
+the output ceiling; an MMR region that decodes no row at all; the
+random-access organisation, which a PDF cannot carry and which would invent
+segments if it were parsed as sequential; and a segment carrying the
+unknown-length sentinel, after which nothing else can be located.
+
+It also covers the case the plan warned about most, and in both directions. A
+file with a generic region *and* an undecodable symbol dictionary **draws the
+region** and reports the missing lineage — refusing it would throw away a
+picture that decoded perfectly. A file with no decodable region is refused.
+Both are tested at the crate boundary and again through a rendered page.
+
+### What proportion of real JBIG2 this decodes versus refuses
+
+**The minority of files, and it matters that this is written down rather than
+inferred from "JBIG2 works now".**
+
+Gap 23 measured JBIG2 at 103 files, 2.3 % of 4 525 — the highest hit rate of
+the three capabilities ruling 3 defers, and an order of magnitude above JPX.
+What it did not measure is the *lineage* split inside those files, and no run
+here has measured it either, so what follows is a claim about producers rather
+than a count.
+
+The generic-region lineage is what a scanner or a fax-to-PDF path emits: a
+whole-page bilevel image, arithmetic or MMR, with no dictionary. The symbol
+dictionary plus text region lineage is what `jbig2enc` and OCRmyPDF emit, and
+an OCR pipeline is the overwhelmingly common reason a JBIG2 stream is inside a
+PDF at all — the format's whole selling point for scanned text is that it
+factors repeated glyphs into a dictionary, and the producers that matter all
+take it. So the expectation is that this decodes the **minority** of real
+JBIG2 by file count, plausibly well under half, and refuses the rest.
+
+That is the outcome the plan chose knowingly rather than a disappointment: the
+refused half is roughly 2 500 further lines with the integer arithmetic
+decoders and the standard Huffman tables, and the scope section calls it a
+separate decision. What this gap guarantees is that the refusal is *correct* —
+a refused file draws the placeholder it drew before, never a blank page — so
+the engine is strictly better off than it was and never worse.
+
+### Three things the plan does not describe
+
+**It is Annex H.1, not H.2.** Milestone 3 asks for "H.2's generic-region
+datastream". H.2 is the arithmetic coder test sequence, which milestone 1
+already used; the datastream example is **H.1**. It is transcribed whole — 860
+bytes, twenty-one segments, three pages — and it is worth far more than one
+picture, because its first two pages are the *same image coded two different
+ways*: page 1 with MMR, page 2 arithmetically on template 0 with typical
+prediction. Two decoders that share no code have to agree pixel for pixel, and
+they do. No round-trip against an encoder written here could have said that.
+
+**A context bit order is unobservable from any datastream.** Relabelling the
+context bits is a bijection on the context array; every adaptive state starts
+identical, so an encoder's slot histories and a decoder's stay in step under
+any permutation. Transposing two of template 0's bits was injected, and Annex
+H.1 still decoded to its published picture byte for byte with every round-trip
+still passing. The same goes for moving typical prediction's pseudo-context to
+an unused neighbour: `0x9B24` decodes Annex H.1 perfectly.
+
+Both are real bugs — 6.2.5.7's pseudo-context is a *literal* slot number, so
+the moment typical prediction is on, the numbering stops being a free choice
+and becomes part of what the encoder agreed to — and neither is reachable by
+any fixture that could be written. The defence is a transcription of Figures 8
+to 11 that sets one pixel at a time and demands the bit the figure assigns it,
+plus the four pseudo-contexts asserted against the standard directly. That one
+test catches three injected defects that nothing else in the repository
+catches.
+
+**An intermediate generic region moved from "understood" to "refused".** It
+was in the decodable set when milestone 2 landed. 7.4.6.1 makes an
+intermediate result an auxiliary buffer for a later segment to refer to, and
+the only thing that refers to one is a refinement region, which this build
+refuses — so compositing it would draw a working buffer as finished content.
+
+### Polarity, and where it lives
+
+T.88 6.2.2 codes 1 for black; a 1-bit DeviceGray sample is 0 for black. The
+decoder returns JBIG2's own sense unconverted, exactly as `T6Rows` already
+did, and `jbig2_samples` in `crates/tinker-pdf/src/resources.rs` inverts once
+— in the same function that reads `/Decode`, `/ImageMask` and `/ColorSpace`,
+so one place in the build knows which convention it is translating between.
+
+Output **joins the generic sample path**, which is the same decision gap 16
+made for a fax and for the same reason: an image that hands back its own
+pixels has to reimplement those three keys to compose at all, and a scanned
+page is an `/ImageMask` about as often as it is a DeviceGray image. `/Decode
+[1 0]` inverting a scan and `/ImageMask true` painting one in the fill colour
+are each a test, and a build that returned RGB would fail both while passing
+everything else.
+
+### Evidence
+
+Twenty-one tests in `jbig2.rs`, seven more in `mq.rs`, eight at the render
+boundary in `crates/tinker-pdf/tests/jbig2.rs`, and the repository's tenth
+determinism fingerprint — which `wasm32-wasip1` under wasmtime reproduces
+byte-for-byte against native Windows, so a 32-bit target and a 64-bit one
+agree about a JBIG2 decode. **None of the other nine moved.**
+
+Sixteen streams from the JBIG2 test corpus SerenityOS publishes — every
+template, each with and without custom AT pixels and typical prediction, plus
+the MMR one — decode to that corpus's own 399 by 400 reference bitmap exactly.
+They are not committed, because they are somebody else's files rather than the
+standard's; they are recorded here because they are what says the context
+numbering agrees with what the rest of the world encodes against, which
+nothing written inside this repository could establish.
+
+The `jbig2` fuzz target ran for ten minutes on four jobs: **1 664 926
+executions, no crash, no out-of-memory, no timeout**, corpus grown from 22
+committed seeds to 1 319 inputs. A coverage replay over a *copy* of that
+corpus puts jbig2.rs at 97.8 % of regions and 98.5 % of lines with **all 36
+functions executed**, and `decode_arithmetic`, `context`, `generic_region`,
+`tpgdon_context` and `template_bits` each at 100 % of both — so all four
+templates and all four pseudo-contexts were reached by real inputs rather than
+by assertion.

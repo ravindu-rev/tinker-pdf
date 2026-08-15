@@ -289,8 +289,17 @@ pub enum ImageCodec {
 
 impl ImageCodec {
     /// The capability gate this codec sits behind, if it has one. `None`
-    /// means the codec is scheduled to be decoded in-crate (wave 2); `Some`
-    /// means the caller substitutes the neutral placeholder (ruling 2).
+    /// means the codec is decoded in-crate; `Some` means a decode **may** be
+    /// refused, and this is the capability the caller names when it
+    /// substitutes the neutral placeholder (ruling 2).
+    ///
+    /// "May", for JBIG2, since gap 17. It used to mean the bytes would never
+    /// be decoded at all. The generic-region lineage now decodes and the
+    /// symbol-dictionary lineage does not, so the gate has become a statement
+    /// about a *decode* rather than about a *format* — see
+    /// [`crate::jbig2_decode`], whose error is this same capability. Plan 02's
+    /// milestone 4 records the change; the assertion below is not a weaker
+    /// version of the old one, it is a claim about a different thing.
     #[must_use]
     pub const fn capability(self) -> Option<Capability> {
         match self {
@@ -639,6 +648,13 @@ mod tests {
         }
     }
 
+    /// Plan 02's milestone 4 pins this, and what it pins moved in gap 17.
+    ///
+    /// JBIG2 still answers `Some`, because a JBIG2 decode can still be
+    /// refused and this is the name it is refused under. What it no longer
+    /// means is "these bytes will never be decoded" — the generic-region
+    /// lineage decodes. The plan file says so in its own words rather than
+    /// this assertion being quietly reinterpreted to keep passing.
     #[test]
     fn capability_gates_name_the_deferred_codecs() {
         assert_eq!(ImageCodec::Jbig2.capability(), Some(Capability::Jbig2));

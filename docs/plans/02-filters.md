@@ -52,14 +52,30 @@ Wave 2 (L):
 
 ## Non-goals
 
-- **JBIG2Decode (7.4.7), JPXDecode (7.4.9), arithmetic-coded JPEG,
-  12-bit JPEG.** Deferred behind capability flags with corpus hit-rate gates
-  per ruling 3 — implemented when the nightly hit-rate report from
+- **JPXDecode (7.4.9), arithmetic-coded JPEG, 12-bit JPEG.** Deferred behind
+  capability flags with corpus hit-rate gates per ruling 3 — implemented when
+  the hit-rate report from
   [14-testing-and-corpora](14-testing-and-corpora.md) shows real documents
   need them, not before. This crate returns a typed `Unsupported` value; the
   rendering device substitutes the neutral placeholder and appends the
   `Bitmap` warning per ruling 2. Never a hard failure, and never this
   crate's job to draw the placeholder.
+
+- **JBIG2Decode (7.4.7) — *half* a non-goal, since August 2026.** The gate
+  opened: gap 23 ran the corpora and JBIG2 came back at 2.3 % of 4 525 files,
+  the highest of the three capabilities ruling 3 defers, and
+  [gaps/17](gaps/17-jbig2-generic-region.md) built the generic-region lineage
+  against it. What this crate now decodes is the MQ arithmetic coder (T.88
+  Annex E, in its own module for gap 18's sake), clause 7's segment headers,
+  Annex D.3's embedded organisation with `/JBIG2Globals`, generic regions on
+  templates 0–3 with AT pixels and typical prediction, and MMR regions through
+  `T6Rows`. What it still refuses is **symbol dictionaries and text regions**
+  (6.4, 6.5) — roughly 2 500 further lines with the integer arithmetic
+  decoders and the standard Huffman tables — plus halftone and refinement
+  regions. Those keep the shape above exactly: `Unsupported(Capability::Jbig2)`
+  and the neutral placeholder. The line between the two halves is not a detail
+  a reader can skip, because the refused half is the *common* one: it is what
+  an OCR pipeline emits.
 - **The Crypt filter (7.4.10).** Decryption happens in
   [01-cos-and-object-model](01-cos-and-object-model.md) +
   [03-encryption](03-encryption.md) before bytes reach this crate. The name
@@ -335,7 +351,7 @@ identity.
 | 1 | Inflate + zlib wrapper + raw fallback | RFC 1950/1951 vectors pass (stored/fixed/dynamic); corpus of streams extracted from real PDFs decodes byte-equal to oracle output; any-prefix property holds under proptest (no panic, output is a prefix); `fuzz_inflate` running in CI; crate builds and tests green on wasm32-unknown-unknown | S |
 | 2 | Deflate encoder | proptest round-trip own deflate → own inflate == identity on arbitrary and structured inputs; external zlib (CI subprocess, ruling 9) inflates our output byte-equal; total corpus-stream size ≤ 1.2× zlib level 6; stored fallback proven on incompressible input | S |
 | 3 | Predictors + ASCIIHex/ASCII85/RunLength + LZW | Decode parity vs `mutool` stream extraction on fixture streams; PNG all five row filters and TIFF at bpc 1/2/4/8/16 pinned by vectors; `/EarlyChange` 0 and 1 both fixture-pinned; every leniency case in Design has a fixture; fuzz targets per decoder | S |
-| 4 | Chain driver + capability surface + hardening | `decode_chain` drives filter/params arrays incl. null entries and post-codec tails; `Unsupported(Capability)` returned for JBIG2/JPX/arithmetic/12-bit probes; 01-cos decodes compressed xref (7.5.8) and object streams (7.5.7) through this crate on real files; 24h aggregate fuzz, zero findings — **wave 1 done, 09-writing unblocked** | S |
+| 4 | Chain driver + capability surface + hardening | `decode_chain` drives filter/params arrays incl. null entries and post-codec tails; `Unsupported(Capability)` returned for JPX/arithmetic/12-bit probes, and for a JBIG2 stream **whose regions this build cannot decode** (see the amendment below); 01-cos decodes compressed xref (7.5.8) and object streams (7.5.7) through this crate on real files; 24h aggregate fuzz, zero findings — **wave 1 done, 09-writing unblocked** | S |
 | 5 | JPEG baseline | SOF0/SOF1 8-bit gray + YCbCr with all common subsamplings; restart handling incl. corrupt-resync fixture; `pdfcmp` within per-fixture perceptual tolerance of libjpeg-turbo (`djpeg` subprocess) across the JPEG fixture set; `fuzz_jpeg` in CI | M |
 | 6 | JPEG progressive + CMYK/YCCK/APP14 | Progressive matrix (spectral × successive-approximation) fixtures pass; APP14 transform cases 0/1/2 and RGB-component-ID case decode correctly; inverted-Photoshop-CMYK fixture matches oracle; plane allocation respects `Limits`; truncated-scan fixture yields partial image + warning | M |
 | 7 | CCITT G3 1D/2D + G4 | T.4/T.6 reference images decode exact; quirk matrix (`/K` sign, `/EncodedByteAlign`, `/BlackIs1`, absent `/Rows`, missing EOFB) fixture-pinned; damaged-row fixture recovers by replication with warning; parity vs `mutool` on scanned fixtures; `fuzz_fax` in CI — **wave 2 done, 08's image milestones unblocked** | M |
@@ -398,3 +414,27 @@ Rulings in [99-consistency](99-consistency.md) that bind this phase: 1
 (never panic), 2 (degrade, don't fail), 3 (evidence-driven capabilities), 8
 (leaf crates stay PDF-free), 9 (oracles are subprocesses), 10 (warnings
 carry provenance). See [PLAN.md](../PLAN.md) for lanes and checkpoints.
+
+## Amendment — August 2026: what the capability surface now asserts
+
+Milestone 4's exit criterion said `Unsupported(Capability)` is returned for a
+JBIG2 probe. That was a statement about a codec nobody had written, and it is
+no longer true as written, so it is corrected here rather than quietly relaxed
+in a test.
+
+`ImageCodec::Jbig2.capability()` still answers `Some(Capability::Jbig2)`, and
+deliberately. What changed is what the answer *means*. It used to mean "this
+crate will never decode these bytes". It now means "this crate may refuse
+these bytes, and when it does, that is the capability to report" — which is
+the same contract every other gated codec has, and the same thing the caller
+does with it: draw the neutral placeholder and name the codec.
+
+The distinction is worth the paragraph because the failure it guards against
+is specific. A JBIG2 stream carrying only a symbol dictionary and a text
+region decodes its page information segment perfectly well, finds no region to
+composite, and could hand back a blank white page as a success — which is
+indistinguishable from a correct decode of a blank scan, and strictly worse
+than the placeholder it replaced. So the refusal is not the absence of a
+feature; it is a feature, tested as one, in both directions: a file with *no*
+decodable region is refused, and a file with a generic region *beside* an
+undecodable symbol dictionary draws the region and reports the rest.
