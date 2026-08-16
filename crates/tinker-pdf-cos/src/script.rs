@@ -144,11 +144,18 @@ impl Budget {
     }
 
     /// Charges one step.
+    ///
+    /// The step that would exceed the limit is **refused rather than
+    /// recorded**, so `used <= limit` holds at every observable moment. The
+    /// obvious ordering -- add, then compare -- leaves `used` one past the
+    /// limit on the failing call, which makes "how much did this cost" a
+    /// number that can exceed what was allowed. The fuzz target asserts the
+    /// invariant, and found the other ordering on its first seed.
     fn step(&mut self) -> Result<(), ScriptError> {
-        self.used = self.used.saturating_add(1);
-        if self.used > self.limit {
+        if self.used >= self.limit {
             return Err(ScriptError::OutOfSteps);
         }
+        self.used += 1;
         Ok(())
     }
 
@@ -157,12 +164,15 @@ impl Budget {
     ///
     /// # Errors
     ///
-    /// [`ScriptError::OutOfSteps`] when the budget is exhausted.
+    /// [`ScriptError::OutOfSteps`] when the budget is exhausted. The budget is
+    /// left spent, not overrun.
     pub fn charge(&mut self, steps: u32) -> Result<(), ScriptError> {
-        self.used = self.used.saturating_add(steps);
-        if self.used > self.limit {
+        let next = self.used.saturating_add(steps);
+        if next > self.limit {
+            self.used = self.limit;
             return Err(ScriptError::OutOfSteps);
         }
+        self.used = next;
         Ok(())
     }
 
@@ -2529,6 +2539,26 @@ mod tests {
             let mut host = Fields::default();
             let _ = run_on(source, &mut host, "0");
         }
+    }
+
+    /// A budget that reports spending more than it allowed is a budget whose
+    /// arithmetic nobody can fold into a larger total. Found by the fuzz
+    /// target's own assertion, on its first seed: `step` used to add and then
+    /// compare, so the refusing call left `used` one past the limit.
+    #[test]
+    fn a_budget_is_never_overrun_by_the_step_it_refuses() {
+        let mut host = Fields::default();
+        let mut budget = Budget::new(4);
+        assert_eq!(
+            run("while (true) { }", "a", "0", &mut host, &mut budget),
+            Err(ScriptError::OutOfSteps)
+        );
+        assert_eq!(budget.used(), 4, "spent exactly what was allowed");
+        assert!(budget.is_spent());
+
+        let mut budget = Budget::new(10);
+        assert_eq!(budget.charge(20), Err(ScriptError::OutOfSteps));
+        assert_eq!(budget.used(), 10, "left spent, not overrun");
     }
 
     #[test]
