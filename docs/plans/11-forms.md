@@ -335,7 +335,127 @@ existing assertions.
 | Value encoding bugs (UTF-16BE, PDFDocEncoding edge cases) corrupt every interchange path at once | One text-string encoder shared with [09-writing](09-writing.md), tested against Annex D and UTF-16 vectors; round-trip assertions run on Unicode-value fixtures including CJK |
 | Scope creep toward the designer, flatten, or interchange — all adjacent, all tempting | Each is named in Non-goals with its owning home; ruling precedence in [99-consistency](99-consistency.md) outranks enthusiasm, same as every phase |
 
+## As built — the fill API, and the transaction primitive (August 2026)
+
+Recorded here rather than in a gap document because PRE-E in
+[the execution order](gaps/00-execution-order.md) has none: it is a
+prerequisite found by a cross-plan review, and it exists so that
+[27](gaps/27-form-calculations-decision.md) option A has something to build
+on.
+
+### Where the code actually lives
+
+Not where "Where the code lives" above says. The field model is
+`tinker-pdf-cos::form` (read-only), filling and appearance layout are
+`tinker-pdf-cos::fill`, and the mutating API is on
+`tinker_pdf_cos::DocumentEditor` in `edit.rs`. There is no `Form<'_>`
+handle and no `Document::form()`; the facade re-exports the editor and its
+result types, which satisfies ruling 11 without a second layer. `Field`
+carries `reference`, `name`, `kind`, `value`, `default`, `flags`,
+`widgets`, `options`, `max_len` and `default_appearance` — not `partial`,
+`alt_name` or `scripts`, and `FieldKind` is a plain enum rather than one
+carrying per-kind payloads.
+
+### What a fill can now say
+
+```rust
+impl DocumentEditor {
+    pub fn transaction<T, E>(
+        &mut self,
+        body: impl FnOnce(&mut DocumentEditor) -> Result<T, E>,
+    ) -> Result<T, E>;
+
+    pub fn fill_field(&mut self, name: &str, value: &str)
+        -> Result<Vec<SkippedWidget>, FillError>;
+
+    pub fn set_field_values(&mut self, values: &[(&str, &str)])
+        -> Result<Vec<SkippedWidget>, FillRejection>;
+
+    pub fn set_field_value(&mut self, name: &str, value: &str) -> bool;
+    pub fn set_checkbox(&mut self, name: &str, on: bool) -> bool;
+    pub fn select_radio(&mut self, name: &str, option: &str) -> bool;
+    pub fn reset_form(&mut self) -> Vec<SkippedWidget>;
+}
+```
+
+`FillError` is `NoSuchField | ValueRefused | FieldUnreadable`, and every
+variant means nothing was written. It stands in for the plan's `TooLong`,
+`NotAnOption`, `ReadOnly` and `ReadOnlyKind`, which are one refusal with
+four causes as far as a caller can act on them; `fill::accepts` is where
+the distinction lives, and splitting the enum is a change to make when
+something needs it rather than in anticipation.
+
+`SetOutcome` does not exist. What it was for — telling the caller what the
+fill actually did — is the `Vec<SkippedWidget>`, and
+`requires_incremental` is not computed: signature fields are not read yet
+(milestone 4 is outstanding), so the engine cannot tell a document that
+must be saved incrementally from one that need not be.
+
+### The transaction primitive
+
+`transaction` snapshots the editor's whole mutable state — the overlay,
+the deleted set, the object-number counter and the page order, which is
+all four of `DocumentEditor`'s mutable fields — runs the body, and
+restores on `Err`. A closure rather than `begin`/`commit`/`rollback`
+because the failure this exists to prevent is silent: there is no way to
+leave the scope without either committing or rolling back. It nests, and
+the snapshot copies what has been edited rather than what is being
+edited, because the document underneath is immutable behind an `Arc`.
+
+**Under a rollback the object-number counter is restored.** The reasoning
+is on the field itself in `edit.rs` and is worth repeating: numbers taken
+inside a rolled-back transaction are never written, so leaving the counter
+advanced leaks one per allocation for the editor's lifetime, and each gap
+splits the appended cross-reference table into another subsection (7.5.4)
+and lifts `/Size` — a file that grows on every *failed* edit. The cost is
+that a number is reused, so an `ObjRef` handed out inside a rolled-back
+transaction is void and a later allocation may give it to something else.
+Do not hold one across the boundary.
+
+### What a widget without a `/Rect` does
+
+12.5.2 Table 164 makes `/Rect` required for every annotation, so a widget
+lacking one is a damaged file rather than a widget with nothing to draw.
+Ruling 2 degrades rather than failing, so the value is written, every
+widget that can be drawn is drawn, and the rest come back as typed
+`SkippedWidget`s naming the object (ruling 10). What ruling 2 does not
+licence is silence, and silence is what was there: a bare `continue` in
+the widget loop, with the function still returning `true`. A field on two
+pages therefore came out with one appearance regenerated and one stale,
+reported as success — [16-build-sequence](16-build-sequence.md)'s "a file
+that looks filled and is wrong", one level below where gap 27 looks for
+it.
+
+`set_field_value` keeps its `bool` and its meaning is now honest: `true`
+only when the field applied whole, `false` having changed nothing. A
+boolean cannot say "partly", and the answer it used to give was `true`.
+
+### What gap 27 should call
+
+```rust
+editor.set_field_values(&[("total", "42.00"), ("vat", "8.40")])
+```
+
+Every field or none: the first refusal rolls back the ones before it and
+returns `FillRejection { field, reason }` naming which (12.7.3.2's fully
+qualified name) and why. `Ok` carries the widgets across all the fields
+that could not be drawn, in the order given — a report, not a failure, and
+a caller that wants all-or-nothing over that too checks `is_empty()`.
+
+For anything a calculation does beyond writing field values — a checkbox
+it also toggles, an object it also writes — wrap the lot:
+
+```rust
+editor.transaction(|tx| {
+    tx.set_field_values(&updates).map_err(Error::Field)?;
+    tx.set_checkbox("paid", true).then_some(()).ok_or(Error::Checkbox)
+})
+```
+
+A script is untrusted input from a document (gap 27's own words), so the
+interpreter's failure path is the common one, not the rare one.
+
 ---
 
-Rulings 1, 9, 10 and 11 in [99-consistency](99-consistency.md) bind this phase;
-the master map is [PLAN.md](../PLAN.md).
+Rulings 1, 2, 9, 10 and 11 in [99-consistency](99-consistency.md) bind this
+phase; the master map is [PLAN.md](../PLAN.md).

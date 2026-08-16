@@ -390,6 +390,45 @@ and milestone 1 is deliberately front-loaded because every other row stacks on i
 | Graft-map merge drops document-level structures users notice (AcroForm collisions, tagged structure) | Same policy Tinker shipped with MuPDF: documented limits with structured warnings, fixtures that prove the limit is known (forms, tagged PDF), field renaming tracked in [11-forms](11-forms.md) |
 | The editor API ossifies before Tinker's real editing UX exercises it | Phase runs post-integration by design: Tinker's ported annotation/page-op/redaction tests are written against this API as it lands, and the plans are living documents — API friction gets written down and fixed here, not worked around there |
 
+## As built — the editor, August 2026
+
+The overlay is real and behaves as designed; four things about its *interface*
+are not what the sketch above says, and each is written down because a caller
+reading the plan would otherwise look for something that does not exist.
+
+1. **There is no `edit()` gate and no `EditorBusy`.**
+   `DocumentEditor::new(Arc<CosDocument>)` is the constructor and any number of
+   editors may exist over one document. Exclusivity was there to protect a
+   mutable store; there is no mutable store to protect — the document is
+   immutable behind an `Arc` and every editor accumulates its own overlay — so
+   the flag would have guarded nothing. Milestone 1's "second `edit()` returns
+   `EditorBusy`" is therefore not a criterion this build can meet, and it is
+   struck rather than pretended.
+2. **There is no `ChangeSet` and no `commit(self)`.** `save(&self,
+   &WriteOptions)` produces the bytes directly, in either mode, and the editor
+   survives it — so a caller can save incrementally and then save again. The
+   change-set was a handoff to a writer that lives in the same crate and reads
+   the overlay itself; the intermediate type would only have copied it.
+   `abort(self)` is `drop`.
+3. **The overlay is three fields, not one map of `Slot`.** `overlay:
+   HashMap<u32, Written>` carries replacements and additions, `deleted:
+   HashSet<u32>` carries deletions — a deleted object is *removed* from the
+   overlay rather than marked in it, so the two cannot be collapsed — and
+   `page_order: Option<Vec<ObjRef>>` carries page surgery, which is `/Kids`
+   rewriting deferred to save time rather than object writes made eagerly.
+   Together with `next` that is the whole of the editor's mutable state, which
+   matters because it is exactly what a rollback restores.
+4. **`transaction` is where `commit`/`abort` landed.** Added by PRE-E:
+   `transaction(|tx| ...)` restores all four fields on an `Err` return, so "this
+   edit applies wholly or not at all" is expressible without a session type.
+   Milestone 1's "`abort` leaves the file untouched" is met by it, and the
+   reasoning for restoring the object-number counter is recorded in
+   [11-forms](11-forms.md) beside the fill API that needed it.
+
+There is no `diagnostics: Vec<EditWarning>` channel either. Operations that
+degrade return what they degraded — `Vec<SkippedWidget>` from a fill — rather
+than appending to a sink the caller has to remember to drain.
+
 ---
 
 Sibling context: [06-content-and-text](06-content-and-text.md) owns the interpreter and
