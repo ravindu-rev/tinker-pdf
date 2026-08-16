@@ -1430,6 +1430,29 @@ mod tests {
         assert!(!editor.is_dirty(), "a refused edit changes nothing");
     }
 
+    /// 7.5.5 Table 15: `/Prev` names the previous cross-reference *section*.
+    /// Naming the end of the file instead leaves every object the update did
+    /// not carry unreachable — and the reader hides it, because a document it
+    /// cannot walk falls to the repair scanner and finds the objects anyway.
+    /// So the assertion is on the **ladder level**, not on the content: every
+    /// page-operation test in this file reads correctly either way.
+    #[test]
+    fn an_incremental_save_chains_to_the_table_it_updates() {
+        let mut editor = DocumentEditor::new(document(3));
+        assert!(editor.delete_page(1));
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        assert_eq!(
+            saved.ladder_level(),
+            crate::LadderLevel::Trust,
+            "the update was walked, not rescanned: {:?}",
+            saved.warnings()
+        );
+        assert!(saved.warnings().is_empty(), "{:?}", saved.warnings());
+        assert_eq!(saved.revisions().len(), 2, "two revisions, chained");
+        assert_eq!(pages::count(&saved), 2);
+    }
+
     #[test]
     fn an_incremental_save_keeps_the_original_bytes() {
         let doc = document(2);

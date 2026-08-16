@@ -585,10 +585,17 @@ pub fn incremental_update(
         .unwrap_or(0);
     let size = changed.max_number().saturating_add(1).max(existing);
     trailer.insert(Name::SIZE, Object::Int(i64::from(size)));
-    trailer.insert(
-        Name::PREV,
-        Object::Int(i64::try_from(previous_startxref).unwrap_or(0)),
-    );
+    // 7.5.5 Table 15: /Prev names the previous cross-reference *section*. A
+    // document with none — one the repair scanner rebuilt — gets no /Prev at
+    // all, rather than a `/Prev 0` that sends every reader to byte zero.
+    if previous_startxref > 0 {
+        trailer.insert(
+            Name::PREV,
+            Object::Int(i64::try_from(previous_startxref).unwrap_or(0)),
+        );
+    } else {
+        trailer = crate::edit::without(&trailer, Name::PREV);
+    }
 
     out.extend_from_slice(b"trailer\n");
     write_dict(&mut out, &trailer, names, 0);
@@ -1056,10 +1063,18 @@ mod tests {
         trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
 
         let original = rewrite(&objects, &trailer, &WriteOptions::default(), &table);
+        let base = crate::CosDocument::open(original.clone()).expect("the base opens");
 
         let mut changed = ObjectSet::new();
         changed.insert(2, Object::Int(42));
-        let updated = incremental_update(&original, &changed, &trailer, 0, &table, false);
+        let updated = incremental_update(
+            &original,
+            &changed,
+            &trailer,
+            base.last_startxref(),
+            &table,
+            false,
+        );
 
         assert!(
             updated.starts_with(&original),
@@ -1077,6 +1092,27 @@ mod tests {
             doc.get(ObjRef::new(2, 0)).ok().as_deref(),
             Some(&Object::Int(42))
         );
+        // And the object the update did *not* carry, which is what a broken
+        // chain loses: reached through the table rather than by rescanning.
+        assert_eq!(doc.ladder_level(), crate::LadderLevel::Trust);
+        assert!(doc.catalog().is_some(), "the earlier revision is reachable");
+    }
+
+    /// A document the repair scanner rebuilt has no section to chain to, and
+    /// `/Prev 0` would send a reader to byte zero rather than saying so.
+    #[test]
+    fn an_update_over_an_unchainable_document_writes_no_prev() {
+        let table = names();
+        let original =
+            b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let mut changed = ObjectSet::new();
+        changed.insert(2, Object::Int(42));
+        let mut trailer = Dict::new();
+        trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
+
+        let updated = incremental_update(&original[..], &changed, &trailer, 0, &table, false);
+        let text = String::from_utf8_lossy(&updated);
+        assert!(!text.contains("/Prev"), "no section to name: {text}");
     }
 
     #[test]

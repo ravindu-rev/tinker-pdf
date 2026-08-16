@@ -364,6 +364,8 @@ impl CosDocument {
             if revisions.is_empty() {
                 revisions.push(Revision {
                     byte_range: 0..buffer.len() as u64,
+                    // Nothing readable to chain to: the tables were discarded.
+                    xref_at: 0,
                     trailer: trailer.clone(),
                 });
             }
@@ -560,11 +562,24 @@ impl CosDocument {
     }
 
     /// The offset of the most recent cross-reference section, which an
-    /// incremental update chains to through `/Prev`.
+    /// incremental update chains to through `/Prev`. Zero when there is none
+    /// to chain to — a document the repair scanner rebuilt.
+    ///
+    /// This returned `byte_range.end` — the byte just past the last `%%EOF` —
+    /// which is not a cross-reference section and is never at the same offset
+    /// as one. Every incremental update this engine wrote therefore published
+    /// a `/Prev` that no reader could follow, so **every object the update did
+    /// not itself carry became unreachable**: a filled form reopened with its
+    /// widgets missing, a rotated page with no content. Nothing caught it
+    /// because the reader recovers — it falls to the repair scanner and finds
+    /// the objects by scanning — and only when the damage is bad enough to
+    /// trigger the fall. A file whose catalog and pages happened to be in the
+    /// update stayed at [`LadderLevel::Trust`] and quietly read the rest as
+    /// null.
     pub fn last_startxref(&self) -> u64 {
         self.revisions
             .first()
-            .map_or(0, |revision| revision.byte_range.end)
+            .map_or(0, |revision| revision.xref_at)
     }
 
     /// The name table, so a writer emits the same symbols this document read.

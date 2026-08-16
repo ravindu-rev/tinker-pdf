@@ -169,6 +169,16 @@ pub struct Revision {
     /// past this revision's `%%EOF`. That is exactly the byte range a
     /// signature covers and exactly what "save the original revision" writes.
     pub byte_range: Range<u64>,
+    /// Where this revision's cross-reference section starts (7.5.4, 7.5.8),
+    /// after any header shift has been corrected for — the offset its own
+    /// `startxref` names, and the one the *next* revision's `/Prev` must name.
+    ///
+    /// Distinct from `byte_range.end` on purpose: they differ by the size of
+    /// the section itself plus the trailer, and an update that chains to the
+    /// end of the file instead of to the table leaves every object of every
+    /// earlier revision unreachable. Zero when the revision was synthesized by
+    /// the repair scanner, which means there is no section to chain to.
+    pub xref_at: u64,
     /// The trailer dictionary this revision published.
     pub trailer: Dict,
 }
@@ -320,10 +330,10 @@ impl Walker<'_> {
                 sink.warn(raw, WarningKind::XrefPrevCycle);
                 break;
             }
-            let Some(section) = self
+            let Some((found_at, section)) = self
                 .candidates(raw)
                 .into_iter()
-                .find_map(|at| self.section(at, sink))
+                .find_map(|at| self.section(at, sink).map(|section| (at, section)))
             else {
                 sink.warn(
                     raw,
@@ -360,6 +370,7 @@ impl Walker<'_> {
 
             self.revisions.push(Revision {
                 byte_range: 0..section.end,
+                xref_at: found_at,
                 trailer: section.trailer,
             });
         }
