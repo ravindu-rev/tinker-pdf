@@ -686,9 +686,9 @@ may refuse these bytes", not "this crate will never decode them".
 | Adding `Warning` or `Capability` variants is a public API change with exhaustive match sites | The compiler catches the filters-crate sites; check whether any consumer maps `Warning` with a wildcard arm, which would swallow the new ones — gap 17's finding |
 | An `As built` that reads as "JPX works now" | Milestone 8's last exit criterion is a number about 19 files, and the `As built` must say it is a claim about 19 files |
 
-## Progress — 16 August 2026
+## Progress — 17 August 2026
 
-**Milestones 0 to 5 have landed**, each in its own commit and each recorded in
+**Milestones 0 to 6 have landed**, each in its own commit and each recorded in
 its own section below. `As built` is deliberately not written yet; it belongs
 to whoever finishes milestone 8.
 
@@ -954,3 +954,126 @@ same coefficients through the same placement.
 - Subsampled components are replicated to the reference grid rather than
   filtered, because `opj_decompress` replicates and gate 1's byte-identity is
   only reachable if the two agree. `subsampled-hand-built` is the seed.
+
+### Milestone 6 — the colour pipeline (17 August 2026)
+
+**Gate 1 now covers three components and subsampling, and is still
+byte-identical.**
+
+| Gate | What against what | Measured |
+| --- | --- | --- |
+| 1 | Reversible 5/3 greyscale against `opj_decompress` | 0 of 3 287 samples differ, eleven fixtures — unmoved |
+| 1 | Reversible 5/3 **RGB with the RCT** against the source image | **0 of 9 477** samples differ, nine fixtures |
+| 1 | **Subsampled** components against `opj_decompress -upsample` | **0 of 13 131** samples differ, three fixtures |
+| 2 | Fixed-point 9/7 against an `f64` reference of F.3.8.2 | 0 of 2 454 differ — unmoved |
+| 2 | Fixed-point **ICT** against an `f64` reference of G.2.2 | **0** samples differ at all, six fixtures |
+| 3 | 9/7 greyscale against `opj_decompress` | 0 past threshold, worst 1 — unmoved |
+| 3 | 9/7 **RGB with the ICT** against `opj_decompress` | **0 of 6 126** past the threshold; **5** samples differ at all, worst **one** level |
+
+The RCT extending gate 1 rather than getting a gate of its own was the plan's
+call and it was the right one: it is the only thing in the repository that can
+see G.2.1's two chrominance terms transposed, because a forward transform with
+the same mistake round-trips perfectly.
+
+**The ICT reuses `mul_q24` and the wavelet's Q24, and the test says so.**
+`g2_ict_constants_are_recomputed_not_restated` asserts `QC == 24` alongside the
+four recomputations, so a later reader who gives the colour transform a format
+of its own fails a test rather than merely disagreeing with a paragraph. The
+four constants are `round(1.402 * 2^24)`, `round(0.344136 * 2^24)`,
+`round(0.714136 * 2^24)` and `round(1.772 * 2^24)`, each with a residual under
+2^-25 — the bound the plan's error analysis assumes. The largest product the
+ICT can form from a clamped plane is 2^54.8, comfortably inside the 2^60 the
+wavelet's `debug_assert` already holds.
+
+**Two defects were found by the oracle that nothing else in the repository
+could see, and neither was the colour pipeline's.** Both are milestone 3 and 4
+code that only a three-component lossy stream from `opj_compress` reaches.
+
+1. **The bit-plane count was `passes.div_ceil(3)`.** That is right exactly
+   when a code-block ends on a cleanup pass — `passes = 1, 4, 7, ...` — and the
+   in-tree test encoder emits `3 * planes - 2` passes *by construction*, so
+   every round trip in the crate took the one case that worked. For any other
+   count it is one plane short and `pass_at` subtracts past zero: a panic in a
+   debug build, and in a release one a shift masked to `plane & 31` writing a
+   magnitude bit in the wrong place. It is now `(passes - 1).div_ceil(3) + 1`,
+   and `the_pass_sequence_covers_every_plane_at_every_pass_count` walks all 91.
+2. **E.1.1.2's reconstruction point was applied at the code-block's lowest
+   plane for every coefficient.** It is per *coefficient*: one that became
+   significant in a cleanup pass and never met a refinement pass is known only
+   to that plane, where its neighbours are known one further down.
+   Reconstructing them all at the bottom puts the first kind a quarter of its
+   own magnitude low — a soft dark patch on an otherwise correct picture.
+   Tier-1 now records the depth each coefficient reached (`half_planes`) and
+   the dequantiser spends it as `2q + 2^h` rather than `2q + 1`. On a complete
+   code-block `h` is zero everywhere and the arithmetic is unchanged, which is
+   why no existing fixture moved.
+
+`opj_decompress` disagreed by **20 levels of 255 over 76 of 663 samples** on
+`c2-q20` before the two were fixed. No unit test, and no `f64` reference, saw
+either: the second is common-mode against gate 2 by construction, since both
+sides read the same dequantised coefficients.
+
+**Injection, and what only a comparison caught.** Six defects, each built, each
+run against the crate with `--no-fail-fast`:
+
+| Injected | Caught by |
+| --- | --- |
+| The RCT's two chrominance terms swapped | three unit tests **and** gate 1 (RGB and subsampled) |
+| G.2.2's two green constants transposed at the point of use | **gate 2 and gate 3 only** — no unit test |
+| G.1's level shift applied before G.2 rather than after | four unit tests **and** gates 1 and 3 |
+| Subsampling by nearest rather than by replication | **the subsampling oracle gate only** — no unit test |
+| The old `passes.div_ceil(3)` plane count | gate 3 and two unit tests |
+| E.1.1.2's half at a per-block depth | **gate 3 only** — not gate 2, not one of 246 unit tests |
+
+The last row is the sharpest statement in this milestone of what the oracle
+buys, and it is sharper than milestone 5's: gate 2 cannot see it *in principle*
+rather than by luck, because the `f64` reference reads the same dequantised
+coefficients through the same `Arith::dyadic` and therefore inherits the error.
+
+**`pclr`, `cmap` and `cdef` are applied, not recorded.** `opj_compress` cannot
+write a `pclr` box, so there is no oracle for a palette and the fixtures are
+hand-built — which is not second-best here: a palette is a lookup table, its
+answer is derived by arithmetic, and that is exactly what source (a) of this
+plan exists to supply. `a_palette_image_decodes_to_colours_rather_than_indices`
+builds a 256-entry three-column palette over a codestream whose samples are all
+128 and demands `(128, 127, 32)`, so a build that ignored the box (giving grey)
+and one that read the wrong column both fail. A `cdef` opacity channel comes
+back beside the colour ones as `JpxImage::opacity` rather than interleaved,
+carrying whether type 2 named it — **un-multiplying it is not done here**,
+because that is `/SMaskInData` 2's rule and it needs the image dictionary.
+
+**One `Refusal::NotBuilt` survives, and it is a real one.** Every stage this
+crate owns now exists, so the seam moved to the one thing no milestone has
+specified: channels of *differing* bit depth, which `JpxImage`'s single
+precision and `/BitsPerComponent` have no answer for. Scaling an 8-bit channel
+to sit beside a 12-bit one is a choice about the picture's contrast. The
+`unfinishable()` fixture in `tests::headers` is now three components at 8, 8
+and 12 bits — its third home, and the note there says the pattern out loud: an
+assertion about what is missing has a half-life.
+
+### What milestone 7 needs
+
+- **The PDF boundary, and it is the first milestone outside this crate.**
+  `crates/tinker-pdf/src/resources.rs` still hands JPX bytes back as
+  `ChainOutput::EncodedImage` and draws the placeholder; `jpx_samples(...)`
+  beside `ccitt_samples` and `jbig2_samples` is the shape, one entry point so
+  the inline and XObject paths cannot drift.
+- **`JpxImage` already carries what 8.9.5.4 needs** and nothing it must not:
+  `components`, `precision`, `colour` and `opacity` with its `premultiplied`
+  flag. `/SMaskInData` does not appear in this crate and must not start to.
+  Un-premultiplying for `/SMaskInData` 2 is `resources.rs`'s, and the flag is
+  there so it can be done rather than guessed.
+- **`JpxColour::Sycc` and `EYcc` are reported, never converted.** A codestream
+  can declare them with `mct` clear, meaning the samples *are* luma and
+  chrominance and PDF has no space to name. Ruling 2 says report; deciding what
+  a PDF consumer does with it is 8.9.5.4's and `tinker-pdf-color`'s.
+- **`JpxColour::IccProfile` likewise**, and the component count is the only
+  thing this crate reads from a method-2 `colr`.
+- A palette makes `JpxImage::components` **disagree with the codestream's**
+  component count, which is the case 8.9.5.4's "the component count must agree
+  or the image is refused" rule has to be written against: it is the *output*
+  channel count that must agree with `/ColorSpace`.
+- Component precisions between 9 and 15 reach `JpxImage::precision` as
+  themselves, where `/BitsPerComponent` admits only 1, 2, 4, 8 and 16. Deciding
+  whether that is normalised at the boundary or refused there is 8.9.5.4's
+  call, not this crate's.

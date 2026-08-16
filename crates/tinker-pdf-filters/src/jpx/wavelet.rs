@@ -71,6 +71,7 @@
 //! pins the plan's own conservative 2^59.96 in a `debug_assert`.
 
 use super::codestream::{Codestream, Quant, QuantStyle};
+use super::colour;
 use super::tier2::{CodeBlock, Orientation, Subband, Tile};
 use super::Refusal;
 
@@ -201,6 +202,24 @@ pub(crate) trait Arith: Copy + Default {
     /// The integer sample this coefficient reconstructs to, before G.1's
     /// level shift.
     fn sample(self) -> i32;
+
+    /// G.2's inverse multiple component transform over one pixel's three
+    /// samples: the RCT for the reversible path, the ICT for the
+    /// irreversible one.
+    ///
+    /// It is a method of *this* trait rather than a free function because
+    /// A.6.1 ties the pairing to the transform -- the RCT rides with the 5/3
+    /// and the ICT with the 9/7 -- so the arithmetic that decoded the
+    /// coefficients has already chosen. Annex G's own equations are in
+    /// [`super::colour`]; what lives here is the width they run at.
+    ///
+    /// **It runs before G.1's level shift**, which is why it takes
+    /// coefficients rather than samples: G.2 is defined on the signed values
+    /// the wavelet produced, and shifting first offsets all three alike,
+    /// which the RCT's `Y0 - floor((Y1 + Y2) / 4)` turns into a green 64
+    /// levels low beside a red and a blue 64 high -- a uniform magenta cast
+    /// on a picture that is otherwise exactly right.
+    fn inverse_mct(y0: Self, y1: Self, y2: Self) -> (Self, Self, Self);
 }
 
 /// The reversible 5/3's arithmetic: exact integers, Q0, no fraction at all.
@@ -230,6 +249,15 @@ impl Arith for Exact {
     fn sample(self) -> i32 {
         self.0
     }
+
+    fn inverse_mct(y0: Self, y1: Self, y2: Self) -> (Self, Self, Self) {
+        let (r, g, b) = colour::inverse_rct(i64::from(y0.0), i64::from(y1.0), i64::from(y2.0));
+        (
+            Exact(clamp_i32(r)),
+            Exact(clamp_i32(g)),
+            Exact(clamp_i32(b)),
+        )
+    }
 }
 
 impl Arith for Fixed {
@@ -258,6 +286,18 @@ impl Arith for Fixed {
         // "Round to nearest" has three meanings and only one of them is a
         // specification.
         (self.0 + (1 << (Q - 1))) >> Q
+    }
+
+    fn inverse_mct(y0: Self, y1: Self, y2: Self) -> (Self, Self, Self) {
+        // Q12 in, Q12 out: `mul_q24` is the 9/7's own rounding and G.2.2's
+        // constants are at the 9/7's own QC. There is deliberately no second
+        // fixed-point format here.
+        let (r, g, b) = colour::inverse_ict(i64::from(y0.0), i64::from(y1.0), i64::from(y2.0));
+        (
+            Fixed(clamp_plane(r)),
+            Fixed(clamp_plane(g)),
+            Fixed(clamp_plane(b)),
+        )
     }
 }
 
@@ -545,15 +585,23 @@ fn clamp_dyadic(m: i64, e: i32, bound: i32, clamped: &mut bool) -> (i64, i32) {
 ///   need putting back where they belong.
 /// - `r = 0.5`, E.1.1.2's reconstruction point inside the quantisation
 ///   interval, which the standard leaves to the decoder. A coefficient that
-///   became significant is known to lie in `[q, q+1) * step`, and the
-///   midpoint is the choice OpenJPEG makes (its tier-1 carries an extra half
-///   bit from the plane a coefficient became significant on, and its
-///   dequantiser then halves the step size to pay for it). One that never
-///   became significant stays at zero rather than at half a step, which is
-///   the asymmetry a decoder that adds `r` unconditionally gets wrong.
+///   became significant is known to lie in one interval and the midpoint is
+///   the choice OpenJPEG makes. One that never became significant stays at
+///   zero rather than at half a step, which is the asymmetry a decoder that
+///   adds `r` unconditionally gets wrong.
+///
+///   **Which interval is per coefficient, not per code-block**, and that only
+///   shows on a truncated stream. A code-block whose passes stop part way
+///   down a plane leaves some coefficients known to the bottom and others
+///   known only to the plane they became significant on -- the ones the
+///   missing refinement pass would have narrowed. Adding the half at the
+///   block's lowest plane for all of them puts the second kind a quarter of
+///   its own magnitude low, which is a soft dark patch on a picture that is
+///   otherwise right. `CodeBlock::half_planes` is tier-1 recording the depth
+///   it reached for each, and `1 << h` below is what spends it.
 ///
 /// All three are dyadic, so the result is exact as `m * 2^e` with
-/// `m = +/-(2q + 1)(2048 + mu)` and `e = t - 12 + R_b - eps_b`.
+/// `m = +/-(2q + 2^h)(2048 + mu)` and `e = t - 12 + R_b - eps_b`.
 fn dequantise<A: Arith>(
     ctx: &BandContext<'_, '_>,
     block: &CodeBlock,
@@ -572,7 +620,7 @@ fn dequantise<A: Arith>(
             let mb = i32::from(quant.guard_bits) + i32::from(exponent) - 1;
             let truncated =
                 (mb - i32::from(block.zero_planes) - i32::from(block.planes)).clamp(0, 64);
-            // `(2q + 1)` carries a factor of two and `(2048 + mu)` carries
+            // `(2q + 2^h)` carries a factor of two and `(2048 + mu)` carries
             // 2^11, so the twelve below is the two of them together.
             let e = truncated - 12 + i32::from(ctx.precision) - i32::from(exponent);
             let scale = 2048 + i64::from(mantissa);
@@ -580,13 +628,19 @@ fn dequantise<A: Arith>(
             Ok(block
                 .coefficients
                 .iter()
-                .map(|&v| {
+                .enumerate()
+                .map(|(i, &v)| {
                     if v == 0 {
                         // Never significant: zero, not half a step.
                         return A::default();
                     }
+                    // The plane this coefficient's own interval bottoms out
+                    // at, which is the block's lowest only when the passes
+                    // ran all the way down for it.
+                    let half = block.half_planes.get(i).copied().unwrap_or(0);
                     let magnitude = i64::from(v.unsigned_abs());
-                    let m = (2 * magnitude + 1) * scale * i64::from(v.signum());
+                    let m =
+                        (2 * magnitude + (1i64 << half.min(62))) * scale * i64::from(v.signum());
                     let (m, e) = clamp_dyadic(m, e, bound, clamped);
                     A::dyadic(m, e)
                 })
@@ -753,6 +807,25 @@ fn write_band<A: Arith>(
     Ok(())
 }
 
+/// Which of Annex F's two filters a tile-component was coded with.
+///
+/// A.6.1 pairs the transform with the quantisation style and Table A.28
+/// permits only two combinations: the reversible 5/3 with no quantisation,
+/// the irreversible 9/7 with a scalar one. The mismatch is refused rather
+/// than resolved in favour of one of them, because either choice decodes --
+/// exactly the plausible-picture failure this codec is dangerous for.
+fn arithmetic(stream: &Codestream<'_>, tile: u16, component: usize) -> Result<bool, Refusal> {
+    let reversible = stream.style_for(tile, component).reversible;
+    let style = stream.quant_for(tile, component).style;
+    match (reversible, style) {
+        (true, QuantStyle::None) => Ok(true),
+        (false, QuantStyle::Derived | QuantStyle::Expounded) => Ok(false),
+        _ => Err(Refusal::Structure(
+            "a wavelet transform and a quantisation style Table A.28 does not pair",
+        )),
+    }
+}
+
 /// Reconstruct one tile-component, choosing the arithmetic Annex F's two
 /// filters need.
 ///
@@ -766,25 +839,83 @@ pub(crate) fn reconstruct(
     component: usize,
     clamped: &mut bool,
 ) -> Result<Plane, Refusal> {
-    let reversible = stream.style_for(tile.index, component).reversible;
-    let style = stream.quant_for(tile.index, component).style;
-    // A.6.1 pairs the transform with the quantisation style and Table A.28
-    // permits only the two combinations below: the reversible 5/3 with no
-    // quantisation, the irreversible 9/7 with a scalar one. The mismatch is
-    // refused rather than resolved in favour of one of them, because either
-    // choice decodes -- exactly the plausible-picture failure this codec is
-    // dangerous for.
-    match (reversible, style) {
-        (true, QuantStyle::None) => Ok(into_samples(ladder::<Exact>(
+    if arithmetic(stream, tile.index, component)? {
+        Ok(into_samples(ladder::<Exact>(
             stream, tile, component, clamped,
-        )?)),
-        (false, QuantStyle::Derived | QuantStyle::Expounded) => Ok(into_samples(ladder::<Fixed>(
+        )?))
+    } else {
+        Ok(into_samples(ladder::<Fixed>(
             stream, tile, component, clamped,
-        )?)),
-        _ => Err(Refusal::Structure(
-            "a wavelet transform and a quantisation style Table A.28 does not pair",
-        )),
+        )?))
     }
+}
+
+/// The first three components of one tile, reconstructed and passed through
+/// G.2's inverse component transform **before** they are rounded to integers.
+///
+/// Rounding first would be a second rounding site on the pixel path for the
+/// ICT's benefit alone, and the plan's error analysis has no term for it. The
+/// transform therefore runs in the plane's own arithmetic, which is also what
+/// `opj_decompress` does -- its irreversible path carries floats through the
+/// MCT and rounds once, at the level shift.
+fn transformed<A: Arith>(
+    stream: &Codestream<'_>,
+    tile: &Tile,
+    clamped: &mut bool,
+) -> Result<Vec<Plane>, Refusal> {
+    let mut planes = Vec::with_capacity(3);
+    for c in 0..3 {
+        planes.push(ladder::<A>(stream, tile, c, clamped)?);
+    }
+    colour::inverse_mct(&mut planes)?;
+    Ok(planes.into_iter().map(into_samples).collect())
+}
+
+/// Every component of one tile, with G.2's transform applied when the COD
+/// asked for it.
+///
+/// This is a tile-level entry point rather than a component-level one because
+/// the component transform is not a component's business: it reads three
+/// planes at once, and a caller that reconstructed them one at a time would
+/// have to hold them anyway and would be free to apply the transform in the
+/// wrong place.
+pub(crate) fn reconstruct_tile(
+    stream: &Codestream<'_>,
+    tile: &Tile,
+    clamped: &mut bool,
+) -> Result<Vec<Plane>, Refusal> {
+    let count = stream.siz.components.len();
+    if !stream.cod_for(tile.index).mct {
+        return (0..count)
+            .map(|c| reconstruct(stream, tile, c, clamped))
+            .collect();
+    }
+    if count < 3 {
+        return Err(Refusal::Structure(
+            "a multiple component transform on fewer than three components",
+        ));
+    }
+    let reversible = arithmetic(stream, tile.index, 0)?;
+    for c in 1..3 {
+        if arithmetic(stream, tile.index, c)? != reversible {
+            // A COC may give component 1 the 9/7 while component 0 keeps the
+            // 5/3, and then G.2 has no answer: the RCT is exact integers and
+            // the ICT is a float transform in fixed point, and there is no
+            // pixel the two share.
+            return Err(Refusal::Structure(
+                "a multiple component transform over components with different wavelets",
+            ));
+        }
+    }
+    let mut planes = if reversible {
+        transformed::<Exact>(stream, tile, clamped)?
+    } else {
+        transformed::<Fixed>(stream, tile, clamped)?
+    };
+    for c in 3..count {
+        planes.push(reconstruct(stream, tile, c, clamped)?);
+    }
+    Ok(planes)
 }
 
 /// The last rounding: one coefficient plane becomes one plane of integers.

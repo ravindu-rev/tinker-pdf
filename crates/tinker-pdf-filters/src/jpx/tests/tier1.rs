@@ -23,8 +23,9 @@
 //! So every row below is the standard's own number.
 
 use crate::jpx::tier1::{
-    initial_contexts, magnitude_refinement_context, sign_coding_context, zero_coding_context,
-    MAGNITUDE_REFINEMENT, RUN_LENGTH, SIGN_CODING, UNIFORM, ZERO_CODING,
+    initial_contexts, magnitude_refinement_context, pass_at, sign_coding_context,
+    zero_coding_context, Pass, MAGNITUDE_REFINEMENT, MAX_PASSES, RUN_LENGTH, SIGN_CODING, UNIFORM,
+    ZERO_CODING,
 };
 use crate::jpx::tier2::Orientation;
 use crate::mq::MqDecoder;
@@ -391,7 +392,7 @@ fn a_code_block_round_trips_through_all_three_passes() {
 
             let mut contexts = initial_contexts();
             let mut work = u64::MAX;
-            let (got, _) = decode_code_block(
+            let got = decode_code_block(
                 &data,
                 w as u32,
                 h as u32,
@@ -404,8 +405,15 @@ fn a_code_block_round_trips_through_all_three_passes() {
             .unwrap_or_else(|e| panic!("{orientation:?}, segmentation {segmentation}: {e:?}"));
 
             assert_eq!(
-                got, values,
+                got.coefficients, values,
                 "{orientation:?}, segmentation symbols {segmentation}"
+            );
+            // A block coded to the bottom knows every coefficient to plane
+            // zero, which is what makes E.1.1.2's half a per-block constant
+            // for everything except a truncated stream.
+            assert!(
+                got.half_planes.iter().all(|&h| h == 0),
+                "{orientation:?}: a fully coded block should know every                  coefficient to the lowest plane"
             );
         }
     }
@@ -447,10 +455,170 @@ fn a_segmentation_symbol_catches_a_decoder_out_of_step() {
 
     match got {
         Err(_) => {}
-        Ok((coefficients, _)) => assert_ne!(
-            coefficients, values,
+        Ok(decoded) => assert_ne!(
+            decoded.coefficients, values,
             "a corrupted block decoded to the original coefficients, which \
              means the corruption was in a byte nothing read"
         ),
+    }
+}
+
+/// A **truncated** code-block knows its coefficients to different depths, and
+/// tier-1 records which.
+///
+/// This is the other half of the pass-count finding, and it is the one that
+/// changes pixels rather than panicking. E.1.1.2 reconstructs a coefficient
+/// at the midpoint of the interval a decoder knows it lies in, and on a
+/// stream that stops part way down a plane that interval is **not** the same
+/// for every coefficient of the block: one that became significant in the
+/// last cleanup pass and never met a refinement pass is known only to that
+/// plane, where its neighbours are known a plane further down.
+///
+/// Reconstructing them all at the block's lowest plane puts the first kind a
+/// quarter of its own magnitude low — a soft dark patch on an otherwise
+/// correct picture, which is this codec's signature failure. `opj_decompress`
+/// disagreed by twenty levels of 255 on a three-component fixture truncated
+/// to a twentieth, and nothing else in the repository did.
+#[test]
+fn a_truncated_code_block_records_the_depth_each_coefficient_reached() {
+    use crate::jpx::tier1::{decode_code_block, encoder::encode_code_block};
+
+    let values: Vec<i32> = vec![5, -3, 0, 7, -1, 2, 6, 0, 0, -7, 1, 3, 4, 0, -2, 5];
+    let planes = 4;
+    let (data, passes) = encode_code_block(&values, 4, 4, planes, Orientation::Ll, false);
+
+    // Every pass count the encoder's stream can be cut to, including the ones
+    // that do not land on a plane boundary -- which is the case a rate
+    // allocator produces and the in-tree encoder never does.
+    for cut in 1..=passes {
+        let mut contexts = initial_contexts();
+        let mut work = u64::MAX;
+        let got = decode_code_block(
+            &data,
+            4,
+            4,
+            cut,
+            Orientation::Ll,
+            false,
+            &mut contexts,
+            &mut work,
+        )
+        .unwrap_or_else(|e| panic!("{cut} passes: {e:?}"));
+
+        let reached = (cut - 1).div_ceil(3) + 1;
+        assert_eq!(got.planes, reached, "{cut} passes");
+        for (i, &h) in got.half_planes.iter().enumerate() {
+            assert!(
+                u32::from(h) < reached,
+                "{cut} passes: coefficient {i} claims plane {h} of {reached}"
+            );
+        }
+        // Whether the last pass narrowed every coefficient or only some is
+        // the whole point: after a cleanup pass the block is uniform, and
+        // after a significance pass it is not.
+        if cut == passes {
+            assert!(
+                got.half_planes.iter().all(|&h| h == 0),
+                "a complete block knows everything to plane zero"
+            );
+        }
+    }
+
+    // And the shape the oracle caught: somewhere in that range there is a cut
+    // whose significant coefficients are known to **different** depths,
+    // because a significance pass narrows the coefficients it takes and
+    // leaves the ones already significant where they were. If no cut produced
+    // one, the per-coefficient record would be a per-block constant and the
+    // whole mechanism could be replaced by `planes`.
+    let mut uneven = 0;
+    for cut in 1..=passes {
+        let mut contexts = initial_contexts();
+        let mut work = u64::MAX;
+        let got = decode_code_block(
+            &data,
+            4,
+            4,
+            cut,
+            Orientation::Ll,
+            false,
+            &mut contexts,
+            &mut work,
+        )
+        .expect("a truncated decode");
+        let depths: Vec<u8> = got
+            .coefficients
+            .iter()
+            .zip(&got.half_planes)
+            .filter(|(v, _)| **v != 0)
+            .map(|(_, &h)| h)
+            .collect();
+        if depths.len() > 1 && depths.iter().any(|&h| h != depths[0]) {
+            uneven += 1;
+        }
+    }
+    assert!(
+        uneven > 0,
+        "no truncation produced coefficients known to different depths, so \
+         the per-coefficient record is not measuring anything"
+    );
+}
+
+/// D.2's pass sequence, walked at **every** legal pass count rather than at
+/// the ones the in-tree encoder happens to write.
+///
+/// This is the test milestone 6 had to add, and what it is worth saying is
+/// why nothing before it existed. The plane count was derived as
+/// `passes.div_ceil(3)`, which is right exactly when a code-block ends on a
+/// cleanup pass — `passes = 1, 4, 7, ...` — and the encoder in `writer` emits
+/// `3 * planes - 2` passes by construction, so **every round trip in this
+/// crate took the one case that worked.** A tier-2 stream from
+/// `opj_compress` does not: a lossy code-block stops wherever the rate
+/// allocator put it, and one that stops on a significance or refinement pass
+/// asked `pass_at` for a plane below zero.
+///
+/// So the assertion is not about a pass sequence being plausible. It is that
+/// the first pass is a cleanup on the top plane, that the planes descend by
+/// one every three passes and never below zero, and that the count of planes
+/// touched is the count the dequantiser is told — because that number is what
+/// E.1 multiplies a truncated code-block back up by, and a plane out there is
+/// a coefficient out by a factor of two.
+#[test]
+fn the_pass_sequence_covers_every_plane_at_every_pass_count() {
+    for passes in 1..=MAX_PASSES {
+        let planes = (passes - 1).div_ceil(3) + 1;
+        assert!(
+            planes <= 31,
+            "{passes} passes claims {planes} planes, past what an i32 holds"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        let mut last = u32::MAX;
+        for i in 0..passes {
+            let (pass, plane) = pass_at(i, planes);
+            assert!(
+                plane < planes,
+                "pass {i} of {passes} asked for plane {plane} of {planes}"
+            );
+            if i == 0 {
+                assert_eq!(pass, Pass::Cleanup, "the first pass is a cleanup");
+                assert_eq!(plane, planes - 1, "on the most significant plane");
+            }
+            assert!(
+                plane <= last,
+                "pass {i} of {passes} went back up to plane {plane}"
+            );
+            last = plane;
+            seen.insert(plane);
+        }
+        assert_eq!(
+            seen.len() as u32,
+            planes,
+            "{passes} passes touched {} planes but the dequantiser is told \
+             {planes}, and E.1 scales a truncated code-block by the \
+             difference",
+            seen.len()
+        );
+        // The lowest plane reached is zero exactly when the block was coded
+        // to the bottom, which is what `planes` claims by definition.
+        assert_eq!(last, 0, "{passes} passes did not reach the lowest plane");
     }
 }

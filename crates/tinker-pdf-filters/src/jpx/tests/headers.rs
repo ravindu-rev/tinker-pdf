@@ -14,17 +14,19 @@ fn parse(bytes: &[u8]) -> Result<codestream::Codestream<'_>, Refusal> {
 /// A codestream this build parses and still cannot finish.
 ///
 /// It has to be *chosen* rather than assumed, and the choice moves as the
-/// decoder grows. Until milestone 4 the minimal single-component fixture was
-/// the example, because nothing turned coefficients into samples; now that
-/// one decodes end to end and this is three components, which needs the
-/// colour pipeline that is milestone 6.
+/// decoder grows — this is its third home. Until milestone 4 it was the
+/// minimal single-component fixture, because nothing turned coefficients into
+/// samples. Milestone 5 moved it to a three-component stream, which needed the
+/// colour pipeline. That pipeline now exists, so what is left is the one thing
+/// no milestone has specified: three components at *different* bit depths,
+/// which `JpxImage`'s single precision has no answer for.
 ///
 /// The pattern is worth naming: a test asserting "not built yet" has a
 /// half-life, and the honest maintenance is to move it to whatever is
 /// genuinely next rather than to keep it passing.
 fn unfinishable() -> Vec<u8> {
     let spec = Spec {
-        components: vec![(8, false, 1, 1); 3],
+        components: vec![(8, false, 1, 1), (8, false, 1, 1), (12, false, 1, 1)],
         ..Spec::default()
     };
     spec.codestream(&[(0, &EMPTY_PACKETS_3C)])
@@ -211,21 +213,33 @@ fn colr_maps_what_it_can_and_refuses_what_it_cannot() {
     }
 }
 
-/// `pclr`, `cmap` and `cdef` are recorded rather than applied. Recording is
-/// what lets milestone 6 refuse a palette it cannot map instead of rendering
-/// the indices as grey.
+/// `pclr`, `cmap` and `cdef` are read in full rather than noted as present.
+///
+/// Milestone 6 applies them, so what this asserts moved with it: it used to
+/// be that the three booleans were set, and it is now that the palette's
+/// entries, the channel mapping and the channel types all come back with the
+/// values the file wrote. What the colour pipeline *does* with them is
+/// `tests::colour`'s.
 #[test]
-fn palette_and_channel_boxes_are_recorded_not_ignored() {
+fn palette_and_channel_boxes_are_read_not_ignored() {
     let mut jp2h = boxed(*b"ihdr", &[0, 0, 0, 4, 0, 0, 0, 4, 0, 1, 7, 7, 0, 0]);
+    // Two entries of one 8-bit channel: 0 and 255.
     jp2h.extend_from_slice(&boxed(*b"pclr", &[0, 2, 1, 7, 0, 255]));
     jp2h.extend_from_slice(&boxed(*b"cmap", &[0, 0, 1, 0]));
-    jp2h.extend_from_slice(&boxed(*b"cdef", &[0, 1, 0, 0, 0, 0]));
+    jp2h.extend_from_slice(&boxed(*b"cdef", &[0, 1, 0, 0, 0, 0, 0, 0]));
     jp2h.extend_from_slice(&boxed(*b"res ", &[]));
     let mut file = SIGNATURE.to_vec();
     file.extend_from_slice(&boxed(*b"jp2h", &jp2h));
     file.extend_from_slice(&boxed(*b"jp2c", &minimal()));
     let header = boxes::parse(&file).expect("valid").header.expect("jp2h");
-    assert!(header.palette && header.component_map && header.channel_definition);
+    let palette = header.palette.expect("pclr");
+    assert_eq!(palette.channels, vec![(8, false)]);
+    assert_eq!(palette.columns, vec![vec![0, 255]]);
+    assert_eq!(header.component_map.len(), 1);
+    assert_eq!(header.component_map[0].component, 0);
+    assert_eq!(header.component_map[0].column, Some(0));
+    assert_eq!(header.channel_definition.len(), 1);
+    assert_eq!(header.channel_definition[0].kind, 0);
 }
 
 /// `bpcc` carries the per-component precisions when `ihdr` says they differ.

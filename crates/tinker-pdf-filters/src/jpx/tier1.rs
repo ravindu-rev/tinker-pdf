@@ -91,7 +91,7 @@ const MAX_BIT_PLANES: u32 = 31;
 
 /// The most coding passes one code-block may declare: `3 * planes - 2`, since
 /// the first bit-plane carries only a cleanup pass.
-const MAX_PASSES: u32 = 3 * MAX_BIT_PLANES - 2;
+pub(crate) const MAX_PASSES: u32 = 3 * MAX_BIT_PLANES - 2;
 
 /// T.800 Table D.1: the zero-coding context for a neighbourhood.
 ///
@@ -296,6 +296,17 @@ pub(crate) struct Block {
     /// Whether this coefficient has been magnitude-refined already, which is
     /// Table D.4's first-refinement distinction and is *not* σ.
     refined: Vec<bool>,
+    /// The **lowest bit-plane whose magnitude bit was actually decoded** for
+    /// this coefficient, which is not the same as the lowest plane the
+    /// code-block reached.
+    ///
+    /// It exists because E.1.1.2's reconstruction point is defined on the
+    /// interval a decoder *knows* a coefficient lies in, and on a truncated
+    /// stream that interval differs per coefficient. One that became
+    /// significant in a cleanup pass and never met a refinement pass is known
+    /// only to `[2^p, 2^(p+1))`, and reconstructing it at the midpoint of the
+    /// bottom plane instead puts it a quarter of its own magnitude low.
+    known: Vec<u32>,
     /// π: coded in the significance propagation pass of the current
     /// bit-plane, and therefore skipped by this plane's cleanup pass. Cleared
     /// at the end of every cleanup pass.
@@ -313,6 +324,7 @@ impl Block {
             sigma: vec![false; n],
             negative: vec![false; n],
             refined: vec![false; n],
+            known: vec![0; n],
             visited: vec![false; n],
             magnitude: vec![0; n],
         }
@@ -388,6 +400,7 @@ impl Block {
         self.sigma[i] = true;
         self.negative[i] = negative;
         self.magnitude[i] |= 1 << plane;
+        self.known[i] = plane;
     }
 
     /// The signed coefficients, with the magnitude as `planes` bits.
@@ -406,6 +419,18 @@ impl Block {
                     m
                 }
             })
+            .collect()
+    }
+
+    /// Per coefficient, the plane whose *half* E.1.1.2 reconstructs at.
+    ///
+    /// Zero for anything insignificant, which the dequantiser never reads
+    /// because a coefficient that never became significant stays at zero
+    /// rather than at half a step.
+    pub(crate) fn half_planes(&self) -> Vec<u8> {
+        self.known
+            .iter()
+            .map(|&p| u8::try_from(p).unwrap_or(u8::MAX))
             .collect()
     }
 
@@ -489,6 +514,10 @@ impl Coder<'_, '_> {
                 let context = block.refinement(x, y);
                 let bit = self.decode(context);
                 block.refined[i] = true;
+                // The plane is now known whichever way the bit went: a zero
+                // narrows the interval exactly as a one does, and it is the
+                // interval E.1.1.2 reconstructs the midpoint of.
+                block.known[i] = plane;
                 if bit == 1 {
                     block.magnitude[i] |= 1 << plane;
                 }
@@ -580,9 +609,9 @@ pub(crate) fn decode_code_block(
     segmentation_symbols: bool,
     contexts: &mut MqContexts,
     work: &mut u64,
-) -> Result<(Vec<i32>, u32), Refusal> {
+) -> Result<Decoded, Refusal> {
     if width == 0 || height == 0 || passes == 0 {
-        return Ok((Vec::new(), 0));
+        return Ok(Decoded::default());
     }
     if passes > MAX_PASSES {
         // T.800's own arithmetic, not an invented cap: a code-block carries
@@ -592,9 +621,23 @@ pub(crate) fn decode_code_block(
             "more coding passes than any legal bit-plane count allows",
         ));
     }
-    // The first pass is a cleanup on the most significant plane and the rest
-    // come in threes, so `passes` fixes the plane count.
-    let planes = passes.div_ceil(3);
+    // The first pass is a cleanup on the most significant plane and every
+    // plane below it carries three, so `passes = 1 + 3(planes - 1)` and this
+    // is that inverted — rounding **up**, because a truncated stream stops
+    // part way through a plane and the plane it stopped inside was still
+    // decoded.
+    //
+    // `passes.div_ceil(3)` is the plausible-looking wrong answer and it was
+    // here until milestone 6. It agrees for `passes = 1, 4, 7, ...` — a
+    // code-block that ends on a cleanup pass, which is every code-block the
+    // in-tree test encoder writes, because it encodes `3 * planes - 2` passes
+    // by construction. For every other count it is one plane short, and
+    // `pass_at` then subtracts past zero: a panic in a debug build and, in a
+    // release one, a shift masked to `plane & 31` writing a coefficient bit
+    // in the wrong place. A picture, in other words. It took a lossy
+    // three-component stream from `opj_compress` to produce a code-block that
+    // stops on a significance or refinement pass.
+    let planes = (passes - 1).div_ceil(3) + 1;
     let area = u64::from(width) * u64::from(height);
 
     // D.2: the contexts are reset at the start of every code-block. `reset`
@@ -619,7 +662,25 @@ pub(crate) fn decode_code_block(
             Pass::Cleanup => coder.cleanup_pass(&mut block, plane)?,
         }
     }
-    Ok((block.coefficients(), planes))
+    Ok(Decoded {
+        coefficients: block.coefficients(),
+        half_planes: block.half_planes(),
+        planes,
+    })
+}
+
+/// What one code-block decode yields.
+///
+/// `half_planes` rides beside the coefficients rather than being derived from
+/// `planes` because it **cannot** be: on a truncated stream two coefficients
+/// of the same code-block are known to different depths, and E.1.1.2's
+/// reconstruction point is a property of each one's own interval.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Decoded {
+    pub(crate) coefficients: Vec<i32>,
+    pub(crate) half_planes: Vec<u8>,
+    /// How many magnitude bit-planes the passes covered.
+    pub(crate) planes: u32,
 }
 
 /// Spends `n` from [`MAX_JPX_WORK`]. Spent and never refunded — see [`super`].
@@ -680,7 +741,7 @@ fn decode_one(
     contexts: &mut MqContexts,
     work: &mut u64,
 ) -> Result<(), Refusal> {
-    let (coefficients, planes) = decode_code_block(
+    let decoded = decode_code_block(
         &block.data,
         block.width(),
         block.height(),
@@ -690,8 +751,9 @@ fn decode_one(
         contexts,
         work,
     )?;
-    block.coefficients = coefficients;
-    block.planes = u8::try_from(planes).unwrap_or(u8::MAX);
+    block.coefficients = decoded.coefficients;
+    block.half_planes = decoded.half_planes;
+    block.planes = u8::try_from(decoded.planes).unwrap_or(u8::MAX);
     Ok(())
 }
 

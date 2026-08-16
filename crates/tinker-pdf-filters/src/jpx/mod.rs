@@ -40,16 +40,18 @@
 //!
 //! # What is built
 //!
-//! Milestones 1 to 5 of the plan: the container, the codestream headers,
-//! tier-2, tier-1, dequantisation and both inverse wavelets — the reversible
-//! 5/3 and the irreversible 9/7 in fixed point. The colour pipeline is
-//! milestone 6 and is **not** here, so a multi-component codestream is
-//! refused with [`Refusal::NotBuilt`] rather than interleaved untransformed.
-//! That is the honest answer and it draws the placeholder (ruling 2); it is
-//! not a partial picture.
+//! Milestones 1 to 6 of the plan: the container, the codestream headers,
+//! tier-2, tier-1, dequantisation, both inverse wavelets — the reversible 5/3
+//! and the irreversible 9/7 in fixed point — and Annex G and I's colour
+//! pipeline. What is left is the *PDF boundary* (milestone 7), which is not a
+//! stage of this crate: ISO 32000-1 8.9.5.4's rules about `/ColorSpace`,
+//! `/BitsPerComponent` and `/SMaskInData` are `resources.rs`'s and no COS
+//! type crosses into here (ruling 8). So a JPX image still draws the
+//! placeholder in a rendered page, and this decoder is what stops doing so.
 
 pub(crate) mod boxes;
 pub(crate) mod codestream;
+pub(crate) mod colour;
 pub(crate) mod tier1;
 pub(crate) mod tier2;
 pub(crate) mod wavelet;
@@ -209,7 +211,15 @@ pub(crate) enum Refusal {
     /// rather than an error.
     SegmentationSymbol,
     /// The codestream parsed and this build has not got the stage that comes
-    /// next. Milestones 4 to 6: dequantisation, the inverse wavelet, colour.
+    /// next.
+    ///
+    /// It named dequantisation, then the inverse wavelet, then the colour
+    /// pipeline, as milestones 4 to 6 each removed the one below it. What is
+    /// left is the stage nobody has specified: reconciling components of
+    /// *different* bit depths into the single output precision `JpxImage`
+    /// carries and `/BitsPerComponent` is. Scaling an 8-bit channel to sit
+    /// beside a 12-bit one is a choice about the picture's contrast, and a
+    /// decoder that made it silently would be choosing.
     NotBuilt(&'static str),
 }
 
@@ -319,6 +329,26 @@ pub struct JpxImage {
     /// What the codestream says its colour space is. `/ColorSpace` on the
     /// image dictionary overrides this when it is present.
     pub colour: JpxColour,
+    /// The channel a `cdef` box typed as opacity (T.800 I.5.3.6), if the
+    /// file had one.
+    ///
+    /// It is carried out of the colour channels rather than interleaved with
+    /// them because what it is *for* is not this crate's decision:
+    /// `/SMaskInData` says whether it is ignored, used as a soft mask, or
+    /// used and un-multiplied, and that rule is ISO 32000-1 8.9.5.4's and
+    /// lives beside `/ColorSpace` (ruling 8).
+    pub opacity: Option<JpxOpacity>,
+}
+
+/// The opacity channel `cdef` named, and which of its two types it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JpxOpacity {
+    /// `cdef` type 2 rather than 1: the colour channels have already been
+    /// multiplied by this one. **They are not un-multiplied here** — that is
+    /// `/SMaskInData` 2's rule and it needs the image dictionary.
+    pub premultiplied: bool,
+    /// One sample per pixel, row-major, at [`JpxImage::precision`].
+    pub samples: Vec<u8>,
 }
 
 /// The colour space a codestream declares (T.800 Annex I `colr`), in this
@@ -399,68 +429,184 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
     // a code-block that has drifted is named here rather than handed on as
     // plausible coefficients.
     tier1::decode_tiles(&stream, &mut tiles)?;
-    // Milestone 6 is the colour pipeline, so a multi-component image still
-    // refuses here rather than interleaving planes the RCT has not been
-    // applied to. A single greyscale component needs none of it, which is
-    // exactly the shape the plan's gate 1 compares against `opj_decompress`.
-    if stream.siz.components.len() != 1 {
-        return Err(Refusal::NotBuilt("the colour pipeline"));
-    }
-    if stream.cod_for(0).mct {
-        return Err(Refusal::NotBuilt("the component transform"));
-    }
 
-    let component = &stream.siz.components[0];
-    let precision = component.precision;
+    // Annex I's boxes and Annex A's components together decide what a channel
+    // *is*, and that has to be settled before a single sample is written: a
+    // `pclr` palette turns one component into three or four channels, so the
+    // output is not the shape the codestream's component count suggests.
+    let header = container.header.as_ref();
+    let plan = colour::plan(header, &stream.siz.components)?;
+    let palette = header.and_then(|h| h.palette.as_ref());
+    let precision = plan.precision;
     if precision > 16 {
         return Err(Refusal::Precision(precision));
     }
+    if plan.colour.len() > MAX_JPX_COMPONENTS as usize {
+        return Err(Refusal::Budget("output colour channels"));
+    }
 
-    let width = stream.siz.xsiz.saturating_sub(stream.siz.xosiz);
-    let height = stream.siz.ysiz.saturating_sub(stream.siz.yosiz);
-    let mut samples =
-        vec![0u8; (width as usize) * (height as usize) * if precision > 8 { 2 } else { 1 }];
+    let width = stream.siz.width();
+    let height = stream.siz.height();
+    let stride = plan.colour.len();
+    let wide = usize::from(precision > 8) + 1;
+    // Re-spent here rather than trusted from `check_budget`, because a
+    // palette is exactly the thing that makes that earlier figure wrong: it
+    // was computed from the codestream's component count, and one component
+    // of indices can generate four channels. A `pclr` box is a few hundred
+    // bytes and it quadruples the output (ruling 1).
+    let channels = stride + usize::from(plan.opacity.is_some());
+    let bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|n| n.checked_mul(channels as u64))
+        .and_then(|n| n.checked_mul(wide as u64))
+        .ok_or(Refusal::Budget("output samples"))?;
+    if bytes > limits.max_output as u64 {
+        return Err(Refusal::Budget("the caller's output ceiling"));
+    }
+
+    let pixels = (width as usize) * (height as usize);
+    let mut samples = vec![0u8; pixels * stride * wide];
+    let mut opacity = plan.opacity.map(|_| vec![0u8; pixels * wide]);
 
     for tile in &tiles {
-        let mut plane = wavelet::reconstruct(&stream, tile, 0, clamped)?;
-        wavelet::level_shift(&mut plane, precision, component.signed);
-        for y in 0..plane.height {
-            for x in 0..plane.width {
-                let (px, py) = (plane.x0 + x, plane.y0 + y);
-                let (px, py) = (
-                    px.saturating_sub(stream.siz.xosiz),
-                    py.saturating_sub(stream.siz.yosiz),
-                );
-                if px >= width || py >= height {
-                    continue;
-                }
-                let value = plane.at(x, y);
-                let at = (py as usize) * (width as usize) + (px as usize);
-                if precision > 8 {
-                    #[allow(clippy::cast_sign_loss, reason = "clamped by level_shift")]
-                    let v = value as u32;
-                    samples[at * 2] = (v >> 8) as u8;
-                    samples[at * 2 + 1] = (v & 0xFF) as u8;
-                } else {
-                    #[allow(clippy::cast_sign_loss, reason = "clamped by level_shift")]
-                    let v = value as u32;
-                    samples[at] = v as u8;
-                }
-            }
+        // Every component of the tile at once, because G.2's transform reads
+        // three planes and applying it one plane at a time is not a thing
+        // that can be done.
+        let mut planes = wavelet::reconstruct_tile(&stream, tile, clamped)?;
+        for (c, plane) in planes.iter_mut().enumerate() {
+            let component = &stream.siz.components[c];
+            // G.1, and *after* G.2 rather than before it — which is what
+            // `reconstruct_tile` having already run makes true here.
+            wavelet::level_shift(plane, component.precision, component.signed);
+        }
+        let bounds = stream.siz.tile_bounds(u32::from(tile.index));
+        for (k, channel) in plan.colour.iter().enumerate() {
+            blit(
+                &planes,
+                &stream.siz,
+                bounds,
+                *channel,
+                palette,
+                Blit {
+                    out: &mut samples,
+                    stride,
+                    at: k,
+                    wide,
+                },
+            );
+        }
+        if let (Some(channel), Some(out)) = (plan.opacity, opacity.as_mut()) {
+            blit(
+                &planes,
+                &stream.siz,
+                bounds,
+                channel,
+                palette,
+                Blit {
+                    out,
+                    stride: 1,
+                    at: 0,
+                    wide,
+                },
+            );
         }
     }
 
     Ok(JpxImage {
         width,
         height,
-        components: 1,
+        components: u8::try_from(stride).map_err(|_| Refusal::Budget("output colour channels"))?,
         precision,
         samples,
-        colour: container
-            .header
-            .as_ref()
-            .map_or(JpxColour::Unstated, |h| h.colour),
+        colour: header.map_or(JpxColour::Unstated, |h| h.colour),
+        opacity: opacity.map(|samples| JpxOpacity {
+            premultiplied: plan.premultiplied,
+            samples,
+        }),
     })
+}
+
+/// Where one channel's samples are going.
+struct Blit<'a> {
+    out: &'a mut [u8],
+    /// Channels per pixel in `out`.
+    stride: usize,
+    /// This channel's index within a pixel.
+    at: usize,
+    /// Bytes per sample: 2 above eight bits, 1 otherwise.
+    wide: usize,
+}
+
+/// Write one channel of one tile onto the reference grid, replicating a
+/// subsampled component.
+///
+/// **Replication, not filtering**, and the reason is the oracle rather than
+/// taste: `opj_decompress -upsample` takes the sample at `floor(X / XRsiz)`
+/// unfiltered, and gate 1 asks for byte-identity against it. A triangle
+/// filter — which is what `docs/plans/02-filters.md` chose for JPEG, where
+/// the oracle is libjpeg-turbo and libjpeg-turbo interpolates — would put
+/// every edge pixel a level or two out and the gate would have to become a
+/// tolerance.
+///
+/// The clamp on the way in is the same rule one step further: `XRsiz` need
+/// not divide the tile's origin, so the first reference-grid column of a tile
+/// can map below the component's own first column. Reading the nearest real
+/// sample is what replication means at an edge; reading zero would put a
+/// black line down the left of every such tile.
+fn blit(
+    planes: &[wavelet::Plane],
+    siz: &codestream::Siz,
+    (x0, y0, x1, y1): (u32, u32, u32, u32),
+    channel: colour::Channel,
+    palette: Option<&boxes::Palette>,
+    to: Blit<'_>,
+) {
+    let (Some(plane), Some(component)) = (
+        planes.get(channel.component),
+        siz.components.get(channel.component),
+    ) else {
+        return;
+    };
+    if plane.width == 0 || plane.height == 0 {
+        return;
+    }
+    let (dx, dy) = (
+        u32::from(component.dx).max(1),
+        u32::from(component.dy).max(1),
+    );
+    let width = siz.width();
+    let height = siz.height();
+    for y in y0..y1 {
+        let Some(py) = y.checked_sub(siz.yosiz) else {
+            continue;
+        };
+        if py >= height {
+            continue;
+        }
+        let cy = (y / dy).saturating_sub(plane.y0).min(plane.height - 1);
+        for x in x0..x1 {
+            let Some(px) = x.checked_sub(siz.xosiz) else {
+                continue;
+            };
+            if px >= width {
+                continue;
+            }
+            let cx = (x / dx).saturating_sub(plane.x0).min(plane.width - 1);
+            let value = channel.lookup(palette, plane.at(cx, cy));
+            let index = ((py as usize) * (width as usize) + (px as usize)) * to.stride + to.at;
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "clamped by level_shift, or a palette entry of the declared precision"
+            )]
+            let value = value as u32;
+            if to.wide == 2 {
+                to.out[index * 2] = (value >> 8) as u8;
+                to.out[index * 2 + 1] = (value & 0xFF) as u8;
+            } else {
+                to.out[index] = value as u8;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

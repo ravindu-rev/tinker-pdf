@@ -22,11 +22,17 @@
 //! `ihdr` fixes the image geometry and `bpcc` the per-component precision
 //! when `ihdr` says they differ, and both are read because the codestream's
 //! own SIZ must agree with them or the file is inconsistent. `colr` is read
-//! for the colour space. `pclr`, `cmap` and `cdef` are *recognised and
-//! recorded* rather than applied, because applying them is the colour
-//! pipeline's milestone — and recording them is what lets that milestone
-//! refuse a palette it cannot map instead of quietly rendering the indices
-//! as grey.
+//! for the colour space. `pclr`, `cmap` and `cdef` are read in full and
+//! applied by [`super::colour`]: a palette turns one component of indices
+//! into three or four channels, `cmap` says which component each channel
+//! comes from and through which palette column, and `cdef` names the one
+//! that is opacity rather than colour.
+//!
+//! Reading them is not optional in the way skipping an unknown box is.
+//! Ignoring a `pclr` renders a palette image's *indices* as grey levels,
+//! which is a picture — a wrong one, plausible enough that nothing
+//! downstream can tell — and that is the failure this whole decoder is
+//! shaped around.
 
 use super::{Cursor, JpxColour, Refusal};
 
@@ -95,14 +101,57 @@ pub(crate) struct Jp2Header {
     /// `bpcc`, decoded the same way, when it was present.
     pub(crate) bpcc: Vec<(u8, bool)>,
     pub(crate) colour: JpxColour,
-    /// `pclr` was present. The palette is the colour pipeline's milestone;
-    /// what this records is that ignoring it would be wrong.
-    pub(crate) palette: bool,
-    /// `cmap` was present.
-    pub(crate) component_map: bool,
-    /// `cdef` was present.
-    pub(crate) channel_definition: bool,
+    /// `pclr` (I.5.3.4), when the file carried one.
+    pub(crate) palette: Option<Palette>,
+    /// `cmap` (I.5.3.5), one entry per output channel, in channel order.
+    pub(crate) component_map: Vec<ChannelMap>,
+    /// `cdef` (I.5.3.6), whatever order the file wrote them in.
+    pub(crate) channel_definition: Vec<ChannelDef>,
 }
+
+/// `pclr` (I.5.3.4): a lookup table from one component's sample value to
+/// several channels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Palette {
+    /// `Bi` per generated channel, decoded as `(precision, signed)`.
+    pub(crate) channels: Vec<(u8, bool)>,
+    /// `NE` rows of `NPC` entries, held column-major so a channel's whole
+    /// column is contiguous: `columns[j][i]` is entry `i` of channel `j`.
+    pub(crate) columns: Vec<Vec<i32>>,
+}
+
+/// One row of `cmap` (I.5.3.5): where one output channel's samples come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelMap {
+    /// `CMP`, the codestream component this channel reads.
+    pub(crate) component: u16,
+    /// `PCOL`, the palette column, when `MTYP` was 1. `None` is `MTYP` 0 —
+    /// the component's samples used directly.
+    pub(crate) column: Option<u8>,
+}
+
+/// One row of `cdef` (I.5.3.6): what a channel *is*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelDef {
+    /// `Cn`, the channel this row describes.
+    pub(crate) channel: u16,
+    /// `Typ`: 0 colour, 1 opacity, 2 premultiplied opacity, 65535
+    /// unspecified.
+    pub(crate) kind: u16,
+    /// `Asoc`: 0 the whole image, 1..n colour channel n, 65535 none.
+    pub(crate) association: u16,
+}
+
+/// Palette entries, T.800 I.5.3.4's own bound (`NE` is 1 to 1024).
+const MAX_PALETTE_ENTRIES: u32 = 1024;
+
+/// Channels one `cmap` or `cdef` may describe.
+///
+/// **Not a work cap** — there is no work here to cap, only allocation, and
+/// [`super::MAX_JPX_COMPONENTS`] already bounds what a channel can point at.
+/// This bounds the list itself, which `cmap` sizes from its own box length
+/// and `cdef` from a 16-bit count it writes for itself.
+const MAX_CHANNELS: usize = 256;
 
 /// Splits a `/JPXDecode` stream into its codestream and, if it had one, its
 /// JP2 header.
@@ -208,9 +257,16 @@ fn jp2_header(body: &[u8], budget: &mut u32) -> Result<Jp2Header, Refusal> {
             ty::COLOUR if header.colour == JpxColour::Unstated => {
                 header.colour = colour(bytes)?;
             }
-            ty::PALETTE => header.palette = true,
-            ty::COMPONENT_MAP => header.component_map = true,
-            ty::CHANNEL_DEFINITION => header.channel_definition = true,
+            // The first of each wins, for the reason `colr` and `ihdr` do: a
+            // file carrying two palettes is saying two different things about
+            // its own pixels, and taking the later one would be a guess.
+            ty::PALETTE if header.palette.is_none() => header.palette = Some(palette(bytes)?),
+            ty::COMPONENT_MAP if header.component_map.is_empty() => {
+                header.component_map = component_map(bytes)?;
+            }
+            ty::CHANNEL_DEFINITION if header.channel_definition.is_empty() => {
+                header.channel_definition = channel_definition(bytes)?;
+            }
             // I.5.3.7. A display resolution changes nothing about the
             // samples, and PDF sizes an image from `/Width`, `/Height` and
             // the CTM rather than from this.
@@ -256,6 +312,117 @@ fn image_header(bytes: &[u8], header: &mut Jp2Header) -> Result<(), Refusal> {
 /// A BPC or BPCC byte: seven bits of `precision - 1`, and a sign bit.
 const fn decode_bpc(b: u8) -> (u8, bool) {
     ((b & 0x7F) + 1, b & 0x80 != 0)
+}
+
+/// `pclr` (I.5.3.4): `NE` entries of `NPC` channels, each channel carrying
+/// its own bit depth.
+///
+/// The entry width is `ceil(B/8)` bytes and it is **per channel**, so a
+/// palette may hold an 8-bit red beside a 16-bit alpha and the rows are not
+/// uniformly sized. Reading it with one width for the whole table is the
+/// mistake that produces a palette shifted by a byte, which is a picture in
+/// wrong colours rather than an error.
+fn palette(bytes: &[u8]) -> Result<Palette, Refusal> {
+    let mut c = Cursor::new(bytes);
+    let (Some(ne), Some(npc)) = (c.u16(), c.u8()) else {
+        return Err(Refusal::Truncated("a pclr palette box"));
+    };
+    if ne == 0 || u32::from(ne) > MAX_PALETTE_ENTRIES {
+        return Err(Refusal::Structure(
+            "a pclr entry count outside I.5.3.4's 1 to 1024",
+        ));
+    }
+    if npc == 0 {
+        return Err(Refusal::Structure("a pclr palette generating no channels"));
+    }
+    let mut channels = Vec::with_capacity(usize::from(npc));
+    for _ in 0..npc {
+        let b = c.u8().ok_or(Refusal::Truncated("a pclr channel depth"))?;
+        let (precision, signed) = decode_bpc(b);
+        // The same ceiling the codestream's own components get, and for the
+        // same reason: PDF's sample path reads at most 16 bits and this build
+        // refuses past it rather than truncating.
+        if precision > 16 {
+            return Err(Refusal::Precision(precision));
+        }
+        channels.push((precision, signed));
+    }
+
+    let mut columns = vec![Vec::with_capacity(usize::from(ne)); usize::from(npc)];
+    for _ in 0..ne {
+        for (j, &(precision, signed)) in channels.iter().enumerate() {
+            let width = usize::from(precision).div_ceil(8);
+            let raw = c
+                .take(width)
+                .ok_or(Refusal::Truncated("a pclr palette entry"))?;
+            let mut v: i32 = 0;
+            for &byte in raw {
+                v = (v << 8) | i32::from(byte);
+            }
+            if signed {
+                // Sign-extend from the declared precision, which is what
+                // makes a signed palette channel mean what I.5.3.4 says
+                // rather than a large positive number.
+                let sign = 1i32 << (i32::from(precision) - 1);
+                if v & sign != 0 {
+                    v -= sign << 1;
+                }
+            }
+            columns[j].push(v);
+        }
+    }
+    Ok(Palette { channels, columns })
+}
+
+/// `cmap` (I.5.3.5): four bytes per output channel, and the box length is the
+/// only thing that says how many there are.
+fn component_map(bytes: &[u8]) -> Result<Vec<ChannelMap>, Refusal> {
+    if bytes.len() % 4 != 0 {
+        return Err(Refusal::Structure(
+            "a cmap box that is not a whole number of channels",
+        ));
+    }
+    if bytes.len() / 4 > MAX_CHANNELS {
+        return Err(Refusal::Budget("cmap channels"));
+    }
+    let mut c = Cursor::new(bytes);
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    while !c.is_empty() {
+        let (Some(component), Some(mtyp), Some(pcol)) = (c.u16(), c.u8(), c.u8()) else {
+            return Err(Refusal::Truncated("a cmap channel mapping"));
+        };
+        let column = match mtyp {
+            0 => None,
+            1 => Some(pcol),
+            // I.5.3.5 defines 0 and 1 and nothing else. A third value is a
+            // mapping this build would have to invent, and inventing one
+            // renders the picture in a way nobody can check.
+            _ => return Err(Refusal::Feature("a cmap MTYP I.5.3.5 does not define")),
+        };
+        out.push(ChannelMap { component, column });
+    }
+    Ok(out)
+}
+
+/// `cdef` (I.5.3.6): a count, then three 16-bit fields per channel.
+fn channel_definition(bytes: &[u8]) -> Result<Vec<ChannelDef>, Refusal> {
+    let mut c = Cursor::new(bytes);
+    let n = c.u16().ok_or(Refusal::Truncated("a cdef channel count"))?;
+    if usize::from(n) > MAX_CHANNELS {
+        return Err(Refusal::Budget("cdef channels"));
+    }
+    let mut out = Vec::with_capacity(usize::from(n));
+    for _ in 0..n {
+        let (Some(channel), Some(kind), Some(association)) = (c.u16(), c.u16(), c.u16()) else {
+            return Err(Refusal::Truncated("a cdef channel definition"));
+        };
+        out.push(ChannelDef {
+            channel,
+            kind,
+            association,
+        });
+    }
+    Ok(out)
 }
 
 /// `colr` (I.5.3.3): the colour specification.

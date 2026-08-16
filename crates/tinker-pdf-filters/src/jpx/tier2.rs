@@ -86,6 +86,11 @@ pub(crate) struct CodeBlock {
     /// Tier-1's output: signed coefficients in scan order, whose magnitudes
     /// occupy [`CodeBlock::planes`] bits. Empty until tier-1 has run.
     pub(crate) coefficients: Vec<i32>,
+    /// Per coefficient, the lowest bit-plane whose magnitude bit tier-1
+    /// actually decoded — which on a truncated stream is **not** the same for
+    /// every coefficient of the block, and is what E.1.1.2 reconstructs the
+    /// midpoint of.
+    pub(crate) half_planes: Vec<u8>,
     /// How many magnitude bit-planes tier-1 decoded, which is what tells
     /// milestone 4 how far to shift them: `Mb - zero_planes - planes` is the
     /// distance a truncated stream left at the bottom.

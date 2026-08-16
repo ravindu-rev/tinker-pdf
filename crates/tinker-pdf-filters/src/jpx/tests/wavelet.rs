@@ -49,8 +49,13 @@ const F4_DELTA: f64 = 0.443506852043971;
 const F4_K: f64 = 1.230174104914001;
 
 /// The `f64` reference arithmetic: F.3.8.2 as the standard writes it.
+///
+/// `pub(super)` because `tests::colour` instantiates the same ladder through
+/// it to put the fixed-point **ICT** against the same reference — G.2.2 is a
+/// float transform in the standard exactly as F.3.8.2 is, so it gets the same
+/// gate rather than a weaker one of its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct Reference(f64);
+pub(super) struct Reference(pub(super) f64);
 
 impl Arith for Reference {
     fn dyadic(m: i64, e: i32) -> Self {
@@ -75,6 +80,19 @@ impl Arith for Reference {
         // ties, which is precisely the kind of difference this gate must not
         // be measuring.
         (self.0 + 0.5).floor() as i32
+    }
+
+    fn inverse_mct(y0: Self, y1: Self, y2: Self) -> (Self, Self, Self) {
+        // G.2.2 in `f64`, from the standard's decimals rather than from the
+        // shipped Q24 integers. The shipped path rounds four products to Q12;
+        // this one does not round at all, so the difference between them is
+        // the fixed point's and nothing else.
+        use super::colour::{G2_B_CB, G2_G_CB, G2_G_CR, G2_R_CR};
+        (
+            Reference(y0.0 + G2_R_CR * y2.0),
+            Reference(y0.0 - G2_G_CB * y1.0 - G2_G_CR * y2.0),
+            Reference(y0.0 + G2_B_CB * y1.0),
+        )
     }
 }
 
