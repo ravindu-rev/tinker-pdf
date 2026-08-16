@@ -81,7 +81,10 @@ pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
 pub use edit::{annot, DocumentEditor, FillError, FillRejection, SkippedWidget, WidgetDefect};
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, Font, FontKind};
-pub use form::{acro_form, fields, Field, FieldKind, FieldValue};
+pub use form::{
+    acro_form, calculation_order, catalog_scripts, document_scripts, fields, script_summary,
+    DocumentScript, Field, FieldKind, FieldScripts, FieldValue, Script, ScriptSummary,
+};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};

@@ -37,8 +37,9 @@ pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
 pub use tinker_pdf_cos::{
-    Action, Attachment, AuthError, AuthLevel, DestKind, Destination, Field, FieldKind, FieldValue,
-    LadderLevel, Link, Metadata, OutlineItem, Trapped, Warning, WarningKind,
+    Action, Attachment, AuthError, AuthLevel, DestKind, Destination, DocumentScript, Field,
+    FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
+    ScriptSummary, Trapped, Warning, WarningKind,
 };
 /// The object model behind [`Document::cos`].
 ///
@@ -420,6 +421,38 @@ impl Document {
     #[must_use]
     pub fn form_fields(&self) -> Vec<Field> {
         tinker_pdf_cos::fields(&self.inner)
+    }
+
+    /// What the form's calculations depend on, in the order they run
+    /// (12.7.2, table 218).
+    ///
+    /// The references are field objects; match them against
+    /// [`Field::reference`]. Empty for a form that declares no order, which
+    /// includes forms whose fields calculate anyway.
+    #[must_use]
+    pub fn calculation_order(&self) -> Vec<ObjRef> {
+        tinker_pdf_cos::calculation_order(&self.inner)
+    }
+
+    /// The document-level scripts, from `/Names /JavaScript` (7.7.4).
+    #[must_use]
+    pub fn document_scripts(&self) -> Vec<DocumentScript> {
+        tinker_pdf_cos::document_scripts(&self.inner)
+    }
+
+    /// The catalog's `/AA` additional actions (12.6.3, table 200).
+    #[must_use]
+    pub fn catalog_scripts(&self) -> Vec<DocumentScript> {
+        tinker_pdf_cos::catalog_scripts(&self.inner)
+    }
+
+    /// How much script this document carries, for a caller that has to say so
+    /// before it fills anything.
+    ///
+    /// Reading a script runs nothing.
+    #[must_use]
+    pub fn script_summary(&self) -> ScriptSummary {
+        tinker_pdf_cos::script_summary(&self.inner)
     }
 
     /// The underlying object model, for callers that need raw access.

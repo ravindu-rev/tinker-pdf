@@ -794,6 +794,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             options: Vec::new(),
             max_len: Some(3),
             default_appearance: None,
+            scripts: form::FieldScripts::default(),
         };
         assert!(accepts(&field, "abc"));
         assert!(
@@ -813,6 +814,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
             flags: 1,
             widgets: Vec::new(),
             options: Vec::new(),
+            scripts: form::FieldScripts::default(),
             max_len: None,
             default_appearance: None,
         };

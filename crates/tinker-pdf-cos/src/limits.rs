@@ -102,3 +102,60 @@ pub const MAX_PAGES: usize = 1 << 21;
 /// Bounds a hostile or cyclic tree without bounding any real one: documents
 /// carry destinations and labels in the hundreds, not the millions.
 pub const MAX_TREE_ENTRIES: usize = 1 << 18;
+
+/// Longest `/AA` or `/Names /JavaScript` source surfaced, in decoded bytes
+/// (12.6.4.16).
+///
+/// A script past this is reported as present and oversized rather than
+/// truncated: a truncated script is source text that means something different
+/// from what the file says, which is worse than saying there is one and it is
+/// too big.
+pub const MAX_SCRIPT_LEN: usize = 64 << 10;
+
+/// Total script source one document may surface, in decoded bytes.
+///
+/// [`MAX_SCRIPT_LEN`] bounds one script and [`MAX_PAGES`] bounds the field
+/// count, and their product is not a bound anybody would want to allocate. A
+/// per-item cap is not a total cap when the item count is document-controlled,
+/// which is the same lesson `MAX_TILE_WORK` exists for.
+pub const MAX_SCRIPT_TOTAL: usize = 4 << 20;
+
+/// Deepest expression or statement nesting the script parser will build.
+///
+/// The evaluator recurses over the tree the parser produced, so this is what
+/// bounds its stack — there is no second cap in the evaluator, because a
+/// second cap is a second thing to get wrong.
+pub const MAX_SCRIPT_DEPTH: u32 = 32;
+
+/// Tokens one script may hold. Bounds the parser's own allocation before any
+/// evaluation begins.
+pub const MAX_SCRIPT_TOKENS: usize = 16_384;
+
+/// Evaluation steps one script may take.
+///
+/// A depth cap is not a work cap. `if` nests to 32 and costs nothing; a
+/// `while` loop is depth 1 and costs everything, and so does a chain of
+/// concatenations. Every statement executed and every expression node
+/// evaluated charges one step, so a script that does not terminate cheaply
+/// stops here rather than running.
+pub const MAX_SCRIPT_STEPS: u32 = 20_000;
+
+/// Evaluation steps a whole recalculation pass may take, across every field's
+/// script.
+///
+/// [`MAX_SCRIPT_STEPS`] bounds one script; a document chooses how many
+/// scripts there are, so the pass needs its own total.
+pub const MAX_CALC_STEPS: u32 = 200_000;
+
+/// Longest string one script may build. Repeated concatenation doubles, and
+/// twenty thousand steps of doubling is not a length anything can hold.
+pub const MAX_SCRIPT_STRING: usize = 8192;
+
+/// Longest array literal one script may build.
+pub const MAX_SCRIPT_ARRAY: usize = 1024;
+
+/// Variables one script may declare.
+pub const MAX_SCRIPT_VARS: usize = 256;
+
+/// Fields whose calculation action one recalculation pass will run.
+pub const MAX_CALC_FIELDS: usize = 4096;

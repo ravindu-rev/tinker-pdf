@@ -83,6 +83,81 @@ impl FieldValue {
     }
 }
 
+/// One `/AA` script, as the file carries it (12.6.4.16).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Script {
+    /// The source text, decoded from whichever string encoding it used.
+    Source(String),
+    /// There is a script and it is this many decoded bytes, which is past
+    /// [`limits::MAX_SCRIPT_LEN`] or past what the document had left of
+    /// [`limits::MAX_SCRIPT_TOTAL`].
+    ///
+    /// Surfacing a truncated script would hand a reader source text that means
+    /// something different from what the file says — and hand an interpreter
+    /// something it would run. The length is what there is to report
+    /// (ruling 10).
+    Oversize(usize),
+}
+
+impl Script {
+    /// The source, when there is all of it.
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Script::Source(text) => Some(text),
+            Script::Oversize(_) => None,
+        }
+    }
+
+    /// Whether the script was too large to surface.
+    #[must_use]
+    pub fn is_oversize(&self) -> bool {
+        matches!(self, Script::Oversize(_))
+    }
+}
+
+/// The scripts a field's `/AA` additional-actions dictionary carries
+/// (12.6.3, table 198).
+///
+/// Data, not behaviour: these are the source texts the file holds, and reading
+/// them runs nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldScripts {
+    /// `/C` — recalculate the field's value when another field changes.
+    pub calculate: Option<Script>,
+    /// `/F` — format the value for display, without changing `/V`.
+    pub format: Option<Script>,
+    /// `/K` — a keystroke as the user types, and the paste and commit events.
+    pub keystroke: Option<Script>,
+    /// `/V` — validate a value the user committed.
+    pub validate: Option<Script>,
+}
+
+impl FieldScripts {
+    /// Whether the field carries no script at all, which is the common case.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.calculate.is_none()
+            && self.format.is_none()
+            && self.keystroke.is_none()
+            && self.validate.is_none()
+    }
+
+    /// How many of the four are present.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        [
+            &self.calculate,
+            &self.format,
+            &self.keystroke,
+            &self.validate,
+        ]
+        .iter()
+        .filter(|script| script.is_some())
+        .count()
+    }
+}
+
 /// One terminal field.
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -108,6 +183,10 @@ pub struct Field {
     /// The default appearance string, inherited if the field does not carry
     /// one — `/Helv 12 Tf 0 g` and the like.
     pub default_appearance: Option<Vec<u8>>,
+    /// The `/AA` scripts, as source text. Not inherited: 12.7.3.1 makes
+    /// `/FT`, `/Ff`, `/V` and `/DV` inheritable and stops there, so a parent's
+    /// additional actions are the parent's.
+    pub scripts: FieldScripts,
 }
 
 impl Field {
@@ -179,9 +258,21 @@ pub fn fields(doc: &CosDocument) -> Vec<Field> {
 
     let mut out = Vec::new();
     let mut visited = HashSet::new();
+    // Script source is document-controlled and per-field, so it needs a total
+    // as well as a per-item cap.
+    let mut budget = limits::MAX_SCRIPT_TOTAL;
     for entry in roots {
         if let Some(reference) = entry.as_objref() {
-            walk(doc, reference, "", &inherited, 0, &mut visited, &mut out);
+            walk(
+                doc,
+                reference,
+                "",
+                &inherited,
+                0,
+                &mut visited,
+                &mut budget,
+                &mut out,
+            );
         }
     }
     out
@@ -197,6 +288,7 @@ struct Inherited {
     appearance: Option<Vec<u8>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     doc: &CosDocument,
     reference: ObjRef,
@@ -204,6 +296,7 @@ fn walk(
     inherited: &Inherited,
     depth: u32,
     visited: &mut HashSet<u32>,
+    budget: &mut usize,
     out: &mut Vec<Field>,
 ) {
     if depth > limits::MAX_NEST_DEPTH || out.len() >= limits::MAX_PAGES {
@@ -279,7 +372,7 @@ fn walk(
 
     if !field_kids.is_empty() {
         for kid in field_kids {
-            walk(doc, kid, &name, &inherited, depth + 1, visited, out);
+            walk(doc, kid, &name, &inherited, depth + 1, visited, budget, out);
         }
         visited.remove(&reference.num);
         return;
@@ -312,6 +405,7 @@ fn walk(
         options: options(doc, dict),
         max_len: dict.get_int(doc.intern(b"MaxLen")),
         default_appearance: inherited.appearance,
+        scripts: field_scripts(doc, dict, budget),
     });
     visited.remove(&reference.num);
 }
@@ -402,6 +496,242 @@ fn options(doc: &CosDocument, dict: &Dict) -> Vec<String> {
             _ => String::new(),
         })
         .collect()
+}
+
+/// The `/JS` of one action dictionary (12.6.4.16, table 217).
+///
+/// `/JS` is a text string or a stream holding one — a producer writes the
+/// stream form as soon as the script is longer than a line, so reading only
+/// the string form finds almost none of the scripts that matter.
+fn read_js(doc: &CosDocument, action: &Dict, budget: &mut usize) -> Option<Script> {
+    let js = action.get(doc.intern(b"JS"))?;
+    let bytes: Vec<u8> = match js {
+        Object::String(text) => text.bytes.clone(),
+        Object::Ref(r) => {
+            let object = doc.get(*r).ok()?;
+            match object.as_ref() {
+                Object::String(text) => text.bytes.clone(),
+                // 7.3.8: a stream is always an indirect object, so this is the
+                // only branch that can reach one.
+                Object::Stream(_) => doc.stream_decoded(*r).ok()?,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    let len = bytes.len();
+    if len > limits::MAX_SCRIPT_LEN || len > *budget {
+        return Some(Script::Oversize(len));
+    }
+    *budget -= len;
+    Some(Script::Source(decode_text_string(&bytes)))
+}
+
+/// One entry of an additional-actions dictionary.
+fn action_js(doc: &CosDocument, aa: &Dict, key: &[u8], budget: &mut usize) -> Option<Script> {
+    let action = doc.resolve_key(aa, doc.intern(key));
+    read_js(doc, action.as_dict()?, budget)
+}
+
+/// A field's `/AA` scripts (12.6.3, table 198).
+fn field_scripts(doc: &CosDocument, dict: &Dict, budget: &mut usize) -> FieldScripts {
+    let aa = doc.resolve_key(dict, doc.intern(b"AA"));
+    let Some(aa) = aa.as_dict() else {
+        return FieldScripts::default();
+    };
+    FieldScripts {
+        calculate: action_js(doc, aa, b"C", budget),
+        format: action_js(doc, aa, b"F", budget),
+        keystroke: action_js(doc, aa, b"K", budget),
+        validate: action_js(doc, aa, b"V", budget),
+    }
+}
+
+/// A script that belongs to the document rather than to a field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentScript {
+    /// Where it came from: the name-tree key for a `/Names /JavaScript`
+    /// entry, or the trigger key (`WC`, `WS`, `DS`, `WP`, `DP`) for one of
+    /// the catalog's additional actions.
+    pub name: String,
+    /// Its source.
+    pub script: Script,
+}
+
+/// The order the form's calculations are meant to run in (12.7.2, table 218).
+///
+/// `/CO` is an array of references to the field dictionaries that have a
+/// calculate action, and the order **is** the semantics: a total that depends
+/// on a subtotal has to be computed after it, and the file is where that
+/// dependency is recorded because nothing in the scripts states it.
+///
+/// Empty when the form declares none, which is also the answer for a form
+/// whose fields calculate but whose producer left `/CO` out.
+#[must_use]
+pub fn calculation_order(doc: &CosDocument) -> Vec<ObjRef> {
+    let Some(form) = acro_form(doc) else {
+        return Vec::new();
+    };
+    doc.resolve_key(&form, doc.intern(b"CO"))
+        .as_array()
+        .map(|entries| entries.iter().filter_map(Object::as_objref).collect())
+        .unwrap_or_default()
+}
+
+/// The document-level scripts, from `/Names /JavaScript` (7.7.4, table 31).
+///
+/// These run once when the document opens and are where a form keeps the
+/// functions its field scripts call. Surfaced as source, and never run: a
+/// document-level script is arbitrary program text with no field to write,
+/// which is a different problem from a calculation.
+#[must_use]
+pub fn document_scripts(doc: &CosDocument) -> Vec<DocumentScript> {
+    let Some(catalog) = doc.catalog() else {
+        return Vec::new();
+    };
+    let names = doc.resolve_key(&catalog, doc.intern(b"Names"));
+    let Some(names) = names.as_dict() else {
+        return Vec::new();
+    };
+    let Some(root) = names.get_ref(doc.intern(b"JavaScript")) else {
+        return Vec::new();
+    };
+
+    let mut budget = limits::MAX_SCRIPT_TOTAL;
+    let mut out = Vec::new();
+    for (name, value) in crate::trees::name_tree(doc, root) {
+        let resolved = doc.resolve(&value);
+        let Some(action) = resolved.as_dict() else {
+            continue;
+        };
+        if let Some(script) = read_js(doc, action, &mut budget) {
+            out.push(DocumentScript {
+                name: decode_text_string(&name),
+                script,
+            });
+        }
+    }
+    out
+}
+
+/// 12.6.3 table 200: the catalog's additional actions, by trigger.
+const CATALOG_TRIGGERS: [&[u8]; 5] = [b"WC", b"WS", b"DS", b"WP", b"DP"];
+
+/// The document catalog's `/AA` scripts (12.6.3, table 200).
+#[must_use]
+pub fn catalog_scripts(doc: &CosDocument) -> Vec<DocumentScript> {
+    let Some(catalog) = doc.catalog() else {
+        return Vec::new();
+    };
+    let aa = doc.resolve_key(&catalog, doc.intern(b"AA"));
+    let Some(aa) = aa.as_dict() else {
+        return Vec::new();
+    };
+
+    let mut budget = limits::MAX_SCRIPT_TOTAL;
+    let mut out = Vec::new();
+    for key in CATALOG_TRIGGERS {
+        if let Some(script) = action_js(doc, aa, key, &mut budget) {
+            out.push(DocumentScript {
+                name: String::from_utf8_lossy(key).into_owned(),
+                script,
+            });
+        }
+    }
+    out
+}
+
+/// How much script a document carries, for a caller that has to say so.
+///
+/// This is deliberately not a [`crate::warn::Warning`]: that set is closed and
+/// describes repairs the lexer and object parser performed on bytes, collected
+/// while parsing. A script is neither a repair nor something the parser sees,
+/// and walking the field tree on every open would charge every document for
+/// the few that have one. So the report is a value a caller asks for, and
+/// [`ScriptSummary::describe`] is the sentence to put in front of a user.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptSummary {
+    /// Fields carrying at least one `/AA` script.
+    pub fields_with_scripts: usize,
+    /// Fields carrying a calculate action specifically.
+    pub calculate_actions: usize,
+    /// Entries in `/CO`.
+    pub calculation_order: usize,
+    /// Entries in `/Names /JavaScript`.
+    pub document_scripts: usize,
+    /// Entries in the catalog's `/AA`.
+    pub catalog_actions: usize,
+    /// Scripts present but past [`limits::MAX_SCRIPT_LEN`] or the document's
+    /// [`limits::MAX_SCRIPT_TOTAL`], so surfaced as
+    /// [`Script::Oversize`] rather than as source.
+    pub oversize: usize,
+}
+
+impl ScriptSummary {
+    /// Whether the document carries no script anywhere.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == ScriptSummary::default()
+    }
+
+    /// One sentence naming what is there, for a caller that warns once per
+    /// document.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "{} field(s) carry scripts ({} calculate), {} in the calculation order, \
+             {} document-level and {} catalog action(s); {} too large to read",
+            self.fields_with_scripts,
+            self.calculate_actions,
+            self.calculation_order,
+            self.document_scripts,
+            self.catalog_actions,
+            self.oversize,
+        )
+    }
+}
+
+/// Counts every script the document carries (12.6.3, 12.7.2).
+#[must_use]
+pub fn script_summary(doc: &CosDocument) -> ScriptSummary {
+    let fields = fields(doc);
+    let document = document_scripts(doc);
+    let catalog = catalog_scripts(doc);
+
+    let mut summary = ScriptSummary {
+        calculation_order: calculation_order(doc).len(),
+        document_scripts: document.len(),
+        catalog_actions: catalog.len(),
+        ..ScriptSummary::default()
+    };
+    for field in &fields {
+        if !field.scripts.is_empty() {
+            summary.fields_with_scripts += 1;
+        }
+        if field.scripts.calculate.is_some() {
+            summary.calculate_actions += 1;
+        }
+        for script in [
+            &field.scripts.calculate,
+            &field.scripts.format,
+            &field.scripts.keystroke,
+            &field.scripts.validate,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if script.is_oversize() {
+                summary.oversize += 1;
+            }
+        }
+    }
+    for script in document.iter().chain(catalog.iter()) {
+        if script.script.is_oversize() {
+            summary.oversize += 1;
+        }
+    }
+    summary
 }
 
 /// The states a button's widget can be in, other than off.
@@ -547,6 +877,147 @@ trailer\n<< /Size 12 /Root 1 0 R >>\n%%EOF\n";
         let doc = CosDocument::open(bytes).expect("it opens");
         let found = fields(&doc);
         assert!(found.len() <= 2, "the cycle is cut, not followed");
+    }
+
+    /// A form whose total is calculated: two inputs, one total with an `/AA`
+    /// `/C` script and a `/F` format script, `/CO` naming the order, and a
+    /// document-level script in `/Names /JavaScript`.
+    fn calculated_document() -> CosDocument {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /JavaScript 40 0 R >>\n\
+   /AA << /WC << /S /JavaScript /JS (app.alert\\('bye'\\);) >> >>\n\
+   /AcroForm << /Fields [10 0 R 11 0 R 12 0 R] /CO [12 0 R 11 0 R] >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R 11 0 R 12 0 R] >>\nendobj\n\
+10 0 obj\n<< /FT /Tx /T (net) /V (100) /Rect [10 150 190 170] /Subtype /Widget /Type /Annot >>\nendobj\n\
+11 0 obj\n<< /FT /Tx /T (vat) /V (0) /Rect [10 120 190 140] /Subtype /Widget /Type /Annot\n\
+   /AA << /C << /S /JavaScript /JS 41 0 R >> >> >>\nendobj\n\
+12 0 obj\n<< /FT /Tx /T (total) /V (0) /Rect [10 90 190 110] /Subtype /Widget /Type /Annot\n\
+   /AA << /C << /S /JavaScript /JS (event.value = 1;) >>\n\
+          /F << /S /JavaScript /JS (AFNumber_Format\\(2, 0, 0, 0, \"\", true\\);) >> >> >>\nendobj\n\
+40 0 obj\n<< /Names [(helper) 42 0 R] >>\nendobj\n\
+41 0 obj\n<< /Length 34 >>\nstream\n\
+event.value = this.getField('x');\n\
+endstream\nendobj\n\
+42 0 obj\n<< /S /JavaScript /JS (function sum\\(a, b\\) { return a + b; }) >>\nendobj\n\
+trailer\n<< /Size 43 /Root 1 0 R >>\n%%EOF\n";
+        CosDocument::open(bytes).expect("the calculated form opens")
+    }
+
+    #[test]
+    fn a_fields_additional_actions_are_read_as_source() {
+        let doc = calculated_document();
+        let found = fields(&doc);
+        let total = found.iter().find(|f| f.name == "total").expect("total");
+        assert_eq!(
+            total.scripts.calculate.as_ref().and_then(Script::source),
+            Some("event.value = 1;")
+        );
+        assert_eq!(
+            total.scripts.format.as_ref().and_then(Script::source),
+            Some("AFNumber_Format(2, 0, 0, 0, \"\", true);")
+        );
+        assert!(total.scripts.keystroke.is_none());
+        assert_eq!(total.scripts.count(), 2);
+    }
+
+    /// 12.6.4.16 allows `/JS` to be a stream, and a producer writes that form
+    /// as soon as the script is longer than a line — so reading only the
+    /// string form finds almost none of the scripts that matter.
+    #[test]
+    fn a_script_held_in_a_stream_is_read_too() {
+        let doc = calculated_document();
+        let found = fields(&doc);
+        let vat = found.iter().find(|f| f.name == "vat").expect("vat");
+        assert_eq!(
+            vat.scripts.calculate.as_ref().and_then(Script::source),
+            Some("event.value = this.getField('x');\n")
+        );
+    }
+
+    #[test]
+    fn a_field_with_no_actions_carries_no_scripts() {
+        let doc = calculated_document();
+        let found = fields(&doc);
+        let net = found.iter().find(|f| f.name == "net").expect("net");
+        assert!(net.scripts.is_empty());
+        assert_eq!(net.scripts.count(), 0);
+    }
+
+    /// The order is the semantics: the file says the total comes before the
+    /// VAT here, and reading it in array order is the only way to honour that.
+    #[test]
+    fn the_calculation_order_is_read_in_the_order_declared() {
+        let doc = calculated_document();
+        assert_eq!(
+            calculation_order(&doc),
+            vec![ObjRef::new(12, 0), ObjRef::new(11, 0)]
+        );
+    }
+
+    #[test]
+    fn document_and_catalog_scripts_are_read() {
+        let doc = calculated_document();
+        let document = document_scripts(&doc);
+        assert_eq!(document.len(), 1);
+        assert_eq!(document[0].name, "helper");
+        assert_eq!(
+            document[0].script.source(),
+            Some("function sum(a, b) { return a + b; }")
+        );
+
+        let catalog = catalog_scripts(&doc);
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "WC");
+        assert_eq!(catalog[0].script.source(), Some("app.alert('bye');"));
+    }
+
+    #[test]
+    fn the_summary_counts_what_is_there() {
+        let doc = calculated_document();
+        let summary = script_summary(&doc);
+        assert!(!summary.is_empty());
+        assert_eq!(summary.fields_with_scripts, 2);
+        assert_eq!(summary.calculate_actions, 2);
+        assert_eq!(summary.calculation_order, 2);
+        assert_eq!(summary.document_scripts, 1);
+        assert_eq!(summary.catalog_actions, 1);
+        assert_eq!(summary.oversize, 0);
+        assert!(summary.describe().contains("2 field(s) carry scripts"));
+    }
+
+    #[test]
+    fn a_document_without_scripts_summarises_to_nothing() {
+        let doc = form_document();
+        let summary = script_summary(&doc);
+        assert!(summary.is_empty(), "{summary:?}");
+        assert!(calculation_order(&doc).is_empty());
+        assert!(document_scripts(&doc).is_empty());
+        assert!(catalog_scripts(&doc).is_empty());
+    }
+
+    /// A script past the cap is reported as present and too big, never
+    /// truncated: truncated source means something different from what the
+    /// file says, and the difference is silent.
+    #[test]
+    fn an_oversized_script_is_named_rather_than_truncated() {
+        let huge = "x".repeat(limits::MAX_SCRIPT_LEN + 1);
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R] >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+10 0 obj\n<< /FT /Tx /T (a) /AA << /C << /JS ({huge}) >> >> >>\nendobj\n\
+trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n"
+        );
+        let doc = CosDocument::open(bytes.into_bytes()).expect("it opens");
+        let found = fields(&doc);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].scripts.calculate,
+            Some(Script::Oversize(limits::MAX_SCRIPT_LEN + 1))
+        );
+        assert!(found[0].scripts.calculate.as_ref().unwrap().is_oversize());
+        assert_eq!(script_summary(&doc).oversize, 1);
     }
 
     #[test]
