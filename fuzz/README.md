@@ -1,6 +1,6 @@
 # Fuzzing
 
-Fifteen `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
+Eighteen `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
 Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-corpora.md).
 
 | Target | What it drives |
@@ -11,6 +11,8 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 | `lzw` | LZW with and without early change |
 | `jpeg` | Baseline JPEG: Huffman tables, restarts, sampling factors |
 | `ccitt` | G3 and G4; the first two input bytes choose the parameters |
+| `jbig2` | T.88 segment headers, the MQ coder and generic regions; the first byte splits the body between `/JBIG2Globals` and the image's own stream |
+| `jpx` | T.800: the JP2 box walk and the Annex A codestream, then tier-2 and tier-1; the first byte chooses the ceiling and whether the body is wrapped in JP2 boxes |
 | `ascii_filters` | ASCIIHex, ASCII85, RunLength, and the predictors |
 | `sfnt` | The table directory and everything around the outlines, including the subsetter that rebuilds one |
 | `truetype` | `cmap`, and `glyf` including composites |
@@ -19,6 +21,7 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 | `cmap` | CMap syntax as an embedded stream, then splitting a string by the codespaces it declared |
 | `crypt` | The standard security handler and the ciphers under it; the input is carved into `/Encrypt`'s fields |
 | `content_tokenizer` | The content-stream tokenizer |
+| `form_script` | The form calculation and format scripts, as an interpreter over attacker-controlled source |
 | `render_page` | Open, extract, and render arbitrary bytes end to end |
 
 ## Running
@@ -86,6 +89,7 @@ account for:
 | `cos_object` | Hand-written 7.3 objects: dictionary, stream, nested array, every number form, two unterminated |
 | `inflate` | Our own `zlib_compress` output, including an empty stream and an incompressible one |
 | `jpeg` | `jpeg.rs`'s `tiny_gray`, `sequential_block` and both progressive fixtures |
+| `jpx` | Ten codestreams `opj_compress` made from *our own* 32 x 32 images — LRCP through CPRL, a boxed JP2, RGB with the RCT, a lossy 9/7, two layers, explicit precincts, tiles with SOP and EPH, and segmentation symbols — plus six hand-built ones the writer in `jpx/tests/writer.rs` emits, including a subsampled component, 16-bit signed samples and an RGN a conformant encoder will not produce. A tool's output on our input is ours to commit; ISO/IEC 15444-4's conformance codestreams stay out, and no part of openjpeg is vendored (ruling 9). Each seed carries the target's control byte in front |
 | `lzw` | 7.4.4.2's Table 8 example, truncated, and a clear-code stream |
 | `render_page` | The subset of the `cos_document` PDFs that has a page worth rendering, plus the composite font `composite_fonts.rs` builds — rewritten by `cargo test -p tinker-pdf --test composite_fonts write_the_fuzz_seed -- --ignored`. Nothing else in any corpus carries a Type 0 font, so `/CIDToGIDMap` — a document-controlled table the renderer indexes once per glyph — was reachable from no target at all. Gap 06 added `optional-content.pdf`, rewritten by `cargo test -p tinker-pdf --test optional_content write_the_fuzz_seed -- --ignored`: nothing in any corpus had an `/OCProperties`, so the group table, the four `/P` policies, `/VE` evaluation and the `/OC` lookups on `/Properties` and on an XObject were reachable from no target — and every one of them walks attacker-controlled indirect references. Reachable by construction, not measured: the writer asserts the seed still renders with the layer hidden, and no campaign has been run against it |
 | `truetype` | `determinism.rs`'s `curvy_font`, plus a truncated copy and its directory alone |

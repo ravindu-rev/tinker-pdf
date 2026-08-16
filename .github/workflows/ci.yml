@@ -238,6 +238,48 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' qpdf-oracle.log
           grep -q 'qpdf-oracle: RAN' qpdf-oracle.log
 
+  jpx-oracle:
+    # The external arbiter gap 18a names for JPEG 2000, and the only one there
+    # is: the repository holds zero JPX bytes, and ISO/IEC 15444-4's
+    # conformance codestreams are not redistributable. `opj_compress` produces
+    # streams this repository did not encode, across the five progression
+    # orders, multiple tiles, multiple layers, explicit precincts, SOP and EPH
+    # — every one of them a partition the decoder would otherwise be guessing
+    # about.
+    #
+    # Ruling 9: openjpeg is invoked, never linked and never vendored, and its
+    # output is a transient comparison reference.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libopenjp2-tools
+      # `-h` is a usage message and exits 1, so this asks for the text rather
+      # than the status. A `|| true` here would hide a missing binary, which
+      # is the whole failure this job exists to prevent.
+      - run: opj_compress -h 2>&1 | grep -q openjp2
+      # The same shape as `qpdf-linearization` above, for the same reason gap
+      # 20 learned it: these tests skip when openjpeg is absent, and a skip
+      # exits 0 and looks exactly like a pass — so the job reads its own
+      # output and fails unless it can see that the oracle ran.
+      - name: Check the JPEG 2000 decoder against openjpeg
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-filters --test jpx_oracle -- --nocapture \
+            2>&1 | tee jpx-oracle.log
+          # The skip is checked first and on its own, so the reason reaches
+          # the log. A bare `grep -q RAN` fails the step too, but under
+          # `bash -e` it fails it *silently* — a red tick with nothing saying
+          # the oracle never ran is only half of what this job is for.
+          if grep -q 'jpx-oracle: SKIPPED' jpx-oracle.log; then
+            echo "::error::openjpeg was not found, so the JPEG 2000 oracle" \
+                 "SKIPPED rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' jpx-oracle.log
+          grep -q 'jpx-oracle: RAN' jpx-oracle.log
+
   licenses:
     runs-on: ubuntu-latest
     steps:

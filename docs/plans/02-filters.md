@@ -52,14 +52,34 @@ Wave 2 (L):
 
 ## Non-goals
 
-- **JPXDecode (7.4.9), arithmetic-coded JPEG, 12-bit JPEG.** Deferred behind
-  capability flags with corpus hit-rate gates per ruling 3 — implemented when
-  the hit-rate report from
-  [14-testing-and-corpora](14-testing-and-corpora.md) shows real documents
-  need them, not before. This crate returns a typed `Unsupported` value; the
-  rendering device substitutes the neutral placeholder and appends the
-  `Bitmap` warning per ruling 2. Never a hard failure, and never this
+- **Arithmetic-coded JPEG, 12-bit JPEG.** Deferred behind capability flags
+  with corpus hit-rate gates per ruling 3 — implemented when the hit-rate
+  report from [14-testing-and-corpora](14-testing-and-corpora.md) shows real
+  documents need them, not before. This crate returns a typed `Unsupported`
+  value; the rendering device substitutes the neutral placeholder and appends
+  the `Bitmap` warning per ruling 2. Never a hard failure, and never this
   crate's job to draw the placeholder.
+
+- **JPXDecode (7.4.9) — *half* a non-goal, since August 2026,** and unlike
+  JBIG2 the gate did **not** open: gap 23 measured JPX at 0.4 % of 4 525
+  files and [gaps/18](gaps/18-jpx-decision.md)'s own amendment reads that
+  number and argues for the 150-line header probe. The owner chose the
+  decoder anyway, and [gaps/18a](gaps/18a-jpx-decoder.md) records at its top
+  that this was a choice and not a finding. What this crate decodes so far is
+  T.800 Annex I's JP2 boxes and a bare J2K codestream, Annex A's marker
+  segments with COC and QCC overriding per component, Annex B's tier-2 —
+  tag trees, packet headers, precincts and all five progression orders — and
+  Annex D's tier-1 on the shared MQ coder. What it still refuses is
+  dequantisation, both inverse wavelets and the colour pipeline, which are
+  milestones 4 to 6, plus everything on that plan's enumerated refusal list:
+  RGN, POC, PPM and PPT, five of Table A.19's six code-block styles, Part 2,
+  precision above 16 bits. All of it keeps the shape above exactly —
+  `Unsupported(Capability::Jpx)` and the neutral placeholder — and the
+  capability still answers `Some(Capability::Jpx)`. What changed is what that
+  answer *means*: "this crate may refuse these bytes", not "this crate will
+  never decode them". The distinction matters more here than for JBIG2,
+  because the failure mode of a partly-built JPEG 2000 decoder is not a
+  visible break but a plausible photograph.
 
 - **JBIG2Decode (7.4.7) — *half* a non-goal, since August 2026.** The gate
   opened: gap 23 ran the corpora and JBIG2 came back at 2.3 % of 4 525 files,

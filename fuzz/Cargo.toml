@@ -71,6 +71,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "jpx"
+path = "fuzz_targets/jpx.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "ascii_filters"
 path = "fuzz_targets/ascii_filters.rs"
 test = false

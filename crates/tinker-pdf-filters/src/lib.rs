@@ -23,6 +23,7 @@ pub mod deflate;
 mod inflate;
 mod jbig2;
 mod jpeg;
+mod jpx;
 mod lzw;
 pub mod mq;
 mod predictors;
@@ -34,6 +35,7 @@ pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
 pub use deflate::{deflate, zlib_compress};
 pub use jbig2::{decode as jbig2_decode, Jbig2Params};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
+pub use jpx::{jpx_decode, JpxColour, JpxImage};
 pub use mq::{MqContext, MqContexts, MqDecoder};
 pub use predictors::PredictorParams;
 
@@ -160,6 +162,55 @@ pub enum Warning {
     /// JBIG2: a region or page declared more pixels than the output ceiling
     /// allows, so it was refused rather than allocated.
     Jbig2RegionTooLarge,
+
+    // ---- JPEG 2000 (T.800) -----------------------------------------------
+    //
+    // Nine, and each of them is one *class* of refusal rather than one
+    // condition, because [`Warning`] is a closed set recorded at most once
+    // per decode and a variant per marker would make it neither. What the
+    // refusal was called in full — which marker, which constraint — lives in
+    // `jpx::Refusal`, which the tests assert against.
+    //
+    // Every one of these is paired with `FilterError::Unsupported`, so the
+    // caller draws the placeholder. That is not a partial success: a wrong
+    // JPEG 2000 decode is a plausible photograph, and this codec has no
+    // half-measure that is better than the honest grey rectangle.
+    /// JPX: a marker T.800 Table A.2 defines and this build does not decode —
+    /// RGN, POC, PPM, PPT or CRG. Never skipped, because a skipped RGN draws
+    /// a bright rectangle and a skipped POC mis-parses every packet after it.
+    JpxMarkerUnsupported,
+    /// JPX: a marker code Table A.2 does not define at all, which is where
+    /// every ISO/IEC 15444-2 marker lands.
+    JpxMarkerUnknown,
+    /// JPX: a structural constraint was violated — A.5.1's tile grid, a
+    /// marker segment length, marker ordering, a JP2 box past its parent.
+    JpxStructureInvalid,
+    /// JPX: a coding feature this build does not implement — a progression
+    /// order, a Table A.19 code-block style bit, a quantisation style, an
+    /// `Rsiz` capability, a `colr` method.
+    JpxFeatureUnsupported,
+    /// JPX: component precision above 16 bits, which is refused rather than
+    /// truncated.
+    JpxPrecisionUnsupported,
+    /// JPX: the codestream ended inside a marker segment, a packet header or
+    /// a code-block segment.
+    JpxTruncated,
+    /// JPX: **an integrity check, not a capability check.** A packet's
+    /// declared length did not land where the next packet begins, so tier-2
+    /// has gone wrong — and it is caught before any pixel exists, because a
+    /// mis-parsed packet header almost never lands on a boundary by accident.
+    JpxPacketLength,
+    /// JPX: **an integrity check, not a capability check.** A cleanup pass
+    /// ended with a segmentation symbol that was not `1010` (T.800 D.5), so
+    /// the arithmetic decoder is out of step with the encoder.
+    JpxSegmentationSymbol,
+    /// JPX: one of `MAX_JPX_SAMPLES`, `MAX_JPX_CODE_BLOCKS` or
+    /// `MAX_JPX_WORK` was spent, or the caller's own output ceiling was.
+    JpxBudgetSpent,
+    /// JPX: the codestream was understood and a stage this build has not got
+    /// comes next. Milestones 4 to 6 of `docs/plans/gaps/18a-jpx-decoder.md`:
+    /// dequantisation, the inverse wavelet, the colour pipeline.
+    JpxStageNotBuilt,
 }
 
 impl Warning {
@@ -190,6 +241,16 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
+            Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
+            Self::JpxMarkerUnknown => "jpx-marker-unknown",
+            Self::JpxStructureInvalid => "jpx-structure-invalid",
+            Self::JpxFeatureUnsupported => "jpx-feature-unsupported",
+            Self::JpxPrecisionUnsupported => "jpx-precision-unsupported",
+            Self::JpxTruncated => "jpx-truncated",
+            Self::JpxPacketLength => "jpx-packet-length",
+            Self::JpxSegmentationSymbol => "jpx-segmentation-symbol",
+            Self::JpxBudgetSpent => "jpx-budget-spent",
+            Self::JpxStageNotBuilt => "jpx-stage-not-built",
         }
     }
 }
@@ -218,6 +279,16 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
+            Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
+            Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
+            Self::JpxStructureInvalid => "JPX codestream or box structure invalid",
+            Self::JpxFeatureUnsupported => "JPX coding feature not implemented here",
+            Self::JpxPrecisionUnsupported => "JPX component precision above 16 bits",
+            Self::JpxTruncated => "JPX codestream ended mid-structure",
+            Self::JpxPacketLength => "JPX packet length does not reach the next packet",
+            Self::JpxSegmentationSymbol => "JPX segmentation symbol was not 1010",
+            Self::JpxBudgetSpent => "JPX decode budget spent",
+            Self::JpxStageNotBuilt => "JPX decoder stage not built in this version",
         };
         f.write_str(s)
     }
