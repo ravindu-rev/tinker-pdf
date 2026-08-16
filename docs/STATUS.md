@@ -137,7 +137,7 @@ by value over risk.
 | **Determinism: the wasm leg has run, but not in CI** | ~~Written, unverified.~~ It has now been executed. `wasm32-wasip1` under wasmtime 47.0.3 reproduces all seven fingerprints byte-for-byte against native Windows, along with the page dimensions and the ink counts they are computed from — 1486, 2363, 9600, 3600, 3230, 4922 and 5262 pixels — so the interesting half of ruling 4's pairing holds: a 64-bit target and a 32-bit one render the same bytes, which is where a `usize` width assumption would have shown. That is **2 of ruling 4's 4 targets**, on one machine. Linux and macOS come only from the CI matrix and no run of the `wasm-determinism` job has been observed, so four-target agreement is not yet a thing anyone has seen. The job is also now guarded against reporting success without running anything, which `cargo test` will otherwise do. Milestone 4, fixture growth, belongs to gaps 09, 10, 11 and 12; gap 07 added one ahead of them, because `fill_with_pattern` had no fingerprint at all and gap 07 is what made a stroke reach it, gap 06 added a second, because every existing fixture would render identically on a build that had never heard of 8.11, and gap 12 added its own, because not one fixture drew an image — so every fingerprint report made while image sampling was being rewritten was true and meant nothing — and gap 11 has now added the eighth, for the same reason again: no fixture had a `/Group` or an ExtGState `/SMask`, so none of the seven would have moved if clause 11's group compositing had never been written. Its first draft could not see backdrop removal either, because 11.4.7.2's correction is exactly zero for an opaque group; that was found by deleting the removal step and watching the hash not move. Gap 09 has added the ninth, `tiling`: gap 07's `pattern` fixture is a `PatternType 2` shading, evaluated per pixel through an inverse transform, and reaches nothing about a rasterised cell, a lattice, or `PaintType 2`. **None of the eight moved when tiling patterns started painting**, on either target, which is what says the new capability is new rather than a change to an old one. Gap 10 has now added the eleventh, `mesh`, which owes the same debt for the same reason and pays one more: it is the only fixture whose hash depends on a *count* chosen from a device-space measure, so a subdivision step that came out one different on another target would show here and nowhere else. Its content was chosen by injection rather than by taste, as gap 12's had to be — the Coons patch sits in a `/Separation` with a **cubic** tint, because a linear space agrees with itself whether colour is interpolated before conversion or after, and its boundaries are **bowed**, because a flat patch's implied interior is the flat grid under 8.7.4.5.7's formula and under a plain corner blend alike. | [25](plans/gaps/25-wasm-determinism-leg.md) |
 | **Binding packaging: the pipeline exists and has been dry-run; still nothing published** | ~~Nothing published; no wheel or per-RID CI.~~ There is now a wheel, an npm package, a per-RID NuGet package and a browser demo, and `cargo run -p xtask -- release` walks all four in an order **computed from the manifests** rather than maintained by hand. The dry run is the default; `--execute` is the flag that publishes, because a half-published release cannot be retracted from crates.io. **Nothing has been published to any registry**, deliberately — the facade does not freeze until 0.1.0 and a published package invites dependence on an API that is explicitly unstable. The exercise found three defects nothing else could: `tinker-pdf-font` **excluded the CMap registry its own `build.rs` asserts is present**, so the published crate would have built for nobody, four crates into an irreversible upload; every `[workspace.dependencies]` entry needed a `version` beside its `path` or `cargo publish` refuses the whole workspace; and the `.csproj` named a `runtimes/` directory that had never existed, so `dotnet pack` was quietly producing a **managed-only** package that restores, compiles and throws `DllNotFoundException` on first use. What is still owed is a **local registry**: `cargo publish --dry-run` resolves against the live index, so the eight crates above the leaves cannot be proved without publishing, and neither can the plan's own choice to build the language packages against the *published* facade. And the whole CI matrix — every Linux and macOS leg, and the one-tag claim — is written and **unobserved**, because no tag has run it. | [26](plans/gaps/26-binding-packaging.md) |
 | **Forms: calculations** | ~~`/AA` scripts are not run~~ **BUILT — option A, against gap 27's own recommendation of option B.** That recommendation's deciding argument is that a half-implementation is worse than none *unless the writes are transactional*; PRE-E built exactly that primitive first, so the argument was answered rather than ignored. Option B's reader landed first and independently green — `/AA`, `/CO`, `/Names /JavaScript` and the catalog's `/AA`, as source text — then the interpreter on top of it. **What is honestly still absent**: keystroke and validate actions are surfaced and never run; document-level scripts are surfaced and never run; nothing recalculates automatically, because when a calculation runs is a host's policy; and format actions produce a display string that deliberately never becomes `/V`. What is present is bounded on purpose — no `eval`, no loops beyond a step budget, no `app.*` beyond inert stubs whose result can never become a field value | [27](plans/gaps/27-form-calculations-decision.md) |
-| **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all. | [28](plans/gaps/28-tinker-integration-decisions.md) |
+| **Tinker integration** | Tinker still runs on MuPDF and does not depend on this engine at all — but it is no longer waiting on a decision. **All three owner decisions are answered and dated**, in plan 15 where the options used to be: EPUB, XPS and CBZ are to be **built natively here** (a fourth option gap 28 did not contain, reaching the licensing outcome dropping them was recommended for, and costing this engine its PDF-only identity — CBZ S, XPS L, EPUB XL+, three gap plans to follow); form calculations are option A and already built; and Tinker's licence becomes **MIT OR Apache-2.0**, with the caveat that relicensing existing Tinker code needs its contributors' agreement, which is outside this repository. The **deletion checklist is re-verified** against Tinker at `f33ce8a` — all twenty-two items still present, nothing moved, and five traces the checklist does *not* name found instead, one of which breaks the released source archive because `git archive` does not follow the submodule Tinker has since gained. The `FontProvider` blocker is closed on this side and planned on Tinker's as milestone 15.1a: faces come from a bundled set first and the system directories second, because Tinker's own golden strategy names bundled fonts as its mitigation for cross-platform flake. What is still owed before the swap is an oracle pass and a `--fonts` corpus bar | [28](plans/gaps/28-tinker-integration-decisions.md) |
 
 ## Where Tinker integration stands
 
@@ -147,20 +147,42 @@ every one is covered, several better than MuPDF covered them: real permission
 flags, owner-versus-user, a pinned A4-at-150-dpi size, destinations as an enum,
 `Send + Sync` reads.
 
-Two things still block the swap, and neither is a missing feature.
+~~Two things still block the swap, and neither is a missing feature.~~ **The
+three owner decisions are answered and dated in plan 15; what still blocks the
+swap is evidence and one piece of Tinker-side work.**
 
-**The corpus has never been run.** Swapping a battle-tested renderer for one
-validated on four self-authored fixtures and eight files from one laptop would
-be a bad trade. `tpdf check` over the pinned corpora is the cheapest remaining
-work with the highest information return.
+**The corpus has run, and it settles half of the precondition.** 4 525 files,
+4 484 rendering every page, zero crashes — so "validated on four self-authored
+fixtures and eight files from one laptop" is no longer the state. But gap 23
+counts a bitmap that came back, not a bitmap that is right: Checkpoint B asks
+for render **parity** at 95 %, and there is no oracle comparison anywhere in
+that run. What is owed is an `oracle-diff` pass over a corpus subset and a
+`--fonts` bar recorded once Tinker has a provider, in that order.
 
-**One decision is the owner's.** MuPDF also opens EPUB, XPS and CBZ, which is
-what `Doc::Other` exists for. This engine reads PDF and will not read those.
-Dropping them, shelling out, or keeping MuPDF for those formats alone is a
-product decision.
+**This engine will read EPUB, XPS and CBZ.** ~~This engine reads PDF and will
+not read those.~~ *Decided 16 August 2026.* MuPDF opens all three, which is
+what `Doc::Other` exists for; rather than drop them, shell out or keep MuPDF
+for those formats alone, they are being **built natively here**. That keeps
+the licensing outcome — MuPDF leaves Tinker's tree entirely — and costs the
+identity: this is no longer a PDF-only engine, and every place that said it
+always would be has been amended. Sized with the costs on the table: **CBZ S,
+XPS L, EPUB XL+**, the last being a layout engine rather than a renderer and
+larger on its own than the whole gap programme just completed. Three gap plans
+follow, one per format. See [28](plans/gaps/28-tinker-integration-decisions.md).
 
-Beyond those, Tinker will need to hand the engine a `FontProvider`, or rendered
-pages lose the text of every document that does not embed its fonts.
+**Tinker's licence becomes MIT OR Apache-2.0**, matching the engine, with the
+caveat that relicensing existing Tinker code needs its contributors'
+agreement — a step outside this repository. The iOS App Store blocker was
+about the dependency rather than about Tinker's own terms, so it clears
+either way.
+
+**The `FontProvider` handover is the one blocker with code still owed**, and
+all of it is Tinker's. The seam here is built, tested and projected across
+every binding, and it is measurable: `testdata/simple-text.pdf` renders 0
+inked pixels with `UnreadableFont` on all three pages and no provider, and
+4 192 on page one at 150 dpi with three real faces. Where Tinker's faces come
+from is now decided — a bundled set first, system directories second — and
+planned as plan 15's milestone 15.1a, which gates the golden re-baseline.
 
 ## The honest summary
 
@@ -170,6 +192,11 @@ transforms, stroke parameters, text render modes — has been found and fixed,
 each with a test that would have caught it. It writes valid files, compresses
 them, and no longer claims encryption it did not apply.
 
-What it still has not done is meet a real corpus. Everything above is true of
-the inputs it has been shown, and almost all of those were written by this
-repository. That remains the next thing worth doing, ahead of any new feature.
+~~What it still has not done is meet a real corpus.~~ It has now met one —
+4 525 documents, 4 484 rendering every page, not one crash — so "everything
+above is true of inputs this repository wrote" is no longer the caveat. The
+caveat that replaces it is narrower and harder: **nothing has compared a page
+this engine drew against a page anything else drew.** The corpus measures
+whether a bitmap came back. Whether it is the *right* bitmap is
+`oracle-diff`'s question, and it is the next thing worth doing, ahead of any
+new feature.

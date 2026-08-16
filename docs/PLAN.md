@@ -20,6 +20,16 @@ Locked decisions this plan builds on, not up for relitigation here:
 - **Spec baseline:** PDF 1.7 (ISO 32000-1). PDF 2.0 deltas that matter early
   (AES-256/R6, UTF-8 strings, deprecations) are tracked in `pdf20-deltas.md`
   as they arise; full 2.0 conformance is explicitly not a v1 goal.
+- **Formats: PDF, and then CBZ, XPS and EPUB** (*decided 16 August 2026*).
+  This engine was "a PDF engine and always will be" until the owner answered
+  [gaps/28](plans/gaps/28-tinker-integration-decisions.md)'s first decision
+  with a fourth option that document did not offer: build the three formats
+  MuPDF also opened, natively, rather than drop them, convert them out of
+  process or keep MuPDF for them. It is what removes the last AGPL code from
+  Tinker's tree without losing a format. Sized honestly — CBZ S, XPS L, EPUB
+  XL+, the last being a layout engine rather than a renderer. None is built;
+  each gets its own plan, and rule 1 applies to all of it, so the ZIP reader,
+  the XML parser and the CSS are ours.
 
 ## The phases
 

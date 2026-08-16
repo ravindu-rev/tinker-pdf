@@ -7,11 +7,14 @@ standalone library for Rust, JavaScript/wasm, Python and .NET.
 > **Status: it reads and renders PDFs.** Opens damaged files, decrypts with
 > correct security semantics, extracts text with geometry, renders vector
 > graphics, images and gradients in colour, and writes valid documents —
-> 620 tests, four CI targets including wasm, with Python, JavaScript and .NET
-> bindings. The two things it still cannot do: draw text for documents that do
-> not embed their fonts (it ships no substitute face), and prove its leniency
-> against a real-world corpus. [`docs/STATUS.md`](docs/STATUS.md) is the honest
-> ledger; [`docs/PLAN.md`](docs/PLAN.md) is the full design.
+> 1570 tests, four CI targets including wasm, with Python, JavaScript and .NET
+> bindings. It has met a real corpus: 4 525 documents from pdf.js, veraPDF,
+> qpdf and the PDF Association, 4 484 of them rendering every page, **not one
+> crash**. The two things it still cannot do: draw text for documents that do
+> not embed their fonts (it ships no substitute face — the host supplies them
+> through `FontProvider`), and compare a page it drew against a page anything
+> else drew. [`docs/STATUS.md`](docs/STATUS.md) is the honest ledger;
+> [`docs/PLAN.md`](docs/PLAN.md) is the full design.
 
 ## Why another PDF engine
 
@@ -39,6 +42,17 @@ by design:
 the rasterizer, the crypto. No third-party crates for PDF logic or primitives —
 dev/build/binding tooling only. That is a deliberate, documented choice; see
 [`docs/plans/00-architecture.md`](docs/plans/00-architecture.md).
+
+**PDF is where it starts, and no longer where it stops.** This engine was
+described as a PDF engine "and always will be" until 16 August 2026, when the
+owner decided that the three formats MuPDF also opened — **CBZ, XPS and
+EPUB** — are to be built here rather than dropped, converted or left to
+MuPDF. That is what finally removes the AGPL dependency without losing a
+format. It is honest about the size: CBZ is small, XPS is substantial, and
+EPUB is a layout engine — a CSS cascade, a box model, line breaking and
+pagination — larger on its own than everything built so far. None of the
+three exists yet; each gets its own plan. The decision and its costs are in
+[`docs/plans/gaps/28-tinker-integration-decisions.md`](docs/plans/gaps/28-tinker-integration-decisions.md).
 
 ## The plan
 
