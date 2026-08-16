@@ -49,6 +49,7 @@
 
 pub(crate) mod boxes;
 pub(crate) mod codestream;
+pub(crate) mod tier2;
 
 use crate::{Capability, FilterError, Limits, Warning};
 
@@ -93,6 +94,22 @@ pub(crate) const MAX_JPX_TILES: u64 = 65_535;
 /// Decomposition levels, T.800 A.6.1's own bound. Resolutions are one more.
 pub(crate) const MAX_JPX_LEVELS: u8 = 32;
 
+/// Code-blocks in one tile-component, across every resolution and precinct.
+///
+/// **Not the work cap** — [`MAX_JPX_SAMPLES`] is. This bounds the *bookkeeping*
+/// instead, which the sample count does not: a tag tree's node count comes
+/// from the precinct grid, and the precinct grid comes from file-supplied
+/// exponents, so a codestream can declare a modest image partitioned into an
+/// enormous number of very small precincts and ask for the trees before a
+/// single coefficient is read.
+///
+/// The magnitude is T.800's own arithmetic rather than an invented one. B.7
+/// puts a code-block at 4x4 samples minimum, so [`MAX_JPX_SAMPLES`] at
+/// `1 << 26` cannot contain more than `1 << 22` of them however it is cut up.
+/// Anything past that is describing a partition that cannot correspond to the
+/// samples it claims, and is refused by name rather than allocated for.
+pub(crate) const MAX_JPX_CODE_BLOCKS: u64 = 1 << 22;
+
 // --- the refusal list ---------------------------------------------------
 
 /// Why a codestream was refused.
@@ -127,6 +144,22 @@ pub(crate) enum Refusal {
     Truncated(&'static str),
     /// A total from the block above was spent. Carries which.
     Budget(&'static str),
+    /// A packet did not end where the next one begins.
+    ///
+    /// An **integrity** refusal rather than a capability one, and the
+    /// distinction is why it has its own variant instead of folding into
+    /// [`Refusal::Structure`]. Tier-2 carries no image data: it hands tier-1
+    /// a byte range, and a byte range wrong by a few bytes still decodes into
+    /// coefficients, which still go through the inverse wavelet, which
+    /// smooths them into a photograph. Nothing downstream can tell.
+    ///
+    /// So the arithmetic is checked against itself: with SOP signalled every
+    /// packet must begin with one, with EPH signalled every header must end
+    /// with one, and in every case a tile's packets must consume its data
+    /// exactly. A tier-2 parser that has gone wrong almost never lands on a
+    /// packet boundary by accident, which makes this the cheapest real
+    /// defence in the decoder -- and it fires before a single pixel exists.
+    PacketLength,
     /// The codestream parsed and this build has not got the stage that comes
     /// next. Milestones 4 to 6: dequantisation, the inverse wavelet, colour.
     NotBuilt(&'static str),
@@ -147,6 +180,10 @@ impl Refusal {
             Self::Precision(_) => Warning::JpxPrecisionUnsupported,
             Self::Truncated(_) => Warning::JpxTruncated,
             Self::Budget(_) => Warning::JpxBudgetSpent,
+            // Structure, not a category of its own: a packet that does not
+            // end where the next begins is a codestream whose arithmetic
+            // disagrees with itself, which is what that warning already says.
+            Self::PacketLength => Warning::JpxStructureInvalid,
             Self::NotBuilt(_) => Warning::JpxStageNotBuilt,
         }
     }
@@ -286,9 +323,20 @@ fn decode_inner(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
     let container = boxes::parse(input)?;
     let stream = codestream::parse(container.codestream)?;
     stream.check_budget(limits)?;
-    // Milestones 2 to 6. The headers are understood and there is nothing yet
-    // to turn them into samples, so this refuses rather than inventing any.
-    Err(Refusal::NotBuilt("tier-2 and everything after it"))
+    // Tier-2 runs here rather than beside tier-1, and it runs even though
+    // nothing consumes its answer yet. Two reasons, both about what a refusal
+    // is worth. It is where the integrity checks live -- a packet that does
+    // not end where the next begins is a codestream disagreeing with itself,
+    // and catching that here means a malformed file is refused *by name*
+    // instead of reaching a stage that would smooth it into a photograph. And
+    // it is what makes the refusal below honest: `tier-1` names the one stage
+    // that is missing, where "tier-2 and everything after it" named five and
+    // would have gone on naming five after tier-2 was written.
+    let _tiles = tier2::decode_tiles(&stream)?;
+    // Milestones 3 to 6. The packets are located and there is nothing yet to
+    // turn their bytes into coefficients, so this refuses rather than
+    // inventing any.
+    Err(Refusal::NotBuilt("tier-1"))
 }
 
 #[cfg(test)]

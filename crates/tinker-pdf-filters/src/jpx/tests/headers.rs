@@ -12,8 +12,23 @@ fn parse(bytes: &[u8]) -> Result<codestream::Codestream<'_>, Refusal> {
 
 /// A minimal 4 x 4 greyscale stream with one empty tile-part.
 fn minimal() -> Vec<u8> {
-    Spec::default().codestream(&[(0, &[])])
+    Spec::default().codestream(&[(0, &EMPTY_PACKETS)])
 }
+
+/// Enough packet bytes for tier-2 to read the tile out exactly.
+///
+/// A tile carrying no data at all is *truncated*, not header-only: B.10 says
+/// a layer has one packet per precinct per resolution per component, and the
+/// default spec has one of each, so the tile owes one packet however empty
+/// the picture is. A single zero bit is that packet -- B.10.3's non-empty
+/// flag clear, meaning no code-block is included -- and the rest of the byte
+/// is padding.
+///
+/// Before tier-2 ran, these fixtures reached the decoder's refusal without
+/// anyone noticing they were short. That is the small print of wiring a stage
+/// in: the fixtures that were sufficient for the stages before it stop being
+/// sufficient, and a test that starts failing is the stage doing its job.
+const EMPTY_PACKETS: [u8; 2] = [0x00, 0x00];
 
 // --- the container ------------------------------------------------------
 

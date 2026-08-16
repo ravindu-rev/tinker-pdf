@@ -685,3 +685,56 @@ may refuse these bytes", not "this crate will never decode them".
 | Five to seven engine-weeks and 3 500–4 500 lines for 0.4 per cent of the pinned corpora | Recorded at the top of this document rather than discovered later: built by decision, with the hit rate stated |
 | Adding `Warning` or `Capability` variants is a public API change with exhaustive match sites | The compiler catches the filters-crate sites; check whether any consumer maps `Warning` with a wildcard arm, which would swallow the new ones — gap 17's finding |
 | An `As built` that reads as "JPX works now" | Milestone 8's last exit criterion is a number about 19 files, and the `As built` must say it is a claim about 19 files |
+
+## Progress — 16 August 2026
+
+**Milestones 0, 1 and 2 have landed.** `As built` is deliberately not written
+yet; it belongs to whoever finishes milestone 8.
+
+- **M0** (`bfa73a2`) — `mq.rs` gained `set_state`, because T.88 starts every
+  context at state 0 and T.800 does not: zero-coding at 4, run-length at 3,
+  UNIFORM at 46. `reset()` returns contexts to the caller's configured states
+  rather than to zero, since the second code-block in every stream would
+  otherwise decode against the wrong probabilities. T.88's Annex H.1 and H.2
+  are still green and now have two guards of their own —
+  `annex_h2_is_unmoved_by_a_configured_neighbour` and
+  `contexts_nobody_configured_still_reset_to_t88_zero` — so a change made for
+  JPX cannot quietly break JBIG2.
+- **M1** (`46364e3`) — every Table A.2 marker parsed or named in a refusal,
+  A.5.1's tile-grid constraints refusing rather than dividing by zero, and the
+  eighteenth fuzz target.
+- **M2** (this commit) — tag trees, the packet bit reader with B.10.1's
+  stuffing rule, precinct and code-block geometry anchored to the reference
+  grid, packet headers, and all five of B.12's progression orders.
+
+**Tier-2 runs even though nothing consumes its answer yet**, and that is
+deliberate. It is where the integrity checks live: a packet that does not end
+where the next begins is a codestream disagreeing with itself, and refusing
+there means a malformed file is named rather than reaching a stage that would
+smooth it into a photograph. It also makes the refusal honest —
+`NotBuilt("tier-1")` names the one stage that is missing, where
+`NotBuilt("tier-2 and everything after it")` named five and would have gone on
+naming five after tier-2 existed.
+
+**A wiring lesson worth keeping.** Two header fixtures started failing the
+moment tier-2 was reached, because they carried no packet bytes at all — the
+default spec is a 4x4 image with one decomposition level, so it has two
+resolutions and owes two packets however empty the picture is. They were
+sufficient for every stage before tier-2 and nobody had noticed they were
+short. A test that starts failing when a stage is wired in is that stage doing
+its job.
+
+### What milestone 3 needs
+
+- `CodeBlock::width`/`height`, `CodingStyle::segmentation_symbols` and
+  `Codestream::quant_for` are written and carry `#[allow(dead_code)]` naming
+  the milestone that reads them. Remove the attributes as they are consumed.
+- The Annex D tables (D.1, D.3, D.4, D.7) must be asserted **entry by entry**,
+  not by round trip. Gap 17 proved a round trip cannot see a bijective
+  relabelling: it transposed two of JBIG2's template 0 context bits and T.88's
+  Annex H.1 still decoded to its published picture byte for byte. JPX's
+  exposure is wider — three zero-coding mappings plus a sign table with an XOR
+  bit.
+- Segmentation symbols, when signalled, are a free per-code-block check that
+  the MQ decoder is still in step. Decode the `1010` in UNIFORM **and check
+  it**.

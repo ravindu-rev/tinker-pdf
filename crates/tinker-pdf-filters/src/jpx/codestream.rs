@@ -292,6 +292,44 @@ pub(crate) struct CodingStyle {
     pub(crate) precincts: Vec<(u8, u8)>,
 }
 
+impl CodingStyle {
+    /// Whether the segmentation symbols of D.5 end every cleanup pass.
+    ///
+    /// Read by milestone 3: decoding the `1010` in UNIFORM and *checking* it
+    /// is a free per-code-block verification that the MQ decoder is still in
+    /// step, and the plan calls discarding it throwing away the one integrity
+    /// check the format offers.
+    #[allow(dead_code, reason = "tier-1, milestone 3")]
+    pub(crate) const fn segmentation_symbols(&self) -> bool {
+        self.cb_style & cb_style::SEGMENTATION_SYMBOLS != 0
+    }
+
+    /// `(PPx, PPy)` at resolution `r`.
+    pub(crate) fn precinct_exponents(&self, r: usize) -> (u8, u8) {
+        self.precincts.get(r).copied().unwrap_or((15, 15))
+    }
+
+    /// The code-block exponents actually used at resolution `r`, after B.7's
+    /// clamp against the precinct.
+    ///
+    /// A precinct is never smaller than the code-blocks inside it. At
+    /// resolution 0 the precinct partition maps one-to-one onto the single LL
+    /// subband; above it, a precinct in *resolution* coordinates covers half
+    /// as much in each of the three subbands, so the code-block exponent is
+    /// clamped against `PPx - 1` rather than `PPx`. Dropping that minus one
+    /// produces the right number of code-blocks in the wrong places, which is
+    /// a picture rather than an error.
+    pub(crate) fn code_block_exponents(&self, r: usize) -> (u8, u8) {
+        let (ppx, ppy) = self.precinct_exponents(r);
+        let (ppx, ppy) = if r == 0 {
+            (ppx, ppy)
+        } else {
+            (ppx.saturating_sub(1), ppy.saturating_sub(1))
+        };
+        (self.cb_width.min(ppx), self.cb_height.min(ppy))
+    }
+}
+
 /// COD (A.6.1): the coding style, defaulting every component.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Cod {
@@ -365,6 +403,63 @@ pub(crate) struct Codestream<'a> {
 }
 
 impl Codestream<'_> {
+    /// The coding style in force for component `c` of tile `t`.
+    ///
+    /// A.6.2's precedence, which is four deep and is the thing a decoder gets
+    /// wrong quietly: a tile-part COC beats a tile-part COD beats a main
+    /// header COC beats the main header COD. Applying the main-header default
+    /// to every component decodes a chroma plane at a luma plane's
+    /// decomposition depth — a picture, not an error.
+    pub(crate) fn style_for(&self, tile: u16, c: usize) -> &CodingStyle {
+        if let Some(part) = self.first_part(tile) {
+            if let Some((_, style)) = part.coc.iter().find(|(i, _)| usize::from(*i) == c) {
+                return style;
+            }
+            if let Some(cod) = &part.cod {
+                return &cod.style;
+            }
+        }
+        if let Some(Some(style)) = self.coc.get(c) {
+            return style;
+        }
+        &self.cod.style
+    }
+
+    /// The COD in force for tile `t` — the progression, layer count and
+    /// transform, which are per-tile but not per-component.
+    pub(crate) fn cod_for(&self, tile: u16) -> &Cod {
+        self.first_part(tile)
+            .and_then(|p| p.cod.as_ref())
+            .unwrap_or(&self.cod)
+    }
+
+    /// The quantisation in force for component `c` of tile `t`, by A.6.5's
+    /// precedence, which mirrors A.6.2's.
+    ///
+    /// Read by milestone 4, which is where a coefficient stops being an
+    /// integer from tier-1 and becomes a number with a magnitude.
+    #[allow(dead_code, reason = "dequantisation, milestone 4")]
+    pub(crate) fn quant_for(&self, tile: u16, c: usize) -> &Quant {
+        if let Some(part) = self.first_part(tile) {
+            if let Some((_, q)) = part.qcc.iter().find(|(i, _)| usize::from(*i) == c) {
+                return q;
+            }
+            if let Some(q) = &part.qcd {
+                return q;
+            }
+        }
+        if let Some(Some(q)) = self.qcc.get(c) {
+            return q;
+        }
+        &self.qcd
+    }
+
+    fn first_part(&self, tile: u16) -> Option<&TilePart<'_>> {
+        self.tile_parts
+            .iter()
+            .find(|p| p.tile == tile && p.index == 0)
+    }
+
     /// The budget of [`super::MAX_JPX_SAMPLES`], and the caller's own
     /// ceiling, both spent before any plane exists.
     ///
