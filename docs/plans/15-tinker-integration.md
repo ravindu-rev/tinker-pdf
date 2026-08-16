@@ -105,20 +105,71 @@ Exact paths, verified against Tinker's tree at planning time:
   item" rationale — pure Rust cross-compiles with rustup targets; the jobs
   stay, their risk register shrinks.
 
-### Owner decisions recorded here, decided at integration
+### Owner decisions recorded here — answered 16 August 2026
 
-1. **EPUB/XPS/CBZ.** `Doc::Other` exists only because MuPDF was
-   multi-format. Options: drop (viewer becomes PDF-only, honest), convert
-   via external tool at open, or a later dedicated module. The capability
-   matrix (`caps_get`) makes any choice UI-clean.
-2. **Forms JS.** Arrives with engine phase [11](11-forms.md)'s open item
-   (own ES-subset interpreter vs `boa`); until then `formCalc: false` in
-   capabilities, exactly as Tinker's web plan already gates it.
-3. **Tinker's license.** With MuPDF gone, the only AGPL in the shipped tree
-   goes with it. Stay AGPL (copyleft app over permissive engine — coherent)
-   or relicense (maximally adoptable; the iOS App Store blocker was
-   specifically *Artifex's* copyright and dies either way). Nothing in this
-   plan forecloses either; `deny.toml` updates to match the choice.
+Recorded with their options when this plan was written, because none of the
+three was decidable before the engine existed. All three now have an answer,
+and each answer is written where the options were rather than in a section of
+its own, so that nobody reads the question without the reply.
+
+**1. EPUB, XPS and CBZ — built natively, inside tinker-pdf.**
+*Answered 16 August 2026.* `Doc::Other` exists only because MuPDF was
+multi-format. [gaps/28](gaps/28-tinker-integration-decisions.md) costed three
+options — drop them, keep MuPDF for those three formats alone, or convert out
+of process — and recommended dropping them. The answer is a fourth option that
+document does not contain: the three formats become capabilities of this
+engine, each with a gap plan of its own written after 28 closes.
+
+It reaches the licensing outcome dropping them was recommended *for*: MuPDF
+leaves Tinker's shipped tree entirely, and takes the AGPL dependency, the
+vendored MSVC patch and the iOS App Store blocker with it. What it costs is
+this repository's stated identity — "tinker-pdf is a PDF engine and always
+will be" is no longer true, and every place that said so is amended
+deliberately rather than left to rot.
+
+Sized with those costs put to the owner explicitly. **CBZ is S**: a ZIP of
+images, which the engine's own inflate and JPEG decoder already do most of.
+**XPS is L**: an OPC ZIP, a hand-rolled XML parser, and fixed-page markup that
+maps closely onto the path, glyph and brush calls the `Device` seam already
+has. **EPUB is XL+**: XHTML with a CSS cascade, a box model, line breaking,
+pagination and font fallback is a layout engine rather than a renderer, and on
+its own it is larger than the whole twenty-eight-plan gap programme that
+precedes this decision. Ruling 3 and CONTRIBUTING rule 1 hold throughout — the
+ZIP reader, the XML parser and every line of the CSS are ours.
+
+The capability matrix (`caps_get`) stays the mechanism either way: until a
+format's plan lands, its absence is reported rather than discovered.
+
+**2. Forms JavaScript — a hand-rolled ECMAScript subset, and it is built.**
+*Answered by [gaps/27](gaps/27-form-calculations-decision.md), closed
+`07dd4b0`..`7c7b52d`.* The option taken is **A**, against that document's own
+recommendation of B, and the reason is that A's precondition had been built in
+the meantime: option B's deciding argument is that a half-implementation is
+worse than none *unless the writes are transactional*, and PRE-E built
+`DocumentEditor::transaction` before gap 27 was picked up. Option B's reader —
+`/AA`, `/CO`, `/Names /JavaScript` and the catalog's `/AA`, surfaced as source
+text — landed first and independently green, so A sits on top of it rather
+than instead of it, and removing the interpreter would leave a working reader.
+Phase [11](11-forms.md)'s open item is closed with it; `boa` was never a
+candidate, because ruling 3 rules out a JavaScript crate. `formCalc` becomes
+true in Tinker's capability matrix at integration, with the honest caveat that
+nothing recalculates by itself — *when* a calculation runs is a host's policy,
+and `recalculate()` is the door.
+
+**3. Tinker's licence — permissive, MIT OR Apache-2.0, matching the engine.**
+*Answered 16 August 2026.* With MuPDF gone the only AGPL in Tinker's shipped
+tree goes with it, so nothing forces the choice, and the owner has chosen the
+engine's own terms rather than staying copyleft. `deny.toml` updates to match:
+`AGPL-3.0` leaves the allowlist along with both `mupdf`/`mupdf-sys`
+exceptions, and the workspace `license` field and `package.json` change with
+them.
+
+Two things the owner should see beside that answer. **Relicensing existing
+Tinker code needs its contributors' agreement**, which is a step outside this
+repository and outside this plan — the decision is recorded here, the consent
+is collected there. And the iOS App Store blocker documented in
+`docs/mupdf-limitations.md` was about the *dependency*, not about Tinker's own
+licence: it clears when MuPDF leaves, whatever Tinker chooses for itself.
 
 ## Milestones
 
