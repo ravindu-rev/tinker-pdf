@@ -15,8 +15,11 @@ is mostly deletion.
   against the tinker-pdf facade.
 - Golden regeneration and fixture handling.
 - The deletion checklist — every MuPDF trace in Tinker's tree.
-- Three owner decisions that only become decidable now, recorded with their
-  options.
+- Substitute faces: the `FontProvider` the swap makes Tinker responsible for
+  (*added 16 August 2026*).
+- Three owner decisions that only become decidable now, ~~recorded with their
+  options~~ **answered 16 August 2026**, with their options kept above each
+  answer.
 
 ## Non-goals
 
@@ -380,9 +383,69 @@ paths were checked at planning time, which was the scaffolding commit. The
 freeze exempts dependency and security bumps, so drift is guaranteed. Re-check
 every path before using it as a checklist.
 
-The three owner decisions below are still open. [gaps/27](gaps/27-form-calculations-decision.md)
-recommends an answer to the forms-JavaScript one;
-[gaps/28](gaps/28-tinker-integration-decisions.md) costs the other two.
+~~The three owner decisions below are still open.~~ *Superseded 16 August 2026
+— all three are answered, and they sit **above** this amendment rather than
+below it, which is where "below" came from.*
+
+### Amendment, 16 August 2026: what the corpus settled, and what it did not
+
+The amendment above is five days old and every one of its three statements has
+changed state. Each is answered here in the same order rather than edited
+there, because a plan whose amendments are silently kept current is a plan
+nobody can date.
+
+**Gap 28 says this plan "has never been amended". That was true when the
+sentence was written and false by the time it landed** — `e0fc873` wrote the
+gap plans and the amendment above in the same commit. Corrected here rather
+than in gap 28, because a gap document is the record of what was believed at
+planning time and this plan is the record of what is true.
+
+**The corpus has run, and it settles less of Checkpoint B than it looks.**
+[gaps/23](gaps/23-corpus-runner.md): 4 525 files from pdf.js, veraPDF, qpdf's
+qtest and the PDF Association, one child process each, 20 s timeout, 72 dpi —
+**4 484 rendered every page, 40 failed, 1 timed out, and not one crashed.**
+
+Precisely what that does and does not give the precondition, because the
+distinction is the whole reason it is worded as it is:
+
+- It gives the thing that did not exist at all. "Validated on four
+  self-authored fixtures and eight files from one laptop" is no longer the
+  state, and a swap can now be argued from evidence.
+- It gives ruling 1 its strongest measurement — thousands of documents real
+  producers emitted, which is better evidence than a fuzzer, because a fuzzer
+  explores mutations of what we thought to write down.
+- **It does not give render parity.** `rendered` is defined as "returned a
+  bitmap without crashing or timing out", deliberately, so that ruling 2's
+  honest degradation cannot count against the bar. 99.1 % is therefore a
+  *crash-and-hang* number. Checkpoint B asks for render **parity** at 95 %,
+  which is a claim about whether the bitmap is the right bitmap, and nothing
+  in gap 23 compares one against anything. That is `oracle-diff`'s question,
+  kept separate on purpose so a regression in either stays legible.
+- **It does not give a comparable second axis yet.** 1 092 files (24 %)
+  rendered with something reported, measured with **no font faces**, so the
+  number is dominated by documents that embed no font and therefore draw no
+  text. `ratchet.json` records `"fonts": "none"` and `corpus-run` refuses to
+  compare a `--fonts` run against a bar recorded without them, which is what
+  stops a font-policy artefact from becoming the committed engine bar.
+
+So the precondition moves from "cannot be measured" to "half measured". What
+is still owed before 15.1 opens is an oracle pass over a corpus subset, and a
+`--fonts` bar recorded once Tinker's provider exists — in that order, because
+the second is what makes the first measure the renderer rather than the font
+policy.
+
+**The `FontProvider` blocker is closed on the engine's side and planned on
+Tinker's.** The seam is built, projected across all four binding surfaces and
+proved end to end; the numbers are under *Where Tinker's faces come from*
+above, together with the answer to the question gap 28 left open — faces come
+from a bundled set first and the system directories second — and milestone
+15.1a, which gates 15.2.
+
+**The deletion checklist has been re-verified** against Tinker at `f33ce8a`.
+All twenty-two items still exist at the paths stated and nothing has moved;
+five traces the checklist does not name were found instead, one of which
+breaks the released source archive. The result is recorded inside the
+checklist rather than here, so that whoever uses it reads it.
 
 ## Risks
 
