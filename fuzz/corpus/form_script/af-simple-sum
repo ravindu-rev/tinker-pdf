@@ -1,0 +1,1 @@
+AFSimple_Calculate("SUM", new Array("a", "b"));

@@ -41,6 +41,11 @@ pub use tinker_pdf_cos::{
     FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
     ScriptSummary, Trapped, Warning, WarningKind,
 };
+/// Form calculations: running the `/AA` calculate actions a form carries.
+///
+/// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
+/// caller of [`DocumentEditor::recalculate`] handles.
+pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
 /// The object model behind [`Document::cos`].
 ///
 /// The escape hatch is only an escape hatch if the types it hands back can be

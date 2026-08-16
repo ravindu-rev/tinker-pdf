@@ -1,0 +1,1 @@
+event.value = getField('a').value + getField('b').value * 2;

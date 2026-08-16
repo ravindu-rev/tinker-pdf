@@ -181,6 +181,20 @@ impl core::fmt::Display for FillError {
     }
 }
 
+/// Who is writing a field value.
+///
+/// The distinction exists for exactly one rule — ReadOnly (12.7.4.1 table
+/// 227) binds the user and not the document's own calculate action — and it is
+/// an enum rather than a `bool` so that the call sites read as what they are
+/// rather than as `true`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Writer {
+    /// A caller filling the form, which is what ReadOnly refuses.
+    User,
+    /// A calculate action the document itself carries.
+    Calculation,
+}
+
 /// Which field refused, and why (ruling 10: a warning names its object).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FillRejection {
@@ -899,10 +913,34 @@ impl DocumentEditor {
             .map(|p| p.media_box)
     }
 
-    /// The document's form fields (12.7).
+    /// The document's form fields (12.7), **as this editor has them**.
+    ///
+    /// The tree walk reads the document underneath the overlay, so a field
+    /// this editor has already written would otherwise come back with the
+    /// value it was saved with. Nothing depended on that before — `accepts`
+    /// looks at the kind and the flags, not the value — but a calculation
+    /// reads the values it computes from, and one that read them from under
+    /// its own writes would compute a total from inputs the file no longer
+    /// has. The value is taken from the overlay whenever the field's object is
+    /// in it, present *or* absent, because 12.7.5.3's reset removes `/V`
+    /// rather than blanking it and "absent" is an answer.
     #[must_use]
     pub fn fields(&self) -> Vec<form::Field> {
-        form::fields(&self.doc)
+        let mut fields = form::fields(&self.doc);
+        if self.overlay.is_empty() && self.deleted.is_empty() {
+            return fields;
+        }
+        let v = self.intern(b"V");
+        for field in &mut fields {
+            if !self.overlay.contains_key(&field.reference.num) {
+                continue;
+            }
+            let Some(Object::Dict(dict)) = self.get(field.reference) else {
+                continue;
+            };
+            field.value = form::field_value(&self.doc, dict.get(v), field.kind);
+        }
+        fields
     }
 
     /// Fills a text or choice field, rebuilding its appearance.
@@ -942,10 +980,28 @@ impl DocumentEditor {
     ///   `skipped.is_empty()`, or uses [`DocumentEditor::set_field_value`],
     ///   which does exactly that.
     pub fn fill_field(&mut self, name: &str, value: &str) -> Result<Vec<SkippedWidget>, FillError> {
+        self.write_field(name, value, Writer::User)
+    }
+
+    /// The one implementation behind every field write.
+    ///
+    /// The only thing [`Writer`] changes is whether ReadOnly applies; every
+    /// other rule about the value is [`fill::accepts_value`], shared, so the
+    /// two doors cannot drift apart.
+    fn write_field(
+        &mut self,
+        name: &str,
+        value: &str,
+        writer: Writer,
+    ) -> Result<Vec<SkippedWidget>, FillError> {
         let Some(field) = self.fields().into_iter().find(|f| f.name == name) else {
             return Err(FillError::NoSuchField);
         };
-        if !fill::accepts(&field, value) {
+        let allowed = match writer {
+            Writer::User => fill::accepts(&field, value),
+            Writer::Calculation => fill::accepts_value(&field, value),
+        };
+        if !allowed {
             return Err(FillError::ValueRefused);
         }
         let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
@@ -977,10 +1033,38 @@ impl DocumentEditor {
         &mut self,
         values: &[(&str, &str)],
     ) -> Result<Vec<SkippedWidget>, FillRejection> {
+        self.write_fields(values, Writer::User)
+    }
+
+    /// The same all-or-nothing apply, for values a calculation produced.
+    ///
+    /// One difference from [`DocumentEditor::set_field_values`], and it is the
+    /// whole reason this exists: a ReadOnly field is written. 12.7.4.1 table
+    /// 227 makes ReadOnly a rule about **the user**, and a calculated total is
+    /// flagged read-only precisely so that nothing but the document's own
+    /// calculate action writes it — refusing here would make every properly
+    /// authored calculated form uncomputable. Every other rule about the value
+    /// is unchanged, because both paths run [`fill::accepts_value`].
+    ///
+    /// Not a private helper: a host that reads the scripts as data (which is
+    /// what the field model surfaces) and computes them itself needs exactly
+    /// this door, and would otherwise have to clear the flag and put it back.
+    pub fn set_calculated_values(
+        &mut self,
+        values: &[(&str, &str)],
+    ) -> Result<Vec<SkippedWidget>, FillRejection> {
+        self.write_fields(values, Writer::Calculation)
+    }
+
+    fn write_fields(
+        &mut self,
+        values: &[(&str, &str)],
+        writer: Writer,
+    ) -> Result<Vec<SkippedWidget>, FillRejection> {
         self.transaction(|tx| {
             let mut skipped = Vec::new();
             for (name, value) in values {
-                match tx.fill_field(name, value) {
+                match tx.write_field(name, value, writer) {
                     Ok(widgets) => skipped.extend(widgets),
                     Err(reason) => {
                         return Err(FillRejection {
@@ -992,6 +1076,21 @@ impl DocumentEditor {
             }
             Ok(skipped)
         })
+    }
+
+    /// Runs the form's calculate actions and applies the result (12.6.3).
+    ///
+    /// See [`crate::calc::recalculate`], which this delegates to whole: the
+    /// pass is long enough to deserve its own module, and putting it there
+    /// keeps the interpreter's only entry point next to the ordering rule it
+    /// depends on.
+    ///
+    /// # Errors
+    ///
+    /// Any script that cannot be run refuses the **whole** pass, and nothing
+    /// is written.
+    pub fn recalculate(&mut self) -> Result<crate::calc::Recalculation, crate::calc::CalcError> {
+        crate::calc::recalculate(self)
     }
 
     /// Turns a checkbox on or off.

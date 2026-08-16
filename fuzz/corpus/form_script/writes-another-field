@@ -1,0 +1,1 @@
+getField('b').value = event.value; event.value = 1;

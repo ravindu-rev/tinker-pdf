@@ -1,0 +1,2 @@
+var n = getField('a').value;
+if (n > 5) { event.value = n * 1.2; } else { event.value = 0; }

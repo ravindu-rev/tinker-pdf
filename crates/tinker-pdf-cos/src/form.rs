@@ -439,6 +439,16 @@ fn classify(doc: &CosDocument, kind: Name, flags: i64) -> FieldKind {
     }
 }
 
+/// Decodes a `/V` or `/DV` entry into a typed value.
+///
+/// Public because an editor holding a changed `/V` in its overlay has to
+/// decode it the same way the tree walk did, and a second decoder is a second
+/// answer to give.
+#[must_use]
+pub fn field_value(doc: &CosDocument, value: Option<&Object>, kind: FieldKind) -> FieldValue {
+    read_value(doc, value, kind)
+}
+
 fn read_value(doc: &CosDocument, value: Option<&Object>, kind: FieldKind) -> FieldValue {
     let Some(value) = value else {
         return FieldValue::None;

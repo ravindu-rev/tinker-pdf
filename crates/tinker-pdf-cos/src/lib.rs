@@ -43,6 +43,7 @@
 
 pub mod appearance;
 pub mod build;
+pub mod calc;
 pub mod decrypt;
 pub mod dest;
 pub mod doc;
@@ -58,6 +59,7 @@ pub mod object;
 pub mod outline;
 pub mod pages;
 pub mod parse;
+pub mod script;
 pub mod security;
 pub mod text_string;
 pub mod trees;
@@ -75,6 +77,7 @@ mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
 pub use build::{DocumentBuilder, ImageData, OutlineEntry, PageBuilder};
+pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
@@ -82,8 +85,9 @@ pub use edit::{annot, DocumentEditor, FillError, FillRejection, SkippedWidget, W
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, Font, FontKind};
 pub use form::{
-    acro_form, calculation_order, catalog_scripts, document_scripts, fields, script_summary,
-    DocumentScript, Field, FieldKind, FieldScripts, FieldValue, Script, ScriptSummary,
+    acro_form, calculation_order, catalog_scripts, document_scripts, field_value, fields,
+    script_summary, DocumentScript, Field, FieldKind, FieldScripts, FieldValue, Script,
+    ScriptSummary,
 };
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
@@ -94,6 +98,7 @@ pub use outline::{
 };
 pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
+pub use script::{Budget, Host, ScriptError};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use text_string::{decode_text_string, parse_date, Date};
 pub use trees::{name_tree, name_tree_lookup, number_tree};

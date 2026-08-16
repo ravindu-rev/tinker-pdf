@@ -1,0 +1,1 @@
+var s = 'xxxx'; while (true) { s = s + s; }

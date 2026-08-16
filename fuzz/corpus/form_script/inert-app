@@ -1,0 +1,1 @@
+event.value = 1; app.alert('done'); // and a comment

@@ -343,7 +343,7 @@ pub const MULTILINE: i64 = 1 << 12;
 /// A text field whose characters sit in fixed cells.
 pub const COMB: i64 = 1 << 24;
 
-/// Whether a value is one the field will accept.
+/// Whether a value is one the field will accept from a user.
 ///
 /// Refusing is better than truncating silently: a form filled with a value the
 /// field rejects is a data error, and writing half of it hides that.
@@ -352,6 +352,20 @@ pub fn accepts(field: &form::Field, value: &str) -> bool {
     if field.is_read_only() {
         return false;
     }
+    accepts_value(field, value)
+}
+
+/// Whether a value fits the field, leaving aside who is writing it.
+///
+/// 12.7.4.1 table 227 says ReadOnly means the field "shall not be modified by
+/// **the user**", and a calculate action is the document's own script rather
+/// than a user — a calculated total is read-only precisely so that nothing
+/// *but* the script writes it. So the read-only test lives in [`accepts`],
+/// which is the user's door, and everything that is true of a value whoever
+/// writes it lives here, where both doors share it. Splitting it any other way
+/// gives the calculation path a second copy of the rules to drift from.
+#[must_use]
+pub fn accepts_value(field: &form::Field, value: &str) -> bool {
     match field.kind {
         FieldKind::Text => field
             .max_len
