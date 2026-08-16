@@ -779,3 +779,65 @@ actually moved before asking `reset` to put them back.
   round trip rather than an oracle.
 - The coefficient planes are `i32` in Q12 and the 5/3 path shares the type at
   Q0 — it is exact integer arithmetic and wants no fraction.
+
+### Milestone 4 — dequantisation and the inverse 5/3 (16 August 2026)
+
+**Gate 1 passes: byte-identical to `opj_decompress`, across eleven fixtures.**
+Five shapes at one, two and three decomposition levels — an even grid, an odd
+one (17 by 13, so every subband carries a partial code-block), an
+eight-by-eight checkerboard, and a 64x1 and a 1x64 where the 1D lifting
+degenerates. 0 of 2 130 samples differ.
+
+That single comparison pins the container, tier-2's packet arithmetic,
+tier-1's context *numbering*, dequantisation, the inverse 5/3 and the DC level
+shift, all at once, against a decoder sharing no code with this one. It is
+what T.800 leaves this project without, since the standard publishes no
+datastream annex — there is no equivalent of T.88's Annex H.1, which gap 17
+leaned on.
+
+**The gate earned its keep immediately.** The first implementation applied
+E.1's `Mb = G + exp - 1` as a realignment shift, on the reading that a
+code-block's magnitudes are left-aligned within `Mb` bits. They are not:
+tier-1 accumulates with `|= 1 << plane` counting down to zero, so the most
+significant decoded bit already sits where `Mb - zero_planes` puts it. The
+shift halved every coefficient, and an inverse wavelet turns a uniformly
+halved subband into **a picture of exactly the right shape at half the
+contrast** — `got = want/2 + 64` once the level shift was applied. It looked
+like a decode. Nothing in this repository would have caught it.
+
+**And one defect is caught by the oracle alone.** Replacing F.3.6's symmetric
+extension with zero padding at the boundaries leaves **all 225 unit tests
+passing**; only the eleven-fixture comparison fails. That is the clearest
+statement available of what the gate buys, and it is why the plan ordered 5/3
+before 9/7.
+
+`dequantise` is consequently almost nothing for the reversible path, and the
+doc comment says why at length — the obvious code is wrong in a way that looks
+right, and a later reader deserves the reasoning rather than a one-line
+identity function.
+
+**A test's "not built yet" assertion had to move.** Two header tests asserted
+that the minimal fixture parses and cannot finish. It now decodes end to end,
+so they point at a three-component stream, which needs the colour pipeline of
+milestone 6. That pattern is worth naming: an assertion about what is missing
+has a half-life, and the honest maintenance is to move it to whatever is
+genuinely next rather than to keep it passing.
+
+**Noted, not fixed, and not this milestone's**: `xtask`'s
+`corpus_isolation` hang test is paced by a timeout and flakes under full
+workspace parallelism — it passed alone and on a re-run, and failed once
+under load. A timing-paced test is flaky by construction, which is the reason
+gap 15's cancellation tests were built on a counting token instead.
+
+### What milestone 5 needs
+
+- The irreversible 9/7, in the Q12 planes and Q24 constants settled above.
+  `dequantise` currently refuses `QuantStyle::Derived` and `Expounded` by name
+  — that refusal is the seam.
+- Gate 2 is against an `f64` reference of F.3.8.2's own lifting steps written
+  in the test module, at `--threshold 1 --budget 0`; gate 3 is lossy 9/7
+  against `opj_decompress` at pdfcmp's defaults, looser for the stated reason
+  that E.1.1.2 leaves the reconstruction point *r* to the decoder.
+- *r* is still asserted at 0.5 from convention and **unverified against a
+  running `opj_decompress`**. It does not arise for reversible 5/3. If gate 3
+  disagrees, *r* is the first thing to check.

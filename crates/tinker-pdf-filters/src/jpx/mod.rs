@@ -51,6 +51,7 @@ pub(crate) mod boxes;
 pub(crate) mod codestream;
 pub(crate) mod tier1;
 pub(crate) mod tier2;
+pub(crate) mod wavelet;
 
 use crate::{Capability, FilterError, Limits, Warning};
 
@@ -389,12 +390,68 @@ fn decode_inner(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
     // a code-block that has drifted is named here rather than handed on as
     // plausible coefficients.
     tier1::decode_tiles(&stream, &mut tiles)?;
-    // Milestones 4 to 6. Every code-block is a set of signed magnitudes now,
-    // and nothing turns them into samples: E.1's dequantisation needs the
-    // guard bits and the step sizes clamped before they reach a plane, and
-    // Annex F's inverse wavelet needs the fixed-point format the plan settled.
-    // So this refuses rather than inventing a picture.
-    Err(Refusal::NotBuilt("dequantisation and the inverse wavelet"))
+    // Milestone 6 is the colour pipeline, so a multi-component image still
+    // refuses here rather than interleaving planes the RCT has not been
+    // applied to. A single greyscale component needs none of it, which is
+    // exactly the shape the plan's gate 1 compares against `opj_decompress`.
+    if stream.siz.components.len() != 1 {
+        return Err(Refusal::NotBuilt("the colour pipeline"));
+    }
+    if stream.cod_for(0).mct {
+        return Err(Refusal::NotBuilt("the component transform"));
+    }
+
+    let component = &stream.siz.components[0];
+    let precision = component.precision;
+    if precision > 16 {
+        return Err(Refusal::Precision(precision));
+    }
+
+    let width = stream.siz.xsiz.saturating_sub(stream.siz.xosiz);
+    let height = stream.siz.ysiz.saturating_sub(stream.siz.yosiz);
+    let mut samples =
+        vec![0u8; (width as usize) * (height as usize) * if precision > 8 { 2 } else { 1 }];
+
+    for tile in &tiles {
+        let mut plane = wavelet::reconstruct(&stream, tile, 0)?;
+        wavelet::level_shift(&mut plane, precision, component.signed);
+        for y in 0..plane.height {
+            for x in 0..plane.width {
+                let (px, py) = (plane.x0 + x, plane.y0 + y);
+                let (px, py) = (
+                    px.saturating_sub(stream.siz.xosiz),
+                    py.saturating_sub(stream.siz.yosiz),
+                );
+                if px >= width || py >= height {
+                    continue;
+                }
+                let value = plane.at(x, y);
+                let at = (py as usize) * (width as usize) + (px as usize);
+                if precision > 8 {
+                    #[allow(clippy::cast_sign_loss, reason = "clamped by level_shift")]
+                    let v = value as u32;
+                    samples[at * 2] = (v >> 8) as u8;
+                    samples[at * 2 + 1] = (v & 0xFF) as u8;
+                } else {
+                    #[allow(clippy::cast_sign_loss, reason = "clamped by level_shift")]
+                    let v = value as u32;
+                    samples[at] = v as u8;
+                }
+            }
+        }
+    }
+
+    Ok(JpxImage {
+        width,
+        height,
+        components: 1,
+        precision,
+        samples,
+        colour: container
+            .header
+            .as_ref()
+            .map_or(JpxColour::Unstated, |h| h.colour),
+    })
 }
 
 #[cfg(test)]

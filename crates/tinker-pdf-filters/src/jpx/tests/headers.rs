@@ -11,6 +11,29 @@ fn parse(bytes: &[u8]) -> Result<codestream::Codestream<'_>, Refusal> {
 }
 
 /// A minimal 4 x 4 greyscale stream with one empty tile-part.
+/// A codestream this build parses and still cannot finish.
+///
+/// It has to be *chosen* rather than assumed, and the choice moves as the
+/// decoder grows. Until milestone 4 the minimal single-component fixture was
+/// the example, because nothing turned coefficients into samples; now that
+/// one decodes end to end and this is three components, which needs the
+/// colour pipeline that is milestone 6.
+///
+/// The pattern is worth naming: a test asserting "not built yet" has a
+/// half-life, and the honest maintenance is to move it to whatever is
+/// genuinely next rather than to keep it passing.
+fn unfinishable() -> Vec<u8> {
+    let spec = Spec {
+        components: vec![(8, false, 1, 1); 3],
+        ..Spec::default()
+    };
+    spec.codestream(&[(0, &EMPTY_PACKETS_3C)])
+}
+
+/// Two packets per resolution per component: three components, two
+/// resolutions, one layer.
+const EMPTY_PACKETS_3C: [u8; 6] = [0x00; 6];
+
 fn minimal() -> Vec<u8> {
     Spec::default().codestream(&[(0, &EMPTY_PACKETS)])
 }
@@ -980,7 +1003,7 @@ fn the_public_entry_point_refuses_with_the_capability_and_one_warning() {
         ),
         (
             "a codestream this build parses and cannot yet finish",
-            minimal(),
+            unfinishable(),
             Warning::JpxStageNotBuilt,
         ),
     ];
@@ -1002,7 +1025,7 @@ fn the_public_entry_point_refuses_with_the_capability_and_one_warning() {
 #[test]
 fn a_decode_leaves_at_most_one_warning() {
     let mut warnings = Vec::new();
-    let _ = jpx_decode(&minimal(), &Limits::new(1 << 20), &mut warnings);
-    let _ = jpx_decode(&minimal(), &Limits::new(1 << 20), &mut warnings);
+    let _ = jpx_decode(&unfinishable(), &Limits::new(1 << 20), &mut warnings);
+    let _ = jpx_decode(&unfinishable(), &Limits::new(1 << 20), &mut warnings);
     assert_eq!(warnings, vec![Warning::JpxStageNotBuilt]);
 }
