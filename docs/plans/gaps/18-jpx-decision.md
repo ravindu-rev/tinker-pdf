@@ -96,9 +96,20 @@ float reference.** Written down before `dwt.rs` exists.
 Second: the MQ decoder moves to a shared module with T.88's Annex H.2 as a
 permanent test, since a change for JPX would otherwise silently alter JBIG2.
 
+*A was chosen.* Both of those are settled in
+[18a](18a-jpx-decoder.md) — along with a third this document does not name,
+which is what a repository holding zero JPX bytes tests against. The second
+one is already half-discharged: [17](17-jbig2-generic-region.md) put the MQ
+decoder in `crates/tinker-pdf-filters/src/mq.rs` from its first commit, with
+Annex H.1 and H.2 as permanent tests, so option A opens with a build rather
+than a refactor.
+
 ## Milestones
 
 Only for option B, since A needs its own plan written after the decision.
+**A was the decision, and that plan now exists:
+[18a](18a-jpx-decoder.md).** The three milestones below are still option B's
+and are left alone — read 18a instead, not this table.
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size |
 | --- | --- | --- | --- |
@@ -161,3 +172,34 @@ Three qualifications, because a decision made on one number deserves them:
 If option A is chosen anyway, the decision record and milestone table it needs
 still do not exist — see the preamble note about a plan being written *after*
 the decision, not before.
+
+## Decided — August 2026: option A, and where its plan lives
+
+**The owner chose A**, against the amendment above and against the corpus
+number it rests on. This document stops being a live question at that point
+and becomes the record of the choice.
+
+The plan is [18a](18a-jpx-decoder.md), written as PRE-D in
+[00-execution-order.md](00-execution-order.md) because the paragraph directly
+above says the plan cannot exist before the decision does. It carries the
+eight-milestone table this document deliberately does not have, and it answers
+the two questions the "If A is chosen" section demands before any code — plus
+the test-material question this document raises in its third qualification and
+leaves open.
+
+Three things belong here rather than only there, because they are properties
+of the *decision* and not of the build:
+
+- **The hit rate is unchanged and is stated in 18a's opening section.** 19
+  files, 0.4 per cent, split `pdfjs` 12 and `verapdf` 7. A reader who comes to
+  18a cold is told in its first paragraph that this was a choice rather than a
+  finding, in the register [10](10-mesh-shadings.md)'s `As built` used for the
+  same situation.
+- **The argument that overrode ruling 3** is this document's own second
+  qualification: none of the pinned corpora samples geospatial, medical or
+  preservation material, which is where JPEG 2000 concentrates. That is a real
+  argument about the corpora rather than a courtesy, and it is the same one
+  gap 10 used. It is not evidence that the corpus asked for the work.
+- **Nothing above is retracted.** The size estimate stands at 3 500–4 500
+  lines and five to seven engine-weeks; 18a sizes eight milestones against it
+  and does not argue it down.
