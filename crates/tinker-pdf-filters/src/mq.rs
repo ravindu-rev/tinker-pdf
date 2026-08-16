@@ -4,9 +4,14 @@
 //! coding: a caller supplies a *context* — one adaptive probability state —
 //! per decision, and gets one bit back. Everything that makes a decision
 //! predictable lives in how the caller chooses the context, which is why the
-//! same coder serves JBIG2's generic regions (T.88 6.2) and, if
-//! `docs/plans/gaps/18-jpx-decision.md` ever proceeds, JPEG 2000's code-block
-//! coder.
+//! same coder serves JBIG2's generic regions (T.88 6.2) and JPEG 2000's
+//! code-block coder (T.800 Annex D), per
+//! `docs/plans/gaps/18a-jpx-decoder.md`.
+//!
+//! The one thing the two codecs do *not* share is where a context starts.
+//! T.88 E.3.6 starts all of them at zero; T.800 Table D.7 fixes three. See
+//! [`MqContexts::set_state`], which is the only part of this module written
+//! for the second caller.
 //!
 //! **This is a module of its own from the first commit, deliberately.** T.88
 //! Annex E and T.800 Annex C are the same coder with different prose around
@@ -126,14 +131,21 @@ pub struct MqContext {
     mps: u8,
 }
 
-/// An array of adaptive contexts, all starting at T.88 E.3.6's initial state.
+/// An array of adaptive contexts, all starting at T.88 E.3.6's initial state
+/// unless [`MqContexts::set_state`] says otherwise.
 ///
 /// JBIG2's generic-region templates index this by a value formed from the
 /// pixels around the one being decoded, so its length is `1 << (template
-/// bits)` — 65 536 at most. JPEG 2000 would use nineteen.
+/// bits)` — 65 536 at most. JPEG 2000 uses nineteen (T.800 Table D.7).
 #[derive(Clone, Debug)]
 pub struct MqContexts {
     states: Vec<MqContext>,
+    /// The contexts [`MqContexts::set_state`] fixed, and what it fixed them
+    /// to. Sparse rather than a second full array: JPEG 2000 sets three of
+    /// nineteen and JBIG2 sets none of 65 536, so a parallel `Vec` would
+    /// double the 64 KB that [`MqContexts::reset`] exists to avoid
+    /// reallocating.
+    initial: Vec<(usize, MqContext)>,
 }
 
 impl MqContexts {
@@ -142,6 +154,7 @@ impl MqContexts {
     pub fn new(len: usize) -> MqContexts {
         MqContexts {
             states: vec![MqContext::default(); len],
+            initial: Vec::new(),
         }
     }
 
@@ -157,14 +170,76 @@ impl MqContexts {
         self.states.is_empty()
     }
 
-    /// Returns every context to the initial state.
+    /// One context's starting state, and its state right now (T.800 Table
+    /// D.7).
+    ///
+    /// **T.88 E.3.6 starts every context at index 0 with MPS 0, and T.800
+    /// does not.** That difference is the whole reason this method exists.
+    /// JBIG2 can number its contexts however it likes precisely because all
+    /// of them start identical — any bijection of the numbering is invisible
+    /// to encoder and decoder alike. JPEG 2000 fixes three: the
+    /// all-insignificant zero-coding context starts at state 4, the
+    /// run-length context at 3, and UNIFORM at 46. A JPEG 2000 decoder that
+    /// starts those three at zero decodes a *plausible* code-block rather
+    /// than failing, which is the failure mode this whole codec is dangerous
+    /// for.
+    ///
+    /// `state` is a row of Table E.1 and is refused above 46; `mps` is
+    /// refused above 1, and an `index` past the end is refused too. A refusal
+    /// is inert — the array is untouched and nothing panics (ruling 1) —
+    /// because every one of the three is a caller error rather than a data
+    /// condition, exactly like [`MqDecoder::decode_at`]'s out-of-range index.
+    ///
+    /// The state survives [`MqContexts::reset`]. That is not a convenience:
+    /// a code-block after the first would otherwise decode against T.88's
+    /// initial probabilities instead of T.800's.
+    pub fn set_state(&mut self, index: usize, state: u8, mps: u8) {
+        if index >= self.states.len() || state as usize >= QE.len() || mps > 1 {
+            return;
+        }
+        let cx = MqContext { index: state, mps };
+        self.states[index] = cx;
+        match self.initial.iter_mut().find(|(at, _)| *at == index) {
+            // Replaced rather than appended: a caller that configures its
+            // contexts inside a per-code-block loop would otherwise grow this
+            // without bound, which is a leak dressed as a last-one-wins rule.
+            Some(slot) => slot.1 = cx,
+            None => self.initial.push((index, cx)),
+        }
+    }
+
+    /// One context's current `(state, mps)`, or `None` past the end.
+    ///
+    /// The fields are private because nothing outside the coder may write
+    /// them, but T.800 Table D.7 is asserted from another module and a table
+    /// that can only be checked through a round-trip is a table that is not
+    /// checked (gap 17's finding).
+    #[must_use]
+    pub fn state(&self, index: usize) -> Option<(u8, u8)> {
+        self.states.get(index).map(|cx| (cx.index, cx.mps))
+    }
+
+    /// Returns every context to its starting state.
     ///
     /// T.88 6.2.5.7 resets a region's contexts between regions unless the
-    /// segment says to retain them, so this is the reset rather than a fresh
-    /// allocation: the array is up to 64 KB and a page may hold many regions.
+    /// segment says to retain them, and T.800 D.2 resets them at the start of
+    /// every code-block that does not retain them. So this is the reset
+    /// rather than a fresh allocation: the array is up to 64 KB and a page
+    /// may hold many regions.
+    ///
+    /// "Starting state" means whatever [`MqContexts::set_state`] fixed, and
+    /// T.88 E.3.6's zero everywhere else. A caller that set nothing — every
+    /// JBIG2 caller — gets exactly the old behaviour.
     pub fn reset(&mut self) {
         for state in &mut self.states {
             *state = MqContext::default();
+        }
+        for &(at, cx) in &self.initial {
+            // `set_state` refused an out-of-range index, so this cannot miss;
+            // it is written to be inert rather than indexing if it ever did.
+            if let Some(slot) = self.states.get_mut(at) {
+                *slot = cx;
+            }
         }
     }
 }
@@ -618,5 +693,109 @@ mod tests {
         assert_ne!(contexts.states[0], MqContext::default());
         contexts.reset();
         assert_eq!(contexts.states[0], MqContext::default());
+    }
+
+    /// **The guard on the shared module.** Every JBIG2 caller sets no state
+    /// at all, and for those `reset` must still be T.88 E.3.6's zero — which
+    /// is the assertion above, kept, plus this one: an array that was never
+    /// configured carries no configuration.
+    #[test]
+    fn contexts_nobody_configured_still_reset_to_t88_zero() {
+        let mut contexts = MqContexts::new(1 << 8);
+        assert_eq!(contexts.state(0), Some((0, 0)));
+        contexts.set_state(7, 46, 1);
+        contexts.reset();
+        for i in 0..contexts.len() {
+            let want = if i == 7 { (46, 1) } else { (0, 0) };
+            assert_eq!(contexts.state(i), Some(want), "context {i}");
+        }
+    }
+
+    /// T.800 Table D.7's three non-zero starting states, through the API that
+    /// exists to express them, and across a reset.
+    ///
+    /// The numbering here is this module's caller's business — the table is
+    /// asserted against the real context indices in `jpx::tier1`. What is
+    /// asserted here is the *mechanism*: a state set is a state kept, and a
+    /// reset returns to it rather than to zero. A `reset` that returned to
+    /// zero would leave every code-block after the first decoding against
+    /// the wrong probabilities, which produces a plausible picture rather
+    /// than a failure.
+    #[test]
+    fn set_state_survives_a_reset() {
+        let mut contexts = MqContexts::new(19);
+        contexts.set_state(0, 4, 0);
+        contexts.set_state(17, 3, 0);
+        contexts.set_state(18, 46, 0);
+        let configured = |c: &MqContexts| {
+            assert_eq!(c.state(0), Some((4, 0)));
+            assert_eq!(c.state(17), Some((3, 0)));
+            assert_eq!(c.state(18), Some((46, 0)));
+            for i in 1..17 {
+                assert_eq!(c.state(i), Some((0, 0)), "context {i} is not T.88 zero");
+            }
+        };
+        configured(&contexts);
+
+        let mut decoder = MqDecoder::new(&H2_ENCODED);
+        for _ in 0..64 {
+            let _ = decoder.decode_at(&mut contexts, 0);
+        }
+        assert_ne!(
+            contexts.state(0),
+            Some((4, 0)),
+            "the decode adapted nothing"
+        );
+        contexts.reset();
+        configured(&contexts);
+    }
+
+    /// Setting the same context twice replaces rather than appends, so a
+    /// caller configuring its contexts once per code-block does not grow an
+    /// unbounded list (ruling 1).
+    #[test]
+    fn set_state_twice_replaces() {
+        let mut contexts = MqContexts::new(4);
+        for _ in 0..1000 {
+            contexts.set_state(1, 4, 0);
+            contexts.set_state(1, 9, 1);
+        }
+        assert_eq!(contexts.initial.len(), 1);
+        contexts.reset();
+        assert_eq!(contexts.state(1), Some((9, 1)));
+    }
+
+    /// A state past Table E.1's last row, an MPS that is not a bit, and an
+    /// index past the end are all caller errors; each is inert.
+    #[test]
+    fn set_state_refuses_what_is_not_a_state() {
+        let mut contexts = MqContexts::new(2);
+        contexts.set_state(0, 47, 0);
+        contexts.set_state(0, 255, 0);
+        contexts.set_state(0, 5, 2);
+        contexts.set_state(99, 5, 0);
+        assert_eq!(contexts.state(0), Some((0, 0)));
+        assert_eq!(contexts.state(1), Some((0, 0)));
+        assert_eq!(contexts.state(2), None);
+        assert!(contexts.initial.is_empty());
+        // Row 46 is the last and is accepted: the boundary is inclusive.
+        contexts.set_state(0, 46, 1);
+        assert_eq!(contexts.state(0), Some((46, 1)));
+    }
+
+    /// Annex H.2's sequence again, on an array whose *other* contexts were
+    /// configured. Nothing the JBIG2 path decodes may move because a JPEG
+    /// 2000 caller exists.
+    #[test]
+    fn annex_h2_is_unmoved_by_a_configured_neighbour() {
+        let mut decoder = MqDecoder::new(&H2_ENCODED);
+        let mut contexts = MqContexts::new(1 << 16);
+        contexts.set_state(1, 46, 1);
+        contexts.set_state(0xFFFF, 4, 0);
+        let mut out = [0u8; 32];
+        for bit in 0..256usize {
+            out[bit / 8] |= decoder.decode_at(&mut contexts, 0) << (7 - (bit % 8));
+        }
+        assert_eq!(out, H2_DECODED);
     }
 }
