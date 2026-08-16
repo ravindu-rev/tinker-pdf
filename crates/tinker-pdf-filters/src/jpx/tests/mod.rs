@@ -19,5 +19,6 @@
 //! d. Gap 23's nineteen real files, as milestone 8's acceptance number.
 
 mod headers;
+mod tier1;
 mod tier2;
 pub(crate) mod writer;

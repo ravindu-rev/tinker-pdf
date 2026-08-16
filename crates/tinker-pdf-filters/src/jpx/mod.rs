@@ -49,6 +49,7 @@
 
 pub(crate) mod boxes;
 pub(crate) mod codestream;
+pub(crate) mod tier1;
 pub(crate) mod tier2;
 
 use crate::{Capability, FilterError, Limits, Warning};
@@ -110,6 +111,38 @@ pub(crate) const MAX_JPX_LEVELS: u8 = 32;
 /// samples it claims, and is refused by name rather than allocated for.
 pub(crate) const MAX_JPX_CODE_BLOCKS: u64 = 1 << 22;
 
+/// **The real budget**: coefficients times coding passes, charged as tier-1
+/// runs and checked *before* each pass.
+///
+/// Neither of the two above can stand in for it, and the reason is the one
+/// `5adf502` landed one layer up — an 1 851-byte page that took 19.3 seconds
+/// to render 9 600 pixels, inside a nesting cap that was in place the whole
+/// time, because **a depth or per-item cap is not a work cap once the
+/// structure branches.** Here the branching is: a code-block's bit-plane
+/// count comes from a tag tree and its coding-pass count from the packet
+/// header, both file-supplied and both cheap to write. A 64 x 64 code-block
+/// declaring the legal maximum of 91 passes is 372 736 coefficient-passes
+/// bought with a two-byte segment, and [`MAX_JPX_CODE_BLOCKS`] would let a
+/// codestream buy `1 << 22` of them: 1.5 x 10^12 coefficient-passes, from a
+/// file that fits in a packet.
+///
+/// **The magnitude is measured, not chosen.** `opj_compress` was run over the
+/// oracle's own 32 x 32 fixtures across every axis it varies — five
+/// progression orders, one to five decomposition levels, 4 x 4 to 64 x 64
+/// code-blocks, three quality layers, multiple tiles, RGB with the RCT and
+/// lossy 9/7 — and the *heaviest* of them spends 34 coefficient-passes per
+/// tile-component sample (lossless 5/3 greyscale at one decomposition level);
+/// the lossy cases spend between 3 and 12. Rounding that worst case up to 48
+/// and multiplying by [`MAX_JPX_SAMPLES`] gives `3 << 31`, which is what this
+/// is: an image at the sample ceiling, coded losslessly, with 40 per cent of
+/// headroom over the densest thing the oracle could be persuaded to emit.
+///
+/// It is a **total**, spent and never refunded across every tile, component,
+/// resolution, precinct, code-block and layer of the codestream — because the
+/// per-item caps beside it are each individually satisfiable by a stream that
+/// is unbounded in the product.
+pub(crate) const MAX_JPX_WORK: u64 = 3 << 31;
+
 // --- the refusal list ---------------------------------------------------
 
 /// Why a codestream was refused.
@@ -160,6 +193,19 @@ pub(crate) enum Refusal {
     /// packet boundary by accident, which makes this the cheapest real
     /// defence in the decoder -- and it fires before a single pixel exists.
     PacketLength,
+    /// A cleanup pass did not end with T.800 D.5's `1010`.
+    ///
+    /// The **second** integrity refusal, and it has its own variant for the
+    /// same reason [`Refusal::PacketLength`] does. When a codestream signals
+    /// segmentation symbols (Table A.19 bit 0x20) every cleanup pass ends
+    /// with four decisions in the UNIFORM context whose value the standard
+    /// fixes, so decoding them and *checking* them is a free per-code-block
+    /// verification that the arithmetic decoder is still in step. A build
+    /// that decoded them and discarded them would have thrown away the one
+    /// thing in the format that says the picture is wrong — and tier-1 is
+    /// exactly where being subtly out of step produces plausible coefficients
+    /// rather than an error.
+    SegmentationSymbol,
     /// The codestream parsed and this build has not got the stage that comes
     /// next. Milestones 4 to 6: dequantisation, the inverse wavelet, colour.
     NotBuilt(&'static str),
@@ -184,6 +230,10 @@ impl Refusal {
             // end where the next begins is a codestream whose arithmetic
             // disagrees with itself, which is what that warning already says.
             Self::PacketLength => Warning::JpxStructureInvalid,
+            // Structure too, and for the same reason: a code-block whose
+            // cleanup pass does not end where D.5 says it does is a
+            // codestream disagreeing with itself.
+            Self::SegmentationSymbol => Warning::JpxStructureInvalid,
             Self::NotBuilt(_) => Warning::JpxStageNotBuilt,
         }
     }
@@ -332,11 +382,19 @@ fn decode_inner(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
     // it is what makes the refusal below honest: `tier-1` names the one stage
     // that is missing, where "tier-2 and everything after it" named five and
     // would have gone on naming five after tier-2 was written.
-    let _tiles = tier2::decode_tiles(&stream)?;
-    // Milestones 3 to 6. The packets are located and there is nothing yet to
-    // turn their bytes into coefficients, so this refuses rather than
-    // inventing any.
-    Err(Refusal::NotBuilt("tier-1"))
+    let mut tiles = tier2::decode_tiles(&stream)?;
+    // Tier-1 runs here for the same reason tier-2 does: it is where the
+    // second integrity check lives. A stream that signalled segmentation
+    // symbols has told the decoder what every cleanup pass must end with, so
+    // a code-block that has drifted is named here rather than handed on as
+    // plausible coefficients.
+    tier1::decode_tiles(&stream, &mut tiles)?;
+    // Milestones 4 to 6. Every code-block is a set of signed magnitudes now,
+    // and nothing turns them into samples: E.1's dequantisation needs the
+    // guard bits and the step sizes clamped before they reach a plane, and
+    // Annex F's inverse wavelet needs the fixed-point format the plan settled.
+    // So this refuses rather than inventing a picture.
+    Err(Refusal::NotBuilt("dequantisation and the inverse wavelet"))
 }
 
 #[cfg(test)]

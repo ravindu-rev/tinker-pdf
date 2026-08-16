@@ -738,3 +738,44 @@ its job.
 - Segmentation symbols, when signalled, are a free per-code-block check that
   the MQ decoder is still in step. Decode the `1010` in UNIFORM **and check
   it**.
+
+### Milestone 3 — tier-1 (16 August 2026)
+
+The three coding passes over the MQ coder, with Annex D's context formation,
+and the `NotBuilt` refusal moved from `tier-1` to `dequantisation`.
+
+**The evidence is the tables, entry by entry — not the round trip.** Both
+exist and they catch disjoint things, which is worth stating because the round
+trip is the one that *looks* conclusive:
+
+- Transposing two of D.3's sign-coding contexts fails
+  `table_d3_sign_coding_entry_by_entry` and `sign_coding_is_antisymmetric`,
+  and **does not fail the round trip**. Relabelling a context array is a
+  bijection: every adaptive state starts identical, so an encoder's slot
+  histories and a decoder's stay in step under any permutation. Gap 17 proved
+  the same thing on JBIG2 by transposing two template 0 bits and watching
+  T.88's Annex H.1 still decode byte for byte.
+- Starting the zero-coding context at T.88's 0 rather than T.800's 4 fails
+  `table_d7_initial_states_entry_by_entry` and
+  `a_reset_returns_to_the_states_t800_asked_for`.
+- What the round trip catches and no table can: the scan pattern, the stripe
+  order, the pass sequence, the run-length shortcut, sign propagation across a
+  stripe boundary, and the segmentation symbol.
+
+**One test was wrong before the code was.** The first `reset` test disturbed
+the contexts with `set_state`, which *redefines the baseline* — its own
+documentation says "the state survives `MqContexts::reset`", which is the
+whole reason it exists. So the test would have passed against a `reset` that
+did nothing at all. It now disturbs by decoding, and asserts the contexts
+actually moved before asking `reset` to put them back.
+
+### What milestone 4 needs
+
+- `Codestream::quant_for` is written and carries
+  `#[allow(dead_code, reason = "dequantisation, milestone 4")]`. Remove it.
+- M4 is where the plan's **gate 1** finally becomes available: reversible 5/3
+  against `opj_decompress`, byte-identical. Until coefficients become samples
+  there is nothing to compare, which is why M3's evidence is tables and a
+  round trip rather than an oracle.
+- The coefficient planes are `i32` in Q12 and the 5/3 path shares the type at
+  Q0 — it is exact integer arithmetic and wants no fraction.

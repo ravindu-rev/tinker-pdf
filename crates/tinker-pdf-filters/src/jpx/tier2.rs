@@ -83,6 +83,13 @@ pub(crate) struct CodeBlock {
     /// because the code-block styles that split it — TERMALL and BYPASS —
     /// are refused in the header parser.
     pub(crate) data: Vec<u8>,
+    /// Tier-1's output: signed coefficients in scan order, whose magnitudes
+    /// occupy [`CodeBlock::planes`] bits. Empty until tier-1 has run.
+    pub(crate) coefficients: Vec<i32>,
+    /// How many magnitude bit-planes tier-1 decoded, which is what tells
+    /// milestone 4 how far to shift them: `Mb - zero_planes - planes` is the
+    /// distance a truncated stream left at the bottom.
+    pub(crate) planes: u8,
     /// B.10.4: whether an earlier layer already included this block, which
     /// changes how inclusion is coded from a tag tree to one bit.
     included: bool,
@@ -92,16 +99,14 @@ pub(crate) struct CodeBlock {
 }
 
 impl CodeBlock {
-    // Milestone 3 reads these: tier-1 decodes a code-block bit-plane by
-    // bit-plane and needs its extent to know where the scan pattern ends.
-    // Kept here rather than recomputed there, because the geometry that
-    // produced them is B.7's and lives in this module.
-    #[allow(dead_code, reason = "tier-1, milestone 3")]
+    // Tier-1 reads these: it decodes a code-block bit-plane by bit-plane and
+    // needs its extent to know where D.2's stripe scan ends. Kept here rather
+    // than recomputed there, because the geometry that produced them is B.7's
+    // and lives in this module.
     pub(crate) const fn width(&self) -> u32 {
         self.x1 - self.x0
     }
 
-    #[allow(dead_code, reason = "tier-1, milestone 3")]
     pub(crate) const fn height(&self) -> u32 {
         self.y1 - self.y0
     }

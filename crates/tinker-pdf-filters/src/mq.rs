@@ -453,6 +453,23 @@ pub(crate) mod encoder {
             }
         }
 
+        /// One context's starting state, the encoder's side of
+        /// [`super::MqContexts::set_state`].
+        ///
+        /// T.800 Table D.7 fixes three of JPEG 2000's nineteen, and an
+        /// encoder that started them at T.88's zero would produce a stream
+        /// this crate's decoder cannot read — so a tier-1 round trip needs
+        /// this to mean anything. Refused above Table E.1's last row, and
+        /// inert past the end of the array, exactly as the decoder's is.
+        pub(crate) fn set_state(&mut self, index: usize, state: u8, mps: u8) {
+            if state as usize >= QE.len() || mps > 1 {
+                return;
+            }
+            if let Some(slot) = self.states.get_mut(index) {
+                *slot = (state, mps);
+            }
+        }
+
         /// `BYTEOUT` (T.88 E.3.8), including the carry that propagates into
         /// the byte already written and the 0xFF stuffing that keeps a marker
         /// from appearing by accident.

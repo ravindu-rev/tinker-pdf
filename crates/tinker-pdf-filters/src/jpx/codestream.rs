@@ -295,11 +295,10 @@ pub(crate) struct CodingStyle {
 impl CodingStyle {
     /// Whether the segmentation symbols of D.5 end every cleanup pass.
     ///
-    /// Read by milestone 3: decoding the `1010` in UNIFORM and *checking* it
-    /// is a free per-code-block verification that the MQ decoder is still in
-    /// step, and the plan calls discarding it throwing away the one integrity
-    /// check the format offers.
-    #[allow(dead_code, reason = "tier-1, milestone 3")]
+    /// Read by tier-1: decoding the `1010` in UNIFORM and *checking* it is a
+    /// free per-code-block verification that the MQ decoder is still in step,
+    /// and the plan calls discarding it throwing away the one integrity check
+    /// the format offers. `Refusal::SegmentationSymbol` is what it fires.
     pub(crate) const fn segmentation_symbols(&self) -> bool {
         self.cb_style & cb_style::SEGMENTATION_SYMBOLS != 0
     }
