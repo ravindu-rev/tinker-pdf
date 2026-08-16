@@ -67,6 +67,99 @@ MuPDF limitation:
   `wmode`/`bidi` fields (Tinker's current field conflates them; the DTO
   keeps its name until Tinker's own text-layer work renames it).
 
+### Where Tinker's faces come from
+
+*Added 16 August 2026.* The swap above quietly removes something no line of it
+mentions. Tinker's `mupdf` feature list enables **`base14-fonts`** ("base-14
+font programs, so text renders without system fonts") and **`system-fonts`**
+("font-kit fallback for documents with non-embedded fonts"), and between them
+they are why a Tinker page has ever shown text for a document that embeds
+none. Delete the dependency and both go with it. This engine bundles no faces
+and reads no font directories — deliberately, so that it has no operating
+system dependency and builds identically on `wasm32-unknown-unknown`, which
+has no filesystem at all — so the host becomes responsible, and Tinker is the
+host. It is a render-parity blocker on the widest class of real files, and it
+appears in no phase plan.
+
+**What the engine already offers, verified rather than assumed.**
+`tinker_pdf::FontProvider` is a one-method trait — `substitute(&FontRequest)
+-> Option<Arc<Vec<u8>>>` — installed with `Document::with_fonts(Arc<dyn
+FontProvider>)` and projected across the C ABI, Python, JS/wasm and .NET as
+`set_fonts`. `FontRequest` carries `/BaseFont` with any 9.6.4 subset prefix
+stripped, plus serif, fixed-pitch, symbolic, bold and italic read from
+`/Flags`, from the name and from `/StemV` — enough to pick a face without
+parsing anything. `SimpleFontProvider` is a working implementation over
+regular/bold/italic/bold-italic with fallback between them. Seven tests in
+`crates/tinker-pdf/tests/substitute_fonts.rs` pin the whole path: ink appears,
+at the text origin and on the baseline; a declining provider changes nothing;
+an embedded font is never displaced; and the request names the font the
+document actually asked for. Measured on this repository's own
+MuPDF-generated fixture as well as on a synthetic face —
+`testdata/simple-text.pdf` renders **0 inked pixels** with `UnreadableFont` on
+all three pages and no provider, and **4 192** on page one at 150 dpi with
+three real system faces behind `tpdf --fonts`, warning gone. The seam is done.
+What follows is the part that is not.
+
+**The decision: both, bundled first, system second.** The question gap 28
+raises is where the faces come from — the system font directories, a bundled
+set, or both with a fallback order — and the answer is both, in that order,
+for four reasons in descending weight.
+
+- **System-only is a regression against the parity bar.** MuPDF bundles the
+  base 14 *and* falls back to system faces; matching only the second half
+  means a document naming Helvetica renders differently on a machine without
+  it, which Tinker's own suite would measure as a loss.
+- **Tinker's golden strategy depends on bundled faces.** Its `plans/01`
+  names the mitigation for cross-platform golden flake as "MuPDF bundles its
+  own fonts and rasterizer (platform-independent output)". Milestone 15.2
+  re-baselines every visual golden once, under human review; doing that
+  against faces that differ per machine makes the review meaningless and
+  makes ruling 4 unobservable at the application level, where it is the one
+  thing this engine can promise that MuPDF could not.
+- **wasm and mobile have no font directory worth reading.** The browser build
+  and the packaged mobile apps get bundled faces or nothing, and one provider
+  that answers on all five platforms beats a desktop path and a separate
+  excuse.
+- **System faces are still worth having, second.** No bundleable set covers
+  CJK, symbol and regional faces at a download size anyone will accept, and
+  a desktop machine usually has them. They widen coverage; they do not
+  establish it.
+
+**The face set.** Tinker's `plans/05` already commits to bundling Noto Sans,
+Noto Serif and JetBrains Mono under OFL-1.1 for the typst templates, and
+`deny.toml` already allows OFL-1.1 — so the licence, the precedent and the
+allowlist entry all exist, and OFL is a font licence that does not propagate
+to the application, which keeps decision 3's permissive relicensing clean.
+Four faces of Noto Sans, four of Noto Serif and one of JetBrains Mono cover
+the base 14's three families in both axes; Symbol and ZapfDingbats are
+**declined**, not approximated, for the reason `SimpleFontProvider` declines
+symbolic fonts by default — a text face standing in for a symbol font draws
+confidently wrong glyphs, which reads as correct and is not.
+
+**The fallback order**, which is the part that has to be written down or it
+gets decided by whoever writes the first `match`:
+
+1. The document's own embedded program. The engine already prefers it and
+   never asks for a substitute when one is present;
+   `an_embedded_font_is_not_replaced` is the guard.
+2. The bundled set, keyed on `FontRequest`: the standard-14 aliases first
+   (Helvetica/Arial to Noto Sans, Times to Noto Serif, Courier to JetBrains
+   Mono), then `serif` and `fixed_pitch` for anything else, then `bold` and
+   `italic` to pick the face.
+3. A system face, by family name and then by the same flags, on the three
+   desktop platforms only. Disabled by default in test runs, so that a golden
+   never depends on what the machine happens to have installed.
+4. Decline. `None` is a legitimate answer, it leaves `UnreadableFont` on the
+   bitmap, and `caps_get` reports it — an honest gap beats a wrong glyph.
+
+**Where the code goes.** `crates/tinker-core/src/engine/fonts.rs`, inside the
+module, because a provider constructs a tinker-pdf type and Tinker's standing
+rule is that engine types never cross `tinker-core`'s public API. The faces
+load **once per process** behind a `OnceLock`, not once per document: the
+engine asks once per font per page, `Arc<Vec<u8>>` makes the share free, and
+the registry outlives every `Document`. The actor installs the provider in
+`finish_open`, so every document gets it without a caller having to remember.
+
 ### Goldens and fixtures
 
 Every visual golden changes — a different rasterizer is a different image.
@@ -241,9 +334,17 @@ licence: it clears when MuPDF leaves, whatever Tinker chooses for itself.
 | # | Deliverable | Exit criteria | Size |
 | --- | --- | --- | --- |
 | 15.1 | Swap PR series: engine module rewritten, `legacy-mupdf` A/B feature | Full Tinker suite green on tinker-pdf; A/B differential run on a personal document set shows no regressions worth blocking | M |
-| 15.2 | Golden regeneration + fixture freeze | New goldens reviewed and committed; `visual_regression.rs` green; fixtures README documents the binary exception | S |
+| 15.1a | Substitute faces: the bundled set vendored, `engine/fonts.rs`, the provider installed in `finish_open` | A document embedding no font renders **with text** and without `UnreadableFont`, on all three desktop platforms and in the wasm build; a symbolic font is still declined; `cargo deny` passes with OFL-1.1 already allowed. **Gates 15.2** | S |
+| 15.2 | Golden regeneration + fixture freeze | New goldens reviewed and committed; `visual_regression.rs` green; fixtures README documents the binary exception. **Not started until 15.1a is green**, or every golden bakes in missing text | S |
 | 15.3 | Deletion checklist executed | `rg -i mupdf` in Tinker, **excluding `engine/`, `apps/app/dist/` and `packages/*/dist/`**, returns only historical docs — the submodule is this engine's own tree and its plans discuss MuPDF throughout; CI green **with no C toolchain installed anywhere**; clean-machine build is `rustup + cargo build` | S |
-| 15.4 | App smoke + release | Tauri app opens, scrolls, searches, renders fixtures and real documents; `tinker-cli info/render/text` parity; a release ships from the simplified pipeline | S |
+| 15.4 | App smoke + release | Tauri app opens, scrolls, searches, renders fixtures and real documents; `tinker-cli info/render/text` parity; a release ships from the simplified pipeline. Includes the source-archive fix the deletion checklist's re-verification found | S |
+
+Faces are **15.1a rather than 15.0** for a reason worth stating, because
+[gaps/28](gaps/28-tinker-integration-decisions.md) puts them before any golden
+comparison and "before" reads as "first". There is no `Document::with_fonts`
+to call until 15.1 has put a `Document` in Tinker, so the work cannot precede
+the swap; what it must precede is 15.2, and that is where the gate belongs. It
+lands inside the 15.1 PR series, at the commit that first opens a document.
 
 ## Dependencies
 
