@@ -18,6 +18,22 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+// The timeouts below are five seconds rather than the fraction of a second a
+// deliberately-hanging stub needs, and the difference is not slack -- it is
+// the test being about the right thing.
+//
+// What these assert is that a hang is *recorded as a hang*, not that it is
+// noticed within any particular interval. A tight bound makes the assertion
+// depend on how quickly a healthy child can be spawned and run, which under
+// `cargo test --workspace` is a machine-load question: at 700 ms these failed
+// two of seven under full parallelism and passed alone, which is a test
+// reporting on the runner rather than on the code. The stub's hang is a loop
+// of sixty-second sleeps, so five seconds still trips it with room to spare
+// while a healthy file has room to finish.
+//
+// Gap 15 reached the same conclusion from the other direction and built its
+// cancellation tests on a counting token precisely so no clock was involved.
+
 use xtask::corpus;
 use xtask::report::{CorpusReport, Run, Settings};
 use xtask::runner::{Child, Outcome};
@@ -121,7 +137,7 @@ fn a_file_that_aborts_and_a_file_that_hangs_both_reach_the_report() {
         ],
     );
 
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_millis(700), 3);
+    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 3);
 
     // Complete: every file has an entry. The failure this guards against is
     // not a wrong verdict, it is a *short report* — the run stopping at the
@@ -233,7 +249,7 @@ fn the_report_carries_both_states_by_name() {
             ("cc-hangs", "hang"),
         ],
     );
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_millis(700), 3);
+    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 3);
 
     let run = Run {
         corpora: vec![CorpusReport {
@@ -296,7 +312,7 @@ fn one_bad_file_does_not_affect_its_neighbours() {
             ("ee-good", "pass"),
         ],
     );
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_millis(700), 1);
+    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 1);
     let passed = results
         .iter()
         .filter(|r| r.outcome == Outcome::Passed)
