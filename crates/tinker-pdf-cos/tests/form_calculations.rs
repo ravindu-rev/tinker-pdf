@@ -166,6 +166,56 @@ fn the_calculation_order_decides_whether_a_total_is_stale() {
     );
 }
 
+/// The same proof from the other side, and the reason it is here is
+/// injection: ignoring `/CO` entirely broke exactly **one** assertion, because
+/// in the ordinary fixture the declaration order happens to agree with it.
+/// Here `/Fields` declares the total *before* the VAT, so document order gives
+/// the stale 100 and only `/CO` gives 120.
+#[test]
+fn the_declared_order_wins_over_the_order_the_fields_appear_in() {
+    let mut editor = DocumentEditor::new(normalize(
+        b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 13 0 R 12 0 R]
+   /CO [12 0 R 13 0 R] /DA (/Helv 0 Tf 0 g)
+   /DR << /Font << /Helv 5 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Annots [10 0 R 13 0 R 12 0 R] >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+10 0 obj
+<< /FT /Tx /T (net) /V (100) /Rect [10 250 290 270] /Subtype /Widget /Type /Annot >>
+endobj
+12 0 obj
+<< /FT /Tx /T (vat) /V (0) /Rect [10 190 290 210] /Subtype /Widget /Type /Annot
+   /AA << /C << /JS (event.value = getField('net').value * 0.2;) >> >> >>
+endobj
+13 0 obj
+<< /FT /Tx /T (total) /V (0) /Rect [10 160 290 180] /Subtype /Widget /Type /Annot
+   /AA << /C << /JS (event.value = getField('net').value + getField('vat').value;) >> >> >>
+endobj
+trailer
+<< /Size 14 /Root 1 0 R >>
+%%EOF
+"
+        .to_vec(),
+    ));
+
+    let result = editor.recalculate().expect("the pass runs");
+    assert_eq!(
+        result.changed.first().map(|(n, _)| n.as_str()),
+        Some("vat"),
+        "/CO put the VAT first, though the file lists the total first"
+    );
+    assert_eq!(value_of(&editor, "total"), "120");
+}
+
 /// A producer that leaves `/CO` out still has a calculating form, and document
 /// order is the only other order the file offers.
 #[test]
@@ -362,6 +412,65 @@ trailer
     );
     assert_eq!(value_of(&editor, "code"), "ab");
     assert!(!editor.is_dirty());
+}
+
+/// The apply door itself, driven directly. Inside `recalculate` this can never
+/// fail — the staging map runs the very same `fill::accepts_value` before a
+/// value is ever staged — so the transaction there is defence in depth and the
+/// only way to hold it up is to call the door.
+///
+/// Injection found this: making `recalculate` apply field by field broke
+/// nothing, because by then nothing can refuse.
+#[test]
+fn the_calculated_apply_is_all_or_nothing() {
+    let doc = normalize(
+        b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 20 0 R]
+   /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R 20 0 R] >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+10 0 obj
+<< /FT /Tx /T (total) /V (0) /Ff 1 /Rect [10 150 190 170] /Subtype /Widget /Type /Annot >>
+endobj
+20 0 obj
+<< /FT /Tx /T (code) /V (ab) /MaxLen 4 /Rect [10 120 190 140] /Subtype /Widget /Type /Annot >>
+endobj
+trailer
+<< /Size 21 /Root 1 0 R >>
+%%EOF
+"
+        .to_vec(),
+    );
+
+    let mut editor = DocumentEditor::new(doc);
+    let rejection = editor
+        .set_calculated_values(&[("total", "120"), ("code", "far too long")])
+        .expect_err("the second value is refused");
+    assert_eq!(rejection.field, "code");
+    assert_eq!(rejection.reason, FillError::ValueRefused);
+    assert_eq!(
+        value_of(&editor, "total"),
+        "0",
+        "the field before the refusal was rolled back"
+    );
+    assert!(!editor.is_dirty());
+
+    // And the same call with values both fields take writes the read-only
+    // one, which is the whole reason this door is separate from the user's.
+    editor
+        .set_calculated_values(&[("total", "120"), ("code", "ok")])
+        .expect("both apply");
+    assert_eq!(value_of(&editor, "total"), "120");
+    assert_eq!(value_of(&editor, "code"), "ok");
 }
 
 /// A widget with no `/Rect` is reported, not refused (ruling 2 degrades,
@@ -655,4 +764,19 @@ fn the_scripts_are_still_readable_as_data() {
     assert!(total.scripts.calculate.is_some());
     assert_eq!(tinker_pdf_cos::calculation_order(&doc).len(), 2);
     assert_eq!(tinker_pdf_cos::script_summary(&doc).calculate_actions, 2);
+}
+
+/// Two calculations that write each other: the true mutual cascade, and the
+/// one the cut rule exists for.
+#[test]
+fn a_mutual_cascade_terminates_and_names_both_cuts() {
+    let mut editor = DocumentEditor::new(invoice(
+        "/CO [12 0 R 13 0 R]",
+        "event.value = 1; getField('total').value = 8;",
+        "event.value = 2; getField('vat').value = 9;",
+    ));
+    let result = editor.recalculate().expect("the pass terminates");
+    assert_eq!(result.cascades_cut, vec!["vat".to_string()]);
+    assert_eq!(value_of(&editor, "vat"), "9");
+    assert_eq!(value_of(&editor, "total"), "2");
 }
