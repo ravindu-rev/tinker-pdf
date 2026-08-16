@@ -54,8 +54,8 @@ pub use tinker_pdf_cos::{
 /// Without these on the facade a caller depending only on this crate could
 /// read a document and never produce one, which is half a library.
 pub use tinker_pdf_cos::{
-    DocumentBuilder, DocumentEditor, Encryption, ImageData, OutlineEntry, PageBuilder, WriteMode,
-    WriteOptions,
+    DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
+    PageBuilder, SkippedWidget, WidgetDefect, WriteMode, WriteOptions,
 };
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;

@@ -108,9 +108,133 @@ pub struct DocumentEditor {
     /// Objects deleted, which are written as null so references to them
     /// resolve to nothing rather than to stale data.
     deleted: HashSet<u32>,
+    /// The next unused object number.
+    ///
+    /// **Restored by a rollback**, so an abandoned edit hands its numbers
+    /// back. The alternative was considered and rejected: numbers allocated
+    /// inside a transaction that rolls back are not in the overlay afterwards,
+    /// so nothing is ever written at them, and leaving `next` advanced burns a
+    /// number per allocation for the life of the editor. A form whose
+    /// calculation is attempted and abandoned on every keystroke would climb
+    /// through the number space, and each gap splits the appended
+    /// cross-reference table into another subsection (7.5.4) and lifts the
+    /// trailer's `/Size`, so the file grows on every *failed* edit -- which is
+    /// the one edit that is supposed to cost nothing. It also contradicts the
+    /// rule the page operations already keep: a refused edit leaves the editor
+    /// genuinely unchanged, not merely unchanged in content.
+    ///
+    /// The cost is that a number **is reused**. An [`ObjRef`] handed out
+    /// inside a rolled-back transaction -- by [`DocumentEditor::allocate`],
+    /// [`DocumentEditor::insert_page`], [`DocumentEditor::import_page`] or
+    /// [`DocumentEditor::add_annotation`] -- is void the moment the rollback
+    /// happens, and a later allocation may give the same number to something
+    /// else. Holding one across the boundary therefore addresses a different
+    /// object rather than nothing. That is the same contract a database gives
+    /// for a row id from a rolled-back transaction, and it is stated here
+    /// because the alternative failure -- a reference that silently resolves
+    /// to nothing -- is not obviously better and costs a file that grows.
     next: u32,
     /// The page order, as references, once it has been disturbed.
     page_order: Option<Vec<ObjRef>>,
+}
+
+/// Everything a rollback restores.
+///
+/// Exhaustive by construction: [`DocumentEditor`] holds these four fields and
+/// one more -- the `Arc<CosDocument>` it overlays, which is immutable and
+/// therefore has nothing to restore. A field added to the editor without being
+/// added here is a silent hole in every transaction, which is why the two
+/// declarations sit next to each other.
+struct Snapshot {
+    overlay: HashMap<u32, Written>,
+    deleted: HashSet<u32>,
+    next: u32,
+    page_order: Option<Vec<ObjRef>>,
+}
+
+/// Why a field could not be filled at all (12.7.4.3).
+///
+/// Every variant means **nothing was written**: the editor is exactly as it
+/// was. The value a caller cannot express in a `bool` is the fourth outcome --
+/// written, and not wholly drawable -- which is [`SkippedWidget`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FillError {
+    /// No field carries that fully qualified name (12.7.3.2).
+    NoSuchField,
+    /// The field will not take this value: it is read-only (Table 227), the
+    /// value is longer than `/MaxLen`, or a non-editable list does not offer
+    /// it. Refusing beats truncating, which hides a data error inside a file
+    /// that then looks correctly filled.
+    ValueRefused,
+    /// The field's own object is not a dictionary, so there is nowhere to put
+    /// `/V`.
+    FieldUnreadable,
+}
+
+impl core::fmt::Display for FillError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            FillError::NoSuchField => "no such field",
+            FillError::ValueRefused => "the field does not accept that value",
+            FillError::FieldUnreadable => "the field object is not a dictionary",
+        })
+    }
+}
+
+/// Which field refused, and why (ruling 10: a warning names its object).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FillRejection {
+    /// The fully qualified name the caller asked for (12.7.3.2).
+    pub field: String,
+    /// Why it refused.
+    pub reason: FillError,
+}
+
+impl core::fmt::Display for FillRejection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.field, self.reason)
+    }
+}
+
+/// What is wrong with a widget that could not be given an appearance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WidgetDefect {
+    /// 12.5.2 Table 164: `/Rect` is required for every annotation, and this
+    /// one has none, or one that is not a usable rectangle. There is no box to
+    /// lay the value out in and nowhere on the page to draw it.
+    RectMissing,
+}
+
+impl core::fmt::Display for WidgetDefect {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            WidgetDefect::RectMissing => "no usable /Rect (12.5.2)",
+        })
+    }
+}
+
+/// A widget whose appearance was **not** regenerated, and which object it is
+/// (ruling 10).
+///
+/// A field that appears on two pages has two widgets. Ruling 2 says degrade
+/// rather than fail, so the value is still written and the widgets that can be
+/// drawn are drawn -- refusing the whole field because a damaged file lost one
+/// `/Rect` would leave the form unfillable. What ruling 2 does not licence is
+/// silence: without this, such a field reported success while one widget kept
+/// whatever it was showing before, which is a document that looks filled and
+/// is wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SkippedWidget {
+    /// The widget annotation left as it was.
+    pub widget: ObjRef,
+    /// What is wrong with it.
+    pub reason: WidgetDefect,
+}
+
+impl core::fmt::Display for SkippedWidget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.widget, self.reason)
+    }
 }
 
 impl DocumentEditor {
@@ -145,6 +269,66 @@ impl DocumentEditor {
         let r = ObjRef::new(self.next, 0);
         self.next = self.next.saturating_add(1);
         r
+    }
+
+    /// Runs `body` as one edit: everything it changes lands together, or
+    /// nothing does.
+    ///
+    /// `Err` out of `body` rolls the editor back to exactly what it was before
+    /// the call -- objects written, objects deleted, the page order, and the
+    /// object-number counter (see [`DocumentEditor`]'s `next` for why that
+    /// last one is restored and what it costs). `Ok` keeps everything, and the
+    /// error type is the caller's, so a transaction composes with whatever
+    /// result the work already produces.
+    ///
+    /// A closure rather than a `begin`/`commit`/`rollback` triple, because
+    /// this API's whole problem is silent misuse. There is no way to leave
+    /// this scope without either committing or rolling back: no forgotten
+    /// `commit`, no `?` that returns past a `rollback`, and no editor left in
+    /// a state where a later reader cannot tell whether a transaction is open.
+    /// The one thing a manual triple buys -- a transaction whose lifetime
+    /// crosses a function boundary -- is not something a document edit needs,
+    /// and is exactly the shape that leaves an edit half applied.
+    ///
+    /// Nesting works and means what it says: an inner rollback restores the
+    /// inner start, an outer one restores the outer start.
+    ///
+    /// The snapshot copies this editor's changes, not the document -- the
+    /// document is immutable and shared behind an `Arc`. So a transaction
+    /// costs what has been edited so far, never what is being edited.
+    ///
+    /// A **panic** out of `body` is not a rollback. Nothing in this crate
+    /// panics on document bytes (ruling 1), so this only arises from a
+    /// caller's own closure; if one catches an unwind here it must drop the
+    /// editor rather than keep using it.
+    pub fn transaction<T, E>(
+        &mut self,
+        body: impl FnOnce(&mut DocumentEditor) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let saved = self.snapshot();
+        match body(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.restore(saved);
+                Err(error)
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            overlay: self.overlay.clone(),
+            deleted: self.deleted.clone(),
+            next: self.next,
+            page_order: self.page_order.clone(),
+        }
+    }
+
+    fn restore(&mut self, saved: Snapshot) {
+        self.overlay = saved.overlay;
+        self.deleted = saved.deleted;
+        self.next = saved.next;
+        self.page_order = saved.page_order;
     }
 
     /// Reads an object, seeing this editor's changes.
@@ -728,52 +912,86 @@ impl DocumentEditor {
     /// `/MaxLen`, or one a non-editable list does not offer. Refusing is the
     /// point: writing a truncated value would hide a data error inside a file
     /// that then looks correctly filled.
+    ///
+    /// It also returns false — **having changed nothing** — when the value
+    /// could be written but one of the field's widgets could not be drawn.
+    /// A `bool` cannot say "partly", and the answer it used to give was
+    /// `true`: a field on two pages came out with one appearance regenerated
+    /// and one stale, reported as success. Use [`DocumentEditor::fill_field`]
+    /// where the difference matters; it applies what can be applied and names
+    /// what could not.
     pub fn set_field_value(&mut self, name: &str, value: &str) -> bool {
+        self.transaction(|tx| match tx.fill_field(name, value) {
+            Ok(skipped) if skipped.is_empty() => Ok(()),
+            _ => Err(()),
+        })
+        .is_ok()
+    }
+
+    /// Fills a text or choice field, saying exactly what happened.
+    ///
+    /// - `Err` — nothing was written at all, and [`FillError`] says why.
+    /// - `Ok(skipped)` with `skipped` empty — `/V` was written and every
+    ///   widget's appearance was regenerated.
+    /// - `Ok(skipped)` non-empty — `/V` was written, and those widgets were
+    ///   left showing whatever they were showing before, because 12.5.2's
+    ///   required `/Rect` is missing from them and there is nowhere to draw.
+    ///   Ruling 2 degrades rather than failing; ruling 10 requires that the
+    ///   degradation name the object it happened to, which is what the return
+    ///   value is for. A caller that wants all-or-nothing checks
+    ///   `skipped.is_empty()`, or uses [`DocumentEditor::set_field_value`],
+    ///   which does exactly that.
+    pub fn fill_field(&mut self, name: &str, value: &str) -> Result<Vec<SkippedWidget>, FillError> {
         let Some(field) = self.fields().into_iter().find(|f| f.name == name) else {
-            return false;
+            return Err(FillError::NoSuchField);
         };
         if !fill::accepts(&field, value) {
-            return false;
+            return Err(FillError::ValueRefused);
         }
-
         let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
-            return false;
+            return Err(FillError::FieldUnreadable);
         };
+
+        // Every reason to refuse has been checked, so from here nothing can
+        // fail and leave the field half written.
         dict.insert(self.intern(b"V"), fill::value_object(value));
         self.put(field.reference, Object::Dict(dict));
-
-        let resources = form::default_resources(&self.doc);
-        let quadding = fill::quadding(&self.doc, &field);
-        let multiline = field.flags & fill::MULTILINE != 0;
-        let comb = (field.flags & fill::COMB != 0)
-            .then_some(field.max_len)
-            .flatten();
-
-        for widget in &field.widgets {
-            let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
-                continue;
-            };
-            let da = fill::appearance_string(&self.doc, &field, *widget);
-            let stream = fill::text_appearance(
-                &self.doc,
-                rect,
-                value,
-                &fill::TextLayout {
-                    da: &da,
-                    quadding,
-                    multiline,
-                    comb,
-                    resources: resources.as_ref(),
-                },
-            );
-
-            let form_ref = self.allocate();
-            self.put_stream(form_ref, stream);
-            self.set_normal_appearance(*widget, Object::Ref(form_ref));
-        }
-
+        let skipped = self.regenerate_text(&field, value);
         self.clear_need_appearances();
-        true
+        Ok(skipped)
+    }
+
+    /// Fills several fields as one edit: all of them, or none of them.
+    ///
+    /// The first field that refuses rolls back every field before it and
+    /// returns which one it was (12.7.3.2's fully qualified name) and why.
+    /// That is the shape a calculated form needs: a script that sets three
+    /// fields and fails on the fourth must not leave a document whose totals
+    /// disagree with its inputs, which is the worst outcome a form has.
+    ///
+    /// `Ok` carries every widget that could not be drawn, across all the
+    /// fields, in the order they were given — see
+    /// [`DocumentEditor::fill_field`] for why that is a report rather than a
+    /// failure.
+    pub fn set_field_values(
+        &mut self,
+        values: &[(&str, &str)],
+    ) -> Result<Vec<SkippedWidget>, FillRejection> {
+        self.transaction(|tx| {
+            let mut skipped = Vec::new();
+            for (name, value) in values {
+                match tx.fill_field(name, value) {
+                    Ok(widgets) => skipped.extend(widgets),
+                    Err(reason) => {
+                        return Err(FillRejection {
+                            field: (*name).to_string(),
+                            reason,
+                        })
+                    }
+                }
+            }
+            Ok(skipped)
+        })
     }
 
     /// Turns a checkbox on or off.
@@ -781,45 +999,53 @@ impl DocumentEditor {
     /// The on state is whatever the widget's appearance dictionary calls it,
     /// which is `/Yes` by convention and something else often enough that
     /// assuming `/Yes` ticks a box the file cannot draw.
+    ///
+    /// All of the field's widgets or none: a box that shows ticked on one page
+    /// and clear on another is worse than one that refuses to be ticked.
     pub fn set_checkbox(&mut self, name: &str, on: bool) -> bool {
-        let Some(field) = self
-            .fields()
-            .into_iter()
-            .find(|f| f.name == name && f.kind == form::FieldKind::Checkbox)
-        else {
-            return false;
-        };
-        if field.is_read_only() {
-            return false;
-        }
-
-        let off = self.intern(b"Off");
-        let state = if on {
-            let Some(widget) = field.widgets.first() else {
-                return false;
+        self.transaction(|tx| {
+            let Some(field) = tx
+                .fields()
+                .into_iter()
+                .find(|f| f.name == name && f.kind == form::FieldKind::Checkbox)
+            else {
+                return Err(());
             };
-            match form::on_state(&self.doc, *widget) {
-                Some(state) => state,
-                // Without an appearance for the on state there is nothing to
-                // draw, and setting /V alone would leave a box that reads as
-                // ticked and displays as empty.
-                None => return false,
+            if field.is_read_only() {
+                return Err(());
             }
-        } else {
-            off
-        };
 
-        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
-            return false;
-        };
-        dict.insert(self.intern(b"V"), Object::Name(state));
-        self.put(field.reference, Object::Dict(dict));
+            let off = tx.intern(b"Off");
+            let state = if on {
+                let Some(widget) = field.widgets.first() else {
+                    return Err(());
+                };
+                match form::on_state(&tx.doc, *widget) {
+                    Some(state) => state,
+                    // Without an appearance for the on state there is nothing
+                    // to draw, and setting /V alone would leave a box that
+                    // reads as ticked and displays as empty.
+                    None => return Err(()),
+                }
+            } else {
+                off
+            };
 
-        for widget in &field.widgets {
-            self.set_appearance_state(*widget, state);
-        }
-        self.clear_need_appearances();
-        true
+            let Some(Object::Dict(mut dict)) = tx.get(field.reference) else {
+                return Err(());
+            };
+            dict.insert(tx.intern(b"V"), Object::Name(state));
+            tx.put(field.reference, Object::Dict(dict));
+
+            for widget in &field.widgets {
+                if !tx.set_appearance_state(*widget, state) {
+                    return Err(());
+                }
+            }
+            tx.clear_need_appearances();
+            Ok(())
+        })
+        .is_ok()
     }
 
     /// Selects one button of a radio group.
@@ -828,45 +1054,52 @@ impl DocumentEditor {
     /// it — the one whose appearance offers that state shows on, the rest show
     /// off. Setting only the chosen widget leaves the previous one still
     /// drawn, which is how two options end up looking selected at once.
+    ///
+    /// So this is all of the group's widgets or none of them.
     pub fn select_radio(&mut self, name: &str, option: &str) -> bool {
-        let Some(field) = self
-            .fields()
-            .into_iter()
-            .find(|f| f.name == name && f.kind == form::FieldKind::Radio)
-        else {
-            return false;
-        };
-        if field.is_read_only() {
-            return false;
-        }
+        self.transaction(|tx| {
+            let Some(field) = tx
+                .fields()
+                .into_iter()
+                .find(|f| f.name == name && f.kind == form::FieldKind::Radio)
+            else {
+                return Err(());
+            };
+            if field.is_read_only() {
+                return Err(());
+            }
 
-        let wanted = self.intern(option.as_bytes());
-        let off = self.intern(b"Off");
-        let offers = |editor: &DocumentEditor, widget: ObjRef| -> bool {
-            editor
-                .get(widget)
-                .and_then(|o| o.as_dict().cloned())
-                .and_then(|d| d.get_dict(editor.intern(b"AP")).cloned())
-                .and_then(|ap| ap.get_dict(editor.intern(b"N")).cloned())
-                .is_some_and(|states| states.get(wanted).is_some())
-        };
+            let wanted = tx.intern(option.as_bytes());
+            let off = tx.intern(b"Off");
+            let offers = |editor: &DocumentEditor, widget: ObjRef| -> bool {
+                editor
+                    .get(widget)
+                    .and_then(|o| o.as_dict().cloned())
+                    .and_then(|d| d.get_dict(editor.intern(b"AP")).cloned())
+                    .and_then(|ap| ap.get_dict(editor.intern(b"N")).cloned())
+                    .is_some_and(|states| states.get(wanted).is_some())
+            };
 
-        if !field.widgets.iter().any(|w| offers(self, *w)) {
-            return false;
-        }
+            if !field.widgets.iter().any(|w| offers(tx, *w)) {
+                return Err(());
+            }
 
-        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
-            return false;
-        };
-        dict.insert(self.intern(b"V"), Object::Name(wanted));
-        self.put(field.reference, Object::Dict(dict));
+            let Some(Object::Dict(mut dict)) = tx.get(field.reference) else {
+                return Err(());
+            };
+            dict.insert(tx.intern(b"V"), Object::Name(wanted));
+            tx.put(field.reference, Object::Dict(dict));
 
-        for widget in &field.widgets {
-            let state = if offers(self, *widget) { wanted } else { off };
-            self.set_appearance_state(*widget, state);
-        }
-        self.clear_need_appearances();
-        true
+            for widget in &field.widgets {
+                let state = if offers(tx, *widget) { wanted } else { off };
+                if !tx.set_appearance_state(*widget, state) {
+                    return Err(());
+                }
+            }
+            tx.clear_need_appearances();
+            Ok(())
+        })
+        .is_ok()
     }
 
     /// Restores every field to its default value (12.7.5.3).
@@ -874,7 +1107,15 @@ impl DocumentEditor {
     /// A field with no `/DV` loses its `/V` entirely rather than gaining an
     /// empty one, because "never filled" and "filled with nothing" are
     /// different states and a submitted form distinguishes them.
-    pub fn reset_form(&mut self) {
+    ///
+    /// Returns the widgets whose appearance could not be rebuilt, for the same
+    /// reason [`DocumentEditor::fill_field`] does: a reset that silently left
+    /// one widget showing the old value is the same defect as a fill that did.
+    /// A reset is not all-or-nothing — it restores every field it can, which
+    /// is what 12.7.5.3's action does — so wrap it in
+    /// [`DocumentEditor::transaction`] if a partial one is unacceptable.
+    pub fn reset_form(&mut self) -> Vec<SkippedWidget> {
+        let mut skipped = Vec::new();
         for field in self.fields() {
             let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
                 continue;
@@ -916,15 +1157,17 @@ impl DocumentEditor {
                                 })
                         })
                         .unwrap_or_default();
-                    self.regenerate_text(&field, &value);
+                    skipped.extend(self.regenerate_text(&field, &value));
                 }
             }
         }
         self.clear_need_appearances();
+        skipped
     }
 
-    /// Rewrites a text field's appearance for a value already stored.
-    fn regenerate_text(&mut self, field: &form::Field, value: &str) {
+    /// Rewrites a text field's appearance for a value already stored,
+    /// returning the widgets it could not draw.
+    fn regenerate_text(&mut self, field: &form::Field, value: &str) -> Vec<SkippedWidget> {
         let resources = form::default_resources(&self.doc);
         let quadding = fill::quadding(&self.doc, field);
         let multiline = field.flags & fill::MULTILINE != 0;
@@ -932,8 +1175,16 @@ impl DocumentEditor {
             .then_some(field.max_len)
             .flatten();
 
+        let mut skipped = Vec::new();
         for widget in &field.widgets {
             let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
+                // 12.5.2 Table 164 makes /Rect required, so this is a damaged
+                // file rather than a widget with nothing to draw. It used to
+                // be a bare `continue` and the field still reported success.
+                skipped.push(SkippedWidget {
+                    widget: *widget,
+                    reason: WidgetDefect::RectMissing,
+                });
                 continue;
             };
             let da = fill::appearance_string(&self.doc, field, *widget);
@@ -953,6 +1204,7 @@ impl DocumentEditor {
             self.put_stream(form_ref, stream);
             self.set_normal_appearance(*widget, Object::Ref(form_ref));
         }
+        skipped
     }
 
     /// Points a widget's `/AP` `/N` at something.
@@ -972,12 +1224,18 @@ impl DocumentEditor {
     }
 
     /// Selects which of a widget's appearance states is shown.
-    fn set_appearance_state(&mut self, widget: ObjRef, state: Name) {
+    ///
+    /// False when the widget is not a dictionary, which is a file that cannot
+    /// be filled correctly rather than one with nothing to show: 12.7.4.2 has
+    /// every widget of a button follow the group's value, and one left behind
+    /// is how two radio options end up looking selected at once.
+    fn set_appearance_state(&mut self, widget: ObjRef, state: Name) -> bool {
         let Some(Object::Dict(mut dict)) = self.get(widget) else {
-            return;
+            return false;
         };
         dict.insert(self.intern(b"AS"), Object::Name(state));
         self.put(widget, Object::Dict(dict));
+        true
     }
 
     /// Drops `/NeedAppearances` now that the appearances are right.
