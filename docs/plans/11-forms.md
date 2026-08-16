@@ -58,7 +58,8 @@ explicitly open decision. The fences are the design.
 
 ## Non-goals
 
-- **JavaScript execution.** The AF\* helper family (AFSimple_Calculate,
+- **JavaScript execution** — *no longer a non-goal; see the As built below.*
+  The AF\* helper family (AFSimple_Calculate,
   AFNumber/AFDate/AFPercent format) needs an ECMAScript subset, and that is the
   open item below — until it is decided, no calculation, no keystroke/format
   events, `formCalc = false`. Keystroke and format events are out of scope for
@@ -251,7 +252,7 @@ the flag set: every field's appearance is rebuilt from `/V` and `/DA`, the flag
 is cleared, and the count of regenerated widgets is returned so the caller can
 report what happened.
 
-### Calculation — the open item, stated plainly
+### Calculation — the open item, stated plainly (**closed**; see the As built below)
 
 Real-world order forms depend on the AF\* helper family, and AF\* is JavaScript:
 supporting it requires an ECMAScript subset interpreter. The options are known
@@ -454,6 +455,79 @@ editor.transaction(|tx| {
 
 A script is untrusted input from a document (gap 27's own words), so the
 interpreter's failure path is the common one, not the rare one.
+
+## As built — the calculation question, closed (August 2026)
+
+**"Calculation — the open item, stated plainly" is no longer open.** That
+section says the owner decides when this phase starts and that the decision is
+recorded as an ADR either way. The ADR is
+[gap 27](gaps/27-form-calculations-decision.md); the decision is **option A**,
+a hand-rolled ECMAScript subset, taken *against* that document's own
+recommendation of option B and for a reason recorded there — the transactional
+primitive its deciding argument demands now exists, so the argument no longer
+applies.
+
+Both options are in the tree. Option B's reader landed first and on its own
+(`07dd4b0`) so that it stays green if the interpreter is ever backed out; the
+interpreter is `acbce89`.
+
+What this changes in the text above:
+
+- **`formCalc = false` is wrong** as a description of this build. The engine
+  runs `/AA` `/C` calculate actions, on an explicit call, through
+  `DocumentEditor::recalculate`.
+- **"there is no recalculation — manual or automatic"** is now half wrong.
+  There is manual recalculation and there is still no automatic one: nothing
+  recalculates on a `set_field_value`, because when a calculation runs is a
+  policy a host owns.
+- **"keystroke/format events are out of scope regardless"** holds for
+  keystroke and is now qualified for format. `/AA` `/F` runs through
+  `calc::formatted_value`, which returns the display string and **writes
+  nothing** — 12.7.3.3 keeps a field's value and its appearance apart, and a
+  `/V` of "GBP 1,234.00" is a form whose export is unusable. No format action
+  runs as a side effect of filling.
+- **"read `/CO` and surface the `/AA` script sources"** is done and is the
+  floor rather than the ceiling: `Field::scripts`, `calculation_order`,
+  `document_scripts`, `catalog_scripts` and `script_summary`.
+
+### The shape a caller sees
+
+```rust
+impl DocumentEditor {
+    pub fn recalculate(&mut self) -> Result<Recalculation, CalcError>;
+
+    /// The all-or-nothing apply a calculation writes through. ReadOnly
+    /// (12.7.4.1 table 227) binds the user, not the document's own action.
+    pub fn set_calculated_values(&mut self, values: &[(&str, &str)])
+        -> Result<Vec<SkippedWidget>, FillRejection>;
+}
+
+/// The display string an `/AA` `/F` action produces. Changes nothing.
+pub fn calc::formatted_value(editor: &DocumentEditor, name: &str)
+    -> Result<Option<String>, CalcError>;
+```
+
+`Err` from `recalculate` means **nothing was written**, including by scripts
+that had already succeeded: the pass runs against a staging map and applies in
+one transaction, so a form this build cannot compute is left exactly as it was
+saved. Any script that cannot be run refuses the whole pass, because running
+the nine that parse and skipping the tenth is the document whose totals
+disagree with its inputs.
+
+`Field` gains `scripts: FieldScripts` — `/C`, `/F`, `/K`, `/V` as
+`Option<Script>`, where `Script` is `Source(String)` or `Oversize(usize)`.
+This is the `scripts` field the design sketch above always named; it arrives
+as data first and behaviour second, which is the order gap 27 argued for and
+got.
+
+### Where it lives
+
+`tinker-pdf-cos`, beside the field model rather than in the facade — the same
+correction the fill API's `As built` section already records. `script.rs` is
+the interpreter and is PDF-free behind a two-method `Host`; `calc.rs` is the
+pass. The facade re-exports `CalcError`, `Recalculation` and `ScriptError`,
+and `Document` grows `calculation_order`, `document_scripts`,
+`catalog_scripts` and `script_summary` (ruling 11).
 
 ---
 

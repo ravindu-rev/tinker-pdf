@@ -79,9 +79,12 @@ XL ≈ 5–8 ([PLAN.md](../../PLAN.md)).
 
 ## Decisions, not implementations
 
+Gap 27 is still listed here because it *was* a decision; it is now also an
+implementation, and the decision went against its own recommendation.
+
 | # | Plan | The question |
 | --- | --- | --- |
-| 27 | [Form calculations](27-form-calculations-decision.md) | Hand-rolled ES subset, data-only, or nothing |
+| 27 | [Form calculations](27-form-calculations-decision.md) | ~~Hand-rolled ES subset, data-only, or nothing~~ **DECIDED and BUILT: option A, against the document's own recommendation of B** — see its `As built`. The recommendation's deciding argument is that a half-implementation is worse than none *unless the writes are transactional*, and names that as "the part most likely to be skipped"; PRE-E built it before this gap was picked up, so the argument was answered by work already landed. **B is underneath A and landed first, in its own commit, independently green**: `/AA` (12.6.3 table 198) in all four flavours, `/CO` (12.7.2 table 218), `/Names /JavaScript` (7.7.4) and the catalog's `/AA` (table 200), with `/JS` read in both of 12.6.4.16's forms and an oversized script *named* rather than truncated. Then a hand-rolled ECMAScript subset in `tinker-pdf-cos::script`, PDF-free behind a two-method `Host`, driven by `::calc`. **A partial calculation is impossible twice over**: scripts write to a staging map and never touch the document, and the apply is one `set_calculated_values` over `transaction` — so any script that cannot be run refuses the *whole* pass and the form is left exactly as saved. Three bounds make a hostile script terminate — depth, a per-script *and* per-pass step budget, and size caps — because a depth cap is not a work cap when the structure branches. The cascade hazard the document does not name is closed by **one pass, every calculate action at most once**, with `cascades_cut` reporting where one pass and a fixed point disagree; injection showed that following the cascade instead does not hang but turns a computable form into an uncomputable one. Two defects found on the way: `DocumentEditor::fields` read *underneath* the overlay, so no edit was visible to a later one, and a `Budget` recorded the step it refused — the second found by the new `form_script` fuzz target's own invariant assertion on its first seed. 1 496 tests to 1 570 | L |
 | 28 | [Tinker integration decisions](28-tinker-integration-decisions.md) | EPUB/XPS/CBZ, the licence, and a parity blocker in no plan |
 
 ## Ordering
