@@ -82,28 +82,93 @@ self-hosts generation and the exception is lifted.
 
 ### The deletion checklist
 
-Exact paths, verified against Tinker's tree at planning time:
+Exact paths, verified against Tinker's tree at planning time, and
+**re-verified 16 August 2026 against Tinker at `f33ce8a`** — the verification
+is recorded item by item below rather than in an amendment at the foot of the
+file, because a checklist is read where it is used.
+
+**Twenty-two named items. All twenty-two still exist, at the paths stated.
+Nothing has moved.** The freeze held for everything the checklist covers: the
+two commits since the scaffolding commit (`a89d7c0`, `f33ce8a`) adopted this
+engine as a submodule and advanced its pointer, and touched none of the MuPDF
+surface. What the re-check found instead is five traces the checklist does
+*not* name, listed after it.
 
 - `third_party/mupdf-msvc/` (the vendored patched wrapper, both patches).
+  **Present**; 60 vendored files, and `PATCH.md` still documents exactly two
+  patches — the MSVC `max_align_t` fix and `permissions()`
+  `from_bits_truncate`.
 - `scripts/vendor-mupdf-patch.mjs`, `scripts/check-mupdf-deps.mjs`, the
   `check:mupdf` entry in `package.json`, and the "MuPDF dependency
-  discipline" CI step.
+  discipline" CI step. **All four present**; the CI step is `ci.yml:27`.
 - `Cargo.toml`: the `[workspace.dependencies] mupdf` block,
-  `[patch.crates-io] mupdf`, `[profile.dev.package.mupdf-sys]`.
-- `.cargo/config.toml`: `MUPDF_MSVC_PLATFORM_TOOLSET`.
+  `[patch.crates-io] mupdf`, `[profile.dev.package.mupdf-sys]`. **All three
+  present**, unchanged, including the ten features the block enables — of
+  which `xps`, `cbz` and `epub` are decision 1's subject, and `base14-fonts`
+  and `system-fonts` are what supplies faces today to documents that embed
+  none — the thing a `FontProvider` has to replace.
+- `.cargo/config.toml`: `MUPDF_MSVC_PLATFORM_TOOLSET`. **Present**, `= "v143"`.
 - `deny.toml`: `AGPL-3.0` in the allowlist, both `mupdf`/`mupdf-sys`
-  exceptions.
+  exceptions. **All three present.** Decision 3 makes this file's whole
+  premise — "Tinker is AGPL-3.0-or-later and links MuPDF" — historical, so it
+  is rewritten rather than edited.
 - CI: clang install steps in `ci.yml`; in `release.yml` the 90-minute
   timeouts, per-arch native macOS runner justification, and the
-  source-archive check for `third_party/mupdf-msvc/Cargo.toml`.
+  source-archive check for `third_party/mupdf-msvc/Cargo.toml`. **All
+  present**, with one correction: there is exactly **one** 90-minute timeout
+  (`release.yml:142`), not several. The clang installs are two, at `ci.yml:39`
+  and `ci.yml:84`.
 - `CONTRIBUTING.md`: the C-toolchain prerequisites and both Windows build
-  quirks; `.gitattributes` comments citing the vendored wrapper.
+  quirks; `.gitattributes` comments citing the vendored wrapper. **All
+  present**; the quirks are still a section headed "Windows: the two build
+  quirks", and `.gitattributes` cites the wrapper twice — the `eol=lf`
+  rationale and `third_party/** linguist-vendored`.
 - `docs/mupdf-limitations.md`: gains a historical banner ("resolved by
   tinker-pdf; kept as the record of why"); `docs/upstream/` bug drafts
-  close with pointers.
+  close with pointers. **Both present**; `docs/upstream/` holds exactly one
+  draft, `mupdf-rs-permissions-bug.md`.
 - The mobile CI jobs lose their "MuPDF cross-compilation is the riskiest
   item" rationale — pure Rust cross-compiles with rustup targets; the jobs
-  stay, their risk register shrinks.
+  stay, their risk register shrinks. **Present**, `ci.yml:97`.
+
+#### Five traces the checklist above does not name
+
+Found by the re-verification, and each would survive a checklist followed
+exactly as written.
+
+1. **`crates/tinker-core::engine_version()` returns `"mupdf-rs 0.8.0"`** from
+   `lib.rs`, and it is *public*. The design section above says there is one
+   error-type coupling outside the engine module; this is a second, it is
+   surfaced to the user through `caps_get`'s `engine` field and `tinker
+   doctor`, and a swap that misses it ships an app reporting the engine it no
+   longer runs on.
+2. **`crates/tinker-core/Cargo.toml` declares `mupdf = { workspace = true }`.**
+   Deleting only the `[workspace.dependencies]` block leaves this inherit
+   dangling and the workspace stops resolving — which is a loud failure rather
+   than a silent one, but it is a second file, and `check-mupdf-deps.mjs`
+   exists precisely because per-crate `mupdf` declarations are the thing that
+   goes wrong here.
+3. **Two CI settings are justified by MuPDF and outlive it**: `ci.yml`'s
+   `CARGO_INCREMENTAL: 0` ("building MuPDF from source is slow and identical
+   across jobs") and `release.yml`'s `cache-on-failure: true` ("a macOS job
+   that dies after twenty minutes of MuPDF compilation"). Both settings may
+   well be worth keeping; both comments become false.
+4. **The source-archive job asserts something that is no longer true.** Its
+   comment reads "`third_party/mupdf-msvc` IS tracked and is a plain directory
+   *rather than a submodule*, so the vendored MuPDF patch travels with the
+   archive". Tinker has since gained a real submodule at `engine/tinker-pdf`
+   (`a89d7c0`), and `git archive` does not follow submodules — so once the
+   swap lands, the released source archive ships a workspace that cannot
+   build, and "Verify what went in" checks for `third_party/mupdf-msvc` rather
+   than for the engine. This is the one drift finding with a shipped
+   consequence, and it belongs to 15.4 rather than 15.3.
+5. **Milestone 15.3's exit criterion cannot go green as written.** `rg -i
+   mupdf` now also returns the submodule's own documentation — this
+   repository's plans, which discuss MuPDF constantly and are not Tinker's to
+   edit — plus a committed build artefact (`apps/app/dist/assets/*.js.map`)
+   and a comment in `packages/backend/src/types.ts` about "MuPDF's WASM build
+   in a browser", which is Tinker's web plan rather than its engine. The
+   criterion is corrected in the milestone table.
 
 ### Owner decisions recorded here — answered 16 August 2026
 
@@ -177,7 +242,7 @@ licence: it clears when MuPDF leaves, whatever Tinker chooses for itself.
 | --- | --- | --- | --- |
 | 15.1 | Swap PR series: engine module rewritten, `legacy-mupdf` A/B feature | Full Tinker suite green on tinker-pdf; A/B differential run on a personal document set shows no regressions worth blocking | M |
 | 15.2 | Golden regeneration + fixture freeze | New goldens reviewed and committed; `visual_regression.rs` green; fixtures README documents the binary exception | S |
-| 15.3 | Deletion checklist executed | `rg -i mupdf` in Tinker returns only historical docs; CI green **with no C toolchain installed anywhere**; clean-machine build is `rustup + cargo build` | S |
+| 15.3 | Deletion checklist executed | `rg -i mupdf` in Tinker, **excluding `engine/`, `apps/app/dist/` and `packages/*/dist/`**, returns only historical docs — the submodule is this engine's own tree and its plans discuss MuPDF throughout; CI green **with no C toolchain installed anywhere**; clean-machine build is `rustup + cargo build` | S |
 | 15.4 | App smoke + release | Tauri app opens, scrolls, searches, renders fixtures and real documents; `tinker-cli info/render/text` parity; a release ships from the simplified pipeline | S |
 
 ## Dependencies
