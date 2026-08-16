@@ -2,9 +2,17 @@
 * text=auto eol=lf
 
 # Fixtures and any future golden images are binary - never normalized.
+#
+# The JPEG 2000 pair is named explicitly rather than left to `text=auto`,
+# which decides by looking for a NUL in the first 8 KB. Every fixture in the
+# tree today happens to have one, but a PGM of an evenly mid-grey image has
+# none - and if such a file ever contains the two bytes 0D 0A, committing it
+# from Windows would rewrite them and change the picture.
 *.pdf binary
 *.png binary
 *.jpg binary
+*.jp2 binary
+*.pgm binary
 
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.

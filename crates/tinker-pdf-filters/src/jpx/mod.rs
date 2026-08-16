@@ -40,12 +40,13 @@
 //!
 //! # What is built
 //!
-//! Milestones 1 to 3 of the plan: the container, the codestream headers,
-//! tier-2 and tier-1. The dequantisation, the inverse wavelet and the colour
-//! pipeline are milestones 4 to 6 and are **not** here, so [`jpx_decode`]
-//! parses a codestream as far as its coefficients and then refuses it with
-//! [`Refusal::NotBuilt`]. That is the honest answer and it draws the
-//! placeholder (ruling 2); it is not a partial picture.
+//! Milestones 1 to 5 of the plan: the container, the codestream headers,
+//! tier-2, tier-1, dequantisation and both inverse wavelets — the reversible
+//! 5/3 and the irreversible 9/7 in fixed point. The colour pipeline is
+//! milestone 6 and is **not** here, so a multi-component codestream is
+//! refused with [`Refusal::NotBuilt`] rather than interleaved untransformed.
+//! That is the honest answer and it draws the placeholder (ruling 2); it is
+//! not a partial picture.
 
 pub(crate) mod boxes;
 pub(crate) mod codestream;
@@ -358,7 +359,15 @@ pub fn jpx_decode(
     limits: &Limits,
     warnings: &mut Vec<Warning>,
 ) -> Result<JpxImage, FilterError> {
-    match decode_inner(input, limits) {
+    let mut clamped = false;
+    let decoded = decode_inner(input, limits, &mut clamped);
+    // Recorded whether the decode went on to succeed or not: E.1's clamp is a
+    // leniency, and ruling 10 wants a leniency to survive the result it led
+    // to rather than only the ones that failed.
+    if clamped && !warnings.contains(&Warning::JpxCoefficientClamped) {
+        warnings.push(Warning::JpxCoefficientClamped);
+    }
+    match decoded {
         Ok(image) => Ok(image),
         Err(refusal) => {
             let w = refusal.warning();
@@ -370,7 +379,7 @@ pub fn jpx_decode(
     }
 }
 
-fn decode_inner(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
+fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<JpxImage, Refusal> {
     let container = boxes::parse(input)?;
     let stream = codestream::parse(container.codestream)?;
     stream.check_budget(limits)?;
@@ -413,7 +422,7 @@ fn decode_inner(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
         vec![0u8; (width as usize) * (height as usize) * if precision > 8 { 2 } else { 1 }];
 
     for tile in &tiles {
-        let mut plane = wavelet::reconstruct(&stream, tile, 0)?;
+        let mut plane = wavelet::reconstruct(&stream, tile, 0, clamped)?;
         wavelet::level_shift(&mut plane, precision, component.signed);
         for y in 0..plane.height {
             for x in 0..plane.width {

@@ -68,10 +68,14 @@ Wave 2 (L):
   that this was a choice and not a finding. What this crate decodes so far is
   T.800 Annex I's JP2 boxes and a bare J2K codestream, Annex A's marker
   segments with COC and QCC overriding per component, Annex B's tier-2 —
-  tag trees, packet headers, precincts and all five progression orders — and
-  Annex D's tier-1 on the shared MQ coder. What it still refuses is
-  dequantisation, both inverse wavelets and the colour pipeline, which are
-  milestones 4 to 6, plus everything on that plan's enumerated refusal list:
+  tag trees, packet headers, precincts and all five progression orders —
+  Annex D's tier-1 on the shared MQ coder, Annex E's dequantisation and both
+  of Annex F's inverse wavelets: the reversible 5/3 exactly, and the
+  irreversible 9/7 in the fixed-point format gap 18a settled before any of it
+  was written. A single-component codestream therefore decodes to pixels.
+  What it still refuses is the colour pipeline, which is milestone 6 — so
+  anything with more than one component or a component transform — plus
+  everything on that plan's enumerated refusal list:
   RGN, POC, PPM and PPT, five of Table A.19's six code-block styles, Part 2,
   precision above 16 bits. All of it keeps the shape above exactly —
   `Unsupported(Capability::Jpx)` and the neutral placeholder — and the

@@ -688,8 +688,9 @@ may refuse these bytes", not "this crate will never decode them".
 
 ## Progress — 16 August 2026
 
-**Milestones 0, 1 and 2 have landed.** `As built` is deliberately not written
-yet; it belongs to whoever finishes milestone 8.
+**Milestones 0 to 5 have landed**, each in its own commit and each recorded in
+its own section below. `As built` is deliberately not written yet; it belongs
+to whoever finishes milestone 8.
 
 - **M0** (`bfa73a2`) — `mq.rs` gained `set_state`, because T.88 starts every
   context at state 0 and T.800 does not: zero-coding at 4, run-length at 3,
@@ -841,3 +842,115 @@ gap 15's cancellation tests were built on a counting token instead.
 - *r* is still asserted at 0.5 from convention and **unverified against a
   running `opj_decompress`**. It does not arise for reversible 5/3. If gate 3
   disagrees, *r* is the first thing to check.
+
+### Milestone 5 — the irreversible 9/7 (17 August 2026)
+
+**All three gates pass, and gate 1 is unmoved.**
+
+| Gate | What against what | Measured |
+| --- | --- | --- |
+| 1 | Reversible 5/3 against `opj_decompress`, byte-identical | 0 of 2 130 samples differ, eleven fixtures — unchanged |
+| 2 | Fixed-point 9/7 against an `f64` reference of F.3.8.2 | **0** of 2 454 samples differ at all, ten fixtures, against a budget of one level and 1 per cent |
+| 3 | 9/7 against `opj_decompress` at `--threshold 12 --budget 0.0005` | **0** samples past the threshold; the worst sample anywhere moves **one** level of 255 |
+
+Ten new fixtures, from the same five source images: `-i2`/`-i3` at rate 1 and
+`-q20` truncated to a twentieth, each with `opj_decompress`'s own decode
+committed beside it as the reference, since a lossy stream has no source image
+to compare against.
+
+**The reconstruction point *r* is now measured, not assumed.** The plan flagged
+it as the one unverified assumption and it was worth flagging. Rebuilding with
+*r* = 0 instead of 0.5 and re-running gate 3:
+
+| Fixture | *r* = 0.5 | *r* = 0 |
+| --- | --- | --- |
+| `r1-q20` (truncated) | 0 of 768 past threshold, worst 0 | **377 of 768 past threshold, worst 42** |
+| `r1-i2` (rate 1) | 0 differing | 200 of 768 differing by 1 or 2 |
+
+So 0.5 is right, and the truncated fixture is what proves it — on a rate-1
+stream the two choices are a fraction of a level apart and either would have
+passed. The plan's instinct to make gate 3's looseness be *about* `r` was
+sound; the looseness turns out not to be needed, which is a better answer than
+using it.
+
+**What the residual one level actually is**, since gate 3 could otherwise be
+read as evidence of fixed-point error: it is a **rounding tie**, not
+arithmetic. OpenJPEG's irreversible path is `f32` and it rounds the final
+sample half-to-even through `lrintf`; this build rounds half-up on an
+arithmetic shift, because that is identical on every target and `lrintf` is not
+(ruling 4). Reconstructing at the midpoint of a quantisation interval lands
+exactly on `.5` often on a synthetic ramp and rarely on a photograph, which is
+why `r4` and `r5` — 64-sample ramps of step 4 — carry 31 of the 64 differences
+and the 32x24 gradient carries none. Gate 3 now holds `worst <= 1` as well as
+the plan's budget, so that finding cannot quietly drift.
+
+**Table E.1's subband gains are the *reversible* filter's.** `R_b` in E-3 is
+the component precision alone for the 9/7, because its analysis filters are
+normalised; applying the 1/2/2/4 gains scales HL, LH and HH by two, two and
+four. That is a picture with the wrong detail contrast — the failure mode this
+codec is dangerous for — and only the oracle could have said which reading was
+right. It is `opj_dwt_getgain_real` returning 0 on the other side.
+
+**Injection, and what only a comparison caught.** Four defects, each built,
+each run against the whole crate with `--no-fail-fast`:
+
+| Injected | Caught by |
+| --- | --- |
+| `K` and `2/K` swapped in F.3.8.2's scaling | **gate 2 and gate 3 only** — no unit test |
+| The four lifting steps in analysis order | **gate 2 and gate 3 only** — no unit test |
+| `alpha` carried at Q16 and shifted up to Q24 | **the constant-recomputation test only** — neither gate saw it |
+| `(p + (1 << 23)) >> 24` replaced by a truncating shift | **nothing, at first** |
+
+Two of those are worth stating plainly. The Q16 constant is a relative error of
+one part in a million: both comparison gates pass it, and only the test that
+recomputes `round(c * 2^24)` from Table F.4's decimals fails. That is the test
+the plan insisted on and this is the evidence it was needed.
+
+And the truncating shift was caught by **nothing in the repository** — not the
+`f64` reference, not `opj_decompress`, not any of the 229 unit tests. That is
+the two gates behaving correctly rather than failing: the error is under 2^-12
+of a sample unit per multiply, comfortably inside what the plan's own error
+analysis bounds. It is still a defect, because an arithmetic shift *floors*, so
+all sixty multiplies on the longest path move the same way and the result is a
+bias rather than noise — the kind of thing that appears as a black point
+creeping on a 16-bit medical image and nowhere on an 8-bit test fixture.
+`the_q24_product_rounds_half_up_rather_than_truncating` now pins it directly,
+and it re-runs green against the injection.
+
+**One warning was added**, `JpxCoefficientClamped`, and it is the crate's first
+JPX leniency rather than a refusal. E.1's clamp to `2^(R+2)` is what turns the
+overflow figures into a proof rather than an assumption — a QCD exponent and
+mantissa are attacker-controlled — so a stream that reaches it has declared a
+step size its own samples cannot justify, and ruling 10 wants that recorded.
+The clamp is applied in the *dyadic* domain, comparing `|m| <= 2^(bound - e)`,
+so nothing has to be evaluated to find out whether evaluating it would
+overflow.
+
+**The two arithmetics share one ladder**, behind an `Arith` trait with three
+methods: what a dequantised coefficient is, what one line of synthesis does,
+and what integer it rounds to. That is not tidiness — B.5's subband geometry
+and F.3.3's interleave are the part gate 1 already pins byte-identically, and a
+second copy written for the 9/7 would have been a second copy outside that
+gate. It is also what makes gate 2 a comparison of *arithmetic*: the `f64`
+reference is a third instantiation of the same ladder, so both sides read the
+same coefficients through the same placement.
+
+### What milestone 6 needs
+
+- The colour pipeline is the last thing between this decoder and a picture a
+  PDF can carry. `decode_inner` still refuses any codestream with more than one
+  component (`NotBuilt("the colour pipeline")`) and any with `mct` set
+  (`NotBuilt("the component transform")`), and both refusals are the seam.
+- The inverse **ICT** is the 9/7's partner and it is a float transform in the
+  standard, exactly as the 9/7 was. It needs the same treatment and the same
+  fixed-point decision — and the constants and the `mul_q24` helper it wants
+  are already in `wavelet.rs` at Q24. Do not invent a second format.
+- The inverse **RCT** is the 5/3's partner and is exact integer arithmetic, so
+  it extends gate 1 rather than needing a gate of its own: `opj_compress` will
+  emit a lossless RGB stream and the comparison must stay byte-identical.
+- Fixtures exist for both already, unused: `fuzz/corpus/jpx/rgb-rct` and
+  `rgb-mct-hand-built`, and `lossy-97` is a three-component 9/7 stream that
+  refuses at the colour pipeline today.
+- Subsampled components are replicated to the reference grid rather than
+  filtered, because `opj_decompress` replicates and gate 1's byte-identity is
+  only reachable if the two agree. `subsampled-hand-built` is the seed.

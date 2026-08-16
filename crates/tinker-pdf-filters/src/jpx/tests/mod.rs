@@ -21,4 +21,5 @@
 mod headers;
 mod tier1;
 mod tier2;
+mod wavelet;
 pub(crate) mod writer;

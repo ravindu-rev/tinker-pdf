@@ -165,16 +165,17 @@ pub enum Warning {
 
     // ---- JPEG 2000 (T.800) -----------------------------------------------
     //
-    // Nine, and each of them is one *class* of refusal rather than one
+    // Ten, and each of them is one *class* of refusal rather than one
     // condition, because [`Warning`] is a closed set recorded at most once
     // per decode and a variant per marker would make it neither. What the
     // refusal was called in full — which marker, which constraint — lives in
     // `jpx::Refusal`, which the tests assert against.
     //
-    // Every one of these is paired with `FilterError::Unsupported`, so the
+    // Nine of the ten are paired with `FilterError::Unsupported`, so the
     // caller draws the placeholder. That is not a partial success: a wrong
     // JPEG 2000 decode is a plausible photograph, and this codec has no
-    // half-measure that is better than the honest grey rectangle.
+    // half-measure that is better than the honest grey rectangle. The tenth,
+    // `JpxCoefficientClamped`, is the one leniency rather than a refusal.
     /// JPX: a marker T.800 Table A.2 defines and this build does not decode —
     /// RGN, POC, PPM, PPT or CRG. Never skipped, because a skipped RGN draws
     /// a bright rectangle and a skipped POC mis-parses every packet after it.
@@ -211,6 +212,17 @@ pub enum Warning {
     /// comes next. Milestones 4 to 6 of `docs/plans/gaps/18a-jpx-decoder.md`:
     /// dequantisation, the inverse wavelet, the colour pipeline.
     JpxStageNotBuilt,
+    /// JPX: **a leniency, not a refusal.** A dequantised coefficient asked
+    /// for a magnitude past T.800 E.1's nominal dynamic range plus one guard
+    /// bit and was clamped to it before it reached a plane.
+    ///
+    /// The exponent and mantissa of a QCD marker are attacker-controlled, so
+    /// without the clamp there is no bound on the fixed-point arithmetic that
+    /// follows and the overflow proof behind the 9/7's `i64` products becomes
+    /// an assumption (ruling 1). Nothing legitimate reaches it — an 8-bit
+    /// image's coefficients live three bits below — so this says the file
+    /// declared a step size its own samples cannot justify.
+    JpxCoefficientClamped,
 }
 
 impl Warning {
@@ -251,6 +263,7 @@ impl Warning {
             Self::JpxSegmentationSymbol => "jpx-segmentation-symbol",
             Self::JpxBudgetSpent => "jpx-budget-spent",
             Self::JpxStageNotBuilt => "jpx-stage-not-built",
+            Self::JpxCoefficientClamped => "jpx-coefficient-clamped",
         }
     }
 }
@@ -289,6 +302,7 @@ impl fmt::Display for Warning {
             Self::JpxSegmentationSymbol => "JPX segmentation symbol was not 1010",
             Self::JpxBudgetSpent => "JPX decode budget spent",
             Self::JpxStageNotBuilt => "JPX decoder stage not built in this version",
+            Self::JpxCoefficientClamped => "JPX coefficient clamped to E.1's dynamic range",
         };
         f.write_str(s)
     }
