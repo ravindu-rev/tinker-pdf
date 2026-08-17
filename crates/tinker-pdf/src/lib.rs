@@ -22,6 +22,7 @@
 #![warn(missing_docs)]
 
 mod annots;
+pub mod cbz;
 pub mod fonts;
 mod optional;
 pub mod redact;
@@ -32,6 +33,9 @@ use std::sync::Arc;
 use tinker_pdf_content::{interpret, Matrix, TextDevice};
 use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 
+/// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
+/// zero, and what it refuses by name.
+pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefect, PageOrigin};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
@@ -158,13 +162,10 @@ impl Bitmap {
 
 /// Why a document could not be opened.
 ///
-/// **`#[non_exhaustive]`**, from gap 29 milestone 4. Nothing is added here yet;
-/// milestone 5 grows this with the named refusal a container this build
-/// recognises and cannot page needs, and gaps 30 and 31 expect their own. It is
-/// marked in the same commit as [`tinker_pdf_cos::ImageData`] and for the same
-/// reason: one break now rather than one more with every gap that adds a
-/// variant. `Copy`, `PartialEq` and `Eq` are kept, because
-/// `tests/tinker_parity.rs` compares values of this type by ruling 12.
+/// **`#[non_exhaustive]`**, from gap 29 milestone 4, which is what let
+/// milestone 5 add [`OpenError::UnsupportedArchive`] without a second break.
+/// Gaps 30 and 31 expect their own. `Copy`, `PartialEq` and `Eq` are kept,
+/// because `tests/tinker_parity.rs` compares values of this type by ruling 12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OpenError {
@@ -182,6 +183,14 @@ pub enum OpenError {
     /// rather than a bad document, and telling the two apart is the difference
     /// between checking the file and checking the code.
     Empty,
+    /// The bytes are a container this build recognises and cannot open as a
+    /// document.
+    ///
+    /// The reason is named rather than collapsed into [`OpenError::NotAPdf`],
+    /// because "I do not read CBR" and "this is not a document" are different
+    /// answers and a host shows different things for them. See
+    /// [`ArchiveRefusal`].
+    UnsupportedArchive(ArchiveRefusal),
 }
 
 /// Why a document could not be *used* after it opened.
@@ -220,6 +229,7 @@ impl core::fmt::Display for OpenError {
         match self {
             OpenError::NotAPdf => f.write_str("not a PDF: no indirect objects found"),
             OpenError::Empty => f.write_str("no bytes to read"),
+            OpenError::UnsupportedArchive(why) => write!(f, "not opened as a document: {why}"),
         }
     }
 }
@@ -238,6 +248,9 @@ pub struct Document {
     /// directories, so a host that wants text drawn for such documents says
     /// where to find it. See [`fonts`].
     fonts: Option<Arc<dyn FontProvider>>,
+    /// Present only when this document was **synthesised** from a container
+    /// rather than parsed from a PDF. See [`Document::archive`].
+    archive: Option<Arc<ArchiveReport>>,
 }
 
 impl Document {
@@ -250,16 +263,60 @@ impl Document {
     /// A damaged file opens anyway wherever anything can be recovered — see
     /// [`Document::ladder_level`] and [`Document::warnings`] for what that
     /// cost.
+    ///
+    /// # Comic archives
+    ///
+    /// Bytes that **begin** with a container signature are not read as a PDF.
+    /// A ZIP is synthesised into a document whose pages are its images (gap
+    /// 29); RAR, 7z and tar are refused by name. The signatures are tested at a
+    /// fixed position and nowhere else, so a PDF that happens to carry
+    /// `PK\x03\x04` inside a stream is unaffected — see [`cbz::container`].
+    ///
+    /// # Errors
+    /// [`OpenError::Empty`] for no bytes, [`OpenError::UnsupportedArchive`] for
+    /// a container this build recognises and cannot page, and
+    /// [`OpenError::NotAPdf`] when not one indirect object could be found.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
         let bytes: Arc<[u8]> = bytes.into();
         if bytes.is_empty() {
             return Err(OpenError::Empty);
         }
+
+        if let Some(container) = cbz::container(&bytes) {
+            let (pdf, report) = cbz::synthesise(container, &bytes, &cbz::Limits::DEFAULT)
+                .map_err(OpenError::UnsupportedArchive)?;
+            // These bytes came out of this repository's own writer moments
+            // ago, so a parse failure is a defect here rather than a claim
+            // about the archive — but ruling 1 forbids asserting it, and
+            // `Damaged` is the honest thing to say to a caller who cannot act
+            // on the difference either way.
+            let inner = CosDocument::open(pdf)
+                .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
+            return Ok(Document {
+                inner: Arc::new(inner),
+                fonts: None,
+                archive: Some(Arc::new(report)),
+            });
+        }
+
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
         Ok(Document {
             inner: Arc::new(inner),
             fonts: None,
+            archive: None,
         })
+    }
+
+    /// Where this document's pages came from, when it was synthesised from a
+    /// container rather than parsed from a PDF.
+    ///
+    /// `None` for an ordinary PDF, which is how a caller tells the two apart.
+    /// [`Document::cos`] answers the same for both, on purpose: the synthesised
+    /// document is a real one, with a real catalog, a real page tree and real
+    /// image XObjects, and it is what the renderer was given.
+    #[must_use]
+    pub fn archive(&self) -> Option<&ArchiveReport> {
+        self.archive.as_deref()
     }
 
     /// Supplies fonts for documents that do not embed their own.
@@ -277,6 +334,10 @@ impl Document {
     }
 
     /// Whether the bytes look like a PDF, without opening them.
+    ///
+    /// A PDF, specifically. [`Document::open`] also opens a comic archive, and
+    /// this answers `false` for one — [`cbz::container`] is the question to ask
+    /// about those.
     #[must_use]
     pub fn sniff(bytes: &[u8]) -> bool {
         let window = bytes.get(..1024.min(bytes.len())).unwrap_or_default();
@@ -477,6 +538,18 @@ impl Document {
     #[must_use]
     pub fn cos(&self) -> &CosDocument {
         &self.inner
+    }
+
+    /// An editor over this document, for callers that want to write it back.
+    ///
+    /// [`Document::cos`] *lends* the object model and [`DocumentEditor`] needs
+    /// to *share* it, so without this a caller who opened a document through
+    /// this facade could read it and never save it — including a document
+    /// synthesised from a comic archive, which is the one thing gap 29 wanted a
+    /// third party to be able to check.
+    #[must_use]
+    pub fn editor(&self) -> DocumentEditor {
+        DocumentEditor::new(self.inner.clone())
     }
 }
 

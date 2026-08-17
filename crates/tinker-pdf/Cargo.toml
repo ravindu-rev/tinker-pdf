@@ -30,6 +30,7 @@ tinker-pdf-render = { workspace = true }
 tinker-pdf-raster = { workspace = true }
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-color = { workspace = true }
+tinker-pdf-zip = { workspace = true }
 
 [dev-dependencies]
 tinker-pdf-cos = { workspace = true }

@@ -1463,3 +1463,129 @@ pixels with a floor per fixture, because a comparison of two blank pages passes.
   well-formed file can reach it.
 - **The ledger sweep and the fuzz campaign** remain milestone 6's, as they were
   after milestones 2 and 3. `docs/STATUS.md` still says 1 686.
+
+## Progress — 17 August 2026, milestone 5
+
+**A CBZ is a `Document`.** `crates/tinker-pdf/src/cbz.rs` with its unit tests
+beside it, `tests/cbz.rs` for the pictures and `tests/cbz_qpdf.rs` for the
+oracle. Forty-seven tests here, and the workspace stands at **1 864**.
+
+The design section's claim is now a thing that runs: `Document::open` sniffs
+`PK\x03\x04` at offset zero, synthesises a real `CosDocument`, and every
+existing method works on it because there is nothing special about it.
+`Document::cos()` returns a borrow, as it always did, and needed no signature
+change — which was the whole argument for synthesis over an enum.
+
+### What the milestone had to decide, and what qpdf decided for it
+
+**A placeholder page has no size of its own.** It takes the **first real
+page's**, and falls back to paper only for a book that never states one. A
+comic's pages are one size, so a placeholder that matches its neighbours is one
+a reader pages straight through, where a 612 x 792 sheet in the middle of a
+2000 x 3000 book is a jolt that reads as a worse defect than the missing
+picture actually is.
+
+**Every page clears its image resources first.** Without that each page
+inherits every image registered before it and a 200-page archive carries 20 100
+resource entries for the 200 it uses. This is the one defect in the whole
+matrix that **only qpdf caught** — the renderer draws the right picture either
+way, because each page names the image it wants, so no pixel comparison in this
+repository can see it. It is exactly the failure this oracle was added for, and
+it is worth recording that it earned its place on the first milestone that
+used it.
+
+**The `--show-pages` assertions had to be rewritten against the real tool.**
+The test as first written asserted qpdf would print `page 1 of 4`; qpdf 12.3.2
+prints `page 1: 6 0 R`. It also claimed in its doc comment to check the media
+boxes and did not check them at all. It now reads both halves from qpdf and
+from **independent commands** — `--show-pages --with-images` for the image
+dimensions qpdf resolved out of the image dictionaries, and `--show-object` per
+page for the `/MediaBox` — so a build that wrote a correct `/MediaBox` over an
+image whose `/Width` disagreed satisfies one and fails the other. That is
+milestone 4's mask failure in a different costume, and reading only one number
+would have missed it.
+
+### Three defects the tests could not see, all found by injection
+
+**A shortened signature is invisible to a suite that asserts only positives.**
+Truncating PNG's eight-byte signature to its first four, and JPEG's three-byte
+one to two, both **survived** a suite whose classification test asserted every
+correct signature is recognised. It could not have caught them: a positive
+assertion cannot distinguish a check from a weaker check that agrees with it on
+every valid file. The near misses are what separate them, and
+`a_signature_shortened_to_a_prefix_is_not_a_signature` now holds fourteen.
+
+The PNG case has a specification behind it rather than being merely tidy.
+15948 5.2 gives eight bytes and says what the last four are *for*: `\r\n`
+catches a transfer that translated line endings, `\x1a` stops the file printing
+on DOS, and `\n` catches the reverse translation. A reader that drops them
+throws away the corruption detection the signature exists to provide and then
+meets the damage further in, where a mangled download reads as a broken image.
+
+**A stable sort hid the tie-break.** `equal_names_break_on_directory_position`
+existed, asserted the right answer, and still could not see the tie-break
+deleted — because `sort_by` is stable, so equal names keep the order the slice
+held them in, which is directory order whenever the entries arrive in directory
+order, as they do from both of the archive reader's routes. The fixture now
+gives the two same-named entries indices that **disagree with their slice
+positions**, which is the only arrangement where stability and the tie-break
+give different answers.
+
+### The bounds
+
+| Constant | Fixtures | A 200-page comic | Cap | Proved to fire by |
+| --- | --- | --- | --- | --- |
+| `MAX_CBZ_PAGES` | 6 | 200 | 4 096 | an archive of 4 097 image entries |
+| `MAX_SYNTHESISED_PDF` | ~4 KB | ~300 MB | see `cbz.rs` | a synthesis charged past it |
+
+`MAX_CBZ_PAGES` sits **below** `MAX_ZIP_ENTRIES`, which is the relation that
+makes it a cap at all: a page cap at or above the archive reader's own entry
+cap could never fire, because the reader would refuse first. That relation is
+now checked in a `const` block rather than a test assertion, so a build that
+broke it **does not compile** — the injection matrix confirmed this by failing
+to build rather than by failing a test, which is the strongest rung available.
+
+### The injection matrix
+
+Eighteen defects, one at a time, each reverted before the next.
+**Fifteen caught, three survived, and all three are closed.**
+
+| Defect | Caught by |
+| --- | --- |
+| Natural sort replaced by lexicographic | `an_archive_stored_as_p10_p1_p2_pages_as_one_two_ten`, and qpdf |
+| Digit runs compared by length, not value | `a_digit_run_longer_than_any_integer_still_orders`, and one more |
+| The `PK` signature accepted anywhere, not only at offset zero | `a_pdf_carrying_the_zip_signature_is_still_a_pdf`, and one more |
+| A RAR archive sniffed as a ZIP rather than refused | `a_cbr_a_cb7_and_a_cbt_are_refused_by_name`, and one more |
+| A GIF treated as decodable rather than unusable | `the_first_bytes_decide_and_the_extension_does_not`, and four more |
+| Page geometry taken with its axes swapped | eleven tests |
+| The image drawn at a fixed size rather than the page's | `a_page_renders_identically_to_the_same_image_embedded_by_hand`, and one more |
+| A placeholder page dropped instead of kept | seven tests |
+| A placeholder falling back to paper rather than the book's size | `a_placeholder_is_the_books_own_size_and_the_neutral_grey`, and qpdf |
+| The placeholder painted white rather than the neutral grey | the same |
+| A page whose image the writer refused reported as a picture | `an_unusable_entry_keeps_its_page_number`, and two more |
+| An entirely encrypted archive opening with placeholders | `an_entirely_encrypted_archive_is_refused_by_name` |
+| **Every page sharing one image resource table** | **qpdf alone** |
+| The page cap never firing | `a_page_count_past_the_cap_is_refused_by_name` |
+| The page cap set above the archive reader's entry cap | **the build fails** |
+| **PNG's signature truncated to its first four bytes** | **survived** — now `a_signature_shortened_to_a_prefix_is_not_a_signature` |
+| **JPEG's signature truncated to two bytes** | **survived** — the same test |
+| **The name tie-break deleted** | **survived** — now `equal_names_break_on_directory_position`, rebuilt |
+
+### Still owed
+
+- **No `.cbz` from a real archiver.** Every archive here is built from
+  APPNOTE 6.3.10's field layouts and every image from its own specification's,
+  which milestones 2 and 3 said the same about. This is the third milestone to
+  owe it and the last one where it can be deferred: milestone 6's peak-memory
+  measurement needs a real 200-page book, and so does the claim that the format
+  works rather than that the fixtures do.
+- **The determinism fingerprint is milestone 6's**, and it is the first whose
+  document is synthesised rather than parsed, so it pins the synthesis as well
+  as the render.
+- **The ledger sweep**, unmoved since milestone 2: `docs/STATUS.md` still says
+  1 686, `fuzz/README.md`'s seed table has no rows for `zip` or `png`, and
+  `docs/plans/02-filters.md`'s non-goals still do not mention PNG.
+- **`cargo fuzz run zip` and `cargo fuzz run png` have not been run**, for the
+  reason milestone 3 gave: libFuzzer is unavailable on
+  `x86_64-pc-windows-msvc` and the WSL2 nightly route belongs to milestone 6.
+

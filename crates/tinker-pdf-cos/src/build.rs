@@ -360,7 +360,15 @@ impl PageBuilder {
 }
 
 /// Reads a JPEG's dimensions and component count from its frame header.
-fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
+///
+/// Public because a caller sometimes has to know how big a JPEG is *before* it
+/// hands the bytes over, and the number it uses must be **this** number. Gap 29
+/// is the caller: a CBZ page's `/MediaBox` is the image's own pixel size, so a
+/// second SOF reader in the facade would be two paths through one picture and a
+/// stretched page on the day they disagreed. It reads a header and decodes
+/// nothing, which is also why it is safe to call on every entry of an archive.
+#[must_use]
+pub fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
     if data.get(..2) != Some(&[0xFF, 0xD8]) {
         return None;
     }
@@ -760,6 +768,26 @@ impl DocumentBuilder {
         self.objects.insert_stream(r.num, StreamData { dict, data });
         self.images.push((resource.to_vec(), r));
         true
+    }
+
+    /// Stops later pages from inheriting the images registered so far.
+    ///
+    /// [`DocumentBuilder::add_image`] registers an image on the **document**,
+    /// and every page added after it names that image in
+    /// `/Resources /XObject` — which is what a caller drawing one logo on
+    /// every page wants, and is quadratic for a caller drawing one image on
+    /// one page. Gap 29 is the second: a CBZ synthesises one page per archive
+    /// entry and no page draws another page's image, so a 200-page archive
+    /// would otherwise carry 20 100 resource entries for the 200 it uses, and
+    /// a 4 096-page one would carry 8 390 656.
+    ///
+    /// Nothing already written is touched. The image objects are in the file
+    /// and the pages that named them still do; this clears only the list a
+    /// *future* [`DocumentBuilder::add_page`] copies. An image cleared before
+    /// any page named it is an unreferenced stream, which is the caller's
+    /// mistake to avoid rather than this method's to prevent.
+    pub fn clear_image_resources(&mut self) {
+        self.images.clear();
     }
 
     /// Fills an image dictionary for bytes that are already encoded.

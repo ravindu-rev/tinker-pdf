@@ -78,8 +78,8 @@ mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
 pub use build::{
-    CompressedImage, DeviceSpace, DocumentBuilder, ImageColorSpace, ImageData, ImageFilter,
-    OutlineEntry, PageBuilder, SoftMask,
+    jpeg_shape, CompressedImage, DeviceSpace, DocumentBuilder, ImageColorSpace, ImageData,
+    ImageFilter, OutlineEntry, PageBuilder, SoftMask,
 };
 pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
