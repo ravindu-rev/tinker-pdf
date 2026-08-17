@@ -82,10 +82,14 @@ now, and reviews enforce all four.
    [`docs/plans/99-consistency.md`](docs/plans/99-consistency.md) and the
    fuzzers enforce it — a fuzz crash blocks a release.
 
-3. **Leaf crates stay PDF-free.** `filters`, `crypto`, `font`, `color` and
-   `raster` take bytes and plain parameter structs, return bytes and values.
-   No COS types, no PDF vocabulary in their public APIs. That is what keeps
-   them independently fuzzable, testable and publishable.
+3. **Leaf crates stay PDF-free.** `filters`, `crypto`, `font`, `color`,
+   `raster`, `math` and `zip` — **seven** — take bytes and plain parameter
+   structs, return bytes and values. No COS types, no PDF vocabulary in their
+   public APIs. That is what keeps them independently fuzzable, testable and
+   publishable. This is ruling 8 in
+   [`docs/plans/99-consistency.md`](docs/plans/99-consistency.md), and the
+   test of it is the definition rather than the list: if a crate takes bytes
+   and returns values, it is a leaf and this rule binds it.
 
 4. **The plan is the spec.** Every crate's doc comment names the plan file
    that governs it. Implement to the plan; where reality disagrees, edit the

@@ -7,7 +7,7 @@ standalone library for Rust, JavaScript/wasm, Python and .NET.
 > **Status: it reads and renders PDFs.** Opens damaged files, decrypts with
 > correct security semantics, extracts text with geometry, renders vector
 > graphics, images and gradients in colour, and writes valid documents —
-> 1570 tests, four CI targets including wasm, with Python, JavaScript and .NET
+> 1872 tests, four CI targets including wasm, with Python, JavaScript and .NET
 > bindings. It has met a real corpus: 4 525 documents from pdf.js, veraPDF,
 > qpdf and the PDF Association, 4 484 of them rendering every page, **not one
 > crash**. The two things it still cannot do: draw text for documents that do
@@ -50,9 +50,21 @@ EPUB** — are to be built here rather than dropped, converted or left to
 MuPDF. That is what finally removes the AGPL dependency without losing a
 format. It is honest about the size: CBZ is small, XPS is substantial, and
 EPUB is a layout engine — a CSS cascade, a box model, line breaking and
-pagination — larger on its own than everything built so far. None of the
-three exists yet; each gets its own plan. The decision and its costs are in
+pagination — larger on its own than everything built so far. Each gets its own
+plan. The decision and its costs are in
 [`docs/plans/gaps/28-tinker-integration-decisions.md`](docs/plans/gaps/28-tinker-integration-decisions.md).
+
+**The first of the three is built.** A `.cbz` — a ZIP of page images — opens as
+a `Document` whose pages are its images, in the order a reader expects, at the
+image's own pixel size. Nothing about it is special below the facade: the
+archive is turned into a real PDF at `open`, so every capability the engine
+already has arrives with it, and `Document::cos()` hands back a document qpdf
+reads clean. JPEG and PNG are read and **everything else is refused by name** —
+a `.cbr`, a `.cb7`, a GIF page, an encrypted entry. The ZIP reader and the PNG
+decoder are ours, like everything else here; `deny.toml` names the crates that
+would have made them somebody else's. XPS and EPUB are not built.
+[`docs/plans/gaps/29-cbz.md`](docs/plans/gaps/29-cbz.md) is the plan and its
+record.
 
 ## The plan
 
@@ -70,12 +82,13 @@ three exists yet; each gets its own plan. The decision and its costs are in
 
 ## Workspace
 
-Leaf crates (`filters`, `crypto`, `font`, `color`, `raster`) are bytes-in,
-values-out, know nothing about PDF, and each is independently fuzzable.
-`cos` owns file syntax; `content` interprets content streams and emits to a
-`Device` trait — the text device needs no rasterizer, which is why text parity
-lands before pixels exist; `render` is the rasterizing device; `tinker-pdf` is
-the facade and the only crate users see; `ffi` and `bindings/` sit on top.
+Seven leaf crates (`filters`, `crypto`, `font`, `color`, `raster`, `math`,
+`zip`) are bytes-in, values-out, know nothing about PDF, and each is
+independently fuzzable. `cos` owns file syntax; `content` interprets content
+streams and emits to a `Device` trait — the text device needs no rasterizer,
+which is why text parity lands before pixels exist; `render` is the rasterizing
+device; `tinker-pdf` is the facade and the only crate users see; `ffi` and
+`bindings/` sit on top.
 
 ## License
 

@@ -69,10 +69,24 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    ([10](10-editing.md)) — which is itself part of the interpreter.
 
 8. **Leaf crates stay PDF-free.** Binds `filters`, `crypto`, `font`,
-   `color`, `raster`. Bytes and values in, values out; no COS types, no
-   PDF-spec vocabulary in their public APIs. This is what keeps them
+   `color`, `raster`, `math`, `zip`. Bytes and values in, values out; no COS
+   types, no PDF-spec vocabulary in their public APIs. This is what keeps them
    independently fuzzable, testable and publishable — and it is also the
    off-ramp insurance in [PLAN.md](../PLAN.md).
+
+   *Amended, August 2026.* This named five, and had named five since it was
+   written. `tinker-pdf-math` arrived with ruling 4's amendment above and this
+   ruling did not move; `tinker-pdf-zip` arrived with
+   [gap 29](gaps/29-cbz.md), which found the first drift while sweeping for
+   the second. The rule is unchanged and its scope is wider than the list
+   suggested — which is the failure mode of a rule that enumerates rather than
+   defines, so: a leaf is any crate that takes bytes and plain parameters and
+   returns bytes and values, whatever the list says. `tinker-pdf-zip` turns an
+   archive into names and byte ranges and has no opinion about what an entry is
+   *for*; gap 29's page semantics live in the facade for exactly that reason.
+   Two leaves depend on `filters` — `font` for its CMap asset pipeline and
+   `zip` for raw DEFLATE and CRC-32 — and a leaf-to-leaf edge does not weaken
+   this ruling, which is about public APIs rather than about edges.
 
 9. **Oracles are subprocesses, never dependencies.** Binds
    [14](14-testing-and-corpora.md) and every phase that cites an oracle

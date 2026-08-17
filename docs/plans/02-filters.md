@@ -105,6 +105,30 @@ Wave 2 (L):
   and the neutral placeholder. The line between the two halves is not a detail
   a reader can skip, because the refused half is the *common* one: it is what
   an OCR pipeline emits.
+- **PNG (ISO/IEC 15948) — *never* a filter, and here anyway, since August
+  2026.** This one is not a capability gate that opened, which is what makes it
+  different from the two entries above it: **no PDF stream is ever a PNG
+  file**, so PNG is not in `Filter`, has no `/Decode` name, and cannot be
+  reached from a content stream at all. It is a **container** decoder, built
+  for [gaps/29](gaps/29-cbz.md) because a CBZ is a ZIP of JPEG and PNG pages,
+  and it lives in this crate rather than beside the archive reader because
+  everything it needs is already here — `inflate.rs` for the zlib-wrapped
+  IDAT (10.3), `predictors.rs` for the row filters, and `crc32.rs` for the
+  per-chunk checksum. The relationship runs the other way from what a reader
+  might assume: PDF's `/Predictor` **is** PNG 9.2, adopted wholesale, so
+  `predictors.rs` was already PNG's code before there was a PNG decoder to
+  call it. What is decoded is the signature and chunk walk with every CRC
+  checked, colour types 0, 2, 3, 4 and 6, bit depths 1 to 16, `PLTE`, `tRNS`
+  in all three forms, and Adam7. What it is *for* is the cases that cannot
+  pass through: a non-interlaced PNG's IDAT is a `/FlateDecode` stream with
+  `/Predictor 15` byte for byte, so the common case is copied into a page
+  without a raster ever existing, and this decoder is the named fallback.
+  Two entry points, therefore, and the split is the design: `png_scan` reads
+  the header and hands back the concatenated IDAT **uninflated**, and
+  `PngScan::decode` is the half that makes pixels.
+  **CRC-32** arrived with it, in `crc32.rs`, shared with the archive reader —
+  `adler32` was in this crate twice and is a different polynomial answering a
+  different question.
 - **The Crypt filter (7.4.10).** Decryption happens in
   [01-cos-and-object-model](01-cos-and-object-model.md) +
   [03-encryption](03-encryption.md) before bytes reach this crate. The name

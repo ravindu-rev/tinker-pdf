@@ -29,16 +29,20 @@ When this phase is done, the tinker-pdf workspace exists and compiles — every 
 ### Crate DAG
 
 ```text
-tinker-pdf-filters ─┐
-tinker-pdf-crypto ──┴─→ tinker-pdf-cos ─┐
-tinker-pdf-font ────────────────────────┼─→ tinker-pdf-content ─→ tinker-pdf-render ─→ tinker-pdf ─→ tinker-pdf-ffi
-tinker-pdf-color ───────────────────────┘                      ↗
-tinker-pdf-raster ─────────────────────────────────────────────┘
+tinker-pdf-math ────→ tinker-pdf-color ──┐
+              └─────→ tinker-pdf-raster ─┼───────────────────────────────┐
+tinker-pdf-filters ─┬─→ tinker-pdf-font ─┤                               ↓
+                    ├─→ tinker-pdf-zip ──┼───────────────────────────────┤
+tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-content ─→ tinker-pdf-render ─→ tinker-pdf ─→ tinker-pdf-ffi
 
 tools: pdfcmp (no PDF deps) · oracle-diff (subprocess oracles) · tpdf (depends on facade)
 ```
 
-Five leaf crates — `filters`, `crypto`, `font`, `color`, `raster` — are bytes-in/values-out with zero PDF types. This is the property that makes each one independently fuzzable: a fuzz target hands `tinker-pdf-font` a byte slice and expects a value or a structured error, with no COS machinery in the corpus or the crash triage. It also means a leaf can be tested against its spec (DEFLATE against RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
+**Seven leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`, `math`, `zip` — are bytes-in/values-out with zero PDF types. This is the property that makes each one independently fuzzable: a fuzz target hands `tinker-pdf-font` a byte slice and expects a value or a structured error, with no COS machinery in the corpus or the crash triage. It also means a leaf can be tested against its spec (DEFLATE against RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
+
+*Amended, August 2026, twice, and the second time is why the amendment is dated in place rather than folded in silently.* This said "five" from the day it was written. `tinker-pdf-math` arrived with ruling 4's amendment as a **second-order leaf** — `no_std`, depended on by `color` and `raster`, depending on nothing — and not one of the three prose statements of the count moved, in this file, in [99-consistency](99-consistency.md)'s ruling 8, or in [CONTRIBUTING.md](../../CONTRIBUTING.md)'s rule 3. It had drifted for weeks before [gap 29](gaps/29-cbz.md) went looking. `tinker-pdf-zip` is the seventh, added by that gap for CBZ and reused by gap 30 for XPS, and the sweep that added it is the one that found the first drift. A count written in four places and enforced in none is a fact about the documentation rather than about the code — which is why the count is stated here with the crates enumerated, so that a reader can check it against `crates/` rather than take it.
+
+Two of the seven have a dependency, and both are leaf-to-leaf: `font -> filters` and `zip -> filters`, each argued in `xtask`'s `ALLOWED` doc comment. A leaf here means bytes in, values out, no PDF types, independently fuzzable — not "no edges". The graph cannot cycle, because `filters` depends on nothing.
 
 `tinker-pdf-cos` owns file syntax, xref, repair, and serializers, and depends on `filters` + `crypto` because streams cannot be read without decoding and decryption. `tinker-pdf-content` is the content-stream interpreter plus `trait Device`, and ships the text device; it depends on `cos`, `font`, `color`. `tinker-pdf-render` is the rasterizing `Device` implementation over `raster`. `tinker-pdf` is the facade and the only user-facing crate; internal crates make no stability promises, ever.
 
@@ -192,7 +196,7 @@ Raster dimensions are `ceil` per axis of the scaled page box: A4 (595.276 × 841
 | --- | --- | --- | --- |
 | 1 | Workspace skeleton: all ten crates plus `pdfcmp`/`oracle-diff`/`tpdf` compile (empty) on stable Rust; DAG-enforcement script | `cargo build --workspace` green on all desktop targets and `--target wasm32-unknown-unknown`; CI fails a deliberately added illegal crate edge | S |
 | 2 | Shared foundations: geometry types (`Point`/`Rect`/`Matrix`/`Quad::bounds()`), per-crate error enums, `Warning`, `Capability`, `CancelToken`, outward-rounding helper | Unit tests pass, including A4@150dpi = 1240×1755; facade re-exports compile; `cargo doc` clean with contracts stated on every public item | S |
-| 3 | CI skeleton: fmt, `clippy -D warnings`, `cargo-deny` with the seven-crate exemption allowlist, test matrix (Linux/Windows/macOS/wasm-under-node), determinism job, `cargo-fuzz` scaffolding for the five leaves + cos + content | `cargo-deny` fails when a non-exempt runtime dependency is added in a test PR; `cargo fuzz build` green for every target; determinism job compares fixed-point/transcendental vector artifacts byte-identically across all matrix targets | S |
+| 3 | CI skeleton: fmt, `clippy -D warnings`, `cargo-deny` with the seven-crate exemption allowlist, test matrix (Linux/Windows/macOS/wasm-under-node), determinism job, `cargo-fuzz` scaffolding for the leaves + cos + content | `cargo-deny` fails when a non-exempt runtime dependency is added in a test PR; `cargo fuzz build` green for every target; determinism job compares fixed-point/transcendental vector artifacts byte-identically across all matrix targets | S |
 | 4 | Facade skeleton: `Document`/`Page`/`TextPage`/`Bitmap`/`RenderOptions`/`CancelToken`/`CosView` signatures with `todo!()` bodies and doc-comment contracts (rounding, warnings, degrade, `&self` auth) | Compiles and documents cleanly; API shape reviewed and recorded against [PLAN.md](../PLAN.md); parity-suite skeleton can import the types | S |
 
 Milestone rows overlap heavily and share scaffolding; the phase as a whole sits in the S band.

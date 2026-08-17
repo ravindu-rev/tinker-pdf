@@ -81,9 +81,9 @@ jobs:
     #
     # Bounded on purpose, and bounded per target rather than in total, so
     # adding a target adds a known amount of time instead of quietly taking
-    # it from the others: fifteen targets, twenty seconds each, one build.
-    # Unlike the nightly this is one runner rather than fifteen, because
-    # holding fifteen machines for twenty seconds each is worse for everyone
+    # it from the others: twenty targets, twenty seconds each, one build.
+    # Unlike the nightly this is one runner rather than twenty, because
+    # holding twenty machines for twenty seconds each is worse for everyone
     # queueing behind it than holding one for five minutes.
     #
     # This job replaces nothing: `fuzz-targets` above still type-checks the

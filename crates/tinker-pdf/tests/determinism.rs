@@ -1390,6 +1390,389 @@ trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// A comic archive, whose document is **synthesised at open** rather than
+/// parsed from the bytes handed in.
+///
+/// *Added August 2026, with gap 29 milestone 6.* Every fixture above is a PDF:
+/// `Document::open` parses it, and what the hash covers is the renderer. This
+/// one is a ZIP of page images, and `Document::open` **builds** the document —
+/// through [`tinker_pdf::DocumentBuilder`], out through the writer and back in
+/// through `CosDocument::open` — so the hash covers the whole of that as well.
+/// Nothing else in this file would move if the synthesiser started writing a
+/// different document.
+///
+/// # What a move in this hash means
+///
+/// Wider than any other entry here, and worth reading before treating a
+/// failure as a rendering change. This one moves if **any** of these changes
+/// its answer:
+///
+/// - the ZIP reader — which entries exist, in what order, and what bytes they
+///   hold (`tinker-pdf-zip`);
+/// - the natural sort, because the first page is deliberately **not** first in
+///   the archive and not first lexicographically either;
+/// - the classification of an entry by its magic bytes, since a `.gif` here is
+///   a placeholder page and a `.xml` is not a page at all;
+/// - `png_scan`, `png_image`'s routing table, and the pass-through's
+///   `/DecodeParms`;
+/// - the PNG decoder and the `/SMask` split, for the one page that takes the
+///   fallback route;
+/// - `DocumentBuilder` — object numbering, dictionary key order, stream
+///   framing — and `CosDocument`'s parse of what it wrote;
+/// - the page geometry (one image pixel is one PDF point), and therefore the
+///   bitmap's own dimensions, which are in the hash;
+/// - and the renderer, as for every fixture above.
+///
+/// That breadth is the point rather than a defect: a fingerprint over a
+/// synthesised document is the only thing in this repository that pins the
+/// producer and the consumer to each other. But it means "the CBZ fingerprint
+/// moved" is not by itself a rendering finding, and the failure has to be
+/// attributed before the table is touched.
+/// [`the_synthesised_document_is_the_same_bytes_on_every_target`] narrows it:
+/// if that hash moved too, the synthesiser changed; if it did not, the renderer
+/// did.
+///
+/// # The pages, and why each is here
+///
+/// Five entries, stored **back to front** so that the reading order is
+/// something the fixture proves rather than something it inherits:
+///
+/// - `page2.png` is an **indexed** PNG at **four bits** a sample with a `tRNS`
+///   naming a contiguous transparent run, so it passes through as
+///   `/FlateDecode` with `/Predictor 15`, an `/Indexed` colour space whose
+///   `/hival` is derived from the palette, and 8.9.6.4's colour-key `/Mask`.
+///   It is page **0**, so it is the page the fingerprint above renders. A
+///   sub-byte depth is deliberate: nothing else in this file packs samples
+///   narrower than a byte except the JBIG2 stencil, and the `/Mask` compares
+///   raw four-bit indices;
+/// - `page3.png` is **RGBA**, which cannot pass through, so it takes the
+///   decoder and is split into samples and an `/SMask`;
+/// - `page4.gif` is a GIF, which this build refuses **by name at the page
+///   level**: it becomes a placeholder page of the book's own size, keeping its
+///   page number, which is gap 29's first "where a half-implementation is worse
+///   than none";
+/// - `page10.jpg` is a baseline JPEG, placed verbatim. No other fixture in this
+///   file embeds one at all;
+/// - `ComicInfo.xml` is metadata: not a page, not a warning.
+///
+/// The names are **unpadded** on purpose. `page001` and `page010` sort
+/// identically under lexicographic and natural order, so a padded fixture
+/// proves nothing about ordering at all — gap 16's zero-padded-filename lesson,
+/// which gap 29's design section restates for this format. Here the archive's
+/// stored order, its lexicographic order and its natural order all disagree
+/// about which entry is page 0: directory order and lexicographic order both
+/// put `page10.jpg` first (16 x 16, a JPEG), and only the natural order this
+/// build implements puts `page2.png` there (40 x 40, indexed). So a regression
+/// to either wrong order changes the picture *and* the bitmap's dimensions.
+fn cbz_page() -> Vec<u8> {
+    zip_archive(&[
+        ("page10.jpg", grey_jpeg(16, 16)),
+        // Six bytes of signature and a screen descriptor: enough to be
+        // recognised as a GIF, which is all this entry is for.
+        ("page4.gif", b"GIF89a\x08\x00\x08\x00\x00\x00\x00".to_vec()),
+        ("page3.png", rgba_png(24, 24)),
+        ("page2.png", indexed_png(40, 40)),
+        (
+            "ComicInfo.xml",
+            b"<ComicInfo><Title>None</Title></ComicInfo>".to_vec(),
+        ),
+    ])
+}
+
+/// A ZIP of stored entries, from APPNOTE 6.3.10's field layouts.
+///
+/// Stored rather than deflated, and it matters for what this fixture is: a
+/// deflated entry would put `deflate`'s output in the archive, so a change to
+/// the *encoder* would change the fixture's own bytes. Everything here is
+/// either a literal or a checksum.
+fn zip_archive(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+
+    for (name, data) in files {
+        let offset = out.len() as u32;
+        let crc = tinker_pdf_filters::crc32(data);
+        let name = name.as_bytes();
+
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&(1u16 << 11).to_le_bytes()); // bit 11: UTF-8
+        out.extend_from_slice(&0u16.to_le_bytes()); // method 0: stored
+        out.extend_from_slice(&0u32.to_le_bytes()); // time and date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        out.extend_from_slice(name);
+        out.extend_from_slice(data);
+
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        central.extend_from_slice(&(1u16 << 11).to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes()); // method
+        central.extend_from_slice(&0u32.to_le_bytes()); // time and date
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes()); // extra, comment
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attributes
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name);
+    }
+
+    let directory_at = out.len() as u32;
+    let count = files.len() as u16;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&0u32.to_le_bytes()); // this disk, directory disk
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&directory_at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    out
+}
+
+/// 15948 5.3: length, type, data, and a CRC over the type and the data.
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let mut covered = kind.to_vec();
+    covered.extend_from_slice(data);
+    out.extend_from_slice(&tinker_pdf_filters::crc32(&covered).to_be_bytes());
+    out
+}
+
+/// A zlib stream (RFC 1950) whose deflate blocks are all **stored**.
+///
+/// Written out rather than produced by `zlib_compress` for the same reason the
+/// archive above stores its entries: the pass-through copies these bytes into
+/// the PDF verbatim, so a compressed IDAT would put the *encoder's* output into
+/// a fingerprint that is supposed to be about the decoder, the embedder and the
+/// writer. `0x7801` passes the modulo-31 check with FDICT clear and FLEVEL 0.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut chunks = data.chunks(0xFFFF).peekable();
+    // An empty input still needs one block, or there is no final block at all.
+    if data.is_empty() {
+        out.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
+    }
+    while let Some(chunk) = chunks.next() {
+        out.push(u8::from(chunks.peek().is_none())); // BFINAL, BTYPE 00
+        out.extend_from_slice(&(chunk.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(chunk.len() as u16)).to_le_bytes());
+        out.extend_from_slice(chunk);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for byte in data {
+        a = (a + u32::from(*byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    out
+}
+
+/// 15948 9.2's five row filters, applied over `stride` bytes a row with the
+/// left-neighbour offset the format gives a sample of this width.
+///
+/// The tag cycles rather than being zero on every row, because `/Predictor 15`
+/// exists precisely so that the filter may change from row to row, and a raster
+/// filtered entirely with type 0 exercises none of it.
+fn png_filter(rows: &[Vec<u8>], bpp: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut previous = vec![0u8; rows.first().map_or(0, Vec::len)];
+    for (y, row) in rows.iter().enumerate() {
+        let tag = (y % 5) as u8;
+        out.push(tag);
+        for i in 0..row.len() {
+            let a = if i >= bpp { i32::from(row[i - bpp]) } else { 0 };
+            let b = i32::from(previous[i]);
+            let c = if i >= bpp {
+                i32::from(previous[i - bpp])
+            } else {
+                0
+            };
+            let predictor = match tag {
+                1 => a,
+                2 => b,
+                3 => (a + b) / 2,
+                4 => {
+                    // 9.4's Paeth predictor, written out so this encoder is
+                    // the specification's rather than the engine's.
+                    let p = a + b - c;
+                    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                    if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    }
+                }
+                _ => 0,
+            };
+            out.push((i32::from(row[i]) - predictor) as u8);
+        }
+        previous.clone_from(row);
+    }
+    out
+}
+
+/// A four-bit indexed PNG with a `tRNS` naming a transparent run.
+///
+/// Sixteen palette entries, none of them white, so every opaque pixel counts as
+/// ink; indices 0 and 1 are fully transparent, which is the shape 8.9.6.4's
+/// `/Mask` expresses as the single inclusive range `[0 1]`. Two samples share
+/// each byte, so the predictor's left-neighbour offset is one byte rather than
+/// one sample — `ceil(1 x 4 / 8)`, floored at one.
+fn indexed_png(width: u32, height: u32) -> Vec<u8> {
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[4, 3, 0, 0, 0]); // depth 4, colour type 3
+
+    let mut palette = Vec::with_capacity(48);
+    for i in 0..16u32 {
+        palette.push((i * 16 + 8) as u8);
+        palette.push((240 - i * 15) as u8);
+        palette.push(((i * 37 + 11) % 251) as u8);
+    }
+
+    let stride = (width as usize).div_ceil(2);
+    let mut rows = Vec::with_capacity(height as usize);
+    for y in 0..height {
+        let mut row = vec![0u8; stride];
+        for x in 0..width {
+            // Neither periodic in x nor in y, so a row or column dropped is
+            // visible rather than absorbed by the pattern repeating.
+            let index = ((x * 3 + y * 5 + (x * y) / 7) % 16) as u8;
+            let at = (x / 2) as usize;
+            if x % 2 == 0 {
+                row[at] |= index << 4;
+            } else {
+                row[at] |= index;
+            }
+        }
+        rows.push(row);
+    }
+
+    let mut out = Vec::from(PNG_SIGNATURE);
+    out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    out.extend_from_slice(&png_chunk(b"PLTE", &palette));
+    // Indices 0 and 1 transparent, and every index past the array opaque.
+    out.extend_from_slice(&png_chunk(b"tRNS", &[0x00, 0x00]));
+    out.extend_from_slice(&png_chunk(b"IDAT", &zlib_stored(&png_filter(&rows, 1))));
+    out.extend_from_slice(&png_chunk(b"IEND", b""));
+    out
+}
+
+/// An eight-bit RGBA PNG, which is the routing table's "cannot pass through".
+///
+/// The alpha is a function of both axes so the `/SMask` the embedder splits out
+/// is a picture rather than a constant, and no pixel is fully transparent, so
+/// the whole raster is ink.
+fn rgba_png(width: u32, height: u32) -> Vec<u8> {
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // depth 8, colour type 6
+
+    let mut rows = Vec::with_capacity(height as usize);
+    for y in 0..height {
+        let mut row = Vec::with_capacity(width as usize * 4);
+        for x in 0..width {
+            row.push((x * 9 + 3) as u8);
+            row.push((y * 9 + 5) as u8);
+            row.push(((x * x + y * 3) % 256) as u8);
+            row.push((64 + (x * 5 + y * 7) % 192) as u8);
+        }
+        rows.push(row);
+    }
+
+    let mut out = Vec::from(PNG_SIGNATURE);
+    out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    out.extend_from_slice(&png_chunk(b"IDAT", &zlib_stored(&png_filter(&rows, 4))));
+    out.extend_from_slice(&png_chunk(b"IEND", b""));
+    out
+}
+
+/// 15948 5.2's eight-byte signature.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// A baseline JPEG (ITU-T T.81), DC only, one grey component.
+///
+/// `width` and `height` must be multiples of eight. Two DC codes are defined so
+/// that a multi-block image can say "no change" after the first, which is what
+/// makes this a fixture rather than an 8 x 8 special case. It reaches the page
+/// as `ImageData::Jpeg` — the bytes the archive holds, never re-encoded.
+fn grey_jpeg(width: u16, height: u16) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+
+    // DQT, table 0, with a large DC quantiser so the one coded coefficient is
+    // a value nobody could mistake for a blank page.
+    let mut quant = [1u8; 64];
+    quant[0] = 255;
+    out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+    out.extend_from_slice(&quant);
+
+    // SOF0: baseline, 8-bit, one component, no subsampling, table 0.
+    out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&width.to_be_bytes());
+    out.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+    // DHT DC table 0: two two-bit codes, `00` for size 0 and `01` for size 2.
+    let mut dc = vec![0x00, 0, 2];
+    dc.extend_from_slice(&[0u8; 14]);
+    dc.extend_from_slice(&[0x00, 0x02]);
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((dc.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&dc);
+
+    // DHT AC table 0: one one-bit code, end-of-block.
+    let mut ac = vec![0x10, 1];
+    ac.extend_from_slice(&[0u8; 15]);
+    ac.push(0x00);
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((ac.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&ac);
+
+    // SOS: one component, the whole spectral band, no successive
+    // approximation, which is what makes it sequential rather than progressive.
+    out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+
+    let blocks = usize::from(width).div_ceil(8) * usize::from(height).div_ceil(8);
+    let mut coded: Vec<u8> = Vec::new();
+    for block in 0..blocks {
+        // Size 2 then `00`, which F.1.2.1's table reads as -3: a DC of -765
+        // after dequantisation, which the level shift puts near 32. Every
+        // block after the first codes size 0, which is "no change".
+        coded.extend_from_slice(if block == 0 { &[0, 1, 0, 0] } else { &[0, 0] });
+        coded.push(0); // the AC end-of-block
+    }
+    while coded.len() % 8 != 0 {
+        coded.push(1);
+    }
+    for byte in coded.chunks(8) {
+        let packed = byte.iter().fold(0u8, |acc, bit| (acc << 1) | bit);
+        out.push(packed);
+        // B.1.1.5: a 0xFF inside the entropy-coded segment is byte-stuffed.
+        if packed == 0xFF {
+            out.push(0x00);
+        }
+    }
+
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
 fn page_with(content: &str, width: f64, height: f64) -> Vec<u8> {
     format!(
         "%PDF-1.7\n\
@@ -1520,6 +1903,24 @@ const GOLDEN: &[Fixture] = &[
         build: jpx_page,
         least_ink: 3600,
     },
+    // 1 403 today, of 1 600: the indexed picture covers the whole page and the
+    // 197 pixels on the two transparent palette indices are what leaves any
+    // white at all.
+    //
+    // This floor is doing two jobs rather than one. It guards the ordinary
+    // failure -- a page that stops drawing -- and it guards the one this
+    // fixture is uniquely exposed to: **a page that became a placeholder**.
+    // Every route into this document can fail into ruling 2's neutral grey,
+    // which is 0xBF on all three channels and therefore counts as ink on every
+    // pixel of the page. So the floor cannot see that one, and the direction
+    // that *can* is the other way: 8.9.6.4's `/Mask` ignored paints the two
+    // transparent indices as their palette colours and takes this page to a
+    // full 1 600. The hash catches that, as it catches the grey.
+    Fixture {
+        name: "cbz",
+        build: cbz_page,
+        least_ink: 700,
+    },
 ];
 
 #[test]
@@ -1624,6 +2025,18 @@ fn rendering_is_stable_across_targets() {
             "jpx",
             "d9d0a1f733de50ca06fae32655bc240854d573679698ce7a8e8095640972ef4d",
         ),
+        // Added August 2026 with gap 29 milestone 6, and the first entry here
+        // whose document is *synthesised* rather than parsed -- so it is the
+        // first that pins a producer and a consumer to each other rather than
+        // only a renderer. Read `cbz_page`'s doc comment before treating a
+        // move in this one as a rendering change: its blast radius is the ZIP
+        // reader, the natural sort, the PNG routing table, the pass-through's
+        // `/DecodeParms`, `DocumentBuilder` and `CosDocument`'s parse of what
+        // it wrote, as well as the renderer every other row here covers.
+        (
+            "cbz",
+            "9e92c73984cff79feef04dcc984c52f04beda91bf3087a50ce9c17b3fc275aea",
+        ),
     ];
     assert_eq!(
         expected.len(),
@@ -1653,6 +2066,138 @@ fn rendering_is_stable_across_targets() {
          If this is a deliberate rendering change, render the page and \
          compare it with `pdfcmp` first, then paste these in:\n\n{}\n",
         wrong.join("\n")
+    );
+}
+
+/// The bytes the CBZ synthesiser hands `CosDocument::open`, hashed.
+///
+/// *Added August 2026, with gap 29 milestone 6.* The `cbz` fingerprint above
+/// covers the synthesis only as far as the synthesis reaches pixels, and that
+/// is less far than it looks: **object numbering, dictionary key order and
+/// stream framing are invisible to it**, because a document renumbered or
+/// re-keyed parses to the same page tree and draws the same picture. Ruling 4
+/// is a claim about rendering, and this is the one place in this repository
+/// where a *written* document is an input to it — so the written bytes get a
+/// claim of their own.
+///
+/// It also covers three things no rendered hash can:
+///
+/// - **the writer's deflate encoder.** The decoded route re-compresses its own
+///   samples in `png_embed`, so `zlib_compress`'s output is in these bytes.
+///   Every other fixture in this file renders a document that was *parsed*, so
+///   the compressor is on no other path here at all;
+/// - **the pages nobody renders.** This hash is over the whole document, so
+///   the RGBA page's `/SMask`, the placeholder's grey rectangle and the JPEG's
+///   verbatim bytes are in it. The fingerprint above renders page 0 and sees
+///   none of them;
+/// - **an unreferenced object.** A stream written and then not pointed at
+///   changes the length and the numbering and changes nothing on any page.
+///
+/// The two hashes together are what attribute a failure. If both move, the
+/// synthesiser changed; if only the fingerprint moved, the renderer did; if
+/// only this one moved, the document changed in a way that draws the same —
+/// which is a real change and worth a sentence in the commit either way.
+#[test]
+fn the_synthesised_document_is_the_same_bytes_on_every_target() {
+    let archive = cbz_page();
+    let (pdf, report) = tinker_pdf::cbz::synthesise(
+        tinker_pdf::Container::Zip,
+        &archive,
+        &tinker_pdf::cbz::Limits::DEFAULT,
+    )
+    .expect("the fixture archive synthesises");
+
+    // The document this hash is about, asserted rather than assumed: four
+    // pages, in natural order, with the GIF a placeholder and nothing else
+    // degraded. A hash over the wrong document is stable and worthless.
+    assert_eq!(
+        report
+            .pages()
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["page2.png", "page3.png", "page4.gif", "page10.jpg"],
+        "the fixture's pages are not the ones this hash was taken over"
+    );
+    assert_eq!(
+        report.pages().iter().filter(|p| p.defect.is_some()).count(),
+        1,
+        "exactly one page is a placeholder: the GIF"
+    );
+    // Ruling 10: "it opened" and "it opened cleanly" stay distinguishable, and
+    // for this archive the difference is one warning and no others. Without
+    // this the fixture could be quietly damaged — a wrong Adler-32 on an IDAT
+    // that is passed through is never inflated by the embedder, so it reaches
+    // the page, renders the same picture and reports leniency nobody reads.
+    assert_eq!(
+        report.warnings().len(),
+        1,
+        "a well-formed archive opens with exactly the placeholder warning: {:?}",
+        report.warnings()
+    );
+    assert_eq!(report.synthesised_bytes(), pdf.len());
+
+    // Gap 29's routing table, entry by entry, in the document it produced. A
+    // hash alone cannot say *why* it is what it is, and the failure this
+    // guards is the one that leaves every picture correct: a build that quietly
+    // decoded everything would render all four pages identically and would have
+    // abandoned the whole design — the pass-through is what keeps a 200-page
+    // archive's peak memory a multiple of the archive rather than of its pixel
+    // count.
+    for (needle, count, what) in [
+        (&b"/Predictor 15"[..], 1, "the indexed PNG passed through"),
+        (b"/Mask [0 1]", 1, "8.9.6.4's colour key, from the tRNS run"),
+        (
+            b"/Indexed /DeviceRGB 15",
+            1,
+            "/hival from the palette's own length",
+        ),
+        (b"/SMask", 1, "the RGBA PNG was decoded and split"),
+        (b"/DCTDecode", 1, "the JPEG reached the page as itself"),
+        (b"/ImageMask", 0, "nothing here is a stencil"),
+    ] {
+        assert_eq!(
+            pdf.windows(needle.len()).filter(|w| *w == needle).count(),
+            count,
+            "{what}: {} in the synthesised document",
+            String::from_utf8_lossy(needle),
+        );
+    }
+
+    // The two pass-throughs are byte-for-byte, which is the claim the design
+    // rests on and the one a dictionary key cannot make: the JPEG's own bytes
+    // and the PNG's own IDAT are *in* the document, not a re-encoding of them.
+    let jpeg = grey_jpeg(16, 16);
+    assert!(
+        pdf.windows(jpeg.len()).any(|w| w == jpeg),
+        "the JPEG was re-encoded rather than placed"
+    );
+    let indexed = indexed_png(40, 40);
+    let find = |tag: &[u8]| {
+        indexed
+            .windows(4)
+            .position(|w| w == tag)
+            .expect("the fixture has this chunk")
+    };
+    // The IDAT's data begins after its type and ends four bytes (its own CRC)
+    // before the IEND chunk's length field, which is four before its type.
+    let idat = &indexed[find(b"IDAT") + 4..find(b"IEND") - 8];
+    assert!(
+        pdf.windows(idat.len()).any(|w| w == idat),
+        "the IDAT was rebuilt rather than copied"
+    );
+
+    let hash: String = tinker_pdf_crypto::sha2::sha256(&pdf)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hash,
+        "ddf0996c5d4b0a1e070784d9c3a6954f2c0b9fee2f9bcd9558c3047ea99658c6",
+        "the synthesised document is not the bytes it was; see this test's doc \
+         comment for what that means and how to tell it apart from a rendering \
+         change. The document is {} bytes.",
+        pdf.len()
     );
 }
 

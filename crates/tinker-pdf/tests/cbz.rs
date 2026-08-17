@@ -25,7 +25,7 @@ use cbz_support::{
     broken_png, distinct_pixels, grey_jpeg, one_image_page, pdf, rgb_png, stream, zip, Damage,
     ZipFile,
 };
-use tinker_pdf::cbz::{self, ArchiveWarning, ImageFormat, ZipEntryError};
+use tinker_pdf::cbz::{self, zip_limits, ArchiveWarning, ImageFormat, ZipEntryError, ZipWarning};
 use tinker_pdf::{
     ArchiveRefusal, Bitmap, Container, Document, OpenError, PageDefect, RenderOptions, WriteMode,
     WriteOptions,
@@ -874,4 +874,118 @@ fn flipping_any_single_byte_never_panics() {
             }
         }
     }
+}
+
+/// Everything the archive reader tolerated reaches the caller (ruling 10).
+///
+/// **Found by gap 29 milestone 6's injection matrix, which is the only reason
+/// it exists.** Deleting the loop in `synthesise` that carries
+/// `Archive::warnings` into the report failed **nothing** in the workspace: a
+/// comic whose directory had to be recovered by scanning, or whose entry name
+/// was truncated, opened with an empty warning list and no test noticed.
+///
+/// That is gap 16's defect exactly — `let (gray, _) = ccitt_decode(...)`, where
+/// "every leniency it took was invisible" — arriving in the plan that cites it.
+/// The archive reader is careful about what it reports and none of that care
+/// survives a call site that drops it, which is the failure mode of a warning
+/// list that is *read* rather than *asserted*.
+///
+/// Two leniencies, from the two different places the reader records them: the
+/// route it had to take, and what it had to do to an entry.
+#[test]
+fn what_the_archive_reader_tolerated_reaches_the_caller() {
+    // A directory that is not there at all, so the local-header scan is the
+    // route. The archive is whole up to the point the writer stopped, which is
+    // what a half-uploaded comic looks like.
+    let whole = zip(&[ZipFile::stored("p1.png", &page_png(4, 4))], Damage::None);
+    let directory_at = whole
+        .windows(4)
+        .position(|w| w == b"PK\x01\x02")
+        .expect("a central directory");
+    let recovered = open(&whole[..directory_at]);
+    let warnings = recovered.archive().expect("a report").warnings().to_vec();
+    assert!(
+        warnings.contains(&ArchiveWarning::Zip(ZipWarning::NoEndOfCentralDirectory)),
+        "the route the reader had to take is not in the report: {warnings:?}"
+    );
+    assert!(
+        warnings.contains(&ArchiveWarning::Zip(ZipWarning::RecoveredFromLocalHeaders)),
+        "recovery happened silently: {warnings:?}"
+    );
+    assert_eq!(recovered.page_count(), 1, "the page survived the recovery");
+
+    // And an entry-level leniency, which the reader records in the same list
+    // from a different place: a name past the cap is truncated and kept.
+    let long = format!("{}.png", "n".repeat(zip_limits::MAX_ZIP_NAME_LEN));
+    let truncated = open(&zip(
+        &[ZipFile::stored(&long, &page_png(4, 4))],
+        Damage::None,
+    ));
+    let warnings = truncated.archive().expect("a report").warnings().to_vec();
+    assert!(
+        warnings.contains(&ArchiveWarning::Zip(ZipWarning::NameTruncated)),
+        "an entry the reader had to shorten is not in the report: {warnings:?}"
+    );
+
+    // The other direction, or the assertions above pass on a build that
+    // reports every warning there is: a healthy archive says nothing.
+    let healthy = open(&zip(
+        &[ZipFile::stored("p1.png", &page_png(4, 4))],
+        Damage::None,
+    ));
+    assert!(
+        healthy.archive().expect("a report").warnings().is_empty(),
+        "a healthy archive reported a leniency it did not take"
+    );
+}
+
+/// A page whose picture arrived and arrived damaged says so, and is still the
+/// picture (ruling 10, and ruling 2's other half).
+///
+/// **The injection matrix found this one too**: `ArchiveWarning::DegradedImage`
+/// was pushed at one site and asserted at none, so disabling the branch failed
+/// nothing. That is milestone 2's `NoEndOfCentralDirectory` in reverse — there
+/// a variant nothing pushed, here a variant nothing read — and both are the
+/// same defect, which is a warning surface nobody has driven.
+///
+/// The distinction it carries is the one a host shows differently.
+/// `PlaceholderPage` means there is no picture; `DegradedImage` means there is
+/// one and it is not all there. A file that stops before its IEND is the
+/// cheapest way to be exactly that: 15948 5.2's chunk structure says the file
+/// is unfinished, and every pixel that did arrive is still good.
+#[test]
+fn a_page_that_arrived_damaged_says_so_and_is_still_a_page() {
+    let good = page_png(6, 6);
+    // IEND is the last twelve bytes: length, type, no data, CRC.
+    let unfinished = &good[..good.len() - 12];
+
+    let document = open(&zip(
+        &[
+            ZipFile::stored("p1.png", &good),
+            ZipFile::stored("p2.png", unfinished),
+        ],
+        Damage::None,
+    ));
+
+    assert_eq!(document.page_count(), 2);
+    let report = document.archive().expect("a report");
+    assert_eq!(
+        report.warnings(),
+        [ArchiveWarning::DegradedImage { page: 1 }],
+        "the damaged page is reported as degraded and the whole page is not"
+    );
+    assert_eq!(
+        report.pages()[1].defect,
+        None,
+        "a degraded page is not a placeholder: the picture is there"
+    );
+
+    // And it *is* the picture: the same 6 x 6 raster, not a grey rectangle.
+    let whole = render(&document, 0);
+    let damaged = render(&document, 1);
+    assert_eq!((damaged.width, damaged.height), (6, 6));
+    assert_eq!(
+        damaged.data, whole.data,
+        "the pixels the file did carry are the pixels on the page"
+    );
 }

@@ -822,3 +822,59 @@ fn flipping_any_single_byte_never_panics() {
         }
     }
 }
+
+/// Writes the five seeds `fuzz/corpus/zip_archive/` carries, so the seeds and
+/// the fixtures here cannot drift apart.
+///
+/// Run with `--ignored` when a fixture changes; the corpus is committed, and a
+/// run that rewrites it is a diff to look at rather than to apply blindly.
+///
+/// Each seed is the target's **control byte** and then an archive, because the
+/// first byte is what picks the bounds. Two of the five carry a control byte of
+/// zero — every cap at its lowest — since a corpus in which every seed is
+/// roomy explores the happy path and never a refusal, which is gap 18a
+/// milestone 8's failure arriving through the corpus rather than through the
+/// constant.
+#[test]
+#[ignore = "writes into fuzz/corpus/zip_archive, which is committed"]
+fn write_the_fuzz_seeds() {
+    let base =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/zip_archive");
+    let body = b"abcabcabcabcabcabcabcabcabcabcabcabc".repeat(4);
+
+    // Both methods and both name encodings in one archive, under the widest
+    // bounds the control byte can pick.
+    let mixed = archive(
+        &[
+            File::stored(b"page01.jpg", b"stored entry"),
+            File::deflated(b"page02.png", &body),
+            File {
+                utf8: false,
+                ..File::stored(b"cover\x81.jpg", b"a CP437 name")
+            },
+        ],
+        Damage::None,
+    );
+    // The recovery rung: local headers and no directory to read them from.
+    let scanned = archive(&[File::deflated(b"page01.png", &body)], Damage::NoDirectory);
+    // A streamed entry, whose sizes are in a descriptor after the data.
+    let streamed = archive(
+        &[File {
+            streamed: true,
+            ..File::deflated(b"page01.png", &body)
+        }],
+        Damage::None,
+    );
+
+    for (name, bytes) in [
+        ("mixed-methods", [&[0xFFu8][..], &mixed].concat()),
+        ("recovered-by-scan", [&[0xFF][..], &scanned].concat()),
+        ("streamed-descriptor", [&[0xFF][..], &streamed].concat()),
+        // The same two archives against the tightest bounds in the set: one
+        // entry, sixteen bytes an entry, no inflation at all, one byte of name.
+        ("mixed-methods-tight", [&[0x00][..], &mixed].concat()),
+        ("streamed-tight", [&[0x00][..], &streamed].concat()),
+    ] {
+        std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+    }
+}

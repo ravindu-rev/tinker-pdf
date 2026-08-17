@@ -1494,3 +1494,49 @@ const ADAM7_8X8: [u8; 143] = [
     0xEB, 0xB6, 0x03, 0xEE, 0x63, 0x07, 0xE1, 0x24, 0x5F, 0x6E, 0x8F, 0x00,
     0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 ];
+
+/// Writes the five seeds `fuzz/corpus/png/` carries, so the seeds and the
+/// fixtures here cannot drift apart.
+///
+/// Run with `--ignored` when a fixture changes; the corpus is committed, and a
+/// run that rewrites it is a diff to look at rather than to apply blindly.
+///
+/// Each seed is the target's **control byte** and then a file, because the
+/// first byte is what picks the output ceiling. One of the five carries a
+/// control byte of zero — a ceiling of one byte — since that is the only value
+/// from which `ExceedsOutputLimit` fires on an otherwise perfectly good file,
+/// and a corpus that never reaches a refusal is the corpus half of gap 18a
+/// milestone 8's failure.
+#[test]
+#[ignore = "writes into fuzz/corpus/png, which is committed"]
+fn write_the_fuzz_seeds() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/png");
+
+    // Colour type 3 with a palette and a tRNS: gap 29's pass-through shape,
+    // and the one branch of `png_scan` that has a table to bounds-check.
+    let palette: Vec<u8> = (0..4u8)
+        .flat_map(|i| [i * 60, 255 - i * 60, i * 17])
+        .collect();
+    let indexed = png(
+        &ihdr_data(4, 4, 2, 3, 0),
+        &[
+            chunk(b"PLTE", &palette),
+            chunk(b"tRNS", &[0x00, 0xFF]),
+            idat(&vec![vec![0b0001_1011]; 4]),
+        ],
+    );
+    // Sixteen bits a component with alpha, which is the widest raster Table
+    // 11.1 allows and therefore the most the sample cap is ever charged.
+    let deep = simple(2, 2, 16, 6, &vec![vec![0xFF; 16]; 2]);
+
+    for (name, bytes) in [
+        ("plain-8x8", [&[0x03u8][..], &PLAIN_8X8].concat()),
+        ("adam7-8x8", [&[0x03][..], &ADAM7_8X8].concat()),
+        ("indexed-trns", [&[0x03][..], &indexed].concat()),
+        ("sixteen-bit-alpha", [&[0x03][..], &deep].concat()),
+        // The same file against a one-byte ceiling.
+        ("plain-8x8-tight", [&[0x00][..], &PLAIN_8X8].concat()),
+    ] {
+        std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+    }
+}

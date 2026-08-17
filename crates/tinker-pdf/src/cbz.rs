@@ -81,7 +81,7 @@ pub use tinker_pdf_zip::{
 ///
 /// | | Pages |
 /// | --- | --- |
-/// | The most any fixture in this repository spends | 4 097 (and 13 outside the test built for this cap) |
+/// | The most any fixture in this repository spends | 4 096 (the archive built *past* this cap holds 4 097 entries; nothing else here holds more than 13) |
 /// | A 200-page comic | 200 |
 /// | **This cap** | **4 096** |
 ///

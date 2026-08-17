@@ -1,6 +1,6 @@
 # Fuzzing
 
-Eighteen `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
+Twenty `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
 Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-corpora.md).
 
 | Target | What it drives |
@@ -13,6 +13,8 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 | `ccitt` | G3 and G4; the first two input bytes choose the parameters |
 | `jbig2` | T.88 segment headers, the MQ coder and generic regions; the first byte splits the body between `/JBIG2Globals` and the image's own stream |
 | `jpx` | T.800: the JP2 box walk and the Annex A codestream, then tier-2 and tier-1; the first byte chooses the ceiling and whether the body is wrapped in JP2 boxes |
+| `zip_archive` | A ZIP by both of its routes — the central directory and the local-header scan — with the first byte choosing the four bounds, deliberately away from the shipped defaults so the caps stay reachable inside an iteration |
+| `png` | The chunk walk, both interlace methods, and the two independent length systems a PNG carries over one file: the declared chunk lengths and IHDR's geometry. The first byte chooses the output ceiling, and one of the four values it can pick is one byte |
 | `ascii_filters` | ASCIIHex, ASCII85, RunLength, and the predictors |
 | `sfnt` | The table directory and everything around the outlines, including the subsetter that rebuilds one |
 | `truetype` | `cmap`, and `glyf` including composites |
@@ -97,6 +99,8 @@ account for:
 | `type1` | `type1.rs`'s `font_with_square`, and a copy cut off inside the eexec section |
 | `cmap` | A `/ToUnicode`, a `cidrange` CMap with two codespaces, a `usecmap`, a predefined name, and one malformed throughout. Gap 04 added three: a differential CMap that inherits from a predefined parent, one that names itself, and one whose sections close with the wrong `end*` operator or with none. The target drives `parse_embedded` with three resolvers built out of the input, since a `usecmap` chain past the predefined set needs a caller and there is no document here to be one. Gap 03 added four more, because until it landed `CMap::predefined` was a fourteen-entry prefix list and there was no table to reach: each names a real registry CMap on its first line, which is where the target looks for one, and follows it with bytes chosen for the new code. `predefined-registry` is Shift-JIS with an undefined two-byte code and a lead byte no range claims; `predefined-vertical` drives the registry's own `usecmap`, so the CMap is built recursively and merged; `predefined-gb18030` is the two-byte/four-byte overlap that per-byte codespace matching exists for; `predefined-utf8` has four codespace widths and sequences that are not UTF-8 |
 | `crypt` | `build_r6` output laid out in the target's carve order, so one seed authenticates and decrypts; plus R4, R2, and three bytes |
+| `zip_archive` | Five, from `tinker-pdf-zip`'s own hand-built archives — the same bytes, written by the tests so the two cannot drift, and rewritten by `cargo test -p tinker-pdf-zip write_the_fuzz_seeds -- --ignored`: both compression methods with a CP437 name beside two UTF-8 ones, an archive with no central directory so the local-header scan is the route, and an entry whose sizes are in a data descriptor. **Two of the five repeat an archive behind a control byte of zero**, which sets every cap to the lowest value the target offers — one entry, sixteen bytes an entry, no inflation at all, one byte of name. A corpus in which every seed is roomy explores the happy path and reaches no refusal, which is gap 18a milestone 8's failure arriving through the corpus instead of through the constant |
+| `png` | Five, from `png.rs`'s own fixtures and rewritten by `cargo test -p tinker-pdf-filters write_the_fuzz_seeds -- --ignored`: the two committed 8 x 8 files whose sixty-four pixels are all distinct, one plain and one Adam7, plus an indexed file with a `PLTE` and a `tRNS` — the pass-through's shape, and the one branch of `png_scan` with a table to bounds-check — and a 16-bit RGBA raster, which is the widest layout Table 11.1 allows and therefore the most `MAX_PNG_SAMPLES` is ever charged. The fifth repeats the plain file behind a control byte of zero, a ceiling of **one byte**, which is the only value from which `ExceedsOutputLimit` fires on an otherwise perfectly good file |
 
 Replaying a corpus without mutating it is the cheapest check that a seed
 still reaches what it was chosen for:

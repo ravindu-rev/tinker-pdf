@@ -1589,3 +1589,337 @@ Eighteen defects, one at a time, each reverted before the next.
   reason milestone 3 gave: libFuzzer is unavailable on
   `x86_64-pc-windows-msvc` and the WSL2 nightly route belongs to milestone 6.
 
+## Progress — 18 August 2026, milestone 6
+
+**The gap is closed.** The thirteenth determinism fingerprint and a fourteenth
+hash beside it, a bounds sweep over all seven constants in one place, the ledger
+sweep across seven documents, and the campaign — `zip_archive` and `png` both
+run for twenty minutes on a nightly toolchain in WSL2, with no crash, no OOM and
+no timeout. Eight tests here, and the workspace stands at **1 872**.
+
+### The thirteenth fingerprint, and why there are two hashes
+
+`determinism.rs` gains `cbz`, and it is the first fixture in that file whose
+document is **synthesised rather than parsed**. The archive is five stored
+entries built from APPNOTE's field layouts in the test itself:
+
+| Entry | What it is | What it pins |
+| --- | --- | --- |
+| `page2.png` | indexed, **four bits** a sample, `tRNS` naming a transparent run | the pass-through: `/FlateDecode` with `/Predictor 15`, an `/Indexed` space whose `/hival` is derived from the palette, and 8.9.6.4's colour-key `/Mask`. **This is page 0**, so it is what the fingerprint renders |
+| `page3.png` | RGBA | the decode route, the alpha split and the `/SMask` |
+| `page4.gif` | a GIF signature | the page-level refusal: a placeholder of the book's own size, keeping its number |
+| `page10.jpg` | baseline JPEG | `ImageData::Jpeg`, verbatim. No other fixture in that file embeds a JPEG at all |
+| `ComicInfo.xml` | metadata | that it is neither a page nor a warning |
+
+The names are **unpadded** and the archive is stored **back to front**, because
+that is the only arrangement in which the ordering is something the fixture
+proves rather than something it inherits: directory order and lexicographic
+order both put `page10.jpg` first, and only natural order puts `page2.png`
+there. The two disagree about the picture *and* about the bitmap's dimensions —
+16 x 16 against 40 x 40 — and the dimensions are in the hash. A padded fixture
+would prove nothing, which is gap 16's lesson restated in the file that most
+needed it.
+
+**A rendered hash cannot see most of a synthesis, and that is why there are
+two.** Object numbering, dictionary key order and stream framing all parse back
+to the same page tree and draw the same picture, so
+`the_synthesised_document_is_the_same_bytes_on_every_target` hashes the bytes
+`CosDocument::open` is handed — 5 114 of them — and asserts the routing table
+entry by entry in the document it produced: one `/Predictor 15`, one
+`/Mask [0 1]`, one `/Indexed /DeviceRGB 15`, one `/SMask`, one `/DCTDecode`, no
+`/ImageMask`, and the JPEG's own bytes and the PNG's own IDAT present
+**verbatim**. It also covers three things no rendered hash can: the writer's
+deflate encoder, which is on no other path in that file because every other
+fixture renders a document that was parsed; the three pages nobody renders; and
+an unreferenced object, which changes the length and nothing else.
+
+The two together are what attribute a failure, and the doc comment says so: both
+moved means the synthesiser changed, only the fingerprint means the renderer
+did, only the byte hash means the document changed in a way that draws the same.
+That last case is not hypothetical — see the matrix below.
+
+The minimum-ink floor is 700 against 1 403 painted of 1 600, and it is doing two
+jobs. The ordinary one, and a warning: **it cannot see a page that became a
+placeholder**, because ruling 2's neutral grey is ink on every pixel. What it
+does catch is a page that stops drawing, and what the hash catches is the
+opposite failure — the `/Mask` ignored takes this page to a full 1 600.
+
+Both hashes reproduce byte-for-byte on `wasm32-wasip1` under wasmtime, and
+**none of the other twelve moved**, on either target.
+
+### The bounds sweep
+
+The plan's table names five bounds and the code has seven, because two of the
+"per-item caps sit beside them" were built as named constants. Each already had
+its own ledger beside its own constant and its own firing test; what none of
+them could do from where it stood is check the **set**.
+`crates/tinker-pdf/tests/bounds_ledger.rs` does, in five tests over one table:
+
+| Constant | Fixtures | A 200-page comic | Cap | The most its own inputs can ask for | Fires by |
+| --- | --- | --- | --- | --- | --- |
+| `MAX_ZIP_ENTRIES` | 6 | 202 | 16 384 | ~91 million — 47-byte records in a 4 GiB archive | the real 16 385-entry archive |
+| `MAX_ZIP_ENTRY_BYTES` | 1 024 | ~48 MB | 128 MiB | 4 294 967 295 — the size field is 32 bits | an entry declaring one past it |
+| `MAX_ZIP_INFLATED` | 1 024 | ~300 MB | 1 GiB | **2 TiB** — every entry the entry cap allows, each at the per-entry cap | a 64-entry bomb crossing a lowered total |
+| `MAX_ZIP_NAME_LEN` | 24 | ~42 | 1 024 | 65 535 — the name-length field is 16 bits | a 1 524-byte name truncating and warning |
+| `MAX_PNG_SAMPLES` | 4 096 | 24 000 000 | 67 108 864 | ~1.8 x 10^19 — IHDR's two 31-bit dimensions, times four components | a thirteen-byte IHDR |
+| `MAX_CBZ_PAGES` | 4 096 | 200 | 4 096 | 16 384 — every entry the reader will hand over | the real 4 097-entry archive |
+| `MAX_SYNTHESISED_PDF` | ~70 KB | ~300 MB | 512 MiB | **512 GiB** — every page the page cap allows, each carrying a whole entry | a synthesis charged past it |
+
+The fifth column is the whole point and it is the one nobody had written down.
+Gap 18a milestone 8's `MAX_JPX_WORK` was set *above* what its own inputs could
+reach, so it could never fire — and nothing failed, because a cap that cannot
+fire behaves exactly like a cap that is never approached. `every_bound_can_fire`
+is that check, done arithmetically for all seven at once, and the matrix below
+records that it is the **only** thing in the workspace that catches it.
+
+Three more assertions come with it, each of which the matrix shows earns its
+place: the constant parses back from the number its own ledger publishes
+(`**This cap** | **1 GiB**` and `1 << 30` cannot drift apart); a 200-page comic
+fits under every one of them, so none is a missing feature wearing a `MAX_`
+prefix; and the test each ledger names as proving it fires **exists**, is a
+`#[test]`, and is not `#[ignore]`d. Nothing here is a clock: the sweep asserts
+that too, since `5adf502`'s scar is a budget proved by a timing assertion that
+passes on a fast machine with the budget removed.
+
+Two of the seven cannot be driven to their shipped value in a test and both say
+so where they are declared. `MAX_ZIP_INFLATED` is a GiB and a fuzz iteration or
+a unit test cannot allocate one, so its firing test lowers the total; the
+reachability check is what says the shipped constant is a cap rather than
+decoration. `MAX_SYNTHESISED_PDF` is the same at 512 MiB.
+
+Milestone 3's four deliberately-absent caps and `limits.rs`'s absent path-depth
+cap are unchanged and still argued where they are: a constant that can never
+fire is the same failure reached from the other direction, and writing down why
+one was *not* added is the cheaper half of this discipline.
+
+### The campaign
+
+libFuzzer does not exist on `x86_64-pc-windows-msvc`, so the route is the one
+four other plans record: WSL2, Ubuntu 24.04, `rustc 1.100.0-nightly
+(34baba539 2026-08-16)`, `cargo-fuzz 0.13.2`, the tree copied onto ext4 because
+building across `/mnt/c` is glacial. `sudo` wants a password in a
+non-interactive shell; `wsl -u root` is the way in.
+
+```
+cargo fuzz run <target> fuzz/corpus/<target> -- \
+  -max_total_time=1200 -timeout=25 -rss_limit_mb=2048 -print_final_stats=1
+```
+
+| | `zip_archive` | `png` |
+| --- | --- | --- |
+| Executions | **4 249 823** | **122 293 604** |
+| Rate | 3 538/s | 101 826/s |
+| Coverage at the end | cov 1 170, ft 6 351 | cov 775, ft 1 692 |
+| Corpus | 5 seeds to 1 507 units, 660 KB | 5 seeds to 187 units, 54 KB |
+| Peak RSS | 446 MB | 461 MB |
+| Slowest unit | 0 s | 0 s |
+| Crashes, OOMs, timeouts | **none** | **none** |
+
+`artifacts/` is empty for both, and both processes exited 0.
+
+The thirty-fold difference in rate is not noise and it is the target doing what
+it was built to do: `zip_archive` opens the same bytes twice, once under the
+control byte's bounds and once under the shipped ones, and reads every entry in
+reverse. That is four parsers over one input where `png` is two.
+
+**One correction to the plan.** Its exit criterion says `cargo fuzz run zip`;
+the target has been called `zip_archive` since milestone 2, because `zip` is
+also the name of the crate and of the denied dependency. The name in the plan is
+wrong and the target is right.
+
+The seed corpora landed here rather than earlier, and they are **curated**
+rather than a campaign's working state — `d9945a0`'s point. Five each, written
+by an `--ignored` test in the crate that owns the fixtures, so the seeds and the
+fixtures cannot drift: `cargo test -p tinker-pdf-zip write_the_fuzz_seeds --
+--ignored` and the same for `-p tinker-pdf-filters`. **Two of the five in each
+carry a control byte of zero**, which sets every knob to the tightest value the
+target offers — one entry, sixteen bytes, no inflation at all, a one-byte name;
+a one-byte output ceiling for PNG. A corpus in which every seed is roomy
+explores the happy path and reaches no refusal, which is gap 18a milestone 8's
+failure arriving through the corpus instead of through the constant.
+
+### The ledger sweep, and the fourth place
+
+The leaf count is written in **four** places and the plan named three of them.
+The fourth is `README.md`'s "Workspace" section, which enumerates the same five
+crates and which nobody had connected to the count. All four now say **seven**
+— `filters`, `crypto`, `font`, `color`, `raster`, `math`, `zip` — with dated
+in-place amendments in `00-architecture.md` and ruling 8 saying what happened:
+it said five from the day it was written, `tinker-pdf-math` arrived as a
+second-order leaf and not one statement moved, and the sweep that added
+`tinker-pdf-zip` is what found the first drift. Ruling 8 gains the sentence its
+enumeration needed — a leaf is anything that takes bytes and returns values,
+whatever the list says — because a rule that enumerates is a rule that goes
+stale, which is what this whole item is about. `00-architecture.md`'s DAG
+diagram is redrawn with both missing leaves and both leaf-to-leaf edges.
+
+The rest of it:
+
+- **`docs/plans/02-filters.md`'s non-goals gain PNG**, in the shape the JBIG2
+  and JPX entries were amended — and it is *not* a capability gate that opened,
+  which is what makes it different from both. No PDF stream is ever a PNG file,
+  so PNG is not in `Filter` and cannot be reached from a content stream at all.
+  The entry says what it is (a container decoder for CBZ), where the two entry
+  points split and why, and that the relationship runs the other way from what a
+  reader assumes: `predictors.rs` was PNG 9.2's code before there was a PNG
+  decoder to call it. CRC-32's arrival is recorded beside it.
+- **`docs/STATUS.md`**: 1 686 to 1 872, eleven fingerprints to thirteen with the
+  fourteenth hash named, sixteen fuzz targets to twenty, and CBZ moved from
+  decided to built with its own row — including what it does not do.
+- **`README.md`**: the leaf list, the test count, and a paragraph under gap 28's
+  amendment saying the first of the three is built and the other two are not.
+- **`fuzz/README.md`**: eighteen targets to twenty, a row each in the target
+  table and the seed table.
+- **`.github/workflows/ci.yml`**'s per-PR fuzz job said "fifteen targets" in a
+  comment that decides its own time budget. Twenty.
+- **`deny.toml`** already had eleven names from milestone 2, and three of them
+  were not the eleven this plan asked for: it has `tar`, `crc-any` and `adler32`
+  where the plan named `rawzip`, `crc32c` and `simd-adler32`. All three of the
+  plan's are added rather than swapped, because the substitutions were
+  improvements — fourteen names now.
+
+`docs/plans/13-bindings.md` also enumerates the leaves, and it is **deliberately
+not amended**: that list is a publishing plan naming the crates gap 26 dry-ran
+to crates.io, and adding `zip` and `math` to it would be a claim about
+publishing rather than a correction to a count. It is recorded here so the next
+sweep does not have to rediscover that it was skipped on purpose.
+
+### The injection matrix
+
+Twenty-three defects, one at a time, each reverted before the next, the suite
+re-run with `--no-fail-fast`. **Twenty-one caught, two survived, and both are
+closed.**
+
+| Defect | Caught by |
+| --- | --- |
+| Natural sort replaced by lexicographic | the `cbz` fingerprint, the byte hash, the ink floor, and two more |
+| The sort dropped entirely, so directory order stands | the same, and `equal_names_break_on_directory_position` |
+| A `tRNS` range passed through with no `/Mask` | the `cbz` fingerprint, the byte hash, and three more |
+| The placeholder painted white | **the byte hash**, and one more — the fingerprint cannot see it, because the placeholder is not page 0 |
+| Every page sharing one image resource table | **the byte hash** and qpdf. In milestone 5 this was caught by *qpdf alone* |
+| The image drawn at zero size, so page 0 is blank | **the minimum-ink floor**, and five more |
+| `/Predictor` written as 1 rather than 15 | eleven tests, including both hashes |
+| Digit runs compared by bytes rather than magnitude | eight tests, including both hashes |
+| A GIF entry dropped instead of becoming a placeholder | six tests, including the byte hash |
+| The archive inflation total never spent | `a_zip_bomb_is_refused_by_name...`, and the ledger test |
+| The per-page byte charge never spent | `a_synthesis_past_the_byte_cap_is_refused_by_name` |
+| The page cap compared with `>` rather than `>=` | `a_page_count_at_the_cap_still_opens`, and one more |
+| The fixture's own IDAT given a wrong Adler-32 | **the byte hash** — the IDAT is copied verbatim, so the document's bytes move |
+| An indexed file decoded instead of passed through | **the byte hash**, and three **route** assertions. The picture is identical — which is milestone 4's whole claim — so `assert_same_picture` still passes and **no rendered comparison anywhere can see this** |
+| `MAX_ZIP_INFLATED` raised to 1 PiB, above what its own inputs can ask for | **`every_bound_can_fire` alone** |
+| `MAX_PNG_SAMPLES` raised to `u64::MAX` | **the build fails**, on const-evaluated overflow in `png.rs`'s own ledger test |
+| `MAX_ZIP_NAME_LEN` changed without its table | **`every_bound_publishes_the_number_it_is` alone** |
+| `MAX_CBZ_PAGES` lowered below a 200-page comic | **the build fails**, on the `const` block milestone 5 added |
+| A firing test renamed | **`every_bound_names_a_test_that_exists` alone** |
+| A firing test made `#[ignore]`d | the same |
+| A bound dropped from the sweep's own table | the same, and `the_sweep_covers_every_bound...` |
+| **The archive reader's warnings dropped at the call site** | **survived** — now `what_the_archive_reader_tolerated_reaches_the_caller` |
+| **`ArchiveWarning::DegradedImage` pushed and asserted nowhere** | **survived** — now `a_page_that_arrived_damaged_says_so_and_is_still_a_page` |
+
+**Both survivors are the same failure and it is gap 16's, which this plan cites
+in its own design section.** `ccitt_decode`'s warnings were discarded at the
+call site — `let (gray, _) = ccitt_decode(...)` — "so every leniency it took was
+invisible". Here `synthesise` reads `Archive::warnings` into the report and
+nothing asserted that it does, so deleting the loop failed **nothing in the
+workspace**: a comic whose directory had to be recovered by scanning, or whose
+entry name was truncated, opened with an empty warning list and no test noticed.
+The archive reader's care about what it reports does not survive a call site
+that drops it. The second is the same defect from the other end and it is
+milestone 2's `NoEndOfCentralDirectory` in reverse — there a variant nothing
+pushed, here a variant nothing read.
+
+Neither could have been caught by a positive assertion, for milestone 5's
+reason: every test that opens a healthy archive asserts the warning list is
+*empty*, and an empty list is what a build that reports nothing produces too.
+Both closures therefore assert in both directions — a damaged archive reports,
+a healthy one does not.
+
+**The matrix's harness found a third defect, in this milestone's own test.** The
+injector rewrote files through a tool that translates line endings, and
+`every_bound_names_a_test_that_exists` matched `"#[test]\n"` exactly, so it
+failed on three unrelated injections. A checkout with `core.autocrlf` on would
+have done the same thing to a contributor. It trims rather than matches now.
+
+### What gap 29 delivered
+
+A `.cbz` opens as a `Document`. `Document::open` sniffs `PK\x03\x04` at offset
+zero and nowhere else; the archive is synthesised into a real PDF, so
+`Document::cos()` still returns a borrow and needed no signature change, which
+was the whole argument for synthesis over an enum. Pages come out in natural
+order, at the image's own pixel size, and the default render resamples nothing.
+Six commits, one per milestone:
+
+- **`e810041`** — `inflate_raw` made public, `crc32` and a resumable `Crc32`
+  written from nothing, and the three costs `flate_decode` would have imposed on
+  ZIP data each demonstrated by a test.
+- **`285b862`** — `tinker-pdf-zip`, the seventh leaf: both routes, Zip64, data
+  descriptors, CP437 names, CRC-32 compared on every entry.
+- **`167dcd3`** — the PNG decoder: every legal colour-type/depth pair, `tRNS` in
+  all three forms, Adam7, checked against PngSuite's 176 files.
+- **`f4b4f8b`** — `ImageData::Compressed`, so a PNG's IDAT reaches a page as the
+  bytes the file holds, and the renderer learned to read `/Mask` because it
+  never had.
+- **`3f4f6de`** — the facade: page semantics, two levels of refusal, and qpdf
+  reading the synthesised document clean.
+- **this one** — bounds, determinism, ledgers, campaign.
+
+Every byte of it is ours: the ZIP reader, the PNG decoder and CRC-32 are all
+new code in this repository, and `deny.toml` names the fourteen crates that
+would have made any of it somebody else's. That was the point of building it
+here rather than reaching for `zip`, and it is the claim CONTRIBUTING rule 1
+exists to keep true.
+
+### What it did not deliver, and what a reader should not assume
+
+**No `.cbz` written by a real archiver has ever been opened by this code.**
+Every archive in the tree is hand-built from APPNOTE 6.3.10's field layouts and
+every image from its own specification's. Milestones 2, 3 and 5 each recorded
+this as owed and milestone 6 does not discharge it, so it stands as a limitation
+of the **whole gap** rather than of one commit: what is tested is that this
+reader agrees with the standard as this repository reads it, and what is not
+tested is that it agrees with 7-Zip, WinRAR, `zip(1)`, Calibre or whatever wrote
+the file on a reader's disk. The fuzz campaign is a partial answer — four and a
+quarter million ZIPs that nobody here designed — but a fuzzer explores damage,
+not the conventions a real archiver has. **The first real archive this meets may
+find something, and nothing here would have.**
+
+The same holds one level down for the images. PngSuite is 176 files of
+deliberate edge cases and this repository's own PNG fixtures are a few pixels
+wide; no PNG here came out of a scanner or an export pipeline, and the JPEGs are
+eight-by-eight blocks of one DC coefficient. The 3.6 GB figure this plan is
+built around — 200 pages at 2000 x 3000 — is arithmetic, not a measurement:
+**no 200-page archive has been opened**, so the peak-memory claim is that the
+design cannot hold a raster per page rather than that somebody watched it not.
+
+Other things a reader should not assume from "CBZ works now":
+
+- **CBR, CB7 and CBT do not open.** They are recognised and refused by name,
+  which is a feature and not a step towards support.
+- **Encrypted entries do not open**, in either ZipCrypto or the AES extensions,
+  and an archive that is entirely encrypted is refused rather than opened as
+  placeholders.
+- **GIF, WebP, AVIF, BMP, TIFF and JPEG 2000 pages do not draw.** Each is
+  recognised by magic bytes and becomes a placeholder page that keeps its
+  number. JPEG 2000 is the surprising one: this engine has a JPX decoder and
+  there is deliberately no route from a container entry to it.
+- **`ComicInfo.xml` is not read**, so no title, no series, no page count from
+  metadata. That needs an XML parser gap 30 will bring.
+- **Nothing writes a CBZ.** A synthesised document saves as a PDF, which is what
+  it is.
+- **This is not XPS or EPUB.** `tinker-pdf-zip` is the part gap 30 will reuse,
+  and the ZIP is the smallest part of either.
+
+Two divergences between the two PNG routes are known, documented and unreachable
+from a well-formed file, and they are recorded here rather than left in
+milestone 4's notes: a `/Mask` that is a reference to a stencil image is
+recognised as not-an-array and ignored, leaving the image opaque; and a sample
+that indexes past its own PLTE renders as the last palette entry on the
+pass-through and as black on the decode, because PDF clamps (8.6.6.3) and PNG's
+reading through ruling 2 does not.
+
+Finally, the numbers in this document are one machine's. The determinism claim
+is two targets — `x86_64-pc-windows-msvc` and `wasm32-wasip1` under wasmtime —
+not ruling 4's four; Linux and macOS come from a CI matrix nobody has watched
+run. The campaign is one twenty-minute session per target in one WSL2 instance.
+Both are more evidence than this format had before and neither is the whole
+claim.
