@@ -15,14 +15,15 @@
 //! caller holding the API wrong ([`FilterError::BadParams`]) and for deferred
 //! capabilities ([`FilterError::Unsupported`]) — decisions, not data.
 //!
-//! Two entry points here are not stream filters at all, and are exported for
+//! Three entry points here are not stream filters at all, and are exported for
 //! the *container* formats gap 29 begins — a CBZ is a ZIP of images, and no
 //! PDF stream is either. [`inflate_raw`] is RFC 1951 with no wrapper and none
 //! looked for, which is what a caller that knows what it holds needs instead
 //! of [`flate_decode`]'s sniff; [`crc32`] is the checksum ZIP puts on an entry
-//! and PNG puts on a chunk. Both live here because this is where inflate and
-//! the PNG row filters already are, and neither changes anything a `/Filter`
-//! name reaches.
+//! and PNG puts on a chunk; [`png_decode`] is the PNG decoder gap 29 needs for
+//! the images its pass-through cannot carry. All three live here because this
+//! is where inflate, the PNG row filters and the checksum already are, and none
+//! of them changes anything a `/Filter` name reaches.
 
 #![forbid(unsafe_code)]
 
@@ -36,6 +37,7 @@ mod jpeg;
 mod jpx;
 mod lzw;
 pub mod mq;
+mod png;
 mod predictors;
 mod runlength;
 
@@ -49,6 +51,10 @@ pub use jbig2::{decode as jbig2_decode, Jbig2Params};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use jpx::{jpx_decode, JpxColour, JpxImage};
 pub use mq::{MqContext, MqContexts, MqDecoder};
+pub use png::{
+    colour_type_depth_is_legal, png_decode, png_scan, ChunkType, PngColour, PngError, PngHeader,
+    PngImage, PngScan, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
+};
 pub use predictors::PredictorParams;
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
@@ -239,6 +245,30 @@ pub enum Warning {
     /// image's coefficients live three bits below — so this says the file
     /// declared a step size its own samples cannot justify.
     JpxCoefficientClamped,
+
+    // ---- PNG (ISO/IEC 15948) ---------------------------------------------
+    //
+    // Three, and every one of them is a *leniency* rather than a refusal.
+    // Everything a PNG can get wrong that costs meaning rather than pixels is
+    // a [`png::PngError`] instead — because gap 17's finding was that naming
+    // the refusal is the feature, and an error can carry the offending chunk's
+    // four bytes where a closed warning set cannot.
+    /// PNG: an **ancillary** chunk's CRC-32 did not match, so the chunk was
+    /// dropped and whatever it said is missing.
+    ///
+    /// A critical chunk failing the same check refuses the image, which is
+    /// 5.4's own rule: the case of a type's first letter says whether the image
+    /// can be shown without it.
+    PngChunkCrcMismatch,
+    /// PNG: a chunk whose CRC was fine was dropped for a structural reason — a
+    /// second IHDR or PLTE, a PLTE where the colour type forbids one, a `tRNS`
+    /// of the wrong length for its colour type, or one that arrived before the
+    /// palette it indexes.
+    PngChunkDropped,
+    /// PNG: a sample indexed past the end of PLTE. 11.2.3 makes that an error;
+    /// ruling 2 makes it a black pixel here, because refusing the image would
+    /// throw away every pixel that was fine.
+    PngPaletteIndexOutOfRange,
 }
 
 impl Warning {
@@ -279,6 +309,9 @@ impl Warning {
             Self::JpxSegmentationSymbol => "jpx-segmentation-symbol",
             Self::JpxBudgetSpent => "jpx-budget-spent",
             Self::JpxCoefficientClamped => "jpx-coefficient-clamped",
+            Self::PngChunkCrcMismatch => "png-chunk-crc-mismatch",
+            Self::PngChunkDropped => "png-chunk-dropped",
+            Self::PngPaletteIndexOutOfRange => "png-palette-index-out-of-range",
         }
     }
 }
@@ -317,6 +350,9 @@ impl fmt::Display for Warning {
             Self::JpxSegmentationSymbol => "JPX segmentation symbol was not 1010",
             Self::JpxBudgetSpent => "JPX decode budget spent",
             Self::JpxCoefficientClamped => "JPX coefficient clamped to E.1's dynamic range",
+            Self::PngChunkCrcMismatch => "PNG ancillary chunk CRC-32 mismatch, chunk dropped",
+            Self::PngChunkDropped => "PNG chunk dropped as misplaced or malformed",
+            Self::PngPaletteIndexOutOfRange => "PNG sample indexed past the end of PLTE",
         };
         f.write_str(s)
     }

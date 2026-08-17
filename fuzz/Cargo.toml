@@ -142,3 +142,9 @@ name = "zip_archive"
 path = "fuzz_targets/zip_archive.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "png"
+path = "fuzz_targets/png.rs"
+test = false
+doc = false

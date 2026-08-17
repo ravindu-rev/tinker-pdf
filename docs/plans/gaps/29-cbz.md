@@ -943,3 +943,277 @@ saying so plainly rather than implying coverage that does not exist. A real
 archive from a real archiver remains worth acquiring before milestone 6
 claims the format works.
 
+## Progress — 17 August 2026, milestone 3
+
+**The PNG decoder has landed**, as `crates/tinker-pdf-filters/src/png.rs` with
+its tests beside it in `src/png/tests.rs`, plus `tests/png_suite.rs` and the
+twentieth fuzz target. Forty-nine tests, and the workspace stands at **1 782**.
+
+### The one design decision this milestone took on its own
+
+The milestone table says "the PNG decoder" and the scope list says the same.
+What milestone 4 needs is **two entry points**, and building only one would
+have forced the pass-through to inflate a raster in order to read a header —
+which is the *w x h x 3* per page this whole plan exists to avoid.
+
+So `png_scan` walks the signature and the chunk structure, checks every CRC and
+hands back IHDR, PLTE, `tRNS` and **the concatenated IDAT with nothing
+inflated**; `PngScan::decode` is the second half, and `png_decode` is the two
+together. The seam costs about ten lines and it is the one milestone 4 will
+build `/FlateDecode` with `/Predictor 15` on top of — the header it needs for
+`/Colors`, `/BitsPerComponent` and `/Columns` comes out of the same walk that
+verified the checksums.
+
+Two smaller shapes were decided here and are recorded so they are not
+re-litigated in milestone 4. The decoder **applies** the palette rather than
+handing one back, because 11.2.3's bounds check is what makes a palette safe
+and it belongs beside the palette rather than in every caller; and it
+**applies** `tRNS` in all three forms, producing an alpha channel, because a
+caller building an `/SMask` wants an alpha channel and re-deriving one from a
+colour key in the facade would put PNG semantics in a place ruling 8 keeps
+PDF-free from the other direction.
+
+### The three things found the hard way
+
+**A `TrailingGarbage` check that could never fire, found by the injection
+matrix.** The first version compared the inflated length against the raster's
+declared length and warned if it was larger. It cannot be larger: the inflate
+ceiling *is* the raster's declared length, so the inflater is not permitted to
+produce the condition the branch tested for. Disabling the branch failed
+nothing, which is how it was caught. It is gone, and what reports an over-long
+IDAT is `Warning::OutputCapHit` from the inflater, which
+`an_idat_that_inflates_past_the_raster_stops_at_the_raster` asserts. This is
+gap 18a milestone 8's failure — a check set above what its own inputs can reach
+— arriving as a *warning* rather than as a cap, and the shape transfers.
+
+**The short-row pixel count divided by the bits in a sample, not the bits in a
+pixel.** Thirty tests missed it, and the reason is exact: the two expressions
+agree on every complete row and on every one-channel image, and almost
+everything in this file is one or the other. The wrong count draws a pixel out
+of samples that were never in the file — the red of a truncated RGB triple
+beside two zeroes, which is a saturated red where the truth is that nothing
+arrived. `a_row_that_stops_mid_pixel_places_no_partial_pixel` builds a stream
+that is *complete* and a raster that is short, which is a different fixture
+from a truncated IDAT and the only one that can see this.
+
+**`tRNS` on greyscale is compared before 13.12's scaling, and only a sub-byte
+depth can tell.** The chunk stores its key in two bytes at the image's own bit
+depth; a 4-bit sample of 2 is stored as `0x0002` and scales to 34. A decoder
+comparing the scaled value against the stored one finds no match anywhere and
+produces a fully opaque image, which looks entirely reasonable until somebody
+notices the transparency is missing. At depth 8 the two readings coincide, so
+an 8-bit fixture proves nothing about it — the same shape as gap 16's
+zero-padded-filename problem, one format down.
+
+### Nothing new was written that already existed
+
+- **`inflate.rs`** does the IDAT. PNG is zlib-*wrapped* (10.3) where a ZIP entry
+  is raw DEFLATE by definition, so this goes through the sniffing door and gets
+  the Adler-32 check milestone 1 was careful to keep on it;
+  `the_idat_adler_is_verified_because_png_is_zlib_wrapped` corrupts the checksum
+  and nothing else. A `RawDeflateFallback` here **means** something, which is
+  exactly the opposite of what it would have meant in the ZIP reader.
+- **`predictors.rs`** does the row filters, through the public
+  `predictor_decode` with `/Predictor 15`. For an interlaced image it is called
+  **once per pass** with that pass's own width as `/Columns`, which is what 7.2
+  asks for and needed no new code. Not one line of PNG 9.2 was written here.
+- **`crc32.rs`**'s resumable `Crc32` does the chunk checksums, and milestone 1's
+  guess about who wanted the resumable form was right for the wrong reason: the
+  ZIP reader turned out not to need it, and PNG does — 5.3's CRC covers a
+  chunk's type and its data, and those are never adjacent in one buffer.
+
+### The bounds
+
+One cap, and `png.rs`'s module note says in as many words which candidates were
+considered and refused — the `tinker-pdf-zip` `limits.rs` form, taken for the
+same reason: a constant that can never fire is gap 18a milestone 8's failure
+reached from the other direction.
+
+| Constant | This crate's fixtures | PngSuite's largest | A 2000 x 3000 comic page | Cap | Proved to fire by |
+| --- | --- | --- | --- | --- | --- |
+| `MAX_PNG_SAMPLES` | 4 096 | 6 400 | 24 000 000 | 67 108 864 | a **thirteen-byte IHDR** declaring 2^31-1 square |
+
+The margin over a real page is 2.8x, and the constant is `1 << 26` — the same
+as `MAX_JPX_SAMPLES`, and for the same arithmetic: at sixteen bits a component
+it is 134 217 728 bytes, `MAX_DECODED_STREAM` to the byte. It is charged at the
+*widest* layout the declared colour type can produce, because `tRNS` decides
+between three components and four and is not known until later in the same
+file. The caller's own `Limits::max_output` sits beside it and refuses under its
+own name, `ExceedsOutputLimit`, carrying the caller's number rather than this
+crate's — so a host that lowered its ceiling can tell its decision from ours.
+
+**Four caps are deliberately absent**, each named in the module note with its
+reason: no chunk-count cap, since a chunk is twelve bytes and the walk allocates
+nothing per chunk, so the input length already bounds both the loop and the
+work; no IDAT-total cap, since the bytes are copied out of the input; no palette
+cap beyond 11.2.3's own `2^bit_depth`; and no per-dimension cap, since a
+1 x 2^31 image is refused by the product and a dimension cap would refuse
+nothing the sample cap does not.
+
+### PngSuite, and the count
+
+**Obtained.** `PngSuite-2017jul19.zip` from `schaik.com`, extracted to a scratch
+directory and **not committed** — ruling 9, and gap 17's SerenityOS handling.
+`tests/png_suite.rs` reads `TINKER_PNGSUITE` and prints `pngsuite-oracle: RAN`
+or `pngsuite-oracle: SKIPPED`, because gap 20 found that a skipped oracle exits
+0 and reads exactly like a pass.
+
+**176 images. 162 decode and 14 are refused, which is precisely the set its
+author publishes as corrupted** — and each is refused for the published reason
+rather than merely refused: four signature bytes and the CR/LF pair as
+`NotPng`, `xhdn0g08` and `xcsn0g01` as `ChunkCrc(IHDR)` and `ChunkCrc(IDAT)`,
+`xdtn0g01` as `MissingImageData`, and `xc1`, `xc9`, `xd0`, `xd3` and `xd9` as
+`BadColourTypeDepth` carrying both numbers. That is most of this milestone's
+refusal list, decided by somebody else.
+
+PngSuite ships no reference rasters, so the references are the ones its author
+published in the naming convention and the file groupings — and they are
+sharper than a pixel dump would be, because each is a claim about a *feature*:
+
+- **The filename is the header.** 161 files state their colour type, bit depth
+  and interlace method in characters 3 to 7, and all 161 agree with what this
+  decoder read. The fifteen `basn*` files are exactly Table 11.1's fifteen
+  pairs, asserted as a set so a missing pair cannot pass by refusing nothing.
+- **`basn` and `basi` are the same image.** Fifteen independent confirmations of
+  Adam7 on files from another encoder, plus eighteen more from the
+  `s01`..`s40` size series — which is where whole passes fall away, since at
+  1 x 1 only the first of the seven holds a pixel. All thirty-three pairs agree.
+- **`oi1`, `oi2`, `oi4`, `oi9`** — one zlib stream in one IDAT chunk, in two, in
+  four unequal ones, and in a run of **length-one** ones. That last is this
+  milestone's concatenation criterion, written by somebody who thought of a
+  fixture nobody here would have.
+- **Ten equivalence classes** in all, adding the four deflate levels of `z*` and
+  the `bKGD`, `sPLT`, `pHYs`, `hIST`, `tEXt`, `zTXt` and `tIME` files a decoder
+  must ignore.
+- **No leniency at all on 162 well-formed files.** Every one decodes complete
+  with an empty warning list, which is ruling 10's distinction being worth
+  something for this format rather than noise from the first release.
+- **And the suite does not collapse**: 91 distinct rasters from those 162, so
+  the forty-odd equalities above are not a decoder returning one picture.
+
+Two groups are deliberately *not* asserted equal, and the file says so rather
+than leaving a reader to wonder: the `f*` filter files and the `g*` gamma files
+carry different pixel data from each other, so pairing them would assert
+something PngSuite never claimed.
+
+**Pillow was also used, once, at fixture-authoring time.** The two committed
+8 x 8 fixtures were produced by a Python script — `zlib` for the stream,
+`binascii` for the CRCs, the interlacing written from Table 7.1 — and then
+decoded by Pillow, which agreed both are 0..63 in row-major order, before either
+was committed. That is tooling under CONTRIBUTING rule 1's exemption and nothing
+links it; it is recorded because the provenance of the Adam7 fixture is the
+whole point of that fixture.
+
+The script is here rather than in the tree, so the 245 committed bytes can be
+regenerated and checked against rather than taken on trust. It reproduces both
+files byte for byte:
+
+```python
+import binascii, zlib
+W = H = 8
+PIX = [[y * 8 + x for x in range(W)] for y in range(H)]
+# Table 7.1: starting row, starting column, row increment, column increment.
+P = [(0,0,8,8), (0,4,8,8), (4,0,8,4), (0,2,4,4), (2,0,4,2), (0,1,2,2), (1,0,2,1)]
+def ck(k, d):
+    return len(d).to_bytes(4,"big") + k + d + (binascii.crc32(k+d) & 0xFFFFFFFF).to_bytes(4,"big")
+def pae(a, b, c):
+    p = a + b - c
+    d = [abs(p-a), abs(p-b), abs(p-c)]
+    return a if d[0] <= d[1] and d[0] <= d[2] else (b if d[1] <= d[2] else c)
+def flt(rows, pick):
+    out, prev = bytearray(), bytes(len(rows[0]))
+    for n, r in enumerate(rows):
+        t = pick(n)
+        f = [0]*len(r)
+        for i in range(len(r)):
+            a, b, c = (r[i-1] if i else 0), prev[i], (prev[i-1] if i else 0)
+            f[i] = (r[i] - [0, a, b, (a+b)>>1, pae(a,b,c)][t]) & 0xFF
+        out.append(t); out += bytes(f); prev = r
+    return bytes(out)
+def png(il, raw):
+    ih = W.to_bytes(4,"big") + H.to_bytes(4,"big") + bytes([8,0,0,0,il])
+    return (bytes([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]) + ck(b"IHDR", ih)
+            + ck(b"IDAT", zlib.compress(raw, 9)) + ck(b"IEND", b""))
+plain = png(0, flt([bytes(r) for r in PIX], lambda n: n % 5))
+raw = bytearray()
+for (ys, xs, yi, xi) in P:
+    cols, rws = range(xs, W, xi), range(ys, H, yi)
+    if len(cols) and len(rws):
+        raw += flt([bytes(PIX[y][x] for x in cols) for y in rws], lambda _n: 0)
+adam7 = png(1, bytes(raw))
+open("plain8x8.png","wb").write(plain); open("adam7_8x8.png","wb").write(adam7)
+```
+
+### The injection matrix
+
+Twenty-six defects, one at a time, each reverted before the next, the suite
+re-run with `--no-fail-fast` and `TINKER_PNGSUITE` set. **Twenty-four were
+caught on the first attempt; two survived, both were real gaps, and both are now
+closed** — the two recorded above.
+
+| Defect | Caught by |
+| --- | --- |
+| Adam7 pass table transposed, row and column roles swapped | `adam7_places_all_sixty_four_distinct_pixels`, and three more |
+| Adam7 increments swapped, starting positions left alone | the same four |
+| A pass with no pixels still emits a filter tag | `interlaced_images_too_small_for_a_pass_skip_it_entirely` |
+| Interlaced files unfiltered as one raster at the full width | `every_interlaced_twin_decodes_to_its_non_interlaced_original`, and four more |
+| Chunk CRC computed over the length field as well | thirty-nine tests, including every PngSuite one |
+| 5.4's ancillary bit read the wrong way round | `a_crc_failure_refuses_a_critical_chunk_and_drops_an_ancillary_one`, and ten more |
+| Only the first IDAT chunk kept | `idat_is_concatenated_across_chunks_before_anything_is_inflated` |
+| Table 11.1 given colour type 3 at depth 16 | `table_11_1_admits_fifteen_pairs_and_refuses_every_other` |
+| 13.12 scaling by shifting instead of multiplying | `sub_byte_depths_are_scaled_to_the_full_range_not_shifted` |
+| 16-bit samples read little-endian | `sixteen_bit_samples_keep_the_networks_byte_order` |
+| `tRNS` grey key compared after scaling instead of before | `trns_on_greyscale_keys_the_raw_sample_and_not_the_scaled_one` |
+| `tRNS` palette entries past the list made transparent, not opaque | `trns_on_a_palette_gives_each_entry_its_own_alpha` |
+| A 16-bit opaque alpha written as `0xFF` rather than `0xFFFF` | the same, and the PngSuite transparency test |
+| Colour type 4's alpha channel dropped on the way out | `every_legal_pair_decodes_to_the_samples_the_table_describes` |
+| PLTE bounded at a flat 256 rather than against the bit depth | `a_palette_larger_than_the_bit_depth_can_index_is_refused` |
+| A palette index past the end silently black | `a_palette_index_past_the_end_is_black_and_says_so` |
+| `MAX_PNG_SAMPLES` never charged | `an_image_past_the_sample_cap_is_refused_before_it_allocates` |
+| The inflate ceiling taken from the caller rather than the raster | `an_idat_that_inflates_past_the_raster_stops_at_the_raster` |
+| The caller's ceiling compared with `>=` instead of `>` | `the_callers_output_ceiling_refuses_with_the_callers_number` |
+| 7.2's row width floored instead of rounded up | `the_channel_count_is_table_11_1s_own_column`, and four more |
+| A second IHDR replaces the first | `a_repeated_header_or_palette_is_dropped` |
+| A missing IEND no longer warns | `a_missing_iend_warns_and_bytes_after_one_warn` |
+| IEND does not stop the walk | the same |
+| The inflater's warnings discarded at the call site — gap 16's defect | `the_idat_adler_is_verified_because_png_is_zlib_wrapped`, and three more |
+| `predictors.rs`'s warnings discarded at the call site | `a_row_that_stops_mid_pixel_places_no_partial_pixel` |
+| **Short-row pixel count divided by sample bits, not pixel bits** | **survived** — now `a_row_that_stops_mid_pixel_places_no_partial_pixel` |
+| **An over-long inflate absorbed rather than reported** | **survived, and the branch was dead** — removed, and `an_idat_that_inflates_past_the_raster_stops_at_the_raster` holds the condition that is real |
+
+### The twentieth fuzz target
+
+`png`, in the shape `zip_archive` landed: the control byte picks the **bounds**
+rather than the input, and one of the four values it can pick is a ceiling of
+**one byte**, which is the only value from which `ExceedsOutputLimit` is
+reachable at all. A PNG is the right subject for a fuzzer because it carries two
+independent length systems over one file — the chunk walk's declared lengths,
+which decide where the IDAT is, and IHDR's geometry, which decides how long the
+inflated result should be — and a hand-built fixture makes them agree by
+construction.
+
+Past "it did not panic" it asserts four things: a decoded raster is exactly its
+own declared size, since milestone 4 hands these bytes to a `/Width` and
+`/Height` taken from the same header; the scan and the decode agree about
+whether a file decodes at all, which is milestone 4's whole premise; a scan that
+succeeds produced a usable IDAT and, for colour type 3, a palette inside its bit
+depth; and **a roomier ceiling never changes the picture and never turns a
+decode into a refusal**. Two cheap versions run on every `cargo test`, as in
+milestone 2: `truncating_a_good_file_anywhere_never_panics` and
+`flipping_any_single_byte_never_panics`.
+
+### Still owed
+
+- **`cargo fuzz run png` has not been run.** libFuzzer is unavailable on
+  `x86_64-pc-windows-msvc`; the WSL2 nightly route is milestone 6's, as it is
+  for `zip`.
+- **`fuzz/README.md`'s seed table still has no rows for `zip` or `png`**, and
+  `docs/plans/02-filters.md`'s non-goals still do not mention PNG. Both belong to
+  the ledger sweep milestone 6 owes, and neither moved here — the posture
+  milestone 2 took, for the same reason.
+- **No PNG in this repository comes from a real comic archive.** PngSuite is 162
+  files of deliberate edge cases and this crate's own fixtures are two pixels
+  wide; neither is a 2000 x 3000 scan. The pass-through means most real pages
+  will never reach this decoder at all, which is why the gap matters less here
+  than it would elsewhere — but milestone 6's peak-memory measurement needs one,
+  and so does the claim that the format works.
