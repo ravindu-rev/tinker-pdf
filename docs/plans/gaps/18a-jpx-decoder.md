@@ -1077,3 +1077,57 @@ assertion about what is missing has a half-life.
   themselves, where `/BitsPerComponent` admits only 1, 2, 4, 8 and 16. Deciding
   whether that is normalised at the boundary or refused there is 8.9.5.4's
   call, not this crate's.
+
+### Milestone 7 — the PDF boundary (17 August 2026)
+
+`jpx_image` in `crates/tinker-pdf/src/resources.rs`, and **both** the XObject
+path and the inline path go through it. That is gap 16's rule and gap 08's
+evidence: CCITT changed its output shape without changing its signature, so a
+second call site would have been invisible to the compiler, and gap 08's
+injection showed a parallel call site caught *only* by a warning test with no
+pixel assertion seeing it.
+
+8.9.5.4, rule by rule, each with a test:
+
+- **`/BitsPerComponent` ignored** — the codestream's precision wins. A
+  dictionary claiming four bits against an eight-bit codestream must not shift
+  a sample.
+- **`/Decode` ignored**, which is the odd one out: every other image filter
+  here honours it, and a JPX image must not reach the generic sample path that
+  applies it.
+- **`/ImageMask` refused by name.** 8.9.6.2 makes a stencil one bit per sample
+  with no colour space; a JPX codestream is neither, so the combination the
+  clause forbids reports rather than painting the fill colour through whatever
+  the codestream held.
+- **`/SMaskInData`** decides what happens to the codestream's own opacity
+  channel: 0 discards it, 1 takes it as-is, 2 un-premultiplies. M6 separated
+  the channel out and deliberately left the decision here, because it is the
+  dictionary that makes it. Skipping the division darkens every transparent
+  edge, which looks like a soft shadow rather than a bug.
+
+**A test of mine was wrong in the way this decoder keeps punishing.** The
+first version asserted that ink appeared. An injection shifting every sample
+down four bits — exactly what honouring `/BitsPerComponent` would do — passed
+it *and all three other tests*, because the comparative ones render two
+dictionaries through the same defect and it moves both sides equally. That is
+the third time in this plan: M4's halved coefficients looked like a decode,
+and M6's `f64` reference shared a stage with the code it checked and inherited
+its error.
+
+The fix is not pixel correspondence, which would only test the resampler — the
+image is 32 by 24 drawn into a 20 by 20 square, and which source sample lands
+under which device pixel is that question. It is the **distribution**: mean and
+range, neither of which depends on the mapping, and both of which a uniform
+scaling moves. Re-injected, the page now averages 7 against the source's 127.
+
+### What milestone 8 needs
+
+- The refusal list end to end: every entry in the plan's list reachable and
+  named, with `Refusal::NotBuilt` gone from the decode path.
+- `MAX_JPX_WORK`, `MAX_JPX_SAMPLES` and `MAX_JPX_CODE_BLOCKS` **measured**
+  against gap 23's nineteen real files rather than chosen — the plan is
+  explicit that picking them from imagination is how `MAX_GROUP_DEPTH` got a
+  number that did not stop anything.
+- A determinism fixture. JPX has reached a page as of this milestone, so gap
+  25 M4's request now applies; none of the eleven currently draws one.
+- The acceptance number: what the nineteen files in gap 23's corpus do.

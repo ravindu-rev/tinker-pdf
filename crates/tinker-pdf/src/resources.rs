@@ -1796,6 +1796,154 @@ impl PageResources {
         Some(samples)
     }
 
+    /// A JPEG 2000 image's pixels, ready to blit (8.9.5.4).
+    ///
+    /// **One entry point, and both the XObject path and the inline path go
+    /// through it.** That is not tidiness: gap 16 changed the CCITT decoder's
+    /// output shape without changing its signature, so a second call site would
+    /// have been invisible to the compiler and would have rendered every fax as a
+    /// negative at one eighth width with a green suite. Gap 08 was reordered
+    /// behind gap 16 for exactly that reason, and its injection showed a parallel
+    /// call site being caught *only* by a warning test -- no pixel assertion saw
+    /// it. JPX carries the same hazard with more surface.
+    ///
+    /// # What 8.9.5.4 does with the image dictionary
+    ///
+    /// A JPX codestream describes itself, and the clause says which of the
+    /// dictionary's claims survive that:
+    ///
+    /// - **`/BitsPerComponent` is ignored.** The codestream's precision wins. A
+    ///   file whose dictionary disagrees must not shift its samples, which is why
+    ///   this never reads the key.
+    /// - **`/ColorSpace` overrides** the codestream's when present, and the
+    ///   codestream's applies when it is absent. Note the ordering trap M6 found:
+    ///   a palette makes the *output* channel count differ from `Csiz`, so it is
+    ///   the output count a `/ColorSpace` must agree with.
+    /// - **`/Decode` is ignored**, unlike every other image filter here.
+    /// - **`/ImageMask` shall not be combined with JPXDecode**, so a file that
+    ///   does is refused by name rather than rendered as a stencil of something.
+    /// - **`/SMaskInData`** decides what happens to the codestream's *own*
+    ///   opacity channel, which the filters crate has already separated out.
+    fn jpx_image(
+        raw: &[u8],
+        smask_in_data: i64,
+        image_mask: bool,
+        interpolate: bool,
+        warnings: &mut Vec<tinker_pdf_filters::Warning>,
+    ) -> Result<DecodedImage, String> {
+        if image_mask {
+            // 8.9.6.2 makes a stencil one bit per sample with no colour space;
+            // 8.9.5.4 forbids the combination outright. Refusing by name beats
+            // painting the fill colour through whatever the codestream held.
+            return Err("JPXDecode with /ImageMask".to_string());
+        }
+
+        let image = tinker_pdf_filters::jpx_decode(
+            raw,
+            &tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM),
+            warnings,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+
+        let count = (image.width as usize) * (image.height as usize);
+        let mut rgb = Vec::with_capacity(count * 3);
+
+        // 16-bit samples arrive big-endian; the renderer wants eight, and taking
+        // the high byte is a truncation the clause permits rather than a rounding
+        // decision worth inventing.
+        let sample = |i: usize, channel: usize| -> u8 {
+            let per = usize::from(image.components);
+            let at = i * per + channel;
+            if image.precision > 8 {
+                image.samples.get(at * 2).copied().unwrap_or(0)
+            } else {
+                image.samples.get(at).copied().unwrap_or(0)
+            }
+        };
+
+        for i in 0..count {
+            match image.components {
+                1 => {
+                    let g = sample(i, 0);
+                    rgb.extend_from_slice(&[g, g, g]);
+                }
+                3 => rgb.extend_from_slice(&[sample(i, 0), sample(i, 1), sample(i, 2)]),
+                4 => {
+                    // CMYK, and the conversion is the naive one the colour crate
+                    // uses elsewhere rather than a second opinion about ink.
+                    let (c, m, y, k) = (
+                        f64::from(sample(i, 0)) / 255.0,
+                        f64::from(sample(i, 1)) / 255.0,
+                        f64::from(sample(i, 2)) / 255.0,
+                        f64::from(sample(i, 3)) / 255.0,
+                    );
+                    let to = |v: f64| {
+                        #[allow(clippy::cast_possible_truncation, reason = "clamped to 0..=255")]
+                        #[allow(clippy::cast_sign_loss, reason = "clamped to 0..=255")]
+                        {
+                            ((1.0 - (v + k).min(1.0)) * 255.0).clamp(0.0, 255.0) as u8
+                        }
+                    };
+                    rgb.extend_from_slice(&[to(c), to(m), to(y)]);
+                }
+                other => {
+                    return Err(format!("JPXDecode with {other} components"));
+                }
+            }
+        }
+
+        // `/SMaskInData` (Table 89): 0 means ignore any opacity the codestream
+        // carries, 1 means it is present and unpremultiplied, 2 means present and
+        // premultiplied. The filters crate separates the channel out and records
+        // which; un-premultiplying is deliberately left here, because it is the
+        // dictionary that says whether to.
+        let alpha = match (smask_in_data, image.opacity.as_ref()) {
+            (0, _) | (_, None) => Vec::new(),
+            (_, Some(opacity)) => {
+                let mut alpha = Vec::with_capacity(count);
+                for i in 0..count {
+                    let a = if image.precision > 8 {
+                        opacity.samples.get(i * 2).copied().unwrap_or(255)
+                    } else {
+                        opacity.samples.get(i).copied().unwrap_or(255)
+                    };
+                    alpha.push(a);
+                }
+                // 2 says the colour is already multiplied by the opacity, so it
+                // has to be divided back out before the renderer multiplies it
+                // again. Skipping this darkens every transparent edge, which
+                // looks like a soft shadow rather than like a bug.
+                if smask_in_data == 2 || opacity.premultiplied {
+                    for (i, &a) in alpha.iter().enumerate() {
+                        if a == 0 {
+                            continue;
+                        }
+                        for channel in 0..3 {
+                            let at = i * 3 + channel;
+                            if let Some(v) = rgb.get_mut(at) {
+                                let restored = (u32::from(*v) * 255) / u32::from(a);
+                                #[allow(clippy::cast_possible_truncation, reason = "min 255")]
+                                {
+                                    *v = restored.min(255) as u8;
+                                }
+                            }
+                        }
+                    }
+                }
+                alpha
+            }
+        };
+
+        Ok(DecodedImage {
+            width: image.width,
+            height: image.height,
+            rgb,
+            alpha,
+            stencil: false,
+            interpolate,
+        })
+    }
+
     /// Decodes an image from its dictionary, wherever that came from.
     fn decode_image_at(
         &self,
@@ -1881,10 +2029,26 @@ impl PageResources {
                 .map_err(|_| "DCTDecode".to_string())?;
             return jpeg_image(&raw, &decode, interpolate);
         }
-        if let Some(filter) = last_filter.as_deref() {
-            if matches!(filter, b"JPXDecode") {
-                return Err(String::from_utf8_lossy(filter).into_owned());
+        if matches!(last_filter.as_deref(), Some(b"JPXDecode")) {
+            // Like a JPEG and unlike a fax, a JPX codestream carries its own
+            // geometry, precision and colour, so it never joins the generic
+            // sample loop below -- 8.9.5.4 is explicit that the dictionary's
+            // `/BitsPerComponent` and `/Decode` do not apply to it.
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "JPXDecode".to_string())?;
+            let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
+            let mut warnings = Vec::new();
+            let image_mask = dict
+                .get_bool(self.doc.intern(b"ImageMask"))
+                .unwrap_or(false);
+            let decoded =
+                Self::jpx_image(&raw, smask_in_data, image_mask, interpolate, &mut warnings);
+            for warning in &warnings {
+                self.report_damaged_image(name, *warning);
             }
+            return decoded;
         }
 
         // CCITT data likewise arrives still coded, and carries its own
@@ -2150,8 +2314,45 @@ impl PageResources {
                     true,
                 )
             }
-            // JBIG2 and JPX are gated capabilities wherever they appear
-            // (ruling 2), inline included.
+            Ok(ChainOutput::EncodedImage {
+                kind: ImageCodec::Jpx,
+                data,
+                warnings,
+            }) => {
+                report(warnings);
+                // The same entry point the XObject path takes, for the same
+                // reason gap 16 gave the fax one and gap 08 was reordered
+                // behind it: a second call site here would not change any
+                // signature, so nothing in the build could notice it drifting
+                // from 8.9.5.4's rules about which of the dictionary's claims
+                // survive a codestream that describes itself.
+                //
+                // 8.9.7 does not list JPXDecode among the inline abbreviations
+                // and `/JPXDecode` cannot be spelled in a content stream's
+                // dictionary, so this arm is reachable only through a file
+                // that writes the full name. It exists anyway: the cost is one
+                // arm, and the alternative is the divergence above.
+                let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
+                let image_mask = dict
+                    .get_bool(self.doc.intern(b"ImageMask"))
+                    .unwrap_or(false);
+                let mut jpx_warnings = Vec::new();
+                let decoded = Self::jpx_image(
+                    &data,
+                    smask_in_data,
+                    image_mask,
+                    interpolate,
+                    &mut jpx_warnings,
+                );
+                for warning in &jpx_warnings {
+                    self.report_damaged_image(INLINE_NAME.as_bytes(), *warning);
+                }
+                return decoded;
+            }
+            // JBIG2 stays a gated capability wherever it appears (ruling 2),
+            // inline included -- and unlike JPX it has no inline path at all,
+            // since `/JBIG2Globals` cannot be an indirect reference inside a
+            // content stream.
             Ok(ChainOutput::EncodedImage { .. }) => {
                 return Err(named(chain.len().saturating_sub(1)))
             }
