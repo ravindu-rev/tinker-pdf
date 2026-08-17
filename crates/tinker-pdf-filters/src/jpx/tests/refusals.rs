@@ -254,6 +254,18 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
 /// The set is transcribed here a second time rather than iterated, for the
 /// reason the Table A.2 test gives: a list derived from the enum agrees with
 /// the enum whatever is in it.
+///
+/// **What this proves and what it does not.** Nine of the ten are refusals,
+/// and every one of them is a `Refusal` variant's `warning()` — which is the
+/// only route by which it can arise — with
+/// `every_entry_of_the_refusal_list_is_reachable_and_named` above showing
+/// each of those refusals coming out of a real decode. The tenth,
+/// `JpxCoefficientClamped`, is the one *leniency*: `jpx_decode` pushes it
+/// directly when E.1's dyadic clamp fires, and no fixture in this repository
+/// reaches that clamp — every one of them asserts it is **not** reached,
+/// because a legitimate 8-bit image's coefficients live three bits below it.
+/// So its entry here is a claim about the wiring and not about a decode, and
+/// saying so is better than letting the row look like the other nine.
 #[test]
 fn every_jpx_warning_is_reachable() {
     let expected = [
