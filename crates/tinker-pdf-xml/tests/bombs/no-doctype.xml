@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<data kind="the twin">
+  <note>Every byte of this file is a shape one of its neighbours also has,
+    minus the document type declaration. It parses.</note>
+  <note>It is here because a suite in which every committed input is refused
+    cannot tell a reader that refuses DTDs from a reader that refuses
+    everything, and the second would pass the first's tests.</note>
+</data>

@@ -1,6 +1,6 @@
 # Fuzzing
 
-Twenty `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
+Twenty-one `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
 Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-corpora.md).
 
 | Target | What it drives |
@@ -15,6 +15,7 @@ Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-co
 | `jpx` | T.800: the JP2 box walk and the Annex A codestream, then tier-2 and tier-1; the first byte chooses the ceiling and whether the body is wrapped in JP2 boxes |
 | `zip_archive` | A ZIP by both of its routes — the central directory and the local-header scan — with the first byte choosing the four bounds, deliberately away from the shipped defaults so the caps stay reachable inside an iteration |
 | `png` | The chunk walk, both interlace methods, and the two independent length systems a PNG carries over one file: the declared chunk lengths and IHDR's geometry. The first byte chooses the output ceiling, and one of the four values it can pick is one byte |
+| `xml` | XML 1.0 with namespaces: the seams between constructs rather than a record layout — a `<` inside an attribute value, a `]]` that is not a terminator, a `&` with no `;`, a prefix declared on the element that uses it. The first byte chooses the four bounds, deliberately away from the shipped defaults so a million-event cap is crossable inside one iteration; the target asserts that no document type declaration is ever *parsed*, which is the refusal gap 30 exists for |
 | `ascii_filters` | ASCIIHex, ASCII85, RunLength, and the predictors |
 | `sfnt` | The table directory and everything around the outlines, including the subsetter that rebuilds one |
 | `truetype` | `cmap`, and `glyf` including composites |
@@ -101,6 +102,7 @@ account for:
 | `crypt` | `build_r6` output laid out in the target's carve order, so one seed authenticates and decrypts; plus R4, R2, and three bytes |
 | `zip_archive` | Five, from `tinker-pdf-zip`'s own hand-built archives — the same bytes, written by the tests so the two cannot drift, and rewritten by `cargo test -p tinker-pdf-zip write_the_fuzz_seeds -- --ignored`: both compression methods with a CP437 name beside two UTF-8 ones, an archive with no central directory so the local-header scan is the route, and an entry whose sizes are in a data descriptor. **Two of the five repeat an archive behind a control byte of zero**, which sets every cap to the lowest value the target offers — one entry, sixteen bytes an entry, no inflation at all, one byte of name. A corpus in which every seed is roomy explores the happy path and reaches no refusal, which is gap 18a milestone 8's failure arriving through the corpus instead of through the constant |
 | `png` | Five, from `png.rs`'s own fixtures and rewritten by `cargo test -p tinker-pdf-filters write_the_fuzz_seeds -- --ignored`: the two committed 8 x 8 files whose sixty-four pixels are all distinct, one plain and one Adam7, plus an indexed file with a `PLTE` and a `tRNS` — the pass-through's shape, and the one branch of `png_scan` with a table to bounds-check — and a 16-bit RGBA raster, which is the widest layout Table 11.1 allows and therefore the most `MAX_PNG_SAMPLES` is ever charged. The fifth repeats the plain file behind a control byte of zero, a ceiling of **one byte**, which is the only value from which `ExceedsOutputLimit` fires on an otherwise perfectly good file |
+| `xml` | Six. Two are the fixed page of `wpf-image-and-text.xps` — markup Microsoft's own serialiser wrote, and the only XML in this repository the repository did not write — one roomy and one behind a control byte of zero. Then `billion-laughs`, so the corpus holds the input the crate exists to refuse and a mutator has the shape to work from; `namespaces-tight`, which shadows a prefix, undeclares one and uses `xml:lang`, also at a control byte of zero; `utf16`, little-endian with a mark, which nothing else in any corpus here is; and `asides`, which carries a comment, two processing instructions, a CDATA section whose body holds `]]`, and all five predefined entities beside both radixes of character reference. **Two of the six set every knob to the tightest value the target offers** — one element deep, no attributes, one byte of name, no events at all — because a corpus in which every seed is roomy explores the happy path and reaches no refusal |
 
 Replaying a corpus without mutating it is the cheapest check that a seed
 still reaches what it was chosen for:

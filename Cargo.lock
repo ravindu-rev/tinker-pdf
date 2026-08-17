@@ -290,6 +290,7 @@ dependencies = [
  "tinker-pdf-font",
  "tinker-pdf-raster",
  "tinker-pdf-render",
+ "tinker-pdf-xml",
  "tinker-pdf-zip",
 ]
 
@@ -364,6 +365,10 @@ dependencies = [
  "tinker-pdf-font",
  "tinker-pdf-raster",
 ]
+
+[[package]]
+name = "tinker-pdf-xml"
+version = "0.0.1"
 
 [[package]]
 name = "tinker-pdf-zip"

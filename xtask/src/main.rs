@@ -183,6 +183,30 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// nothing of documents, pages or objects; it turns an archive into names and
 /// byte ranges. Gap 29's page semantics live in the facade for precisely that
 /// reason.
+///
+/// **`xml` is the fourth amendment, and the argument is that it needs
+/// nothing.** The other three each added an edge and had to say why the edge
+/// was safe; this one adds a node with an empty allow-list, and the thing worth
+/// writing down is that the empty list is a *finding* rather than an omission.
+/// `tinker-pdf-xml` was checked against what it might have wanted and wants
+/// none of it: not `filters`, because nothing in XML is compressed and the five
+/// predefined entities cannot expand — a reference is at least four bytes and
+/// produces exactly one character, so decoded text is never longer than its
+/// source and there is no decoder to reach for; not `zip`, because a part
+/// arrives as a byte slice and where it came from is the caller's business
+/// (gap 30's package layer lives in the facade for exactly that reason); not
+/// `math`, because there is no arithmetic here beyond a checked multiply in a
+/// character reference; and not `cos`, which is the edge that would invert the
+/// layering. It is the third crate in the workspace with no internal
+/// dependency at all, beside `filters` and `crypto`.
+///
+/// What it does add is a name to the facade's row, and the reason that is
+/// listed rather than left to arrive with the code is the commentary directly
+/// above this one: a crate appearing in a manifest without its argument is the
+/// failure this file's own history records. Gap 31, EPUB, reuses this crate and
+/// reuses **none** of gap 30's package layer, because EPUB's container is OCF
+/// rather than OPC — which is the argument for the parser being a crate and the
+/// package layer not being one, and it is recorded in both places.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -191,6 +215,8 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &["tinker-pdf-filters"]),
     ("tinker-pdf-zip", &["tinker-pdf-filters"]),
+    // The eighth leaf, and the first with nothing under it since `crypto`.
+    ("tinker-pdf-xml", &[]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
@@ -225,6 +251,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-filters",
             "tinker-pdf-color",
             "tinker-pdf-zip",
+            "tinker-pdf-xml",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

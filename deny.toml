@@ -91,6 +91,30 @@ deny = [
   { name = "adler2" },
   { name = "adler32" },
   { name = "simd-adler32" },
+  # XML. An XML reader is the single most reachable-for dependency in this
+  # whole programme -- there are nine good ones, all permissively licensed, and
+  # every one of them would have passed every other check in this file. Gap 30
+  # writes the parser by hand under CONTRIBUTING rule 1 because three parts of
+  # an OPC package are XML and because a reader that *parses* a document type
+  # declaration is one refactor away from a reader that resolves an external
+  # entity; these names are denied in the milestone that writes the parser
+  # rather than the one that finishes the plan, because the milestone that
+  # writes the parser is the window in which the temptation exists.
+  #
+  # `serde` and `serde_derive` are deliberately NOT here, and the omission is
+  # recorded so it does not read as an oversight: they are not format
+  # implementations, nothing here uses them, and denying a general-purpose crate
+  # on the grounds that it is often seen near XML would make this file about
+  # taste rather than about rule 1.
+  { name = "quick-xml" },
+  { name = "roxmltree" },
+  { name = "xml-rs" },
+  { name = "xmlparser" },
+  { name = "serde-xml-rs" },
+  { name = "minidom" },
+  { name = "sxd-document" },
+  { name = "libxml" },
+  { name = "rustyxml" },
   # Fonts and text shaping.
   { name = "ttf-parser" },
   { name = "rustybuzz" },

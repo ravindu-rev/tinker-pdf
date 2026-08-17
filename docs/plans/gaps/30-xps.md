@@ -1468,3 +1468,133 @@ so, because a crate appearing in a manifest without its argument is the failure
   this milestone landed. Milestone 3's criterion to *"confirm and fix or show
   not to exist"* is discharged; the finding held, and every package here takes
   the central-directory route, so none of them exercises the fix.
+
+## Progress — 18 August 2026, milestone 2
+
+**`tinker-pdf-xml` has landed**, as the eighth leaf and the first crate in this
+repository that depends on nothing at all except `tinker-pdf-math` does.
+`lib.rs`, `limits.rs`, `scan.rs`, `text.rs`, sixty tests beside the code and ten
+more over milestone 1's real packages. The workspace stands at **1 959**.
+
+### The defence is structural, and the tests say which kind it is
+
+`<!DOCTYPE` is [`Error::DoctypeUnsupported`] **before one byte after it is
+read**. That is the whole answer to entity expansion: billion laughs, the
+quadratic-blowup variant, an external entity and an internal-subset parameter
+entity are each committed, and each is asserted to be refused *by that name*.
+
+The assertion that matters is `every_bomb_is_refused_as_a_doctype_and_not_as_a_cap`.
+A test asserting only "the bomb is refused" would pass on a parser that entered
+the grammar, expanded entities and hit `MAX_XML_TOKENS` on the way — which is a
+defence that works until somebody tunes a cap. Naming the error is what says
+the parser never enters the grammar that has the attack in it. The distinction
+is exactly gap 17's: the refusal is the feature, and *which* refusal is part of
+it.
+
+### What milestone 1's real files changed about this parser
+
+Every finding milestone 1 recorded became an assertion here, and two of them
+would have produced a parser that refuses genuine files:
+
+- **A reader requiring a BOM refuses every OpenXPS file Windows writes.** The
+  object model writes none, on any part; WPF writes one on every part. Both
+  are real, and `one_producer_writes_a_byte_order_mark_on_every_part_and_the_other_writes_none`
+  holds the two apart.
+- **A fixed page may carry no XML declaration at all.** Four prolog spellings
+  appear across eight packages and one of them is nothing.
+- A comment arrives **inside element content**, not in the prolog.
+- Inter-element whitespace is real text with real line ends to normalise.
+- Two spellings of the geometry and two of the colours, in one corpus.
+
+That is the milestone-1 investment paying: none of these would have been in a
+hand-built fixture, because a fixture author writes the file they already have
+in mind. The ten tests in `crates/tinker-pdf/tests/xml_real_packages.rs` are
+the only XML assertions in this repository whose inputs the repository did not
+write.
+
+### The bounds
+
+| Constant | Fixtures | A dense fixed page | Cap | Proved to fire by |
+| --- | --- | --- | --- | --- |
+| `MAX_XML_DEPTH` | 256 | 24 | 256 | `nesting_past_the_depth_cap_is_refused_by_name` |
+| `MAX_XML_ATTRIBUTES` | 256 | 24 | 256 | `more_attributes_than_the_cap_is_refused_by_name` |
+| `MAX_XML_NAME_LEN` | 1 024 | 48 | 1 024 | a name past the cap |
+| `MAX_XML_TOKENS` | 1 048 576 | ~92 000 | 1 << 20 | `more_events_than_the_token_cap_is_refused_by_name` |
+
+All four join `bounds_ledger.rs`'s existing table and pass its five checks,
+`every_bound_can_fire` included — the one thing in the workspace that catches
+`MAX_JPX_WORK`'s failure.
+
+**`MAX_XML_TOKENS` is a total and not a per-element cap**, and
+`the_token_cap_is_a_total_and_not_a_per_element_cap` is what holds it there.
+That is `MAX_ZIP_INFLATED`'s lesson in a second format: a per-item cap is not a
+total once the file chooses how many items there are, and a document of a
+million one-attribute elements needs no nesting at all.
+
+Note that the first column equals the cap in every row, which is different from
+gap 29's ledgers, where it was what the *ordinary* fixtures spend. Here the
+fixture that drives a cap to its edge is counted, so the column reads "a
+fixture reaches this" rather than "the fixtures leave this much headroom". The
+headroom is the second column against the fourth, and it is an order of
+magnitude in every row.
+
+### The injection matrix
+
+Fourteen defects, one at a time, each reverted before the next, the full
+workspace re-run with `--no-fail-fast`. **All fourteen caught; none survived.**
+
+| Defect | Caught by |
+| --- | --- |
+| DOCTYPE parsed rather than refused before it is read | six tests, including `every_bomb_is_refused_as_a_doctype_and_not_as_a_cap` |
+| The depth cap counting one too many | `nesting_past_the_depth_cap_is_refused_by_name` |
+| The depth cap never firing | the same |
+| The attribute cap never firing | `more_attributes_than_the_cap_is_refused_by_name` |
+| The token cap never firing | `more_events_than_the_token_cap_is_refused_by_name`, and the total/per-element test |
+| An undeclared prefix resolving to nothing rather than refusing | three tests |
+| **Bindings not unbound when their scope closes** | `a_prefix_is_resolved_from_its_own_scope_and_unbound_when_that_scope_closes` |
+| **Duplicates compared only by spelling, not by expanded name** | `two_prefixes_bound_to_one_namespace_are_one_attribute_name` |
+| **Duplicates compared only by expanded name, not by spelling** | `a_duplicate_attribute_is_refused_by_name` |
+| An element name resolved as though it were an attribute name | `the_default_namespace_applies_to_elements_and_never_to_attributes`, and two more |
+| A character reference accepting any scalar the encoder takes | `a_character_reference_naming_no_character_is_refused_by_name` |
+| XML 1.0's `Char` production unchecked after decoding | the same |
+| `]]>` in ordinary character data accepted silently | `a_cdata_close_in_ordinary_text_warns_and_the_text_is_kept` |
+
+The two duplicate-attribute injections are the pair worth keeping. XML 1.0 and
+Namespaces §5.3 are **different rules that share a name**: the first forbids one
+spelling twice, the second forbids one expanded name twice however differently
+it is spelled. Deleting either leaves the other passing every test written for
+it, so a suite with one test for "duplicate attributes" would have caught only
+whichever it happened to exercise. Two rules, two tests, two injections.
+
+### The DAG and the denylist
+
+`ALLOWED` gains `tinker-pdf-xml` as the **fourth amendment**, and its argument
+is the unusual one: it needs nothing. Not `filters`, because there is no
+compression in an XML document; not `math`, because there is no arithmetic past
+counting. It is the second node in the table with an empty dependency list, and
+the doc comment records what it was checked against rather than leaving "no
+dependencies" to look like an omission.
+
+`deny.toml` gains nine names — `quick-xml`, `roxmltree`, `xml-rs`,
+`xmlparser`, `serde-xml-rs`, `minidom`, `sxd-document`, `libxml`, `rustyxml` —
+because a parser is the single easiest thing in this plan to reach for a crate
+for, and CONTRIBUTING rule 1 lived only in prose until gap 29 started writing
+these names down.
+
+The **twenty-first fuzz target**, `xml`, in the shape `zip_archive` established:
+the control byte picks the bounds rather than the input, away from the shipped
+defaults, because a 1 048 576-event cap cannot fire inside a fuzz iteration and
+a target that used it would leave the crate's only total unexplored.
+
+### Still owed
+
+- **The campaign has not run.** libFuzzer is unavailable on
+  `x86_64-pc-windows-msvc`; the target compiles and the WSL2 route gap 29
+  milestone 6 established works, but the session belongs to milestone 9.
+- **UTF-16 is decoded and no real package uses it.** Both producers write
+  UTF-8. The UTF-16 tests are hand-built, and that is a hand-built claim about
+  a path no measured file exercises — the same shape as gap 29's fixtures, in a
+  corner rather than everywhere.
+- **No non-Windows producer**, inherited from milestone 1 and not this
+  milestone's to discharge.
+

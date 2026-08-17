@@ -1,0 +1,24 @@
+[package]
+name = "tinker-pdf-xml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "XML 1.0 with namespaces, hand-rolled: a pull parser over the well-formed subset, UTF-8 and UTF-16, and DTD content refused by name. No PDF types"
+
+# No dependencies, deliberately, and this is the third crate in that position
+# beside `filters` and `crypto`. A markup reader needs nothing but the bytes it
+# is handed: no allocator helper, no encoding crate, no `std::io`. The DAG
+# amendment in `xtask/src/main.rs` is therefore the first of the four that adds
+# no edge at all, and its argument is written there in the register the other
+# three use.
+#
+# It has no `[dev-dependencies]` either. The eight real XPS packages this
+# parser was checked against are ZIP files, and reading one needs
+# `tinker-pdf-zip`; that test lives in the facade
+# (`crates/tinker-pdf/tests/xml_real_packages.rs`), which already depends on
+# both, rather than here — because a dev-dependency is still an edge the graph
+# check sees, and a leaf that reaches sideways to test itself is a leaf with a
+# direction it did not need.

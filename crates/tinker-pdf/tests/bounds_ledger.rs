@@ -1,4 +1,16 @@
-//! Gap 29's seven bounds, swept in one place (milestone 6).
+//! Gap 29's seven bounds and gap 30's, swept in one place.
+//!
+//! *Amended, 18 August 2026, gap 30 milestone 2.* Four more rows —
+//! `tinker-pdf-xml`'s — and one more relation. Gap 30's bounds section says the
+//! new constants join **this** table rather than getting a sweep of their own,
+//! *"because the whole value of it is that it is one table"*, and they inherit
+//! all five checks below unchanged. What they add is a second yardstick: gap
+//! 29's is a 200-page comic and gap 30's is a 200-page fixed document at
+//! roughly 2 000 drawable elements and 40 000 path segments a page, and a bound
+//! that refuses either is a missing feature wearing a `MAX_` prefix. The
+//! yardstick is `Option`al per row because gap 29's seven have no figure for it
+//! yet; gap 30's milestone 9 fills those in when it adds the rest of its own
+//! table.
 //!
 //! Each of the four modules this gap added carries its own ledger beside its
 //! own constants — `tinker-pdf-zip`'s `limits.rs`, `png.rs`'s module note,
@@ -38,6 +50,7 @@
 
 use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
 use tinker_pdf_filters::MAX_PNG_SAMPLES;
+use tinker_pdf_xml::limits as xml_limits;
 
 /// The sources the ledgers live in, so a number here can be checked against
 /// the number written beside the constant rather than against a memory of it.
@@ -47,6 +60,8 @@ const PNG: &str = include_str!("../../tinker-pdf-filters/src/png.rs");
 const PNG_TESTS: &str = include_str!("../../tinker-pdf-filters/src/png/tests.rs");
 const CBZ: &str = include_str!("../src/cbz.rs");
 const CBZ_TESTS: &str = include_str!("cbz.rs");
+const XML_LIMITS: &str = include_str!("../../tinker-pdf-xml/src/limits.rs");
+const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
 
 /// One bound, as its own ledger publishes it.
 struct Bound {
@@ -60,6 +75,11 @@ struct Bound {
     fixtures: u128,
     /// The most gap 29's yardstick spends: a 200-page comic at 2000 x 3000.
     comic: u128,
+    /// The most gap 30's yardstick spends: a 200-page fixed document at
+    /// roughly 2 000 drawable elements and 40 000 path segments a page. `None`
+    /// where nobody has worked the figure out yet, which is gap 29's seven
+    /// rows — milestone 9 fills them in with the rest of gap 30's table.
+    document: Option<u128>,
     /// The most this bound's own inputs can ask for, which must exceed the cap
     /// or the cap can never fire.
     reachable: u128,
@@ -84,6 +104,7 @@ fn ledger() -> Vec<Bound> {
             published: "16 384",
             fixtures: 6,
             comic: 202,
+            document: None,
             // A central directory record is 46 bytes plus a name, so a name of
             // one byte is the densest an archive can be.
             reachable: ARCHIVE_CEILING / 47,
@@ -100,6 +121,7 @@ fn ledger() -> Vec<Bound> {
             published: "128 MiB",
             fixtures: 1_024,
             comic: 48_000_000,
+            document: None,
             reachable: u32::MAX as u128,
             reachable_because: "the uncompressed-size field is 32 bits, and Zip64's is 64",
             declared_in: ZIP_LIMITS,
@@ -114,6 +136,7 @@ fn ledger() -> Vec<Bound> {
             published: "1 GiB",
             fixtures: 1_024,
             comic: 300_000_000,
+            document: None,
             // The work cap's whole argument: a per-entry ceiling times a
             // file-chosen entry count is not a bound, and this is the product
             // it would otherwise be.
@@ -132,6 +155,7 @@ fn ledger() -> Vec<Bound> {
             published: "1 024",
             fixtures: 24,
             comic: 42,
+            document: None,
             reachable: u16::MAX as u128,
             reachable_because: "the name-length field is 16 bits",
             declared_in: ZIP_LIMITS,
@@ -143,6 +167,7 @@ fn ledger() -> Vec<Bound> {
             published: "67 108 864",
             fixtures: 4_096,
             comic: 24_000_000,
+            document: None,
             // Thirteen bytes of IHDR: two 31-bit dimensions, charged at the
             // widest layout the colour type can produce.
             reachable: 0x7FFF_FFFFu128 * 0x7FFF_FFFF * 4,
@@ -161,6 +186,7 @@ fn ledger() -> Vec<Bound> {
             // the most any fixture here spends and is *allowed*.
             fixtures: 4_096,
             comic: 200,
+            document: None,
             reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
             reachable_because: "every entry the archive reader will hand over could be an image",
             declared_in: CBZ,
@@ -172,6 +198,7 @@ fn ledger() -> Vec<Bound> {
             published: "512 MiB",
             fixtures: 70_000,
             comic: 300_000_000,
+            document: None,
             reachable: MAX_CBZ_PAGES as u128
                 * (PAGE_OVERHEAD as u128 + zip_limits::MAX_ZIP_ENTRY_BYTES as u128),
             reachable_because: "every page the page cap allows, each carrying a whole entry",
@@ -181,14 +208,92 @@ fn ledger() -> Vec<Bound> {
                 CBZ_TESTS,
             ),
         },
+        // ---- gap 30, milestone 2 ---------------------------------------
+        //
+        // The ceiling in front of all four is the same and it is worth stating
+        // once: an XML part reaches this engine as a ZIP entry, so
+        // `MAX_ZIP_ENTRY_BYTES` — 128 MiB — is the most text any of them can be
+        // handed. Every `reachable` below is that number divided by what one
+        // unit of the thing being counted costs in bytes.
+        Bound {
+            name: "MAX_XML_DEPTH",
+            cap: xml_limits::MAX_XML_DEPTH as u128,
+            published: "256",
+            // The fixture that proves it fires nests 257 and is 771 bytes, so
+            // the most any fixture *spends* is the cap. Real markup reaches 6,
+            // measured by `xml_real_packages.rs`.
+            fixtures: xml_limits::MAX_XML_DEPTH as u128,
+            // A comic archive holds no XML at all: gap 29's `ComicInfo.xml` is
+            // still nobody's scope and gap 30 says so in as many words.
+            comic: 0,
+            // ECMA-388 18.2 recommends 16 canvases; a path geometry adds four
+            // and a resource dictionary two.
+            document: Some(24),
+            reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 3,
+            reachable_because: "`<a>` is three bytes, in a part of at most MAX_ZIP_ENTRY_BYTES",
+            declared_in: XML_LIMITS,
+            fires_in: ("nesting_past_the_depth_cap_is_refused_by_name", XML_TESTS),
+        },
+        Bound {
+            name: "MAX_XML_ATTRIBUTES",
+            cap: xml_limits::MAX_XML_ATTRIBUTES as u128,
+            published: "256",
+            fixtures: xml_limits::MAX_XML_ATTRIBUTES as u128,
+            comic: 0,
+            // A `Glyphs` with every optional attribute ECMA-388 12.1 gives it.
+            document: Some(24),
+            reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 5,
+            reachable_because: "` a=\"\"` is five bytes, and they may all sit on one element",
+            declared_in: XML_LIMITS,
+            fires_in: ("more_attributes_than_the_cap_is_refused_by_name", XML_TESTS),
+        },
+        Bound {
+            name: "MAX_XML_NAME_LEN",
+            cap: xml_limits::MAX_XML_NAME_LEN as u128,
+            published: "1 024",
+            fixtures: xml_limits::MAX_XML_NAME_LEN as u128,
+            comic: 0,
+            // `LinearGradientBrush.GradientStops` is 33, plus room for a prefix.
+            document: Some(48),
+            reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
+            reachable_because: "a name may be as long as the part that holds it",
+            declared_in: XML_LIMITS,
+            fires_in: (
+                "a_name_past_the_cap_is_refused_rather_than_truncated",
+                XML_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_XML_TOKENS",
+            cap: xml_limits::MAX_XML_TOKENS as u128,
+            published: "1 048 576",
+            fixtures: xml_limits::MAX_XML_TOKENS as u128,
+            comic: 0,
+            // 2 000 drawable elements at three elements of markup each, plus
+            // 40 000 path segments as `PolyLineSegment` children, at two events
+            // an element.
+            document: Some(2_000 * 3 * 2 + 40_000 * 2),
+            // The work cap's argument, in this format's terms: `<a/>` is four
+            // bytes and produces two events, so a per-element cap times a
+            // file-chosen element count is not a bound and this is the product
+            // it would otherwise be.
+            reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 2,
+            reachable_because: "`<a/>` is four bytes and two events, across a whole part",
+            declared_in: XML_LIMITS,
+            fires_in: (
+                "more_events_than_the_token_cap_is_refused_by_name",
+                XML_TESTS,
+            ),
+        },
     ]
 }
 
-/// The plan's bounds table has five rows and the code has seven, because two
-/// of the plan's "per-item caps sit beside them" were built as named
-/// constants. All seven are here, and a bound added without a row fails this.
+/// Gap 29's bounds table has five rows and its code has seven, because two of
+/// the plan's "per-item caps sit beside them" were built as named constants.
+/// Gap 30's milestone 2 adds four. All eleven are here, and a bound added
+/// without a row fails this.
 #[test]
-fn the_sweep_covers_every_bound_gap_twenty_nine_added() {
+fn the_sweep_covers_every_bound_these_two_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
     assert_eq!(
         names,
@@ -200,6 +305,10 @@ fn the_sweep_covers_every_bound_gap_twenty_nine_added() {
             "MAX_PNG_SAMPLES",
             "MAX_CBZ_PAGES",
             "MAX_SYNTHESISED_PDF",
+            "MAX_XML_DEPTH",
+            "MAX_XML_ATTRIBUTES",
+            "MAX_XML_NAME_LEN",
+            "MAX_XML_TOKENS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -264,6 +373,39 @@ fn no_bound_refuses_a_two_hundred_page_comic() {
             bound.cap,
         );
     }
+}
+
+/// Gap 30's yardstick, for the rows that have one: a 200-page fixed document at
+/// roughly 2 000 drawable elements and 40 000 path segments a page.
+///
+/// A separate test from the comic rather than a second assertion inside it,
+/// because the two yardsticks measure different documents and a row may
+/// legitimately have one figure and not the other — a comic holds no XML and a
+/// fixed document holds no comic page. What must not happen is a row acquiring
+/// a bound that refuses the format it was written for, which is the failure
+/// this pair of tests exists to make impossible in both directions.
+#[test]
+fn no_bound_refuses_a_dense_fixed_document() {
+    let mut measured = 0usize;
+    for bound in ledger() {
+        let Some(document) = bound.document else {
+            continue;
+        };
+        measured += 1;
+        assert!(
+            document < bound.cap,
+            "{} is {} and a dense 200-page fixed document spends {}: this cap \
+             refuses a real document",
+            bound.name,
+            bound.cap,
+            document,
+        );
+    }
+    // A sweep that found nothing to sweep is a sweep that does not run.
+    assert_eq!(
+        measured, 4,
+        "gap 30's yardstick covers {measured} rows, not the four its milestone 2 added"
+    );
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not
@@ -339,7 +481,7 @@ fn every_bound_names_a_test_that_exists() {
     // Not one of them may be a timing assertion. `5adf502` is the scar: a
     // budget proved by a clock passes on a fast machine with the budget
     // removed.
-    for source in [ZIP_TESTS, PNG_TESTS, CBZ_TESTS] {
+    for source in [ZIP_TESTS, PNG_TESTS, CBZ_TESTS, XML_TESTS] {
         assert!(
             !source.contains("Instant::now"),
             "a bound in this gap is being proved by a clock"
