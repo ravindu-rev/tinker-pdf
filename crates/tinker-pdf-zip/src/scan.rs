@@ -94,7 +94,11 @@ pub(crate) fn local_headers(
                 }
             }
         } else {
-            (header.compressed_size, header.uncompressed_size, Some(header.crc))
+            (
+                header.compressed_size,
+                header.uncompressed_size,
+                Some(header.crc),
+            )
         };
 
         entries.push(Entry {
@@ -149,8 +153,9 @@ fn extent(
     if !raw.complete {
         return None;
     }
-    let descriptor = local::parse_descriptor(bytes, data_at + raw.end, raw.end as u64, header.zip64)
-        .or_else(|| local::search_descriptor(bytes, data_at))?;
+    let descriptor =
+        local::parse_descriptor(bytes, data_at + raw.end, raw.end as u64, header.zip64)
+            .or_else(|| local::search_descriptor(bytes, data_at))?;
     Some((
         descriptor.compressed_size,
         descriptor.uncompressed_size,

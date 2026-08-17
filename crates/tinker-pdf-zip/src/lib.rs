@@ -340,13 +340,19 @@ impl fmt::Display for EntryError {
             Self::Truncated => f.write_str("the entry's data ends before the entry does"),
             Self::Corrupt => f.write_str("the deflate stream is structurally invalid"),
             Self::OversizedStream { declared } => {
-                write!(f, "the stream produces more than the {declared} bytes declared")
+                write!(
+                    f,
+                    "the stream produces more than the {declared} bytes declared"
+                )
             }
             Self::SizeMismatch { declared, produced } => {
                 write!(f, "declared {declared} bytes, produced {produced}")
             }
             Self::ChecksumMismatch { declared, computed } => {
-                write!(f, "CRC-32 {computed:#010x}, the archive says {declared:#010x}")
+                write!(
+                    f,
+                    "CRC-32 {computed:#010x}, the archive says {declared:#010x}"
+                )
             }
             Self::EntryTooLarge => f.write_str("the entry is past the per-entry ceiling"),
             Self::ArchiveBudgetSpent => f.write_str("the archive's inflation total is spent"),
@@ -438,13 +444,15 @@ impl<'a> Archive<'a> {
                     // Two different answers, and the difference is the whole
                     // point of refusing by name: a JPEG is not a damaged
                     // archive, and a truncated CBZ is not "not a PDF".
-                    return Err(if le::find(bytes, 0, &local::LOCAL_SIG).is_none()
-                        && le::rfind(bytes, &local::EOCD_SIG).is_none()
-                    {
-                        ArchiveError::NotAZip
-                    } else {
-                        ArchiveError::Damaged
-                    });
+                    return Err(
+                        if le::find(bytes, 0, &local::LOCAL_SIG).is_none()
+                            && le::rfind(bytes, &local::EOCD_SIG).is_none()
+                        {
+                            ArchiveError::NotAZip
+                        } else {
+                            ArchiveError::Damaged
+                        },
+                    );
                 }
                 (entries, Route::LocalHeaderScan)
             }
@@ -504,7 +512,11 @@ impl<'a> Archive<'a> {
     /// [`EntryError`], one variant per refusal.
     pub fn read(&mut self, index: usize) -> Result<Cow<'a, [u8]>, EntryError> {
         let bytes = self.bytes;
-        let entry = self.entries.get(index).ok_or(EntryError::NoSuchEntry)?.clone();
+        let entry = self
+            .entries
+            .get(index)
+            .ok_or(EntryError::NoSuchEntry)?
+            .clone();
 
         if entry.encrypted {
             return Err(EntryError::Encrypted);
@@ -570,7 +582,10 @@ impl<'a> Archive<'a> {
         entry: &Entry,
     ) -> Result<Cow<'a, [u8]>, EntryError> {
         let n = usize::try_from(entry.compressed_size).map_err(|_| EntryError::Truncated)?;
-        let end = header.data_offset.checked_add(n).ok_or(EntryError::Truncated)?;
+        let end = header
+            .data_offset
+            .checked_add(n)
+            .ok_or(EntryError::Truncated)?;
         let data = self
             .bytes
             .get(header.data_offset..end)
@@ -611,11 +626,13 @@ impl<'a> Archive<'a> {
             });
         }
         if !r.complete {
-            return Err(if r.warnings.contains(&InflateWarning::CorruptDeflateStream) {
-                EntryError::Corrupt
-            } else {
-                EntryError::Truncated
-            });
+            return Err(
+                if r.warnings.contains(&InflateWarning::CorruptDeflateStream) {
+                    EntryError::Corrupt
+                } else {
+                    EntryError::Truncated
+                },
+            );
         }
 
         // `end` is read **here and nowhere else**, because here is the only

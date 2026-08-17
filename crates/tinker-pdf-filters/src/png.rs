@@ -828,6 +828,23 @@ impl PngScan {
             let want = usize::try_from((row_bytes + 1).saturating_mul(u64::from(ph)))
                 .unwrap_or(usize::MAX);
             let end = at.saturating_add(want).min(filtered.len());
+            if end < at.saturating_add(want) {
+                // The raster stops short of the height IHDR declares, and
+                // **`predictors.rs` cannot see this**: `/Rows` is not one of its
+                // parameters, so an input that runs out on a row boundary looks
+                // finished to it and `rows.complete` comes back true. The rows
+                // that never arrived would otherwise stay the output buffer's
+                // zeroes — a band of black at the bottom of the picture, with
+                // nothing anywhere saying the file was damaged.
+                //
+                // `PredictorRowShort` covers only the other half, a row that
+                // ends *between* two of its own bytes, so the two are
+                // complementary rather than duplicated. Found by gap 29
+                // milestone 4, writing a test for the `complete` flag a CBZ page
+                // will be built on.
+                complete = false;
+                w.push(Warning::TruncatedInput);
+            }
             let Some(slice) = filtered.get(at..end).filter(|s| !s.is_empty()) else {
                 complete = false;
                 continue;

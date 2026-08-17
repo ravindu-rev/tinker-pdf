@@ -157,10 +157,23 @@ impl Bitmap {
 }
 
 /// Why a document could not be opened.
+///
+/// **`#[non_exhaustive]`**, from gap 29 milestone 4. Nothing is added here yet;
+/// milestone 5 grows this with the named refusal a container this build
+/// recognises and cannot page needs, and gaps 30 and 31 expect their own. It is
+/// marked in the same commit as [`tinker_pdf_cos::ImageData`] and for the same
+/// reason: one break now rather than one more with every gap that adds a
+/// variant. `Copy`, `PartialEq` and `Eq` are kept, because
+/// `tests/tinker_parity.rs` compares values of this type by ruling 12.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OpenError {
     /// Nothing in the bytes resembles a PDF: not one indirect object could be
     /// found, even after a full rescan.
+    ///
+    /// Failing to be a PDF is not the same as failing to be a *document*: a
+    /// container this build recognises and cannot page gets its own answer
+    /// rather than being collapsed into this one.
     NotAPdf,
     /// The bytes are empty.
     ///

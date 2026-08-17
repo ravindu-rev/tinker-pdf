@@ -178,7 +178,11 @@ pub(crate) fn parse_descriptor(
     // With the signature skipped first, because that is the common shape; an
     // unsigned descriptor whose CRC happens to be `PK\x07\x08` is then still
     // reachable by the second candidate rather than lost to the first.
-    let starts = if signed { [Some(at + 4), Some(at)] } else { [Some(at), None] };
+    let starts = if signed {
+        [Some(at + 4), Some(at)]
+    } else {
+        [Some(at), None]
+    };
 
     // The declared width first, the other only as a fallback for a writer that
     // flagged it wrongly. Never the other order: see above.

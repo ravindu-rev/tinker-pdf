@@ -998,6 +998,68 @@ fn a_row_that_stops_mid_pixel_places_no_partial_pixel() {
     assert_eq!(img.data, vec![0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0]);
 }
 
+/// **A raster short by whole rows says so**, which `predictors.rs` cannot.
+///
+/// The twin of the test above and the other half of the same failure. That one
+/// is a row that ends between two of its own bytes; this one is a row that never
+/// began at all — and only the first is visible from inside `predictor_decode`,
+/// because `/Rows` is not one of Table 10's parameters. An input that runs out
+/// exactly on a row boundary looks finished to it and comes back `complete`.
+///
+/// So the rows that never arrived stayed the output buffer's zeroes, a band of
+/// black across the bottom of the picture, and the image was returned complete
+/// with an empty warning list. Gap 29 calls that a page that half-draws with
+/// nothing saying the file was damaged; it was found by milestone 4 writing a
+/// test for the flag a CBZ page would be built on, not by this file.
+#[test]
+fn a_raster_short_by_whole_rows_says_so() {
+    // Four rows declared, two supplied, and the stream itself is complete: the
+    // zlib wrapper closes cleanly and the Adler-32 agrees, so nothing about the
+    // *compression* is wrong. Only the header and the data disagree.
+    let mut raw = Vec::new();
+    for value in [0x11u8, 0x22] {
+        raw.push(0u8);
+        raw.extend_from_slice(&[value, value]);
+    }
+    let bytes = png(
+        &ihdr_data(2, 4, 8, 0, 0),
+        &[chunk(b"IDAT", &zlib_compress(&raw))],
+    );
+
+    let img = png_decode(&bytes, &CAP).expect("degrade rather than refuse");
+    assert_eq!(
+        img.data,
+        vec![0x11, 0x11, 0x22, 0x22, 0, 0, 0, 0],
+        "the rows that arrived are placed and the rest stay zero"
+    );
+    assert!(!img.complete, "and the image is not reported whole");
+    assert!(
+        img.warnings.contains(&Warning::TruncatedInput),
+        "with the reason named: {:?}",
+        img.warnings
+    );
+    // Not the *other* half's warning: no row here ended between its own bytes,
+    // and reporting one that did would send a reader looking for the wrong
+    // damage.
+    assert!(!img.warnings.contains(&Warning::PredictorRowShort));
+
+    // The same file with all four rows is complete and silent, which is what
+    // makes the assertions above about this fixture rather than about the
+    // decoder refusing everything.
+    let mut whole = Vec::new();
+    for value in [0x11u8, 0x22, 0x33, 0x44] {
+        whole.push(0u8);
+        whole.extend_from_slice(&[value, value]);
+    }
+    let bytes = png(
+        &ihdr_data(2, 4, 8, 0, 0),
+        &[chunk(b"IDAT", &zlib_compress(&whole))],
+    );
+    let img = png_decode(&bytes, &CAP).expect("decode");
+    assert!(img.complete);
+    assert!(img.warnings.is_empty(), "{:?}", img.warnings);
+}
+
 /// The IDAT went through the **zlib** door, so its Adler-32 was checked.
 ///
 /// 10.3 wraps the compressed datastream, unlike a ZIP entry, which is raw

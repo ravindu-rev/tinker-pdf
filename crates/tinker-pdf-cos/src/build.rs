@@ -11,6 +11,13 @@ use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
 
 /// Image data to embed.
+///
+/// **`#[non_exhaustive]`**, from gap 29 milestone 4. A caller outside this
+/// workspace matches with a wildcard arm, so the next image shape is an
+/// addition rather than a break. It is marked here rather than when it is next
+/// needed because marking it later costs the same break again for nothing, and
+/// gaps 30 and 31 each expect to add one.
+#[non_exhaustive]
 pub enum ImageData<'a> {
     /// JPEG bytes, placed **as they are**.
     ///
@@ -36,6 +43,208 @@ pub enum ImageData<'a> {
         /// The samples.
         data: &'a [u8],
     },
+    /// Bytes that are **already** in the encoding their dictionary declares.
+    ///
+    /// [`ImageData::Jpeg`] is this idea for one codec: place the bytes, name
+    /// the filter, do no pixel work. This generalises it, and gap 29 is why —
+    /// a CBZ synthesises every page at open, so whatever a page holds is held
+    /// for the whole document. Decoding each PNG to [`ImageData::Rgb8`] would
+    /// cost *w x h x 3* a page, about 3.6 GB for a 200-page archive at
+    /// 2000 x 3000; passing the compressed bytes through keeps the peak a
+    /// small multiple of the archive's own size, and that multiple is a
+    /// constant rather than a function of the pixel count.
+    ///
+    /// It works at all because a non-interlaced PNG's IDAT **is** a
+    /// `/FlateDecode` stream with `/Predictor 15`, byte for byte: PDF's
+    /// `/Predictor` is PNG 9.2's row-filter specification adopted wholesale,
+    /// down to the per-row tag and the `ceil(colors x bpc / 8)` left-neighbour
+    /// offset floored at one.
+    ///
+    /// The writer never re-encodes these bytes, and that is a contract rather
+    /// than an accident: `maybe_compress` declines any stream whose dictionary
+    /// already declares a `/Filter`, and
+    /// `a_stream_that_already_declares_a_filter_is_handed_through_untouched`
+    /// holds it there.
+    Compressed(CompressedImage<'a>),
+}
+
+/// A device colour space, which is all an `/Indexed` base may be here.
+///
+/// 8.6.6.3 forbids an `/Indexed` whose base is itself `/Indexed`, and this
+/// writer emits no CIE-based, `/Separation` or `/DeviceN` space — so the three
+/// device families are the whole of it, and the restriction is the
+/// specification's rather than an invention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceSpace {
+    /// `/DeviceGray`.
+    Gray,
+    /// `/DeviceRGB`.
+    Rgb,
+    /// `/DeviceCMYK`.
+    Cmyk,
+}
+
+impl DeviceSpace {
+    /// Colour components per sample: 8.6.4's own counts.
+    #[must_use]
+    pub const fn components(self) -> u32 {
+        match self {
+            DeviceSpace::Gray => 1,
+            DeviceSpace::Rgb => 3,
+            DeviceSpace::Cmyk => 4,
+        }
+    }
+
+    const fn pdf_name(self) -> &'static [u8] {
+        match self {
+            DeviceSpace::Gray => b"DeviceGray",
+            DeviceSpace::Rgb => b"DeviceRGB",
+            DeviceSpace::Cmyk => b"DeviceCMYK",
+        }
+    }
+}
+
+/// The `/ColorSpace` of a [`CompressedImage`] — the set this writer can emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageColorSpace<'a> {
+    /// `/DeviceGray`.
+    DeviceGray,
+    /// `/DeviceRGB`.
+    DeviceRgb,
+    /// `/DeviceCMYK`.
+    DeviceCmyk,
+    /// `[/Indexed base hival lookup]` (8.6.6.3).
+    Indexed {
+        /// The space each table entry is expressed in.
+        base: DeviceSpace,
+        /// The table, `base.components()` bytes an entry, from index zero.
+        ///
+        /// `/hival` is **derived from this length** rather than carried
+        /// separately. A `/hival` that disagrees with the table it describes is
+        /// exactly how a reader ends up indexing past the end of one, and there
+        /// is no legitimate document in which the two differ.
+        lookup: &'a [u8],
+    },
+}
+
+impl ImageColorSpace<'_> {
+    /// Components in one *sample* of this space.
+    ///
+    /// An `/Indexed` sample is a single index whatever its base is (8.6.6.3),
+    /// which is also what `/DecodeParms /Colors` must say for it.
+    #[must_use]
+    pub const fn components(&self) -> u32 {
+        match self {
+            ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
+            ImageColorSpace::DeviceRgb => 3,
+            ImageColorSpace::DeviceCmyk => 4,
+        }
+    }
+}
+
+/// A filter **already applied** to the bytes handed over with it.
+///
+/// Not a request to encode: the `/Filter` and `/DecodeParms` this names are
+/// written into the dictionary and the bytes are placed unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFilter {
+    /// `/DCTDecode`, which carries no `/DecodeParms`.
+    Dct,
+    /// `/FlateDecode` over the samples directly, with no `/DecodeParms`.
+    Flate,
+    /// `/FlateDecode` with
+    /// `/DecodeParms << /Predictor 15 /Colors c /BitsPerComponent b /Columns w >>`.
+    ///
+    /// 7.4.4.4's predictor 15 is "PNG optimum": every row carries its own
+    /// filter tag, which is what PNG 9.2 writes and what makes a PNG's IDAT
+    /// legible to a PDF reader without a byte being touched.
+    ///
+    /// The three parameters describe **the bytes**, not the image, which is why
+    /// they are carried rather than derived — but a set that disagrees with the
+    /// image's own geometry describes a different raster from the one the
+    /// dictionary declares, so [`DocumentBuilder::add_image`] refuses it.
+    FlatePngPredictor {
+        /// `/Colors`: components per sample in the *encoded* data.
+        colors: u32,
+        /// `/BitsPerComponent`, as the predictor saw them.
+        bits_per_component: u32,
+        /// `/Columns`: samples per row.
+        columns: u32,
+    },
+}
+
+/// Per-sample opacity, as the `/DeviceGray` sub-image 11.6.5.3 asks for.
+///
+/// Its colour space is not a field: `/SMask` *is* `/DeviceGray`, and a mask in
+/// any other space is not a mask.
+pub struct SoftMask<'a> {
+    /// Width in samples. Need not match the image's; a reader scales it.
+    pub width: u32,
+    /// Height in samples.
+    pub height: u32,
+    /// 1, 2, 4, 8 or 16.
+    pub bits_per_component: u8,
+    /// The filter already applied to `data`, or `None` for raw samples.
+    pub filter: Option<ImageFilter>,
+    /// The bytes, encoded as `filter` says.
+    pub data: &'a [u8],
+}
+
+/// An image whose bytes are already encoded — see [`ImageData::Compressed`].
+pub struct CompressedImage<'a> {
+    /// Width in samples.
+    pub width: u32,
+    /// Height in samples.
+    pub height: u32,
+    /// 1, 2, 4, 8 or 16 (Table 89). An `/Indexed` image may not use 16,
+    /// because 8.6.6.3 caps `/hival` at 255.
+    pub bits_per_component: u8,
+    /// The `/ColorSpace`.
+    pub color_space: ImageColorSpace<'a>,
+    /// The filter already applied to `data`, or `None` for raw samples — in
+    /// which case the writer's ordinary compression applies.
+    pub filter: Option<ImageFilter>,
+    /// The bytes, encoded as `filter` says.
+    pub data: &'a [u8],
+    /// 8.9.6.4 colour-key masking: one inclusive `(min, max)` range per colour
+    /// component, compared against **raw sample values**, before `/Decode`.
+    ///
+    /// A sample inside every one of its ranges is not painted. This is a range
+    /// test rather than a lookup, which is precisely what a PNG `tRNS` naming
+    /// one fully transparent colour or index needs and precisely what a `tRNS`
+    /// giving partial alpha to a palette cannot use.
+    pub color_key_mask: Option<&'a [(u32, u32)]>,
+    /// 11.6.5.3 `/SMask`, written as its own image XObject.
+    pub soft_mask: Option<SoftMask<'a>>,
+}
+
+/// Table 89: the five depths an image sample may have.
+const fn is_legal_depth(bits: u8) -> bool {
+    matches!(bits, 1 | 2 | 4 | 8 | 16)
+}
+
+/// The largest raw value a sample of this depth can hold.
+const fn max_sample(bits: u8) -> u32 {
+    // `bits` is one of Table 89's five, so the shift is at most 16.
+    (1u32 << bits) - 1
+}
+
+/// Whether a filter's declared `/DecodeParms` describe the image carrying it.
+///
+/// A `/Columns` that is not the width unfilters every row at the wrong stride
+/// and produces a picture that is scrambled rather than absent — the shape of
+/// failure that reads as a decoder bug and gets found late. There is no
+/// document in which these three legitimately differ from the image's own
+/// geometry, so a disagreement is refused rather than written out.
+fn filter_describes(filter: Option<ImageFilter>, components: u32, bits: u8, width: u32) -> bool {
+    match filter {
+        Some(ImageFilter::FlatePngPredictor {
+            colors,
+            bits_per_component,
+            columns,
+        }) => colors == components && bits_per_component == u32::from(bits) && columns == width,
+        _ => true,
+    }
 }
 
 /// A font whose program is embedded, held until `finish`.
@@ -540,11 +749,200 @@ impl DocumentBuilder {
                 );
                 data.get(..expected).unwrap_or(data).to_vec()
             }
+            ImageData::Compressed(image) => {
+                let Some(data) = self.compressed_image(&mut dict, image) else {
+                    return false;
+                };
+                data
+            }
         };
 
         self.objects.insert_stream(r.num, StreamData { dict, data });
         self.images.push((resource.to_vec(), r));
         true
+    }
+
+    /// Fills an image dictionary for bytes that are already encoded.
+    ///
+    /// Everything is checked **before** anything is written: a refused image
+    /// that had already inserted its `/SMask` would leave an unreferenced
+    /// stream in the file, and `add_image` returning false would stop being the
+    /// whole story.
+    fn compressed_image(
+        &mut self,
+        dict: &mut Dict,
+        image: &CompressedImage<'_>,
+    ) -> Option<Vec<u8>> {
+        if image.width == 0 || image.height == 0 || image.data.is_empty() {
+            return None;
+        }
+        if !is_legal_depth(image.bits_per_component) {
+            return None;
+        }
+        let components = image.color_space.components();
+        if !filter_describes(
+            image.filter,
+            components,
+            image.bits_per_component,
+            image.width,
+        ) {
+            return None;
+        }
+
+        // 8.6.6.3: `/hival` is at most 255, and every index the samples can
+        // name has to be one the table holds — so a 4-bit indexed image may
+        // carry sixteen entries and a 1-bit one may carry two.
+        let mut entries = 0usize;
+        if let ImageColorSpace::Indexed { base, lookup } = image.color_space {
+            let per = base.components() as usize;
+            if lookup.is_empty() || lookup.len() % per != 0 {
+                return None;
+            }
+            entries = lookup.len() / per;
+            if image.bits_per_component > 8 || entries > 1usize << image.bits_per_component {
+                return None;
+            }
+        }
+
+        if let Some(ranges) = image.color_key_mask {
+            // 8.9.6.4: 2 x n integers, "each in the range 0 to
+            // 2^BitsPerComponent - 1", and a min above its max names an empty
+            // range that would mask nothing while looking as though it did.
+            if ranges.len() != components as usize {
+                return None;
+            }
+            let ceiling = max_sample(image.bits_per_component);
+            if ranges.iter().any(|&(lo, hi)| lo > hi || hi > ceiling) {
+                return None;
+            }
+        }
+
+        if let Some(mask) = &image.soft_mask {
+            if mask.width == 0 || mask.height == 0 || mask.data.is_empty() {
+                return None;
+            }
+            if !is_legal_depth(mask.bits_per_component) {
+                return None;
+            }
+            // A soft mask is one-component `/DeviceGray`, so its own predictor
+            // parameters are checked against that rather than against the
+            // image's.
+            if !filter_describes(mask.filter, 1, mask.bits_per_component, mask.width) {
+                return None;
+            }
+        }
+
+        dict.insert(
+            self.names.intern(b"Width"),
+            Object::Int(i64::from(image.width)),
+        );
+        dict.insert(
+            self.names.intern(b"Height"),
+            Object::Int(i64::from(image.height)),
+        );
+        dict.insert(
+            self.names.intern(b"BitsPerComponent"),
+            Object::Int(i64::from(image.bits_per_component)),
+        );
+        let space = match image.color_space {
+            ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
+            ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
+            ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
+            ImageColorSpace::Indexed { base, lookup } => Object::Array(vec![
+                Object::Name(self.names.intern(b"Indexed")),
+                Object::Name(self.names.intern(base.pdf_name())),
+                // Checked above to be at least one, so this cannot wrap.
+                Object::Int(entries as i64 - 1),
+                // A hex string rather than a literal: a palette is arbitrary
+                // bytes, and hex needs no escaping decisions at all.
+                Object::String(PdfString::hex(lookup.to_vec())),
+            ]),
+        };
+        dict.insert(self.names.intern(b"ColorSpace"), space);
+        if let Some(filter) = image.filter {
+            self.insert_filter(dict, filter);
+        }
+        if let Some(ranges) = image.color_key_mask {
+            dict.insert(
+                self.names.intern(b"Mask"),
+                Object::Array(
+                    ranges
+                        .iter()
+                        .flat_map(|&(lo, hi)| {
+                            [Object::Int(i64::from(lo)), Object::Int(i64::from(hi))]
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(mask) = &image.soft_mask {
+            let reference = self.allocate();
+            let mut md = Dict::new();
+            md.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
+            md.insert(
+                self.names.intern(b"Subtype"),
+                Object::Name(self.names.intern(b"Image")),
+            );
+            md.insert(
+                self.names.intern(b"Width"),
+                Object::Int(i64::from(mask.width)),
+            );
+            md.insert(
+                self.names.intern(b"Height"),
+                Object::Int(i64::from(mask.height)),
+            );
+            md.insert(
+                self.names.intern(b"BitsPerComponent"),
+                Object::Int(i64::from(mask.bits_per_component)),
+            );
+            md.insert(
+                self.names.intern(b"ColorSpace"),
+                Object::Name(self.names.intern(b"DeviceGray")),
+            );
+            if let Some(filter) = mask.filter {
+                self.insert_filter(&mut md, filter);
+            }
+            self.objects.insert_stream(
+                reference.num,
+                StreamData {
+                    dict: md,
+                    data: mask.data.to_vec(),
+                },
+            );
+            dict.insert(self.names.intern(b"SMask"), Object::Ref(reference));
+        }
+
+        Some(image.data.to_vec())
+    }
+
+    /// Writes `/Filter` and, where the filter has any, `/DecodeParms`.
+    fn insert_filter(&mut self, dict: &mut Dict, filter: ImageFilter) {
+        let name = match filter {
+            ImageFilter::Dct => b"DCTDecode".as_slice(),
+            _ => b"FlateDecode",
+        };
+        dict.insert(Name::FILTER, Object::Name(self.names.intern(name)));
+
+        if let ImageFilter::FlatePngPredictor {
+            colors,
+            bits_per_component,
+            columns,
+        } = filter
+        {
+            let mut parms = Dict::new();
+            // 7.4.4.4 Table 10, in the table's own order.
+            parms.insert(self.names.intern(b"Predictor"), Object::Int(15));
+            parms.insert(self.names.intern(b"Colors"), Object::Int(i64::from(colors)));
+            parms.insert(
+                self.names.intern(b"BitsPerComponent"),
+                Object::Int(i64::from(bits_per_component)),
+            );
+            parms.insert(
+                self.names.intern(b"Columns"),
+                Object::Int(i64::from(columns)),
+            );
+            dict.insert(Name::DECODE_PARMS, Object::Dict(parms));
+        }
     }
 
     /// Adds a page, drawing it with the given closure.
@@ -1004,6 +1402,345 @@ mod image_tests {
         assert!(
             bytes.windows(jpeg.len()).any(|w| w == jpeg),
             "the JPEG data is embedded byte for byte"
+        );
+    }
+
+    /// A compressed image with nothing wrong with it, for the refusals below to
+    /// be measured against.
+    fn sound() -> CompressedImage<'static> {
+        CompressedImage {
+            width: 4,
+            height: 2,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::DeviceRgb,
+            filter: Some(ImageFilter::FlatePngPredictor {
+                colors: 3,
+                bits_per_component: 8,
+                columns: 4,
+            }),
+            data: b"encoded",
+            color_key_mask: None,
+            soft_mask: None,
+        }
+    }
+
+    /// Every way a pre-compressed image can fail to describe an image, refused
+    /// rather than written out as a dictionary a reader will choke on.
+    ///
+    /// The control comes first on purpose: a `compressed_image` that returned
+    /// `None` unconditionally would satisfy every other line here.
+    #[test]
+    fn a_compressed_image_that_does_not_describe_an_image_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        assert!(
+            builder.add_image(b"Ok", &ImageData::Compressed(sound())),
+            "the control is accepted"
+        );
+
+        const LOOKUP: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let cases: Vec<(&str, CompressedImage<'_>)> = vec![
+            (
+                "no width",
+                CompressedImage {
+                    width: 0,
+                    ..sound()
+                },
+            ),
+            (
+                "no height",
+                CompressedImage {
+                    height: 0,
+                    ..sound()
+                },
+            ),
+            (
+                "no data",
+                CompressedImage {
+                    data: b"",
+                    ..sound()
+                },
+            ),
+            // Table 89 admits 1, 2, 4, 8 and 16 and nothing else. A depth of 3
+            // would be read as 3 by the sample loop and produce a row stride
+            // nothing in the file agrees with.
+            (
+                "a depth outside Table 89",
+                CompressedImage {
+                    bits_per_component: 3,
+                    filter: Some(ImageFilter::FlatePngPredictor {
+                        colors: 3,
+                        bits_per_component: 3,
+                        columns: 4,
+                    }),
+                    ..sound()
+                },
+            ),
+            (
+                "a depth of zero",
+                CompressedImage {
+                    bits_per_component: 0,
+                    filter: None,
+                    ..sound()
+                },
+            ),
+            // 7.4.4.4: the three parameters describe the bytes, so a set that
+            // disagrees with the image's own geometry unfilters at a stride the
+            // data never had.
+            (
+                "/Columns that is not the width",
+                CompressedImage {
+                    filter: Some(ImageFilter::FlatePngPredictor {
+                        colors: 3,
+                        bits_per_component: 8,
+                        columns: 3,
+                    }),
+                    ..sound()
+                },
+            ),
+            (
+                "/Colors that is not the component count",
+                CompressedImage {
+                    filter: Some(ImageFilter::FlatePngPredictor {
+                        colors: 1,
+                        bits_per_component: 8,
+                        columns: 4,
+                    }),
+                    ..sound()
+                },
+            ),
+            (
+                "/BitsPerComponent that is not the depth",
+                CompressedImage {
+                    filter: Some(ImageFilter::FlatePngPredictor {
+                        colors: 3,
+                        bits_per_component: 4,
+                        columns: 4,
+                    }),
+                    ..sound()
+                },
+            ),
+            // 8.6.6.3.
+            (
+                "an empty palette",
+                CompressedImage {
+                    color_space: ImageColorSpace::Indexed {
+                        base: DeviceSpace::Rgb,
+                        lookup: b"",
+                    },
+                    filter: None,
+                    ..sound()
+                },
+            ),
+            (
+                "a palette that is not whole entries",
+                CompressedImage {
+                    color_space: ImageColorSpace::Indexed {
+                        base: DeviceSpace::Rgb,
+                        lookup: &LOOKUP[..8],
+                    },
+                    filter: None,
+                    ..sound()
+                },
+            ),
+            (
+                "a palette larger than the depth can index",
+                CompressedImage {
+                    bits_per_component: 1,
+                    color_space: ImageColorSpace::Indexed {
+                        base: DeviceSpace::Rgb,
+                        lookup: &LOOKUP,
+                    },
+                    filter: None,
+                    ..sound()
+                },
+            ),
+            (
+                "an indexed image at sixteen bits",
+                CompressedImage {
+                    bits_per_component: 16,
+                    color_space: ImageColorSpace::Indexed {
+                        base: DeviceSpace::Rgb,
+                        lookup: &LOOKUP,
+                    },
+                    filter: None,
+                    ..sound()
+                },
+            ),
+            // 8.9.6.4.
+            (
+                "a colour key of the wrong length",
+                CompressedImage {
+                    color_key_mask: Some(&[(0, 0)]),
+                    ..sound()
+                },
+            ),
+            (
+                "a colour key past the depth's range",
+                CompressedImage {
+                    color_key_mask: Some(&[(0, 0), (0, 0), (0, 256)]),
+                    ..sound()
+                },
+            ),
+            (
+                "a colour key whose minimum is above its maximum",
+                CompressedImage {
+                    color_key_mask: Some(&[(0, 0), (0, 0), (9, 8)]),
+                    ..sound()
+                },
+            ),
+            // 11.6.5.3.
+            (
+                "a soft mask with no width",
+                CompressedImage {
+                    soft_mask: Some(SoftMask {
+                        width: 0,
+                        height: 2,
+                        bits_per_component: 8,
+                        filter: None,
+                        data: b"xx",
+                    }),
+                    ..sound()
+                },
+            ),
+            (
+                "a soft mask with no data",
+                CompressedImage {
+                    soft_mask: Some(SoftMask {
+                        width: 4,
+                        height: 2,
+                        bits_per_component: 8,
+                        filter: None,
+                        data: b"",
+                    }),
+                    ..sound()
+                },
+            ),
+            (
+                "a soft mask at a depth outside Table 89",
+                CompressedImage {
+                    soft_mask: Some(SoftMask {
+                        width: 4,
+                        height: 2,
+                        bits_per_component: 7,
+                        filter: None,
+                        data: b"xx",
+                    }),
+                    ..sound()
+                },
+            ),
+            (
+                "a soft mask whose predictor claims three colours",
+                CompressedImage {
+                    soft_mask: Some(SoftMask {
+                        width: 4,
+                        height: 2,
+                        bits_per_component: 8,
+                        filter: Some(ImageFilter::FlatePngPredictor {
+                            colors: 3,
+                            bits_per_component: 8,
+                            columns: 4,
+                        }),
+                        data: b"xx",
+                    }),
+                    ..sound()
+                },
+            ),
+        ];
+
+        for (what, image) in cases {
+            assert!(
+                !builder.add_image(b"Im", &ImageData::Compressed(image)),
+                "{what} was accepted"
+            );
+        }
+    }
+
+    /// A refusal writes nothing at all — not even the part that was checked
+    /// before the part that failed.
+    ///
+    /// The soft mask is the last thing validated and the only thing that gets
+    /// an object of its own, so it is the one place an ordering mistake would
+    /// leave an unreferenced stream behind in every file that hit it.
+    #[test]
+    fn a_refused_image_leaves_no_orphan_stream_behind() {
+        let mut builder = DocumentBuilder::new();
+        assert!(!builder.add_image(
+            b"Im0",
+            &ImageData::Compressed(CompressedImage {
+                // Sound in every respect except its mask.
+                soft_mask: Some(SoftMask {
+                    width: 4,
+                    height: 0,
+                    bits_per_component: 8,
+                    filter: None,
+                    data: b"the mask that must not be written",
+                }),
+                ..sound()
+            })
+        ));
+        builder.add_page(10.0, 10.0, |_| {});
+
+        let bytes = builder.finish();
+        assert!(
+            !bytes
+                .windows(33)
+                .any(|w| w == b"the mask that must not be written"),
+            "the mask was written despite the image being refused"
+        );
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("/Subtype /Image"),
+            "and no image XObject exists at all"
+        );
+    }
+
+    /// A pre-compressed image with **no** filter is placed as raw samples and
+    /// declares none, which is the other half of the `maybe_compress` contract:
+    /// the rule is "a `/Filter` key means hands off", not "this variant means
+    /// hands off".
+    ///
+    /// It also records something a reader of this variant needs to know.
+    /// `WriteOptions::default()` has `compress: false`, and `finish` uses the
+    /// default — so the writer will *not* deflate these bytes on the way out.
+    /// Anything handing over a raster has to compress it itself or the samples
+    /// land in the file at full size, which is `png_embed`'s reason for
+    /// re-deflating the decoded route rather than leaving it to the writer.
+    #[test]
+    fn a_compressed_image_with_no_filter_is_placed_as_raw_samples() {
+        let samples: Vec<u8> = (0..3 * 64 * 64).map(|i| (i % 251) as u8).collect();
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_image(
+            b"Im0",
+            &ImageData::Compressed(CompressedImage {
+                width: 64,
+                height: 64,
+                bits_per_component: 8,
+                color_space: ImageColorSpace::DeviceRgb,
+                filter: None,
+                data: &samples,
+                color_key_mask: None,
+                soft_mask: None,
+            })
+        ));
+        builder.add_page(64.0, 64.0, |page| page.image(b"Im0", 0.0, 0.0, 64.0, 64.0));
+
+        let bytes = builder.finish();
+        assert!(
+            bytes.windows(samples.len()).any(|w| w == samples),
+            "the samples are in the file verbatim"
+        );
+        let doc = CosDocument::open(bytes).expect("it opens");
+        let found = (1..20u32)
+            .map(|num| ObjRef::new(num, 0))
+            .find(|r| doc.stream_decoded(*r).is_ok_and(|d| d == samples))
+            .expect("the image object");
+        let dict = doc
+            .get(found)
+            .ok()
+            .and_then(|o| o.as_dict().cloned())
+            .expect("a stream dictionary");
+        assert!(
+            !dict.contains_key(Name::FILTER),
+            "and no filter is claimed for them"
         );
     }
 

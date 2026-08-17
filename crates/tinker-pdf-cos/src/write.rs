@@ -459,6 +459,18 @@ pub(crate) fn build_encryption(
 /// rewritten and would usually make them larger. A result no smaller than the
 /// input is discarded for the same reason — an already-compressed image does
 /// not compress twice.
+///
+/// # The first of those is a contract, not an optimisation
+///
+/// [`crate::ImageData::Compressed`] depends on it. That variant's whole point
+/// is that a PNG's IDAT reaches a page **unmodified**, as `/FlateDecode` with
+/// `/Predictor 15`; a writer that re-deflated it would produce a stream whose
+/// declared filter describes the inner encoding and whose bytes are the outer
+/// one, which no reader can undo. The dictionary is the only signal available
+/// here — the bytes cannot be asked whether they are encoded — so the rule is
+/// exactly "a `/Filter` key means hands off", and
+/// `a_stream_that_already_declares_a_filter_is_handed_through_untouched`
+/// asserts it rather than leaving it to be re-derived from this comment.
 pub(crate) fn maybe_compress(
     data: &[u8],
     dict: &mut Dict,
@@ -1151,6 +1163,55 @@ mod tests {
         let mut out = Vec::new();
         write_object(&mut out, &object, &names());
         assert!(!out.is_empty());
+    }
+
+    /// The contract [`ImageData::Compressed`] rests on, asserted rather than
+    /// inferred from `maybe_compress`'s shape.
+    ///
+    /// The bytes below are highly compressible on purpose — a run of one value,
+    /// which `zlib_compress` shortens by an order of magnitude — so "no smaller
+    /// than the input" cannot be what spares them. Only the `/Filter` key can.
+    /// Both directions are checked, because a test that only pinned the
+    /// declining half would pass on a `maybe_compress` that had stopped
+    /// compressing anything at all.
+    #[test]
+    fn a_stream_that_already_declares_a_filter_is_handed_through_untouched() {
+        let table = names();
+        let data = vec![0x5Au8; 4096];
+
+        let mut bare = Dict::new();
+        let packed = maybe_compress(&data, &mut bare, &table, true);
+        assert!(
+            packed.len() < data.len() / 4,
+            "an unfiltered stream is compressed: {} bytes",
+            packed.len()
+        );
+        assert!(
+            bare.contains_key(Name::FILTER),
+            "and the writer records that it did"
+        );
+
+        let mut declared = Dict::new();
+        declared.insert(Name::FILTER, Object::Name(table.intern(b"FlateDecode")));
+        declared.insert(Name::DECODE_PARMS, {
+            let mut parms = Dict::new();
+            parms.insert(table.intern(b"Predictor"), Object::Int(15));
+            Object::Dict(parms)
+        });
+        let before = declared.clone();
+        let through = maybe_compress(&data, &mut declared, &table, true);
+
+        assert_eq!(through, data, "the bytes are the bytes that were handed in");
+        assert_eq!(
+            declared, before,
+            "and the dictionary is untouched, /DecodeParms included"
+        );
+
+        // The same holds for a filter that is not this writer's own, since the
+        // rule is the key's presence and never which codec it names.
+        let mut dct = Dict::new();
+        dct.insert(Name::FILTER, Object::Name(table.intern(b"DCTDecode")));
+        assert_eq!(maybe_compress(&data, &mut dct, &table, true), data);
     }
 }
 

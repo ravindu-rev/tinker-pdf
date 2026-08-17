@@ -59,6 +59,7 @@ pub mod object;
 pub mod outline;
 pub mod pages;
 pub mod parse;
+pub mod png_embed;
 pub mod script;
 pub mod security;
 pub mod text_string;
@@ -76,7 +77,10 @@ mod store;
 mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
-pub use build::{DocumentBuilder, ImageData, OutlineEntry, PageBuilder};
+pub use build::{
+    CompressedImage, DeviceSpace, DocumentBuilder, ImageColorSpace, ImageData, ImageFilter,
+    OutlineEntry, PageBuilder, SoftMask,
+};
 pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
@@ -98,6 +102,7 @@ pub use outline::{
 };
 pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
+pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use script::{Budget, Host, ScriptError};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use text_string::{decode_text_string, parse_date, Date};

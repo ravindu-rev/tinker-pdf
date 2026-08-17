@@ -2113,6 +2113,11 @@ impl PageResources {
             .as_bool()
             .unwrap_or(false);
 
+        // 8.9.6.4: colour-key masking. Read before the loop because it is a
+        // property of the image and not of a pixel, and applied inside it
+        // because it is a test on the *raw* samples.
+        let color_key = self.color_key(&dict, n, bpc);
+
         let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
         let mut alpha = Vec::new();
         let row_bits = (width as usize) * n * (bpc as usize);
@@ -2122,9 +2127,19 @@ impl PageResources {
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let mut components = Vec::with_capacity(n);
+                // "Shall be masked ... if min_i <= sample_i <= max_i for *all*
+                // i" — one component outside its range paints the pixel, which
+                // is why this starts true and is narrowed rather than widened.
+                let mut keyed = color_key.is_some();
                 for c in 0..n {
                     let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                     let value = read_bits(&data, bit, bpc);
+                    if let Some(ranges) = &color_key {
+                        // An absent range can never match, so a short array
+                        // masks nothing rather than everything.
+                        let (lo, hi) = ranges.get(c).copied().unwrap_or((1, 0));
+                        keyed &= value >= lo && value <= hi;
+                    }
                     let raw = match &space {
                         // An indexed space's component is the index itself.
                         ColorSpace::Indexed { .. } => f64::from(value),
@@ -2149,6 +2164,9 @@ impl PageResources {
                 } else {
                     let (r, g, b) = space.to_rgb(&components);
                     rgb.extend_from_slice(&[r, g, b]);
+                    if color_key.is_some() {
+                        alpha.push(if keyed { 0 } else { 255 });
+                    }
                 }
             }
         }
@@ -2161,6 +2179,42 @@ impl PageResources {
             stencil: is_mask,
             interpolate,
         })
+    }
+
+    /// 8.9.6.4's colour-key mask: one inclusive range of **raw** sample values
+    /// per colour component, before `/Decode`.
+    ///
+    /// `/Mask` has a second form — a reference to a stencil-mask image — which
+    /// is a different feature and is not read here. This returns `None` for it,
+    /// and for any array that is not exactly `2 x n` integers inside the depth's
+    /// range, because a mask that cannot be read has to leave the image opaque:
+    /// masking *more* than the file asked for erases pixels that were in it,
+    /// and there is no way to tell from the result that anything went wrong.
+    ///
+    /// Gap 29 is what this was built for. A PNG `tRNS` naming one fully
+    /// transparent colour or one run of palette indices maps onto exactly this
+    /// array, which is what lets such a file reach a page as its own compressed
+    /// bytes instead of being decoded into an `/SMask`.
+    fn color_key(&self, dict: &Dict, n: usize, bpc: u32) -> Option<Vec<(u32, u32)>> {
+        let value = self.doc.resolve_key(dict, self.doc.intern(b"Mask"));
+        let items = value.as_array()?;
+        if n == 0 || items.len() != n * 2 {
+            return None;
+        }
+
+        // "Each integer shall be in the range 0 to 2^BitsPerComponent - 1."
+        let ceiling = i64::from((1u32 << bpc.min(16)) - 1);
+        let mut ranges = Vec::with_capacity(n);
+        for pair in items.chunks_exact(2) {
+            let lo = self.doc.resolve(&pair[0]).as_int()?;
+            let hi = self.doc.resolve(&pair[1]).as_int()?;
+            if lo < 0 || hi < lo || hi > ceiling {
+                return None;
+            }
+            // Both are within `0 ..= ceiling`, which is at most `u32::MAX`.
+            ranges.push((lo as u32, hi as u32));
+        }
+        Some(ranges)
     }
 
     /// Decodes an inline image's samples (8.9.7).

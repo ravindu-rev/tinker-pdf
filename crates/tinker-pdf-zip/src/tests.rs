@@ -192,11 +192,19 @@ fn the_two_ways_a_directory_can_be_missing_are_reported_apart() {
     let absent = open(&absent_bytes).unwrap();
     let broken = open(&broken_bytes).unwrap();
 
-    assert!(absent.warnings().contains(&Warning::NoEndOfCentralDirectory));
-    assert!(!absent.warnings().contains(&Warning::CentralDirectoryUnreadable));
+    assert!(absent
+        .warnings()
+        .contains(&Warning::NoEndOfCentralDirectory));
+    assert!(!absent
+        .warnings()
+        .contains(&Warning::CentralDirectoryUnreadable));
 
-    assert!(broken.warnings().contains(&Warning::CentralDirectoryUnreadable));
-    assert!(!broken.warnings().contains(&Warning::NoEndOfCentralDirectory));
+    assert!(broken
+        .warnings()
+        .contains(&Warning::CentralDirectoryUnreadable));
+    assert!(!broken
+        .warnings()
+        .contains(&Warning::NoEndOfCentralDirectory));
 }
 
 #[test]
@@ -329,7 +337,10 @@ fn a_streamed_entry_read_through_the_directory_is_fine() {
 
 #[test]
 fn a_corrupt_entry_is_refused_rather_than_handed_over() {
-    let zip = archive(&[File::stored(b"page01.jpg", b"tampered")], Damage::CorruptCrc);
+    let zip = archive(
+        &[File::stored(b"page01.jpg", b"tampered")],
+        Damage::CorruptCrc,
+    );
     let mut a = open(&zip).unwrap();
 
     match a.read(0) {
@@ -467,7 +478,11 @@ fn a_zip_bomb_is_refused_by_name_rather_than_by_running_out_of_memory() {
         ..Limits::DEFAULT
     };
     let mut a = Archive::open(&zip, &limits).unwrap();
-    assert_eq!(a.entries().len(), 64, "the bomb was refused at open, not at read");
+    assert_eq!(
+        a.entries().len(),
+        64,
+        "the bomb was refused at open, not at read"
+    );
 
     let mut refused = None;
     for i in 0..64 {
@@ -525,7 +540,11 @@ fn the_fixtures_in_this_crate_spend_what_the_ledger_says() {
     a.read(1).unwrap();
 
     assert_eq!(a.entries().len(), 2);
-    assert_eq!(a.inflated(), data.len(), "only the deflated entry is charged");
+    assert_eq!(
+        a.inflated(),
+        data.len(),
+        "only the deflated entry is charged"
+    );
     assert!(
         a.inflated() <= 1024,
         "the ledger says no fixture here spends more than 1 024 bytes, and this one spent {}",
@@ -603,8 +622,14 @@ fn a_failed_decode_does_not_get_to_name_its_own_extent() {
     // The fixture only proves something if the decode really does fail here,
     // and really does stop where the descriptor was placed.
     let probe = tinker_pdf_filters::inflate_raw(&raw, &tinker_pdf_filters::Limits::new(1 << 20));
-    assert!(!probe.complete, "the fixture decoded cleanly and proves nothing");
-    assert_eq!(probe.end, 22, "the fixture stopped somewhere else: {probe:?}");
+    assert!(
+        !probe.complete,
+        "the fixture decoded cleanly and proves nothing"
+    );
+    assert_eq!(
+        probe.end, 22,
+        "the fixture stopped somewhere else: {probe:?}"
+    );
 
     let mut file = File::deflated(b"page01.jpg", &[0xA5; 16]);
     file.streamed = true;
@@ -643,7 +668,11 @@ fn a_truncated_streamed_entry_is_not_sized_from_where_the_decoder_gave_up() {
     let cut = zip.len() - 12;
     let mut a = open(&zip[..cut]).unwrap();
 
-    assert_eq!(a.entries().len(), 1, "the page vanished instead of being refused");
+    assert_eq!(
+        a.entries().len(),
+        1,
+        "the page vanished instead of being refused"
+    );
     assert_eq!(
         a.entries()[0].crc,
         None,
@@ -677,7 +706,10 @@ fn a_cp437_name_is_decoded_rather_than_mangled() {
 
 #[test]
 fn a_utf8_name_is_taken_at_its_word() {
-    let zip = archive(&[File::stored("ページ01.jpg".as_bytes(), b"body")], Damage::None);
+    let zip = archive(
+        &[File::stored("ページ01.jpg".as_bytes(), b"body")],
+        Damage::None,
+    );
     let a = open(&zip).unwrap();
     assert_eq!(a.entries()[0].name, "ページ01.jpg");
     assert!(!a.warnings().contains(&Warning::NameNotUtf8));
@@ -705,7 +737,10 @@ fn a_local_header_disagreeing_with_the_directory_warns_and_believes_the_director
     // Both copies exist and either can be wrong. The directory is the one
     // written last, after the data was actually compressed, so it is the one
     // believed — and the disagreement is said out loud rather than swallowed.
-    let mut zip = archive(&[File::stored(b"page01.jpg", b"twelve bytes")], Damage::None);
+    let mut zip = archive(
+        &[File::stored(b"page01.jpg", b"twelve bytes")],
+        Damage::None,
+    );
     let local = crate::le::find(&zip, 0, b"PK\x03\x04").unwrap();
     zip[local + 14..local + 18].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
 
@@ -771,7 +806,10 @@ fn truncating_a_good_archive_anywhere_never_panics() {
 
 #[test]
 fn flipping_any_single_byte_never_panics() {
-    let zip = archive(&[File::deflated(b"page01.jpg", &b"content ".repeat(16))], Damage::None);
+    let zip = archive(
+        &[File::deflated(b"page01.jpg", &b"content ".repeat(16))],
+        Damage::None,
+    );
     for i in 0..zip.len() {
         for bit in [0x01u8, 0x80] {
             let mut damaged = zip.clone();
@@ -784,4 +822,3 @@ fn flipping_any_single_byte_never_panics() {
         }
     }
 }
-

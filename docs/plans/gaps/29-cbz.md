@@ -1217,3 +1217,249 @@ milestone 2: `truncating_a_good_file_anywhere_never_panics` and
   will never reach this decoder at all, which is why the gap matters less here
   than it would elsewhere — but milestone 6's peak-memory measurement needs one,
   and so does the claim that the format works.
+
+## Progress — 17 August 2026, milestone 4
+
+**`ImageData::Compressed` has landed**, with the `png_embed` module that decides
+which PNGs use it, `maybe_compress`'s contract asserted rather than assumed,
+`#[non_exhaustive]` on both enums the plan names — and one thing the plan
+assumed the engine already had and it did not. Thirty-one tests, and the
+workspace stands at **1 813**.
+
+### The variant, and what it carries
+
+`ImageData::Compressed(CompressedImage)` in `crates/tinker-pdf-cos/src/build.rs`,
+plus `ImageColorSpace`, `DeviceSpace`, `ImageFilter` and `SoftMask` beside it.
+Every field the exit criterion asks for, and one design note per field where the
+obvious shape would have been wrong:
+
+| Field | Shape | Why this shape |
+| --- | --- | --- |
+| `width`, `height`, `bits_per_component` | plain numbers | Table 89's five depths, and nothing else accepted |
+| `color_space` | `DeviceGray`, `DeviceRgb`, `DeviceCmyk`, `Indexed { base, lookup }` | exactly what the writer can already emit; `/hival` is **derived from the lookup's length** rather than carried, because a `/hival` that disagrees with its own table is how a reader indexes past the end of one |
+| `filter` | `Option<ImageFilter>` — `Dct`, `Flate`, `FlatePngPredictor { colors, bits_per_component, columns }` | the parameters describe the *bytes*, not the image, so they are carried — but a set that disagrees with the image's geometry describes a different raster and `add_image` refuses it |
+| `color_key_mask` | `Option<&[(u32, u32)]>` | 8.9.6.4's inclusive ranges as pairs rather than a flat array, so a min and a max cannot be transposed by an off-by-one |
+| `soft_mask` | `Option<SoftMask>` | no colour-space field: `/SMask` **is** `/DeviceGray` (11.6.5.3), and a mask in another space is not a mask |
+
+`maybe_compress` gains the doc paragraph that says the declining branch is a
+contract this variant rests on, and
+`a_stream_that_already_declares_a_filter_is_handed_through_untouched` holds it in
+both directions — the highly compressible bytes it hands in are shortened by an
+order of magnitude without the key and untouched with it, so "no smaller than the
+input" cannot be what spared them.
+
+### The design decision this milestone took on its own
+
+**Where the chooser lives.** The plan puts CBZ page semantics in the facade and
+says why: they cannot live in `cos` "without teaching the object model about ZIP".
+Deciding whether a PNG passes through is not that decision — it involves no ZIP,
+it is the same job `build.rs` already does for a JPEG when it reads a frame
+header to fill an image dictionary, and `cos` already depends on the crate where
+`png_scan` lives. So `crates/tinker-pdf-cos/src/png_embed.rs` holds it, as
+`png_image(bytes, limits) -> PngImageData`, and milestone 5's `cbz.rs` calls it.
+Ruling 8 is untouched: it binds the *leaves*, and this is one level up.
+
+It also earns its place outside CBZ. `DocumentBuilder` can now embed a PNG, which
+is a thing an authoring layer should be able to do.
+
+**One rule is wider than the plan's table**, deliberately. The table says a
+`tRNS` "naming one fully transparent colour or index" passes through with
+`/Mask`. What 8.9.6.4 actually expresses is an inclusive *range*, so a contiguous
+run of transparent palette indices passes through too; one index is the case of a
+run of length one. The wider rule sends strictly fewer files to the decoder for
+the same picture, and `a_palette_transparency_is_a_range_only_when_it_is_one`
+holds all four shapes apart — one index, a run of two, two separate runs, and
+partial alpha.
+
+### The four things the design got wrong
+
+**The renderer had never read `/Mask`.** This is the important one. Plan 08's
+milestone 5 lists "color-key masking (8.9.6.4)" in scope and nothing in `crates/`
+reads the key — `grep` finds `/SMask`, `/ImageMask` and no `/Mask` at all. The
+routing table above therefore described a pass-through that would have rendered
+**fully opaque** while its decoded twin rendered transparent: two paths, two
+pictures, and only for files with transparency, which is the subset a fixture
+without a `tRNS` cannot see. It was found by writing the comparative test the
+exit criterion asks for and watching it fail.
+
+So `decode_image_at` now reads it: `2 x n` integers, compared against the *raw*
+samples before `/Decode`, masking a pixel only when **every** component is inside
+its own range. Which direction the reader errs in is not symmetric and the code
+says so — ignoring a mask shows pixels the file wanted hidden, which whoever is
+looking can see, while honouring a malformed one hides pixels that were in the
+file and the result is indistinguishable from an image that was always that
+shape. So an unreadable `/Mask` leaves the image opaque.
+
+**`/Predictor 12` is not a negative control.** It began life in
+`the_comparison_notices_when_a_predictor_parameter_is_wrong`'s list of wrong
+parameters and rendered the right picture. 7.4.4.4 is the reason: any predictor
+of 10 or more means "PNG prediction", and the filter actually used is the tag
+byte at the head of each row — so 12 and 15 decode identically and a reader that
+honoured 12 as a fixed Up filter would be wrong. It is now a positive assertion
+in the same test, which is a better use for it.
+
+**`WriteOptions::default()` has `compress: false`.** `DocumentBuilder::finish`
+uses the default, so a raster handed to the writer uncompressed lands in the file
+at full size — the *w x h x 3* a page this plan exists to avoid, moved out of
+memory and into the document. The decoded route therefore deflates its own
+samples in `png_embed` rather than leaving it to the writer, and
+`a_decoded_png_is_re_deflated_here_because_the_writer_will_not` measures both the
+buffer and the finished file.
+
+**A raster short by whole rows was reported complete — a milestone 3 defect.**
+Found by writing a test for `PngImageData::complete`, which is the flag milestone
+5 will build a page's honesty on. `predictor_decode` cannot see this and never
+could: `/Rows` is not one of Table 10's parameters, so an input that runs out
+exactly on a row boundary looks finished to it and comes back `complete`. The
+rows that never arrived stayed the output buffer's zeroes — a band of black
+across the bottom of the picture — with an empty warning list beside it. That is
+this plan's "page that half-draws with nothing saying the file was damaged",
+arriving on the decode side rather than the pass-through side.
+
+`png.rs` now compares each pass's declared extent against what the inflater
+produced and pushes `TruncatedInput`. It is the twin of milestone 3's
+`a_row_that_stops_mid_pixel_places_no_partial_pixel`: that one is a row that ends
+between two of its own bytes, this one is a row that never began, and the two
+warnings are complementary rather than duplicated. PngSuite's 162 well-formed
+files still decode complete with empty warning lists, which is what says the new
+check does not misfire.
+
+### Bounds: this milestone adds none, and here is the argument
+
+Gap 18a milestone 8's failure was a cap set above what its own inputs could
+reach. `png_embed.rs`'s module note carries the four candidates and why each
+would be decoration, in `tinker-pdf-zip`'s `limits.rs` form:
+
+- **Nothing on the pass-through.** Its whole allocation is a copy of the input's
+  own IDAT bytes, so the input length bounds it. There is no raster.
+- **Nothing on the decode.** `MAX_PNG_SAMPLES` refuses the geometry before a
+  buffer exists and the caller's `Limits::max_output` refuses it again under the
+  caller's own number. A third ceiling here would have to be kept in step with
+  two that already fire.
+- **Nothing on the split or the re-deflate.** Both are bounded by the raster
+  those two already allowed: the split writes exactly as many bytes as it reads,
+  and `zlib_compress` of *n* bytes is *n* plus a fixed header at worst.
+- **Nothing on the palette.** 11.2.3 caps it at `2^bit_depth` entries and the
+  scan enforces exactly that, so 768 bytes is the format's own ceiling.
+
+What this milestone adds instead is a **validation** surface, and every one of
+its refusals is exercised: nineteen ways a `CompressedImage` can fail to describe
+an image, each refused before anything is written — which matters because the
+soft mask is the only part that gets an object of its own, and an ordering
+mistake there would leave an unreferenced stream in every file that hit it.
+
+### The comparative test, and what it cannot prove
+
+The headline test is two different paths through one picture, which is the right
+shape — but gap 18 milestone 7's scar is a comparison whose two sides shared the
+defect, so `tests/png_passthrough.rs` opens by writing down which parts are
+shared. `predictors.rs` and `inflate.rs` are on both sides, so a Paeth bug would
+move both pictures together; `predictors.rs` has its own tests and PngSuite's
+`f*` files exercise the five filters against another encoder. `/DecodeParms`, the
+colour space, 13.12's sub-byte scaling, `/Mask` against `/SMask`, and Adam7 are
+**not** shared, and those are what the file is for.
+
+Sensitivity is then proved rather than asserted.
+`the_comparison_notices_when_a_predictor_parameter_is_wrong` hand-builds four
+files the writer would have refused — a `/Columns` one short, a `/Colors` of one,
+a `/BitsPerComponent` of four, a TIFF predictor — plus one with no
+`/DecodeParms` at all, and shows each renders differently from the decode.
+
+### The injection matrix
+
+Thirty-two defects, one at a time, each reverted before the next, the suite
+re-run with `--no-fail-fast`. Twenty-eight in the first pass, of which
+**twenty-seven were caught and one survived**; then four more to confirm the
+closures and the milestone-3 fix, of which **one survived the first version of
+the test written for it**. Both survivors were gaps in the *tests* rather than in
+the code, both were the same gap, and both are now closed.
+
+| Defect | Caught by |
+| --- | --- |
+| The `/DecodeParms` contract dropped, any parameters accepted | `a_compressed_image_that_does_not_describe_an_image_is_refused` |
+| `/Columns` no longer checked against the width | the same |
+| A palette larger than the depth can index accepted | the same |
+| A colour key past the depth's range accepted by the writer | the same |
+| Table 89's five depths no longer enforced | the same |
+| The soft mask written before it is validated | the same, and `a_refused_image_leaves_no_orphan_stream_behind` |
+| `/hival` written as the entry count rather than one less | `an_indexed_png_carries_its_palette_as_the_colour_space` |
+| An `/Indexed` sample counted as three components | the same, and two render comparisons |
+| An indexed file passed through as `/DeviceRGB` | the same, and two more |
+| `/Predictor` written as 1 rather than 15 | `a_passed_through_png_reaches_the_page_as_flate_with_predictor_fifteen`, and six render comparisons |
+| `/DecodeParms` omitted entirely | the same, and seven more |
+| `/Colors` taken as three rather than Table 11.1's channel count | `the_predictor_parameters_are_ihdrs_own_numbers`, and three more |
+| `/Columns` taken from the height | the same, and two more |
+| 8.9.6.4's ranges written high value first | `an_indexed_colour_key_and_a_soft_mask_are_one_picture` |
+| `maybe_compress` re-encodes a stream that declares a filter | `a_stream_that_already_declares_a_filter_is_handed_through_untouched`, and `an_already_filtered_stream_is_not_compressed_twice` |
+| An interlaced file passed through | `every_colour_type_takes_the_route_the_design_table_says`, and two more |
+| Colour types 4 and 6 passed through | the same, and six more |
+| Nothing passes through: everything decoded | sixteen tests |
+| Partial palette alpha treated as opaque rather than refused | `a_palette_transparency_is_a_range_only_when_it_is_one` |
+| Two separate transparent runs collapsed into one range | the same |
+| A `tRNS` key the depth cannot hold emitted anyway | `a_key_the_depth_cannot_hold_produces_no_mask_rather_than_an_illegal_one` |
+| The alpha split on a one-byte stride at every depth | `a_sixteen_bit_alpha_channel_splits_on_the_right_stride` |
+| Colour and alpha swapped by the split | the same, and four more |
+| The decoded route left uncompressed for the writer to handle | `a_decoded_png_is_re_deflated_here_because_the_writer_will_not`, and three more |
+| 8.9.6.4's `/Mask` ignored by the reader | `a_colour_key_leaves_the_page_showing_through`, and two more |
+| The colour key inverted: matching samples the only ones painted | the same, and two more |
+| One component inside its range enough to mask a pixel | `a_colour_key_and_a_soft_mask_are_one_picture` |
+| **A `/Mask` past the depth's range read anyway** | **survived** — now `a_mask_the_reader_cannot_read_leaves_the_image_opaque` |
+| **A `/Mask` of the wrong length read anyway** | **survived twice** — see below |
+| *Confirming:* only the last component decides | `a_colour_key_and_a_soft_mask_are_one_picture` |
+| *Confirming:* a raster short by whole rows reported complete | `a_raster_short_by_whole_rows_says_so`, and `a_decoded_image_reports_its_own_raster` |
+
+**Both survivors are the same failure, and it is worth naming.** No test could
+reach a malformed `/Mask` because `add_image` refuses to *write* one, so the only
+route to those branches is a hand-built file — which is what
+`a_mask_the_reader_cannot_read_leaves_the_image_opaque` now is. The wrong-length
+case then survived a *second* time, against the first version of that test, and
+the reason is sharper than the first: with the length check disabled only as many
+components as the array holds are read, and a leading pair matching nothing
+leaves the image opaque for the same reason a rejected array does. The fixture
+had `/Mask [0 0 0 0]` over samples of 17. It now has `[17 17 0 0]`, and the
+comment says why.
+
+Two fixture weaknesses were found the same way and fixed before the matrix could
+report them as passes. `a_colour_key_and_a_soft_mask_are_one_picture` originally
+used a key colour whose three values appeared nowhere else in the image, so no
+pixel existed where "every component in range" and "any component in range"
+disagree; it now carries decoys matching one and two of the three, and asserts
+they are there before comparing anything. And `assert_painted` counts distinct
+pixels with a floor per fixture, because a comparison of two blank pages passes.
+
+### The seams milestone 5 gets
+
+- **`png_image(bytes, &Limits) -> Result<PngImageData, PngError>`**, whose
+  `image()` borrows an `ImageData` to hand `add_image`. The value must outlive the
+  call, which is also what keeps the peak at one page's buffers rather than the
+  document's.
+- **`route()`** says which way a file went, and it is worth surfacing: a build
+  that quietly decoded everything would render every page correctly and be wrong
+  about the only thing that module is for.
+- **`complete()` and `warnings()`** are the two fields with no consumer yet, so
+  they are tested as though they had one — milestone 1's posture towards `end`.
+  `complete` distinguishes damage that costs *pixels* from damage that costs
+  none: a dropped `gAMA` with a broken CRC is reported and leaves the picture
+  whole, a file that stopped before IEND is not complete, and a decoded raster
+  carries its own short-row answer. Milestone 5's placeholder-page decision is
+  the caller these are for.
+- **A refused image writes nothing at all**, so `add_image` returning false is
+  the whole story and a page builder can retry with a placeholder.
+
+### Still owed
+
+- **No PNG in this repository comes from a real comic archive**, which milestone
+  3 said too and this milestone does not change.
+- **`/Mask`'s second form is still unread.** A `/Mask` that is a reference to a
+  stencil-mask image is a different feature (8.9.6.4's other half); it is
+  recognised as not-an-array and ignored, which leaves the image opaque, and
+  `a_mask_the_reader_cannot_read_leaves_the_image_opaque` pins that. Nothing in
+  gap 29 produces one.
+- **The two routes disagree about a malformed palette index.** PDF clamps an
+  index to `/hival` (8.6.6.3) and `png.rs` draws black and warns (11.2.3 read
+  through ruling 2), so a file whose samples index past its own PLTE renders as
+  the last entry on the pass-through and as black on the decode. Both are
+  defensible and neither is silent, but they are not the same picture, and no
+  well-formed file can reach it.
+- **The ledger sweep and the fuzz campaign** remain milestone 6's, as they were
+  after milestones 2 and 3. `docs/STATUS.md` still says 1 686.
