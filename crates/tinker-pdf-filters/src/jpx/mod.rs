@@ -40,14 +40,26 @@
 //!
 //! # What is built
 //!
-//! Milestones 1 to 6 of the plan: the container, the codestream headers,
-//! tier-2, tier-1, dequantisation, both inverse wavelets — the reversible 5/3
-//! and the irreversible 9/7 in fixed point — and Annex G and I's colour
-//! pipeline. What is left is the *PDF boundary* (milestone 7), which is not a
-//! stage of this crate: ISO 32000-1 8.9.5.4's rules about `/ColorSpace`,
+//! All of it, as this crate's half goes: the container, the codestream
+//! headers, tier-2, tier-1, dequantisation, both inverse wavelets — the
+//! reversible 5/3 and the irreversible 9/7 in fixed point — and Annex G and
+//! I's colour pipeline. ISO 32000-1 8.9.5.4's rules about `/ColorSpace`,
 //! `/BitsPerComponent` and `/SMaskInData` are `resources.rs`'s and no COS
-//! type crosses into here (ruling 8). So a JPX image still draws the
-//! placeholder in a rendered page, and this decoder is what stops doing so.
+//! type crosses into here (ruling 8).
+//!
+//! **What is refused is enumerated rather than defaulted**, and the list is
+//! the plan's: a progression order or code-block style this build does not
+//! implement, POC, RGN, any Part 2 marker, tile-parts out of order, a
+//! `colr` this build cannot map, precision above 16 bits, channels of
+//! differing bit depth, and any of the three budgets above. Every entry is
+//! reached by a test in `tests::refusals`, because "the refusals are the
+//! feature" is only a claim if something checks that they fire.
+//!
+//! Measured against gap 23's nineteen real JPX files: fourteen decode, four
+//! refuse by name, and one is never asked for — its image sits two form
+//! XObjects deep and a form's own `/Resources` are consulted nowhere in this
+//! engine, which is gap 11's recorded non-goal rather than this decoder's.
+//! That is a claim about nineteen files and not about JPEG 2000.
 
 pub(crate) mod boxes;
 pub(crate) mod codestream;
@@ -237,17 +249,6 @@ pub(crate) enum Refusal {
     /// exactly where being subtly out of step produces plausible coefficients
     /// rather than an error.
     SegmentationSymbol,
-    /// The codestream parsed and this build has not got the stage that comes
-    /// next.
-    ///
-    /// It named dequantisation, then the inverse wavelet, then the colour
-    /// pipeline, as milestones 4 to 6 each removed the one below it. What is
-    /// left is the stage nobody has specified: reconciling components of
-    /// *different* bit depths into the single output precision `JpxImage`
-    /// carries and `/BitsPerComponent` is. Scaling an 8-bit channel to sit
-    /// beside a 12-bit one is a choice about the picture's contrast, and a
-    /// decoder that made it silently would be choosing.
-    NotBuilt(&'static str),
 }
 
 impl Refusal {
@@ -265,15 +266,24 @@ impl Refusal {
             Self::Precision(_) => Warning::JpxPrecisionUnsupported,
             Self::Truncated(_) => Warning::JpxTruncated,
             Self::Budget(_) => Warning::JpxBudgetSpent,
-            // Structure, not a category of its own: a packet that does not
-            // end where the next begins is a codestream whose arithmetic
-            // disagrees with itself, which is what that warning already says.
-            Self::PacketLength => Warning::JpxStructureInvalid,
-            // Structure too, and for the same reason: a code-block whose
-            // cleanup pass does not end where D.5 says it does is a
-            // codestream disagreeing with itself.
-            Self::SegmentationSymbol => Warning::JpxStructureInvalid,
-            Self::NotBuilt(_) => Warning::JpxStageNotBuilt,
+            // The two integrity refusals keep their own warnings, where they
+            // both reported `JpxStructureInvalid` until milestone 8. That
+            // mapping was defensible in the small -- a codestream disagreeing
+            // with itself *is* structurally invalid -- and wrong in the large
+            // for two reasons.
+            //
+            // It made two public `Warning` variants that nothing could emit,
+            // which is a surface claiming a distinction it does not draw. And
+            // it threw away the distinction at exactly the boundary where a
+            // caller can act on it: a capability refusal says this build is
+            // short of a feature and a better build would draw the picture,
+            // while an integrity refusal says the *file* is inconsistent and
+            // no decoder should draw it. The `Refusal` enum has kept them
+            // apart from the milestone that wrote them, on the grounds that a
+            // reader should be able to tell them apart; a reader outside this
+            // crate is still a reader.
+            Self::PacketLength => Warning::JpxPacketLength,
+            Self::SegmentationSymbol => Warning::JpxSegmentationSymbol,
         }
     }
 }

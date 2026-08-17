@@ -3,39 +3,31 @@
 use super::writer::{boxed, segment, tile_part, Spec, SIGNATURE};
 use crate::jpx::codestream::{marker, refuse_marker, Progression, QuantStyle};
 use crate::jpx::{boxes, codestream, jpx_decode, JpxColour, Refusal};
-use crate::{Capability, FilterError, Limits, Warning};
+use crate::Limits;
 
 /// The bytes of a codestream, parsed, or the refusal it earned.
 fn parse(bytes: &[u8]) -> Result<codestream::Codestream<'_>, Refusal> {
     codestream::parse(bytes)
 }
 
+// `unfinishable()` stood here from milestone 1 to milestone 7: a codestream
+// this build parsed and still could not finish, whose contents had to be
+// *chosen* rather than assumed and moved three times as the decoder grew.
+// Until milestone 4 it was the minimal single-component fixture, because
+// nothing turned coefficients into samples; milestone 5 moved it to three
+// components, which needed the colour pipeline; milestone 6 moved it to three
+// components at 8, 8 and 12 bits, the one thing no milestone had specified.
+//
+// Milestone 8 retired it, because there is no longer a stage for it to name.
+// Differing bit depths are still refused -- `super::refusals` reaches them --
+// but as a *capability* this build does not have rather than as a decoder
+// that is part-built, which is the difference `Refusal::NotBuilt` used to
+// carry and no longer needs to. The pattern the fixture existed to
+// demonstrate outlives it: an assertion about what is missing has a
+// half-life, and the honest maintenance is to move it to whatever is
+// genuinely next, right up until nothing is.
+
 /// A minimal 4 x 4 greyscale stream with one empty tile-part.
-/// A codestream this build parses and still cannot finish.
-///
-/// It has to be *chosen* rather than assumed, and the choice moves as the
-/// decoder grows — this is its third home. Until milestone 4 it was the
-/// minimal single-component fixture, because nothing turned coefficients into
-/// samples. Milestone 5 moved it to a three-component stream, which needed the
-/// colour pipeline. That pipeline now exists, so what is left is the one thing
-/// no milestone has specified: three components at *different* bit depths,
-/// which `JpxImage`'s single precision has no answer for.
-///
-/// The pattern is worth naming: a test asserting "not built yet" has a
-/// half-life, and the honest maintenance is to move it to whatever is
-/// genuinely next rather than to keep it passing.
-fn unfinishable() -> Vec<u8> {
-    let spec = Spec {
-        components: vec![(8, false, 1, 1), (8, false, 1, 1), (12, false, 1, 1)],
-        ..Spec::default()
-    };
-    spec.codestream(&[(0, &EMPTY_PACKETS_3C)])
-}
-
-/// Two packets per resolution per component: three components, two
-/// resolutions, one layer.
-const EMPTY_PACKETS_3C: [u8; 6] = [0x00; 6];
-
 fn minimal() -> Vec<u8> {
     Spec::default().codestream(&[(0, &EMPTY_PACKETS)])
 }
@@ -967,79 +959,10 @@ fn no_prefix_or_corruption_panics() {
 }
 
 // --- the public boundary ------------------------------------------------
-
-/// The whole degradation contract in one test: every refusal is the named
-/// capability, and every one leaves exactly one warning saying which class it
-/// was. The caller draws the placeholder (ruling 2) and reports the reason
-/// (ruling 10).
-#[test]
-fn the_public_entry_point_refuses_with_the_capability_and_one_warning() {
-    let cases: [(&str, Vec<u8>, Warning); 5] = [
-        (
-            "a marker T.800 defines and this build does not",
-            {
-                let spec = Spec::default();
-                let mut b = spec.main_header();
-                b.extend_from_slice(&segment(marker::RGN, &[0, 0, 0]));
-                b.extend_from_slice(&marker::EOC.to_be_bytes());
-                b
-            },
-            Warning::JpxMarkerUnsupported,
-        ),
-        (
-            "a marker Table A.2 does not define",
-            {
-                let spec = Spec::default();
-                let mut b = spec.main_header();
-                b.extend_from_slice(&segment(0xFF74, &[0]));
-                b.extend_from_slice(&marker::EOC.to_be_bytes());
-                b
-            },
-            Warning::JpxMarkerUnknown,
-        ),
-        (
-            "a zero tile size",
-            Spec {
-                xtsiz: 0,
-                ..Spec::default()
-            }
-            .codestream(&[]),
-            Warning::JpxStructureInvalid,
-        ),
-        (
-            "precision above sixteen bits",
-            Spec {
-                components: vec![(24, false, 1, 1)],
-                ..Spec::default()
-            }
-            .codestream(&[]),
-            Warning::JpxPrecisionUnsupported,
-        ),
-        (
-            "a codestream this build parses and cannot yet finish",
-            unfinishable(),
-            Warning::JpxStageNotBuilt,
-        ),
-    ];
-    for (what, bytes, want) in cases {
-        let mut warnings = Vec::new();
-        let got = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
-        assert_eq!(
-            got,
-            Err(FilterError::Unsupported(Capability::Jpx)),
-            "{what} did not refuse with the capability"
-        );
-        assert_eq!(warnings, vec![want], "{what}");
-    }
-}
-
-/// Ruling 10: the warning set is closed and each variant is recorded at most
-/// once per decode, so a stream of a million bad markers cannot turn leniency
-/// into an allocation attack.
-#[test]
-fn a_decode_leaves_at_most_one_warning() {
-    let mut warnings = Vec::new();
-    let _ = jpx_decode(&unfinishable(), &Limits::new(1 << 20), &mut warnings);
-    let _ = jpx_decode(&unfinishable(), &Limits::new(1 << 20), &mut warnings);
-    assert_eq!(warnings, vec![Warning::JpxStageNotBuilt]);
-}
+//
+// The whole degradation contract -- every refusal reaching the caller as the
+// named capability with exactly one warning saying which class it was -- is
+// asserted in `super::refusals`, over the plan's refusal list entry by entry
+// rather than over the five cases that lived here while the list was still
+// being built. Two tests moved there with milestone 8, and this note is where
+// a reader looking for them lands.

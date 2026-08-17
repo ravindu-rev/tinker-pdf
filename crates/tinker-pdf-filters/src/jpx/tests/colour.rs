@@ -554,10 +554,7 @@ fn a_channel_arrangement_this_build_cannot_map_is_refused_by_name() {
     for (what, h, precisions) in cases {
         let got = colour::plan(Some(h), &components(precisions));
         assert!(
-            matches!(
-                got,
-                Err(Refusal::Structure(_) | Refusal::Feature(_) | Refusal::NotBuilt(_))
-            ),
+            matches!(got, Err(Refusal::Structure(_) | Refusal::Feature(_))),
             "{what} was not refused: {got:?}"
         );
     }

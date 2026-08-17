@@ -21,6 +21,7 @@
 mod bounds;
 mod colour;
 mod headers;
+mod refusals;
 mod tier1;
 mod tier2;
 mod wavelet;

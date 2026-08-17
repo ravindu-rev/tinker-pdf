@@ -176,6 +176,14 @@ pub enum Warning {
     // JPEG 2000 decode is a plausible photograph, and this codec has no
     // half-measure that is better than the honest grey rectangle. The tenth,
     // `JpxCoefficientClamped`, is the one leniency rather than a refusal.
+    //
+    // Every one of the ten is reachable, and `jpx::tests::refusals` asserts
+    // it by decoding a codestream that produces each. Milestone 8 found three
+    // that were not: `JpxStageNotBuilt` was removed with the last stage it
+    // could name, and `JpxPacketLength` and `JpxSegmentationSymbol` were
+    // being reported as `JpxStructureInvalid`, so the two integrity checks
+    // the plan calls the cheapest real defence in the decoder were invisible
+    // from outside the crate.
     /// JPX: a marker T.800 Table A.2 defines and this build does not decode —
     /// RGN, POC, PPM, PPT or CRG. Never skipped, because a skipped RGN draws
     /// a bright rectangle and a skipped POC mis-parses every packet after it.
@@ -208,10 +216,6 @@ pub enum Warning {
     /// JPX: one of `MAX_JPX_SAMPLES`, `MAX_JPX_CODE_BLOCKS` or
     /// `MAX_JPX_WORK` was spent, or the caller's own output ceiling was.
     JpxBudgetSpent,
-    /// JPX: the codestream was understood and a stage this build has not got
-    /// comes next. Milestones 4 to 6 of `docs/plans/gaps/18a-jpx-decoder.md`:
-    /// dequantisation, the inverse wavelet, the colour pipeline.
-    JpxStageNotBuilt,
     /// JPX: **a leniency, not a refusal.** A dequantised coefficient asked
     /// for a magnitude past T.800 E.1's nominal dynamic range plus one guard
     /// bit and was clamped to it before it reached a plane.
@@ -262,7 +266,6 @@ impl Warning {
             Self::JpxPacketLength => "jpx-packet-length",
             Self::JpxSegmentationSymbol => "jpx-segmentation-symbol",
             Self::JpxBudgetSpent => "jpx-budget-spent",
-            Self::JpxStageNotBuilt => "jpx-stage-not-built",
             Self::JpxCoefficientClamped => "jpx-coefficient-clamped",
         }
     }
@@ -301,7 +304,6 @@ impl fmt::Display for Warning {
             Self::JpxPacketLength => "JPX packet length does not reach the next packet",
             Self::JpxSegmentationSymbol => "JPX segmentation symbol was not 1010",
             Self::JpxBudgetSpent => "JPX decode budget spent",
-            Self::JpxStageNotBuilt => "JPX decoder stage not built in this version",
             Self::JpxCoefficientClamped => "JPX coefficient clamped to E.1's dynamic range",
         };
         f.write_str(s)

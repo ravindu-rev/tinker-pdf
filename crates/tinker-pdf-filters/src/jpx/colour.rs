@@ -296,18 +296,28 @@ pub(crate) fn plan(header: Option<&Jp2Header>, components: &[Component]) -> Resu
 
     // One precision for the whole output, because `JpxImage` carries one and
     // ISO 32000-1's `/BitsPerComponent` is one number. Normalising channels of
-    // different depths against each other is a choice no milestone has made,
-    // and a decoder that picked one would be picking the picture's contrast --
-    // so this is the stage that is genuinely not built, rather than a feature
-    // refused on principle.
+    // different depths against each other means scaling an 8-bit channel to
+    // sit beside a 12-bit one, which is a choice about the picture's contrast
+    // and not an arithmetic consequence of anything -- so it is refused by
+    // name, in the same class as a `colr` method this build cannot map and for
+    // the same reason: a decoder that picked silently would be picking.
+    //
+    // It carried `Refusal::NotBuilt` until milestone 8. That variant meant
+    // "the codestream parsed and a *stage* of this decoder comes next", and it
+    // named dequantisation, then the wavelet, then the colour pipeline as
+    // milestones 4 to 6 removed the one below it. Every stage now exists, so
+    // the variant went with them: what is left here is a capability this build
+    // does not have, which is what `Feature` is, and keeping a stage-shaped
+    // refusal for it would have gone on telling a reader that some part of the
+    // decoder was missing.
     let precision = colour[0].precision;
     if colour
         .iter()
         .chain(opacity_channel.as_ref())
         .any(|c| c.precision != precision)
     {
-        return Err(Refusal::NotBuilt(
-            "a common precision for channels of differing depth",
+        return Err(Refusal::Feature(
+            "channels of differing bit depth, which one output precision cannot carry",
         ));
     }
 
