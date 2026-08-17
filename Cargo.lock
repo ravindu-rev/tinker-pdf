@@ -365,6 +365,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinker-pdf-zip"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-filters",
+]
+
+[[package]]
 name = "tpdf"
 version = "0.0.1"
 dependencies = [

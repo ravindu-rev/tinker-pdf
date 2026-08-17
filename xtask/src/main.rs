@@ -157,6 +157,32 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// and the graph cannot cycle, because `filters` depends on nothing. The
 /// runtime half is optional and disappears with `cmap-predefined`; the
 /// build-time half is unconditional and never reaches a binary.
+///
+/// **`zip -> filters` is the third amendment, and the second leaf-to-leaf
+/// edge.** A ZIP entry stored with method 8 is raw RFC 1951 by definition
+/// (APPNOTE 4.4.5), and every entry carries a CRC-32 the format requires be
+/// checked. Both already exist in `filters` — `inflate_raw` was made public
+/// for exactly this caller, and `crc32` was written there because PNG needs
+/// the identical routine for its chunk checksums. The alternatives are worse
+/// in the two available directions: re-implementing DEFLATE inside the ZIP
+/// crate is a second copy of the most intricate code in the tree, and moving
+/// the archive reader into `filters` puts a container format inside a crate
+/// whose entire subject is PDF stream filters.
+///
+/// The same three properties that made `font -> filters` acceptable hold
+/// here. It points from one leaf to another rather than upward, so the
+/// layering is not inverted. It cannot cycle, because `filters` depends on
+/// nothing. And a sibling workspace crate is not a third-party dependency, so
+/// ruling 3 and CONTRIBUTING rule 1 are untouched — which is the whole point:
+/// gap 29 exists so that reading a comic archive adds no crate from outside
+/// this repository.
+///
+/// **`zip` is a leaf despite having a dependency**, on the same reading that
+/// makes `font` and `color` leaves: what a leaf means here is bytes in,
+/// values out, no PDF types, independently fuzzable. `tinker-pdf-zip` knows
+/// nothing of documents, pages or objects; it turns an archive into names and
+/// byte ranges. Gap 29's page semantics live in the facade for precisely that
+/// reason.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -164,6 +190,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-filters", &[]),
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &["tinker-pdf-filters"]),
+    ("tinker-pdf-zip", &["tinker-pdf-filters"]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
@@ -197,6 +224,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-raster",
             "tinker-pdf-filters",
             "tinker-pdf-color",
+            "tinker-pdf-zip",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

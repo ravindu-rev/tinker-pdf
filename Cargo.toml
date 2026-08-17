@@ -11,6 +11,7 @@ resolver = "2"
 members = [
   "crates/tinker-pdf-cos",
   "crates/tinker-pdf-filters",
+  "crates/tinker-pdf-zip",
   "crates/tinker-pdf-crypto",
   "crates/tinker-pdf-font",
   "crates/tinker-pdf-color",
@@ -59,6 +60,7 @@ authors = ["tinker-pdf contributors"]
 [workspace.dependencies]
 tinker-pdf-cos = { path = "crates/tinker-pdf-cos", version = "0.0.1", default-features = false }
 tinker-pdf-filters = { path = "crates/tinker-pdf-filters", version = "0.0.1" }
+tinker-pdf-zip = { path = "crates/tinker-pdf-zip", version = "0.0.1" }
 tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto", version = "0.0.1" }
 tinker-pdf-font = { path = "crates/tinker-pdf-font", version = "0.0.1", default-features = false }
 tinker-pdf-color = { path = "crates/tinker-pdf-color", version = "0.0.1" }

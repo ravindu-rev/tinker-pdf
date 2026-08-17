@@ -791,3 +791,155 @@ gap 18's milestone 6 is why it was taken.
   names are milestone 6's. A `tinker-pdf-zip` that appears without the
   `ALLOWED` edge and its written argument is the failure that file's own
   commentary records.
+
+## Progress — 17 August 2026, milestone 2
+
+**`tinker-pdf-zip` has landed**, as the seventh leaf: `cp437.rs`, `le.rs`,
+`limits.rs`, `local.rs`, `dir.rs`, `scan.rs`, `lib.rs`, plus a test-only
+archive writer. Forty-seven tests, and the workspace stands at **1 733**.
+
+### The two things the design got wrong, found by writing the tests
+
+**A data descriptor's width cannot be recovered from its bytes.** The first
+version of `parse_descriptor` tried the 32-bit shape and then the 64-bit one
+and kept whichever agreed with the length the caller already knew — and the
+field comment on `LocalHeader::zip64` said, in as many words, that this was
+*stronger* than trusting APPNOTE 4.3.9.2's flag, because a writer that sets
+the flag wrongly would still be read correctly.
+
+It is not stronger; it is wrong, and wrong in the ordinary case rather than the
+exotic one. A 64-bit little-endian 7 begins with the same four bytes as a
+32-bit 7. So for **every** entry under 4 GB, reading a 64-bit descriptor as
+32-bit succeeds, agrees with the expected length, and silently takes the high
+half of the compressed size — a zero — as the uncompressed size. Trying both
+and keeping whichever matches therefore always keeps the 32-bit answer, and is
+wrong exactly when the width mattered.
+
+The flag now chooses the width and validation confirms it, with the declared
+width tried first and the other kept as a fallback for a writer that flagged
+it wrongly. A field the compiler had reported as never read was not dead code
+to be allowed away; it was the one input the function needed.
+
+**`NoEndOfCentralDirectory` was a variant nothing ever pushed.** Recovery
+reported only that it had happened, not which of the two ways the directory
+was missing — a writer that stopped before appending it, or a record that is
+there and points nowhere. Both fall back to the scan, and a caller reporting
+to a human wants to say which. `dir.rs` now pushes it, and
+`the_two_ways_a_directory_can_be_missing_are_reported_apart` holds the two
+apart in both directions.
+
+### The bounds, and that each one fires
+
+`limits.rs` carries the three numbers per constant that gap 18 milestone 8
+made mandatory — what the fixtures here actually spend, what a plausible real
+archive spends, and the cap — and the first of the three is **measured** by
+`the_fixtures_in_this_crate_spend_what_the_ledger_says` reading
+`Archive::inflated()` back, so the ledger cannot drift away from the code in
+silence.
+
+| Constant | Fixtures | A 200-page comic | Cap | Proved to fire by |
+| --- | --- | --- | --- | --- |
+| `MAX_ZIP_ENTRIES` | 6 | 202 | 16 384 | building the real 16 385-entry archive |
+| `MAX_ZIP_ENTRY_BYTES` | 1 024 | ~48 MB | 128 MiB | an entry declaring one byte past it |
+| `MAX_ZIP_INFLATED` | 1 024 | 0 stored, ~300 MB deflated | 1 GiB | a 64-entry bomb crossing a lowered total |
+| `MAX_ZIP_NAME_LEN` | 24 | ~42 | 1 024 | a 1 524-byte name truncating and warning |
+
+There is deliberately **no** cap on path depth, and `limits.rs` says why:
+nothing here touches a filesystem, so depth bounds no allocation, no recursion
+and no work. A constant for it could never fire, which is gap 18 milestone 8's
+failure reached from the other direction.
+
+### What the tests actually catch
+
+Twelve defects injected one at a time, each reverted before the next, the
+suite re-run with `--no-fail-fast`. **All twelve are caught; none survived.**
+
+| Defect | Caught by |
+| --- | --- |
+| Descriptor width guessed rather than declared | `a_descriptor_is_read_in_whichever_of_its_four_shapes_it_has` |
+| CRC-32 check dropped | `a_corrupt_entry_is_refused_rather_than_handed_over` |
+| Stored entry copied instead of borrowed | `a_stored_entry_is_borrowed_and_a_deflated_one_is_owned` |
+| Declared uncompressed size trusted, not bounded | `an_entry_declaring_more_than_the_per_entry_cap_is_refused_before_it_allocates` |
+| Archive inflation total never spent | `a_zip_bomb_is_refused_by_name...`, and the ledger test |
+| Entry cap warns instead of refusing | `an_archive_with_more_entries_than_the_cap_is_refused_by_name` |
+| Over-long name drops the entry | `a_name_past_the_cap_is_truncated_and_says_so` |
+| Scan resumes inside an entry's data | `image_bytes_containing_a_local_signature_do_not_become_an_entry` |
+| Length check dropped, only the checksum left | `a_short_entry_is_refused_for_its_length_rather_than_its_checksum` |
+| Streamed stored entry sized by a guess | `a_streamed_stored_entry_is_listed_and_then_refused` |
+| `end` trusted when the decode did not complete | `a_failed_decode_does_not_get_to_name_its_own_extent` |
+| Multi-disk archive read in part | `a_multi_disk_archive_is_refused_rather_than_read_in_part` |
+
+Three of those needed a test written for them, and two of the three are worth
+recording because the *first* attempt did not work.
+
+**The length check looked redundant and is not.** A short entry fails the CRC
+too, so both versions refuse and a test asserting only "refused" cannot tell
+them apart — which is precisely what the matrix reported. The two say
+different things to whoever reads the error: "this archive promised 5 000
+bytes and produced 4 000" points at a truncated file and "checksum wrong"
+points at a corrupted one. The more specific one has to come first, and now a
+test holds it there.
+
+**The `complete` guard is not observable from an ordinary truncation.** On a
+truncated stream the decoder consumes the whole remaining file, so a
+descriptor read from `end` runs off the end and fails whether or not the guard
+is there — the first version of that test proved nothing, and the matrix said
+so. The guard earns its place against an archive *built* for it, because
+`expected_compressed` is derived from the same `end` it is meant to check, so
+the validation is self-consistent and confirms a number it took on trust. The
+fixture is a complete non-final stored block, one byte the decoder must reject
+as a block header (BTYPE=11 is reserved), and then a well-formed unsigned
+descriptor at exactly the offset the failed decode reports, declaring exactly
+that offset as its compressed size. `end` counts the byte the decoder choked
+on rather than the one before it, which the fixture had to be corrected for.
+
+### The seams milestone 1 named, and where each stands
+
+- **`inflate_raw`, never `flate_decode`.** Held, and tested rather than
+  assumed: `a_deflate_stream_beginning_with_a_stored_block_decodes` builds a
+  raw stream whose first two bytes are `08 1D` — a valid CM, a multiple of 31,
+  FDICT clear — so it passes every test the sniff applies, and asserts the
+  entry still decodes to its twenty-nine bytes.
+- **`end` only when `complete`.** Held, and now the one thing in this
+  milestone that needed a purpose-built adversarial fixture to prove.
+- **The per-entry ceiling is not the total.** Held. `read_deflated` passes
+  the declared size as `inflate_raw`'s ceiling and spends it against a
+  separate archive budget; `stored_entries_do_not_spend_the_inflation_total`
+  pins that stored data charges nothing, because it allocates nothing.
+- **The CRC is compared, not stored — but not resumably.** Milestone 1
+  expected an entry checksummed *as* it inflated. `inflate_raw` returns a
+  finished `Vec` rather than a stream of chunks, so there is no interleaving
+  available without giving it a callback shape no other caller wants, and a
+  stored entry has no inflation to interleave with at all. It is one pass over
+  the finished bytes and the only pass anything makes over them. `Crc32`'s
+  resumable form stays worth having for the PNG decoder, whose chunks arrive
+  separately by construction. The reason now lives beside the code.
+- **The DAG amendment and `deny.toml`.** Both landed here rather than being
+  left to milestone 6. `ALLOWED` gains `tinker-pdf-zip -> tinker-pdf-filters`
+  with its argument written out in the house style: it is the third amendment
+  and the second leaf-to-leaf edge, it cannot cycle because `filters` depends
+  on nothing, and a sibling workspace crate is not a third-party dependency.
+  `deny.toml` gains eleven names — `zip` and its neighbours, `tar`, and the
+  CRC-32 crates — with the note that `zip` is the one CONTRIBUTING rule 1
+  would have been most quietly broken by.
+- **The nineteenth fuzz target**, `zip_archive`, whose control byte picks the
+  *bounds* rather than the input, deliberately away from the shipped defaults:
+  a 1 GiB total cannot fire inside a fuzz iteration, so a target using it
+  would leave the crate's only work cap unexplored. It asserts four things
+  past "it did not panic" — a successful read produced exactly the declared
+  length, it spent no more than the total, an entry with no checksum was
+  refused rather than read, and the entry list did not change under reading.
+
+Two cheap versions of the fuzzer run on every `cargo test`, because a panic
+introduced today should not wait on a fuzz session:
+`truncating_a_good_archive_anywhere_never_panics` and
+`flipping_any_single_byte_never_panics`.
+
+### Still owed
+
+Every archive here is hand-built from APPNOTE's field layouts. **There is no
+`.cbz` in this repository to round-trip**, and gap 17 is the precedent for
+saying so plainly rather than implying coverage that does not exist. A real
+archive from a real archiver remains worth acquiring before milestone 6
+claims the format works.
+

@@ -1,0 +1,25 @@
+[package]
+name = "tinker-pdf-zip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "ZIP containers, hand-rolled: end-of-central-directory, central directory, local-header recovery, Zip64, stored and deflated entries, CRC-32 checked on every one. No PDF types"
+
+[dependencies]
+# Raw DEFLATE and CRC-32, and nothing else from anywhere. A ZIP entry stored
+# with method 8 is RFC 1951 with no wrapper (APPNOTE 4.4.5), so this crate
+# calls `inflate_raw` and never `flate_decode` — the sniffing door would raise
+# a `RawDeflateFallback` on every deflated entry in every archive. The other
+# half of the edge is the checksum: the pass-through design gap 29 turns on
+# means nothing in this engine ever looks at an entry's bytes again, so the
+# archive's own CRC is the only integrity evidence that will ever exist for
+# them, and it lives in the same crate as the inflater.
+#
+# A leaf that takes a dependency is unusual here and it is deliberate: it is
+# the second leaf-to-leaf edge, written up beside `font -> filters` in
+# `xtask`'s ALLOWED. Plan 00's "bytes-in/values-out with zero PDF types" is
+# about PDF vocabulary, not about arity, and there is none of it below.
+tinker-pdf-filters = { workspace = true }

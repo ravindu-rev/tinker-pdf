@@ -70,6 +70,24 @@ deny = [
   { name = "image" },
   { name = "png" },
   { name = "fax" },
+  # Archive containers and checksums. `zip` is the one CONTRIBUTING rule 1
+  # would have been most quietly broken by: gap 29 reads comic archives, and
+  # reaching for the obvious crate would have added a third-party format
+  # implementation to an engine whose entire claim is that it has none. The
+  # CRC-32 crates sit here for the same reason at a smaller scale -- it is a
+  # sixty-line table-driven routine, and `tinker-pdf-filters` has it because
+  # both ZIP entries and PNG chunks need the identical polynomial.
+  { name = "zip" },
+  { name = "zip-extract" },
+  { name = "async_zip" },
+  { name = "rc-zip" },
+  { name = "tar" },
+  { name = "crc32fast" },
+  { name = "crc" },
+  { name = "crc-any" },
+  { name = "adler" },
+  { name = "adler2" },
+  { name = "adler32" },
   # Fonts and text shaping.
   { name = "ttf-parser" },
   { name = "rustybuzz" },
