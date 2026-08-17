@@ -715,3 +715,79 @@ meaningful sense: EPUB is also a ZIP, and the ZIP is the smallest part of it.
 | `Document` is made an enum by whoever writes `cbz.rs`, and `cos()` becomes fallible | Decided here with the argument written out, before any file exists — the shape gap 18's risk table warned about for the fixed-point width |
 | `zip` or `crc32fast` is added as a dependency because the rule lived only in prose | Both denied by name in milestone 6, in the file whose own comment says that is exactly how the rule became enforceable |
 | An `As built` that reads as "comic archives work now" | The claim this plan can support is JPEG and PNG in a ZIP; every other container and every other image format is refused **by name**, and the `As built` says which of gap 23's corpora contained one (none of them can) |
+
+## Progress — 17 August 2026
+
+**Milestone 1 has landed.** One commit, in the filters crate, and nothing
+consumes any of it yet — which is the point rather than an oversight, and the
+reason is the last row but three of the risk table above.
+
+- **`inflate_raw` is public**, as
+  `inflate_raw(input: &[u8], limits: &Limits) -> RawInflated`, with the result
+  carrying `data`, `complete`, `capped`, `end` and `warnings`. The private
+  byte layer it wraps is now called `raw_bytes`, which is the name every other
+  filter in that crate gives its own, and `flate_bytes` calls it under the new
+  name and is otherwise untouched: every removed line in `inflate.rs` is one
+  of the five occurrences of the old identifier.
+- **`end` is documented as a ceiling and as conditional.** DEFLATE finishes on
+  a bit boundary and every container that carries it resumes on a byte one, so
+  a final block ending mid-byte counts that whole byte; and `end` means what
+  the doc comment says **only when `complete`**, because a truncated, corrupt
+  or capped decode stopped where this decoder gave up rather than where the
+  stream ends.
+- **`crc32` and `Crc32`**, in `crc32.rs`, table-driven from a `const fn` that
+  derives the 256 entries from `0xEDB8_8320` at compile time. The three
+  published values are pinned, and a second implementation written the other
+  way round — most-significant-bit-first over the unreflected `0x04C1_1DB7` —
+  is asserted to agree over every single byte and thirteen lengths, because a
+  polynomial reflected the wrong way produces self-consistent wrong answers
+  that no amount of testing `crc32` against itself can see.
+- **`flate_decode` is unchanged**, which is a claim the diff supports rather
+  than a promise: the sniff, the fallback, the Adler check and all 1 666
+  existing tests are as they were. This milestone adds a door; it does not
+  move the one that was there.
+
+Twenty tests, in `crates/tinker-pdf-filters/tests/containers.rs` and beside
+the code, and the workspace stands at **1 686**. The three costs the design
+section predicts are each demonstrated: a `RawDeflateFallback` on a plain
+deflated entry, a `TrailingGarbage` on one followed by a data descriptor, and
+the mis-decode — `08 1D 00 E2 FF ...` is committed as `ZLIB_SNIFF_WITNESS`
+and the two doors return two different twenty-nine-byte answers from it. The
+sharpest part of that last one was not predicted here and is worth recording:
+`flate_decode` does not warn that it took the zlib branch, because
+`RawDeflateFallback` is pushed on the *other* path, so its only warning on
+the witness is `TruncatedInput` — about a stream that is not truncated.
+
+`end` is the field with no consumer, so it is tested as though it had one.
+Every assertion is `input[end..]`, against the bytes that follow the stream,
+rather than against a number: a data descriptor is what milestone 2 will find
+with it. Injecting an off-by-one **in the public wrapper alone**, in both
+directions, fails six tests in that file and **nothing else in the
+workspace** — which is the measurement this milestone existed to take, and
+gap 18's milestone 6 is why it was taken.
+
+### What milestone 2 needs
+
+- **`tinker-pdf-zip` calls `inflate_raw` and never `flate_decode`.** That is
+  the whole reason this milestone is separate, and it is a claim worth a test
+  of its own rather than a convention: an entry decoded through the sniffing
+  door is detectable from outside, because it arrives carrying a
+  `RawDeflateFallback` that nothing did.
+- **Read `end` only when `complete` is true.** A capped decode reports where
+  the ceiling stopped it, and a consumer that treated that as a stream end
+  would look for the data descriptor inside the entry's own bytes.
+  `a_capped_decode_says_so_rather_than_reporting_a_stream_end` asserts the
+  distinction from this side; the entry reader owes the other half.
+- **`Limits::max_output` here is a per-entry cap and is not
+  `MAX_ZIP_INFLATED`.** The bounds table says why in as many words. The total
+  is the ZIP reader's to keep, spent across every entry and never refunded,
+  and passing a per-entry ceiling into `inflate_raw` does not create one.
+- **The CRC is compared, not stored.** `Crc32` is resumable so that an entry
+  can be checksummed as it is inflated rather than after; `crc32` over a
+  reassembled buffer is the same answer and costs a second pass over data the
+  pass-through design says will be hundreds of megabytes.
+- **The DAG amendment and `deny.toml` are still owed.** Neither moved here:
+  `xtask -- dag` is green because no node was added, and the eleven denied
+  names are milestone 6's. A `tinker-pdf-zip` that appears without the
+  `ALLOWED` edge and its written argument is the failure that file's own
+  commentary records.

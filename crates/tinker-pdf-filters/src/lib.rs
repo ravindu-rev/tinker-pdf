@@ -14,11 +14,21 @@
 //! condition leaves a typed [`Warning`]. [`FilterError`] is reserved for the
 //! caller holding the API wrong ([`FilterError::BadParams`]) and for deferred
 //! capabilities ([`FilterError::Unsupported`]) — decisions, not data.
+//!
+//! Two entry points here are not stream filters at all, and are exported for
+//! the *container* formats gap 29 begins — a CBZ is a ZIP of images, and no
+//! PDF stream is either. [`inflate_raw`] is RFC 1951 with no wrapper and none
+//! looked for, which is what a caller that knows what it holds needs instead
+//! of [`flate_decode`]'s sniff; [`crc32`] is the checksum ZIP puts on an entry
+//! and PNG puts on a chunk. Both live here because this is where inflate and
+//! the PNG row filters already are, and neither changes anything a `/Filter`
+//! name reaches.
 
 #![forbid(unsafe_code)]
 
 mod ascii;
 mod ccitt;
+mod crc32;
 pub mod deflate;
 mod inflate;
 mod jbig2;
@@ -32,7 +42,9 @@ mod runlength;
 use core::fmt;
 
 pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
+pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
+pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{decode as jbig2_decode, Jbig2Params};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use jpx::{jpx_decode, JpxColour, JpxImage};

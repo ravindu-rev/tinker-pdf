@@ -3,7 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_filters::{flate_decode, Limits, PredictorParams};
+use tinker_pdf_filters::{flate_decode, inflate_raw, Limits, PredictorParams};
 
 fuzz_target!(|data: &[u8]| {
     let limits = Limits::new(1 << 20);
@@ -18,4 +18,17 @@ fuzz_target!(|data: &[u8]| {
         columns: 7,
     };
     let _ = flate_decode(data, &limits, Some(&predictor));
+
+    // And through the other door, because there are two now. `inflate_raw`
+    // skips the zlib sniff, so it reaches the state machine on inputs
+    // `flate_decode` hands to the wrapper first, and it is the entry point a
+    // ZIP entry's attacker-chosen bytes will arrive at from gap 29's milestone
+    // 2 onwards.
+    let raw = inflate_raw(data, &limits);
+    assert!(raw.data.len() <= limits.max_output);
+    // `end` indexes the caller's own slice, and milestone 2 slices with it to
+    // find a data descriptor. Out of range is a panic in the consumer rather
+    // than here, which is exactly the kind of defect a fuzzer should own.
+    assert!(raw.end <= data.len());
+    assert!(!(raw.capped && raw.complete));
 });

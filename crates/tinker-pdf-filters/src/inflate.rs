@@ -650,7 +650,87 @@ struct Raw {
     end: usize,
 }
 
-fn inflate_raw(input: &[u8], limits: &Limits, w: &mut Warnings) -> Raw {
+/// What [`inflate_raw`] produced, and how far into the input it reached.
+///
+/// Not [`crate::Decoded`], which is what a `/Filter` chain returns, and the
+/// difference is the reason this type exists. A caller here is not running a
+/// PDF filter; it is reading a *container* whose payload happens to be RFC
+/// 1951, and it needs two things a filter never asks for: whether the ceiling
+/// rather than the data ended the decode, and where the stream stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawInflated {
+    /// The bytes produced, truncated at [`Limits::max_output`].
+    pub data: Vec<u8>,
+    /// False when the input ended early, was damaged, or hit the ceiling.
+    pub complete: bool,
+    /// The output ceiling, not the data, ended this decode. Implies
+    /// `!complete`: the stream had more to give and was not allowed to.
+    pub capped: bool,
+    /// Input bytes consumed, counted to the end of the final block — so
+    /// `input[..end]` is the stream and `input[end..]` is whatever the
+    /// container put after it.
+    ///
+    /// DEFLATE ends on a *bit* boundary and every container that carries it
+    /// resumes on a byte one, so a final block ending mid-byte counts that
+    /// whole byte. `end` is therefore a ceiling, and `input[..end]` is a
+    /// stream rather than a prefix of one.
+    ///
+    /// **Only meaningful when `complete`.** A truncated, corrupt or capped
+    /// decode stopped somewhere the format did not choose, and `end` there
+    /// records where this decoder gave up rather than where the stream ends.
+    ///
+    /// This is the field a ZIP entry with general-purpose bit 3 set has no
+    /// substitute for: its compressed size is not written ahead of the data,
+    /// so the only way to find the data descriptor that follows is to inflate
+    /// and see where the stream stopped.
+    pub end: usize,
+    /// Typed leniency records (ruling 10), deduplicated, in first-occurrence
+    /// order — the same contract as [`crate::Decoded::warnings`].
+    pub warnings: Vec<Warning>,
+}
+
+/// Inflate a raw RFC 1951 stream, with no zlib wrapper and none looked for.
+///
+/// [`crate::flate_decode`] is the door for a PDF stream named `/FlateDecode`,
+/// where the bytes may be either and sniffing is right. This is the door for a
+/// caller that **knows a priori** it holds raw DEFLATE — a ZIP entry stored
+/// with method 8 is RFC 1951 with no wrapper by definition (APPNOTE 4.4.5) —
+/// and going through the sniff instead would cost it three things:
+///
+/// - a [`Warning::RawDeflateFallback`] on every single entry, because the
+///   sniffing path treats raw DEFLATE as a *fallback* where here it is the
+///   norm. Ruling 10 exists so that "it opened" and "it opened cleanly" stay
+///   distinguishable, and a warning raised once per entry for something that
+///   is not leniency at all destroys that distinction for the whole format;
+/// - a [`Warning::TrailingGarbage`] on every entry whose size was streamed,
+///   because what follows such an entry is its data descriptor and then the
+///   next local header — structure, not garbage;
+/// - and, rarely but constructibly, a wrong answer. A raw stream beginning
+///   with a non-final stored block whose discarded pad bit is set presents the
+///   low nibble a zlib header wants; `08 1D` passes both of the sniff's tests
+///   (`0x081D` is 31 x 67), and the retry that would recover only runs when
+///   the wrapped read produced *nothing at all*. `tests/containers.rs` commits
+///   such a string and walks it through both doors.
+///
+/// Bounded on any input (ruling 1): output stops at `limits.max_output` with
+/// [`Warning::OutputCapHit`] and `capped` set, so a bomb is refused by its own
+/// warning rather than by how long it took.
+#[must_use]
+pub fn inflate_raw(input: &[u8], limits: &Limits) -> RawInflated {
+    let mut w = Warnings::default();
+    let r = raw_bytes(input, limits, &mut w);
+    RawInflated {
+        data: r.data,
+        complete: r.complete,
+        capped: r.capped,
+        end: r.end,
+        warnings: w.into_vec(),
+    }
+}
+
+/// The byte layer, shared by [`inflate_raw`] and [`flate_bytes`] — named for
+/// the convention every other filter in this crate uses for its own.
+fn raw_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> Raw {
     let mut inf = Inflate::new();
     let mut src = Bits { input, pos: 0 };
     let mut out = Vec::new();
@@ -710,7 +790,7 @@ pub(crate) fn flate_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (V
         let start = if fdict { 6 } else { 2 };
         let body = input.get(start..).unwrap_or(&[]);
         let mut aw = Warnings::default();
-        let r = inflate_raw(body, limits, &mut aw);
+        let r = raw_bytes(body, limits, &mut aw);
         // Retrying as raw only makes sense when the wrapped bytes yielded
         // nothing at all; a ceiling hit is our decision, not bad data.
         if !r.data.is_empty() || r.complete || r.capped {
@@ -739,7 +819,7 @@ pub(crate) fn flate_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (V
     // files carry raw deflate under a FlateDecode name often enough that
     // this retry is required, not optional.
     w.push(Warning::RawDeflateFallback);
-    let r = inflate_raw(input, limits, w);
+    let r = raw_bytes(input, limits, w);
     if r.complete && r.end < input.len() {
         w.push(Warning::TrailingGarbage);
     }
@@ -754,7 +834,7 @@ mod tests {
 
     fn raw(input: &[u8]) -> (Vec<u8>, bool, Vec<Warning>) {
         let mut w = Warnings::default();
-        let r = inflate_raw(input, &CAP, &mut w);
+        let r = raw_bytes(input, &CAP, &mut w);
         (r.data, r.complete, w.into_vec())
     }
 
@@ -924,10 +1004,25 @@ mod tests {
     fn output_cap_stops_a_stored_block() {
         let limits = Limits::new(2);
         let mut w = Warnings::default();
-        let r = inflate_raw(b"\x01\x05\x00\xfa\xffHello", &limits, &mut w);
+        let r = raw_bytes(b"\x01\x05\x00\xfa\xffHello", &limits, &mut w);
         assert_eq!(r.data, b"He");
         assert!(!r.complete);
         assert_eq!(w.into_vec(), vec![Warning::OutputCapHit]);
+    }
+
+    /// The first two bytes of `tests/containers.rs`'s witness, which is where
+    /// the rest of the claim is made. `zlib_header` is private, so the half of
+    /// the hazard that is a *sniff* result rather than a decode result is
+    /// asserted here, next to the function it is about.
+    ///
+    /// `0x08` is CM 8 with CINFO 0 — and, read as DEFLATE, BFINAL 0 with BTYPE
+    /// 00 and bit 3 set, which is the pad bit a stored block discards. `0x081D`
+    /// is 2 077, which is 31 x 67, so the modulo-31 check passes too. Neither
+    /// test is weak; they simply do not know what the bytes are for.
+    #[test]
+    fn a_raw_stored_block_can_present_a_valid_zlib_header() {
+        assert_eq!(zlib_header(&[0x08, 0x1D]), Some(false));
+        assert_eq!(0x081D_u32 % 31, 0);
     }
 
     #[test]
