@@ -331,6 +331,88 @@ fn a_streamed_entry_read_through_the_directory_is_fine() {
     assert_eq!(&*a.read(0).unwrap(), b"sized by the directory");
 }
 
+/// The recovery scan inflates, so the recovery scan is charged.
+///
+/// This is the only inflate that happens during `open`. Every other one is a
+/// caller asking for an entry, and spends the budget on the way. A streamed
+/// deflated entry with no central directory has to be inflated just to find out
+/// where it *ends* -- and an earlier version of this crate did that for free,
+/// with the budget passed in as `_budget` and never touched. Nothing caught it:
+/// every test that reads the total reads it after `read`, and the enumeration
+/// had already happened by then.
+#[test]
+fn the_recovery_scan_charges_what_it_inflates() {
+    let data = b"streamed, deflated, and enumerated ".repeat(12);
+    let mut file = File::deflated(b"page01.jpg", &data);
+    file.streamed = true;
+    let zip = archive(&[file], Damage::NoDirectory);
+
+    let a = open(&zip).unwrap();
+    assert_eq!(a.route(), Route::LocalHeaderScan);
+    assert_eq!(
+        a.inflated(),
+        data.len(),
+        "the scan inflated the entry and charged nothing for it"
+    );
+}
+
+/// And a damaged archive cannot inflate past the total while it is still being
+/// enumerated.
+///
+/// `MAX_ZIP_INFLATED`'s doc comment says it is spent across every entry of one
+/// archive and never refunded. A path that skips it makes that sentence false,
+/// and this is the path: a thousand streamed deflated entries in an archive
+/// with no directory, each one inflated to find its own end, before any caller
+/// has asked for a single page.
+#[test]
+fn enumeration_cannot_inflate_past_the_archive_total() {
+    let page = b"a page of a book that was never finished ".repeat(64);
+    let files: Vec<File> = (0..32)
+        .map(|i| {
+            let mut f = File::deflated(format!("page{i:03}.jpg").as_bytes(), &page);
+            f.streamed = true;
+            f
+        })
+        .collect();
+    let zip = archive(&files, Damage::NoDirectory);
+
+    // Room for a handful of entries and not for all thirty-two.
+    let cap = page.len() * 4;
+    let limits = Limits {
+        max_inflated_total: cap,
+        ..Limits::DEFAULT
+    };
+    let a = Archive::open(&zip, &limits).unwrap();
+
+    assert!(
+        a.inflated() <= cap,
+        "enumeration inflated {} bytes against a {cap}-byte total",
+        a.inflated()
+    );
+    // Every entry is still *listed*, and that is the right answer rather than a
+    // leak: an entry whose extent the budget would not pay to establish is the
+    // same case as a stored streamed one, so it takes the same treatment --
+    // listed, so a twenty-page book still reports twenty pages, and carrying no
+    // checksum, so it is refused at read rather than handed back at a guess.
+    // The page count staying honest is gap 17's rule; the budget staying spent
+    // is ruling 1's.
+    assert_eq!(a.entries().len(), 32, "the page count went short");
+    let sized = a.entries().iter().filter(|e| e.crc.is_some()).count();
+    assert!(
+        (1..32).contains(&sized),
+        "expected the budget to stop the scan partway, and {sized} of 32 were sized"
+    );
+
+    // And the ones it could not pay for refuse by name rather than returning
+    // bytes whose length nothing established.
+    let mut a = a;
+    for i in 0..32 {
+        if a.entries()[i].crc.is_none() {
+            assert_eq!(a.read(i), Err(EntryError::NoChecksum));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Refusals, each by name
 // ---------------------------------------------------------------------------

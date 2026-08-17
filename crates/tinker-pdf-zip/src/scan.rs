@@ -137,22 +137,60 @@ pub(crate) fn local_headers(
 ///
 /// Stored: `None`. There is no marker, and inventing one is the failure this
 /// module is written to avoid.
+///
+/// # This is the only inflate that happens at `open`
+///
+/// Every other decode in this crate is a caller asking for one entry, and it
+/// spends [`crate::Archive::read`]'s budget as it goes. This one runs while the
+/// archive is still being *enumerated*, before any caller has asked for
+/// anything -- so if it did not charge, a damaged archive of a thousand
+/// streamed deflated entries could inflate `max_entry_bytes` a thousand times
+/// during `open` and never touch the total that exists to stop exactly that.
+/// [`crate::limits::MAX_ZIP_INFLATED`] says it is "spent across every entry of
+/// one archive and never refunded", and a path that skips it makes that
+/// sentence false.
+///
+/// The charge is the bytes actually produced rather than the ceiling offered,
+/// because the ceiling is what this is *allowed* to spend and the total counts
+/// what was spent. A refusal here ends the scan rather than the archive: the
+/// entries already recovered are real, and the caller is told the budget ran
+/// out by the warning the scan pushes.
 fn extent(
     bytes: &[u8],
     header: &local::LocalHeader,
     data_at: usize,
     limits: &Limits,
-    _budget: &mut Budget,
+    budget: &mut Budget,
 ) -> Option<(u64, u64, Option<u32>)> {
     if header.method != 8 {
         return None;
     }
     let tail = bytes.get(data_at..)?;
-    let room = limits.max_entry_bytes;
+    // The per-entry ceiling and what the archive has left, whichever is
+    // smaller. Offering the per-entry ceiling when the total cannot cover it
+    // would inflate bytes this is not permitted to spend and then refuse them.
+    //
+    // **No test can see this `min`, and that is worth saying rather than
+    // leaving for somebody to discover.** Removing it changes no answer: the
+    // decode still runs, `spend` still refuses, the entry is still listed
+    // unsized and still refused at `read`. The only difference is the work
+    // done before the refusal, and ruling 1 says a bound is proved by its own
+    // refusal and never by a clock -- so the one symptom this has is the one
+    // symptom this repository does not accept as evidence. The injection
+    // matrix duly reports it as surviving, correctly.
+    //
+    // It stays because the alternative is doing the work the cap exists to
+    // prevent and then declining to keep it, which is the shape of every
+    // decompression bomb: `MAX_ZIP_INFLATED`'s point is that the bytes are
+    // never produced, not that they are produced and dropped.
+    let room = limits.max_entry_bytes.min(budget.remaining());
     let raw = tinker_pdf_filters::inflate_raw(tail, &tinker_pdf_filters::Limits::new(room));
     if !raw.complete {
         return None;
     }
+    // Charged before the descriptor is looked for, because the work is already
+    // done by here and the total counts work rather than success.
+    budget.spend(raw.data.len()).ok()?;
     let descriptor =
         local::parse_descriptor(bytes, data_at + raw.end, raw.end as u64, header.zip64)
             .or_else(|| local::search_descriptor(bytes, data_at))?;

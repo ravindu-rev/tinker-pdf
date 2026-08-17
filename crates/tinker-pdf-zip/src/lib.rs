@@ -382,6 +382,14 @@ pub(crate) struct Budget {
 }
 
 impl Budget {
+    /// What is left, which is what a decode may be offered rather than what it
+    /// would like. Offering a ceiling the total cannot cover would inflate
+    /// bytes that are then refused, which is the work the cap exists to
+    /// prevent being done anyway.
+    pub(crate) fn remaining(&self) -> usize {
+        self.cap.saturating_sub(self.spent)
+    }
+
     pub(crate) fn spend(&mut self, permit: usize) -> Result<(), EntryError> {
         let after = self.spent.checked_add(permit);
         match after {
