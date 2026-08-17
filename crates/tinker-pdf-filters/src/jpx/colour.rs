@@ -155,6 +155,14 @@ pub(crate) struct Channel {
     /// Bits per sample, from the palette column when there is one and from
     /// SIZ otherwise.
     pub(crate) precision: u8,
+    /// Whether those bits are two's complement, from the same place.
+    ///
+    /// T.800 G.1 shifts an *unsigned* component into range and leaves a
+    /// signed one centred on zero, so a signed channel arrives here still
+    /// negative for half its values. PDF's sample path has no signed samples
+    /// at all, so the shift the level shift did not do is done at the output
+    /// boundary instead -- see `jpx::normalise`.
+    pub(crate) signed: bool,
 }
 
 /// What the container says the decoded components add up to.
@@ -209,6 +217,7 @@ pub(crate) fn plan(header: Option<&Jp2Header>, components: &[Component]) -> Resu
                 component: i,
                 column: None,
                 precision: c.precision,
+                signed: c.signed,
             });
         }
     } else {
@@ -217,23 +226,24 @@ pub(crate) fn plan(header: Option<&Jp2Header>, components: &[Component]) -> Resu
             let source = components.get(component).ok_or(Refusal::Structure(
                 "a cmap channel naming no such component",
             ))?;
-            let (column, precision) = match entry.column {
-                None => (None, source.precision),
+            let (column, precision, signed) = match entry.column {
+                None => (None, source.precision, source.signed),
                 Some(col) => {
                     let palette = palette.ok_or(Refusal::Structure(
                         "a cmap palette mapping with no pclr box",
                     ))?;
                     let col = usize::from(col);
-                    let &(precision, _) = palette.channels.get(col).ok_or(Refusal::Structure(
-                        "a cmap PCOL past the palette's channels",
-                    ))?;
-                    (Some(col), precision)
+                    let &(precision, signed) = palette.channels.get(col).ok_or(
+                        Refusal::Structure("a cmap PCOL past the palette's channels"),
+                    )?;
+                    (Some(col), precision, signed)
                 }
             };
             channels.push(Channel {
                 component,
                 column,
                 precision,
+                signed,
             });
         }
     }

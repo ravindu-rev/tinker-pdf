@@ -474,10 +474,25 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
     let header = container.header.as_ref();
     let plan = colour::plan(header, &stream.siz.components)?;
     let palette = header.and_then(|h| h.palette.as_ref());
-    let precision = plan.precision;
-    if precision > 16 {
-        return Err(Refusal::Precision(precision));
+    if plan.precision > 16 {
+        return Err(Refusal::Precision(plan.precision));
     }
+    // **The output is 8 or 16 bits and nothing else**, which is what
+    // `JpxImage::precision` has always documented and what ISO 32000-1's
+    // sample path can carry. T.800 allows any precision from 1 to 38 and this
+    // build accepts 1 to 16, so a 6-bit or 12-bit component is an ordinary
+    // file rather than a curiosity -- 12-bit in particular is what medical and
+    // geospatial imagery is, which is the whole domain this decoder was built
+    // for. Widening at the boundary is therefore the answer and refusing is
+    // not.
+    //
+    // Until milestone 8 the codestream's own precision was handed out
+    // unchanged, and a fuzz session found it: a 6-bit image came back with
+    // `precision: 6` and samples in 0..=63, which `resources.rs` then read as
+    // 8-bit and drew at a quarter of its brightness. A picture, in other
+    // words, and a plausible one -- this codec's whole hazard, reached not
+    // through any of the wavelet arithmetic but through a field in SIZ.
+    let precision = if plan.precision > 8 { 16 } else { 8 };
     if plan.colour.len() > MAX_JPX_COMPONENTS as usize {
         return Err(Refusal::Budget("output colour channels"));
     }
@@ -529,6 +544,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
                     stride,
                     at: k,
                     wide,
+                    precision,
                 },
             );
         }
@@ -544,6 +560,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
                     stride: 1,
                     at: 0,
                     wide,
+                    precision,
                 },
             );
         }
@@ -572,6 +589,51 @@ struct Blit<'a> {
     at: usize,
     /// Bytes per sample: 2 above eight bits, 1 otherwise.
     wide: usize,
+    /// The output precision, 8 or 16, that [`normalise`] widens each sample
+    /// to from its own channel's.
+    precision: u8,
+}
+
+/// One decoded sample, moved out of its channel's domain and into the
+/// output's.
+///
+/// Two things happen and both are corrections rather than choices.
+///
+/// **The sign.** T.800 G.1's level shift moves an *unsigned* component into
+/// range and deliberately leaves a signed one centred on zero, because that is
+/// where the wavelet wants it. PDF's sample path has no signed samples at all,
+/// so the shift G.1 did not do happens here. Without it a signed component's
+/// negative half wraps through `as u32` and comes back as the top half of the
+/// range: mid-grey renders black and black renders mid-grey, in a picture that
+/// is otherwise correct.
+///
+/// **The width.** `from` is what SIZ or the `pclr` box declared, anywhere in
+/// 1 to 16; `to` is 8 or 16, because that is what `JpxImage` carries and what
+/// `/BitsPerComponent` can be. The scaling is the full-range one --
+/// `v * (2^to - 1) / (2^from - 1)`, rounded to nearest -- so 0 maps to 0 and
+/// the largest input maps to the largest output, which a shift would not do:
+/// `v << 2` on a 6-bit sample tops out at 252 and leaves every image it
+/// touches unable to reach white.
+///
+/// It is an identity when `from == to`, which is every fixture in this
+/// repository and every one of gap 23's nineteen files, so nothing that
+/// already decoded moves.
+fn normalise(value: i32, from: u8, to: u8, signed: bool) -> u32 {
+    let shifted = if signed {
+        value.saturating_add(1i32 << (i32::from(from) - 1))
+    } else {
+        value
+    };
+    let in_max = (1u32 << from) - 1;
+    let out_max = (1u32 << to) - 1;
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "clamped into 0..=in_max on the line above"
+    )]
+    let v = shifted.clamp(0, in_max as i32) as u32;
+    // `in_max` is at most 65 535 and `out_max` at most 65 535, so the product
+    // is under 2^32 and the arithmetic needs no widening.
+    (v * out_max + in_max / 2) / in_max
 }
 
 /// Write one channel of one tile onto the reference grid, replicating a
@@ -631,11 +693,7 @@ fn blit(
             let cx = (x / dx).saturating_sub(plane.x0).min(plane.width - 1);
             let value = channel.lookup(palette, plane.at(cx, cy));
             let index = ((py as usize) * (width as usize) + (px as usize)) * to.stride + to.at;
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "clamped by level_shift, or a palette entry of the declared precision"
-            )]
-            let value = value as u32;
+            let value = normalise(value, channel.precision, to.precision, channel.signed);
             if to.wide == 2 {
                 to.out[index * 2] = (value >> 8) as u8;
                 to.out[index * 2 + 1] = (value & 0xFF) as u8;

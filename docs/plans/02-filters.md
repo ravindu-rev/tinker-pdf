@@ -60,30 +60,35 @@ Wave 2 (L):
   the `Bitmap` warning per ruling 2. Never a hard failure, and never this
   crate's job to draw the placeholder.
 
-- **JPXDecode (7.4.9) — *half* a non-goal, since August 2026,** and unlike
-  JBIG2 the gate did **not** open: gap 23 measured JPX at 0.4 % of 4 525
-  files and [gaps/18](gaps/18-jpx-decision.md)'s own amendment reads that
-  number and argues for the 150-line header probe. The owner chose the
-  decoder anyway, and [gaps/18a](gaps/18a-jpx-decoder.md) records at its top
-  that this was a choice and not a finding. What this crate decodes so far is
-  T.800 Annex I's JP2 boxes and a bare J2K codestream, Annex A's marker
-  segments with COC and QCC overriding per component, Annex B's tier-2 —
-  tag trees, packet headers, precincts and all five progression orders —
-  Annex D's tier-1 on the shared MQ coder, Annex E's dequantisation and both
-  of Annex F's inverse wavelets: the reversible 5/3 exactly, and the
-  irreversible 9/7 in the fixed-point format gap 18a settled before any of it
-  was written. A single-component codestream therefore decodes to pixels.
-  What it still refuses is the colour pipeline, which is milestone 6 — so
-  anything with more than one component or a component transform — plus
-  everything on that plan's enumerated refusal list:
-  RGN, POC, PPM and PPT, five of Table A.19's six code-block styles, Part 2,
-  precision above 16 bits. All of it keeps the shape above exactly —
-  `Unsupported(Capability::Jpx)` and the neutral placeholder — and the
-  capability still answers `Some(Capability::Jpx)`. What changed is what that
-  answer *means*: "this crate may refuse these bytes", not "this crate will
-  never decode them". The distinction matters more here than for JBIG2,
-  because the failure mode of a partly-built JPEG 2000 decoder is not a
-  visible break but a plausible photograph.
+- **JPXDecode (7.4.9) — *no longer* a non-goal, since August 2026,** and
+  unlike JBIG2 the gate did **not** open on a corpus number: gap 23 measured
+  JPX at 0.4 % of 4 525 files and [gaps/18](gaps/18-jpx-decision.md)'s own
+  amendment reads that number and argues for the 150-line header probe. The
+  owner chose the decoder anyway, and
+  [gaps/18a](gaps/18a-jpx-decoder.md) records at its top that this was a
+  choice and not a finding. What this crate decodes is T.800 Annex I's JP2
+  boxes and a bare J2K codestream, Annex A's marker segments with COC and QCC
+  overriding per component, Annex B's tier-2 — tag trees, packet headers,
+  precincts and all five progression orders — Annex D's tier-1 on the shared
+  MQ coder, Annex E's dequantisation, both of Annex F's inverse wavelets (the
+  reversible 5/3 exactly, and the irreversible 9/7 in the fixed-point format
+  gap 18a settled before any of it was written), and Annex G and I's colour
+  pipeline: the inverse RCT and ICT, the DC level shift, subsampled components
+  replicated to the reference grid, `pclr` palettes through `cmap`, and `cdef`
+  naming an opacity channel. ISO 32000-1 8.9.5.4 is `tinker-pdf`'s half of the
+  boundary and lives there.
+  What it refuses is [gap 18a](gaps/18a-jpx-decoder.md)'s enumerated list, and
+  **every entry of it is reachable and named** — RGN, POC, PPM, PPT, CRG,
+  five of Table A.19's six code-block styles, any Part 2 marker, tile-parts
+  out of order, a `colr` this build cannot map, precision above 16 bits,
+  channels of differing bit depth, and the three totals ruling 1 needs. All of
+  it keeps the shape above exactly — `Unsupported(Capability::Jpx)` and the
+  neutral placeholder — and the capability still answers
+  `Some(Capability::Jpx)`. What changed is what that answer *means*: "this
+  crate may refuse these bytes", not "this crate will never decode them". The
+  distinction matters more here than for JBIG2, because the failure mode of a
+  partly-built JPEG 2000 decoder is not a visible break but a plausible
+  photograph.
 
 - **JBIG2Decode (7.4.7) — *half* a non-goal, since August 2026.** The gate
   opened: gap 23 ran the corpora and JBIG2 came back at 2.3 % of 4 525 files,

@@ -1131,3 +1131,379 @@ scaling moves. Re-injected, the page now averages 7 against the source's 127.
 - A determinism fixture. JPX has reached a page as of this milestone, so gap
   25 M4's request now applies; none of the eleven currently draws one.
 - The acceptance number: what the nineteen files in gap 23's corpus do.
+
+### Milestone 8 — bounds, refusal, determinism and the number (17 August 2026)
+
+**The acceptance number, first, because it is what the plan asked to be told.**
+
+Gap 23's nineteen JPX files, run through `tpdf probe` at 72 dpi:
+
+| What happened | Files |
+| --- | --- |
+| **Decode** | **14** — `S2`, `bug_jpx`, `issue12213`, `issue19326`, `issue5475`, `issue5481` (three pages), `issue5549`, `issue5567`, `jpx_smaskindata`, and five of veraPDF's seven (`t01-fail-b`, `t01-pass-a`, `t01-pass-b`, `t02-fail-a`, `t05-fail-a`) |
+| **Refused by name** | **4** — `jp2k-resetprob` and veraPDF `t03-fail-a` and `t04-fail-a` as `jpx-feature-unsupported`; `issue19517` as `jpx-budget-spent` |
+| **Neither** | **1** — `red_stamp`, whose image the renderer never asks the decoder for |
+
+All nineteen **rendered** in gap 23's sense — twenty-one pages claimed,
+twenty-one bitmaps returned, no crash and no timeout — because a refusal draws
+the placeholder, which is ruling 2 working rather than failing.
+
+Each of the five that did not decode, by name:
+
+- **`jp2k-resetprob`** signals Table A.19's `RESET` — reset the context
+  probabilities at every coding pass — which changes how tier-1 reads every
+  code-block. Its filename says so.
+- **veraPDF `t03-fail-a`** carries a `colr` method this build cannot map;
+  **`t04-fail-a`** an enumerated colour space it has no name for. Both are
+  ruling 2's "report, do not guess", and both files are *conformance failures
+  by design* — the suite wrote them to be rejected.
+- **`issue19517`** is **12 608 by 16 806 in four components**: 847 560 192
+  samples, whose interleaved output is 847 MB. That is 12.6 times
+  `MAX_JPX_SAMPLES` and 6.3 times `MAX_DECODED_STREAM`, the ceiling every
+  other stream in this engine already decodes under, so it is refused by the
+  engine-wide bound rather than by anything JPEG 2000 chose. The header parse
+  costs nothing and the refusal is immediate.
+- **`red_stamp` is not this decoder's**, and its codestream is fine: extracted
+  and decoded on its own it comes back in 30 000 samples over 84 code-blocks
+  with no warning. The image sits inside a form XObject inside a form XObject
+  inside an annotation appearance stream, and **a form's own `/Resources` are
+  consulted nowhere in this engine** — [11](11-transparency-groups.md) records
+  that as a pre-existing non-goal it ran into and did not create, and
+  [06](../06-content-and-text.md) specifies the behaviour that is still
+  unbuilt. So `/Im0` never resolves, `decode_image` returns the resource name,
+  and the placeholder is drawn without the decoder ever being called.
+
+**This is a claim about nineteen files.** It is not a claim about JPEG 2000,
+and the reason it cannot be is the first section of this document: none of the
+three pinned corpora samples geospatial imagery, medical DICOM export or
+digital preservation masters, which is where the format concentrates. Fourteen
+of nineteen is what a browser's regression suite and a conformance suite hold.
+
+#### The three budgets, measured
+
+The plan specified all three **by shape and deliberately not by number**,
+because "picking them from imagination is how `MAX_GROUP_DEPTH` got set to a
+number that did not stop anything". Measuring them found that one of them was
+exactly that.
+
+| Bound | Value | Measured against |
+| --- | --- | --- |
+| `MAX_JPX_SAMPLES` | `1 << 26` | Densest real file 5 062 500 (`issue5567`), 7.6 % of the cap. The one file past it wants 847 560 192 |
+| `MAX_JPX_CODE_BLOCKS` | `1 << 22` | Densest real file 3 870 (`issue5549`), a 1084th of the cap |
+| `MAX_JPX_WORK` | ~~`3 << 31`~~ **`3 << 30`** | Densest measured spend **22.75 coefficient-passes per tile-component sample**; the cap is 48 |
+
+**`MAX_JPX_WORK` could not fire.** Tier-1's work is the sum over code-blocks
+of area times passes; T.800's subbands are critically sampled, so the areas
+over every resolution of a tile-component sum to *exactly* that
+tile-component's sample count, which `MAX_JPX_SAMPLES` caps; and the pass
+count is capped at 91 by `MAX_PASSES`. So no codestream can ask for more than
+`MAX_JPX_SAMPLES * MAX_PASSES` = 6 106 906 624, and `3 << 31` is
+6 442 450 944 — **above the ceiling of its own input**. A one-bit slip between
+the derivation and the constant it produced: the comment that set it says
+"rounding that worst case up to 48 and multiplying by `MAX_JPX_SAMPLES`", and
+48 times `1 << 26` is `3 << 30`.
+
+The measurement is direct rather than estimated. Every codestream this
+repository holds was decoded with the three counters instrumented and each
+spend divided by its own tile-component sample count: the 44 `opj_compress`
+fixtures under `tests/jpx` — five progression orders, one to five
+decomposition levels, 4 x 4 to 64 x 64 code-blocks, three quality layers,
+multiple tiles, subsampling, RGB through both the RCT and the ICT, lossy 9/7
+at a rate and truncated — and the fifteen of the nineteen real files that
+reach tier-1. The densest is 22.75 (a lossless 5/3 greyscale, which is the
+heaviest coding there is because every plane of every coefficient is present);
+the densest *real* file is 22.0; lossy streams spend between 0.17 and 15. The
+plan's own guidance decided the rest: **a budget that refuses a real file is
+worse than one that is generous**, so 48 per sample is 2.1 times the densest
+ever measured and 53 per cent of what the format can ask for.
+
+`the_work_cap_can_fire_at_all` asserts the *relation* and not the number,
+because a test restating `3 << 31` would have agreed with the constant however
+wrong it was — the same lesson as the Q24 constants being recomputed from
+Table F.4's decimals rather than transcribed twice.
+
+**What the cap adds over `MAX_JPX_SAMPLES` is smaller than the plan assumed,
+and the comment now says so.** The plan costed a hostile stream at `1 << 22`
+code-blocks of 4 096 coefficients at 91 passes — 1.5 x 10^12 — but that is
+1.7 x 10^10 coefficients, 256 times what the sample ceiling permits, so the
+sample ceiling already forbids it. The factor genuinely bought is 91/48, just
+under two. What is *not* redundant is **when** the charge falls: it now comes
+off the budget once per code-block, from the pass count the packet header
+declared, before the first decision is decoded, where it was one charge per
+pass as the passes ran. Both total the same, so a test checking only the sum
+passes against either — and the difference is that a per-pass charge refuses
+the ninety-first pass having already run ninety, which is to say having
+already spent the time the budget exists to prevent. The milestone's exit
+criterion is that the refusal be assertable **by the warning rather than by a
+clock**, and it only is if the charge comes from the declaration.
+
+#### The refusal list, end to end
+
+`Refusal::NotBuilt` is **gone**, and so is `Warning::JpxStageNotBuilt`. The
+variant meant "the codestream parsed and a *stage* of this decoder comes
+next"; it named dequantisation, then the wavelet, then the colour pipeline as
+milestones 4 to 6 removed the one below it, and every stage now exists. What
+was still returning it — channels of differing bit depth, which one output
+precision and `/BitsPerComponent` have no answer for — is not a stage but a
+capability, in the same class as a `colr` method this build cannot map, and it
+is refused as `Feature`. **That capability is genuinely not built**, and it is
+in the "not built" list below rather than dressed as a decoder that is
+part-finished.
+
+Two more entries were unreachable, and finding them is the argument for having
+walked the list. **`Warning::JpxPacketLength` and
+`Warning::JpxSegmentationSymbol` had never been emitted**: `Refusal::warning`
+mapped both integrity refusals to `JpxStructureInvalid`. That is defensible in
+the small — a codestream disagreeing with itself *is* structurally invalid —
+and wrong in the large twice over. It left two public variants nothing could
+produce, and it discarded the distinction at exactly the boundary where a
+caller can act on it: a capability refusal says a better build would draw this
+picture, an integrity refusal says no build should. The `Refusal` enum has
+kept the two apart since the milestones that wrote them, on the stated grounds
+that a reader should be able to tell them apart, and a reader outside this
+crate is still a reader.
+
+`tests/refusals.rs` transcribes the plan's list, in the plan's order, so the
+two can be read side by side, and drives every entry through `jpx_decode`
+itself rather than an internal parser — because the claim is about the public
+boundary: `Unsupported(Capability::Jpx)` so the caller draws the placeholder,
+and exactly one warning naming the class. `every_jpx_warning_is_reachable` is
+the counterpart, and the set is transcribed a second time rather than iterated
+for the reason the Table A.2 test gives.
+
+The `unfinishable()` fixture is retired rather than moved a fourth time. Its
+whole life was the pattern it demonstrated — an assertion about what is
+missing has a half-life — and that pattern now ends, because there is no stage
+left for it to name.
+
+#### The twelfth determinism fingerprint
+
+`jpx`, at
+`d9d0a1f733de50ca06fae32655bc240854d573679698ce7a8e8095640972ef4d`, on both
+`x86_64-pc-windows-msvc` and `wasm32-wasip1` under wasmtime 47.0.3, with none
+of the other eleven moving.
+
+**It is the fixture ruling 4 most needs**, because this is the only decoder in
+the engine whose arithmetic was designed around that ruling and nothing else.
+Three codestreams, reaching different arithmetic: reversible 5/3 with the RCT,
+which is exact and covers everything the other two share below the wavelet;
+irreversible 9/7 with the ICT, which is the fixed point in both places it
+lives; and the same image truncated to a twentieth, which is the only one
+where E.1.1.2's reconstruction point does anything per coefficient rather than
+per block — the defect milestone 6 found with `opj_decompress` alone.
+
+The ink floor is **weaker here than elsewhere in that file and the comment
+says so** rather than letting it look like the same guard. Both of this
+codec's failure modes paint: a refusal draws ruling 2's grey placeholder, and
+a wrong decode draws a plausible photograph with as much ink in it as a right
+one. So no ink count can see either, and this fixture leans on its hash almost
+entirely — which is the reason it exists.
+
+## As built
+
+**Eight milestones, eight commits, each green under the full gate.** JPEG 2000
+decodes to pixels in `crates/tinker-pdf-filters/src/jpx/`, reaches a page
+through one `jpx_image` entry point in `crates/tinker-pdf/src/resources.rs`,
+and refuses by name everywhere else.
+
+### It was a choice, and it was made against the evidence
+
+Gap 18's August amendment reads gap 23's corpus number — **JPX at 19 files of
+4 525, 0.4 per cent** — and argues for option B, the 150-line header probe,
+because option A is thousands of lines of security-sensitive decoder parsing
+attacker-controlled input under ruling 1, for a capability the pinned corpora
+barely contain. **The owner chose A anyway**, and the argument that overrides
+ruling 3 is stated at the top of this document rather than implied: none of
+the three corpora samples the domains JPEG 2000 concentrates in — geospatial
+imagery, medical DICOM export, digital preservation masters. 0.4 per cent is a
+fact about a browser's regression suite, a conformance suite and a writer's
+test suite, not about the world.
+
+Nobody reading this should take the work as evidence that the corpus asked for
+it. It did not.
+
+### The three questions, settled before any code existed
+
+That was the plan's whole reason to exist, and each answer earned its keep:
+
+1. **The fixed point.** `i32` planes at Q12, `i64` constants at Q24, every
+   product formed in `i64` and rounded with `(p + (1 << 23)) >> 24`, bounded
+   at 2^59.96 by a clamp that turns the overflow figures into a proof rather
+   than an assumption. The constants are *wider than the data* because
+   constant rounding is relative to the coefficient it multiplies where data
+   rounding is absolute: at Q16 an 8-bit image accumulates 1.9 sample units,
+   past a whole level, and at Q24 it is 0.03. Milestone 6 then reused
+   `mul_q24` for the ICT rather than inventing a second width, and the test
+   asserts `QC == 24` alongside the recomputations so that a later reader who
+   gives the colour transform a format of its own fails a test rather than
+   merely disagreeing with a paragraph.
+2. **The perceptual budget**, in `pdfcmp`'s own numbers. All three gates pass
+   and none was negotiated downwards: 5/3 byte-identical to `opj_decompress`
+   over eleven greyscale, nine RGB and three subsampled fixtures; the 9/7 and
+   the ICT against `f64` references of F.3.8.2 and G.2.2 with **zero** samples
+   differing at all against a budget of one level and one per cent; and lossy
+   9/7 against `opj_decompress` with nothing past the threshold and a worst
+   sample of **one** level, which is a rounding tie rather than arithmetic
+   (OpenJPEG's `lrintf` rounds half to even; this build rounds half up on an
+   arithmetic shift, because that is identical on every target and `lrintf` is
+   not).
+3. **The test material**, since the repository holds zero JPX bytes and ISO
+   15444-4's conformance streams are not redistributable. All four sources
+   were used and the two that mattered most are the ones the plan predicted:
+   Annex D's tables asserted entry by entry, and `openjpeg` as a subprocess
+   oracle.
+
+### *r* was measured, not assumed — and only the truncated fixture proves it
+
+E.1.1.2 leaves the reconstruction point inside a quantisation interval to the
+decoder. The plan asserted *r* = 0.5 from convention and flagged it as its one
+unverified assumption. Milestone 5 rebuilt with *r* = 0 and re-ran gate 3:
+**377 of 768 samples past the threshold, worst 42**, where 0.5 matches
+`opj_decompress` exactly.
+
+The important half is *which fixture said so*. On a rate-1 stream the two
+choices are a fraction of a level apart and either would have passed; it is
+the `-q20` stream truncated to a twentieth that separates them. An assumption
+is only measured by a fixture that can tell the answers apart, and the plan's
+instinct to make gate 3's looseness be *about* `r` turned out not to be
+needed — a better answer than using it.
+
+### What the oracle caught that nothing else could
+
+This is the plan's strongest claim and it held every time. Each of these
+produces a **picture** rather than an error, which is the whole hazard:
+
+- **Milestone 4: a realignment that halved every coefficient.** E.1's
+  `Mb = G + exp - 1` applied as a shift, on the reading that a code-block's
+  magnitudes are left-aligned within `Mb` bits. They are not. An inverse
+  wavelet turns a uniformly halved subband into a picture of exactly the right
+  shape at half the contrast — `got = want/2 + 64`. **It looked like a
+  decode.** Nothing already in the repository could have told the difference.
+- **Milestone 4: symmetric extension replaced by zero padding.** All **225**
+  unit tests pass; only the eleven-fixture byte-identical comparison fails.
+  That is the clearest available statement of what the gate buys, and it is
+  why the plan ordered 5/3 before 9/7.
+- **Milestone 6: the bit-plane count was `passes.div_ceil(3)`.** Correct
+  exactly when a code-block ends on a cleanup pass — `passes = 1, 4, 7, ...`
+  — and the in-tree test encoder emits `3 * planes - 2` passes *by
+  construction*, so **every round trip in the crate took the one case that
+  worked**. For any other count it is one plane short and `pass_at` subtracts
+  past zero: a panic in debug, and in release a shift masked to `plane & 31`
+  writing a magnitude bit in the wrong place. It took a three-component lossy
+  stream from `opj_compress` to produce a code-block that stops on a
+  significance or refinement pass.
+- **Milestone 6: E.1.1.2's half at a per-block depth**, where it belongs to
+  each coefficient's own interval. Caught by **gate 3 alone** — not by the
+  `f64` reference and not by one of 246 unit tests — and that one is sharper
+  than milestone 5's oracle-only catches, because gate 2 **cannot** see it in
+  principle rather than by luck: both sides read the same dequantised
+  coefficients through the same `Arith::dyadic` and inherit the error
+  together. `opj_decompress` disagreed by 20 levels of 255 over 76 of 663
+  samples.
+- **Milestone 7: a test was wrong before the code was.** It asserted that ink
+  appeared, and an injection shifting every sample down four bits — exactly
+  what honouring `/BitsPerComponent` would do — passed it *and all three
+  other tests*, because the comparative ones render two dictionaries through
+  the same defect and it moves both sides equally. The fix is the
+  **distribution** — mean and range, neither of which depends on the
+  resampler's mapping — and re-injected the page averages 7 against the
+  source's 127.
+
+Four of the same shape in four consecutive milestones. The pattern worth
+carrying out of this plan is not "use an oracle": it is that **a comparison
+sharing a stage with the thing it checks inherits that stage's error**, and
+that a test asserting something happened is not a test asserting the right
+thing happened.
+
+The tables also earned their keep exactly where the plan said they would.
+Transposing two of D.3's sign-coding contexts fails
+`table_d3_sign_coding_entry_by_entry` and **does not fail the round trip** —
+relabelling a context array is a bijection, so an encoder's slot histories and
+a decoder's stay in step under any permutation. And a constant carried at Q16
+and shifted up to Q24 is a relative error of one part in a million: **both
+comparison gates pass it**, and only the test recomputing `round(c * 2^24)`
+from Table F.4's decimals fails.
+
+#### The fuzz campaign, and what it found
+
+`cargo fuzz run jpx` under WSL2 / Ubuntu-24.04, nightly with cargo-fuzz
+0.13.2, seeded with the twenty-four committed corpus entries. **It found a
+defect in thirty minutes, and it is the characteristic one.**
+
+`JpxImage::precision` has documented "8 or 16" since milestone 1 and nothing
+enforced it. T.800 lets a component declare any precision from 1 to 38 and
+this build accepts 1 to 16, so a 6-bit component came back as `precision: 6`
+with samples in `0..=63`; `resources.rs` reads anything at or below eight as a
+byte, so it drew the image at **a quarter of its brightness**. A picture, and
+a plausible one — reached not through the wavelet, the MQ coder or the packet
+arithmetic that this plan spent almost all of its care on, but through a
+three-byte field in SIZ that every stage passed along unexamined.
+
+The fix is at the output boundary rather than a refusal, because 12-bit is
+what medical and geospatial imagery *is* — the domains named at the top of
+this document as the reason to build the decoder at all — so refusing them
+would remove most of the point. `normalise` widens each sample by the
+full-scale rule `v * (2^to - 1) / (2^from - 1)` rounded to nearest, which is
+an identity when the widths already agree: every fixture in this repository,
+every one of gap 23's nineteen files, and the determinism fingerprint are
+unmoved. A shift would not do — `v << 2` on a 6-bit sample tops out at 252 and
+leaves the image unable to reach white, which is the same kind of
+small-and-plausible wrong that the halved coefficients of milestone 4 were.
+
+It found a second thing at the same seam. **A signed component's negative half
+was wrapping through `as u32`**: G.1's level shift moves an unsigned component
+into range and deliberately leaves a signed one centred on zero, because that
+is where the wavelet wants it, and nothing afterwards undid that for an output
+domain which has no signed samples. Mid-grey rendered black and black rendered
+mid-grey. `normalise` does the shift G.1 did not.
+
+The lesson is the plan's own, arriving from a direction it did not predict.
+Every oracle-only catch in milestones 4 to 7 was in arithmetic; this one is in
+a field nobody thought needed checking, and no comparison gate could have
+found it because no fixture in the repository declares a precision other than
+8. **A gate compares what you thought to compare.**
+
+### What is not built
+
+The plan's own non-goals, unchanged and each refused by name: any encoder on
+the shipped surface; ISO/IEC 15444-2 Part 2 — ATK, ADS, non-linearity points,
+multiple-component transforms beyond the RCT and ICT; JPM, Motion JPEG 2000,
+JPIP and JPX's animation, compositing and layering boxes; region of interest
+(RGN); resolution-limited or layer-limited decoding as a feature; component
+precision above 16 bits; ICC colour management beyond reading a method-2
+`colr` for its component count; and streaming, incremental or threaded decode.
+
+Deferred by the milestones and never picked up:
+
+- **Channels of differing bit depth.** `JpxImage` carries one precision
+  because `/BitsPerComponent` is one number, and scaling an 8-bit channel to
+  sit beside a 12-bit one is a choice about the picture's contrast that no
+  milestone made. This was `Refusal::NotBuilt`'s last home and is now a named
+  `Feature` refusal.
+- **Five of Table A.19's six code-block styles**: selective arithmetic-coding
+  bypass, context reset on each pass, termination on each pass, vertically
+  causal context, predictable termination. The sixth, segmentation symbols, is
+  implemented *because* checking it is the only free integrity check the
+  format offers. `jp2k-resetprob` is the one file of nineteen this costs.
+- **PPM and PPT**, packed packet headers, and **CRG**, sub-pixel component
+  registration. Named refusals since milestone 1.
+- **Component precisions other than 8 and 16 are widened, not carried.** A
+  6-bit or 12-bit codestream decodes, and `normalise` scales it to the output
+  width; what is not built is any way for a caller to learn that the file's
+  own precision was narrower, since `JpxImage` carries one number and it is
+  the output's.
+- **`JpxColour::Sycc`, `EYcc` and `IccProfile` are reported, never
+  converted.** A codestream can declare them with `mct` clear, meaning the
+  samples *are* luma and chrominance and PDF has no space to name; deciding
+  what a consumer does with that is 8.9.5.4's and `tinker-pdf-color`'s.
+
+
+And one thing that is not this plan's and is now measured rather than
+suspected: **a form XObject's own `/Resources` are consulted nowhere in this
+engine**, which is [11](11-transparency-groups.md)'s recorded non-goal and
+[06](../06-content-and-text.md)'s unbuilt specification. It is what makes
+`red_stamp.pdf` the one file of nineteen that neither decodes nor refuses, and
+it will do the same to any JPX image reached through a nested form or an
+annotation appearance. Fixing it is a real feature — resources on the `Form`
+seam, or a scope stack in the interpreter, plus 8.10.2's parent fallback — and
+it belongs to whoever owns that gap rather than to this one.

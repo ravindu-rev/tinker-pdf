@@ -666,3 +666,80 @@ fn a_cdef_opacity_channel_is_carried_out_of_the_samples() {
     );
     assert_eq!(opacity.samples.len(), 4 * 4);
 }
+
+// --- the output domain (milestone 8) ------------------------------------
+
+/// `JpxImage::precision` is 8 or 16 for every precision T.800 lets a
+/// component declare.
+///
+/// **A fuzz session found this and nothing in the repository had.** The
+/// codestream's own precision used to be handed out unchanged, so a 6-bit
+/// image came back as `precision: 6` with samples in `0..=63`; `resources.rs`
+/// reads anything at or below eight as a byte, so it drew at a quarter of its
+/// brightness. That is a picture, and a plausible one, reached through a field
+/// in SIZ rather than through any of the arithmetic this plan spent its care
+/// on -- which is the argument for the fuzzer rather than against the tests.
+///
+/// Every precision is walked rather than a sample of them, because the two
+/// interesting boundaries are 8 and 9 and a test that picked 6 and 12 would
+/// have missed the one that decides `wide`.
+#[test]
+fn an_output_precision_is_always_eight_or_sixteen() {
+    for precision in 1u8..=16 {
+        let spec = Spec {
+            components: vec![(precision, false, 1, 1)],
+            ..Spec::default()
+        };
+        let bytes = spec.codestream(&[(0, &[0x00, 0x00])]);
+        let mut warnings = Vec::new();
+        let image = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings)
+            .unwrap_or_else(|e| panic!("{precision} bits: {e:?} {warnings:?}"));
+        assert!(
+            image.precision == 8 || image.precision == 16,
+            "{precision} bits came back as {}",
+            image.precision
+        );
+        let wide = usize::from(image.precision > 8) + 1;
+        let want =
+            (image.width as usize) * (image.height as usize) * usize::from(image.components) * wide;
+        assert_eq!(image.samples.len(), want, "{precision} bits");
+    }
+}
+
+/// The widening is full-scale, and it is the reason it is not a shift.
+///
+/// `v << 2` on a 6-bit sample tops out at 252, so every 6-bit image would be
+/// unable to reach white and the whole picture would sit slightly dark --
+/// small enough to look like a rendering choice rather than a defect, which is
+/// this codec's characteristic failure. `v * 255 / 63` maps 63 to 255.
+///
+/// The identity cases are the ones that matter for everything already
+/// committed: `from == to` moves nothing, which is why no fixture and no
+/// determinism fingerprint changed when this was added.
+#[test]
+fn widening_a_narrow_channel_reaches_full_scale() {
+    use crate::jpx::normalise;
+
+    for (from, to) in [(1u8, 8u8), (6, 8), (8, 8), (12, 16), (16, 16)] {
+        let in_max = (1i32 << from) - 1;
+        let out_max = (1u32 << to) - 1;
+        assert_eq!(normalise(0, from, to, false), 0, "{from} -> {to} at zero");
+        assert_eq!(
+            normalise(in_max, from, to, false),
+            out_max,
+            "{from} -> {to} at full scale"
+        );
+    }
+
+    // Identity where the widths already agree, over the whole range.
+    for v in 0..=255i32 {
+        assert_eq!(normalise(v, 8, 8, false), v as u32);
+    }
+
+    // A signed channel is shifted rather than wrapped. T.800 G.1 leaves it
+    // centred on zero and PDF has no signed samples, so -128 is black and 0
+    // is mid-grey -- where `as u32` made -128 mid-grey and 0 black.
+    assert_eq!(normalise(-128, 8, 8, true), 0);
+    assert_eq!(normalise(0, 8, 8, true), 128);
+    assert_eq!(normalise(127, 8, 8, true), 255);
+}
