@@ -1205,7 +1205,7 @@ the derivation and the constant it produced: the comment that set it says
 
 The measurement is direct rather than estimated. Every codestream this
 repository holds was decoded with the three counters instrumented and each
-spend divided by its own tile-component sample count: the 44 `opj_compress`
+spend divided by its own tile-component sample count: the 39 `opj_compress`
 fixtures under `tests/jpx` — five progression orders, one to five
 decomposition levels, 4 x 4 to 64 x 64 code-blocks, three quality layers,
 multiple tiles, subsampling, RGB through both the RCT and the ICT, lossy 9/7
@@ -1301,10 +1301,17 @@ entirely — which is the reason it exists.
 
 ## As built
 
-**Eight milestones, eight commits, each green under the full gate.** JPEG 2000
+**Nine milestones counting M0, each green under the full gate.** JPEG 2000
 decodes to pixels in `crates/tinker-pdf-filters/src/jpx/`, reaches a page
 through one `jpx_image` entry point in `crates/tinker-pdf/src/resources.rs`,
 and refuses by name everywhere else.
+
+The plan asked for one commit per milestone and got it through milestone 7.
+**Milestone 8 is five**, and the departure is worth recording rather than
+quietly taken: it is four separable deliverables — the bounds, the refusal
+list, the fingerprint, the ledgers — and then a defect the fuzz campaign found
+while the rest was being written, which had no business sharing a commit with
+any of them.
 
 ### It was a choice, and it was made against the evidence
 
@@ -1496,7 +1503,6 @@ Deferred by the milestones and never picked up:
   converted.** A codestream can declare them with `mct` clear, meaning the
   samples *are* luma and chrominance and PDF has no space to name; deciding
   what a consumer does with that is 8.9.5.4's and `tinker-pdf-color`'s.
-
 
 And one thing that is not this plan's and is now measured rather than
 suspected: **a form XObject's own `/Resources` are consulted nowhere in this

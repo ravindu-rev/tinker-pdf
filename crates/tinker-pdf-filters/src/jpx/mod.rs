@@ -158,7 +158,7 @@ pub(crate) const MAX_JPX_CODE_BLOCKS: u64 = 1 << 22;
 /// number, so the next reader who adjusts it cannot walk back past the input.
 ///
 /// **What the measurement says.** Every codestream this repository has was
-/// run and its spend divided by its tile-component sample count: the 44
+/// run and its spend divided by its tile-component sample count: the 39
 /// `opj_compress` fixtures under `tests/jpx`, which span five progression
 /// orders, one to five decomposition levels, 4 x 4 to 64 x 64 code-blocks,
 /// three quality layers, multiple tiles, subsampling, RGB through the RCT and
@@ -543,7 +543,6 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
                     out: &mut samples,
                     stride,
                     at: k,
-                    wide,
                     precision,
                 },
             );
@@ -559,7 +558,6 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
                     out,
                     stride: 1,
                     at: 0,
-                    wide,
                     precision,
                 },
             );
@@ -587,10 +585,12 @@ struct Blit<'a> {
     stride: usize,
     /// This channel's index within a pixel.
     at: usize,
-    /// Bytes per sample: 2 above eight bits, 1 otherwise.
-    wide: usize,
     /// The output precision, 8 or 16, that [`normalise`] widens each sample
     /// to from its own channel's.
+    ///
+    /// The bytes per sample come from it rather than riding beside it: two
+    /// numbers that must agree are a chance for them to disagree, and the
+    /// buffer this writes into was sized from the same rule.
     precision: u8,
 }
 
@@ -619,6 +619,12 @@ struct Blit<'a> {
 /// repository and every one of gap 23's nineteen files, so nothing that
 /// already decoded moves.
 fn normalise(value: i32, from: u8, to: u8, signed: bool) -> u32 {
+    // Both are `(Ssiz & 0x7F) + 1` or a `pclr` `Bi` read the same way, and
+    // both are refused above 16 where they are read. Stated because the two
+    // things below would be a shift by minus one and a division by zero if a
+    // later reader let a zero through, and neither would look like this
+    // function's fault (ruling 1).
+    debug_assert!((1..=16).contains(&from) && (to == 8 || to == 16));
     let shifted = if signed {
         value.saturating_add(1i32 << (i32::from(from) - 1))
     } else {
@@ -694,7 +700,7 @@ fn blit(
             let value = channel.lookup(palette, plane.at(cx, cy));
             let index = ((py as usize) * (width as usize) + (px as usize)) * to.stride + to.at;
             let value = normalise(value, channel.precision, to.precision, channel.signed);
-            if to.wide == 2 {
+            if to.precision > 8 {
                 to.out[index * 2] = (value >> 8) as u8;
                 to.out[index * 2 + 1] = (value & 0xFF) as u8;
             } else {
