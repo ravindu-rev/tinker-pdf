@@ -593,8 +593,9 @@ impl Coder<'_, '_> {
 ///
 /// `passes` and `planes` both come from the packet header and are therefore
 /// attacker numbers; both are bounded before a single decision is decoded,
-/// and the work they buy is charged against the caller's remaining budget
-/// *before* each pass runs rather than after.
+/// and the work they buy — all of it, `area * passes` — is charged against
+/// the caller's remaining budget before the first pass runs rather than one
+/// pass at a time as it goes.
 // Eight, because a code-block's decode genuinely depends on eight things and
 // bundling them into a struct would only move the list. T.800 D.4's scan needs
 // the block, its geometry, its coding style, its bit-plane count, its passes,
@@ -640,6 +641,22 @@ pub(crate) fn decode_code_block(
     let planes = (passes - 1).div_ceil(3) + 1;
     let area = u64::from(width) * u64::from(height);
 
+    // The whole block's cost, charged before its first decision is decoded.
+    //
+    // Every one of the `passes` passes below visits every one of the `area`
+    // coefficients, so this is exactly what the block is about to spend and
+    // not an estimate of it. Charging it here rather than inside the loop is
+    // what makes the budget a check on what the codestream *declared*: the
+    // pass count came out of the packet header, so it is known before any
+    // work is done, and a per-pass charge would refuse the ninety-first pass
+    // having already run ninety — which is to say, having already spent the
+    // time the budget exists to prevent. That is `5adf502`'s method, whose
+    // whole point was that the refusal be assertable by the warning rather
+    // than by a clock. `the_work_charge_is_the_whole_block_before_any_of_it`
+    // pins the boundary at `area * passes` exactly, which is the assertion
+    // the two designs disagree on.
+    charge(work, area.saturating_mul(u64::from(passes)))?;
+
     // D.2: the contexts are reset at the start of every code-block. `reset`
     // returns to Table D.7's states rather than to T.88's zero, which is the
     // half of `set_state` that had to exist for this line to be right.
@@ -652,9 +669,6 @@ pub(crate) fn decode_code_block(
     };
 
     for i in 0..passes {
-        // Charged before the pass, not after. A budget checked afterwards is
-        // a budget that has already been spent.
-        charge(work, area)?;
         let (pass, plane) = pass_at(i, planes);
         match pass {
             Pass::Significance => coder.significance_pass(&mut block, plane),

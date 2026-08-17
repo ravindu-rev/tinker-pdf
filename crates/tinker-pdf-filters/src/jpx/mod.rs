@@ -115,37 +115,64 @@ pub(crate) const MAX_JPX_LEVELS: u8 = 32;
 /// samples it claims, and is refused by name rather than allocated for.
 pub(crate) const MAX_JPX_CODE_BLOCKS: u64 = 1 << 22;
 
-/// **The real budget**: coefficients times coding passes, charged as tier-1
-/// runs and checked *before* each pass.
-///
-/// Neither of the two above can stand in for it, and the reason is the one
-/// `5adf502` landed one layer up — an 1 851-byte page that took 19.3 seconds
-/// to render 9 600 pixels, inside a nesting cap that was in place the whole
-/// time, because **a depth or per-item cap is not a work cap once the
-/// structure branches.** Here the branching is: a code-block's bit-plane
-/// count comes from a tag tree and its coding-pass count from the packet
-/// header, both file-supplied and both cheap to write. A 64 x 64 code-block
-/// declaring the legal maximum of 91 passes is 372 736 coefficient-passes
-/// bought with a two-byte segment, and [`MAX_JPX_CODE_BLOCKS`] would let a
-/// codestream buy `1 << 22` of them: 1.5 x 10^12 coefficient-passes, from a
-/// file that fits in a packet.
-///
-/// **The magnitude is measured, not chosen.** `opj_compress` was run over the
-/// oracle's own 32 x 32 fixtures across every axis it varies — five
-/// progression orders, one to five decomposition levels, 4 x 4 to 64 x 64
-/// code-blocks, three quality layers, multiple tiles, RGB with the RCT and
-/// lossy 9/7 — and the *heaviest* of them spends 34 coefficient-passes per
-/// tile-component sample (lossless 5/3 greyscale at one decomposition level);
-/// the lossy cases spend between 3 and 12. Rounding that worst case up to 48
-/// and multiplying by [`MAX_JPX_SAMPLES`] gives `3 << 31`, which is what this
-/// is: an image at the sample ceiling, coded losslessly, with 40 per cent of
-/// headroom over the densest thing the oracle could be persuaded to emit.
+/// **The real budget**: coefficients times coding passes, charged from a
+/// code-block's declared pass count *before* the first of them runs.
 ///
 /// It is a **total**, spent and never refunded across every tile, component,
 /// resolution, precinct, code-block and layer of the codestream — because the
 /// per-item caps beside it are each individually satisfiable by a stream that
-/// is unbounded in the product.
-pub(crate) const MAX_JPX_WORK: u64 = 3 << 31;
+/// is unbounded in the product. `5adf502` landed that lesson one layer up: an
+/// 1 851-byte page that took 19.3 seconds to render 9 600 pixels, inside a
+/// nesting cap that was in place the whole time, because **a depth or
+/// per-item cap is not a work cap once the structure branches.**
+///
+/// # The magnitude is measured, and the first value was wrong
+///
+/// It stood at `3 << 31` from milestone 1 until milestone 8 measured it, and
+/// **at that value it could not fire at all.** Tier-1's work is bounded above
+/// by the total code-block area times [`tier1::MAX_PASSES`], and the total
+/// code-block area is not a free parameter: T.800's subbands are critically
+/// sampled, so the areas over every resolution of a tile-component sum to
+/// exactly that tile-component's sample count, which [`MAX_JPX_SAMPLES`]
+/// caps. So no codestream can ask for more than `MAX_JPX_SAMPLES *
+/// MAX_PASSES` = 6 106 906 624 coefficient-passes, and `3 << 31` is
+/// 6 442 450 944 — above the ceiling of its own input. It was a budget with
+/// nothing on the other side of it, which is precisely the shape
+/// `MAX_GROUP_DEPTH` had when `5adf502` found it, arrived at here by a
+/// one-bit slip between a derivation and the constant it produced: the
+/// paragraph that set it said "rounding that worst case up to 48 and
+/// multiplying by `MAX_JPX_SAMPLES`", and 48 times `1 << 26` is `3 << 30`.
+/// `the_work_cap_can_fire_at_all` now asserts the relation rather than the
+/// number, so the next reader who adjusts it cannot walk back past the input.
+///
+/// **What the measurement says.** Every codestream this repository has was
+/// run and its spend divided by its tile-component sample count: the 44
+/// `opj_compress` fixtures under `tests/jpx`, which span five progression
+/// orders, one to five decomposition levels, 4 x 4 to 64 x 64 code-blocks,
+/// three quality layers, multiple tiles, subsampling, RGB through the RCT and
+/// the ICT, and lossy 9/7 both at a rate and truncated; and the fifteen of
+/// gap 23's nineteen real files that reach tier-1. The densest is **22.75
+/// coefficient-passes per tile-component sample** — a lossless 5/3 greyscale,
+/// which is the heaviest coding there is, since every plane of every
+/// coefficient is present — and the densest *real* file is 22.0. Lossy
+/// streams spend between 0.17 and 15.
+///
+/// So this is 48 per sample: `48 * MAX_JPX_SAMPLES`, which is **2.1 times the
+/// densest thing ever measured here** and 53 per cent of what the format can
+/// ask for. A budget that refuses a real file is worse than one that is
+/// generous, and the gap between 22.75 and 91 is where the only honest room
+/// to choose is.
+///
+/// **What it adds over [`MAX_JPX_SAMPLES`] is smaller than the plan assumed**,
+/// and saying so is the point of having measured. The plan costed a hostile
+/// stream at `1 << 22` code-blocks of 4 096 coefficients and 91 passes —
+/// 1.5 x 10^12 — but that is 1.7 x 10^10 coefficients, 256 times what
+/// [`MAX_JPX_SAMPLES`] permits, so the sample ceiling already forbids it. The
+/// factor genuinely bought here is 91/48, just under two. What is *not*
+/// redundant is when the charge falls: it comes from the pass count in the
+/// packet header, so a code-block is refused before it decodes a single
+/// decision rather than after ninety of them.
+pub(crate) const MAX_JPX_WORK: u64 = 3 << 30;
 
 // --- the refusal list ---------------------------------------------------
 

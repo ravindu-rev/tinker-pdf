@@ -18,6 +18,7 @@
 //!    vendored, in `tests/jpx_oracle.rs`.
 //! d. Gap 23's nineteen real files, as milestone 8's acceptance number.
 
+mod bounds;
 mod colour;
 mod headers;
 mod tier1;
