@@ -204,6 +204,35 @@ own fuzz job is `runs-on: ubuntu-latest`. Gaps 03, 16, 17 and 24 all inherit
 this. WSL2/Ubuntu-24.04 with nightly and `cargo-fuzz 0.13.2` is the local route
 and it works.
 
+**One ZIP signature covers five formats, so gap 29's sniff mis-opens gap 30's
+input.** *Added while planning [30](30-xps.md), August 2026.* `Document::open`
+sniffs `PK\x03\x04` at offset zero and hands the bytes to `cbz::synthesise`,
+which is correct for a comic archive and wrong for every other ZIP-shaped
+document format. Measured on a real one-page XPS written by Windows' own XPS
+serialiser: it **opens**, reports one page, and renders a 4 × 4-point page whose
+picture is one of the document's raster resources, with the 816 × 1056 page
+dimensions, the text and the fonts discarded and **no warning at all**. A
+document with no raster resource is refused as `NoImages` instead — "a valid
+archive and not one entry produced a page" — said about a document that has a
+page.
+
+This is a property of the set rather than a defect in either plan: gap 29 was
+right to sniff the container it was built for, and gap 30 is where the second
+container arrives. It is recorded here because it changes an ordering. Gap 30's
+milestone 3, which routes by ECMA-388 E.3's three-step test, is the **only** one
+of that plan's nine milestones that improves matters on its own, and it is the
+part that must land even if the rest of XPS is descoped — so it is early in that
+plan's table and its two failing tests are committed by milestone 1.
+
+**Gap 30's milestone 5 must land before its milestones 6 and 7.** The same shape
+as PRE-D and as gap 29's `inflate_raw` milestone: the writer cannot emit an
+`/ExtGState`, a `/Shading`, a `/Pattern` or a Type0 font, and a build that
+reaches XPS's brushes and glyphs without them will approximate opacity and
+address glyphs through `/WinAnsiEncoding`. Both approximations render correctly
+on every fixture anybody would write by hand and are wrong on real documents,
+which is this programme's recurring failure and the reason the ordering is
+written down rather than left to whoever picks the plan up.
+
 **The commit-boundary rule is per-plan, not global.** CONTRIBUTING says to treat
 each plan's milestone table as the commit boundary set. One commit per gap is
 right for gap 21 and gap 22; it is wrong for gap 01 (five milestones, landed as
@@ -248,7 +277,15 @@ Prerequisites are marked. Sizes are from [README.md](README.md).
 | 30 | [26](26-binding-packaging.md) binding packaging (M) | Dry run only; the matrix legs are CI-only | |
 | 31 | **PRE-E** `DocumentEditor` transactions | 27 option A cannot be built without it | |
 | 32 | [27](27-form-calculations-decision.md) form calculations, option A | Two commits: option B's reader, then the interpreter | |
-| 33 | [28](28-tinker-integration-decisions.md) Tinker integration | M4 is code in a different repository | |
+| 33 | [28](28-tinker-integration-decisions.md) Tinker integration | M4 is code in a different repository | **done** |
+| 34 | [29](29-cbz.md) CBZ (S) | The first of the three container plans gap 28's decision spawned. Nothing blocks it; it builds `tinker-pdf-zip`, which 30 needs | **done** `5f46fe3`..`b764917` |
+| 35 | [30](30-xps.md) XPS (L) | The second. Needs 29 for `tinker-pdf-zip`, `ImageData::Compressed` and `bounds_ledger.rs`, and needs 09, 10 and 11 because its milestone 5 writes patterns, shadings and groups and the only check on what it writes is that this engine already reads them. **Its own milestone 1 is a corpus of real documents, before any reader** — gap 29 closed owing exactly that, and the ordering is how this one does not | |
+| 36 | 31 EPUB (XL+) | The third, and not written. It reuses 30's `tinker-pdf-xml` and **none** of its OPC layer: EPUB's container is OCF with `META-INF/container.xml`, not OPC | |
+
+The three container plans sit after 33 because gap 28 is the decision that
+spawned them, and they are numbered here rather than left out of the ledger
+because the file's own opening — "what order they are being closed in" — stops
+being true the moment work happens outside it.
 
 ## What has landed
 
