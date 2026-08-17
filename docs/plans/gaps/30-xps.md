@@ -1200,3 +1200,271 @@ against making OPC a crate and is recorded in both places.
 | An XML crate is added because the rule lived only in prose | Nine names denied in milestone 2, the milestone where the temptation exists, rather than in milestone 9 |
 | The fixtures are hand-built from ECMA-388 and the first real file finds something — gap 29's own closing sentence | Milestone 1 is first, and the real files have already found seven things this plan would otherwise have got wrong |
 | An `As built` that reads as "XPS works now" | The claim this plan can support is fixed-page markup with paths, glyphs, images and the five brushes, from a package whose parts are JPEG, PNG and OpenType. Structure, signatures, print tickets, 3D, TIFF, JPEG XR, ICC and N-channel colour are refused **by name**, and the `As built` says which of the milestone-1 corpus needed each of them |
+
+## Progress — 18 August 2026, milestone 1
+
+**Eight genuine XPS packages have landed**, under
+`crates/tinker-pdf/tests/xps/`, with per-file provenance in a README beside
+them, an inventory of all fifty-two parts that a test recomputes on every run,
+and the two present-day failures pinned as `#[ignore]`d tests that fail when
+run. Nine tests in `crates/tinker-pdf/tests/xps.rs`, seven of them green; the
+workspace stands at **1 881**, up seven, because an ignored test does not count.
+
+No reader code. That was the point of scheduling this first.
+
+### Both routes were tried, and route 2 was blocked
+
+**Route 1 worked exactly as this plan reported.** `ReachFramework` under
+Windows PowerShell 5.1 with `-STA`, no printer and no elevation, six packages,
+XPS 1.0 throughout.
+
+**Route 2 could not be used, and here is precisely what was tried.**
+`Get-WindowsOptionalFeature -Online`, `Enable-WindowsOptionalFeature -Online
+-FeatureName Printing-XPSServices-Features -NoRestart` and `dism /online
+/get-featureinfo` each answered *"The requested operation requires elevation"* —
+DISM error 740. `mxdwdrv.dll` is absent from `System32`, `Get-Printer` lists no
+XPS printer, `xpsrchvw.exe` is absent, and `Add-PrinterDriver "Microsoft XPS
+Document Writer v4"` answers *"The specified driver does not exist in the driver
+store"* even though two copies of `mxdwdrv.dll` sit under
+`DriverStore\FileRepository`, because the INF is not staged. Elevation was not
+obtainable non-interactively. So this plan's sentence — that the feature is not
+installed and that enabling it needs elevation — is confirmed on this machine a
+day later, and the feature name it quoted from documentation is the right one.
+
+**A third Microsoft producer stands in for it, and it is not a hand-built
+file.** The XPS Document API's object model — the "XPS Object Factory" coclass
+`{E974D26D-3D9B-4D47-88CC-3872F2DC3585}`, served by `XpsServices.dll`
+10.0.26100.8972 — **is registered on a stock Windows 11 install without the
+printing feature**, which this plan did not know.
+`IXpsOMPackage1::WriteToFile1` takes an `XPS_DOCUMENT_TYPE`, and
+`XPS_DOCUMENT_TYPE_OPENXPS` makes Microsoft code write every byte of an OpenXPS
+package. `tests/xps/to-openxps.ps1` declares the two interfaces from the Windows
+SDK's own headers — vtable order and IIDs read out of `xpsobjectmodel.h` and
+`xpsobjectmodel_1.h` rather than remembered — and calls it. Two `.oxps` files
+came out.
+
+So **both dialects are represented**, which is what route 2 was for. What is
+**not** established is that the MXDW printer's bytes match the object model's,
+and that is stated rather than assumed: the printer is a different component and
+nobody here has seen its output. If a later milestone gets elevation, the cheap
+check is whether an MXDW `.oxps` differs from `xpsom-image-and-text.oxps` in
+anything beyond part GUIDs.
+
+### The `.oxps` content-type question is settled: `xps-`, not `oxps-`
+
+This plan left it open and made this milestone answer it. **Windows' OpenXPS
+output uses ECMA-388 Table D–4's `xps-` strings, unchanged.** Measured on both
+`.oxps` files:
+
+```text
+<Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml" />
+<Default Extension="fdoc"  ContentType="application/vnd.ms-package.xps-fixeddocument+xml" />
+<Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml" />
+<Default Extension="ODTTF" ContentType="application/vnd.ms-package.obfuscated-opentype" />
+```
+
+Byte-identical to the XPS 1.0 packages' content types. The sources reporting
+`application/vnd.ms-package.oxps-fixeddocumentsequence+xml` are wrong about what
+this producer writes, and
+`both_dialects_are_represented_and_the_content_type_does_not_tell_them_apart`
+asserts that **no package in the corpus contains the substring `oxps-` in its
+content-types item at all**.
+
+**So decision 3 stands, and its reasoning is now measured rather than assumed.**
+The reader keys on the **namespace** — `http://schemas.openxps.org/oxps/v1.0`
+against `http://schemas.microsoft.com/xps/2005/06`, on the elements and on the
+relationship types alike — and treats the content type as corroboration.
+[Two dialects, one reader](#two-dialects-one-reader)'s warning that *"the
+obvious sniff is the wrong one, and it is recorded here because it looks
+right"* is exactly right, and it is now right for a reason a test can check.
+
+### The two failures, re-measured and pinned
+
+This plan's report is **confirmed to the number**, on a package it did not
+write. `wpf-image-and-text.xps` is one 816 × 1056 fixed page — 612 × 792 pt, US
+Letter to the point — with a 32 × 32 PNG resource and a `<Glyphs>` run.
+`Document::open` accepts it, `page_count()` is 1, `Page::size()` is
+`(32.0, 32.0)`, and `ArchiveReport::warnings()` is **empty**. The markup, the
+text, the ODTTF and the page size are discarded in silence.
+`wpf-shapes-only.xps` — a fixed page of three filled `Path` elements, no image
+part anywhere in the package — is refused as
+`OpenError::UnsupportedArchive(ArchiveRefusal::NoImages)`, whose own
+documentation reads *"a valid archive with no image entries"*, said about a
+document that has a page.
+
+Three tests carry it:
+
+- `an_xps_with_a_raster_resource_is_not_a_one_page_comic` and
+  `an_xps_without_a_raster_resource_is_not_refused_as_having_no_images` are
+  `#[ignore]`d with the reason naming milestone 3, and **both fail when run with
+  `--ignored`**, which was checked rather than assumed. They are the two
+  milestone 3's exit criterion turns green.
+- `today_an_xps_opens_as_a_comic_and_this_is_what_it_reports` **passes**, and
+  asserts the wrong answers exactly. It exists so the defect is watched rather
+  than described: when milestone 3 lands, that test fails, and it is deleted in
+  the same commit that un-ignores the other two. A record of old behaviour that
+  does not break when the behaviour changes is not a record — which is gap 29's
+  milestone-6 survivor in a different costume.
+
+`every_package_in_the_corpus_is_mis_read_today` sweeps all eight, and the
+result is worse than this plan's two examples in a way worth writing down: the
+page count is the count of **raster parts**, so `wpf-three-pages.xps` — a
+three-page document — is refused as `NoImages`, and `wpf-tiled-brush.xps`
+reports one page because its two brushes share one PNG. Five of the eight
+refuse; three open as a one-page comic; **not one is read as the document it
+is**, in either dialect. The plan's *"a ten-page report with sixty image
+resources opens as a sixty-page book in filename order"* understates it: a
+document with no raster at all does not open, and a document with one raster
+opens as one page however many pages it has.
+
+### What the real files showed that this plan did not predict
+
+The full list is in `tests/xps/README.md`. Seven of this plan's predictions held
+— `[Content_Types].xml` last, the `<Default Extension="ODTTF">` case mismatch,
+`Indices=",53"`, the relative-and-absolute target pair, the namespace
+divergence, the geometry, and the two failures. These are the ones it did not
+have, each of which a fixture written from ECMA-388 would have got wrong:
+
+- **The UTF-8 BOM is a WPF habit, not an XPS one.** [A real
+  `.xps`](#a-real-xps-and-gap-29s-largest-debt) lists *"the UTF-8 BOM on every
+  XML part"* among what opening a real file already found. True of WPF's output;
+  **the object model writes no BOM on any part**. A reader that required one
+  refuses every OpenXPS file Windows writes. Scope's *"UTF-8 and UTF-16 with BOM
+  detection"* stands, but *detection* has to mean detection and not expectation.
+- **A fixed page part may carry no XML declaration at all.** WPF's `.fpage`,
+  `.fdoc` and `.fdseq` begin directly with their root element. Four spellings of
+  the prolog appear across eight files, including `<?xml version="1.0"?>` with no
+  encoding, and `encoding` spelled both `utf-8` and `UTF-8`.
+- **A comment sits inside element content**, not in the prolog: `<!-- Generated
+  by: Microsoft XPS Object Model, … -->` between `<FixedPage>` and
+  `<FixedPage.Resources>`. Milestone 2's parser meets it on the first real file.
+- **`ImageSource` and `FontUri` are relative in OpenXPS.**
+  `../../../Resources/….png` in the markup, where XPS 1.0 writes
+  `/Resources/….png` for the same part. [OPC is not "a ZIP with names in
+  it"](#opc-is-not-a-zip-with-names-in-it) predicts a relative *relationship
+  target* beside an absolute *markup* reference and quotes exactly that pair;
+  the other combination is also real, so relative-reference resolution is owed on
+  markup attributes too, resolved against the fixed page part's own name.
+  Milestones 3 and 6 inherit it.
+- **Two spellings of everything, in one corpus.** Abbreviated geometry as
+  `M0,0L200,0 200,200 0,200Z` and as `M 0,0 L 200,0 200,200 0,200 Z`; colours as
+  `#FF000000` and as `#000000`, the latter lower case. Both producers are
+  Microsoft and they do not agree with each other.
+- **Inter-element whitespace is real.** WPF writes newlines and four-space
+  indentation inside `FixedPage.Resources`, with no `xml:space`.
+- **The object model drops the defaults WPF writes** — `TileMode="None"`,
+  `SpreadMethod="Pad"`, `ColorInterpolationMode="SRgbLinearInterpolation"` — so
+  an attribute present in one dialect's twin of a page is absent from the
+  other's.
+- **Both ZIP methods appear, and neither producer is consistent about it.**
+  `_rels/.rels` is **stored** in the WPF packages and **deflated** in the object
+  model's; image parts are stored and ODTTF parts deflated in both.
+- **Eight characters of text cost a 189 252-byte font part.** WPF's subsetter
+  keeps a variable font's `gvar` table whole — 142 688 bytes of it — out of
+  Cascadia Mono's 371 352. Well under `MAX_ZIP_ENTRY_BYTES` (128 MiB), but it is
+  the measured figure for the ledger's *"the most any fixture in this repository
+  legitimately spends"* column and for milestone 9's peak-memory record, and the
+  shape matters more than the number: **a real XPS's font part is not
+  proportional to the text on its page.**
+- **A dialect conversion does not re-obfuscate the font.** The ODTTF part keeps
+  its name, its GUID, its content type and all 189 252 of its bytes across the
+  two `image-and-text` packages, so one de-obfuscation reference serves both
+  dialects.
+
+**No `.piece` item appears anywhere in the corpus**, so [Interleaving is refused,
+with an escape hatch](#interleaving-is-refused-with-an-escape-hatch)'s condition
+for building the case — *"if milestone 1's corpus turns up an interleaved
+package, this plan is amended"* — is not met, and the refusal stands as written.
+
+**Nothing was produced by anything that is not Windows.** The criterion asks for
+one *"if one can be found"* and none was: no LibreOffice, Ghostscript or
+Inkscape is installed here and nothing else on the machine emits XPS. Recorded
+as owed rather than quietly dropped, and it is the one part of row 1 that is
+short.
+
+### The ODTTF key order is a reversal, and the B-notation is a trap
+
+[Fonts: ODTTF is thirty-two XORs](#fonts-odttf-is-thirty-two-xors-and-the-order-is-the-whole-of-it)'s
+permutation — *"B37, B36, B35, B34, B33, B32, B31, B30, B20, B21, B10, B11,
+B00, B01, B02, B03"* — read against a last segment written
+`B03B02B01B00-B11B10-B21B20-B30B31-B32B33B34B35B36B37`, is **exactly the sixteen
+bytes of the hex string reversed**. Transcribing it as the B-names instead
+transposed two pairs on the first attempt here, and the result was a font whose
+first eight bytes were right, whose table tags read correctly as `DSIG`, `GDEF`,
+`GPOS`, `GSUB`, and whose `searchRange`, `entrySelector` and `rangeShift` were
+garbage — plausible enough to look like a different bug entirely. This plan's
+judgement that the permutation *"is entirely unmemorable"*, and its decision to
+check it against a real file before rather than after, is now confirmed from the
+other side. The corrected arithmetic and the reference bytes for
+`Resources/595c31af-dbe8-48a5-a032-c677a052f501.ODTTF` are in
+`tests/xps/README.md`; milestone 7 asserts against them.
+
+### What was committed, and under which precedent
+
+172 868 bytes, under `fuzz/README.md`'s *"a tool's output on our input is ours
+to commit"* reading: the content of every package — four coloured quadrants
+under a white diagonal, three rectangles, two gradients, eight characters of
+text — is authored in `make-corpus.ps1` in this repository, and only the font is
+not ours. That font is **Cascadia Mono**, chosen because its own `name` table
+carries the SIL Open Font License grant — *"use, study, copy, merge, embed,
+modify, redistribute"*, with *"The requirement for fonts to remain under this
+license does not apply to any document created using the Font Software"* — and
+because it is the **only** font on a stock Windows 11 install that does. Every
+other face in `C:\Windows\Fonts` is Monotype's or Microsoft's under terms that
+do not say so, and none of them is used. `fsType` is `Installable`.
+
+`.gitattributes` gains `*.xps` and `*.oxps` as binary, with the reason written
+down: a normalised line ending inside a **stored** part would break its CRC-32,
+and these files cannot be regenerated byte for byte, because both serialisers
+mint a fresh GUID for every resource part and a fresh `Id` for every
+relationship. A second run of the script is a different file. The README carries
+a hash per file for that reason, and says so.
+
+### The inventory, and a cross-check that came free
+
+`INVENTORY.tsv` names all fifty-two parts with media type, ZIP method and both
+sizes, written by `tests/xps/inventory.ps1` through .NET's
+`System.IO.Compression`. `inventory_matches_the_packages` recomputes name,
+method and both sizes through **`tinker-pdf-zip`** and compares every row, so
+the inventory cannot drift from the files, and two independent ZIP readers have
+to agree about all fifty-two.
+
+That comparison also discharges something gap 29 could not: **it is the first
+time this repository's archive reader has been pointed at an archive it did not
+write.** It read all eight by the central-directory route, with **no warnings
+and no leniency of any kind**, which is a small result and the one that was
+owed.
+
+The media-type column is deliberately **not** checked by that test: resolving
+one is OPC 7.2.3.5's ordered algorithm and it does not exist yet. Milestone 3's
+round-trip criterion is where the column becomes checkable, and it now has a
+committed table of real answers to check against — including the
+`Extension="ODTTF"` case mismatch in both dialects, and the `(none)` that
+`[Content_Types].xml` itself resolves to, since it is an item and not a part.
+
+`tinker-pdf-zip` is added to the facade's `[dev-dependencies]`. It is already a
+normal dependency, so `xtask -- dag` sees no new edge; the manifest comment says
+so, because a crate appearing in a manifest without its argument is the failure
+`ALLOWED`'s own commentary records.
+
+### What milestones 2 and 3 inherit
+
+- **Two failing tests with names, and a passing test that must break.**
+  Milestone 3 un-ignores the two and deletes
+  `today_an_xps_opens_as_a_comic_and_this_is_what_it_reports` in the same
+  commit. If that third test still passes afterwards, the discrimination did not
+  happen.
+- **Comments in element content, and no BOM.** Milestone 2's parser meets both
+  on the first real file, and neither would be in a hand-written fixture.
+- **Relative references in markup, not only in relationships.** Milestone 3's
+  resolver and milestone 6's `ImageSource` handling both need it, resolved
+  against the source part.
+- **A real `<Default Extension="ODTTF">` to compare case-insensitively
+  against**, in both dialects, out of `INVENTORY.tsv` rather than out of prose.
+- **A corpus in which `[Content_Types].xml` is last in all eight packages**, and
+  a test that says so, so a positional assumption fails in CI rather than on
+  somebody's machine.
+- **`scan::extent`'s uncharged budget is already fixed**, at `84ee3b7`, before
+  this milestone landed. Milestone 3's criterion to *"confirm and fix or show
+  not to exist"* is discharged; the finding held, and every package here takes
+  the central-directory route, so none of them exercises the fix.

@@ -34,3 +34,9 @@ tinker-pdf-zip = { workspace = true }
 
 [dev-dependencies]
 tinker-pdf-cos = { workspace = true }
+# `tests/xps.rs` recomputes the XPS corpus's committed inventory through this
+# reader and compares it against the one .NET's `System.IO.Compression` wrote,
+# so the two have to agree about every name, method and size. Already a normal
+# dependency above (gap 29), so this adds no edge to the graph `xtask dag`
+# checks — only a test target's access to it.
+tinker-pdf-zip = { workspace = true }
