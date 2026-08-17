@@ -688,9 +688,12 @@ may refuse these bytes", not "this crate will never decode them".
 
 ## Progress — 17 August 2026
 
-**Milestones 0 to 6 have landed**, each in its own commit and each recorded in
-its own section below. `As built` is deliberately not written yet; it belongs
-to whoever finishes milestone 8.
+**All of them have landed** — M0 through M8 — each recorded in its own section
+below, and [`As built`](#as-built) at the end is milestone 8's and closes the
+gap. The sections are kept as they were written rather than rewritten in
+hindsight: what each milestone found while it was the frontier is worth more
+than a tidy summary, and several of them found the same shape of defect from
+different directions.
 
 - **M0** (`bfa73a2`) — `mq.rs` gained `set_state`, because T.88 starts every
   context at state 0 and T.800 does not: zero-coding at 4, run-length at 3,
@@ -1434,8 +1437,21 @@ from Table F.4's decimals fails.
 #### The fuzz campaign, and what it found
 
 `cargo fuzz run jpx` under WSL2 / Ubuntu-24.04, nightly with cargo-fuzz
-0.13.2, seeded with the twenty-four committed corpus entries. **It found a
-defect in thirty minutes, and it is the characteristic one.**
+0.13.2, seeded with the twenty-four committed corpus entries — libFuzzer is
+not supported on `x86_64-pc-windows-msvc`, which is what three other plans
+already record. **The first session found a defect inside thirty minutes, and
+it is the characteristic one.** The second, after the fix, ran **571 053
+executions in 2 101 seconds with no crash, no OOM and no timeout**, which is
+the milestone's exit criterion.
+
+The seeds are **reachable by construction rather than measured**: each is a
+codestream `opj_compress` emitted on one of this repository's own images or
+one the test writer built, chosen for a feature — a progression order, a
+partition, a colour transform — and the target's first byte chooses the output
+ceiling and whether the body is wrapped in JP2 boxes, so a flat corpus reaches
+both shapes PDF permits. What the session adds beyond that is the mutation
+space between them, and the finding below came out of exactly that: no seed
+declares a precision other than 8, and the defect needed one that did.
 
 `JpxImage::precision` has documented "8 or 16" since milestone 1 and nothing
 enforced it. T.800 lets a component declare any precision from 1 to 38 and
