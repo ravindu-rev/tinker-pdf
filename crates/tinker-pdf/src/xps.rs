@@ -126,6 +126,7 @@ pub mod brush;
 pub mod font;
 pub mod geometry;
 pub mod glyphs;
+mod image;
 pub mod markup;
 pub mod opc;
 pub mod paint;
@@ -691,6 +692,24 @@ pub enum XpsElementDefect {
     /// the asymmetry rather than the geometry side, and dropping the text
     /// would lose far more than the simulation does.
     GlyphsStyleSimulated,
+    /// An `ImageSource` that resolves to no part in the package, or to one the
+    /// package does not hold.
+    ImageUnresolved,
+    /// 9.1.5's TIFF or 9.1.5.1's JPEG XR. This engine has neither decoder, and
+    /// the refusal is at the **element** so the rest of the page still draws --
+    /// a report whose every page failed because one picture did would be worse
+    /// than the missing picture.
+    ///
+    /// Also the answer when neither the content type nor the magic bytes name a
+    /// format at all: a part nobody has identified is not one to guess at.
+    ImageFormatUnsupported,
+    /// The part is a format this build draws and its bytes will not decode.
+    ImageUnreadable,
+    /// 9.1.5's `{ColorConvertedBitmap ...}`, which names an ICC profile. The
+    /// profile is a non-goal of gap 30, and the syntax has nowhere to put an
+    /// sRGB fallback -- so the picture is refused rather than drawn in colours
+    /// the file did not ask for.
+    ImageProfileUnsupported,
     /// Markup this build does not draw: an element from another vocabulary, a
     /// property element nothing here reads, a dictionary entry with no
     /// `x:Key`.
@@ -729,6 +748,12 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::GlyphsStyleSimulated => {
                 "a `StyleSimulations` this build does not simulate"
             }
+            XpsElementDefect::ImageUnresolved => "an image the package does not hold",
+            XpsElementDefect::ImageFormatUnsupported => {
+                "an image format this build does not decode"
+            }
+            XpsElementDefect::ImageUnreadable => "an image whose bytes will not decode",
+            XpsElementDefect::ImageProfileUnsupported => "an image behind a colour profile",
             XpsElementDefect::ElementUnknown => "markup this build does not draw",
         })
     }
@@ -1134,6 +1159,9 @@ fn synthesise(
     // resource name has to be unique across a document, because `add_page`
     // copies the whole resource table into every page.
     let mut fonts = Fonts::default();
+    // And one image table, for the same reason and with the same lifetime: two
+    // pages naming one `/XI0` for two different pictures would be one picture.
+    let mut images = image::Images::default();
     // Painted **once per part**, for the reason milestone 4 built its own
     // caches: a `FixedDocument` may show one page part four thousand times,
     // and `Source::new` walks every character of a part before it yields an
@@ -1159,6 +1187,12 @@ fn synthesise(
                 if let Err(Trouble::Exhausted) = fonts.load(package, part, &mut builder, limits) {
                     return Err(ArchiveRefusal::TooLarge);
                 }
+                // 9.1.5's images, in a second pass and before the walk for the
+                // reason the fonts are: `read_part` hands back a borrow the walk
+                // is already holding. See `image::Images::load`.
+                if let Err(Trouble::Exhausted) = images.load(package, part, &mut builder, limits) {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
                 let drawn = match package.read_part(part) {
                     Ok(bytes) => painter.page(
                         &mut builder,
@@ -1166,6 +1200,8 @@ fn synthesise(
                         &Surroundings {
                             part,
                             fonts: &fonts,
+                            images: &images,
+                            page: (width, height),
                             xml: &limits.xml,
                         },
                         &mut budget,

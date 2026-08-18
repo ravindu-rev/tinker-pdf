@@ -3144,3 +3144,160 @@ a build that did not run measured nothing whatever its exit code said.
 - **The campaign has not run** (milestone 9), **no non-Windows producer**
   (milestone 1), and **`docs/STATUS.md` still says 1 872 tests** — the ledger
   sweep, the README rows and the fourteenth fingerprint are milestone 9's.
+
+## Progress — 19 August 2026, milestone 8
+
+**An `ImageBrush` paints.** `crates/tinker-pdf/src/xps/image.rs` resolves image
+parts, `brush.rs` reads 15.3's grammar, and `paint.rs` turns the pair into a PDF
+tiling pattern. Thirteen tests in the new `tests/xps_images.rs`, and the
+workspace stands at **2 190**.
+
+**All eight of milestone 1's real packages now render with nothing owed** — four
+after milestone 6, six after milestone 7, eight here. The design section's own
+one-page package, quoted at the top of this plan as the file that says why
+resource dictionaries cannot be deferred, reads whole.
+
+### Row 8 is amended, not claimed: `VisualBrush` is refused by name
+
+Row 8 asks for `VisualBrush` "through a tiling pattern, bounded by
+`MAX_XPS_VISUAL_DEPTH` **across parts**", and that is **not built**. The reason
+is structural rather than a shortage of time: an `ImageBrush`'s cell is a *part*,
+which [`image::Images`] resolves in a pass before the drawing walk for the same
+reason the fonts are; a `VisualBrush`'s cell is a **subtree of markup**, so
+painting one means re-entering the drawing walk from inside a brush, carrying
+18.2's cross-part depth with it, while `brush.rs` is deliberately pure and knows
+nothing of the package.
+
+So the brush is `BrushUnsupported` and the shape keeps the placeholder grey,
+which is the same answer every other unpainted brush gets. `MAX_XPS_VISUAL_DEPTH`
+is **not** added to `bounds_ledger.rs`, because a cap over a thing nothing walks
+is a constant that could never fire — gap 18a milestone 8's failure, reached from
+the direction milestone 4 also refused it from. The bound arrives with the walk
+or not at all. Milestone 6 amended its own row this way and the precedent is the
+reason this is written down rather than quietly deferred.
+
+### The two defects the tests caught, both in one matrix
+
+Neither was subtle in hindsight and both drew *something*, which is the point.
+
+**`markup::concat(first, second)` composes innermost-first**, and the transform
+chain was assembled outermost-first. The picture landed 4 336 points down a
+792-point page — off the sheet entirely, so the page rendered with the text on it
+and no picture, which reads exactly like "the image brush is not implemented yet"
+and had been the truth for two milestones. The fix is four lines and the comment
+above them says which way round is wrong, because the wrong way compiles and
+runs.
+
+**The page height arrives already in points.** `plan.size` is scaled by
+`UNITS_TO_POINTS` where it is built, so scaling it again inside the painter was
+the same bug in a smaller place — and it survives the first fix, because both
+errors move the picture in the same direction.
+
+The corrected `/Matrix` is `[4.686846 0 0 -4.686846 75 717]`, and every number in
+it is checkable by hand: the viewport's origin is `(0,0)` in element space, the
+element translates by `(100,100)` XPS units, and 18.1 turns that into
+`(75, 792 − 75)` points. That is why the test asserts the numbers rather than the
+presence of a pattern.
+
+### Three tests amended rather than deleted
+
+All three asserted the `ImageBrush` was **not** drawn, which was true when they
+were written.
+
+- `an_image_brush_is_the_placeholder_grey_and_named` asserted
+  `BrushUnsupported`. Its fixture names a part no package holds, so the answer is
+  now `ImageUnresolved` — a different sentence about a different fault, and the
+  two are separate variants precisely so a report can tell "this build cannot
+  draw that" from "the file pointed at nothing". Renamed to say so.
+- The corpus table said four packages owed `BrushUnsupported`. It now says none
+  do, and the count stays in the test's own doc comment because that line is the
+  one place in the suite that records how much of somebody else's format this
+  build actually reads.
+- **Milestone 1's pinned test is the interesting one.** Its last assertion was
+  that the document *must not come back silent*, and that was right for five
+  milestones: while anything on the page was owed, silence could only mean the
+  original defect, an XPS read as a comic — which complains about nothing,
+  because from `cbz.rs`'s side nothing went wrong. Now the page is complete and
+  legitimately silent, and the assertion inverted.
+
+  What separates the two silences is **not** the warning list. It is whether the
+  page is the size the markup states and whether the picture is actually there.
+  Both are now asserted and the second is asserted in pixels: the original defect
+  produced a 32 × 32 page that was entirely the PNG, and a build that read the
+  markup and drew none of it produces a 612 × 792 page that is entirely white.
+  Neither passes.
+
+### What the design got right and what it did not say
+
+**Right:** the pass-through is inherited whole. Nothing in this milestone decodes
+a picture. `png_image` is the one door and it chooses its own route;
+`ImageData::Jpeg` places a JPEG verbatim. A page's peak cost is a multiple of the
+part, which is gap 29's argument arriving in a second format with no second
+implementation.
+
+**Not said:** 13.4.1's resolution is load-bearing and the plan treats it as a
+detail. An `ImageBrush` states its `Viewbox` in the image's **own** units, and the
+real package says `Viewbox="0,0,32.004467,32.004467"` for a 32-pixel PNG — those
+are the same thing only at 96 dpi. A reader that assumed 96 for a 300 dpi scan
+would draw it at three times its size, and the arithmetic lives in
+`Image::units` with the reason beside it.
+
+**Also not said:** the five `TileMode`s are five rules and PDF has none of them.
+8.7.3.1 gives a cell, two steps and a matrix, and no reflection at all — so
+`FlipX` is a cell twice the image wide with the image drawn into it twice, and
+`FlipXY` is four times and four drawings. `TileMode="None"` is the odd one: PDF
+has no pattern that draws once, so the step is made larger than any page can be
+and the shape's own extent does the clipping.
+
+### The bounds
+
+**No new row.** `bounds_ledger.rs` stays at seventeen, and the argument is
+milestone 4's and milestone 5's: an image part is charged where every other part
+is, by `MAX_ZIP_INFLATED` and `MAX_XPS_PARTS`, and the cell content this milestone
+writes is bounded by the markup that named it — `MAX_XPS_ELEMENTS` for the brush
+and at most four `Do` operators for the flips. `MAX_XPS_VISUAL_DEPTH` is argued
+above.
+
+### The injection matrix
+
+Twenty-eight defects, one at a time, each reverted before the next, the full
+workspace re-run with `--no-fail-fast`. The run was **stopped at defect ten** to
+land this commit, and the harness left that defect applied — which the
+`M8_APPLIED` marker caught immediately, and a verification pass over all
+twenty-eight anchors confirmed the tree is clean before anything was committed.
+That marker exists because milestone 5 and milestone 7 were each bitten by a
+run killed mid-injection, milestone 7's by a *deletion* patch that left the tree
+looking entirely ordinary.
+
+**Of the nine that completed, all nine were caught.** The remaining nineteen are
+owed and are the first thing milestone 9 does; they are listed here so the debt
+is specific rather than a note saying "more testing".
+
+| Defect | Caught by |
+| --- | --- |
+| The viewbox and the viewport swapped | `the_viewbox_scales_to_the_viewport_and_not_the_other_way` |
+| One scale for both axes | `the_two_units_attributes_are_read_separately` |
+| The viewport's offset dropped from the matrix | the real-package render |
+| The element's transform left out of the pattern matrix | `the_real_one_page_package_from_the_design_section_renders` |
+| The composition order reversed | the same |
+| 18.1's flip left out of the transform in force | the same |
+| The scopes walked outermost first | the same |
+| `TileMode="None"` given the cell's own step | `tile_mode_none_puts_one_picture_on_the_page` |
+| `FlipX` given a cell one image wide | `each_flip_makes_the_cell_large_enough_to_hold_its_reflections` |
+
+### Still owed
+
+- **Nineteen injections**, above. Milestone 9's first task.
+- **`VisualBrush`**, argued above, with `MAX_XPS_VISUAL_DEPTH` waiting on it.
+- **A remote resource dictionary part** is not resolved, and row 8 asks for one.
+  `ResourceDictionaryRemote` names it, which is where milestone 6 left it.
+- **`ImageBrush.Transform` is parsed and composed, and no real package states
+  one** — so that path is exercised only by fixtures this repository wrote.
+- **The qpdf oracle has not been extended to a pattern.** Milestone 5 asserted
+  `add_tiling_pattern`'s output through `qpdf_reads_back_the_states_the_groups_the_gradients_and_the_pattern`,
+  so the writer's half is checked by a third party; the *painter's* half — that
+  the pattern this milestone builds is the one qpdf reads — is not, and it is the
+  natural first assertion of milestone 9's campaign.
+- **No non-Windows producer** (milestone 1), and **the fuzz campaign,
+  the fourteenth fingerprint and `docs/STATUS.md`** (milestone 9), all inherited.
+

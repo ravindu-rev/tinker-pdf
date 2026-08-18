@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use tinker_pdf::xps::opc::PartName;
-use tinker_pdf::{ArchiveRefusal, ArchiveWarning, Dialect, Document, OpenError};
+use tinker_pdf::{ArchiveRefusal, ArchiveWarning, Dialect, Document, OpenError, RenderOptions};
 
 // ---- the corpus ---------------------------------------------------------
 
@@ -164,6 +164,21 @@ fn both_dialects_are_represented_and_the_content_type_does_not_tell_them_apart()
 ///
 /// Milestone 3 is where it went green: an `.xps` is now read as a fixed
 /// document, or refused by a name that is true.
+///
+/// *Amended, milestone 8.* The last assertion used to be that the document
+/// **must not come back silent**, and that was the right assertion for five
+/// milestones: while anything on the page was still owed, silence could only
+/// mean the original defect — an XPS read as a comic, which complains about
+/// nothing because from `cbz.rs`'s side nothing went wrong. Milestone 8 draws
+/// the `ImageBrush`, so the page is now complete and legitimately silent, and
+/// the assertion inverted.
+///
+/// What separates the two silences is not the warning list — it is whether the
+/// page is the size the *markup* states and whether the picture is actually
+/// there. So both are asserted, and the second one is asserted **in pixels**:
+/// the original defect produced a 32 × 32 page that was entirely the PNG, and a
+/// build that read the fixed page and drew nothing would produce a 612 × 792
+/// page that is entirely white. Neither passes below.
 #[test]
 fn an_xps_with_a_raster_resource_is_not_a_one_page_comic() {
     let document = Document::open(package("wpf-image-and-text.xps"))
@@ -177,12 +192,32 @@ fn an_xps_with_a_raster_resource_is_not_a_one_page_comic() {
          inch, which is 612 x 792 pt; today the page is the 32 x 32 PNG \
          resource at its own pixel size"
     );
+    // Nothing is owed on this page any more, which is milestone 8's own
+    // criterion. Asserted as an empty list rather than as "no brush warning",
+    // because a list that grew a new complaint would be a regression whatever
+    // the complaint was.
+    let report = document.archive().expect("a synthesised document reports");
     assert!(
-        document
-            .archive()
-            .is_none_or(|report| !report.warnings().is_empty()),
-        "a document synthesised from something that is not a comic archive \
-         must not come back silent"
+        report.warnings().is_empty(),
+        "the whole page reads: {:?}",
+        report.warnings()
+    );
+
+    // And the picture is there. A page that read its markup and drew none of it
+    // would be white, which is exactly what the four milestones before this one
+    // produced for this file — so silence is only the right answer alongside
+    // ink.
+    let bitmap = page.render(&RenderOptions::default());
+    assert_eq!((bitmap.width, bitmap.height), (612, 792));
+    let ink = bitmap
+        .data
+        .chunks_exact(3)
+        .filter(|px| *px != [0xFF, 0xFF, 0xFF])
+        .count();
+    assert!(
+        ink > 1_000,
+        "the page drew {ink} non-white pixels; the picture is 200 x 200 units \
+         at 0.75 and the text is a line of eight glyphs"
     );
 }
 

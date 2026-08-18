@@ -31,7 +31,7 @@
 #[path = "../cbz_support/mod.rs"]
 mod archive_writer;
 
-pub use archive_writer::{distinct_pixels, rgb_png, zip, Damage, ZipFile};
+pub use archive_writer::{distinct_pixels, grey_jpeg, rgb_png, zip, Damage, ZipFile};
 
 use tinker_pdf::cbz;
 use tinker_pdf::xps::opc;

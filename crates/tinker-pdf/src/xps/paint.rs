@@ -58,17 +58,18 @@ use std::collections::HashMap;
 
 use tinker_pdf_cos::{
     DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Glyph, PlacedGlyph, Shading,
-    TransparencyGroup,
+    TilingPattern, TilingType, TransparencyGroup,
 };
 use tinker_pdf_xml::{Event, Limits as XmlLimits, Source};
 
-use super::brush::{self, Brush, BrushError, Paint};
+use super::brush::{self, Brush, BrushError, ImageTile, Paint, TileMode, Units};
 use super::font::Fonts;
 use super::geometry::{self, Geometry, GeometryError};
 use super::glyphs::{self, RunError};
+use super::image::Images;
 use super::markup::{self, Budget, Node, Trouble};
 use super::opc::PartName;
-use super::XpsElementDefect;
+use super::{XpsElementDefect, UNITS_TO_POINTS};
 use crate::cbz::PLACEHOLDER_GREY;
 
 /// How deep a chain of `{StaticResource}` aliases may run.
@@ -105,6 +106,14 @@ pub struct Painter {
     /// it. A page of a thousand half-transparent shapes writes one dictionary.
     gstates: HashMap<(u64, u64), Vec<u8>>,
 }
+
+/// The step a `TileMode="None"` pattern gets.
+///
+/// PDF has no "draw this once" pattern — 8.7.3.1's cells always repeat — so the
+/// spacing is made larger than any page can be and the shape's own extent does
+/// the rest. A million points is about thirteen thousand inches; the largest
+/// page PDF admits is 200.
+const NO_TILE_STEP: f64 = 1.0e6;
 
 impl Painter {
     fn name(&mut self, prefix: &str) -> Vec<u8> {
@@ -174,6 +183,17 @@ pub struct Surroundings<'a> {
     pub part: &'a PartName,
     /// The fonts [`super::font::Fonts::load`] resolved for this part.
     pub fonts: &'a Fonts,
+    /// The images [`super::image::Images::load`] placed for this part.
+    pub images: &'a Images,
+    /// The page's own size, in XPS units.
+    ///
+    /// Needed for one thing and it is not the geometry: a tiling pattern's
+    /// `/Matrix` maps pattern space into the page's **default** space (8.7.3.1),
+    /// not into the transform in force when the pattern is set — so the painter
+    /// has to be able to reconstruct 18.1's own `cm`, and that one carries the
+    /// page height. Everything else in this module works in markup units on
+    /// purpose, so the numbers in a content stream are the numbers in the file.
+    pub page: (f64, f64),
     /// What the markup reader may spend on one part.
     pub xml: &'a XmlLimits,
 }
@@ -636,6 +656,10 @@ impl State<'_> {
                         // written
                     }
                 }
+                Paint::Image(tile) => {
+                    let ctm = self.in_force(scopes, transform);
+                    self.tile(&tile, &mut out, &data, bbox, ctm);
+                }
             }
         }
         if let Some(brush) = stroke {
@@ -846,7 +870,7 @@ impl State<'_> {
             // placeholder grey rather than the gradient's first stop, which is
             // gap 07's defect said the other way round — and the same answer a
             // gradient *stroke* already gets.
-            Paint::Gradient { .. } => {
+            Paint::Gradient { .. } | Paint::Image(_) => {
                 self.warn(XpsElementDefect::BrushUnsupported);
                 markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
             }
@@ -888,6 +912,223 @@ impl State<'_> {
             }
         }
         Ok(())
+    }
+
+    /// 18.1's own `cm`, then every open scope's transform, then this element's.
+    ///
+    /// This is the *only* place in the painter that needs it, and it exists
+    /// because 8.7.3.1 says a tiling pattern's `/Matrix` is relative to the
+    /// page's default space and **ignores the transform in force**. Every other
+    /// operator this module writes is inside the `q ... Q` that carries those
+    /// transforms, which is why the numbers in a content stream are the numbers
+    /// in the markup — a property gap 30's geometry section asks not to be
+    /// thrown away, and one a pattern cannot have.
+    fn in_force(&self, scopes: &[Scope], element: [f64; 6]) -> [f64; 6] {
+        // `markup::concat(first, second)` is "first then second", so the
+        // *innermost* transform is the first argument and this builds outward:
+        // the element's own, then each open scope from the inside, then 18.1's.
+        // Written this way round rather than the other because the other way
+        // round compiles, runs, and puts the picture four thousand points down
+        // the page — which is what it did before this comment existed.
+        let mut matrix = element;
+        for scope in scopes.iter().rev() {
+            matrix = markup::concat(matrix, scope.transform);
+        }
+        // 18.1: one XPS unit is 1/96 inch against PDF's 1/72, origin top left
+        // with y downward. The page's height arrives **already in points** —
+        // `plan.size` is scaled by `UNITS_TO_POINTS` where it is built — so
+        // scaling it again here is the same bug in a smaller place.
+        let page = [
+            UNITS_TO_POINTS,
+            0.0,
+            0.0,
+            -UNITS_TO_POINTS,
+            0.0,
+            self.around.page.1,
+        ];
+        markup::concat(matrix, page)
+    }
+
+    /// Writes an image fill: a tiling pattern, then the shape filled with it.
+    ///
+    /// # The three spaces, and why the arithmetic is written out
+    ///
+    /// An `ImageBrush` states two rectangles in two different spaces and PDF
+    /// wants a third. `viewbox` says which part of the *image* to show, in the
+    /// image's own units — a 384-pixel PNG at 96 dpi is four units across, which
+    /// is why [`super::image::Image::units`] exists and why 13.4.1's resolution
+    /// is not decoration. `viewport` says where that goes in the *element's*
+    /// space. PDF's pattern (8.7.3.1) wants a cell in pattern space, two steps,
+    /// and a `/Matrix` into the page's **default** space — not into whatever
+    /// transform is in force when the pattern is set, which is the trap this
+    /// method exists to keep in one place.
+    ///
+    /// So the cell is built in image-unit space, one image across, and the
+    /// matrix carries three things at once: the viewbox-to-viewport scale, the
+    /// viewport's own offset, and the element's current transform. A build that
+    /// left the last of those out would draw every tiled picture at the page's
+    /// origin, which looks like a clipping bug and is not one.
+    ///
+    /// # The flips have no PDF equivalent
+    ///
+    /// 8.7.3.1 gives a cell and two steps and no reflection at all, so
+    /// `FlipX`, `FlipY` and `FlipXY` are built by making the cell **twice the
+    /// image in the flipped direction** and drawing the image into it twice,
+    /// once mirrored. `FlipXY` is four times the image and four drawings. That
+    /// is the whole of the difference between the five `TileMode`s, and each is
+    /// a rule rather than a variation on one.
+    fn tile(
+        &mut self,
+        tile: &ImageTile,
+        out: &mut Vec<u8>,
+        data: &Geometry,
+        bbox: Option<[f64; 4]>,
+        ctm: [f64; 6],
+    ) {
+        let grey = |state: &mut Self, out: &mut Vec<u8>, defect: XpsElementDefect| {
+            state.warn(defect);
+            // `rg` and not `g`, to match every other placeholder this module paints:
+            // a reader diffing two content streams should not have to know that
+            // one grey is three numbers and another is one.
+            markup::op(out, &[PLACEHOLDER_GREY; 3], "rg");
+            data.emit(out, true);
+            out.extend_from_slice(data.fill_operator().as_bytes());
+            out.push(b'\n');
+        };
+
+        let image = match self.around.images.get(self.around.part, &tile.source) {
+            Ok(image) => image,
+            // The picture is not there, is a format this build refuses, or
+            // carries a colour profile — each already named by `Images::get`.
+            // The *shape* is still known, so it takes the placeholder and the
+            // rest of the page is untouched, which is row 8's own requirement.
+            Err(defect) => return grey(self, out, defect),
+        };
+        let resource = image.resource.clone();
+        let (image_w, image_h) = image.units();
+
+        // 15.3's units. An absolute viewbox is already in image units; a
+        // relative one is a fraction of the whole image.
+        let viewbox = match tile.viewbox_units {
+            Units::Absolute => tile.viewbox,
+            Units::RelativeToBoundingBox => [
+                tile.viewbox[0] * image_w,
+                tile.viewbox[1] * image_h,
+                tile.viewbox[2] * image_w,
+                tile.viewbox[3] * image_h,
+            ],
+        };
+        // A relative viewport is a fraction of the box being filled, which is
+        // why `brush::image_brush` refuses one with no box rather than
+        // inventing the box here.
+        let viewport = match tile.viewport_units {
+            Units::Absolute => tile.viewport,
+            Units::RelativeToBoundingBox => {
+                let Some(b) = bbox else {
+                    return grey(self, out, XpsElementDefect::BrushUnreadable);
+                };
+                let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
+                [
+                    b[0] + tile.viewport[0] * bw,
+                    b[1] + tile.viewport[1] * bh,
+                    tile.viewport[2] * bw,
+                    tile.viewport[3] * bh,
+                ]
+            }
+        };
+        if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 {
+            return grey(self, out, XpsElementDefect::BrushUnreadable);
+        }
+
+        // Viewbox to viewport, in each direction independently: 15.3 does not
+        // preserve the aspect ratio, and a build that took one scale for both
+        // would letterbox a picture the file said to stretch.
+        let sx = viewport[2] / viewbox[2];
+        let sy = viewport[3] / viewbox[3];
+
+        // The cell, in image units, and how many images wide it is. The flips
+        // are the only reason it is ever more than one.
+        let (cells_x, cells_y) = match tile.tile {
+            TileMode::None | TileMode::Tile => (1.0, 1.0),
+            TileMode::FlipX => (2.0, 1.0),
+            TileMode::FlipY => (1.0, 2.0),
+            TileMode::FlipXY => (2.0, 2.0),
+        };
+        let cell_w = viewbox[2] * cells_x;
+        let cell_h = viewbox[3] * cells_y;
+
+        // The cell's content: the image drawn once per reflection. 8.9.5.2 puts
+        // an image in the unit square, so the `cm` is the image's own extent
+        // and a negative scale with a compensating translation is the mirror.
+        let mut cell = Vec::new();
+        let flips: &[(f64, f64)] = match tile.tile {
+            TileMode::None | TileMode::Tile => &[(1.0, 1.0)],
+            TileMode::FlipX => &[(1.0, 1.0), (-1.0, 1.0)],
+            TileMode::FlipY => &[(1.0, 1.0), (1.0, -1.0)],
+            TileMode::FlipXY => &[(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)],
+        };
+        for (fx, fy) in flips {
+            let w = viewbox[2];
+            let h = viewbox[3];
+            // The origin of this copy: a mirrored copy sits on the far side of
+            // the cell and draws backwards into its own half.
+            let ox = if *fx < 0.0 { 2.0 * w } else { 0.0 };
+            let oy = if *fy < 0.0 { 2.0 * h } else { 0.0 };
+            cell.extend_from_slice(b"q\n");
+            markup::op(&mut cell, &[w * fx, 0.0, 0.0, h * fy, ox, oy], "cm");
+            cell.push(b'/');
+            cell.extend_from_slice(&resource);
+            cell.extend_from_slice(b" Do\nQ\n");
+        }
+
+        // Pattern space into the page's default space. The element's own
+        // transform is composed in here rather than left to the `cm` in force,
+        // because 8.7.3.1 says a pattern ignores that one.
+        let place = [
+            sx,
+            0.0,
+            0.0,
+            sy,
+            viewport[0] - viewbox[0] * sx,
+            viewport[1] - viewbox[1] * sy,
+        ];
+        // `place` maps pattern space (image units) into the element's space and
+        // the CTM maps that into the page's, so `place` is the inner one. The
+        // other order scales the translation by the viewbox-to-viewport factor,
+        // which puts a 200-unit picture four thousand points down the page.
+        let matrix = markup::concat(place, ctm);
+
+        let name = self.painter.name("P");
+        let pattern = TilingPattern {
+            bbox: [0.0, 0.0, cell_w, cell_h],
+            // `TileMode::None` draws the picture once. PDF has no such thing —
+            // a pattern always repeats — so the step is made large enough that
+            // no second cell can reach the shape, and the clip does the rest.
+            x_step: if tile.tile == TileMode::None {
+                NO_TILE_STEP
+            } else {
+                cell_w
+            },
+            y_step: if tile.tile == TileMode::None {
+                NO_TILE_STEP
+            } else {
+                cell_h
+            },
+            matrix: Some(matrix),
+            tiling_type: TilingType::ConstantSpacing,
+            content: &cell,
+        };
+        if !self.builder.add_tiling_pattern(&name, &pattern) {
+            // A degenerate cell or a non-finite number: the writer refused it,
+            // and the shape takes the placeholder rather than nothing.
+            return grey(self, out, XpsElementDefect::BrushUnreadable);
+        }
+        out.extend_from_slice(b"/Pattern cs /");
+        out.extend_from_slice(&name);
+        out.extend_from_slice(b" scn\n");
+        data.emit(out, true);
+        out.extend_from_slice(data.fill_operator().as_bytes());
+        out.push(b'\n');
     }
 
     /// Writes a gradient fill: the shape as a clip, then `sh` over it.
@@ -949,7 +1190,7 @@ impl State<'_> {
         }
         match &brush.paint {
             Paint::Solid(rgb) => markup::op(out, rgb, "RG"),
-            Paint::Gradient { .. } => {
+            Paint::Gradient { .. } | Paint::Image(_) => {
                 self.warn(XpsElementDefect::BrushUnsupported);
                 markup::op(out, &[PLACEHOLDER_GREY], "G");
             }

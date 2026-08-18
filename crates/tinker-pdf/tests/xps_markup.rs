@@ -969,12 +969,24 @@ fn a_fill_that_will_not_read_is_painted_grey_and_the_shape_survives() {
     assert!(content.contains("10 10 l"), "{content}");
 }
 
-/// An `ImageBrush` is grey and named, and the name says which milestone owns
-/// it.
+/// An `ImageBrush` whose picture is not in the package is grey and named, and
+/// the name says **which** thing was missing.
+///
+/// *Amended, milestone 8.* This used to assert `BrushUnsupported` — "an
+/// `ImageBrush` is a brush this build does not paint" — and that was the truth
+/// for two milestones. Now the brush is painted and this fixture's
+/// `ImageSource` names a part no package here holds, so the answer is
+/// `ImageUnresolved`, which is a different sentence about a different fault:
+/// one says the reader cannot draw this kind of thing, the other says the file
+/// pointed at nothing. A reader of the report needs to be able to tell them
+/// apart, which is why they are separate variants rather than one.
+///
+/// The grey and the shape are unchanged, and that is the half of the old
+/// assertion that was never about the milestone.
 #[test]
-fn an_image_brush_is_the_placeholder_grey_and_named() {
+fn an_image_brush_whose_picture_is_missing_is_grey_and_named() {
     let body = r##"<Path Data="M0,0L10,0Z"><Path.Fill><ImageBrush ImageSource="/Resources/x.png" Viewbox="0,0,1,1" Viewport="0,0,1,1" /></Path.Fill></Path>"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushUnsupported]);
+    assert_eq!(body_defects(body), [XpsElementDefect::ImageUnresolved]);
     assert!(drawn(body).contains("0.749 0.749 0.749 rg"));
 }
 
@@ -1328,12 +1340,17 @@ fn the_real_one_page_package_from_the_design_section_renders() {
             _ => None,
         })
         .collect();
+    // **Nothing is owed.** Milestone 6 drew the path, milestone 7 the run and
+    // milestone 8 the `ImageBrush` behind the `{{StaticResource}}`, so the
+    // whole of the design section's package now reads. This is the assertion
+    // row 6 was written for and could not have, and it is stated as an empty
+    // list rather than as "no brush warning" so that a list which grew a new
+    // complaint would fail whatever the complaint was.
     assert_eq!(
         element,
-        [XpsElementDefect::BrushUnsupported],
-        "the `ImageBrush` is milestone 8's, and it is not a \
-         `{{StaticResource}}` that failed to resolve; the `Glyphs` run \
-         milestone 6 owed is drawn"
+        [],
+        "the design section's package reads whole: {:?}",
+        report.warnings()
     );
 
     // The `Path`'s own numbers, straight out of the markup.
@@ -1354,8 +1371,13 @@ fn the_real_one_page_package_from_the_design_section_renders() {
     assert_eq!(ops(&stream(&twin)), ops(&content));
 }
 
-/// And the rest of the corpus, counted: **two of the eight packages render
-/// with nothing owed at all**, and no page in any of them is a placeholder.
+/// And the rest of the corpus, counted: **all eight packages render with
+/// nothing owed at all**, and no page in any of them is a placeholder.
+///
+/// *Amended, milestone 8.* This said "two of the eight" when milestone 6 wrote
+/// it and "four" after milestone 7. The number is kept in the sentence rather
+/// than dropped, because it is the one line in this suite that says how much of
+/// a format written by somebody else this build actually reads.
 #[test]
 fn every_package_in_the_corpus_draws_and_says_what_it_does_not() {
     let expected: &[(&str, &[XpsElementDefect])] = &[
@@ -1363,18 +1385,14 @@ fn every_package_in_the_corpus_draws_and_says_what_it_does_not() {
         ("wpf-three-pages.xps", &[]),
         ("wpf-gradients.xps", &[]),
         ("xpsom-gradients.oxps", &[]),
-        // Milestone 7 drew the `Glyphs` run in both of these, so what each
-        // owes is now **one** thing and it is milestone 8's.
-        (
-            "wpf-image-and-text.xps",
-            &[XpsElementDefect::BrushUnsupported],
-        ),
-        (
-            "xpsom-image-and-text.oxps",
-            &[XpsElementDefect::BrushUnsupported],
-        ),
-        ("wpf-tiled-brush.xps", &[XpsElementDefect::BrushUnsupported]),
-        ("wpf-jpeg-image.xps", &[XpsElementDefect::BrushUnsupported]),
+        // Milestone 7 drew the `Glyphs` runs and milestone 8 the `ImageBrush`
+        // each of these hangs its picture from, so **every package in the
+        // corpus now owes nothing**. Eight of eight, where milestone 6 left
+        // four and milestone 7 left six.
+        ("wpf-image-and-text.xps", &[]),
+        ("xpsom-image-and-text.oxps", &[]),
+        ("wpf-tiled-brush.xps", &[]),
+        ("wpf-jpeg-image.xps", &[]),
     ];
     for (name, owed) in expected {
         let bytes = corpus(name);

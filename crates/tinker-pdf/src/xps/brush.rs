@@ -82,6 +82,76 @@ pub enum Paint {
         /// Shading space into the space the element draws in.
         matrix: [f64; 6],
     },
+    /// An `ImageBrush` (15.3), which becomes a PDF tiling pattern.
+    ///
+    /// The `ImageSource` is carried **unresolved**, because resolving it needs
+    /// the package and this module is pure -- [`super::image::Images`] holds the
+    /// table and [`super::paint`] does the lookup. That split is not tidiness:
+    /// `Package::read_part` hands back a borrow the painter is already holding,
+    /// which is why images are resolved in a pass before the drawing walk.
+    Image(Box<ImageTile>),
+}
+
+/// An `ImageBrush`, parsed but not resolved (15.3).
+///
+/// Both rectangles are kept, and they are **two different spaces**. `viewbox`
+/// is stated in the image's own units, so a 384-pixel PNG at 96 dpi is four
+/// units across; `viewport` is stated in the element's. The mapping between
+/// them is what becomes the pattern's `/Matrix`, and a build that swapped them
+/// would draw the picture at the reciprocal of its intended size -- which is why
+/// they are separate fields with separate tests rather than one `[f64; 8]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageTile {
+    /// `ImageSource`, verbatim. Resolved against the fixed page part's own name.
+    pub source: String,
+    /// `Viewbox`, as `x y width height` in the image's own units.
+    pub viewbox: [f64; 4],
+    /// `Viewport`, as `x y width height` in the element's units.
+    pub viewport: [f64; 4],
+    /// Whether `Viewbox` is absolute or a fraction of the image.
+    pub viewbox_units: Units,
+    /// Whether `Viewport` is absolute or a fraction of the filled box.
+    pub viewport_units: Units,
+    /// `TileMode` (15.3.1).
+    pub tile: TileMode,
+    /// `Transform`, which maps the brush's space into the element's.
+    pub transform: [f64; 6],
+}
+
+/// 15.3's `ViewboxUnits` and `ViewportUnits`.
+///
+/// Two independent attributes with one grammar. Milestone 1 measured
+/// `Absolute` on both in all eight real packages, so the relative form is
+/// exercised only by fixtures this repository wrote -- recorded rather than
+/// left for a reader to assume otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Units {
+    /// The rectangle is stated in the space it names -- image units for a
+    /// viewbox, element units for a viewport.
+    Absolute,
+    /// The rectangle is a fraction of that space's own extent.
+    RelativeToBoundingBox,
+}
+
+/// 15.3.1's `TileMode`, in all five spellings.
+///
+/// Five values and **five rules**: `None` draws the image once and leaves the
+/// rest of the shape unpainted, `Tile` repeats it, and the three flips reflect
+/// alternate cells. PDF's tiling patterns have no flip at all (8.7.3.1 gives a
+/// cell, two steps and a matrix), so a flip has to be built by making the
+/// *cell* four times the image and drawing the image into it four ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileMode {
+    /// Draw the image once and leave the rest of the shape unpainted.
+    None,
+    /// Repeat it in both directions.
+    Tile,
+    /// Repeat it, mirroring alternate columns.
+    FlipX,
+    /// Repeat it, mirroring alternate rows.
+    FlipY,
+    /// Repeat it, mirroring alternate columns and rows.
+    FlipXY,
 }
 
 /// A brush, resolved.
@@ -230,11 +300,104 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
             Ok(brush)
         }
         "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox),
-        // Milestone 8's, both of them, and named rather than collapsed into
-        // "some brush".
-        "ImageBrush" | "VisualBrush" => Err(BrushError::Unsupported),
+        "ImageBrush" => image_brush(node, bbox),
+        // `VisualBrush` is row 8's and is not built. Its cell is a *subtree* of
+        // markup rather than a part, so painting one means re-entering the
+        // drawing walk from inside a brush -- with 18.2's cross-part depth to
+        // carry -- and this module is deliberately pure. Refused by name rather
+        // than drawn as its first child, which would be a picture the file
+        // never described. See the plan's amended row 8.
+        "VisualBrush" => Err(BrushError::Unsupported),
         _ => Err(BrushError::Syntax),
     }
+}
+
+/// Reads an `ImageBrush` (15.3).
+///
+/// `bbox` is the box a `RelativeToBoundingBox` viewport is stated in fractions
+/// of -- the geometry about to be filled. `None` makes a relative viewport
+/// unreadable rather than a picture placed over a box this reader invented,
+/// which is `gradient`'s rule and for the same reason.
+fn image_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+    let source = node.attr("ImageSource").ok_or(BrushError::Syntax)?;
+    // 15.3 makes both rectangles required on an `ImageBrush`; there is no
+    // sensible default for "which part of the image" or "where it goes".
+    let viewbox = rect(node.attr("Viewbox").ok_or(BrushError::Syntax)?)?;
+    let viewport = rect(node.attr("Viewport").ok_or(BrushError::Syntax)?)?;
+    let viewbox_units = units_of(node, "ViewboxUnits")?;
+    let viewport_units = units_of(node, "ViewportUnits")?;
+    if viewport_units == Units::RelativeToBoundingBox && bbox.is_none() {
+        return Err(BrushError::Syntax);
+    }
+    let tile = match node.attr("TileMode") {
+        None | Some("None") => TileMode::None,
+        Some("Tile") => TileMode::Tile,
+        Some("FlipX") => TileMode::FlipX,
+        Some("FlipY") => TileMode::FlipY,
+        Some("FlipXY") => TileMode::FlipXY,
+        Some(_) => return Err(BrushError::Syntax),
+    };
+    let transform = transform_of(node)?;
+
+    // A viewbox or viewport with no extent paints nothing at all, and a
+    // pattern whose cell is degenerate is one the writer refuses anyway. Said
+    // here so the refusal names the brush rather than the pattern.
+    if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 || viewport[2] <= 0.0 || viewport[3] <= 0.0 {
+        return Err(BrushError::Syntax);
+    }
+
+    Ok(Brush {
+        paint: Paint::Image(Box::new(ImageTile {
+            source: source.to_string(),
+            viewbox,
+            viewport,
+            viewbox_units,
+            viewport_units,
+            tile,
+            transform,
+        })),
+        alpha: opacity_of(node)?,
+        approximated: false,
+    })
+}
+
+/// `x,y,width,height`, which 15.3 writes as four numbers.
+fn rect(text: &str) -> Result<[f64; 4], BrushError> {
+    let values = markup::numbers(text).ok_or(BrushError::Syntax)?;
+    if values.len() != 4 || !values.iter().all(|v| v.is_finite()) {
+        return Err(BrushError::Syntax);
+    }
+    Ok([values[0], values[1], values[2], values[3]])
+}
+
+/// One of the two `*Units` attributes.
+fn units_of(node: &Node, attribute: &str) -> Result<Units, BrushError> {
+    match node.attr(attribute) {
+        None | Some("RelativeToBoundingBox") => Ok(Units::RelativeToBoundingBox),
+        Some("Absolute") => Ok(Units::Absolute),
+        Some(_) => Err(BrushError::Syntax),
+    }
+}
+
+/// A brush's own `Transform`, in either the attribute or the element form.
+fn transform_of(node: &Node) -> Result<[f64; 6], BrushError> {
+    if let Some(text) = node.attr("Transform") {
+        return markup::matrix(text).ok_or(BrushError::Syntax);
+    }
+    let wanted = format!("{}.Transform", node.local);
+    let Some(property) = node
+        .children
+        .iter()
+        .find(|child| child.xps && child.local == wanted)
+    else {
+        return Ok([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    };
+    let matrix = property
+        .children
+        .iter()
+        .find(|child| child.xps && child.local == "MatrixTransform")
+        .ok_or(BrushError::Syntax)?;
+    markup::matrix(matrix.attr("Matrix").ok_or(BrushError::Syntax)?).ok_or(BrushError::Syntax)
 }
 
 /// 15.1's `Opacity`, which every brush may carry and which defaults to one.
