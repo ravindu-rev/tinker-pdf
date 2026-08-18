@@ -1,5 +1,32 @@
 //! Gap 29's seven bounds and gap 30's, swept in one place.
 //!
+//! *Amended, 19 August 2026, gap 30 milestone 9.* **No new row, and that is the
+//! point of this amendment: what it adds is the missing half of the rows that
+//! were already here.** Gap 30's yardstick — a 200-page fixed document at
+//! roughly 2 000 drawable elements and 40 000 path segments a page — arrived in
+//! milestone 2 with a figure for gap 30's own rows and `None` for gap 29's
+//! seven, and milestone 2 wrote down that milestone 9 would fill them in. It
+//! has, so [`Bound::document`] is no longer an `Option` and
+//! [`no_bound_refuses_a_dense_fixed_document`] sweeps **seventeen** rows rather
+//! than ten. Row 9 asks for *"three recorded numbers each"* and a row with a
+//! `None` in it had two.
+//!
+//! Filling them in is not bookkeeping. Four of the seven are gap 29's ZIP
+//! caps, and **every XPS part in this repository is a ZIP entry** — so those
+//! four stand in front of the whole of gap 30 and had never been measured
+//! against anything gap 30 produces. `MAX_PNG_SAMPLES` is the row that shows
+//! why it was worth doing: gap 29's yardstick spends 24 000 000 against it and
+//! gap 30's spends 33 660 000, because a 300 dpi RGBA page scan in a report is
+//! a larger image than any page of a comic, and the margin under the cap is
+//! half what the comic suggested.
+//!
+//! `MAX_XPS_VISUAL_DEPTH` is in gap 30's bounds table and is **not** here, and
+//! the argument is milestone 8's rather than an omission: `VisualBrush` is
+//! refused by name, so a cap over a walk nothing performs is a constant that
+//! could never fire — [`every_bound_can_fire`]'s own failure, reached from the
+//! direction that writes the constant first. The bound arrives with the walk or
+//! not at all.
+//!
 //! *Amended, 18 August 2026, gap 30 milestone 7.* One more row —
 //! `MAX_XPS_GLYPHS` — and it is here rather than absent because a `Glyphs` is
 //! **one** element and **no** segments, so neither work cap milestone 6 added
@@ -111,10 +138,13 @@ struct Bound {
     /// The most gap 29's yardstick spends: a 200-page comic at 2000 x 3000.
     comic: u128,
     /// The most gap 30's yardstick spends: a 200-page fixed document at
-    /// roughly 2 000 drawable elements and 40 000 path segments a page. `None`
-    /// where nobody has worked the figure out yet, which is gap 29's seven
-    /// rows — milestone 9 fills them in with the rest of gap 30's table.
-    document: Option<u128>,
+    /// roughly 2 000 drawable elements and 40 000 path segments a page.
+    ///
+    /// Not an `Option` since milestone 9. It was one for seven milestones,
+    /// because gap 29's rows arrived before gap 30 had a yardstick to measure
+    /// them with — and a row that opts out of a check is a row that is not
+    /// checked, which is the shape of every failure this file exists for.
+    document: u128,
     /// The most this bound's own inputs can ask for, which must exceed the cap
     /// or the cap can never fire.
     reachable: u128,
@@ -139,7 +169,13 @@ fn ledger() -> Vec<Bound> {
             published: "16 384",
             fixtures: 6,
             comic: 202,
-            document: None,
+            // An OPC package of the yardstick's shape: the package
+            // relationships part and `[Content_Types].xml`, one
+            // `FixedDocumentSequence`, one `FixedDocument`, two hundred fixed
+            // pages with a `_rels` part each, and about a hundred fonts and
+            // images between them. The same 505 `MAX_XPS_PARTS` counts, because
+            // in this format a part *is* an entry.
+            document: 505,
             // A central directory record is 46 bytes plus a name, so a name of
             // one byte is the densest an archive can be.
             reachable: ARCHIVE_CEILING / 47,
@@ -156,7 +192,12 @@ fn ledger() -> Vec<Bound> {
             published: "128 MiB",
             fixtures: 1_024,
             comic: 48_000_000,
-            document: None,
+            // The largest single entry, which for this yardstick is one fixed
+            // page's markup rather than an image: 40 000 segments at about
+            // fourteen bytes of `L 1234,5678 ` apiece, plus 2 000 elements at
+            // about sixty. A comic's largest entry is a scan and is seventy
+            // times this, which is why the two yardsticks disagree most here.
+            document: 40_000 * 14 + 2_000 * 60,
             reachable: u32::MAX as u128,
             reachable_because: "the uncompressed-size field is 32 bits, and Zip64's is 64",
             declared_in: ZIP_LIMITS,
@@ -171,7 +212,11 @@ fn ledger() -> Vec<Bound> {
             published: "1 GiB",
             fixtures: 1_024,
             comic: 300_000_000,
-            document: None,
+            // Two hundred of those pages, plus about twenty megabytes of fonts
+            // and images. This is the row the whole of gap 30 stands behind:
+            // an XPS part reaches this engine as a ZIP entry, so nothing gap 30
+            // reads is admitted without being charged here first.
+            document: 200 * (40_000 * 14 + 2_000 * 60) + 20_000_000,
             // The work cap's whole argument: a per-entry ceiling times a
             // file-chosen entry count is not a bound, and this is the product
             // it would otherwise be.
@@ -190,7 +235,13 @@ fn ledger() -> Vec<Bound> {
             published: "1 024",
             fixtures: 24,
             comic: 42,
-            document: None,
+            // The longest part name a real package in this repository holds,
+            // measured off milestone 1's committed inventory rather than
+            // imagined: `Resources/595c31af-dbe8-48a5-a032-c677a052f501.ODTTF`,
+            // which is `Resources/` plus a GUID plus an extension. Doubled for
+            // headroom, because the yardstick is a *plausible* document rather
+            // than the corpus.
+            document: 104,
             reachable: u16::MAX as u128,
             reachable_because: "the name-length field is 16 bits",
             declared_in: ZIP_LIMITS,
@@ -202,7 +253,14 @@ fn ledger() -> Vec<Bound> {
             published: "67 108 864",
             fixtures: 4_096,
             comic: 24_000_000,
-            document: None,
+            // **The row that made filling these in worth doing.** A full-page
+            // 300 dpi RGBA scan — 2 550 x 3 300 x 4 — which is an ordinary
+            // thing for a report to carry and is *larger* than any page of a
+            // 2000 x 3000 comic. The margin under this cap is half what gap
+            // 29's yardstick alone suggested, and RGBA is not academic here:
+            // it is what WPF's serialiser writes, so it is the colour type
+            // every real package in this repository uses.
+            document: 2_550 * 3_300 * 4,
             // Thirteen bytes of IHDR: two 31-bit dimensions, charged at the
             // widest layout the colour type can produce.
             reachable: 0x7FFF_FFFFu128 * 0x7FFF_FFFF * 4,
@@ -221,7 +279,13 @@ fn ledger() -> Vec<Bound> {
             // the most any fixture here spends and is *allowed*.
             fixtures: 4_096,
             comic: 200,
-            document: None,
+            // Zero, and it is an answer rather than a blank: a fixed document
+            // has no comic pages at all, exactly as a comic archive has no XML
+            // and every gap 30 row above says `comic: 0`. The symmetry is the
+            // check — a yardstick that measured something here would mean the
+            // two paths had been confused, which is the defect this whole gap
+            // exists to fix.
+            document: 0,
             reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
             reachable_because: "every entry the archive reader will hand over could be an image",
             declared_in: CBZ,
@@ -233,7 +297,13 @@ fn ledger() -> Vec<Bound> {
             published: "512 MiB",
             fixtures: 70_000,
             comic: 300_000_000,
-            document: None,
+            // The document gap 30 synthesises from that package: 40 000
+            // segments a page at about twenty bytes of content-stream operator,
+            // two hundred times, plus the fonts and the images. Shared with
+            // gap 29 rather than duplicated — `cbz.rs` declares this cap and
+            // `xps.rs` reuses it, which is the ledger entry the plan asked for
+            // in as many words.
+            document: 200 * 40_000 * 20 + 20_000_000,
             reachable: MAX_CBZ_PAGES as u128
                 * (PAGE_OVERHEAD as u128 + zip_limits::MAX_ZIP_ENTRY_BYTES as u128),
             reachable_because: "every page the page cap allows, each carrying a whole entry",
@@ -263,7 +333,7 @@ fn ledger() -> Vec<Bound> {
             comic: 0,
             // ECMA-388 18.2 recommends 16 canvases; a path geometry adds four
             // and a resource dictionary two.
-            document: Some(24),
+            document: 24,
             reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 3,
             reachable_because: "`<a>` is three bytes, in a part of at most MAX_ZIP_ENTRY_BYTES",
             declared_in: XML_LIMITS,
@@ -276,7 +346,7 @@ fn ledger() -> Vec<Bound> {
             fixtures: xml_limits::MAX_XML_ATTRIBUTES as u128,
             comic: 0,
             // A `Glyphs` with every optional attribute ECMA-388 12.1 gives it.
-            document: Some(24),
+            document: 24,
             reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 5,
             reachable_because: "` a=\"\"` is five bytes, and they may all sit on one element",
             declared_in: XML_LIMITS,
@@ -289,7 +359,7 @@ fn ledger() -> Vec<Bound> {
             fixtures: xml_limits::MAX_XML_NAME_LEN as u128,
             comic: 0,
             // `LinearGradientBrush.GradientStops` is 33, plus room for a prefix.
-            document: Some(48),
+            document: 48,
             reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
             reachable_because: "a name may be as long as the part that holds it",
             declared_in: XML_LIMITS,
@@ -307,7 +377,7 @@ fn ledger() -> Vec<Bound> {
             // 2 000 drawable elements at three elements of markup each, plus
             // 40 000 path segments as `PolyLineSegment` children, at two events
             // an element.
-            document: Some(2_000 * 3 * 2 + 40_000 * 2),
+            document: 2_000 * 3 * 2 + 40_000 * 2,
             // The work cap's argument, in this format's terms: `<a/>` is four
             // bytes and produces two events, so a per-element cap times a
             // file-chosen element count is not a bound and this is the product
@@ -334,7 +404,7 @@ fn ledger() -> Vec<Bound> {
             // One sequence, one document, two hundred pages, two hundred page
             // relationships parts, the package relationships part and about a
             // hundred fonts and images.
-            document: Some(505),
+            document: 505,
             reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
             reachable_because: "every entry the archive reader will hand over could be a part",
             declared_in: XPS,
@@ -346,7 +416,7 @@ fn ledger() -> Vec<Bound> {
             published: "4 096",
             fixtures: MAX_XPS_PAGES as u128,
             comic: 0,
-            document: Some(200),
+            document: 200,
             // **Not** the part cap, and this is the row that says why: two
             // hundred `PageContent` elements may name one part between them, so
             // the page count is not bounded by the part count at all. What
@@ -368,7 +438,7 @@ fn ledger() -> Vec<Bound> {
             // package spends; the one built past it spends three more.
             fixtures: MAX_XPS_ELEMENTS as u128 - 1,
             comic: 0,
-            document: Some(400_000),
+            document: 400_000,
             // No **single** part can reach this, which is the whole reason it
             // is a total: `MAX_XML_TOKENS` bounds one part at a million events,
             // of which at most half can be start tags. The ceiling is that,
@@ -387,7 +457,7 @@ fn ledger() -> Vec<Bound> {
             published: "8 388 608",
             fixtures: MAX_XPS_SEGMENTS as u128,
             comic: 0,
-            document: Some(8_000_000),
+            document: 8_000_000,
             // `H1` is two bytes and one segment, in a part this build already
             // admits at 128 MiB — and that is one path, before the file has
             // chosen how many paths or how many pages.
@@ -405,7 +475,7 @@ fn ledger() -> Vec<Bound> {
             published: "2 097 152",
             fixtures: MAX_XPS_GLYPHS as u128,
             comic: 0,
-            document: Some(1_000_000),
+            document: 1_000_000,
             // `1;` is two bytes and one more mapping, in one attribute of one
             // element, in a part this build already admits at 128 MiB — and a
             // `Glyphs` costs one element and no segments, so neither cap
@@ -424,7 +494,7 @@ fn ledger() -> Vec<Bound> {
             published: "16",
             fixtures: MAX_XPS_RESOURCE_DEPTH as u128,
             comic: 0,
-            document: Some(2),
+            document: 2,
             // One dictionary may hold as many entries as its part has events,
             // and a chain through all of them is not a cycle.
             reachable: xml_limits::MAX_XML_TOKENS as u128,
@@ -536,34 +606,42 @@ fn no_bound_refuses_a_two_hundred_page_comic() {
 /// roughly 2 000 drawable elements and 40 000 path segments a page.
 ///
 /// A separate test from the comic rather than a second assertion inside it,
-/// because the two yardsticks measure different documents and a row may
-/// legitimately have one figure and not the other — a comic holds no XML and a
-/// fixed document holds no comic page. What must not happen is a row acquiring
-/// a bound that refuses the format it was written for, which is the failure
-/// this pair of tests exists to make impossible in both directions.
+/// because the two yardsticks measure different documents and a row's two
+/// figures are genuinely different numbers — a comic holds no XML and a fixed
+/// document holds no comic page, and both of those are recorded as a zero
+/// rather than as an absence. What must not happen is a row acquiring a bound
+/// that refuses the format it was written for, which is the failure this pair
+/// of tests exists to make impossible in both directions.
+///
+/// *Amended by milestone 9.* It swept ten rows of seventeen until then, because
+/// gap 29's seven arrived before gap 30 had a yardstick and opted out with a
+/// `None`. **A row that opts out of a check is a row that is not checked**, and
+/// four of those seven are the ZIP caps every XPS part in this repository is
+/// admitted through — so the seven rows standing in front of gap 30's whole
+/// input path were the seven this test could not see.
 #[test]
 fn no_bound_refuses_a_dense_fixed_document() {
     let mut measured = 0usize;
     for bound in ledger() {
-        let Some(document) = bound.document else {
-            continue;
-        };
         measured += 1;
         assert!(
-            document < bound.cap,
+            bound.document < bound.cap,
             "{} is {} and a dense 200-page fixed document spends {}: this cap \
              refuses a real document",
             bound.name,
             bound.cap,
-            document,
+            bound.document,
         );
     }
-    // A sweep that found nothing to sweep is a sweep that does not run.
+    // A sweep that found nothing to sweep is a sweep that does not run, and a
+    // sweep that found *some* of it is what this test was until milestone 9.
     assert_eq!(
-        measured, 10,
-        "gap 30's yardstick covers {measured} rows, not the ten its milestones \
-         2, 3, 6 and 7 added"
+        measured,
+        ledger().len(),
+        "gap 30's yardstick covers {measured} rows and the ledger has {}",
+        ledger().len(),
     );
+    assert_eq!(measured, 17, "the ledger is seventeen rows");
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not
@@ -639,6 +717,11 @@ fn every_bound_names_a_test_that_exists() {
     // Not one of them may be a timing assertion. `5adf502` is the scar: a
     // budget proved by a clock passes on a fast machine with the budget
     // removed.
+    // `XPS_GLYPH_TESTS` joined this list in milestone 9 and was missing from it
+    // from the moment milestone 7 added the row it holds: a source named by a
+    // `fires_in` and left out here is a file where a clock could be introduced
+    // without this sweep noticing, which is half of the fifth check absent for
+    // exactly one bound.
     for source in [
         ZIP_TESTS,
         PNG_TESTS,
@@ -646,6 +729,7 @@ fn every_bound_names_a_test_that_exists() {
         XML_TESTS,
         XPS_TESTS,
         XPS_MARKUP_TESTS,
+        XPS_GLYPH_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

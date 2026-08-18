@@ -208,6 +208,21 @@ its own larger than the entire twenty-eight-plan gap programme just completed.
 CONTRIBUTING rule 1 forbids third-party crates, so the ZIP reader, the XML
 parser and every line of the CSS live in this tree.
 
+*Amended in place, 19 August 2026, by [30](30-xps.md) milestone 9.* **XPS is
+still L and the reason above is wrong.** "Fixed-page markup that maps closely
+onto the path, glyph and brush calls the `Device` seam already has" describes
+the *reader*, and gap 30's first decision was not to emit to `Device` at all —
+because a `Device` call sequence cannot answer `Document::cos()`, needs a
+second producer for `Page::text()`, needs a second `GlyphSource`, and no oracle
+can check it. It synthesises a PDF instead, and the writer it emits to had **no
+`/ExtGState`, no `/Shading`, no `/Pattern` and no Type0 font**, so a glyph could
+not be addressed by index at all — `Indices="53"` had nowhere to go. That
+missing half of the writer is an entire milestone of gap 30 (its fifth) and it
+lands *before* the two milestones that need it, which is the ordering the plan
+argues for at length. The size is unchanged because the work is the same size;
+what moved is which part of it is the work. The corrected sentence is also in
+[gaps/README.md](README.md)'s row for 30, which is where a reader arrives from.
+
 **Three new gap plans will be written for them — CBZ, XPS and EPUB — after
 this gap closes.** That is where the work is planned; it is not in this
 document and it is not in plan 15.

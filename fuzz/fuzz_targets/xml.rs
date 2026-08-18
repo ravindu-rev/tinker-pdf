@@ -80,11 +80,25 @@ fuzz_target!(|data: &[u8]| {
     };
     let text = source.text().to_string();
 
-    // Whatever the encoding, the mark is gone and the text is characters XML
-    // admits — the sweep `Source::new` promises to have done.
+    // Whatever the encoding, **the** mark is gone — one, at offset zero, which
+    // is all 4.3.3 says to consume.
+    //
+    // This assertion used to be `!text.starts_with('\u{FEFF}')` and it was
+    // wrong. The first session this target ever ran produced `FE FF FE FF` and
+    // fired it in eleven minutes: a *second* `U+FEFF` is ZERO WIDTH NO-BREAK
+    // SPACE, an ordinary character, and leaving it in the text is correct. What
+    // is not correct is accepting it before the root element, and that is the
+    // reader's answer rather than the decoder's — `Error::TextBeforeRoot`,
+    // asserted in the crate's own tests. A target that demanded the decoder
+    // strip it would have driven the crate into silently accepting a document
+    // 2.8 forbids.
+    let stripped = match source.encoding() {
+        Encoding::Utf8 => body.len() - text.len(),
+        _ => 0,
+    };
     assert!(
-        !text.starts_with('\u{FEFF}'),
-        "a byte order mark reached the text"
+        stripped <= 3,
+        "more than one byte order mark was consumed"
     );
     if source.encoding() == Encoding::Utf8 {
         assert!(

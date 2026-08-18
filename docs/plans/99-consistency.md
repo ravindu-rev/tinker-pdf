@@ -88,6 +88,20 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    `zip` for raw DEFLATE and CRC-32 — and a leaf-to-leaf edge does not weaken
    this ruling, which is about public APIs rather than about edges.
 
+   *Amended again, 19 August 2026, [gap 30](gaps/30-xps.md) milestone 9.*
+   **Eight**, and this is the first update the amendment above predicted: it
+   said the scope is wider than the list, and `tinker-pdf-xml` is a crate the
+   list did not name and the definition always covered. It takes bytes of
+   markup and returns events, holds no PDF and no XPS vocabulary in its public
+   API — gap 30's package layer lives in the facade for exactly that reason,
+   the same place gap 29 put page semantics — and it has **no internal
+   dependency at all**, which is the third crate in the workspace of which that
+   is true. What makes it worth a sentence rather than a name in a list is that
+   [31](gaps/README.md), EPUB, reuses this crate and reuses **none** of gap
+   30's package layer, because EPUB's container is OCF with
+   `META-INF/container.xml` rather than OPC: the leaf is the reusable part
+   precisely because it is a leaf.
+
 9. **Oracles are subprocesses, never dependencies.** Binds
    [14](14-testing-and-corpora.md) and every phase that cites an oracle
    diff. mutool, pdftoppm, pdfium_test and qpdf are invoked as external

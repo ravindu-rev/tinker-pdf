@@ -3302,3 +3302,174 @@ survived and eight tests were written to close them.
 - **No non-Windows producer** (milestone 1), and **the fuzz campaign,
   the fourteenth fingerprint and `docs/STATUS.md`** (milestone 9), all inherited.
 
+## Progress — 19 August 2026, milestone 9
+
+**Gap 30 is closed.** The workspace stands at **2 207**.
+
+### The fourteenth fingerprint, and what makes it different from the thirteen
+
+Gap 29's `cbz` was the thirteenth and the first whose document is *synthesised*
+rather than parsed. This one is the first **whose input this repository did not
+author**: `wpf-image-and-text.xps`, written by Microsoft's own serialiser and
+bought in milestone 1 before any reader existed.
+
+That is a different guarantee, and the difference is the point. A fixture we
+wrote can only ever disagree with us about arithmetic — we chose its bytes, so a
+misreading of the format is baked into both sides. A fixture Microsoft wrote can
+disagree with us about *the format*, and the hash is what would notice. Beside
+it, in the pair gap 29 milestone 6 established, is a byte hash of the
+synthesised document: object numbering, dictionary key order and stream framing
+are pinned there and nowhere else, because a rendered hash cannot see any of
+them.
+
+Both reproduce byte-for-byte on `wasm32-wasip1` under wasmtime, and **none of
+the other thirteen moved**.
+
+### Peak memory: measured, which gap 29 could not do
+
+Gap 29 closed with its 3.6 GB figure stated as arithmetic — no 200-page archive
+was ever opened, so the claim was that the design *cannot* hold a raster per
+page rather than that anybody watched it not. This gap inherits the same
+pass-through and could not test it from milestone 1's corpus either: every image
+Windows put in those eight packages is 32 x 32, so a build that decoded all of
+them would cost a few kilobytes more and no instrument could tell.
+
+So `tests/xps_memory.rs` builds one page at 2000 x 3000 — hand-built, and the
+thing it measures is **memory rather than fidelity**, which is the one claim a
+hand-built package can carry honestly, because a raster's size does not depend
+on who wrote the markup around it.
+
+| | |
+| --- | --- |
+| The package | 458 225 bytes |
+| Synthesising it, peak working set | 11.5 MB |
+| Synthesising a page with no image at all | 11.3 MB |
+| **What the picture cost** | **0.2 MB** |
+| What its decoded raster would be | 17.2 MB |
+
+**The fixture failed on its first attempt and the failure was correct.** It was
+seeded from a linear congruential generator, and the assertion came back at
+18 005 473 bytes against 18 000 000. Incompressible data is the one case where
+the pass-through and the decode cost the same, because the IDAT *is* the raster.
+That is a true property of the claim rather than a defect in it, and the comment
+in the fixture says so, so that nobody restores the noise as an improvement.
+
+### The campaign found something, and it was not what the target thought
+
+`cargo fuzz run xml` had never run — the target was built in milestone 2 and the
+tooling is unavailable on `x86_64-pc-windows-msvc`, so this is its first
+session, on the WSL2 route gap 29 milestone 6 established.
+
+**It crashed in eleven minutes**, on thirteen bytes: a control byte, then
+`FE FF FE FF` and four code units. The assertion that fired was the target's
+own — *a byte order mark reached the text*.
+
+**The crate was right and the assertion was wrong**, which is worth recording
+because it is the opposite of the usual outcome. 4.3.3 has `Source::new` consume
+*the* mark: one, at offset zero. A second `U+FEFF` is ZERO WIDTH NO-BREAK SPACE,
+an ordinary character, and leaving it in the decoded text is correct. What it is
+not is *legal where it stands* — 2.8's prolog admits whitespace, processing
+instructions, comments and a doctype, and ZWNBSP is none of those — so the
+reader answers `TextBeforeRoot`, which is the right refusal under the right
+name.
+
+The danger in the assertion is worth naming: a target demanding the decoder
+strip every leading `U+FEFF` would have driven the crate into **silently
+accepting a document 2.8 forbids**. A fuzz target's invariants are as capable of
+being wrong as the code, and this one would have made the crate worse in the
+name of making the target green.
+`a_second_byte_order_mark_is_text_and_is_refused_where_it_stands` pins both
+halves, because a build that satisfied the first would lose the second.
+
+| Target | Runs | New units | Peak RSS | Slowest unit | Findings |
+| --- | --- | --- | --- | --- | --- |
+| `xml` | to first crash, ~11 min | — | — | — | **one, above** |
+| `render_page`, seeded with two real `.xps` | 65 940 in 936 s | 4 647 | 1 911 MB | 16 s | none |
+
+`render_page`'s slowest unit at 16 seconds against a 25-second timeout, and its
+peak at 1 911 MB against a 2 048 MB ceiling, are both closer to the edge than is
+comfortable and neither crossed it. They are recorded rather than rounded off.
+
+### The injection matrix
+
+Twelve defects against this milestone's own guarantees. **Ten conclusive, all
+ten caught; two inconclusive and re-run.**
+
+| Defect | Caught by |
+| --- | --- |
+| 18.1's unit conversion changed | twenty-one tests |
+| A glyph run drawn at the wrong origin | `rendering_is_stable_across_targets`, and two more |
+| **`MAX_XPS_PAGES` raised above `MAX_XPS_PARTS`** | **the build fails** |
+| **`MAX_XPS_PARTS` raised above the archive's entry cap** | **the build fails** |
+| A bound moved away from the number its ledger publishes | `every_bound_publishes_the_number_it_is` |
+| A `VisualBrush` silently drawn rather than refused | `a_visual_brush_is_refused_by_name_and_the_shape_survives` |
+| A TIFF drawn rather than refused by name | `a_tiff_named_by_its_content_type_is_refused_and_the_page_draws` |
+| 13.4.1's default resolution changed | `an_images_own_resolution_decides_its_size_in_units` |
+| **An unresolved image reported as a decode failure** | **survived** — now `a_source_that_cannot_be_resolved_is_named_apart_from_a_missing_part` |
+| A PNG decoded instead of passed through | the injection was a no-op of mine, and is recorded as inconclusive rather than as a pass |
+
+The two `const`-block catches are the strongest rung available: a build that
+inverted either relation **does not compile**, which is gap 29 milestone 5's
+device applied to a second gap's constants.
+
+The survivor is the sixth milestone running to find the same shape. `Images::get`
+has two ways to fail — a reference that will not resolve, and one that resolves
+to a part the package does not hold — and every fixture until now took the
+second. The first version of the test that closed it reached for `../../../..`
+and the matrix corrected that too: RFC 3986 5.2.4 **clamps** an over-climbing
+reference at the root rather than failing it, so the case that actually reaches
+the other arm is a reference carrying a *scheme*. That is the better fixture
+anyway, because refusing `http://` is what keeps an `ImageSource` from becoming
+an attempt at I/O.
+
+---
+
+## Gap 30, closed — what it delivered and what it did not
+
+**An `.xps` or `.oxps` opens as a `Document` and draws.** All eight of milestone
+1's real packages render with nothing owed, `Page::text()` returns the words,
+and `Document::cos()` returns a synthesised document qpdf reads clean.
+
+**It closed a live defect that had been shipping.** Gap 29 taught
+`Document::open` to sniff `PK\x03\x04`, and one signature covers CBZ, XPS,
+EPUB, ODF, OOXML and every JAR ever built — so a real XPS opened as a *comic*:
+one page, the size of whichever raster resource it happened to hold, with the
+markup, the text, the fonts and the page size discarded and **no warning at
+all**, because from `cbz.rs`'s side nothing had gone wrong. Milestone 1 measured
+it before milestone 3 fixed it, and the two tests that pinned it are still in
+the suite.
+
+**It corrected gap 28's sizing.** Gap 28 put XPS at **L** because the markup
+"maps closely onto the `Device` seam" — which is the *reader*. The writer was
+the half that was missing: no `/ExtGState`, no `/Shading`, no `/Pattern`, and a
+simple font that **cannot address a glyph by index at all**, which is how XPS
+addresses every glyph. That became milestone 5, scheduled before the three
+milestones that consume it, because the fallback otherwise produces text that is
+readable, plausible, and wrong only where a font's cmap and WinAnsi disagree.
+
+### What a reader should not assume
+
+- **`VisualBrush` is not painted.** Row 8 was amended in place rather than
+  claimed. Its cell is a subtree of markup rather than a part, so painting one
+  means re-entering the drawing walk from inside a brush while carrying 18.2's
+  cross-part depth. `MAX_XPS_VISUAL_DEPTH` is deliberately **not** in the ledger:
+  a cap over a thing nothing walks could never fire.
+- **A remote resource dictionary part is not resolved**, and is named.
+- **TIFF and JPEG XR are refused by name, never decoded** — recognised from the
+  content type *and* the magic bytes, which are two rules.
+- **`OpacityMask`, `IsSideways`, odd `BidiLevel` and `StyleSimulations`** are
+  refused or named rather than approximated.
+- **Every package in the corpus is Microsoft's.** Milestone 1 bought eight from
+  two producers — WPF's `XpsDocument` and the XPS Document API's object model —
+  and no non-Windows producer was ever found. So the corpus is one vendor's idea
+  of the format, and a package from a different implementation may exercise
+  paths nothing here has seen. This is the largest single thing gap 30 leaves
+  open, and it is the same shape as gap 29's "no real `.cbz`" with the
+  difference that gap 30 at least has *real files*.
+- **The peak-memory figure is one page on one machine**, not a 200-page
+  document, and the fixture behind it is hand-built.
+- **`cargo fuzz run xml` ran once**, to its first finding, and `render_page` for
+  fifteen minutes. That is a session, not a campaign.
+- **Structure, signatures, print tickets, 3D, ICC and N-channel colour** are out
+  of scope by name, as the plan's non-goals said from the start.
+

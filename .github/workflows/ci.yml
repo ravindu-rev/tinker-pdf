@@ -258,6 +258,52 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' container-oracle.log
           grep -q 'qpdf-oracle: RAN' container-oracle.log
 
+  mutool-xps-oracle:
+    # Ruling 9's oracle for XPS itself, and gap 30's design section writes the
+    # irony down rather than leaving it to be noticed: MuPDF reads XPS, mutool
+    # is already one of ruling 9's four named oracles, and so **the library gap
+    # 28's decision removes from Tinker's shipped tree is the best available
+    # oracle for the format it is being removed for**. Ruling 9 permits exactly
+    # that, because an oracle is invoked and never linked.
+    #
+    # `qpdf-linearization` above reads the PDF this engine wrote and says
+    # whether it is a well-formed PDF. It has never seen an XPS. This job reads
+    # **both** — the package and the document synthesised from it — so what it
+    # compares is two readings of one source by two independent programs, which
+    # is the only thing in the repository that can catch a mistake this engine
+    # makes consistently in both directions.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y mupdf-tools
+      # `mutool -v` writes its banner to stderr and exits 0. A `|| true` here
+      # would hide a missing binary, which is the whole failure this job exists
+      # to prevent.
+      - run: mutool -v
+      # The same shape as `qpdf-linearization` above, for the reason gap 20
+      # learned it: these tests skip when mutool is absent, and a skip exits 0
+      # and looks exactly like a pass — so the job reads its own output and
+      # fails unless it can see that the oracle ran. Row 9's own words are that
+      # the job is **red when the tool is missing**.
+      - name: Check the XPS reader against mutool
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test xps_mutool -- --nocapture \
+            2>&1 | tee mutool-oracle.log
+          # The skip is checked first and on its own, so the reason reaches the
+          # log. A bare `grep -q RAN` fails the step too, but under `bash -e` it
+          # fails it *silently* — a red tick with nothing saying the oracle
+          # never ran is only half of what this job is for.
+          if grep -q 'mutool-oracle: SKIPPED' mutool-oracle.log; then
+            echo "::error::mutool was not found, so the XPS oracle SKIPPED" \
+                 "rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' mutool-oracle.log
+          grep -q 'mutool-oracle: RAN' mutool-oracle.log
+
   jpx-oracle:
     # The external arbiter gap 18a names for JPEG 2000, and the only one there
     # is: the repository holds zero JPX bytes, and ISO/IEC 15444-4's

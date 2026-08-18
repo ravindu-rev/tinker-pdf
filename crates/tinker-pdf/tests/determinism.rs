@@ -1787,6 +1787,62 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
     .into_bytes()
 }
 
+/// **The fourteenth fingerprint's page, and the first in this file whose input
+/// this repository did not author.**
+///
+/// Every other fixture here is bytes assembled a few lines above it, from a
+/// specification this repository read. That is the whole of gap 29's closing
+/// limitation — *"the first real archive this meets may find something, and
+/// nothing here would have"* — arriving in the one file where it matters most,
+/// because a fingerprint over a document we wrote pins this engine to its own
+/// reading of a format rather than to the format.
+///
+/// This one is `wpf-image-and-text.xps` from
+/// [milestone 1's corpus](xps/README.md): every byte of it was written by
+/// `System.Windows.Xps.Packaging.XpsDocument`, WPF's `ReachFramework`
+/// serialiser, on Windows 11. `include_bytes!` rather than `std::fs`, because
+/// this file runs on `wasm32-wasip1` under wasmtime with no preopened
+/// directory and a fixture that cannot be read is a fixture that cannot be
+/// hashed.
+///
+/// # Why this package and not one of the other seven
+///
+/// All eight render with nothing owed after milestone 8, so any of them would
+/// produce a stable hash. This is the only one that puts **every** layer gap 30
+/// built on one page:
+///
+/// - OPC — `[Content_Types].xml` with an `Override`, `/_rels/.rels`, a part's
+///   derived `_rels` name, and a relative target resolved against its source
+///   part;
+/// - the spine — `FixedDocumentSequence` to `FixedDocument` to `FixedPage`,
+///   through relationships and media types rather than extensions;
+/// - `FixedPage.Resources`, a `ResourceDictionary` and a `{StaticResource}`,
+///   which is 14.2.5's scoping and the reason milestone 6's row exists;
+/// - an `ImageBrush` over a PNG part, **passed through** rather than decoded,
+///   with 13.4.1's resolution deciding the viewbox's units, painted as a PDF
+///   tiling pattern with the four-times cell flips do not need here;
+/// - a `Glyphs` run with `Indices=",53"` — the empty-glyph-index form nothing
+///   in ECMA-388 predicts — through 9.1.7.3's ODTTF de-obfuscation and out to
+///   milestone 5's Type0/CIDFontType2 font with `/Identity-H`.
+///
+/// So a change anywhere from the ZIP reader to the glyph rasteriser moves it,
+/// which is the same breadth `cbz_page` carries and more of it: the CBZ
+/// fixture reaches no XML, no font and no pattern at all.
+///
+/// # What a move in this hash means
+///
+/// The same attribution problem `cbz_page`'s doc comment sets out, one format
+/// wider. This moves if the ZIP reader, the XML parser, the OPC layer, the
+/// spine, the markup walk, the brush grammar, the geometry parser, the ODTTF
+/// key arithmetic, `DocumentBuilder`, `CosDocument`'s parse of what it wrote,
+/// or the renderer changes its answer.
+/// [`the_synthesised_fixed_document_is_the_same_bytes_on_every_target`] is what
+/// narrows it: if that hash moved too, the synthesiser changed; if it did not,
+/// the renderer did.
+fn xps_package() -> Vec<u8> {
+    include_bytes!("xps/wpf-image-and-text.xps").to_vec()
+}
+
 /// The committed fingerprints.
 ///
 /// Every entry is a claim that this page renders to these exact bytes on
@@ -1921,6 +1977,31 @@ const GOLDEN: &[Fixture] = &[
         build: cbz_page,
         least_ink: 700,
     },
+    // 20 333 today, of 484 704: a 612 x 792 page, most of it white.
+    //
+    // The floor is doing three jobs here rather than the usual one, because
+    // this page has three independent halves and a hash cannot say which of
+    // them stopped.
+    //
+    // The picture the `ImageBrush` paints is the bulk of the ink. A pattern
+    // whose matrix is wrong puts it off the sheet entirely — which is
+    // milestone 8's own defect, and the page rendered *plausibly* with it,
+    // because the text was still there. That failure is the one this floor is
+    // set to catch: losing the picture takes the page under it.
+    //
+    // The glyph run is small in pixels and cannot be floored on its own, so
+    // it is guarded the other way, by `fingerprint`'s `UnreadableFont` check:
+    // the ODTTF key arithmetic failing does not paint grey, it paints nothing
+    // and warns.
+    //
+    // And a page that became ruling 2's placeholder is grey rather than white,
+    // so it counts as ink on every one of the 484 704 pixels and no floor can
+    // see it. That direction is the hash's, as it is for `cbz`.
+    Fixture {
+        name: "xps",
+        build: xps_package,
+        least_ink: 10_000,
+    },
 ];
 
 #[test]
@@ -2036,6 +2117,19 @@ fn rendering_is_stable_across_targets() {
         (
             "cbz",
             "9e92c73984cff79feef04dcc984c52f04beda91bf3087a50ce9c17b3fc275aea",
+        ),
+        // Added August 2026 with gap 30 milestone 9, and **the first entry here
+        // whose input this repository did not author**: Microsoft's own XPS
+        // serialiser wrote the package, and every other fixture above is bytes
+        // assembled a few lines from its own entry. Read `xps_package`'s doc
+        // comment before treating a move in this one as a rendering change --
+        // its blast radius is the ZIP reader, the XML parser, the OPC layer,
+        // the spine, the markup walk, the brush grammar, the ODTTF key
+        // arithmetic, `DocumentBuilder` and `CosDocument`'s parse of what it
+        // wrote, as well as the renderer every other row here covers.
+        (
+            "xps",
+            "3e91e30f90903a7b5a91f0442c965acc2519ab22ce7e1c9c5f9b6392e2f74751",
         ),
     ];
     assert_eq!(
@@ -2197,6 +2291,142 @@ fn the_synthesised_document_is_the_same_bytes_on_every_target() {
         "the synthesised document is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
+        pdf.len()
+    );
+}
+
+/// The bytes the XPS synthesiser hands `CosDocument::open`, hashed.
+///
+/// *Added August 2026, with gap 30 milestone 9,* in the pair gap 29's milestone
+/// 6 established and for the reason it established it: **a rendered hash cannot
+/// see object numbering, dictionary key order or stream framing**, because a
+/// document renumbered or re-keyed parses to the same page tree and draws the
+/// same picture. Ruling 4 is a claim about rendering; this is the second place
+/// in this repository where a *written* document is an input to it, so the
+/// written bytes get a claim of their own.
+///
+/// What it covers that the `xps` fingerprint above cannot:
+///
+/// - **milestone 5's writer, as structure rather than as pixels.** The Type0
+///   font's five objects, the `/W` array built from the face's own `hmtx`, the
+///   `/ToUnicode` CMap and the tiling pattern's `/Matrix` are all in these
+///   bytes. The renderer reads them back and draws the same page whether the
+///   `/W` array is written as one run or as forty;
+/// - **the ODTTF part as it lands in the document.** 9.1.7.3's de-obfuscation
+///   produces a face this build then *subsets*, and a subsetter that emitted
+///   the whole 189 252-byte face would render identically;
+/// - **the routing table, on a file this repository did not write.** WPF's
+///   serialiser emits its images as **RGBA**, which is the one colour type gap
+///   29's pass-through cannot take — no PDF filter produces an alpha channel —
+///   so this package reaches the *decoder* and is split into samples and an
+///   `/SMask`. That is the fallback route arriving from a real producer rather
+///   than from a fixture written to exercise it, and the assertions below say
+///   so in both directions: an `/SMask` is present and a `/Predictor` is not.
+///
+/// The two hashes together attribute a failure. If both move, the synthesiser
+/// changed; if only the fingerprint moved, the renderer did; if only this one
+/// moved, the document changed in a way that draws the same — which is a real
+/// change and worth a sentence in the commit either way.
+#[test]
+fn the_synthesised_fixed_document_is_the_same_bytes_on_every_target() {
+    let package = xps_package();
+    let archive = tinker_pdf::cbz::open_archive(&package, &tinker_pdf_zip::Limits::DEFAULT)
+        .expect("the package is a readable ZIP");
+    let (pdf, report) = match tinker_pdf::xps::route(archive, &tinker_pdf::xps::Limits::DEFAULT) {
+        tinker_pdf::xps::Routing::Document(pdf, report) => (pdf, report),
+        tinker_pdf::xps::Routing::Refused(why) => panic!("the package was refused: {why}"),
+        tinker_pdf::xps::Routing::NotXps(_) => panic!("the package is an XPS"),
+    };
+
+    // The document this hash is about, asserted rather than assumed. A hash
+    // over the wrong document is stable and worthless, and for this package the
+    // wrong document has a name: before milestone 3 these same bytes opened as
+    // a one-page *comic* whose single page was the 32 x 32 PNG.
+    assert_eq!(
+        report.xps_dialect(),
+        Some(tinker_pdf::xps::Dialect::Xps1),
+        "WPF's serialiser writes the XPS 1.0 namespace, which is decision 3"
+    );
+    assert_eq!(report.pages().len(), 1, "one FixedPage");
+    assert!(
+        report.pages()[0].defect.is_none(),
+        "the page is the markup's own, not a placeholder: {:?}",
+        report.pages()[0].defect
+    );
+    // Ruling 10: "it opened" and "it opened cleanly" stay distinguishable.
+    // Milestone 8 is where this package stopped owing anything, and the
+    // assertion inverted then — while any element was unpainted the document
+    // could not be silent, and now it must be.
+    assert!(
+        report.warnings().is_empty(),
+        "this package renders with nothing owed: {:?}",
+        report.warnings()
+    );
+    assert_eq!(report.synthesised_bytes(), pdf.len());
+
+    // The structure only a byte hash pins, named entry by entry so a failure
+    // says which half moved. A hash alone cannot say *why* it is what it is.
+    for (needle, count, what) in [
+        (&b"/PatternType 1"[..], 1, "the ImageBrush became a pattern"),
+        (b"/Identity-H", 1, "9.7.6's Type0 encoding"),
+        (b"/CIDToGIDMap", 1, "the CID is the glyph index"),
+        (b"/ToUnicode", 1, "the run's UnicodeString is extractable"),
+        (
+            b"/SMask",
+            1,
+            "the RGBA part took gap 29's decoder and was split",
+        ),
+        (
+            b"/Predictor",
+            0,
+            "and therefore did *not* pass through: RGBA is the one colour type \
+             that cannot, because no PDF filter produces an alpha channel",
+        ),
+        (b"/DCTDecode", 0, "this package holds no JPEG"),
+        (b"/ImageMask", 0, "nothing here is a stencil"),
+    ] {
+        assert_eq!(
+            pdf.windows(needle.len()).filter(|w| *w == needle).count(),
+            count,
+            "{what}: {} in the synthesised document",
+            String::from_utf8_lossy(needle),
+        );
+    }
+
+    // The picture is the part's own 32 x 32 and not the page's, which is the
+    // shape of the original defect: before milestone 3 this package opened as a
+    // comic whose one page *was* this image, at 32 x 32 points.
+    for needle in [&b"/Width 32"[..], b"/Height 32"] {
+        assert!(
+            pdf.windows(needle.len()).any(|w| w == needle),
+            "the image is the part's own size: {}",
+            String::from_utf8_lossy(needle),
+        );
+    }
+
+    // The ODTTF is **subsetted**, and the cheapest true statement of that is
+    // that the whole document is smaller than the face it draws with: 9.1.7.3
+    // de-obfuscates 189 252 bytes of Cascadia Mono and the run needs eight
+    // glyphs of it. A build that embedded the face whole renders this page
+    // identically, which is exactly the class of change no rendered hash sees.
+    const DEOBFUSCATED_FACE: usize = 189_252;
+    assert!(
+        report.synthesised_bytes() < DEOBFUSCATED_FACE,
+        "the document is {} bytes and the face it draws with is {DEOBFUSCATED_FACE}: \
+         the subsetter is not running",
+        report.synthesised_bytes(),
+    );
+
+    let hash: String = tinker_pdf_crypto::sha2::sha256(&pdf)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hash,
+        "aed81359bf5d42df7cd71bbe006efb01e21d558b74ae28ebce760d913fefa2a7",
+        "the synthesised fixed document is not the bytes it was; see this \
+         test's doc comment for what that means and how to tell it apart from \
+         a rendering change. The document is {} bytes.",
         pdf.len()
     );
 }

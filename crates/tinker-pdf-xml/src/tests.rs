@@ -1157,3 +1157,43 @@ fn arbitrary_bytes_never_panic() {
         }
     }
 }
+
+/// A **second** byte order mark is text, and the reader refuses it where it
+/// stands.
+///
+/// Found by gap 30 milestone 9's fuzz campaign, which is the first session the
+/// `xml` target has ever had. libFuzzer produced thirteen bytes — a control
+/// byte and then `FE FF FE FF` and four code units — and the target's own
+/// assertion fired: *a byte order mark reached the text*.
+///
+/// **The crate was right and the assertion was wrong**, which is worth writing
+/// down because the opposite is the usual outcome. 4.3.3 has `Source::new`
+/// consume *the* mark, one, at offset zero; a `U+FEFF` after it is
+/// ZERO WIDTH NO-BREAK SPACE and an ordinary character, so decoding leaves it
+/// in the text exactly as it should. What it is not is *legal there*: 2.8's
+/// prolog admits whitespace, processing instructions, comments and a doctype,
+/// and ZWNBSP is none of those — so the reader answers
+/// [`Error::TextBeforeRoot`], which is the right refusal by the right name.
+///
+/// Both halves are asserted here, because a build that stripped every leading
+/// `U+FEFF` would satisfy the first and lose the second: it would silently
+/// accept a document XML says is malformed.
+#[test]
+fn a_second_byte_order_mark_is_text_and_is_refused_where_it_stands() {
+    // UTF-16 big-endian: the mark, the mark again, then two characters.
+    let bytes = [0xFEu8, 0xFF, 0xFE, 0xFF, 0xD3, 0x3C, 0xFA, 0x3C];
+    let source = Source::new(&bytes).expect("it decodes");
+    assert_eq!(source.encoding(), Encoding::Utf16BigEndian);
+
+    // The first mark is gone and the second is a character.
+    assert_eq!(
+        source.text().chars().next(),
+        Some('\u{FEFF}'),
+        "the second mark is text, not a mark"
+    );
+    assert_eq!(source.text().chars().count(), 3);
+
+    // And it is not text the prolog admits.
+    let mut reader = source.reader(&Limits::DEFAULT);
+    assert_eq!(reader.next(), Some(Err(Error::TextBeforeRoot)));
+}

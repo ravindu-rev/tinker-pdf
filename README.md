@@ -54,7 +54,7 @@ pagination — larger on its own than everything built so far. Each gets its own
 plan. The decision and its costs are in
 [`docs/plans/gaps/28-tinker-integration-decisions.md`](docs/plans/gaps/28-tinker-integration-decisions.md).
 
-**The first of the three is built.** A `.cbz` — a ZIP of page images — opens as
+**Two of the three are built.** A `.cbz` — a ZIP of page images — opens as
 a `Document` whose pages are its images, in the order a reader expects, at the
 image's own pixel size. Nothing about it is special below the facade: the
 archive is turned into a real PDF at `open`, so every capability the engine
@@ -62,9 +62,25 @@ already has arrives with it, and `Document::cos()` hands back a document qpdf
 reads clean. JPEG and PNG are read and **everything else is refused by name** —
 a `.cbr`, a `.cb7`, a GIF page, an encrypted entry. The ZIP reader and the PNG
 decoder are ours, like everything else here; `deny.toml` names the crates that
-would have made them somebody else's. XPS and EPUB are not built.
+would have made them somebody else's.
 [`docs/plans/gaps/29-cbz.md`](docs/plans/gaps/29-cbz.md) is the plan and its
 record.
+
+**And an `.xps` opens as a fixed document.** Not as a comic, which is what it
+used to do: one ZIP signature covers CBZ, XPS, EPUB, ODF and every JAR ever
+built, so until August 2026 a real XPS carrying a picture opened as a one-page
+comic *whose page was the picture*, with the text, the fonts and the page size
+discarded and no warning at all. Now ECMA-388 E.3's own three-step test decides
+which it is, an OPC package layer resolves parts and relationships, and a
+`FixedDocumentSequence` is paged in its markup's order at the size its markup
+states. Paths, glyphs, images and five brushes reach the page, through an XML
+parser that is an **eighth leaf crate** and **refuses DTD content by name**
+rather than bounding it — which is what makes billion laughs a named refusal
+instead of a budget. Everything else is refused by name: `VisualBrush`,
+signatures, print tickets, 3D, TIFF and JPEG XR. Nothing in this repository
+wrote any of the eight packages it is tested against.
+[`docs/plans/gaps/30-xps.md`](docs/plans/gaps/30-xps.md) is the plan and its
+record; EPUB is not built.
 
 ## The plan
 
@@ -82,8 +98,8 @@ record.
 
 ## Workspace
 
-Seven leaf crates (`filters`, `crypto`, `font`, `color`, `raster`, `math`,
-`zip`) are bytes-in, values-out, know nothing about PDF, and each is
+Eight leaf crates (`filters`, `crypto`, `font`, `color`, `raster`, `math`,
+`zip`, `xml`) are bytes-in, values-out, know nothing about PDF, and each is
 independently fuzzable. `cos` owns file syntax; `content` interprets content
 streams and emits to a `Device` trait — the text device needs no rasterizer,
 which is why text parity lands before pixels exist; `render` is the rasterizing

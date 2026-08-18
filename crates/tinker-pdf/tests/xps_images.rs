@@ -456,6 +456,36 @@ fn an_images_own_resolution_decides_its_size_in_units() {
     );
 }
 
+/// An `ImageSource` that **cannot be resolved at all** is named apart from one
+/// that resolves to a part the package does not hold.
+///
+/// Two failures, two names, and the injection matrix found only one of them
+/// tested: every fixture until now used a well-formed reference to an absent
+/// part, which reaches the "the package does not hold it" arm. A reference
+/// carrying a **scheme** reaches the other — and over-climbing does not, because
+/// RFC 3986 5.2.4 clamps `../` at the root rather than failing, which the first
+/// version of this test assumed and the matrix corrected.
+///
+/// The scheme case is the one worth having anyway: `resolve_reference`'s own
+/// doc says refusing it is what keeps an `http://` `ImageSource` from becoming
+/// an attempt at I/O this engine could not perform. A build that collapsed the
+/// two names would tell a reader "this image will not decode" about a file that
+/// named no image in the package at all.
+#[test]
+fn a_source_that_cannot_be_resolved_is_named_apart_from_a_missing_part() {
+    let body = r#"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
+        <ImageBrush ImageSource="http://example.com/outside.png"
+                    Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                    ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+        </Path.Fill></Path>"#;
+    let markup = format!(
+        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+    let bytes = archive(before_content_types(parts, png_part()));
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageUnresolved]);
+}
+
 /// An unknown `TileMode` is refused rather than taken for `None`.
 ///
 /// 15.3.1 gives five spellings and a sixth is not one of them. Taking an

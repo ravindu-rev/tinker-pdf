@@ -577,11 +577,25 @@ pub fn attachments(doc: &CosDocument) -> Vec<Attachment> {
 
 /// The document's XMP metadata stream, as bytes (14.3.2).
 ///
-/// Returned unparsed. XMP is RDF/XML, parsing it needs an XML reader this
-/// engine does not have and should not grow, and a caller that wants it
-/// already has one. What matters here is that the bytes are *reachable* —
-/// they carry the document identity and rights information that `/Info` does
-/// not, and several archival profiles require them.
+/// Returned unparsed. XMP is RDF/XML, and a caller that wants it already has a
+/// reader. What matters here is that the bytes are *reachable* — they carry
+/// the document identity and rights information that `/Info` does not, and
+/// several archival profiles require them.
+///
+/// *Amended, 19 August 2026, [gap 30](../../../docs/plans/gaps/30-xps.md)
+/// milestone 9, per CONTRIBUTING rule 4.* This used to say the parser "this
+/// engine does not have and should not grow", and half of that is no longer
+/// true: `tinker-pdf-xml` exists, as the eighth leaf, because XPS's fixed-page
+/// markup needed one. **It is deliberately not used here, and the amendment
+/// says so rather than reading as a promise.** Three reasons, and the first is
+/// the one that would still hold if the other two were solved: `tinker-pdf-cos`
+/// does not depend on `tinker-pdf-xml` and adding the edge to parse a metadata
+/// stream would be exactly the "convenience dependency" plan 00 names as how
+/// seams die. Then: RDF/XML is a *graph* serialisation and a pull parser over
+/// elements is the smaller half of reading one, so what a caller would get is
+/// a token stream and the same work still to do; and `xmp_metadata`'s contract
+/// is the bytes, which is a promise this function already keeps and a parsed
+/// form would break.
 #[must_use]
 pub fn xmp_metadata(doc: &CosDocument) -> Option<Vec<u8>> {
     let catalog = doc.catalog()?;
