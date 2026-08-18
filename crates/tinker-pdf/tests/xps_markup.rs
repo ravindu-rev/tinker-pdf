@@ -109,7 +109,7 @@ fn ops(stream: &str) -> Vec<String> {
 
 /// A geometry from the abbreviated syntax, with a budget nothing here reaches.
 fn geometry(data: &str) -> Result<geometry::Geometry, geometry::GeometryError> {
-    let mut budget = Budget::new(1 << 20, 1 << 23);
+    let mut budget = Budget::new(1 << 20, 1 << 23, 1 << 21);
     geometry::abbreviated(data, &mut budget)
 }
 
@@ -1211,13 +1211,20 @@ fn a_dictionary_entry_with_no_key_is_named() {
 
 // ---- what is not drawn, by name -----------------------------------------
 
-/// A `Glyphs` run is named rather than passed over, because a page whose words
-/// are missing and whose report says nothing is gap 17's blank page one
-/// element down.
+/// A `Glyphs` run whose font is not in the package is named rather than passed
+/// over, because a page whose words are missing and whose report says nothing
+/// is gap 17's blank page one element down.
+///
+/// *Amended by milestone 7.* Until that milestone the answer was
+/// `GlyphsNotDrawn` — one name for every run on every page, whatever was wrong
+/// with it. That variant is **deleted** rather than kept as a shape nothing
+/// produces, which is milestone 6's own argument for deleting `NotDrawn` one
+/// level up: a record of old behaviour that does not break when the behaviour
+/// changes is not a record.
 #[test]
 fn a_glyphs_run_is_named_rather_than_silently_skipped() {
     let body = r##"<Glyphs OriginX="10" OriginY="10" FontRenderingEmSize="12" FontUri="/Resources/f.odttf" UnicodeString="hi" Fill="#000000" />"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::GlyphsNotDrawn]);
+    assert_eq!(body_defects(body), [XpsElementDefect::GlyphsFontUnresolved]);
 }
 
 /// **A property element belongs to the element whose name it carries, whole.**
@@ -1323,12 +1330,10 @@ fn the_real_one_page_package_from_the_design_section_renders() {
         .collect();
     assert_eq!(
         element,
-        [
-            XpsElementDefect::BrushUnsupported,
-            XpsElementDefect::GlyphsNotDrawn
-        ],
-        "the `ImageBrush` is milestone 8's and the `Glyphs` is milestone 7's, \
-         and neither is a `{{StaticResource}}` that failed to resolve"
+        [XpsElementDefect::BrushUnsupported],
+        "the `ImageBrush` is milestone 8's, and it is not a \
+         `{{StaticResource}}` that failed to resolve; the `Glyphs` run \
+         milestone 6 owed is drawn"
     );
 
     // The `Path`'s own numbers, straight out of the markup.
@@ -1358,19 +1363,15 @@ fn every_package_in_the_corpus_draws_and_says_what_it_does_not() {
         ("wpf-three-pages.xps", &[]),
         ("wpf-gradients.xps", &[]),
         ("xpsom-gradients.oxps", &[]),
+        // Milestone 7 drew the `Glyphs` run in both of these, so what each
+        // owes is now **one** thing and it is milestone 8's.
         (
             "wpf-image-and-text.xps",
-            &[
-                XpsElementDefect::BrushUnsupported,
-                XpsElementDefect::GlyphsNotDrawn,
-            ],
+            &[XpsElementDefect::BrushUnsupported],
         ),
         (
             "xpsom-image-and-text.oxps",
-            &[
-                XpsElementDefect::BrushUnsupported,
-                XpsElementDefect::GlyphsNotDrawn,
-            ],
+            &[XpsElementDefect::BrushUnsupported],
         ),
         ("wpf-tiled-brush.xps", &[XpsElementDefect::BrushUnsupported]),
         ("wpf-jpeg-image.xps", &[XpsElementDefect::BrushUnsupported]),

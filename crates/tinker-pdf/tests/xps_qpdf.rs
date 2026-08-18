@@ -178,6 +178,48 @@ fn object(qpdf: &Path, path: &Path, number: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The object number a flattened dictionary's key refers to.
+///
+/// The value may be a reference or a one-element array holding one — `/W` and
+/// `/DescendantFonts` are the two shapes — so this takes the first `N 0 R`
+/// after the key rather than assuming which.
+fn follow_ref(flat: &str, key: &str) -> String {
+    let at = flat.find(key).unwrap_or_else(|| panic!("{key} in {flat}"));
+    let rest = &flat[at + key.len()..];
+    let number = rest
+        .split_whitespace()
+        .find(|token| token.chars().all(|c| c.is_ascii_digit()) && !token.is_empty())
+        .unwrap_or_else(|| panic!("a reference after {key} in {flat}"));
+    number.to_string()
+}
+
+/// The object a flattened dictionary's key refers to, printed by qpdf.
+fn follow(qpdf: &Path, path: &Path, flat: &str, key: &str) -> String {
+    object(qpdf, path, &follow_ref(flat, key))
+}
+
+/// A stream's **decoded bytes**, which `--show-object` does not print.
+///
+/// `--show-object` prints the dictionary and the words `Object is stream.`
+/// where the data would be; `--filtered-stream-data` is the flag that hands
+/// the bytes over, and it was found by running the tool.
+fn stream_data(qpdf: &Path, path: &Path, number: &str) -> String {
+    let (code, text) = run(
+        qpdf,
+        &[
+            &format!("--show-object={number}"),
+            "--filtered-stream-data",
+            &path.display().to_string(),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "qpdf --show-object={number} --filtered-stream-data:
+{text}"
+    );
+    text
+}
+
 // ---- the structure ------------------------------------------------------
 
 /// The document the synthesiser hands the parser, checked by somebody else.
@@ -564,4 +606,149 @@ fn qpdf_reads_the_transparency_group_a_canvas_opacity_became() {
         !images.contains("image:"),
         "a fixed page draws its markup, not a raster:\n{images}"
     );
+}
+
+// ---- the composite font a `Glyphs` run reaches the page through ---------
+
+/// **The font a real `Glyphs` run drew with, read by a program that has never
+/// seen the ODTTF.**
+///
+/// This is the one assertion in gap 30 that says the de-obfuscation, the
+/// subsetter and the Type0 machinery all agree with somebody else's reader.
+/// Milestone 5 wrote a composite font and nothing consumed it; this is the
+/// first one in this repository that came out of a **file**, and the font
+/// program in it was thirty-two XORs away from a stream qpdf would have
+/// refused.
+///
+/// Followed from the page's `/Resources` rather than guessed at, and every
+/// number is one the package chose:
+///
+/// - `/Encoding /Identity-H` over a `/CIDFontType2` descendant with
+///   `/CIDToGIDMap /Identity`, which is what makes `Indices` addressable at
+///   all;
+/// - `/W` carrying **586** for each of the seven glyphs the run drew — Cascadia
+///   Mono's own 1200 `hmtx` units over 2048 per em, rounded to a thousandth by
+///   a writer that has never heard of XPS;
+/// - a `/ToUnicode` of exactly seven `bfchar` entries, which is what
+///   `UnicodeString="Page one"` is once its two `e`s are one glyph.
+///
+/// `--filtered-stream-data` is what hands the CMap over; `--show-object` alone
+/// prints `Object is stream.` where the bytes would be, which is the fifth
+/// milestone running to have had to read the tool before asserting on it.
+#[test]
+fn qpdf_reads_the_composite_font_a_real_glyphs_run_drew_with() {
+    let qpdf = oracle!("--show-object over a synthesised XPS's Type0 font");
+
+    let pdf = synthesise(&corpus("wpf-image-and-text.xps"));
+    let path = fixture("glyphs", "image-and-text.pdf", &pdf);
+
+    let (code, dump) = run(&qpdf, &["--show-pages", &path.display().to_string()]);
+    assert_eq!(code, 0, "qpdf --show-pages:\n{dump}");
+    let page = page_objects(&dump).first().cloned().expect("one page");
+
+    // The page names one font and nothing else.
+    let page_object = object(&qpdf, &path, &page);
+    assert!(
+        page_object.contains("/Font << /XF0 "),
+        "the page names the run's font: {page_object}"
+    );
+
+    let font = follow(&qpdf, &path, &page_object, "/XF0");
+    assert!(font.contains("/Subtype /Type0"), "{font}");
+    assert!(font.contains("/Encoding /Identity-H"), "{font}");
+    assert!(
+        font.contains("/BaseFont /") && font.contains("+XpsFont"),
+        "9.6.4's six-letter subset tag, because the program is cut down to \
+         seven glyphs out of a face that carries a whole `gvar`: {font}"
+    );
+
+    let descendant = follow(&qpdf, &path, &font, "/DescendantFonts");
+    assert!(
+        descendant.contains("/Subtype /CIDFontType2"),
+        "{descendant}"
+    );
+    assert!(
+        descendant.contains("/CIDToGIDMap /Identity"),
+        "{descendant}"
+    );
+    assert!(descendant.contains("/DW 1000"), "{descendant}");
+    // qpdf sorts a dictionary's keys, so `/CIDSystemInfo` prints in an order
+    // this writer did not choose — the lesson gap 30's milestone 5 recorded,
+    // taken as read here.
+    assert!(
+        descendant.contains("/Ordering (Identity)"),
+        "a descendant claiming another ordering under `/Identity-H` is a font \
+         whose two halves disagree: {descendant}"
+    );
+    assert!(
+        descendant.contains("/W [ 146 [ 586 ] 222 [ 586 ] 260 [ 586 ] 284 [ 586 ] 336 [ 586 ] 345 [ 586 ] 861 [ 586 ] ]"),
+        "seven glyphs, at Cascadia Mono's own 1200/2048 em: {descendant}"
+    );
+
+    let cmap = stream_data(&qpdf, &path, &follow_ref(&font, "/ToUnicode"));
+    assert!(cmap.contains("7 beginbfchar"), "{cmap}");
+    for entry in [
+        "<0092> <0050>",
+        "<00DE> <0061>",
+        "<0104> <0065>",
+        "<011C> <0067>",
+        "<0150> <006E>",
+        "<0159> <006F>",
+        "<035D> <0020>",
+    ] {
+        assert!(cmap.contains(entry), "{entry} in {cmap}");
+    }
+    assert!(
+        cmap.contains("<0000> <FFFF>"),
+        "the codespace is two bytes wide, which is what says a code is a CID: {cmap}"
+    );
+}
+
+/// `--check` is clean on a document whose font came out of thirty-two XORs,
+/// in every write mode.
+///
+/// The compressed-and-object-streams mode is the one that matters here for the
+/// same reason it mattered to milestone 5: the `/ToUnicode` CMap and the
+/// embedded font program both become `/FlateDecode` streams, and a subset that
+/// was almost a font would show up there rather than in the page.
+#[test]
+fn qpdf_check_finds_nothing_wrong_with_a_document_carrying_an_odttf() {
+    let qpdf = oracle!("--check over a synthesised XPS carrying an ODTTF");
+
+    let document = Document::open(corpus("xpsom-image-and-text.oxps")).expect("a fixed document");
+    for (name, options) in [
+        (
+            "rewritten.pdf",
+            WriteOptions {
+                mode: WriteMode::Rewrite,
+                ..WriteOptions::default()
+            },
+        ),
+        (
+            "linearized.pdf",
+            WriteOptions {
+                mode: WriteMode::Rewrite,
+                linearize: true,
+                ..WriteOptions::default()
+            },
+        ),
+        (
+            "compressed.pdf",
+            WriteOptions {
+                mode: WriteMode::Rewrite,
+                compress: true,
+                object_streams: true,
+                ..WriteOptions::default()
+            },
+        ),
+    ] {
+        let saved = document.editor().save(&options);
+        let path = fixture("odttf", name, &saved);
+        let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
+        assert_eq!(code, 0, "qpdf --check on {name}:\n{text}");
+        assert!(
+            text.contains("No syntax or stream encoding errors found"),
+            "{name}: qpdf found something:\n{text}"
+        );
+    }
 }

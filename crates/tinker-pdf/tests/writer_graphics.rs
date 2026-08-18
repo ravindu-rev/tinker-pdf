@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use tinker_pdf::{
     Bitmap, BlendMode, DeviceSpace, Document, DocumentBuilder, ExtGState, FormXObject, Function,
-    Glyph, MaskKind, RenderOptions, Shading, StateMask, TilingPattern, TilingType,
+    Glyph, MaskKind, PlacedGlyph, RenderOptions, Shading, StateMask, TilingPattern, TilingType,
     TransparencyGroup,
 };
 
@@ -936,4 +936,134 @@ fn a_composite_run_positions_its_glyphs_from_the_widths_the_font_states() {
         (quads[0].0 - 0.0).abs() < 0.5 && (quads[1].0 - 10.0).abs() < 0.5,
         "the second glyph is one advance along: {quads:?}"
     );
+}
+
+// ---- a run written into a caller's own stream (gap 30, milestone 7) ------
+
+/// **A caller's stream is not a page's, so a rise this run set has to be put
+/// back before the run ends.**
+///
+/// *A survivor of gap 30 milestone 7's injection matrix.* `Ts` is a **graphics
+/// state** parameter and not a text-object one, so it outlives `ET`: a run that
+/// left one set tilts whatever the caller writes next off the baseline. The
+/// XPS painter happens to bracket every run in `q`/`Q`, which hides it — so the
+/// only place the rule is observable is here, where two runs go into one buffer
+/// with nothing between them.
+///
+/// Both glyphs are the same glyph at the same origin, which is what makes the
+/// assertion about the rise and nothing else: the first is lifted thirty points
+/// and the second is not, and a build that never cleared the rise draws both in
+/// the same place.
+#[test]
+fn a_run_puts_its_rise_back_before_the_next_one_starts() {
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"C0", b"Disagree", &disagreeing_font()));
+
+    let mut content = Vec::new();
+    content.extend_from_slice(b"0 0 0 rg\n");
+    assert!(builder.glyph_run(
+        &mut content,
+        b"C0",
+        30.0,
+        [1.0, 0.0, 0.0, 1.0, 5.0, 10.0],
+        &[PlacedGlyph {
+            glyph: Glyph { id: 1, text: "a" },
+            x: 0.0,
+            rise: 20.0,
+        }],
+    ));
+    assert!(builder.glyph_run(
+        &mut content,
+        b"C0",
+        30.0,
+        [1.0, 0.0, 0.0, 1.0, 5.0, 10.0],
+        &[PlacedGlyph {
+            glyph: Glyph { id: 1, text: "a" },
+            x: 0.0,
+            rise: 0.0,
+        }],
+    ));
+    builder.add_page(60.0, 60.0, |page| page.raw(&content));
+
+    let drawn = render(builder.finish());
+    // Glyph 1 fills the bottom-left three tenths of the em, so at thirty
+    // points from (5, 10) it inks 5..14 across and 10..19 up — and the risen
+    // copy is twenty points higher, at 30..39.
+    assert!(
+        at(&drawn, 9.0, 14.0).0 < 40,
+        "the unrisen run: {:?}",
+        at(&drawn, 9.0, 14.0)
+    );
+    assert!(
+        at(&drawn, 9.0, 34.0).0 < 40,
+        "the risen run: {:?}",
+        at(&drawn, 9.0, 34.0)
+    );
+    assert!(
+        at(&drawn, 9.0, 54.0).0 > 235,
+        "and nothing forty points up, which is where a rise left set would put \
+         the second run: {:?}",
+        at(&drawn, 9.0, 54.0)
+    );
+}
+
+/// A run is refused into a **simple** font, having written nothing.
+///
+/// *A survivor.* Every font an XPS run reaches is registered through
+/// `add_cid_font`, so the composite check is unreachable from that side and
+/// nothing in gap 30 could ever exercise it. `PageBuilder::glyphs` has the same
+/// guard for the same reason — two-byte codes in a font whose codes are one
+/// byte draw the wrong glyphs at the wrong widths and read as a font problem
+/// rather than an encoding one — and it is a **pair**: the composite font
+/// accepts the run and the simple one does not.
+#[test]
+fn a_run_into_a_simple_font_is_refused_and_writes_nothing() {
+    let mut builder = DocumentBuilder::new();
+    let program = disagreeing_font();
+    assert!(builder.add_embedded_font(b"F0", b"Disagree", &program));
+    assert!(builder.add_cid_font(b"C0", b"Disagree", &program));
+
+    let placed = [PlacedGlyph {
+        glyph: Glyph { id: 2, text: "A" },
+        x: 0.0,
+        rise: 0.0,
+    }];
+
+    let mut simple = Vec::new();
+    assert!(
+        !builder.glyph_run(
+            &mut simple,
+            b"F0",
+            12.0,
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &placed
+        ),
+        "a simple font has no spelling for a glyph index"
+    );
+    assert!(simple.is_empty(), "and nothing was written: {simple:?}");
+
+    let mut composite = Vec::new();
+    assert!(builder.glyph_run(
+        &mut composite,
+        b"C0",
+        12.0,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        &placed
+    ));
+    assert!(
+        String::from_utf8_lossy(&composite).contains("<0002>"),
+        "and the composite one drew the index"
+    );
+
+    // A resource that is no font at all is refused too, which is the third
+    // case and the one a caller reaches by misspelling a name.
+    let mut missing = Vec::new();
+    assert!(!builder.glyph_run(
+        &mut missing,
+        b"nowhere",
+        12.0,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        &placed
+    ));
+    assert!(missing.is_empty());
 }

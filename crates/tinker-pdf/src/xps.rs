@@ -123,7 +123,9 @@
 //! instead.
 
 pub mod brush;
+pub mod font;
 pub mod geometry;
+pub mod glyphs;
 pub mod markup;
 pub mod opc;
 pub mod paint;
@@ -138,9 +140,10 @@ use crate::cbz::{
     ArchiveRefusal, ArchiveReport, ArchiveWarning, PageOrigin, DOCUMENT_OVERHEAD,
     MAX_SYNTHESISED_PDF, PAGE_OVERHEAD, PLACEHOLDER_GREY,
 };
+use font::Fonts;
 use markup::{Budget, Trouble};
 use opc::{Package, PackageProblem, PartName};
-use paint::{Drawn, Painter};
+use paint::{Drawn, Painter, Surroundings};
 
 // ---- Bounds -----------------------------------------------------------------
 
@@ -240,6 +243,41 @@ pub const MAX_XPS_ELEMENTS: usize = 1 << 20;
 ///
 /// Reachable: `a_geometry_past_the_segment_cap_is_refused_by_name`.
 pub const MAX_XPS_SEGMENTS: usize = 1 << 23;
+
+/// The most glyphs one package's `Glyphs` runs may place.
+///
+/// **A total, and neither of the two above sees a single glyph.** A `Glyphs`
+/// element is *one* element and *no* segments, and the number of glyphs it
+/// draws is the length of its own `Indices` and `UnicodeString` attributes —
+/// `;` is one byte and one more glyph, so one attribute in a part this build
+/// already admits (128 MiB, [`zip_limits::MAX_ZIP_ENTRY_BYTES`]) is a hundred
+/// million of them under an element cap that counted it as one. That is
+/// [`MAX_XPS_SEGMENTS`]'s argument arriving in the one place milestone 6 could
+/// not have found it, because milestone 6 drew no glyphs.
+///
+/// | | Glyphs |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 2 097 152 (the run built *past* this cap places one more; the largest real package here places 8) |
+/// | A 200-page fixed document | 1 000 000 |
+/// | **This cap** | **2 097 152** |
+///
+/// The yardstick is gap 30's own — a 200-page dense fixed document — read for
+/// text rather than for drawing: five thousand glyphs a page is a page of
+/// small type with no white space on it at all, and two hundred of those is a
+/// million, against a cap at twice that.
+///
+/// The margin is narrow for [`MAX_XPS_SEGMENTS`]'s reason: **this cap is also
+/// a peak-memory bound.** Every glyph of a run is materialised before any of
+/// it is written, because the run's extent is what fixes the box a canvas
+/// opacity groups over. A `GlyphMapping` is eighty bytes and a placed glyph
+/// forty-eight — both measured rather than estimated — so the whole total is
+/// about 260 MiB with its content stream on top, under `MAX_ZIP_INFLATED`'s
+/// 1 GiB that this build already admits and well under
+/// [`MAX_SYNTHESISED_PDF`].
+///
+/// Reachable: `a_run_past_the_glyph_cap_is_refused_by_name` builds the real
+/// run rather than lowering the constant.
+pub const MAX_XPS_GLYPHS: usize = 1 << 21;
 
 /// How long a chain of `{StaticResource}` aliases may be.
 ///
@@ -425,6 +463,8 @@ pub struct Limits {
     pub max_elements: usize,
     /// Path segments across the document. See [`MAX_XPS_SEGMENTS`].
     pub max_segments: usize,
+    /// Glyphs placed across the document. See [`MAX_XPS_GLYPHS`].
+    pub max_glyphs: usize,
     /// Bytes of the document handed to the parser. Shared with the comic path
     /// rather than duplicated — see [`MAX_SYNTHESISED_PDF`], whose argument is
     /// about the writer and not about the container.
@@ -449,6 +489,7 @@ impl Limits {
         max_pages: MAX_XPS_PAGES,
         max_elements: MAX_XPS_ELEMENTS,
         max_segments: MAX_XPS_SEGMENTS,
+        max_glyphs: MAX_XPS_GLYPHS,
         max_synthesised: MAX_SYNTHESISED_PDF,
         xml: XmlLimits::DEFAULT,
         zip_name_len: zip_limits::MAX_ZIP_NAME_LEN,
@@ -609,10 +650,47 @@ pub enum XpsElementDefect {
     /// Gap 30's milestone 8; every key in it is unresolvable until then, and
     /// saying so once beats one `BrushUnresolved` per use.
     ResourceDictionaryRemote,
-    /// A `Glyphs` run, which is gap 30's milestone 7. **Not painted**, and
-    /// named — a page whose words are missing and whose report says nothing is
-    /// gap 17's blank page one element down.
-    GlyphsNotDrawn,
+    /// A `Glyphs` whose `FontUri` names no part of this package, or a part
+    /// that will not read. **Not painted** — a run whose font is unknown has
+    /// no glyph indices to draw and no widths to place them at.
+    GlyphsFontUnresolved,
+    /// A `FontUri` whose 9.1.7 fragment names a face other than the first.
+    /// **Not painted**, and refused rather than drawn in face zero, which is
+    /// what `Sfnt::parse` would silently do with a TrueType collection.
+    GlyphsFontFace,
+    /// A part whose media type is Table D-4's obfuscated OpenType and whose
+    /// last segment is not 9.1.7.3's GUID, so there is no key. **Not
+    /// painted**, and never reported as a font that would not parse: the
+    /// bytes were never de-obfuscated at all.
+    GlyphsFontObfuscation,
+    /// A font part this engine cannot read as a font program. **Not painted.**
+    GlyphsFontUnreadable,
+    /// `Indices` that is not 12.1.3's grammar, or whose cluster counts and
+    /// `UnicodeString` disagree. **Not painted** — the glyphs, their widths
+    /// and the text they stand for are all stated there, and a run read past a
+    /// mapping it did not understand draws the wrong glyphs at the wrong
+    /// widths for the wrong characters.
+    GlyphsIndicesUnreadable,
+    /// A `Glyphs` whose `OriginX`, `OriginY` or `FontRenderingEmSize` is
+    /// absent or is not a number a page can be drawn with. **Not painted**,
+    /// which is the geometry rule: a run at an origin this reader invented is
+    /// text in the wrong place.
+    GlyphsUnreadable,
+    /// `IsSideways="true"` (12.1). **Not painted**, and refused by name rather
+    /// than drawn upright: rotated glyphs drawn the other way round are a
+    /// different picture at the same place.
+    GlyphsSidewaysUnsupported,
+    /// A `BidiLevel` that is odd, which is 12.1's right-to-left run.
+    /// **Not painted**, because the origin of a right-to-left run is the
+    /// *right* edge of it and drawing it left to right puts the text
+    /// somewhere it is not.
+    GlyphsBidiUnsupported,
+    /// A `StyleSimulations` other than `None` (12.1). The run **is painted**,
+    /// at exactly the glyphs, widths and positions the file states, without
+    /// the synthetic slant or weight — which is the paint-unreadable side of
+    /// the asymmetry rather than the geometry side, and dropping the text
+    /// would lose far more than the simulation does.
+    GlyphsStyleSimulated,
     /// Markup this build does not draw: an element from another vocabulary, a
     /// property element nothing here reads, a dictionary entry with no
     /// `x:Key`.
@@ -634,7 +712,23 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
             XpsElementDefect::ResourceDictionaryRemote => "a `ResourceDictionary` in another part",
-            XpsElementDefect::GlyphsNotDrawn => "a `Glyphs` run, which is not drawn yet",
+            XpsElementDefect::GlyphsFontUnresolved => "a `FontUri` naming no readable font part",
+            XpsElementDefect::GlyphsFontFace => "a `FontUri` naming a face other than the first",
+            XpsElementDefect::GlyphsFontObfuscation => {
+                "an obfuscated font part whose name carries no GUID"
+            }
+            XpsElementDefect::GlyphsFontUnreadable => "a font part this engine cannot read",
+            XpsElementDefect::GlyphsIndicesUnreadable => "`Indices` that is not 12.1.3's grammar",
+            XpsElementDefect::GlyphsUnreadable => "a `Glyphs` stating no usable origin or em size",
+            XpsElementDefect::GlyphsSidewaysUnsupported => {
+                "an `IsSideways` run, which is not drawn"
+            }
+            XpsElementDefect::GlyphsBidiUnsupported => {
+                "a right-to-left `BidiLevel`, which is not drawn"
+            }
+            XpsElementDefect::GlyphsStyleSimulated => {
+                "a `StyleSimulations` this build does not simulate"
+            }
             XpsElementDefect::ElementUnknown => "markup this build does not draw",
         })
     }
@@ -1034,8 +1128,12 @@ fn synthesise(
     // one painter serves the whole document because a resource name has to be
     // unique across it: `add_page` copies the document's whole resource table
     // into every page, so two pages naming one `/GS0` would be one state.
-    let mut budget = Budget::new(limits.max_elements, limits.max_segments);
+    let mut budget = Budget::new(limits.max_elements, limits.max_segments, limits.max_glyphs);
     let mut painter = Painter::default();
+    // One font table for the document, for the painter's own reason: a PDF
+    // resource name has to be unique across a document, because `add_page`
+    // copies the whole resource table into every page.
+    let mut fonts = Fonts::default();
     // Painted **once per part**, for the reason milestone 4 built its own
     // caches: a `FixedDocument` may show one page part four thousand times,
     // and `Source::new` walks every character of a part before it yields an
@@ -1052,8 +1150,26 @@ fn synthesise(
 
         if let Some(part) = &plan.part {
             if !painted.contains_key(part) {
+                // 9.1.7's fonts, resolved before the drawing walk rather than
+                // during it: `read_part` hands back a borrow of the package
+                // and the walk is already holding one, so a font looked up
+                // mid-walk would need the page's bytes copied out — and a
+                // fixed page part is the one part of this format whose size
+                // the file chooses. See `font::Fonts::load`.
+                if let Err(Trouble::Exhausted) = fonts.load(package, part, &mut builder, limits) {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
                 let drawn = match package.read_part(part) {
-                    Ok(bytes) => painter.page(&mut builder, bytes, &limits.xml, &mut budget),
+                    Ok(bytes) => painter.page(
+                        &mut builder,
+                        bytes,
+                        &Surroundings {
+                            part,
+                            fonts: &fonts,
+                            xml: &limits.xml,
+                        },
+                        &mut budget,
+                    ),
                     Err(_) => Err(Trouble::Markup),
                 };
                 match drawn {

@@ -1,5 +1,14 @@
 //! Gap 29's seven bounds and gap 30's, swept in one place.
 //!
+//! *Amended, 18 August 2026, gap 30 milestone 7.* One more row —
+//! `MAX_XPS_GLYPHS` — and it is here rather than absent because a `Glyphs` is
+//! **one** element and **no** segments, so neither work cap milestone 6 added
+//! sees a single glyph. `1;` is two bytes and one more glyph mapping, and one
+//! mapping is eighty bytes of value, so a single `Indices` attribute in a part
+//! this build already admits is a hundred million of them. It is charged
+//! *before* the mappings are materialised for that reason, which is
+//! `tinker-pdf-zip`'s own posture: a permit is what has been promised.
+//!
 //! *Amended, 18 August 2026, gap 30 milestone 6.* Three more rows —
 //! `MAX_XPS_ELEMENTS`, `MAX_XPS_SEGMENTS` and `MAX_XPS_RESOURCE_DEPTH`. The
 //! first two are the plan's own **work caps**, the numbers a file chooses when
@@ -68,7 +77,8 @@
 
 use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
 use tinker_pdf::xps::{
-    MAX_XPS_ELEMENTS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH, MAX_XPS_SEGMENTS,
+    MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
+    MAX_XPS_SEGMENTS,
 };
 use tinker_pdf_filters::MAX_PNG_SAMPLES;
 use tinker_pdf_xml::limits as xml_limits;
@@ -86,6 +96,7 @@ const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
+const XPS_GLYPH_TESTS: &str = include_str!("xps_glyphs.rs");
 
 /// One bound, as its own ledger publishes it.
 struct Bound {
@@ -389,6 +400,25 @@ fn ledger() -> Vec<Bound> {
             ),
         },
         Bound {
+            name: "MAX_XPS_GLYPHS",
+            cap: MAX_XPS_GLYPHS as u128,
+            published: "2 097 152",
+            fixtures: MAX_XPS_GLYPHS as u128,
+            comic: 0,
+            document: Some(1_000_000),
+            // `1;` is two bytes and one more mapping, in one attribute of one
+            // element, in a part this build already admits at 128 MiB — and a
+            // `Glyphs` costs one element and no segments, so neither cap
+            // milestone 6 added stands in front of this one.
+            reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128 / 2,
+            reachable_because: "a two-byte `1;` per glyph in one `Indices` attribute",
+            declared_in: XPS,
+            fires_in: (
+                "a_run_past_the_glyph_cap_is_refused_by_name",
+                XPS_GLYPH_TESTS,
+            ),
+        },
+        Bound {
             name: "MAX_XPS_RESOURCE_DEPTH",
             cap: MAX_XPS_RESOURCE_DEPTH as u128,
             published: "16",
@@ -434,6 +464,7 @@ fn the_sweep_covers_every_bound_these_two_gaps_added() {
             "MAX_XPS_PAGES",
             "MAX_XPS_ELEMENTS",
             "MAX_XPS_SEGMENTS",
+            "MAX_XPS_GLYPHS",
             "MAX_XPS_RESOURCE_DEPTH",
         ],
         "a bound was added or renamed without a row in this sweep"
@@ -529,9 +560,9 @@ fn no_bound_refuses_a_dense_fixed_document() {
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
     assert_eq!(
-        measured, 9,
-        "gap 30's yardstick covers {measured} rows, not the nine its milestones \
-         2, 3 and 6 added"
+        measured, 10,
+        "gap 30's yardstick covers {measured} rows, not the ten its milestones \
+         2, 3, 6 and 7 added"
     );
 }
 

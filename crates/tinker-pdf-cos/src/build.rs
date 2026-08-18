@@ -575,6 +575,32 @@ pub struct Glyph<'a> {
     pub text: &'a str,
 }
 
+/// One glyph of a run the **caller** laid out, for
+/// [`DocumentBuilder::glyph_run`] (gap 30, milestone 7).
+///
+/// [`PageBuilder::glyphs`] draws a run at one position and lets the font's own
+/// advances decide where every glyph after the first lands, which is what a
+/// caller writing text wants. A caller reading a document that states each
+/// glyph's position — an XPS `Glyphs` run does, and 9.4.3 is how PDF says the
+/// same thing — has the positions already and needs the advances *not* to
+/// decide them.
+///
+/// Both coordinates are in **unscaled text space**: one unit of whatever space
+/// the run's matrix maps from, which is the space 9.4.4's `Tm` translation is
+/// stated in. They are not multiplied by the font size, because 9.4.2's
+/// displacement is not either.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedGlyph<'a> {
+    /// The glyph, and the text it stands for.
+    pub glyph: Glyph<'a>,
+    /// Its origin along the baseline, from the run's own origin.
+    pub x: f64,
+    /// Its origin off the baseline, positive away from the descenders —
+    /// 9.4.3's `Ts`, which displaces the glyph and leaves the pen where it
+    /// was.
+    pub rise: f64,
+}
+
 /// The resources one page, form or pattern may name.
 ///
 /// Held as one value rather than as six fields because a form XObject and a
@@ -907,6 +933,29 @@ fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// One number, as 7.3.3 spells it, rounded to a ten-thousandth.
+///
+/// A PDF real has no exponent form, which `f64`'s own `Display` already
+/// respects; what it does not do is stop, so `0.1 + 0.2` arrives as
+/// `0.30000000000000004` and the length of a content stream comes to depend on
+/// a floating-point accident. One ten-thousandth of a text space unit is two
+/// orders below what any rasteriser resolves.
+fn number(value: f64) -> String {
+    let rounded = (value * 1.0e4).round() / 1.0e4;
+    // `-0` is a PDF number and a pointless one, and it is a second spelling of
+    // a stream that is otherwise the same bytes.
+    let rounded = if rounded == 0.0 { 0.0 } else { rounded };
+    format!("{rounded}")
+}
+
+/// Closes an open `TJ` array, if one is open.
+fn close_array(out: &mut Vec<u8>, open: &mut bool) {
+    if *open {
+        out.extend_from_slice(b"] TJ\n");
+        *open = false;
+    }
+}
+
 /// A page being assembled.
 pub struct PageBuilder {
     width: f64,
@@ -1225,6 +1274,10 @@ pub struct DocumentBuilder {
     /// Composite fonts, written at `finish` for the same reason — with the
     /// glyphs rather than the characters deciding the subset.
     cid_fonts: Vec<CidFont>,
+    /// Glyphs drawn by [`DocumentBuilder::glyph_run`], into a content stream
+    /// this builder does not own. Merged with every page's own record at
+    /// `finish`; see that method for why the record is the document's.
+    drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
     subset_fonts: bool,
     info: Dict,
     outline: Vec<OutlineEntry>,
@@ -1251,6 +1304,7 @@ impl DocumentBuilder {
             composite: BTreeSet::new(),
             embedded: Vec::new(),
             cid_fonts: Vec::new(),
+            drawn: BTreeMap::new(),
             subset_fonts: true,
             info: Dict::new(),
             outline: Vec::new(),
@@ -1371,6 +1425,145 @@ impl DocumentBuilder {
         });
         self.resources.fonts.push((resource.to_vec(), font_ref));
         self.composite.insert(resource.to_vec());
+        true
+    }
+
+    /// Writes one composite-font text run into a content stream the caller is
+    /// assembling itself, and records its glyphs (gap 30, milestone 7).
+    ///
+    /// # Why this is not [`PageBuilder::glyphs`]
+    ///
+    /// Two differences, and each of them is the reason the other is not
+    /// enough.
+    ///
+    /// **The caller has the positions.** `glyphs` shows a string and lets the
+    /// font's advances place everything after the first glyph, which is what a
+    /// caller *writing* text wants. A caller reading a document that states
+    /// each glyph's own position has the numbers already, and letting the
+    /// advances decide would move them. So the placement is the caller's and
+    /// the **adjustments are worked out here**, from the same `hmtx` `/W` is
+    /// written from — which is the property worth having: the numbers in the
+    /// `TJ` array and the numbers in `/W` cannot disagree, because one is
+    /// computed from the other.
+    ///
+    /// **The stream is not a page's.** A caller that assembles a content
+    /// stream before the page exists — one part's markup shown on four
+    /// thousand pages is painted once — cannot reach a [`PageBuilder`] at all,
+    /// and the `/W` and `/ToUnicode` a run owes are the **document's** rather
+    /// than any one page's. So the record goes here, and merges with every
+    /// page's under the same first-non-empty-text-wins rule.
+    ///
+    /// One call rather than a write and a note, deliberately: a caller that
+    /// could write the operators without recording the glyphs would produce a
+    /// run that draws and has no `/ToUnicode`, and a run that draws and cannot
+    /// be extracted is exactly the half-answer this builder exists to make
+    /// impossible.
+    ///
+    /// Returns false, having written nothing, when `font` is not a registered
+    /// **composite** font, when there are no glyphs, or when the size, the
+    /// matrix or a placement is not a number a content stream can carry.
+    pub fn glyph_run(
+        &mut self,
+        out: &mut Vec<u8>,
+        font: &[u8],
+        size: f64,
+        matrix: [f64; 6],
+        glyphs: &[PlacedGlyph<'_>],
+    ) -> bool {
+        if !self.composite.contains(font) || glyphs.is_empty() {
+            return false;
+        }
+        if !size.is_finite() || size <= 0.0 || !matrix.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        if !glyphs.iter().all(|g| g.x.is_finite() && g.rise.is_finite()) {
+            return false;
+        }
+
+        // The advances the reader will use, which are `/W`'s and not `hmtx`'s
+        // raw numbers: `width_array` rounds to a whole thousandth, so a pen
+        // model built on the unrounded figure would drift a glyph at a time
+        // away from where the reader puts it.
+        let program = self
+            .cid_fonts
+            .iter()
+            .find(|f| f.resource == font)
+            .map(|f| f.program.clone());
+        let sfnt = program.as_deref().and_then(tinker_pdf_font::Sfnt::parse);
+        let units = sfnt
+            .as_ref()
+            .map_or(1000.0, |s| f64::from(s.units_per_em.max(1)));
+        let advance = |id: u16| -> f64 {
+            // 9.7.4.3: a CID with no `/W` entry takes `/DW`, which this writer
+            // states as 1000 — one em.
+            sfnt.as_ref()
+                .and_then(|s| s.advance(id))
+                .map_or(1.0, |a| (f64::from(a) * 1000.0 / units).round() / 1000.0)
+        };
+
+        let mapping = self.drawn.entry(font.to_vec()).or_default();
+        for placed in glyphs {
+            let text = mapping.entry(placed.glyph.id).or_default();
+            if text.is_empty() && !placed.glyph.text.is_empty() {
+                *text = placed.glyph.text.to_string();
+            }
+        }
+
+        out.extend_from_slice(b"BT /");
+        out.extend_from_slice(font);
+        out.extend_from_slice(format!(" {} Tf ", number(size)).as_bytes());
+        for value in matrix {
+            out.extend_from_slice(number(value).as_bytes());
+            out.push(b' ');
+        }
+        out.extend_from_slice(b"Tm\n");
+
+        // The pen, in unscaled text space, and the rise the text state is
+        // currently in. A run is one `TJ` array until a glyph asks to sit off
+        // the baseline: `Ts` is a text-state parameter and cannot go inside
+        // one, and it is the only spelling of a vertical offset that leaves
+        // the pen where it was.
+        let mut pen = 0.0f64;
+        let mut rise = 0.0f64;
+        let mut open = false;
+        for placed in glyphs {
+            if placed.rise != rise {
+                close_array(out, &mut open);
+                rise = placed.rise;
+                out.extend_from_slice(format!("{} Ts\n", number(rise)).as_bytes());
+            }
+            if !open {
+                out.push(b'[');
+                open = true;
+            }
+            // 9.4.3: a number in a `TJ` array moves the pen **backwards** by
+            // that many thousandths of a text space unit, scaled by the font
+            // size. So the number that puts the next glyph at `x` is the gap
+            // between where the pen is and where the caller put it, negated.
+            let adjust = (pen - placed.x) * 1000.0 / size;
+            if number(adjust) != "0" {
+                // A `>` already ends the hex string before it, so the space is
+                // not needed to parse — it is there so a content stream reads
+                // as a sequence and a diff against the source document can be
+                // followed, which is the property gap 30's geometry section
+                // asks not to be thrown away.
+                if out.last() == Some(&b'>') {
+                    out.push(b' ');
+                }
+                out.extend_from_slice(number(adjust).as_bytes());
+                out.push(b' ');
+            }
+            out.extend_from_slice(format!("<{:04X}>", placed.glyph.id).as_bytes());
+            pen = placed.x + advance(placed.glyph.id) * size;
+        }
+        close_array(out, &mut open);
+        if rise != 0.0 {
+            // `Ts` outlives `ET` — it is graphics state, not text-object state
+            // — so a run that left one set would tilt whatever a caller drew
+            // next off the baseline.
+            out.extend_from_slice(b"0 Ts\n");
+        }
+        out.extend_from_slice(b"ET\n");
         true
     }
 
@@ -2406,7 +2599,10 @@ impl DocumentBuilder {
         // Every character every page drew, per font resource. Gathered before
         // anything is written because the embedded programs are subset to it.
         let mut used: BTreeMap<Vec<u8>, BTreeSet<char>> = BTreeMap::new();
-        let mut drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>> = BTreeMap::new();
+        // The runs written into streams this builder does not own go in first,
+        // so that first-non-empty-wins is decided by the order the caller drew
+        // them in and not by whether a run happened to reach a `PageBuilder`.
+        let mut drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>> = std::mem::take(&mut self.drawn);
         for page in &pages {
             for (resource, characters) in &page.used {
                 used.entry(resource.clone())

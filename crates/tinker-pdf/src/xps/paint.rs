@@ -57,13 +57,17 @@
 use std::collections::HashMap;
 
 use tinker_pdf_cos::{
-    DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Shading, TransparencyGroup,
+    DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Glyph, PlacedGlyph, Shading,
+    TransparencyGroup,
 };
 use tinker_pdf_xml::{Event, Limits as XmlLimits, Source};
 
 use super::brush::{self, Brush, BrushError, Paint};
+use super::font::Fonts;
 use super::geometry::{self, Geometry, GeometryError};
+use super::glyphs::{self, RunError};
 use super::markup::{self, Budget, Node, Trouble};
+use super::opc::PartName;
 use super::XpsElementDefect;
 use crate::cbz::PLACEHOLDER_GREY;
 
@@ -119,11 +123,11 @@ impl Painter {
         &mut self,
         builder: &mut DocumentBuilder,
         bytes: &[u8],
-        limits: &XmlLimits,
+        around: &Surroundings<'_>,
         budget: &mut Budget,
     ) -> Result<Drawn, Trouble> {
         let source = Source::new(bytes).map_err(|_| Trouble::Markup)?;
-        let mut reader = source.reader(limits);
+        let mut reader = source.reader(around.xml);
 
         // The root has already been checked by the spine — it is a `FixedPage`
         // in one of the two dialects, or this part would never have become a
@@ -141,6 +145,7 @@ impl Painter {
         let mut state = State {
             painter: self,
             builder,
+            around,
             defects: Vec::new(),
             dictionaries: Vec::new(),
         };
@@ -153,6 +158,24 @@ impl Painter {
             defects: state.defects,
         })
     }
+}
+
+/// What a fixed page part needs from outside its own markup.
+///
+/// One value rather than three parameters, because every one of them is *the
+/// part's* — its own name, the fonts resolved against that name, and what the
+/// markup reader may spend on it — and a caller that had to thread three would
+/// eventually thread one page's name past another page's fonts.
+pub struct Surroundings<'a> {
+    /// The fixed page part's own name, which every relative reference in its
+    /// markup resolves against (OPC 8.1, and milestone 1 measured both forms:
+    /// XPS 1.0 writes `/Resources/…` and OpenXPS writes `../../../Resources/…`
+    /// for the same part).
+    pub part: &'a PartName,
+    /// The fonts [`super::font::Fonts::load`] resolved for this part.
+    pub fonts: &'a Fonts,
+    /// What the markup reader may spend on one part.
+    pub xml: &'a XmlLimits,
 }
 
 /// One open element that has content of its own.
@@ -204,6 +227,7 @@ struct Dictionary {
 struct State<'a> {
     painter: &'a mut Painter,
     builder: &'a mut DocumentBuilder,
+    around: &'a Surroundings<'a>,
     defects: Vec<XpsElementDefect>,
     dictionaries: Vec<Dictionary>,
 }
@@ -259,12 +283,8 @@ impl State<'_> {
                                 self.path(scopes, &subtree, budget)?;
                             }
                             "Glyphs" => {
-                                // 12.1's text run, which is gap 30 milestone
-                                // 7. Named, because a page whose words are
-                                // missing and whose report says nothing is
-                                // gap 17's blank page one element down.
-                                self.warn(XpsElementDefect::GlyphsNotDrawn);
-                                markup::skip_subtree(reader, budget)?;
+                                let subtree = markup::subtree(reader, &element, budget)?;
+                                self.glyphs(scopes, &subtree, budget)?;
                             }
                             _ => {
                                 self.warn(XpsElementDefect::ElementUnknown);
@@ -629,6 +649,241 @@ impl State<'_> {
                 .and_then(|b| clipped(b, clip.as_ref()))
                 .and_then(|b| through(b, transform))
             {
+                scope.boxes.push(bbox);
+            }
+        }
+        Ok(())
+    }
+
+    /// Draws one `Glyphs` run (12.1).
+    ///
+    /// # Three refusals that are not the geometry rule, and one that is not a
+    /// refusal
+    ///
+    /// 12.1 gives a run three attributes this build cannot draw, and gap 30's
+    /// row 7 asks that each be *implemented or refused by name, never
+    /// ignored*. They do not get the same answer, and which one each gets is
+    /// decided by what ignoring it would produce:
+    ///
+    /// - **`IsSideways`** rotates every glyph a quarter turn about its origin.
+    ///   Drawn upright it is a different picture in the same place, so the run
+    ///   is **not painted**.
+    /// - **An odd `BidiLevel`** is a right-to-left run, whose origin is its
+    ///   *right* edge. Drawn left to right it is the same picture somewhere
+    ///   else, which is the wrong-place failure the whole refusal asymmetry
+    ///   exists for, so the run is **not painted**. An even level is a
+    ///   left-to-right run at any embedding depth and draws normally, which is
+    ///   the implemented half.
+    /// - **`StyleSimulations`** adds a synthetic slant or weight to glyphs
+    ///   that are otherwise exactly the ones the file names, at exactly the
+    ///   widths and positions it states. That is the *paint* side of the
+    ///   asymmetry rather than the geometry side — the shape and its place are
+    ///   known and only its appearance is approximate — so the run **is
+    ///   painted** and says so. Refusing it would drop a page of text to avoid
+    ///   drawing it upright.
+    fn glyphs(
+        &mut self,
+        scopes: &mut [Scope],
+        node: &Node,
+        budget: &mut Budget,
+    ) -> Result<(), Trouble> {
+        if scopes.last().is_some_and(|scope| scope.refused) {
+            return Ok(());
+        }
+        // Copied out before the builder is touched: the font is borrowed from
+        // the surroundings and the writer is borrowed from `self`, and a
+        // reference held through `self` would make the two one borrow.
+        let around = self.around;
+
+        // The three that refuse the element, in `path`'s own order and for
+        // `path`'s own reason: a run drawn and then found to be in the wrong
+        // place has already been drawn.
+        let transform = match geometry::transform_of(node, "Glyphs") {
+            Ok(matrix) => matrix.unwrap_or(markup::IDENTITY),
+            Err(_) => {
+                self.warn(XpsElementDefect::TransformUnreadable);
+                return Ok(());
+            }
+        };
+        let opacity = match opacity_of(node) {
+            Ok(value) => value,
+            Err(()) => {
+                self.warn(XpsElementDefect::OpacityUnreadable);
+                return Ok(());
+            }
+        };
+        if node.attr("OpacityMask").is_some()
+            || node
+                .children
+                .iter()
+                .any(|child| child.local == "Glyphs.OpacityMask")
+        {
+            self.warn(XpsElementDefect::OpacityMaskUnsupported);
+            return Ok(());
+        }
+        let clip = match geometry::property(node, "Glyphs", "Clip", budget) {
+            Ok(clip) => clip,
+            Err(GeometryError::Exhausted) => return Err(Trouble::Exhausted),
+            Err(GeometryError::Syntax) => {
+                self.warn(XpsElementDefect::ClipUnreadable);
+                return Ok(());
+            }
+        };
+
+        // 12.1's three required numbers. All three or none: a run at an origin
+        // this reader invented is text in the wrong place, which is the
+        // geometry rule said about a run rather than about a shape.
+        let origin_x = node.attr("OriginX").and_then(markup::number);
+        let origin_y = node.attr("OriginY").and_then(markup::number);
+        let em = node
+            .attr("FontRenderingEmSize")
+            .and_then(markup::number)
+            .filter(|size| *size >= 0.0);
+        let (Some(origin_x), Some(origin_y), Some(em)) = (origin_x, origin_y, em) else {
+            self.warn(XpsElementDefect::GlyphsUnreadable);
+            return Ok(());
+        };
+
+        match node.attr("IsSideways").map(markup::boolean) {
+            None | Some(Some(false)) => {}
+            Some(Some(true)) => {
+                self.warn(XpsElementDefect::GlyphsSidewaysUnsupported);
+                return Ok(());
+            }
+            Some(None) => {
+                self.warn(XpsElementDefect::GlyphsUnreadable);
+                return Ok(());
+            }
+        }
+        match node
+            .attr("BidiLevel")
+            .map(|text| text.trim().parse::<u32>())
+        {
+            None => {}
+            Some(Ok(level)) if level % 2 == 0 => {}
+            Some(Ok(_)) => {
+                self.warn(XpsElementDefect::GlyphsBidiUnsupported);
+                return Ok(());
+            }
+            Some(Err(_)) => {
+                self.warn(XpsElementDefect::GlyphsUnreadable);
+                return Ok(());
+            }
+        }
+        if node
+            .attr("StyleSimulations")
+            .is_some_and(|value| value.trim() != "None")
+        {
+            self.warn(XpsElementDefect::GlyphsStyleSimulated);
+        }
+
+        // 9.1.7's font, resolved against **this part's** name.
+        let Some(uri) = node.attr("FontUri") else {
+            self.warn(XpsElementDefect::GlyphsFontUnresolved);
+            return Ok(());
+        };
+        let font = match around.fonts.get(around.part, uri) {
+            Ok(font) => font,
+            Err(defect) => {
+                self.warn(defect);
+                return Ok(());
+            }
+        };
+
+        let placed = match glyphs::run(node, font, em, budget) {
+            Ok(placed) => placed,
+            Err(RunError::Exhausted) => return Err(Trouble::Exhausted),
+            Err(RunError::Indices) => {
+                self.warn(XpsElementDefect::GlyphsIndicesUnreadable);
+                return Ok(());
+            }
+        };
+        // A run of no glyphs, and an em size of zero, are both things 12.1
+        // permits and neither is a defect: a `Glyphs` with no `UnicodeString`
+        // and no `Indices` names no glyph, and one at size zero is invisible
+        // by arithmetic rather than by omission.
+        if placed.is_empty() || em == 0.0 {
+            return Ok(());
+        }
+
+        // The box the run occupies: its own advance along the baseline, and
+        // one em above it. Not the ink — this reader does not read outlines —
+        // and it is used for exactly two decisions that are about *where* a
+        // thing is: 14.3's overlap test, and the box a
+        // `RelativeToBoundingBox` brush is stated in fractions of.
+        let (low, high) = glyphs::extent(&placed, font, em);
+        let bbox = [origin_x + low, origin_y - em, origin_x + high, origin_y];
+
+        // 12.1 makes `Fill` required, and a run without one is text nobody
+        // asked to see — `path`'s answer to a shape with neither brush, for
+        // the same reason.
+        let Some(fill) = self.brush_of(node, "Glyphs", "Fill", Some(bbox)) else {
+            return Ok(());
+        };
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"q\n");
+        if transform != markup::IDENTITY {
+            markup::op(&mut out, &transform, "cm");
+        }
+        if let Some(clip) = &clip {
+            clip.emit(&mut out, true);
+            out.extend_from_slice(clip.clip_operator().as_bytes());
+            out.push(b'\n');
+        }
+        let alpha = opacity * fill.alpha;
+        if alpha < 1.0 {
+            if let Some(name) = self.gstate(alpha, alpha) {
+                out.push(b'/');
+                out.extend_from_slice(&name);
+                out.extend_from_slice(b" gs\n");
+            }
+        }
+        match &fill.paint {
+            Paint::Solid(rgb) => markup::op(&mut out, rgb, "rg"),
+            // A gradient over text needs a shading **pattern**, which gap 30's
+            // milestone 5 records in as many words that it does not write. The
+            // placeholder grey rather than the gradient's first stop, which is
+            // gap 07's defect said the other way round — and the same answer a
+            // gradient *stroke* already gets.
+            Paint::Gradient { .. } => {
+                self.warn(XpsElementDefect::BrushUnsupported);
+                markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+            }
+        }
+
+        let run: Vec<PlacedGlyph<'_>> = placed
+            .iter()
+            .map(|glyph| PlacedGlyph {
+                glyph: Glyph {
+                    id: glyph.id,
+                    text: &glyph.text,
+                },
+                x: glyph.x,
+                rise: glyph.rise,
+            })
+            .collect();
+        // 18.1's flip lives in the page's one `cm`, so user space here has y
+        // increasing **downward** — and a text matrix that did not undo it
+        // would draw every glyph upside down at exactly the right place, which
+        // is the most plausible wrong picture in this whole milestone.
+        let matrix = [1.0, 0.0, 0.0, -1.0, origin_x, origin_y];
+        if !self
+            .builder
+            .glyph_run(&mut out, &font.resource, em, matrix, &run)
+        {
+            // The writer refused the run: the resource is not a composite font
+            // after all, or a number in it is not one a content stream can
+            // carry. Nothing was written, and the run is named rather than
+            // left as a `q Q` pair that draws nothing.
+            self.warn(XpsElementDefect::GlyphsFontUnreadable);
+            return Ok(());
+        }
+        out.extend_from_slice(b"Q\n");
+
+        if let Some(scope) = scopes.last_mut() {
+            scope.content.extend_from_slice(&out);
+            if let Some(bbox) = clipped(bbox, clip.as_ref()).and_then(|b| through(b, transform)) {
                 scope.boxes.push(bbox);
             }
         }

@@ -2721,3 +2721,426 @@ document no producer writes.
 - **The campaign has not run** (milestone 9), **no non-Windows producer**
   (milestone 1), and **`docs/STATUS.md` still says 1 872 tests** — the ledger
   sweep, the README rows and the fourteenth fingerprint are milestone 9's.
+
+## Progress — 18 August 2026, milestone 7
+
+**Text appears.** 9.1.7.3's thirty-two XORs, 9.1.7's face selector, 12.1.3's
+`Indices` grammar in full and 12.1's run drawn through milestone 5's Identity-H
+font — `crates/tinker-pdf/src/xps/font.rs` and `glyphs.rs`, a `glyphs` arm in
+`paint.rs`, and one new method in `crates/tinker-pdf-cos/src/build.rs`.
+Forty-four tests in `crates/tinker-pdf/tests/xps_glyphs.rs`, two more in
+`xps_qpdf.rs` and two in `writer_graphics.rs`. The workspace stands at
+**2 177**, up forty-eight.
+
+**The two packages milestone 6 left owing two things now owe one.**
+`wpf-image-and-text.xps` and `xpsom-image-and-text.oxps` draw their `<Glyphs>`
+run — seven distinct glyphs of Cascadia Mono out of a part that was thirty-two
+XORs away from being a font — and `Page::text()` returns `"Page one"` from both.
+What each still owes is `BrushUnsupported`, by name, at the element, and it is
+milestone 8's.
+
+### What the design got wrong, and how it was found out
+
+**1. The writer's missing half was one method short, and the method it was
+short of is the one that cannot be split in two.** Milestone 5 built
+`PageBuilder::glyphs`, and row 5's own summary says the Type0 work is done. It
+is not usable from here, for a reason that has nothing to do with fonts: that
+method writes into a **page's** content buffer and records into a **page's**
+glyph map, and the XPS painter has neither. A part's markup is painted **once**
+and shown on as many pages as the document names it — milestone 6's own cache —
+so the content is a buffer the painter owns, and the `/W` and `/ToUnicode` a run
+owes are the **document's** rather than any one page's.
+
+So `DocumentBuilder::glyph_run` arrives, and the shape it takes is the finding.
+The obvious decomposition is two calls — one that formats the operators into the
+caller's buffer and one that notes the glyphs — and that is precisely gap 30's
+recurring failure written into an API: **two independent consequences, one of
+them droppable.** A run that draws and is not recorded produces a page that
+looks right, a `/W` that is absent and a `/ToUnicode` that is empty, and
+`Page::text()` comes back blank on a document that renders perfectly. One call
+does both, and the injection matrix's *"a run's glyphs are drawn and not
+recorded"* row is what that decision is worth.
+
+Row 5's *"nothing in this milestone mentions XPS"* still holds of the new
+method: its vocabulary is 9.4.3's, its argument is a text matrix and a list of
+placements in unscaled text space, and `writer_graphics.rs` could have been
+written against it a milestone earlier.
+
+**2. The advances a run positions from have to be the *reader's*, not the
+font's.** `width_array` rounds `hmtx` to a whole thousandth of an em, because
+that is what `/W` holds. XPS states each glyph's own position, so the `TJ`
+adjustment between two glyphs is the difference between where the pen is and
+where the file put it — and *where the pen is* is whatever the reader computed
+from `/W`, not what the font's `hmtx` says. A pen model built on the unrounded
+figure drifts a glyph at a time.
+
+The real package shows it to the digit. Cascadia Mono is 1200 `hmtx` units over
+2048 per em; `/W` publishes 586 thousandths; at `FontRenderingEmSize="24"` the
+two are 14.064 and 14.0625, and the synthesised stream carries a `0.0625`
+adjustment before each of the six glyphs after the first. Those six numbers are
+the correction, and a build that computed from `hmtx` would emit none of them
+and put the last glyph nine thousandths of a point out. So `glyph_run` computes
+the adjustments from the same function `/W` is written from — one number, two
+readers, and no way for them to disagree.
+
+**3. `MAX_XPS_GLYPHS` had to exist, and the bounds table has no row for it.**
+Gap 30's table has eleven rows and **not one of them sees a glyph**. A `Glyphs`
+is *one* element and *no* path segments; the number of glyphs it draws is the
+length of two of its attributes. `1;` is two bytes and one more glyph mapping,
+so a single `Indices` in a part this build already admits — 128 MiB — is a
+hundred million mappings, at about eighty bytes of value each.
+
+The second half is where the cap goes rather than what it is. Charging it as
+each glyph is *placed* would be charging after `indices()` had already
+materialised the whole `Vec<Mapping>` — a cap checked after the allocation it
+exists to stop. The mappings are separated by `;`, so the count is one more than
+the separators and is known without allocating any of them, and that is where
+the charge is: `tinker-pdf-zip`'s own posture, where a permit is what has been
+promised. The one over-charge is a trailing empty mapping that turns out to be a
+separator, which is one glyph out of two million.
+
+**4. Row 7's *"implemented or refused by name, never ignored"* reads as one
+rule over three attributes and it is three rules, and they do not agree.** What
+decides each is what *ignoring* it would produce, which is the design section's
+own asymmetry applied one element down:
+
+- **`IsSideways`** rotates every glyph a quarter turn about its origin. Drawn
+  upright it is a different picture in the same place, so the run is **not
+  painted**.
+- **An odd `BidiLevel`** is a right-to-left run, whose origin is its *right*
+  edge. Drawn left to right it is the same picture somewhere else — the
+  wrong-place failure the whole asymmetry exists for — so the run is **not
+  painted**. An **even** level is a left-to-right run at some embedding depth
+  and is ordinary text: refusing every non-zero level would refuse text this
+  build draws exactly, so the even case is the *implemented* half and the test
+  carries both.
+- **`StyleSimulations`** adds a synthetic slant or weight to glyphs that are
+  otherwise exactly the ones the file names, at exactly the widths and positions
+  it states. That is the *paint* side of the asymmetry rather than the geometry
+  side, so the run **is painted** and says so. Refusing it would drop a page of
+  text to avoid drawing it unslanted, which is a worse answer than the one it
+  was trying to avoid.
+
+Three answers out of one sentence, and a build that gave all three the same one
+would have been defensible on any single fixture.
+
+**5. A cluster's `ClusterGlyphCount` is not "this mapping makes `n` glyphs".**
+The plan describes `(m:n)` as *"precisely a many-to-many mapping"*, which is
+true of what it means and silent about how it is written. 12.1.3 puts the counts
+on the cluster's **first** mapping, and the `n − 1` mappings *after* it are the
+rest of the cluster: each is a glyph with its own index, advance and offsets,
+and none of them consumes a code unit. The first reading of it here produced
+`n` glyphs out of one mapping and then read the following mappings as new
+clusters — which draws the **right number of glyphs from the wrong text**, and
+the only place that shows is the `/ToUnicode`.
+
+That is this milestone's own instance of the rule, and it is the fourth
+independent statement inside one attribute:
+`a_cluster_maps_m_code_units_to_n_glyphs_and_both_counts_matter` distinguishes
+three builds by glyph count alone — the right one draws three glyphs from
+`"ABA"`, one that ignores the code-unit count draws four, and one that ignores
+the glyph count draws two — and then reads the `/ToUnicode` for which text
+landed on which of them.
+
+**6. The fonts had to be resolved *before* the drawing walk, and the reason the
+answer is a second pass is memory.** `Package::read_part` hands back a borrow of
+the package and the painter is already holding one for the markup it is walking,
+so a `FontUri` looked up mid-walk needs the page's bytes copied out first. A
+fixed page part is the one part of this format whose size the file chooses, so
+that copy is up to 128 MiB, transient, per part. A second walk over the same
+part costs time proportional to it and **no** memory — and gap 30 has already
+decided that trade once, in `MAX_XPS_SEGMENTS`'s own note that *"this cap is
+also the peak-memory bound"*. `Fonts::load` is that pass, once per part, keyed
+on the part and face a URI resolves to so a page naming one font twice loads it
+once.
+
+The pass had a bug worth one line, because it is a shape rather than a slip:
+`let Ok(Event::Start(element)) = event else { break };` reads as a filter and is
+a **terminator** — the first end tag ends the walk, and the corpus test caught
+it on the first run because a real fixed page has an end tag before its
+`<Glyphs>`.
+
+**7. Milestone 1's transposed key takes three pairs, not two.** `tests/xps/README.md`
+records the trap as *"two pairs transposed"*, with the symptom that the sfnt
+version and every table tag survived and `searchRange`, `entrySelector` and
+`rangeShift` were garbage. Reproducing that symptom needs all **three** of the
+segment's two-byte groups — `B11B10`, `B21B20` and `B30B31` — left in the order
+the part name spells them, because those three groups are exactly what the key's
+bytes 6 to 11 come from and bytes 6 to 11 are exactly those three fields.
+`the_key_is_the_guid_reversed_and_not_its_b_names_transcribed` builds that key
+and asserts the whole symptom: version and table count intact, `DSIG` and `GDEF`
+intact, all three fields wrong. The finding stands; the count was one short, and
+this is the amendment.
+
+### The bound
+
+| Constant | Fixtures | A dense fixed document | Cap | In front of it | Proved to fire by |
+| --- | --- | --- | --- | --- | --- |
+| `MAX_XPS_GLYPHS` | 2 097 152 | 1 000 000 | 2 097 152 | `MAX_ZIP_ENTRY_BYTES`/2, one `Indices` | `a_run_past_the_glyph_cap_is_refused_by_name`, and `…_through_its_unicode_string_…` |
+
+It fires at its **shipped** value against a real package built past it — one
+`Indices` attribute of 2 097 153 mappings, four megabytes of markup that
+deflates to a few kilobytes — and the test also asserts that a run of exactly
+the cap **opens, warns about nothing and reaches the page**, so the cap is what
+stopped the other one rather than something else about a large attribute. An
+`Ok` on its own would not have said that: a package refused one level down
+produces a placeholder page and an `Ok` too.
+
+The yardstick is gap 30's own, read for text rather than for drawing: five
+thousand glyphs a page is a page of small type with no white space on it, and
+two hundred of those is a million against a cap at twice that. The margin is
+narrow for `MAX_XPS_SEGMENTS`'s reason — **this cap is also a peak-memory
+bound**, because a run is materialised whole before any of it is written (the
+extent is what fixes the box a canvas opacity groups over). A `GlyphMapping`
+is eighty bytes and a placed glyph forty-eight, both measured rather than
+estimated, so the whole total is about 260 MiB with its content stream on top
+— under `MAX_ZIP_INFLATED`'s 1 GiB that this build already admits.
+
+`bounds_ledger.rs` is now **seventeen** rows and `no_bound_refuses_a_dense_fixed_document`
+covers ten.
+
+`the_glyph_total_is_a_total_and_not_a_per_run_cap` is the other half: two runs
+of half the cap each are past it together, which a per-run cap set to the same
+number would not see. That is `5adf502`'s finding for the third time in this
+gap.
+
+### What qpdf said
+
+Two new tests in `tests/xps_qpdf.rs`, qpdf 12.3.2, in the house form — `RAN`/`SKIPPED`
+printed, fixtures under `CARGO_TARGET_TMPDIR`, the `oracle!` macro. This is the
+first composite font in this repository that came out of a **file**, and the
+font program in it was thirty-two XORs away from a stream qpdf would have
+refused outright.
+
+- **`--check` is clean** on `xpsom-image-and-text.oxps` saved three ways —
+  rewritten, linearised, and compressed with object streams on. The last is the
+  one that matters: the `/ToUnicode` CMap and the embedded program both become
+  `/FlateDecode` streams, and a subset that was *almost* a font would show up
+  there rather than on the page.
+- **The font, followed from the page's `/Resources` rather than guessed at**:
+  `/Subtype /Type0`, `/Encoding /Identity-H`, a `/CIDFontType2` descendant with
+  `/CIDToGIDMap /Identity` and `/DW 1000`, and `/Ordering (Identity)` — printed
+  in qpdf's own sorted order, which milestone 5 recorded having to learn.
+- **`/W [ 146 [ 586 ] 222 [ 586 ] 260 [ 586 ] 284 [ 586 ] 336 [ 586 ] 345 [ 586 ] 861 [ 586 ] ]`**
+  — seven glyphs, each at Cascadia Mono's own 1200 `hmtx` units over 2048 per
+  em, rounded to a thousandth, read by a program that has never seen the ODTTF
+  and could not have de-obfuscated it if it had.
+- **Seven `bfchar` entries out of eight characters**, because `"Page one"` has
+  two `e`s and they are one glyph. That is the whole difference between a
+  mapping keyed by *code* and one keyed by *character*, said by somebody else.
+- **The subset is 20 749 bytes.** Milestone 1 measured that eight characters of
+  text cost a **189 252**-byte font part, because WPF keeps a variable font's
+  `gvar` whole; the document this synthesises carries a ninth of that under a
+  `/BaseFont /WZKFDK+XpsFont`, because `subset` drops the tables the seven
+  glyphs do not need. The two numbers belong together and neither was known
+  before this milestone.
+- **`--filtered-stream-data` again.** `--show-object` prints `Object is stream.`
+  where the CMap would be. That is the **fifth** milestone running in this
+  programme to have had to read the tool's output before asserting on it.
+
+### What the real packages forced
+
+- **`Indices=",53"` is the whole of 12.1.3's least obvious form and the corpus
+  carries nothing else.** Both producers wrote it, unchanged, for the same page
+  — an empty `GlyphIndex`, an advance, and seven characters after it with
+  nothing said about them at all. Every other form in the grammar is exercised
+  by fixtures this repository wrote, and that is recorded rather than glossed:
+  no cluster, no offset, no exponent and no second mapping appears in any of the
+  eight real packages.
+- **The advance the file states is not the advance the font states**, and it is
+  not close. 53 hundredths of the em against Cascadia Mono's own 58.59, for the
+  first glyph only. A build that honoured the font and ignored the file would
+  put every glyph after the first 1.344 units to the right, which on this page
+  is a fifth of a character — visible, plausible, and exactly the sort of thing
+  that reads as a font problem.
+- **One relative reference and one absolute, for one font.** XPS 1.0 writes
+  `FontUri="/Resources/….ODTTF"` and OpenXPS writes
+  `"../../../Resources/….ODTTF"` for the same part of the same document, which
+  is milestone 1's finding arriving where it was said it would.
+  `both_dialects_resolve_the_same_font_and_draw_the_same_run` asserts the two
+  produce the **identical** run, which is one assertion for the resolution and
+  for everything downstream of it.
+- **A `<Default Extension="ODTTF">` in upper case against a part named
+  `….ODTTF`**, in both dialects, and a media type that is the thing that
+  actually selects the path. The corpus cannot tell those two apart — its
+  extension and its content type agree — so both lies are fixtures this
+  repository wrote, in both directions.
+
+### The injection matrix, and the seven that survived
+
+Forty-one defects, each applied alone, reverted before the next, the whole
+workspace re-run with `--no-fail-fast`. **Thirty-four were caught. Seven
+survived**, and every one of them has a test now.
+
+Milestone 6's warning was taken literally: a verdict of "caught" that rests on
+a broad fixture failing for an unrelated reason is not a verdict, so every row
+was read for **which** tests failed. Twenty-one of the thirty-four failed
+exactly **one** test — the one written for that rule and nothing else — and the
+five rows that fail seventeen or more (the key, the empty `GlyphIndex`, the
+one-byte codes) each also fail the single test written for exactly that rule.
+
+| Defect | Caught by |
+| --- | --- |
+| The GUID key is not reversed | thirty-six, including `the_real_part_de_obfuscates_to_the_font_milestone_one_measured` |
+| The key is applied once rather than twice | seventeen, including `only_the_first_thirty_two_bytes_are_obfuscated` |
+| Every byte of the part is XORed | twenty-one, including the same |
+| A part name of any length is read as a GUID | `a_part_name_that_is_not_a_guid_has_no_key` |
+| **The extension** selects the de-obfuscation | `the_content_type_selects_the_de_obfuscation_and_the_extension_does_not` |
+| The media type is compared case-sensitively | `the_obfuscated_media_type_is_compared_without_regard_to_case` |
+| A face other than the first is drawn in the first | `a_font_uri_naming_a_face_other_than_the_first_is_refused_by_name` |
+| A part with no GUID is handed over unchanged | `an_obfuscated_part_with_no_guid_in_its_name_is_named_rather_than_unreadable` |
+| **A `FontUri` resolves against the package root** | **nothing — a survivor, below** |
+| The advance and the `uOffset` are swapped | four, including `an_advance_moves_the_pen_and_an_offset_moves_only_the_glyph` |
+| A `uOffset` moves the pen as well as the glyph | the same |
+| **A `vOffset` is measured the other way up** | **nothing — a survivor, below** |
+| An advance is read as ems rather than hundredths | three, including the same |
+| An empty `GlyphIndex` is `.notdef` rather than a `cmap` lookup | eighteen, including `an_empty_glyph_index_looks_the_code_unit_up_in_the_fonts_own_cmap` |
+| `ClusterCodeUnitCount` ignored | `a_cluster_maps_m_code_units_to_n_glyphs_and_both_counts_matter` |
+| `ClusterGlyphCount` ignored | the same, and one more |
+| Every glyph of a cluster claims the cluster's text | the same |
+| The code units past the last mapping are dropped | twenty, including `a_unicode_string_alone_addresses_glyphs_through_the_fonts_own_cmap` |
+| A trailing empty mapping is always a glyph | `a_trailing_empty_mapping_is_a_separator_and_not_a_glyph` |
+| A fifth field accepted | `indices_that_are_not_the_grammar_are_named_and_not_painted` |
+| A glyph index wider than sixteen bits truncated | the same |
+| A real parsed without the finiteness check | the same |
+| **The glyph total not charged for the string's own glyphs** | **nothing — a survivor, below** |
+| The glyph total not charged for the mappings | `a_run_past_the_glyph_cap_is_refused_by_name`, and one more |
+| A cluster promising more glyphs than the list holds accepted | `cluster_counts_that_do_not_add_up_refuse_the_run` |
+| `IsSideways` ignored | `is_sideways_is_refused_by_name_rather_than_drawn_upright` |
+| An odd `BidiLevel` drawn left to right | `an_odd_bidi_level_is_refused_by_name_and_an_even_one_draws` |
+| A `StyleSimulations` ignored | `a_style_simulation_is_named_and_the_run_still_draws` |
+| The run's text matrix not flipped | three, including `a_run_is_not_drawn_upside_down` |
+| An element `Opacity` does not reach the run | `an_element_opacity_multiplies_the_brushs_own_alpha` |
+| A gradient over text drawn in its first colour | `a_gradient_over_text_is_the_placeholder_grey_and_named` |
+| **A run contributes no box to its canvas's overlap test** | **nothing — a survivor, below** |
+| **A `Glyphs` clip that will not read is not painted rather than refusing** | **nothing — a survivor, below** |
+| A run's glyphs drawn and **not recorded** | eight, including `page_text_comes_back_from_the_unicode_string_through_the_to_unicode` |
+| A `TJ` adjustment signed the other way | three, including `an_advance_moves_the_pen_and_an_offset_moves_only_the_glyph` |
+| The pen model uses `hmtx` rather than the rounded `/W` | `the_real_run_draws_the_cmaps_glyphs_and_the_files_own_first_advance` |
+| **A rise is left set when the run ends** | **nothing — a survivor, below** |
+| A rise is never written | `a_v_offset_is_a_rise_and_the_rise_is_put_back` |
+| Glyph codes written one byte each | seventeen, including `indices_names_a_glyph_the_cmap_would_never_reach` |
+| **A run accepted into a simple font** | **nothing — a survivor, below** |
+| The runs written outside a page never reach `finish` | eight, including the `/ToUnicode` and qpdf tests |
+
+### The seven survivors, and the three shapes between them
+
+**Two are a corpus that cannot tell two rules apart.**
+
+**1. A `FontUri` resolved against the package root.** The only relative
+`FontUri` in eight real packages is OpenXPS's `../../../Resources/….ODTTF` on a
+page at `/Documents/1/Pages/1.fpage` — three segments down, so it climbs
+**exactly** to the package root and both bases give the same part. So
+`both_dialects_resolve_the_same_font_and_draw_the_same_run` — the assertion
+written for precisely this rule — cannot see it, and no producer will ever
+write the file that can.
+`a_font_uri_resolves_against_the_fixed_page_part_and_not_the_package_root`
+puts the font part **beside** the page and asserts both directions: a
+page-relative reference finds a sibling, and the same reference does not reach
+a part of that name at the root.
+
+**2. A run accepted into a simple font.** Every font an XPS run reaches is
+registered through `add_cid_font`, so from gap 30's side the composite check is
+unreachable and nothing here could ever have exercised it. It is the writer's
+rule and it belongs in the writer's tests:
+`a_run_into_a_simple_font_is_refused_and_writes_nothing` is a pair — the
+composite font takes the run and the simple one is refused having written
+nothing — beside the one milestone 5 wrote for `PageBuilder::glyphs`.
+
+**Two are a `contains` that a sign or a prefix satisfies.** Both are in one
+test, and both are the same three characters.
+
+**3. A `vOffset` measured the other way up**, and **4. a rise left set when the
+run ends.** `a_v_offset_is_a_rise_and_the_rise_is_put_back` asserted
+`contains("30 Ts")` and `contains("0 Ts")` — and `"-30 Ts"` contains the first,
+and `"30 Ts"` contains the second. Two assertions, both vacuous, in the one
+test written for the rule. The fixes are not tighter string matches: the
+direction of an offset is a **picture**, so `a_v_offset_moves_the_glyph_up_the_page`
+renders and reads three pixels; and a rise outliving its run is only observable
+in a stream nobody bracketed, so `a_run_puts_its_rise_back_before_the_next_one_starts`
+writes two runs into one buffer through `DocumentBuilder::glyph_run` and renders
+the second on its own baseline. **A substring assertion over a signed number is
+not an assertion**, and it is worth writing down because it looks exactly like
+one.
+
+**Three are a rule whose second consequence had no fixture.** This is the shape
+the last six milestones each found, and it is the seventh.
+
+**5. The glyph total not charged for the string's own glyphs.**
+`MAX_XPS_GLYPHS` is charged in two independent places — once for the mappings
+before they are parsed, once for the code units the mappings did not reach —
+and the cap's own fixture states `Indices` and no `UnicodeString`, so it drove
+one of them. `a_run_past_the_glyph_cap_through_its_unicode_string_is_refused_by_name`
+drives the other, with two megabytes of `UnicodeString` and no `Indices` at all.
+
+**6. A run contributing no box to its canvas's overlap test.** 14.3's opacity
+is a transparency group only where two children cover the same place, and the
+test reads the boxes the children pushed. A `Glyphs` that pushed none leaves a
+canvas holding one box, which overlaps nothing — so a canvas of a `Path` and a
+run drew without a group and every canvas test in the suite is about two
+`Path`s. `a_run_contributes_its_box_to_its_canvass_overlap_test` is a pair, for
+milestone 6's own reason.
+
+**7. A `Glyphs` clip that will not read, not painted rather than refusing.**
+`a_transform_or_a_clip_that_will_not_read_refuses_the_run` asserted the
+warning's **name** and not its **consequence**, so a build that warned and then
+drew the run unclipped passed it. That is milestone 6's finding — one parser,
+two answers — arriving on a run: an unreadable clip that is ignored draws every
+glyph the clip existed to hide. `a_clip_that_will_not_read_leaves_the_run_undrawn`
+asserts the run is not there, and that a clip which **does** read leaves it
+there inside one.
+
+Each was re-run after its test was written and each is now caught by **exactly
+that test**. Milestone 5's rule needs no amendment for the seventh milestone
+running: *when a thing has two independent consequences, a test for one of them
+is not a test.* What this milestone adds to it is the corollary the two vacuous
+assertions found: **a test that cannot fail is not a test either**, and
+`contains` over a number that can carry a sign is the cheapest way to write
+one.
+
+### A note on the campaign itself, because it went wrong once
+
+The first run of the matrix was killed by the harness after twenty-seven
+defects, **while the twenty-eighth was applied** — and that defect's patch was
+a *deletion*, so the working tree looked ordinary and `git diff --stat` showed
+nothing unusual. Twelve subsequent verdicts were recorded against a source file
+missing six lines, and every one of them was invalid. Gap 30's own instruction
+to *"verify after the run that no injection is left applied"* is the thing that
+caught it, one milestone after it was written down.
+
+The harness now writes an `APPLIED` marker beside its log before it patches and
+removes it after it restores, so a killed campaign is distinguishable from a
+finished one by a file rather than by reading the diff — and it classifies a
+run with no `test result:` line as `COMPILE` rather than as a survivor, because
+a build that did not run measured nothing whatever its exit code said.
+
+### Still owed after milestone 7
+
+- **`ImageBrush` and `VisualBrush` are not painted** (milestone 8). That is now
+  the *only* thing either `image-and-text` package owes.
+- **`IsSideways` and an odd `BidiLevel` are refused rather than implemented.**
+  Both are drawable in principle — a quarter-turn text matrix and a run measured
+  from its right edge — and neither is built, because neither appears in any
+  package here and a layout this build cannot check is worse than a named
+  refusal.
+- **`StyleSimulations` is not simulated.** 9.3.6's render mode 2 with a stroke
+  width would fake the weight and a sheared text matrix the slant, and both are
+  numbers this engine would have to invent.
+- **`DeviceFontName` (12.1.2) is not read.** It names a device font a printer
+  may substitute; the embedded `FontUri` is still required and is what draws, so
+  ignoring it changes no picture — but it is named here rather than left for
+  somebody to find.
+- **A gradient over text is the placeholder grey**, for the gradient stroke's
+  reason: it needs a shading pattern and milestone 5 writes none.
+- **The run's box is its advance and one em above the baseline**, not its ink.
+  It decides two things — 14.3's overlap test and a `RelativeToBoundingBox`
+  brush — and both are questions about where a thing is rather than which pixels
+  it covers, but a descender or an overhanging glyph is outside it.
+- **The `/ToUnicode` is `bfchar` throughout** and **`/PaintType 2` is not
+  written**, both inherited from milestone 5.
+- **Text extraction order is the order the runs are written in.** There is no
+  `DocumentStructure`, which is a non-goal of the whole plan, and no attempt to
+  re-order runs geometrically beyond what the extractor already does for a PDF.
+- **The campaign has not run** (milestone 9), **no non-Windows producer**
+  (milestone 1), and **`docs/STATUS.md` still says 1 872 tests** — the ledger
+  sweep, the README rows and the fourteenth fingerprint are milestone 9's.

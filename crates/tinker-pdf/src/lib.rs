@@ -47,8 +47,8 @@ pub use tinker_pdf_cos::{
     ScriptSummary, Trapped, Warning, WarningKind,
 };
 pub use tinker_pdf_cos::{
-    BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, Shading, StateMask,
-    TilingPattern, TilingType, TransparencyGroup,
+    BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PlacedGlyph,
+    Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///

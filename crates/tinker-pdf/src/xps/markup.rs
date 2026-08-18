@@ -43,6 +43,7 @@ use tinker_pdf_xml::{Element, Error as XmlError, Event, Reader};
 pub struct Budget {
     elements: usize,
     segments: usize,
+    glyphs: usize,
 }
 
 /// A total ran out. The package is refused rather than truncated: a document
@@ -53,10 +54,14 @@ pub struct Budget {
 pub struct Exhausted;
 
 impl Budget {
-    /// A budget with the two totals set.
+    /// A budget with the three totals set.
     #[must_use]
-    pub fn new(elements: usize, segments: usize) -> Budget {
-        Budget { elements, segments }
+    pub fn new(elements: usize, segments: usize, glyphs: usize) -> Budget {
+        Budget {
+            elements,
+            segments,
+            glyphs,
+        }
     }
 
     /// Charges one markup element — one materialised into a subtree, or one
@@ -78,6 +83,27 @@ impl Budget {
         Ok(())
     }
 
+    /// Charges `count` glyphs placed by a `Glyphs` run.
+    ///
+    /// A third total, and it is one for [`Budget::segments`]'s reason rather
+    /// than by analogy: one `Indices` attribute in a part this build already
+    /// admits holds millions of glyph mappings, and neither the element count
+    /// nor the segment count sees a single one of them.
+    ///
+    /// **Charged before the mappings are materialised, not after**, which is
+    /// `tinker-pdf-zip`'s `Budget` posture — a permit is what has been
+    /// promised rather than what happened to arrive. One `GlyphMapping` is
+    /// eighty bytes of value out of one byte of markup, so a cap checked after
+    /// the parse would be a cap checked after the allocation it exists to
+    /// stop.
+    ///
+    /// # Errors
+    /// [`Exhausted`] when the document's glyph total is spent.
+    pub fn glyphs(&mut self, count: usize) -> Result<(), Exhausted> {
+        self.glyphs = self.glyphs.checked_sub(count).ok_or(Exhausted)?;
+        Ok(())
+    }
+
     /// How many elements are left, for the tests that prove the total is a
     /// total and not a per-page cap.
     #[must_use]
@@ -89,6 +115,12 @@ impl Budget {
     #[must_use]
     pub fn segments_left(&self) -> usize {
         self.segments
+    }
+
+    /// How many glyphs are left.
+    #[must_use]
+    pub fn glyphs_left(&self) -> usize {
+        self.glyphs
     }
 }
 

@@ -80,7 +80,7 @@ pub use appearance::synthesize as synthesize_appearance;
 pub use build::{
     jpeg_shape, BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
     Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry, PageBuilder,
-    Shading, SoftMask, StateMask, TilingPattern, TilingType, TransparencyGroup,
+    PlacedGlyph, Shading, SoftMask, StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
 pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
