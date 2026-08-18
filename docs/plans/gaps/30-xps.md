@@ -1863,3 +1863,248 @@ and nothing reached `MAX_PAGE_UNITS`.
   two `.xps` seeds the plan asks for, in `fuzz/corpus/render_page/` — the
   whole-pipeline target is where `Document::open` routes a `PK\x03\x04`, so it is
   the only target the OPC layer is reachable from.
+
+## Progress — 18 August 2026, milestone 4
+
+**Row 4's remainder has landed**, in the shape milestone 3 narrowed it to: pages
+in **markup order**, `/CropBox` and `/BleedBox` from `ContentBox` and
+`BleedBox`, the payload parts routed by **media type** rather than by their root
+element, and **qpdf** on the produced file. `crates/tinker-pdf/tests/xps_spine.rs`
+and `crates/tinker-pdf/tests/xps_qpdf.rs` are new, the three XPS test binaries
+now share `crates/tinker-pdf/tests/xps_support/`, and `PageBuilder` grew the two
+box setters the mapping needs. The workspace stands at **2 027**, up
+twenty-four.
+
+### What the design got wrong, and how it was found out
+
+**1. The `/CropBox` mapping is right and what it costs is written down
+nowhere.** [Geometry](#geometry-196-inch-top-left-y-down) says `ContentBox` and
+`BleedBox` *"map onto PDF's `/CropBox` and `/BleedBox` and are written when
+present — one line each"*. The mapping is taken exactly as written. What the
+plan does not say, and what a host meets on the first fixed page that carries a
+`ContentBox`, is that **`Page::size()` is the crop box**:
+`cos_pages::Page::display_size` returns the crop box's dimensions, which is what
+every PDF viewer lays out. So an 816 x 1056 fixed page stating
+`ContentBox="96,48,192,96"` reports 144 x 72 pt and renders at 144 x 72 rather
+than at 612 x 792. Nothing is lost — `media_box()` still carries the whole page
+— but the number a host asks for changes, and "one line each" reads as though it
+could not. `a_content_box_and_a_bleed_box_reach_the_pdf_scaled_once_and_flipped_once`
+asserts the consequence rather than leaving it to be discovered. No package in
+milestone 1's corpus states either box, so nothing already measured moves.
+
+**2. "One line each" is three conversions stacked, and each is the identity on
+the only box a hand-written fixture would have had.** A page box carries a unit
+(1/96 inch to 1/72), an origin (top-left with y down to bottom-left with y up)
+and a *form* (10.3's `x,y,width,height` against PDF's `x0 y0 x1 y1`) — and on a
+box at the page's own origin, `0,0,w,h`, the flip and the form are both the
+identity. `page_box`'s doc comment enumerates what each mistake produces for the
+fixture's own box: no flip gives `[72, 36, 216, 108]`, no scale
+`[96, 912, 288, 1008]`, the scale twice `[54, 513, 162, 567]`, and reading the
+four numbers as a PDF rectangle `[72, 720, 144, 756]`. Four wrong answers, four
+distinct rectangles, and the fixture's box is deliberately neither square nor at
+the origin so that every one of them is visible.
+
+**3. The find: a payload part was parsed once per *reference*, and a reference
+is not a part.**
+
+`tinker_pdf_xml::Source::new` decodes the part and then walks **every character
+of it** against XML 1.0's `Char` production before it yields a single event, so
+it costs O(part) whatever the caller stops at — and milestone 3's reader called
+it once per `PageContent` and once per `DocumentReference`. Nothing makes those
+counts the part count, and milestone 3's own `MAX_XPS_PAGES` note says so in as
+many words: *"four thousand `PageContent` elements may name **one** part between
+them"*. Two consequences, and the second is worse:
+
+- 4 096 pages naming one 128 MiB part — `MAX_ZIP_ENTRY_BYTES`, which this build
+  already admits — is **512 GiB of scanning**, out of a package that deflates to
+  a few hundred kilobytes.
+- A `DocumentReference` whose document holds **no** `PageContent` pushes no plan
+  and charges nothing against the page cap, so `MAX_XML_TOKENS` was the only
+  thing in front of the sequence loop: a million references, each of them a full
+  scan of whatever it names.
+
+That is `5adf502`'s *"depth is not work once the recursion branches"* in a third
+format, and this plan's own sentence about it: **a per-item cap is not a total
+once the file chooses how many items there are.**
+
+Two fixes, and **neither is a new constant**:
+
+- **`xps::Payload` caches one parse per part.** Cached, the markup this
+  synthesis parses totals the **distinct** parts it read, and the archive reader
+  already bounds that from both sides — a deflated part against
+  `MAX_ZIP_INFLATED` (1 GiB) and a stored one against the length of the file
+  itself. A constant over it could never be the thing that stopped anything,
+  which is gap 18a milestone 8's failure reached from the other side. A work cap
+  would also have to refuse something conforming: a fixed document that shows
+  one page part four thousand times is legal XPS and costs one part.
+- **The sequence's reference count is bounded at `MAX_XPS_PAGES`**, because a
+  sequence naming more documents than this build will synthesise pages cannot
+  produce a document it would finish. A second thing an existing constant
+  bounds, rather than a fourteenth row in `bounds_ledger.rs`.
+
+Proved by a count and never by a clock, which is ruling 1's rule about how a
+bound is shown to work. `ArchiveReport::parsed_parts()` is published for
+`synthesised_bytes()`'s stated reason — a cache with no observable is a cache a
+test cannot tell from its own absence — and `Archive::inflated()` cannot stand
+in for it, because the **bytes** were already cached a layer down and it is the
+**parse** that repeated. A thousand references to one part is three parses;
+three references to three distinct parts is five; a comic archive is zero, which
+is a real answer rather than a placeholder.
+
+**4. `Package::relationships` re-parsed, which milestone 3 recorded as a
+decision.** Closed, cached against the entry it came from, and `Package::parses()`
+is the observable for the same reason — a test written against `inflated()` would
+assert `n == n` and pass with the cache deleted, which is gap 29's milestone-6
+survivor exactly.
+
+### This milestone adds no bound, and here is the argument
+
+Three new counts arrived and none of them wanted a constant of its own. The
+markup total is bounded by the parts already charged to `MAX_ZIP_INFLATED` and
+by the file's own length, once the cache exists. The sequence's reference count
+is bounded by `MAX_XPS_PAGES`, which was already there, already publishes its
+three numbers and already fires. `page_box` allocates nothing and refuses at the
+fifth number, so a `ContentBox` of a million fields costs one linear pass over
+an attribute the XML reader had already produced and bounded. `bounds_ledger.rs`
+stays at **thirteen** rows, and `MAX_XPS_PAGES` gains a second firing site
+rather than a twin.
+
+### The decision milestone 3 left open: the refusal stands, and it is narrow
+
+Milestone 3 flagged that *"an item that is not a part name refuses the whole
+package"* is stricter than ruling 2 would be on its own, and asked row 4 to
+revisit it *"if a real file turns one up"*. **No real file turns one up, so it
+stands** — on the same footing as the `.piece` refusal, tied to evidence rather
+than to taste.
+
+What is new is the measurement that makes it a decision rather than an
+inheritance. `the_invalid_part_name_refusal_is_narrower_than_it_looks` shows
+that the names a general-purpose archiver leaves behind when a package is
+repacked are **all valid part names** under 6.2.2.2 — `Thumbs.db`,
+`Documents/1/.DS_Store`, `__MACOSX/._FixedDocumentSequence.fdseq` and a
+percent-encoded space are admitted and the package opens — and it pins the four
+shapes that are refused: a **raw** space, a backslash, a percent-encoded
+unreserved character, and a segment ending in a dot. The raw space is the one
+that would change this decision, because it is the only one a third-party
+producer could plausibly write; nothing in the corpus carries one, and neither
+Microsoft serialiser can, since both name every resource part with a GUID.
+
+### What qpdf said
+
+Four tests in `tests/xps_qpdf.rs`, in gap 29's house form: `RAN`/`SKIPPED`
+printed so a skipped oracle cannot read as a pass, fixtures under
+`CARGO_TARGET_TMPDIR`, the `oracle!` macro. qpdf 12.3.2, and its output format
+was read off the tool before anything was asserted against it — gap 29's
+milestone 5 had to rebuild these assertions against `--show-pages`'s real shape
+after assuming one, so the page objects here are parsed out of qpdf's own dump
+rather than predicted from the writer's numbering.
+
+- **`--check` is clean**, on three real packages' synthesised documents —
+  `wpf-three-pages.xps`, `wpf-image-and-text.xps` and `xpsom-gradients.oxps`, so
+  both dialects — and on the same document saved back through
+  `Document::editor().save()` in both write modes. Linearised, qpdf also says
+  *"File is linearized"*, which is gap 20's job speaking about gap 30's output.
+- **`--show-pages` puts the pages in markup order.** 612 x 792, 300 x 450,
+  150 x 225 for a document whose parts are named `p10`, `p1`, `p2`. Natural
+  order would have said 450, 225, 792; lexicographic 450, 792, 225; the
+  archive's own storage order 225, 792, 450. Four orders, all distinct, which is
+  the whole reason the fixture exists.
+- **`--with-images` finds no image XObject on any page**, which is this gap's
+  headline defect said from outside: the same file used to open as a one-page
+  comic whose page *was* a resource.
+- **The two boxes are in the file as written** — `/CropBox [ 72 684 216 756 ]`
+  and `/BleedBox [ 36 18 576 774 ]` — and a page that stated neither carries **no
+  key at all** rather than one equal to the media box. That is the half this
+  engine cannot check about itself: its own page reader normalises a rectangle
+  and clips a crop box to the media box on the way in, so a box written back to
+  front, or written where the file stated none, reads back correct.
+
+**And qpdf exposed a CI hole that is gap 29's rather than this milestone's.**
+That plan's row 5 says its criterion holds *"through the CI job
+[20](20-linearization-validation.md) already built"*, and that job runs
+`-p tinker-pdf-cos --test qpdf_oracle` and nothing else — so `tests/cbz_qpdf.rs`
+has only ever run under `cargo test --workspace`, where a skipped oracle exits 0
+and reads exactly like a pass. That is the precise failure gap 20 built the grep
+for, surviving beside the grep. `qpdf-linearization` gains a second step running
+**both** container oracles with the same SKIPPED-checked-first shape.
+
+### The injection matrix, and the one that survived
+
+Twenty-four defects, each applied alone, reverted before the next, the whole
+workspace re-run with `--no-fail-fast`. Twenty-three were caught. **One
+survived**, and it is the same lesson this gap has now learned three times.
+
+| Defect | Caught by |
+| --- | --- |
+| Page order taken from the part names rather than the markup | five, including `pages_come_in_markup_order_and_in_no_order_over_their_names` and qpdf |
+| Markup order reversed | eight, including both qpdf tests and `the_real_multi_page_package_has_one_page_per_page_content` |
+| A `PageContent` that does not resolve dropped rather than placeheld | `an_unresolved_page_keeps_its_place_in_markup_order`, and one more |
+| A `PageContent` naming the wrong media type dropped | three, including `a_fixed_page_is_routed_by_media_type_and_not_by_its_name` |
+| `/CropBox` written from `BleedBox` rather than `ContentBox` | three, including qpdf |
+| A page box left in XPS units, so the scale is never applied | `a_content_box_and_a_bleed_box_reach_the_pdf_scaled_once_and_flipped_once`, and qpdf |
+| A page box scaled twice | three, including qpdf |
+| A page box scaled and not flipped | the same two |
+| A page box read as PDF's `x0 y0 x1 y1` rather than 10.3's `x,y,w,h` | the same two |
+| A box that will not read silently dropped rather than named | `a_page_box_that_will_not_read_is_named_rather_than_defaulted` |
+| A page that stated no box given one equal to the media box | three, including qpdf |
+| The boxes never reaching the page | three, including qpdf |
+| 14.11.2's reduction to the media box dropped | `a_bleed_box_that_runs_off_the_page_is_reduced_to_the_page` |
+| A fixed page routed by extension rather than by 7.2.3.5 | three, including milestone 3's own `a_part_resolves_however_a_reference_spells_its_case` |
+| A fixed page's media type not checked at all | three |
+| A fixed document's media type not checked at all | `a_document_reference_naming_something_that_is_not_a_document_is_named` |
+| The second warning a page owes dropped | `a_page_box_that_will_not_read_is_named_rather_than_defaulted` |
+| The placeholder painted white rather than the neutral grey | `every_page_is_the_neutral_grey_rather_than_white` |
+| The placeholder not painted at all, so a page is blank | the same |
+| `Package::relationships` re-parsing on every ask | `asking_a_part_for_its_relationships_twice_parses_once` |
+| `/CropBox` and `/BleedBox` never written by the builder | four, including `a_page_carries_the_boxes_it_was_given_and_no_others` and qpdf |
+| **The payload's `children` cache never used** | **nothing — the survivor, below** |
+| The payload's page-geometry cache never used | `a_part_named_by_a_thousand_references_is_parsed_once` |
+| The sequence's reference count not bounded | `a_sequence_naming_more_documents_than_the_page_cap_is_refused_by_name` |
+
+**The survivor is one test standing for two caches.** `Payload` holds two of
+them — a part's children and a fixed page's geometry — and they are two pieces
+of code. `a_part_named_by_a_thousand_references_is_parsed_once` was written for
+both and could only see one: its fixture names one `FixedDocument` **once**, so
+`Payload::children` was called once per distinct part whether it cached or not,
+and the parse count did not move when the cache was deleted. The geometry half
+was covered, because a thousand `PageContent` elements name one page part.
+
+That is gap 29's milestone-5 lesson arriving for the third time in this gap —
+after `PartName`'s case fold in milestone 3 and the two duplicate-attribute
+rules in milestone 2 — and the shape is identical every time: **a positive
+assertion cannot catch a weakened check, and one test cannot stand for two rules
+that share a sentence.** The closing leg names one document three times from one
+sequence, which 12.3.1 permits and which is three pages out of three parses; the
+injection was re-run afterwards and is caught.
+
+### Still owed after milestone 4
+
+- **Nothing on a page is drawn**, inherited. Milestones 6 to 8 are the markup
+  and milestone 5 is the writer work they need.
+- **10.3's containment rules are not enforced.** This reader parses both boxes,
+  converts them, and reduces them to the page per PDF 14.11.2; it does not
+  refuse a `ContentBox` that lies outside the page's `BleedBox` or check either
+  against the other. No fixture exists in either direction, and refusing on a
+  rule nothing here has seen a producer break would be a claim about files
+  rather than about this reader.
+- **No real package states either box**, so every assertion about the box
+  arithmetic is against a fixture this repository wrote. That is milestone 1's
+  investment failing to reach one corner, and it is worth naming rather than
+  letting the corpus's presence imply coverage it does not have.
+- **`Package::index_of` is a linear scan** over every item, so resolving *n*
+  references costs *n* x parts. With the two counts now bounded at 4 096 and
+  8 192 that is at most about 67 million `PartName` comparisons for a package
+  built to provoke it, and nothing in the corpus comes near it. Recorded rather
+  than fixed: a name index changes the package layer's shape, and this milestone
+  had no measurement asking for one.
+- **`Page::size()` on a page that states a `ContentBox` is the content box.**
+  Argued above. It follows from this plan's own mapping and from PDF's own rule,
+  and if it is the wrong trade it is the plan's to reverse — one line, in
+  `plan_page`.
+- **`ArchiveReport::parsed_parts` is new public surface**, and milestone 9's
+  ledger sweep is where it should reach whatever enumerates the facade's API.
+- **The campaign has not run** (milestone 9), and **no non-Windows producer**
+  (milestone 1); both inherited.
+- **`docs/STATUS.md` still says 1 872 tests**, and the leaf-count sweep, the
+  README rows and the fourteenth fingerprint remain milestone 9's, per this
+  plan's own ledger section.

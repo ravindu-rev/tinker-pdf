@@ -1,4 +1,5 @@
-//! An XPS package opens as the fixed document it is (gap 30, milestone 3).
+//! An XPS package opens as the fixed document it is (gap 30, milestones 3
+//! and 4).
 //!
 //! # The defect this module exists to remove
 //!
@@ -80,8 +81,40 @@
 //! [`XpsPageDefect::NotDrawn`], so a host that asks what it got is told. Paths,
 //! brushes, glyphs and images are gap 30's milestones 6 to 8, and the writer
 //! work they need is milestone 5.
+//!
+//! # Three things milestone 4 decided, each of which has a wrong answer that
+//! looks right
+//!
+//! **Pages come in markup order.** 12.3.1 gives a `FixedDocument`'s pages in
+//! the order its `PageContent` elements appear and defines no other order at
+//! all, so the archive's own storage order and any sort over the part names are
+//! three more answers that are wrong on any document whose producer did not
+//! happen to agree with them. Gap 29's comic path sorts by name because a CBZ
+//! has nothing else to sort by; this one never sorts. No package in milestone
+//! 1's corpus can tell the difference — all eight name their pages `1`, `2`,
+//! `3` and reference them in that order — which is why `tests/xps_spine.rs`
+//! builds one that can.
+//!
+//! **The payload is resolved by media type.** A `DocumentReference` and a
+//! `PageContent` each name a part, and what makes that part a fixed document or
+//! a fixed page is OPC 7.2.3.5's answer over `[Content_Types].xml`, never the
+//! extension its name happens to end in — which is what Table D-4 is for. A
+//! reference to the wrong kind of part is a page that keeps its number and
+//! carries [`XpsPageDefect::MediaTypeMismatch`], because a `PageContent`
+//! pointing at a PNG is a broken document and not a page that failed to draw.
+//! Milestone 3 resolved these by root element alone and recorded it as owed.
+//!
+//! **10.3's two rectangles survive.** `ContentBox` becomes `/CropBox` and
+//! `BleedBox` becomes `/BleedBox`, each scaled by [`UNITS_TO_POINTS`] exactly
+//! once and flipped from XPS's top-left origin exactly once. They are the only
+//! statement a fixed page makes about where its content is, and a synthesised
+//! document that dropped them would lose it for good. `page_box`'s own comment
+//! carries the arithmetic and what each of the plausible mistakes produces
+//! instead.
 
 pub mod opc;
+
+use std::collections::HashMap;
 
 use tinker_pdf_cos::DocumentBuilder;
 use tinker_pdf_xml::{Event, Limits as XmlLimits, Source};
@@ -361,6 +394,26 @@ pub enum XpsPageDefect {
     /// be, so the page took the book's own size instead of a size the file
     /// stated.
     SizeUnusable,
+    /// The reference named a part the package holds and **its media type is
+    /// not the one Table D-4 fixes for it** (gap 30, milestone 4).
+    ///
+    /// A `PageContent` naming an image part, or a `DocumentReference` naming a
+    /// fixed page, is a broken document rather than a page that happens not to
+    /// draw — and it is not read as a fixed page on the strength of what its
+    /// name ends in, which is the whole reason 7.2.3.5 is an ordered algorithm
+    /// over the content-types item rather than a table of extensions. The page
+    /// is kept and keeps its number, for [`XpsPageDefect::SourceUnresolved`]'s
+    /// reason.
+    MediaTypeMismatch,
+    /// A `ContentBox` or `BleedBox` was stated and would not read as four
+    /// usable numbers, so the page carries no `/CropBox` or `/BleedBox` (gap
+    /// 30, milestone 4).
+    ///
+    /// Named rather than defaulted, because 7.7.3.3 makes an absent `/CropBox`
+    /// mean "the whole media box" — which is a plausible answer, and a
+    /// plausible answer silently substituted for a statement the file made is
+    /// this gap's own failure mode. The page is otherwise unaffected.
+    PageBoxUnusable,
 }
 
 impl core::fmt::Display for XpsPageDefect {
@@ -371,6 +424,10 @@ impl core::fmt::Display for XpsPageDefect {
             XpsPageDefect::DocumentUnresolved => "a `DocumentReference` naming no readable part",
             XpsPageDefect::Unreadable => "the fixed page part is not a readable `FixedPage`",
             XpsPageDefect::SizeUnusable => "the fixed page states no usable size",
+            XpsPageDefect::MediaTypeMismatch => {
+                "a reference naming a part whose media type is not the payload's"
+            }
+            XpsPageDefect::PageBoxUnusable => "a `ContentBox` or `BleedBox` that will not read",
         })
     }
 }
@@ -403,7 +460,7 @@ pub enum Routing<'a> {
 #[must_use]
 pub fn route<'a>(archive: Archive<'a>, limits: &Limits) -> Routing<'a> {
     let mut package = Package::open(archive, limits.zip_name_len, limits.xml);
-    match recognise(&mut package, limits) {
+    match recognise(&mut package) {
         Recognition::NotXps => Routing::NotXps(package.into_archive()),
         Recognition::Broken(why) => Routing::Refused(why),
         Recognition::Xps { sequence, dialect } => {
@@ -430,7 +487,7 @@ enum Recognition {
 }
 
 /// ECMA-388 E.3, step by step.
-fn recognise(package: &mut Package<'_>, limits: &Limits) -> Recognition {
+fn recognise(package: &mut Package<'_>) -> Recognition {
     // Step 1 is the caller's: the bytes began with a local file header and
     // opened as a ZIP.
     //
@@ -439,17 +496,17 @@ fn recognise(package: &mut Package<'_>, limits: &Limits) -> Recognition {
     if package.item_index(opc::CONTENT_TYPES_ITEM).is_none() {
         return Recognition::NotXps;
     }
-    let Some(rels) = package.item_index(opc::PACKAGE_RELATIONSHIPS_ITEM) else {
+    if package
+        .item_index(opc::PACKAGE_RELATIONSHIPS_ITEM)
+        .is_none()
+    {
         return Recognition::NotXps;
-    };
+    }
 
     // Step 3. From here the archive carries OPC's own two parts, so a failure
     // is a broken package rather than a comic — see this module's header for
     // why that refinement of E.3 is taken.
-    let relationships = match package
-        .read(rels)
-        .and_then(|bytes| opc::parse_relationships(bytes, &limits.xml))
-    {
+    let relationships = match package.relationships(None) {
         Ok(relationships) => relationships,
         Err(_) => return Recognition::Broken(ArchiveRefusal::UnreadablePackage),
     };
@@ -498,7 +555,134 @@ struct Plan {
     /// report.
     name: String,
     size: Option<(f64, f64)>,
+    /// `/CropBox` and `/BleedBox`, in PDF points, from 10.3's two attributes.
+    boxes: PageBoxes,
     defect: XpsPageDefect,
+    /// A second warning this page owes beside `defect`. A page has one reason
+    /// for being a placeholder and may separately have said something about its
+    /// own boxes that would not read, and collapsing the two would lose
+    /// whichever came second.
+    extra: Option<XpsPageDefect>,
+}
+
+/// The rectangles ECMA-388 10.3 lets a fixed page state, in **PDF points**.
+///
+/// 10.3.1's `ContentBox` becomes `/CropBox` and 10.3.2's `BleedBox` becomes
+/// `/BleedBox`. Neither is written when the page did not state it: 7.7.3.3
+/// makes an absent `/CropBox` mean the whole media box, so writing one anyway
+/// would turn a page that said nothing into a page that said everything.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PageBoxes {
+    crop: Option<[f64; 4]>,
+    bleed: Option<[f64; 4]>,
+}
+
+/// What a fixed page's root element said about its own geometry.
+#[derive(Clone, Copy)]
+struct PageGeometry {
+    /// `None` when `Width` or `Height` is absent or unusable.
+    size: Option<(f64, f64)>,
+    boxes: PageBoxes,
+    /// A box attribute was there and would not read.
+    box_unusable: bool,
+}
+
+/// The payload markup this synthesis has already read, parsed **once per
+/// part** (gap 30, milestone 4).
+///
+/// # The multiplier this removes, which is ruling 1's own sentence
+///
+/// Nothing makes a reference and a part the same thing. A `FixedDocument` may
+/// name one `PageContent` `Source` four thousand times, and a
+/// `FixedDocumentSequence` may name one `FixedDocument` a million times — 12.3
+/// forbids neither, and milestone 3's own `MAX_XPS_PAGES` note is about exactly
+/// that asymmetry: *"four thousand `PageContent` elements may name **one** part
+/// between them"*.
+///
+/// Reading is cheap — [`opc::Package`] caches the bytes — and **parsing was
+/// not**. `tinker_pdf_xml::Source::new` decodes the part and then walks every
+/// character of it against XML 1.0's `Char` production before a single event is
+/// produced, so it is O(part) whatever the caller stops at. Milestone 3's
+/// reader called it once per *reference*, which multiplies a part this build
+/// already admits (128 MiB, [`zip_limits::MAX_ZIP_ENTRY_BYTES`]) by a count the
+/// file chooses: 4 096 pages naming one part is 512 GiB of scanning from a
+/// package that deflates to a few hundred kilobytes, and a sequence naming a
+/// million documents that hold no page at all spends no page budget while it
+/// does it.
+///
+/// That is `5adf502`'s finding in a third format — *"depth is not work once the
+/// recursion branches"* — and the plan's own version of it: **a per-item cap is
+/// not a total once the file chooses how many items there are.**
+///
+/// # Why the answer is a cache and not a cap
+///
+/// A work cap here would have to refuse something a conforming document may do:
+/// a fixed document that shows one page part four thousand times is legal XPS
+/// and costs one part. Cached, the total markup this synthesis parses is the
+/// sum of the **distinct** parts it read, which the archive reader has already
+/// bounded from both sides — a deflated part against
+/// [`zip_limits::MAX_ZIP_INFLATED`] and a stored one against the length of the
+/// file itself. So a constant over it could never be the thing that stopped
+/// anything, which is gap 18a milestone 8's failure, and gap 30 gains no new
+/// row in `bounds_ledger.rs` for it. What the sequence *does* gain is a count:
+/// see [`synthesise`], where a sequence naming more documents than the page cap
+/// allows is refused before any of them is resolved.
+#[derive(Default)]
+struct Payload {
+    /// `(part, root element)` to that part's children's `Source` attributes.
+    children: HashMap<(PartName, &'static str), Option<Vec<Option<String>>>>,
+    /// One fixed page part's geometry.
+    pages: HashMap<PartName, Option<PageGeometry>>,
+    /// How many parts' markup has been parsed.
+    ///
+    /// Published through [`ArchiveReport::parsed_parts`] for the reason
+    /// `synthesised_bytes` is: a cache with no observable is a cache a test
+    /// cannot tell from its own absence, and `Archive::inflated` cannot stand
+    /// in for it because the bytes were already cached a layer down.
+    parses: usize,
+}
+
+impl Payload {
+    /// Every `child` element's `Source` in `part`, in markup order, read once.
+    fn children(
+        &mut self,
+        package: &mut Package<'_>,
+        part: &PartName,
+        root: &'static str,
+        child: &'static str,
+        limits: &Limits,
+    ) -> Option<Vec<Option<String>>> {
+        let key = (part.clone(), root);
+        if let Some(found) = self.children.get(&key) {
+            return found.clone();
+        }
+        let parsed = match package.read_part(part) {
+            Ok(bytes) => child_sources(bytes, root, child, limits),
+            Err(_) => None,
+        };
+        self.parses = self.parses.saturating_add(1);
+        self.children.insert(key, parsed.clone());
+        parsed
+    }
+
+    /// One fixed page part's geometry, read once.
+    fn geometry(
+        &mut self,
+        package: &mut Package<'_>,
+        part: &PartName,
+        limits: &Limits,
+    ) -> Option<PageGeometry> {
+        if let Some(found) = self.pages.get(part) {
+            return *found;
+        }
+        let parsed = match package.read_part(part) {
+            Ok(bytes) => fixed_page_geometry(bytes, limits),
+            Err(_) => None,
+        };
+        self.parses = self.parses.saturating_add(1);
+        self.pages.insert(part.clone(), parsed);
+        parsed
+    }
 }
 
 /// Reads the fixed payload and builds a PDF whose pages are its fixed pages.
@@ -523,38 +707,71 @@ fn synthesise(
             PackageProblem::TooManyParts => ArchiveRefusal::TooLarge,
         })?;
 
-    let documents = match package.read_part(sequence) {
-        Ok(bytes) => child_sources(bytes, "FixedDocumentSequence", "DocumentReference", limits),
-        Err(_) => None,
-    };
+    let mut payload = Payload::default();
+    let documents = payload.children(
+        package,
+        sequence,
+        "FixedDocumentSequence",
+        "DocumentReference",
+        limits,
+    );
     // "A `FixedDocumentSequence` naming no documents at all" is a package-level
     // refusal in gap 30's design, and so is one that will not read: there is no
     // page to degrade *to*.
     let Some(documents) = documents.filter(|sources| !sources.is_empty()) else {
         return Err(ArchiveRefusal::NoFixedPages);
     };
+    // A reference is not a page, so the page cap does not bound this loop on its
+    // own: a `DocumentReference` naming a document that holds no `PageContent`
+    // pushes no plan and charges nothing, and `MAX_XML_TOKENS` lets one sequence
+    // hold a million of them. Each costs a name resolution and a lookup over
+    // every item in the package, so the count is bounded here rather than left
+    // to whatever the pages happen to cost — and it is bounded at the page cap
+    // because a sequence naming more documents than this build will synthesise
+    // pages cannot produce a document it would finish.
+    if documents.len() > limits.max_pages {
+        return Err(ArchiveRefusal::TooLarge);
+    }
 
     let mut plans: Vec<Plan> = Vec::new();
     for source in documents {
         let document = source
             .as_deref()
             .and_then(|reference| sequence.resolve(reference));
-        let pages = match &document {
-            Some(name) => match package.read_part(name) {
-                Ok(bytes) => child_sources(bytes, "FixedDocument", "PageContent", limits),
-                Err(_) => None,
-            },
-            None => None,
+        // Table D-4 fixes the media type of a `FixedDocument` part, and
+        // 7.2.3.5 is how a part's media type is found — never its extension,
+        // which nothing in this reader consults for the payload at all. A
+        // reference to something that is not a fixed document is a document
+        // that did not resolve, said more precisely.
+        let typed = match &document {
+            Some(name) => {
+                package.has(name)
+                    && matches!(package.media_type(name), Ok(Some(m)) if m == FIXED_DOCUMENT_MEDIA_TYPE)
+            }
+            None => false,
+        };
+        let pages = match (&document, typed) {
+            (Some(name), true) => {
+                payload.children(package, name, "FixedDocument", "PageContent", limits)
+            }
+            _ => None,
         };
         let Some(pages) = pages else {
             // A document that vanished takes an unknown number of pages with
             // it, so it leaves one visible page behind rather than nothing.
+            let named = document.as_ref().is_some_and(|name| package.has(name));
             push_plan(
                 &mut plans,
                 Plan {
                     name: reference_name(&document, source.as_deref()),
                     size: None,
-                    defect: XpsPageDefect::DocumentUnresolved,
+                    boxes: PageBoxes::default(),
+                    defect: if named && !typed {
+                        XpsPageDefect::MediaTypeMismatch
+                    } else {
+                        XpsPageDefect::DocumentUnresolved
+                    },
+                    extra: None,
                 },
                 limits,
             )?;
@@ -566,7 +783,7 @@ fn synthesise(
         for page in pages {
             push_plan(
                 &mut plans,
-                plan_page(package, &base, page.as_deref(), limits),
+                plan_page(package, &mut payload, &base, page.as_deref(), limits),
                 limits,
             )?;
         }
@@ -599,13 +816,30 @@ fn synthesise(
 
     for (number, plan) in plans.iter().enumerate() {
         let (width, height) = plan.size.unwrap_or(fallback);
+        let boxes = plan.boxes;
         builder.add_page(width, height, |page| {
             page.fill_rect(0.0, 0.0, width, height, PLACEHOLDER_GREY);
+            // 10.3.1 and 10.3.2 are the only statement a fixed page makes about
+            // where its content is, and a synthesised document that dropped
+            // them would lose it for good.
+            if let Some([x0, y0, x1, y1]) = boxes.crop {
+                page.set_crop_box(x0, y0, x1, y1);
+            }
+            if let Some([x0, y0, x1, y1]) = boxes.bleed {
+                page.set_bleed_box(x0, y0, x1, y1);
+            }
         });
+        let number = u32::try_from(number).unwrap_or(u32::MAX);
         warnings.push(ArchiveWarning::XpsPage {
-            page: u32::try_from(number).unwrap_or(u32::MAX),
+            page: number,
             defect: plan.defect,
         });
+        if let Some(defect) = plan.extra {
+            warnings.push(ArchiveWarning::XpsPage {
+                page: number,
+                defect,
+            });
+        }
         pages.push(PageOrigin {
             name: plan.name.clone(),
             defect: None,
@@ -628,7 +862,13 @@ fn synthesise(
     let synthesised_bytes = pdf.len();
     Ok((
         pdf,
-        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, Some(dialect)),
+        ArchiveReport::synthesised(
+            warnings,
+            pages,
+            synthesised_bytes,
+            Some(dialect),
+            payload.parses,
+        ),
     ))
 }
 
@@ -644,47 +884,57 @@ fn push_plan(plans: &mut Vec<Plan>, plan: Plan, limits: &Limits) -> Result<(), A
 /// What one `PageContent` becomes.
 fn plan_page(
     package: &mut Package<'_>,
+    payload: &mut Payload,
     base: &PartName,
     source: Option<&str>,
     limits: &Limits,
 ) -> Plan {
+    let placeholder = |name: String, defect: XpsPageDefect| Plan {
+        name,
+        size: None,
+        boxes: PageBoxes::default(),
+        defect,
+        extra: None,
+    };
+
     let Some(page) = source.and_then(|reference| base.resolve(reference)) else {
-        return Plan {
-            name: source.unwrap_or("").to_string(),
-            size: None,
-            defect: XpsPageDefect::SourceUnresolved,
-        };
+        return placeholder(
+            source.unwrap_or("").to_string(),
+            XpsPageDefect::SourceUnresolved,
+        );
     };
     let name = page.as_str().to_string();
     if !package.has(&page) {
-        return Plan {
-            name,
-            size: None,
-            defect: XpsPageDefect::SourceUnresolved,
-        };
+        return placeholder(name, XpsPageDefect::SourceUnresolved);
     }
-    let stated = match package.read_part(&page) {
-        Ok(bytes) => fixed_page_size(bytes, limits),
-        Err(_) => None,
+    // 7.2.3.5 over Table D-4's fixed page type. A `PageContent` naming a part
+    // the package holds and whose media type is something else — an image, a
+    // print ticket, a fixed *document* — is not read as a page on the strength
+    // of what its name ends in. The part is not even read: a reference to the
+    // wrong thing is answered before its bytes are.
+    if !matches!(package.media_type(&page), Ok(Some(m)) if m == FIXED_PAGE_MEDIA_TYPE) {
+        return placeholder(name, XpsPageDefect::MediaTypeMismatch);
+    }
+    let Some(geometry) = payload.geometry(package, &page, limits) else {
+        return placeholder(name, XpsPageDefect::Unreadable);
     };
-    match stated {
-        Some(Some(size)) => Plan {
+    let box_unusable = geometry
+        .box_unusable
+        .then_some(XpsPageDefect::PageBoxUnusable);
+    match geometry.size {
+        Some(size) => Plan {
             name,
             size: Some(size),
+            boxes: geometry.boxes,
             defect: XpsPageDefect::NotDrawn,
+            extra: box_unusable,
         },
         // A `FixedPage` whose size is missing or unusable is still a page, at
-        // the book's own size.
-        Some(None) => Plan {
-            name,
-            size: None,
-            defect: XpsPageDefect::SizeUnusable,
-        },
-        None => Plan {
-            name,
-            size: None,
-            defect: XpsPageDefect::Unreadable,
-        },
+        // the book's own size — and it carries no boxes, because 10.3's two
+        // rectangles are stated in the coordinate space of a page this one did
+        // not state. `SizeUnusable` already says that; a second warning about
+        // the consequence would be the same sentence twice.
+        None => placeholder(name, XpsPageDefect::SizeUnusable),
     }
 }
 
@@ -736,13 +986,11 @@ fn child_sources(
     seen_root.then_some(out)
 }
 
-/// A fixed page's size in **PDF points**, from the `Width` and `Height` its
-/// root element states.
+/// A fixed page's geometry in **PDF points**, from its root element alone.
 ///
-/// `None` refuses the part; `Some(None)` is a `FixedPage` that stated no usable
-/// size. The read stops at the root element, so a page of forty thousand path
-/// segments costs the same here as an empty one.
-fn fixed_page_size(bytes: &[u8], limits: &Limits) -> Option<Option<(f64, f64)>> {
+/// `None` refuses the part. The read stops at the root element, so a page of
+/// forty thousand path segments costs the same here as an empty one.
+fn fixed_page_geometry(bytes: &[u8], limits: &Limits) -> Option<PageGeometry> {
     let source = Source::new(bytes).ok()?;
     for event in source.reader(&limits.xml) {
         let Event::Start(element) = event.ok()? else {
@@ -753,11 +1001,37 @@ fn fixed_page_size(bytes: &[u8], limits: &Limits) -> Option<Option<(f64, f64)>> 
         }
         let width = element.attribute(None, "Width").and_then(page_units);
         let height = element.attribute(None, "Height").and_then(page_units);
-        return Some(match (width, height) {
+        let size = match (width, height) {
             (Some(width), Some(height)) => {
                 Some((width * UNITS_TO_POINTS, height * UNITS_TO_POINTS))
             }
             _ => None,
+        };
+
+        let mut boxes = PageBoxes::default();
+        let mut box_unusable = false;
+        if let Some(page) = size {
+            // 10.3.1 to `/CropBox`, 10.3.2 to `/BleedBox`. Read only when the
+            // page stated a size, because both are rectangles *in that page's*
+            // coordinate space and flipping one against a size the file never
+            // gave would be arithmetic over a number this reader invented.
+            for (attribute, slot) in [
+                ("ContentBox", &mut boxes.crop),
+                ("BleedBox", &mut boxes.bleed),
+            ] {
+                let Some(text) = element.attribute(None, attribute) else {
+                    continue;
+                };
+                match page_box(text, page) {
+                    Some(rect) => *slot = Some(rect),
+                    None => box_unusable = true,
+                }
+            }
+        }
+        return Some(PageGeometry {
+            size,
+            boxes,
+            box_unusable,
         });
     }
     None
@@ -767,4 +1041,57 @@ fn fixed_page_size(bytes: &[u8], limits: &Limits) -> Option<Option<(f64, f64)>> 
 fn page_units(text: &str) -> Option<f64> {
     let value = text.trim().parse::<f64>().ok()?;
     (value.is_finite() && value > 0.0 && value <= MAX_PAGE_UNITS).then_some(value)
+}
+
+/// ECMA-388 10.3's `x,y,width,height`, as a PDF rectangle in points.
+///
+/// Three conversions in one place, and each is a defect somebody has shipped:
+///
+/// - **the unit**, 1/96 inch to 1/72, applied exactly once — the same
+///   [`UNITS_TO_POINTS`] the page size uses, so a box and its page cannot
+///   disagree about the scale;
+/// - **the origin**, top-left with y down to bottom-left with y up, which is a
+///   subtraction from the page height rather than a negation — a box that was
+///   scaled and not flipped lands in the mirror-image half of the page and is
+///   the right size, which is exactly the shape that reads as the producer's
+///   fault;
+/// - **the form**, `x,y,width,height` rather than PDF's `x0 y0 x1 y1`, which
+///   are the same four numbers in a package whose box starts at the origin and
+///   nowhere else.
+///
+/// The result is intersected with the page, because 14.11.2 says a consumer
+/// reduces these boxes to their intersection with the media box anyway — so
+/// writing the intersection is writing what any reader would compute, and a
+/// bleed box that lies wholly outside the page is a statement with no PDF
+/// spelling rather than one worth half-writing.
+fn page_box(text: &str, page: (f64, f64)) -> Option<[f64; 4]> {
+    let mut numbers = [0f64; 4];
+    let mut seen = 0usize;
+    // Commas with optional whitespace are 10.3's own form, and whitespace alone
+    // is what the object model writes elsewhere in the same corpus. Accepting
+    // both is parsing rather than guessing: neither spelling is ambiguous.
+    for field in text.split([',', ' ', '\t', '\r', '\n']) {
+        if field.is_empty() {
+            continue;
+        }
+        let value = field.parse::<f64>().ok()?;
+        if !value.is_finite() || value.abs() > MAX_PAGE_UNITS {
+            return None;
+        }
+        *numbers.get_mut(seen)? = value;
+        seen += 1;
+    }
+    if seen != 4 {
+        return None;
+    }
+    let [x, y, width, height] = numbers;
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let (page_width, page_height) = page;
+    let x0 = (x * UNITS_TO_POINTS).max(0.0);
+    let x1 = ((x + width) * UNITS_TO_POINTS).min(page_width);
+    let y0 = (page_height - (y + height) * UNITS_TO_POINTS).max(0.0);
+    let y1 = (page_height - y * UNITS_TO_POINTS).min(page_height);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
 }

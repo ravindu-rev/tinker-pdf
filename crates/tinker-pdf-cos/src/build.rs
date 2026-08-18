@@ -294,9 +294,37 @@ pub struct PageBuilder {
     images: Vec<(Vec<u8>, ObjRef)>,
     /// Characters drawn with each font resource, for subsetting.
     used: BTreeMap<Vec<u8>, BTreeSet<char>>,
+    /// `/CropBox`, when the caller stated one. See [`PageBuilder::set_crop_box`].
+    crop_box: Option<[f64; 4]>,
+    /// `/BleedBox`, likewise.
+    bleed_box: Option<[f64; 4]>,
 }
 
 impl PageBuilder {
+    /// Sets `/CropBox`, as `[x0 y0 x1 y1]` in points from the bottom-left.
+    ///
+    /// 7.7.3.3: the region a viewer displays, defaulting to `/MediaBox` when
+    /// absent — which is why this is an option rather than a value every page
+    /// carries. A caller that has nothing to say about the visible region
+    /// should say nothing, because a `/CropBox` equal to the media box is a
+    /// statement where its absence is not.
+    ///
+    /// Nothing is normalised or clipped here. 14.11.2 makes a consumer reduce
+    /// these boxes to their intersection with the media box, and this crate's
+    /// own page reader already does it, so a writer that clipped as well would
+    /// be the same rule in two places — and the caller's numbers would no
+    /// longer be the numbers in the file, which is the property that makes a
+    /// diff against the source document readable.
+    pub fn set_crop_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        self.crop_box = Some([x0, y0, x1, y1]);
+    }
+
+    /// Sets `/BleedBox` (14.11.2), in the same coordinates as
+    /// [`PageBuilder::set_crop_box`].
+    pub fn set_bleed_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        self.bleed_box = Some([x0, y0, x1, y1]);
+    }
+
     /// Writes text at a position, in points from the bottom-left.
     ///
     /// `font` names a font registered with [`DocumentBuilder::add_base_font`].
@@ -986,6 +1014,8 @@ impl DocumentBuilder {
             fonts: self.fonts.clone(),
             images: self.images.clone(),
             used: BTreeMap::new(),
+            crop_box: None,
+            bleed_box: None,
         };
         draw(&mut page);
         self.pages.push(page);
@@ -1066,6 +1096,22 @@ impl DocumentBuilder {
                     Object::Real(page.height),
                 ]),
             );
+            // Written only when the caller stated one, and in 7.7.3.3's own
+            // order after the media box, so a page's boxes read down the
+            // dictionary the way the specification lists them.
+            for (key, rect) in [
+                (&b"CropBox"[..], page.crop_box),
+                (&b"BleedBox"[..], page.bleed_box),
+            ] {
+                let Some(rect) = rect else {
+                    continue;
+                };
+                let name = self.names.intern(key);
+                dict.insert(
+                    name,
+                    Object::Array(rect.iter().map(|v| Object::Real(*v)).collect()),
+                );
+            }
             dict.insert(Name::RESOURCES, Object::Dict(resources));
             dict.insert(Name::CONTENTS, Object::Ref(content_ref));
             self.objects.insert(reference.num, Object::Dict(dict));
@@ -1234,6 +1280,71 @@ mod tests {
         let text = String::from_utf8_lossy(&content);
         assert!(text.contains("BT"), "text operators: {text}");
         assert!(text.contains("(Hello)"), "the string: {text}");
+    }
+
+    /// `/CropBox` and `/BleedBox` are written when stated and **absent when
+    /// not**, which is the half a writer gets wrong by defaulting them.
+    ///
+    /// 7.7.3.3 makes an absent `/CropBox` mean "the media box", so writing one
+    /// equal to the media box on every page is not the same document: it turns
+    /// a page that said nothing about its visible region into one that said the
+    /// whole of it. Gap 30's fixed pages need exactly this distinction — only a
+    /// `FixedPage` carrying a `ContentBox` gets a crop box — so both directions
+    /// are asserted here rather than only the interesting one.
+    #[test]
+    fn a_page_carries_the_boxes_it_was_given_and_no_others() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(612.0, 792.0, |page| {
+            page.set_crop_box(72.0, 684.0, 216.0, 756.0);
+            page.set_bleed_box(0.0, 0.0, 612.0, 792.0);
+        });
+        builder.add_page(612.0, 792.0, |page| {
+            page.fill_rect(0.0, 0.0, 612.0, 792.0, 0.5);
+        });
+        let bytes = builder.finish();
+
+        let doc = CosDocument::open(bytes).expect("it opens");
+        let pages = crate::pages::collect(&doc);
+        assert_eq!(pages.len(), 2);
+
+        let stated = pages.first().expect("the first page");
+        assert_eq!(
+            (
+                stated.crop_box.x0,
+                stated.crop_box.y0,
+                stated.crop_box.x1,
+                stated.crop_box.y1
+            ),
+            (72.0, 684.0, 216.0, 756.0)
+        );
+        assert_eq!(
+            stated.media_box.width(),
+            612.0,
+            "the media box is untouched"
+        );
+
+        // 7.7.3.3: an absent `/CropBox` reads back as the media box, so the
+        // page object is what has to be inspected rather than the resolved
+        // rectangle -- the two are indistinguishable through `Page`.
+        let bare = pages.get(1).expect("the second page");
+        let object = doc.get(bare.reference).expect("the page object");
+        let dict = object.as_dict().expect("a page dictionary");
+        for key in [&b"CropBox"[..], b"BleedBox"] {
+            assert!(
+                dict.get(doc.intern(key)).is_none(),
+                "a page given no boxes carries none: /{}",
+                String::from_utf8_lossy(key)
+            );
+        }
+
+        let bleed: Vec<f64> = doc
+            .get(stated.reference)
+            .expect("the page object")
+            .as_dict()
+            .and_then(|d| d.get_array(doc.intern(b"BleedBox")))
+            .map(|values| values.iter().filter_map(Object::as_number).collect())
+            .unwrap_or_default();
+        assert_eq!(bleed, vec![0.0, 0.0, 612.0, 792.0]);
     }
 
     #[test]

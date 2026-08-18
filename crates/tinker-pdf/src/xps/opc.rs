@@ -692,6 +692,32 @@ pub struct Package<'a> {
     /// `[Content_Types].xml`, parsed at most once. The outer `Option` is "not
     /// tried yet" and the inner is "tried and failed".
     types: Option<Result<ContentTypes, PackageDefect>>,
+    /// One slot per archive entry, for the entries that are `.rels` parts
+    /// (gap 30, milestone 4).
+    ///
+    /// Milestone 3 cached the *bytes* and not the markup, so asking a part for
+    /// its relationships twice parsed twice — recorded there as a decision
+    /// rather than left as an oversight, and closed here because the payload
+    /// walk asks the same part more than once as soon as anything but the spine
+    /// is read.
+    ///
+    /// **No cap of its own, and the argument is the one `limits.rs` asks
+    /// for.** What is retained is a re-shaping of bytes the archive has already
+    /// charged against `MAX_ZIP_INFLATED`: the shortest `<Relationship>` an OPC
+    /// package can hold is about forty bytes and it becomes three `String`s and
+    /// a `bool`, so the cache is a small constant times an already-bounded
+    /// number. A constant over it could only ever fire after that one did,
+    /// which is gap 18a milestone 8's failure written the other way round.
+    relationships: Vec<Option<Result<Vec<Relationship>, PackageDefect>>>,
+    /// How many times a part's markup has been parsed.
+    ///
+    /// The cache above has no other observable: the bytes are already cached,
+    /// so `Archive::inflated` does not move whether the markup is parsed once
+    /// or a thousand times, and a test written against it would assert
+    /// `n == n` and pass with the cache deleted. That is gap 29's
+    /// milestone-6 survivor exactly — a loop nothing checked was there — so the
+    /// count is published for the same reason `Archive::inflated` is.
+    parses: usize,
     xml: XmlLimits,
 }
 
@@ -725,11 +751,14 @@ impl<'a> Package<'a> {
             .map(|entry| classify(&entry.name, entry.is_directory(), truncated, zip_name_len))
             .collect();
         let cache = vec![None; items.len()];
+        let relationships = vec![None; items.len()];
         Package {
             archive,
             items,
             cache,
             types: None,
+            relationships,
+            parses: 0,
             xml,
         }
     }
@@ -845,6 +874,16 @@ impl<'a> Package<'a> {
         }
     }
 
+    /// How many times this package has parsed a part's markup.
+    ///
+    /// Public because a cache nobody can measure is a cache nobody can check —
+    /// `Archive::inflated`'s argument, one layer up. See the field's own
+    /// comment for why the archive's budget cannot stand in for it.
+    #[must_use]
+    pub fn parses(&self) -> usize {
+        self.parses
+    }
+
     /// Parses `[Content_Types].xml` if it has not been parsed yet.
     fn parse_content_types(&mut self) -> Result<(), PackageDefect> {
         if let Some(done) = &self.types {
@@ -858,17 +897,22 @@ impl<'a> Package<'a> {
                 Err(why) => Err(why),
             },
         };
+        self.parses = self.parses.saturating_add(1);
         let answer = parsed.as_ref().map(|_| ()).map_err(|why| *why);
         self.types = Some(parsed);
         answer
     }
 
-    /// The relationships of a part, or of the package itself.
+    /// The relationships of a part, or of the package itself, parsed **once**.
     ///
     /// `None` for the package relationships part `/_rels/.rels`; `Some(part)`
     /// for that part's derived `_rels` name. An **absent** relationships part
     /// is `Ok(vec![])` rather than an error: 6.5.2 does not require one, and
     /// most parts of a real package have none.
+    ///
+    /// The answer is cached against the entry it came from, so a second ask
+    /// costs a clone rather than a parse — see the `relationships` field and
+    /// [`Package::parses`], which is how a test can tell the two apart at all.
     ///
     /// # Errors
     /// [`PackageDefect`] when the part is there and will not read.
@@ -885,9 +929,22 @@ impl<'a> Package<'a> {
         let Some(index) = self.index_of(&name) else {
             return Ok(Vec::new());
         };
-        let xml = self.xml;
-        let bytes = self.read(index)?;
-        parse_relationships(bytes, &xml)
+        if !matches!(self.relationships.get(index), Some(Some(_))) {
+            let xml = self.xml;
+            let parsed = match self.read(index) {
+                Ok(bytes) => parse_relationships(bytes, &xml),
+                Err(why) => Err(why),
+            };
+            self.parses = self.parses.saturating_add(1);
+            if let Some(slot) = self.relationships.get_mut(index) {
+                *slot = Some(parsed);
+            }
+        }
+        match self.relationships.get(index) {
+            Some(Some(Ok(found))) => Ok(found.clone()),
+            Some(Some(Err(why))) => Err(*why),
+            _ => Err(PackageDefect::Missing),
+        }
     }
 
     /// The strict half of OPC, run **after** the format has been decided.

@@ -27,150 +27,19 @@
 //! through an 8 193-part package and `MAX_XPS_PAGES` through a fixed document
 //! naming 4 097 pages.
 
-mod cbz_support;
+mod xps_support;
 
-use cbz_support::{distinct_pixels, rgb_png, zip, Damage, ZipFile};
 use tinker_pdf::cbz;
 use tinker_pdf::xps::{
     self,
-    opc::{self, Item, PartName},
+    opc::{Item, PartName},
 };
-use tinker_pdf::{ArchiveRefusal, ArchiveWarning, Dialect, Document, OpenError, XpsPageDefect};
+use tinker_pdf::{ArchiveRefusal, ArchiveWarning, Dialect, XpsPageDefect};
 use tinker_pdf_zip::{limits as zip_limits, Limits as ZipLimits, Warning as ZipWarning};
-
-// ---- building a package -------------------------------------------------
-
-const CONTENT_TYPES: &str = concat!(
-    r#"<?xml version="1.0" encoding="utf-8"?>"#,
-    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
-    r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />"#,
-    r#"<Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml" />"#,
-    r#"<Default Extension="fdoc" ContentType="application/vnd.ms-package.xps-fixeddocument+xml" />"#,
-    r#"<Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml" />"#,
-    r#"<Default Extension="png" ContentType="image/png" />"#,
-    r#"</Types>"#
-);
-
-const XPS_NS: &str = "http://schemas.microsoft.com/xps/2005/06";
-
-fn package_rels(target: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Type="{XPS_NS}/fixedrepresentation" Target="{target}" Id="R0" /></Relationships>"#
-    )
-}
-
-fn sequence(documents: &[&str]) -> String {
-    let refs: String = documents
-        .iter()
-        .map(|source| format!(r#"<DocumentReference Source="{source}" />"#))
-        .collect();
-    format!(r#"<FixedDocumentSequence xmlns="{XPS_NS}">{refs}</FixedDocumentSequence>"#)
-}
-
-fn document(pages: &[&str]) -> String {
-    let refs: String = pages
-        .iter()
-        .map(|source| format!(r#"<PageContent Source="{source}" />"#))
-        .collect();
-    format!(r#"<FixedDocument xmlns="{XPS_NS}">{refs}</FixedDocument>"#)
-}
-
-fn fixed_page(width: &str, height: &str) -> String {
-    format!(r#"<FixedPage xmlns="{XPS_NS}" Width="{width}" Height="{height}" />"#)
-}
-
-/// One item of a package to build.
-struct Part {
-    name: String,
-    data: Vec<u8>,
-}
-
-fn part(name: &str, data: &str) -> Part {
-    Part {
-        name: name.to_string(),
-        data: data.as_bytes().to_vec(),
-    }
-}
-
-/// Builds an archive out of parts, deflated, with no damage.
-///
-/// Deflated rather than stored, and it matters for one test: `Archive::inflated`
-/// is the only public measure of the archive's budget and a **stored** entry
-/// spends none of it, so a read-once cache checked over a stored part asserts
-/// `0 == 0` and passes with the cache deleted. Milestone 1 measured both — WPF
-/// stores `_rels/.rels` and the XPS object model deflates it — so either would
-/// have been a defensible fixture and only one of them can see the defect.
-fn archive(parts: Vec<Part>) -> Vec<u8> {
-    let files: Vec<ZipFile> = parts
-        .iter()
-        .map(|p| {
-            // A directory record holds no bytes, and deflating none of them is
-            // not what an archiver writes.
-            if p.data.is_empty() {
-                ZipFile::stored(&p.name, &p.data)
-            } else {
-                ZipFile::deflated(&p.name, &p.data)
-            }
-        })
-        .collect();
-    zip(&files, Damage::None)
-}
-
-/// The smallest package that is an XPS: one document, one page, 816 x 1056.
-///
-/// `[Content_Types].xml` goes **last**, as it does in all eight of milestone
-/// 1's real packages — OPC 7.3.7 leaves its position unconstrained and a reader
-/// that assumed it was first would be wrong on the first real file.
-fn one_page_package() -> Vec<Part> {
-    vec![
-        part("_rels/.rels", &package_rels("/FixedDocumentSequence.fdseq")),
-        part(
-            "FixedDocumentSequence.fdseq",
-            &sequence(&["Documents/1/FixedDocument.fdoc"]),
-        ),
-        part(
-            "Documents/1/FixedDocument.fdoc",
-            &document(&["Pages/1.fpage"]),
-        ),
-        part("Documents/1/Pages/1.fpage", &fixed_page("816", "1056")),
-        part("[Content_Types].xml", CONTENT_TYPES),
-    ]
-}
-
-/// Replaces one part's bytes in place, keeping its position.
-fn with(mut parts: Vec<Part>, name: &str, data: &str) -> Vec<Part> {
-    for slot in &mut parts {
-        if slot.name == name {
-            slot.data = data.as_bytes().to_vec();
-            return parts;
-        }
-    }
-    parts.push(part(name, data));
-    parts
-}
-
-fn open(bytes: &[u8]) -> Result<Document, OpenError> {
-    Document::open(bytes.to_vec())
-}
-
-fn refusal(bytes: &[u8]) -> Option<ArchiveRefusal> {
-    match Document::open(bytes.to_vec()) {
-        Err(OpenError::UnsupportedArchive(why)) => Some(why),
-        _ => None,
-    }
-}
-
-/// A package read through the OPC layer directly, for the tests that are about
-/// the layer rather than about the facade.
-fn opened(bytes: &[u8]) -> opc::Package<'_> {
-    let archive =
-        cbz::open_archive(bytes, &ZipLimits::DEFAULT).expect("the fixture is a readable ZIP");
-    opc::Package::open(
-        archive,
-        zip_limits::MAX_ZIP_NAME_LEN,
-        tinker_pdf_xml::Limits::DEFAULT,
-    )
-}
+use xps_support::{
+    archive, distinct_pixels, document, fixed_page, one_page_package, open, opened, package_rels,
+    part, refusal, rgb_png, sequence, with, zip, Damage, Part, ZipFile, CONTENT_TYPES, XPS_NS,
+};
 
 // ---- the happy path, so the near misses mean something ------------------
 

@@ -437,6 +437,7 @@ pub struct ArchiveReport {
     pages: Vec<PageOrigin>,
     synthesised_bytes: usize,
     dialect: Option<crate::xps::Dialect>,
+    parsed_parts: usize,
 }
 
 impl ArchiveReport {
@@ -447,12 +448,14 @@ impl ArchiveReport {
         pages: Vec<PageOrigin>,
         synthesised_bytes: usize,
         dialect: Option<crate::xps::Dialect>,
+        parsed_parts: usize,
     ) -> ArchiveReport {
         ArchiveReport {
             warnings,
             pages,
             synthesised_bytes,
             dialect,
+            parsed_parts,
         }
     }
 
@@ -488,6 +491,26 @@ impl ArchiveReport {
     #[must_use]
     pub fn synthesised_bytes(&self) -> usize {
         self.synthesised_bytes
+    }
+
+    /// How many parts' markup was parsed while the document was synthesised
+    /// (gap 30, milestone 4).
+    ///
+    /// **Zero for a comic archive**, and that is a real answer rather than a
+    /// placeholder: the comic path reads magic bytes and image headers and
+    /// parses no markup at all — `ComicInfo.xml` is deliberately nobody's scope.
+    ///
+    /// For an XPS this is the count of **distinct parts**, not of references to
+    /// them, and it is published for the same reason
+    /// [`ArchiveReport::synthesised_bytes`] is. `crate::xps::Payload` caches a
+    /// parse per part because `Source::new` walks the whole part before it
+    /// yields an event, so a fixed document naming one page four thousand times
+    /// would otherwise scan it four thousand times — and nothing else about the
+    /// document would change, so a test with no counter to read could not tell
+    /// the cache from its own absence.
+    #[must_use]
+    pub fn parsed_parts(&self) -> usize {
+        self.parsed_parts
     }
 }
 
@@ -881,9 +904,11 @@ pub fn pages_from_archive(
 
     let pdf = builder.finish();
     let synthesised_bytes = pdf.len();
+    // No markup: the comic path reads magic bytes and image headers, and
+    // `ComicInfo.xml` is gap 29's named non-goal rather than an omission.
     Ok((
         pdf,
-        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None),
+        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None, 0),
     ))
 }
 
