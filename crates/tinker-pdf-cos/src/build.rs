@@ -247,6 +247,516 @@ fn filter_describes(filter: Option<ImageFilter>, components: u32, bits: u8, widt
     }
 }
 
+// ---- the graphics state, groups, gradients and patterns -----------------
+//
+// Everything from here to `Embedded` is the writer catching up with what this
+// engine has read since gaps 09, 10 and 11: tiling patterns, shadings and
+// transparency groups each have a reader in this repository and had no writer
+// at all. A caller wanting an opacity, a gradient, a tiling brush or a glyph
+// addressed by index had exactly one door — `PageBuilder::raw`, which writes
+// operators and cannot name a resource — so none of it was reachable.
+
+/// 11.3.5's blend modes, as `/BM` spells them.
+///
+/// All sixteen: Table 136's twelve separable modes and Table 137's four
+/// non-separable ones. The set is closed and PDF 2.0 adds none, so this is
+/// exhaustive on purpose and a caller may match it without a wildcard arm.
+/// `/Compatible` is deliberately absent: 11.3.5 makes it a synonym for
+/// `/Normal` kept for 1.3 files, and offering two spellings of one mode would
+/// be a choice with no consequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BlendMode {
+    /// `/Normal`.
+    Normal,
+    /// `/Multiply`.
+    Multiply,
+    /// `/Screen`.
+    Screen,
+    /// `/Overlay`.
+    Overlay,
+    /// `/Darken`.
+    Darken,
+    /// `/Lighten`.
+    Lighten,
+    /// `/ColorDodge`.
+    ColorDodge,
+    /// `/ColorBurn`.
+    ColorBurn,
+    /// `/HardLight`.
+    HardLight,
+    /// `/SoftLight`.
+    SoftLight,
+    /// `/Difference`.
+    Difference,
+    /// `/Exclusion`.
+    Exclusion,
+    /// `/Hue`.
+    Hue,
+    /// `/Saturation`.
+    Saturation,
+    /// `/Color`.
+    Color,
+    /// `/Luminosity`.
+    Luminosity,
+}
+
+impl BlendMode {
+    const fn pdf_name(self) -> &'static [u8] {
+        match self {
+            BlendMode::Normal => b"Normal",
+            BlendMode::Multiply => b"Multiply",
+            BlendMode::Screen => b"Screen",
+            BlendMode::Overlay => b"Overlay",
+            BlendMode::Darken => b"Darken",
+            BlendMode::Lighten => b"Lighten",
+            BlendMode::ColorDodge => b"ColorDodge",
+            BlendMode::ColorBurn => b"ColorBurn",
+            BlendMode::HardLight => b"HardLight",
+            BlendMode::SoftLight => b"SoftLight",
+            BlendMode::Difference => b"Difference",
+            BlendMode::Exclusion => b"Exclusion",
+            BlendMode::Hue => b"Hue",
+            BlendMode::Saturation => b"Saturation",
+            BlendMode::Color => b"Color",
+            BlendMode::Luminosity => b"Luminosity",
+        }
+    }
+}
+
+/// What a graphics-state soft mask derives its alpha from (11.6.5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MaskKind {
+    /// `/S /Alpha`: the alpha the group's own painting produced.
+    Alpha,
+    /// `/S /Luminosity`: the luminosity of the colour the group painted,
+    /// composited first against the backdrop `/BC` names.
+    Luminosity,
+}
+
+impl MaskKind {
+    const fn pdf_name(self) -> &'static [u8] {
+        match self {
+            MaskKind::Alpha => b"Alpha",
+            MaskKind::Luminosity => b"Luminosity",
+        }
+    }
+}
+
+/// An `/SMask` entry in a graphics state (11.6.5.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StateMask<'a> {
+    /// `/SMask /None`.
+    ///
+    /// Not the same as leaving `/SMask` out. An absent entry inherits whatever
+    /// mask is already in force; `/None` turns it off, which is the only way
+    /// to stop one inside a `q`/`Q` pair that did not open it.
+    None,
+    /// A mask built from a transparency group.
+    Group {
+        /// `/S`.
+        kind: MaskKind,
+        /// `/G`: the resource name of a form XObject registered with
+        /// [`DocumentBuilder::add_form`].
+        ///
+        /// 11.6.5.2 requires it to be a **transparency group** XObject, so a
+        /// name registered without a [`TransparencyGroup`] is refused rather
+        /// than written out — a mask over a plain form is a mask a reader
+        /// cannot evaluate, and a page that silently failed to be masked looks
+        /// exactly like a page nobody meant to mask.
+        form: &'a [u8],
+        /// `/BC`, the backdrop colour, in the **mask group's own** colour
+        /// space — so its length is that group's component count and not the
+        /// page's.
+        ///
+        /// Only meaningful for [`MaskKind::Luminosity`]; 11.6.5.2 says a
+        /// luminosity mask composites its group against a backdrop and that
+        /// this entry names it, defaulting to black.
+        backdrop: Option<&'a [f64]>,
+    },
+}
+
+/// Graphics state parameters, written as an `/ExtGState` (Table 58).
+///
+/// Every field is an `Option` because Table 58 is a *set of overrides*: an
+/// absent entry leaves the parameter as it was, and writing a value equal to
+/// the default is not the same document as writing nothing. Build one with
+/// `..ExtGState::default()` so a field added later does not break the call.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExtGState<'a> {
+    /// `/ca`, the **non-stroking** alpha constant (11.6.4.4).
+    ///
+    /// Fill alpha and stroke alpha are two parameters, not one spelled twice:
+    /// a rule stroked at 0.5 around a shape filled at 1.0 is an ordinary thing
+    /// to draw, and a writer that set both from one number could not say it.
+    pub fill_alpha: Option<f64>,
+    /// `/CA`, the **stroking** alpha constant (11.6.4.4).
+    pub stroke_alpha: Option<f64>,
+    /// `/BM`.
+    pub blend_mode: Option<BlendMode>,
+    /// `/SMask`.
+    pub soft_mask: Option<StateMask<'a>>,
+}
+
+/// A form XObject's `/Group` entry (11.6.6): a transparency group.
+///
+/// `isolated` and `knockout` are **independent** flags over one group and
+/// 11.6.6 gives them different jobs — one decides what the group composites
+/// against (its own initial backdrop, or the page's), the other decides what
+/// each element inside it composites against (the group's initial backdrop, or
+/// the result accumulated so far). All four combinations are meaningful, so
+/// neither can be derived from the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TransparencyGroup {
+    /// `/CS`, the group's blending colour space.
+    pub color_space: DeviceSpace,
+    /// `/I`: isolated.
+    pub isolated: bool,
+    /// `/K`: knockout.
+    pub knockout: bool,
+}
+
+/// A form XObject (8.10).
+pub struct FormXObject<'a> {
+    /// `/BBox`, as `[x0 y0 x1 y1]` in the form's own space.
+    ///
+    /// Not normalised here. 8.10.2 makes a reader normalise it and this
+    /// crate's own reader does — but a degenerate box clips the whole form
+    /// away, producing a form that draws nothing while looking registered, so
+    /// `x1 > x0` and `y1 > y0` are required rather than repaired.
+    pub bbox: [f64; 4],
+    /// `/Matrix`, mapping form space into the space of whatever invokes it, or
+    /// `None` for the identity.
+    pub matrix: Option<[f64; 6]>,
+    /// `/Group`, or `None` for a form that is not a transparency group.
+    pub group: Option<TransparencyGroup>,
+    /// The content stream, in operator bytes.
+    pub content: &'a [u8],
+}
+
+/// A PDF function (7.10), in the two types a gradient is built from.
+///
+/// **`#[non_exhaustive]`**: 7.10 defines four types and this writer emits two.
+/// Sampled (type 0) and PostScript calculator (type 4) functions are additions
+/// a later gap can make without breaking a caller that matched with a wildcard.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Function {
+    /// Type 2, exponential interpolation (7.10.3).
+    Exponential {
+        /// `/Domain`, as `[t0 t1]`.
+        domain: [f64; 2],
+        /// `/C0`, the value at the domain's start. One number per output.
+        c0: Vec<f64>,
+        /// `/C1`, the value at the domain's end.
+        c1: Vec<f64>,
+        /// `/N`, the interpolation exponent. One is a straight ramp.
+        n: f64,
+    },
+    /// Type 3, stitching (7.10.4).
+    ///
+    /// Where a gradient with more than two stops lives. It can be wrong in two
+    /// independent ways — in the **stitch** (`bounds` and `encode`, which
+    /// decide where each sub-function starts and how its own domain is
+    /// reached) and in a **sub-function** (which decides what colour comes out
+    /// once it is reached) — and neither is visible in the other's tests.
+    Stitching {
+        /// `/Domain`, as `[t0 t1]`.
+        domain: [f64; 2],
+        /// `/Functions`, in order. One more than `bounds` has entries.
+        functions: Vec<Function>,
+        /// `/Bounds`: the interior division points, strictly increasing and
+        /// strictly inside `domain`.
+        bounds: Vec<f64>,
+        /// `/Encode`: one `[lo hi]` per sub-function, mapping its subdomain
+        /// onto the domain that sub-function itself wants.
+        encode: Vec<[f64; 2]>,
+    },
+}
+
+/// A shading (8.7.4.5), in the two gradient types.
+///
+/// **`#[non_exhaustive]`**: 8.7.4.5 defines seven and this writer emits two.
+/// Function-based (type 1) and the four mesh types have readers in this
+/// repository already, so each is an addition rather than a redesign.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Shading {
+    /// Type 2, axial (8.7.4.5.3).
+    Axial {
+        /// `/ColorSpace`.
+        color_space: DeviceSpace,
+        /// `/Coords`, as `[x0 y0 x1 y1]`: the axis, in shading space.
+        coords: [f64; 4],
+        /// `/Function`, whose output count is the colour space's.
+        function: Function,
+        /// `/Extend`, beyond the axis's start and end.
+        extend: (bool, bool),
+    },
+    /// Type 3, radial (8.7.4.5.4).
+    ///
+    /// Not an axial shading with a radius bolted on: 8.7.4.5.4 blends between
+    /// two **circles**, so the geometry is six numbers rather than four and a
+    /// writer sharing one code path with type 2 would have nowhere to put the
+    /// radii.
+    Radial {
+        /// `/ColorSpace`.
+        color_space: DeviceSpace,
+        /// `/Coords`, as `[x0 y0 r0 x1 y1 r1]`: the two circles.
+        coords: [f64; 6],
+        /// `/Function`.
+        function: Function,
+        /// `/Extend`, beyond the first and second circle.
+        extend: (bool, bool),
+    },
+}
+
+/// `/TilingType` (Table 75): how a reader may adjust a cell's spacing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TilingType {
+    /// 1: constant spacing. Cells are distorted by up to a device pixel so the
+    /// spacing is the same everywhere.
+    ConstantSpacing,
+    /// 2: no distortion. The cell is placed exactly and the spacing varies.
+    NoDistortion,
+    /// 3: constant spacing and faster tiling. As 1, with more distortion
+    /// permitted.
+    FasterTiling,
+}
+
+/// A tiling pattern, `/PatternType 1` (8.7.3).
+///
+/// `/PaintType` is always 1, a **coloured** pattern, and the reason is written
+/// here rather than left as a gap: an uncoloured pattern is named through a
+/// `[/Pattern base]` colour space, which has to be a `/ColorSpace` resource,
+/// and this writer has no API for one. Emitting a `/PaintType 2` pattern that
+/// no page could then name would be a feature that does not work.
+pub struct TilingPattern<'a> {
+    /// `/BBox`, the cell, as `[x0 y0 x1 y1]`. Degenerate boxes are refused for
+    /// [`FormXObject::bbox`]'s reason.
+    pub bbox: [f64; 4],
+    /// `/XStep`: the horizontal spacing between cells, which 8.7.3.1 allows to
+    /// differ from the cell's own width. Zero is invalid.
+    pub x_step: f64,
+    /// `/YStep`, likewise.
+    pub y_step: f64,
+    /// `/Matrix`, mapping pattern space into the **default** coordinate system
+    /// of the page the pattern is used on — not into whatever transform is in
+    /// force when it is set (8.7.3.1). `None` for the identity.
+    pub matrix: Option<[f64; 6]>,
+    /// `/TilingType`.
+    pub tiling_type: TilingType,
+    /// The cell's content stream, in operator bytes.
+    pub content: &'a [u8],
+}
+
+/// One glyph to draw, addressed by **index**, with the text it stands for.
+///
+/// This is the pair a simple font cannot carry. A `/TrueType` font with
+/// `/WinAnsiEncoding` addresses a glyph by putting a character code in the
+/// string and letting the font's `cmap` decide — which is correct exactly
+/// while that `cmap` and WinAnsi agree, and produces readable, plausible,
+/// wrong text when they do not. Stating the glyph and the text separately is
+/// the only shape in which both are said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Glyph<'a> {
+    /// The glyph index in the font program.
+    ///
+    /// Under `/Encoding /Identity-H` with `/CIDToGIDMap /Identity` this one
+    /// number is the code in the string, the CID and the glyph index at once,
+    /// which is what makes an index addressable at all.
+    pub id: u16,
+    /// The characters this glyph stands for, for `/ToUnicode`.
+    ///
+    /// Three shapes are all normal and all supported. Empty: the glyph stands
+    /// for nothing extractable. One character: the ordinary case. Several: a
+    /// ligature, where one glyph stands for `"ffi"`. And several glyphs may
+    /// each name the **same** character, which is what an alternate or a
+    /// positional form is.
+    pub text: &'a str,
+}
+
+/// The resources one page, form or pattern may name.
+///
+/// Held as one value rather than as six fields because a form XObject and a
+/// pattern each need the same `/Resources` a page does, and three copies of
+/// the assembly would be three places for a resource kind to be forgotten.
+#[derive(Clone, Default)]
+struct ResourceSet {
+    fonts: Vec<(Vec<u8>, ObjRef)>,
+    images: Vec<(Vec<u8>, ObjRef)>,
+    forms: Vec<(Vec<u8>, ObjRef)>,
+    ext_gstates: Vec<(Vec<u8>, ObjRef)>,
+    shadings: Vec<(Vec<u8>, ObjRef)>,
+    patterns: Vec<(Vec<u8>, ObjRef)>,
+}
+
+impl ResourceSet {
+    /// The `/Resources` dictionary, carrying the sub-dictionaries that have
+    /// anything in them and no others.
+    ///
+    /// Images and forms share `/XObject`, because 8.8 gives them one
+    /// dictionary and tells them apart by `/Subtype`. Forms are written
+    /// second, so a form registered under a name an image already holds
+    /// replaces it — the same last-registration-wins rule two images under one
+    /// name already follow.
+    fn dict(&self, names: &NameTable) -> Dict {
+        let mut xobjects = Dict::new();
+        for (resource, reference) in self.images.iter().chain(self.forms.iter()) {
+            xobjects.insert(names.intern(resource), Object::Ref(*reference));
+        }
+
+        let mut out = Dict::new();
+        for (key, entries) in [
+            (&b"Font"[..], &self.fonts),
+            (b"ExtGState", &self.ext_gstates),
+            (b"Shading", &self.shadings),
+            (b"Pattern", &self.patterns),
+        ] {
+            if entries.is_empty() {
+                continue;
+            }
+            let mut sub = Dict::new();
+            for (resource, reference) in entries {
+                sub.insert(names.intern(resource), Object::Ref(*reference));
+            }
+            out.insert(names.intern(key), Object::Dict(sub));
+        }
+        if !xobjects.is_empty() {
+            out.insert(names.intern(b"XObject"), Object::Dict(xobjects));
+        }
+        out
+    }
+}
+
+/// Whether a resource name is already registered in a list.
+fn holds(entries: &[(Vec<u8>, ObjRef)], resource: &[u8]) -> bool {
+    entries.iter().any(|(name, _)| name == resource)
+}
+
+/// Whether every number in a slice is finite.
+///
+/// A `NaN` or an infinity would reach the file as `NaN` or `inf`, which is not
+/// a PDF number at all — so it is refused at the door rather than serialised
+/// into a token no reader can lex.
+fn all_finite(values: &[f64]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
+/// 11.6.4.4's range for an alpha constant.
+///
+/// Refused rather than clamped. A caller that asks for 1.5 has made an
+/// arithmetic mistake somewhere upstream, and silently writing 1.0 turns it
+/// into a picture that is merely wrong instead of a call that failed.
+fn is_alpha(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+/// Whether a rectangle encloses an area, in the order `[x0 y0 x1 y1]`.
+fn is_box(rect: &[f64; 4]) -> bool {
+    all_finite(rect) && rect[2] > rect[0] && rect[3] > rect[1]
+}
+
+/// How deeply a type 3 function may stitch functions that stitch functions.
+///
+/// **Not a resource bound, and it stays out of `bounds_ledger.rs` for that
+/// reason.** Nothing here is read from a file: a [`Function`] is a value the
+/// caller already built in memory, so a constant over it could never be the
+/// thing that stopped an attacker — which is gap 18a milestone 8's failure
+/// reached from the other side. What it is instead is a **compatibility limit
+/// taken from this repository's own reader**, whose `parse_function` stops at
+/// depth eight. A writer that emitted a deeper nest would produce a file this
+/// engine cannot read back, and a writer whose output its own reader refuses
+/// is not a writer. It is checked iteratively, so a caller handing over a nest
+/// a thousand deep is refused rather than overflowing a stack finding out.
+const MAX_FUNCTION_DEPTH: u32 = 8;
+
+/// The most `<code> <text>` pairs one `beginbfchar` section may hold.
+///
+/// The CMap specification's own limit, and not a resource bound either: a
+/// longer section is a syntax error rather than an expense, so `/ToUnicode` is
+/// written in blocks of this size however many glyphs a document draws.
+const BFCHAR_PER_SECTION: usize = 100;
+
+impl Function {
+    /// Whether this is a function a reader can evaluate, given how many output
+    /// components it has to produce.
+    ///
+    /// Checked without recursion. The tree is the caller's own value and its
+    /// depth is the caller's choice, so a recursive validator would be a stack
+    /// overflow reachable from a `Vec` push.
+    fn is_valid(&self, outputs: usize) -> bool {
+        let mut stack = vec![(self, 0u32)];
+        while let Some((function, depth)) = stack.pop() {
+            if depth > MAX_FUNCTION_DEPTH {
+                return false;
+            }
+            match function {
+                Function::Exponential { domain, c0, c1, n } => {
+                    if !all_finite(domain) || domain[1] <= domain[0] {
+                        return false;
+                    }
+                    // 7.10.3: x is raised to /N, so a zero or negative
+                    // exponent is undefined at the domain's own start rather
+                    // than merely unusual.
+                    if !n.is_finite() || *n <= 0.0 {
+                        return false;
+                    }
+                    // 7.10.1: the function's range is what the shading's
+                    // colour space asks for. A two-component function under
+                    // `/DeviceRGB` hands a reader two numbers where it needs
+                    // three, and what it invents for the third is its own
+                    // business rather than this document's statement.
+                    if c0.len() != outputs || c1.len() != outputs {
+                        return false;
+                    }
+                    if !all_finite(c0) || !all_finite(c1) {
+                        return false;
+                    }
+                }
+                Function::Stitching {
+                    domain,
+                    functions,
+                    bounds,
+                    encode,
+                } => {
+                    if !all_finite(domain) || domain[1] <= domain[0] {
+                        return false;
+                    }
+                    // 7.10.4's arithmetic, and the half of a gradient that
+                    // gets it wrong: k sub-functions want k-1 bounds and k
+                    // encode pairs.
+                    if functions.is_empty()
+                        || bounds.len() + 1 != functions.len()
+                        || encode.len() != functions.len()
+                    {
+                        return false;
+                    }
+                    if !all_finite(bounds) || encode.iter().any(|e| !all_finite(e)) {
+                        return false;
+                    }
+                    // 7.10.4: Domain0 < Bounds0 < ... < Bounds(k-2) < Domain1,
+                    // strictly. An equal pair names an empty subdomain, which
+                    // is a sub-function that can never be reached.
+                    let mut previous = domain[0];
+                    for bound in bounds {
+                        if *bound <= previous {
+                            return false;
+                        }
+                        previous = *bound;
+                    }
+                    if domain[1] <= previous {
+                        return false;
+                    }
+                    for sub in functions {
+                        stack.push((sub, depth + 1));
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
 /// A font whose program is embedded, held until `finish`.
 ///
 /// The subset depends on what the document draws, which is not known when the
@@ -259,6 +769,23 @@ struct Embedded {
     file_ref: ObjRef,
     descriptor_ref: ObjRef,
     font_ref: ObjRef,
+}
+
+/// A composite font whose program is embedded, held until `finish`.
+///
+/// Five object numbers rather than [`Embedded`]'s three: 9.7.6 makes a Type0
+/// font a pair — the font a page names and the **descendant** CIDFont that
+/// carries the metrics and the descriptor — and the `/ToUnicode` CMap is a
+/// stream of its own.
+struct CidFont {
+    resource: Vec<u8>,
+    base_font: Vec<u8>,
+    program: Vec<u8>,
+    file_ref: ObjRef,
+    descriptor_ref: ObjRef,
+    descendant_ref: ObjRef,
+    font_ref: ObjRef,
+    to_unicode_ref: ObjRef,
 }
 
 /// The six-letter tag and plus sign a subset font name carries (9.6.4).
@@ -285,15 +812,118 @@ fn subset_tag(program: &[u8]) -> Vec<u8> {
     tag
 }
 
+/// `/W` for the glyphs a document drew, from the font's own `hmtx` (9.7.4.3).
+///
+/// Table 116's `c [w1 w2 ...]` form, one run per stretch of consecutive CIDs,
+/// so a document drawing glyphs 5, 6, 7 and 40 writes two runs rather than
+/// four singletons.
+///
+/// `None` when the font states no advances at all — no `hmtx`, or an `hhea`
+/// claiming no metrics. That is the one case where a width array would have to
+/// be **invented**, and 9.7.4.3's `/DW` already says what to do about a CID
+/// with no entry. Writing 500 for every glyph, which the simple-font path does
+/// because 9.6.6.4 leaves it no choice, would be a number this document made
+/// up presented as the font's.
+fn width_array(
+    sfnt: &tinker_pdf_font::Sfnt<'_>,
+    units: f64,
+    ids: impl Iterator<Item = u16>,
+) -> Option<Vec<Object>> {
+    let mut runs: Vec<(u16, Vec<Object>)> = Vec::new();
+    for id in ids {
+        let advance = sfnt.advance(id)?;
+        let width = (f64::from(advance) * 1000.0 / units).round();
+        match runs.last_mut() {
+            // `ids` arrives from a `BTreeMap`'s keys, so it is sorted and
+            // duplicate-free; a run therefore continues exactly when the next
+            // id is one more than the last written.
+            Some((first, widths)) if usize::from(*first) + widths.len() == usize::from(id) => {
+                widths.push(Object::Real(width));
+            }
+            _ => runs.push((id, vec![Object::Real(width)])),
+        }
+    }
+    if runs.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(runs.len() * 2);
+    for (first, widths) in runs {
+        out.push(Object::Int(i64::from(first)));
+        out.push(Object::Array(widths));
+    }
+    Some(out)
+}
+
+/// A `/ToUnicode` CMap for the glyphs a document drew (9.10.3).
+///
+/// `bfchar` throughout rather than `bfrange`, and deliberately: a range says
+/// that consecutive codes map to consecutive characters, which is true of a
+/// Latin subset and false of everything else — and a writer that emitted one
+/// on the evidence of two adjacent glyphs would be asserting a relationship
+/// the font never claimed.
+///
+/// The mapping this produces is many-to-one and one-to-many at once, which is
+/// what makes it worth writing at all. Several glyphs may name the same
+/// character — an alternate, a positional form, a small capital — and one
+/// glyph may name several, which is what a ligature is. Neither is expressible
+/// through a simple font's `/Encoding`.
+///
+/// `None` when nothing has any text, because 9.10.3's grammar has no
+/// zero-entry section and a CMap that maps nothing is worse than no CMap: a
+/// reader that finds one stops looking for another answer.
+fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
+    let entries: Vec<(u16, Vec<u16>)> = mapping
+        .iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(id, text)| (*id, text.encode_utf16().collect::<Vec<u16>>()))
+        .filter(|(_, units)| !units.is_empty())
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n");
+    out.extend_from_slice(
+        b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n",
+    );
+    out.extend_from_slice(b"/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n");
+    // The codespace is the whole of `/Identity-H`'s two-byte space, which is
+    // what says a code is two bytes to a reader that only has this stream.
+    out.extend_from_slice(b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    for chunk in entries.chunks(BFCHAR_PER_SECTION) {
+        out.extend_from_slice(format!("{} beginbfchar\n", chunk.len()).as_bytes());
+        for (id, units) in chunk {
+            out.extend_from_slice(format!("<{id:04X}> <").as_bytes());
+            for unit in units {
+                out.extend_from_slice(format!("{unit:04X}").as_bytes());
+            }
+            out.extend_from_slice(b">\n");
+        }
+        out.extend_from_slice(b"endbfchar\n");
+    }
+    out.extend_from_slice(b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    Some(out)
+}
+
 /// A page being assembled.
 pub struct PageBuilder {
     width: f64,
     height: f64,
     content: Vec<u8>,
-    fonts: Vec<(Vec<u8>, ObjRef)>,
-    images: Vec<(Vec<u8>, ObjRef)>,
+    /// Everything this page may name, copied from the document when the page
+    /// was added.
+    resources: ResourceSet,
+    /// Which font resources are composite, so [`PageBuilder::glyphs`] can tell
+    /// a font whose codes are two bytes from one whose codes are one.
+    composite: BTreeSet<Vec<u8>>,
     /// Characters drawn with each font resource, for subsetting.
     used: BTreeMap<Vec<u8>, BTreeSet<char>>,
+    /// Glyphs drawn with each composite font resource, and the text each
+    /// stands for. `/W` comes from the first and `/ToUnicode` from the second,
+    /// and they are two independent statements about one glyph.
+    drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
     /// `/CropBox`, when the caller stated one. See [`PageBuilder::set_crop_box`].
     crop_box: Option<[f64; 4]>,
     /// `/BleedBox`, likewise.
@@ -377,6 +1007,140 @@ impl PageBuilder {
             .extend_from_slice(format!("{} {} {} rg\n", c(r), c(g), c(b)).as_bytes());
     }
 
+    /// Sets the **stroking** colour, as red, green and blue from zero to one.
+    ///
+    /// `RG`, not `rg`. The two are different parameters of the graphics state
+    /// and always have been; only this writer conflated them, by having one.
+    pub fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) {
+        let c = |v: f64| v.clamp(0.0, 1.0);
+        self.content
+            .extend_from_slice(format!("{} {} {} RG\n", c(r), c(g), c(b)).as_bytes());
+    }
+
+    /// Applies a graphics state registered with
+    /// [`DocumentBuilder::add_ext_gstate`] — the `gs` operator.
+    ///
+    /// The parameters stay in force until a `Q` restores an earlier state, so
+    /// a caller setting an alpha for one shape brackets it with
+    /// [`PageBuilder::raw`]`(b"q")` and `(b"Q")`. That is deliberate rather
+    /// than an omission: `q`/`Q` nest around whole subtrees of drawing and an
+    /// API that paired them with one `gs` could not express the ordinary case.
+    ///
+    /// Returns false when nothing is registered under `resource`, rather than
+    /// writing a `gs` naming a resource the page does not carry.
+    pub fn set_ext_gstate(&mut self, resource: &[u8]) -> bool {
+        if !holds(&self.resources.ext_gstates, resource) {
+            return false;
+        }
+        self.content.push(b'/');
+        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b" gs\n");
+        true
+    }
+
+    /// Draws a form XObject registered with [`DocumentBuilder::add_form`].
+    ///
+    /// The form's own `/Matrix` and `/BBox` place and clip it, so this writes
+    /// the `Do` and nothing else; a caller wanting it somewhere else brackets
+    /// the call with a `cm` through [`PageBuilder::raw`].
+    pub fn form(&mut self, resource: &[u8]) -> bool {
+        if !holds(&self.resources.forms, resource) {
+            return false;
+        }
+        self.content.push(b'/');
+        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b" Do\n");
+        true
+    }
+
+    /// Paints a shading registered with [`DocumentBuilder::add_shading`] over
+    /// the current clip — the `sh` operator (8.7.4.1).
+    ///
+    /// `sh` fills the clip, not a shape. Filling a *shape* with a gradient is
+    /// [`PageBuilder::set_fill_pattern`] over a shading pattern, which this
+    /// writer does not emit; the equivalent here is a clip set with `W n`
+    /// through [`PageBuilder::raw`] before the call.
+    pub fn shading(&mut self, resource: &[u8]) -> bool {
+        if !holds(&self.resources.shadings, resource) {
+            return false;
+        }
+        self.content.push(b'/');
+        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b" sh\n");
+        true
+    }
+
+    /// Sets the non-stroking colour to a tiling pattern registered with
+    /// [`DocumentBuilder::add_tiling_pattern`].
+    ///
+    /// 8.7.3.2: the colour space has to become `/Pattern` before a pattern
+    /// name can be an `scn` operand, so both operators are written together —
+    /// a `scn` without its `cs` is a name in whatever space was in force, and
+    /// the reader is entitled to read it as a number.
+    pub fn set_fill_pattern(&mut self, resource: &[u8]) -> bool {
+        if !holds(&self.resources.patterns, resource) {
+            return false;
+        }
+        self.content.extend_from_slice(b"/Pattern cs /");
+        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b" scn\n");
+        true
+    }
+
+    /// Sets the **stroking** colour to a tiling pattern — `CS` and `SCN`.
+    pub fn set_stroke_pattern(&mut self, resource: &[u8]) -> bool {
+        if !holds(&self.resources.patterns, resource) {
+            return false;
+        }
+        self.content.extend_from_slice(b"/Pattern CS /");
+        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b" SCN\n");
+        true
+    }
+
+    /// Draws glyphs **by index** with a composite font registered with
+    /// [`DocumentBuilder::add_cid_font`].
+    ///
+    /// The string is two bytes a glyph, big-endian, because `/Identity-H`
+    /// makes the code the CID and `/CIDToGIDMap /Identity` makes the CID the
+    /// glyph index. Written as a hex string rather than a literal: a glyph
+    /// index is arbitrary bytes and hex needs no escaping decisions at all.
+    ///
+    /// Returns false when `resource` is not a registered **composite** font,
+    /// rather than writing two-byte codes into a font whose codes are one byte
+    /// — which would draw the wrong glyphs at the wrong widths and look like a
+    /// font problem rather than an encoding one.
+    pub fn glyphs(&mut self, font: &[u8], size: f64, x: f64, y: f64, glyphs: &[Glyph<'_>]) -> bool {
+        if !self.composite.contains(font) {
+            return false;
+        }
+
+        // Recorded so `finish` can write `/W` from the font's own `hmtx` for
+        // the glyphs the document drew, and a `/ToUnicode` from the text they
+        // stood for. The first non-empty text a glyph is drawn with stands:
+        // `/ToUnicode` is a function from code to text, so a glyph drawn twice
+        // with two meanings has to resolve to one, and taking the first keeps
+        // the answer the same however many times the document is written.
+        let mapping = self.drawn.entry(font.to_vec()).or_default();
+        for glyph in glyphs {
+            let text = mapping.entry(glyph.id).or_default();
+            if text.is_empty() && !glyph.text.is_empty() {
+                *text = glyph.text.to_string();
+            }
+        }
+
+        self.content.extend_from_slice(b"BT /");
+        self.content.extend_from_slice(font);
+        self.content
+            .extend_from_slice(format!(" {size} Tf {x} {y} Td <").as_bytes());
+        for glyph in glyphs {
+            self.content
+                .extend_from_slice(format!("{:04X}", glyph.id).as_bytes());
+        }
+        self.content.extend_from_slice(b"> Tj ET\n");
+        true
+    }
+
     /// Appends raw content-stream operators.
     ///
     /// An escape hatch for callers that know the operator set; nothing checks
@@ -448,11 +1212,19 @@ pub struct DocumentBuilder {
     objects: ObjectSet,
     next: u32,
     pages: Vec<PageBuilder>,
-    fonts: Vec<(Vec<u8>, ObjRef)>,
-    images: Vec<(Vec<u8>, ObjRef)>,
+    /// Everything a page added from here on may name.
+    resources: ResourceSet,
+    /// Which form resources carry a `/Group`, so an `/SMask` naming one that
+    /// does not can be refused (11.6.5.2).
+    groups: BTreeSet<Vec<u8>>,
+    /// Which font resources are composite.
+    composite: BTreeSet<Vec<u8>>,
     /// Fonts whose programs are embedded, written at `finish` once the
     /// characters they are asked to draw are known.
     embedded: Vec<Embedded>,
+    /// Composite fonts, written at `finish` for the same reason — with the
+    /// glyphs rather than the characters deciding the subset.
+    cid_fonts: Vec<CidFont>,
     subset_fonts: bool,
     info: Dict,
     outline: Vec<OutlineEntry>,
@@ -474,9 +1246,11 @@ impl DocumentBuilder {
             // 1 and 2 are reserved for the catalog and the page tree.
             next: 3,
             pages: Vec::new(),
-            fonts: Vec::new(),
-            images: Vec::new(),
+            resources: ResourceSet::default(),
+            groups: BTreeSet::new(),
+            composite: BTreeSet::new(),
             embedded: Vec::new(),
+            cid_fonts: Vec::new(),
             subset_fonts: true,
             info: Dict::new(),
             outline: Vec::new(),
@@ -511,7 +1285,7 @@ impl DocumentBuilder {
             Object::Name(self.names.intern(b"WinAnsiEncoding")),
         );
         self.objects.insert(r.num, Object::Dict(dict));
-        self.fonts.push((resource.to_vec(), r));
+        self.resources.fonts.push((resource.to_vec(), r));
     }
 
     /// Registers a TrueType font, embedding its program (9.6.6, 9.9).
@@ -552,8 +1326,408 @@ impl DocumentBuilder {
             descriptor_ref,
             font_ref,
         });
-        self.fonts.push((resource.to_vec(), font_ref));
+        self.resources.fonts.push((resource.to_vec(), font_ref));
         true
+    }
+
+    /// Registers a **composite** font, embedding its program (9.7).
+    ///
+    /// A Type0 font over a CIDFontType2 descendant, with `/Encoding
+    /// /Identity-H` and `/CIDToGIDMap /Identity` — which together make the
+    /// two-byte code in a string the CID and the CID the glyph index, so
+    /// [`PageBuilder::glyphs`] can address a glyph directly. That is the whole
+    /// difference from [`DocumentBuilder::add_embedded_font`], and it is not a
+    /// convenience: a simple font with `/WinAnsiEncoding` has no way to name a
+    /// glyph the font's `cmap` does not reach from a character, and no way at
+    /// all to distinguish two glyphs that stand for one character.
+    ///
+    /// `/W` comes from the font program's own `hmtx` and `/ToUnicode` from the
+    /// text the caller says each glyph stands for. They are written at
+    /// `finish`, because both depend on which glyphs the document ends up
+    /// drawing.
+    ///
+    /// Returns false when the bytes are not a font this can read, for
+    /// [`DocumentBuilder::add_embedded_font`]'s reason.
+    pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
+        if tinker_pdf_font::Sfnt::parse(program).is_none() {
+            return false;
+        }
+
+        let file_ref = self.allocate();
+        let descriptor_ref = self.allocate();
+        let descendant_ref = self.allocate();
+        let font_ref = self.allocate();
+        let to_unicode_ref = self.allocate();
+
+        self.cid_fonts.push(CidFont {
+            resource: resource.to_vec(),
+            base_font: base_font.to_vec(),
+            program: program.to_vec(),
+            file_ref,
+            descriptor_ref,
+            descendant_ref,
+            font_ref,
+            to_unicode_ref,
+        });
+        self.resources.fonts.push((resource.to_vec(), font_ref));
+        self.composite.insert(resource.to_vec());
+        true
+    }
+
+    /// Registers a graphics state under a resource name (Table 58).
+    ///
+    /// Everything is checked before anything is written, which is
+    /// [`DocumentBuilder::add_image`]'s posture and is worth restating for the
+    /// one entry that can fail late: an `/SMask` names a form, and a mask over
+    /// a form that is not a transparency group is one 11.6.5.2 forbids.
+    ///
+    /// Returns false for an alpha outside 11.6.4.4's range, a non-finite
+    /// backdrop component, or an `/SMask` naming a form that is not
+    /// registered or carries no `/Group`.
+    pub fn add_ext_gstate(&mut self, resource: &[u8], state: &ExtGState<'_>) -> bool {
+        if state.fill_alpha.is_some_and(|v| !is_alpha(v))
+            || state.stroke_alpha.is_some_and(|v| !is_alpha(v))
+        {
+            return false;
+        }
+
+        let mut mask_ref = None;
+        if let Some(StateMask::Group { form, backdrop, .. }) = &state.soft_mask {
+            if !self.groups.contains(*form) {
+                return false;
+            }
+            let Some((_, reference)) = self
+                .resources
+                .forms
+                .iter()
+                .find(|(name, _)| name.as_slice() == *form)
+            else {
+                return false;
+            };
+            if let Some(values) = backdrop {
+                if values.is_empty() || !all_finite(values) {
+                    return false;
+                }
+            }
+            mask_ref = Some(*reference);
+        }
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"ExtGState")));
+        if let Some(alpha) = state.fill_alpha {
+            dict.insert(self.names.intern(b"ca"), Object::Real(alpha));
+        }
+        if let Some(alpha) = state.stroke_alpha {
+            dict.insert(self.names.intern(b"CA"), Object::Real(alpha));
+        }
+        if let Some(mode) = state.blend_mode {
+            dict.insert(
+                self.names.intern(b"BM"),
+                Object::Name(self.names.intern(mode.pdf_name())),
+            );
+        }
+        match (&state.soft_mask, mask_ref) {
+            (Some(StateMask::None), _) => {
+                dict.insert(
+                    self.names.intern(b"SMask"),
+                    Object::Name(self.names.intern(b"None")),
+                );
+            }
+            (Some(StateMask::Group { kind, backdrop, .. }), Some(reference)) => {
+                let mut mask = Dict::new();
+                mask.insert(Name::TYPE, Object::Name(self.names.intern(b"Mask")));
+                mask.insert(
+                    self.names.intern(b"S"),
+                    Object::Name(self.names.intern(kind.pdf_name())),
+                );
+                mask.insert(self.names.intern(b"G"), Object::Ref(reference));
+                if let Some(values) = backdrop {
+                    mask.insert(
+                        self.names.intern(b"BC"),
+                        Object::Array(values.iter().map(|v| Object::Real(*v)).collect()),
+                    );
+                }
+                dict.insert(self.names.intern(b"SMask"), Object::Dict(mask));
+            }
+            _ => {}
+        }
+
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Dict(dict));
+        self.resources
+            .ext_gstates
+            .push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Registers a form XObject under a resource name (8.10).
+    ///
+    /// The form's `/Resources` is the document's registered resources **at the
+    /// moment this is called**, which is the rule
+    /// [`DocumentBuilder::add_page`] already follows. One consequence is worth
+    /// having in writing: a form cannot name itself, because it is not
+    /// registered until this returns — so a form referring to a form is a
+    /// chain that can only point backwards, and a cycle is unreachable by
+    /// construction rather than caught by a depth cap.
+    ///
+    /// Returns false for a degenerate `/BBox` or a non-finite `/Matrix`.
+    pub fn add_form(&mut self, resource: &[u8], form: &FormXObject<'_>) -> bool {
+        if !is_box(&form.bbox) {
+            return false;
+        }
+        if let Some(matrix) = form.matrix {
+            if !all_finite(&matrix) {
+                return false;
+            }
+        }
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"Form")),
+        );
+        dict.insert(
+            self.names.intern(b"BBox"),
+            Object::Array(form.bbox.iter().map(|v| Object::Real(*v)).collect()),
+        );
+        if let Some(matrix) = form.matrix {
+            dict.insert(
+                self.names.intern(b"Matrix"),
+                Object::Array(matrix.iter().map(|v| Object::Real(*v)).collect()),
+            );
+        }
+        if let Some(group) = form.group {
+            let mut entry = Dict::new();
+            entry.insert(self.names.intern(b"S"), {
+                let name = self.names.intern(b"Transparency");
+                Object::Name(name)
+            });
+            entry.insert(
+                self.names.intern(b"CS"),
+                Object::Name(self.names.intern(group.color_space.pdf_name())),
+            );
+            // 11.6.6 defaults both to false, so each is written only when it
+            // is true — an explicit `/I false` says the same thing as the
+            // absence and makes two spellings of one group.
+            if group.isolated {
+                entry.insert(self.names.intern(b"I"), Object::Bool(true));
+            }
+            if group.knockout {
+                entry.insert(self.names.intern(b"K"), Object::Bool(true));
+            }
+            dict.insert(self.names.intern(b"Group"), Object::Dict(entry));
+        }
+        let resources = self.resources.dict(&self.names);
+        dict.insert(Name::RESOURCES, Object::Dict(resources));
+
+        let reference = self.allocate();
+        self.objects.insert_stream(
+            reference.num,
+            StreamData {
+                dict,
+                data: form.content.to_vec(),
+            },
+        );
+        self.resources.forms.push((resource.to_vec(), reference));
+        if form.group.is_some() {
+            self.groups.insert(resource.to_vec());
+        }
+        true
+    }
+
+    /// Registers a shading under a resource name (8.7.4.5).
+    ///
+    /// Returns false for a degenerate geometry, a negative radius, or a
+    /// `/Function` that does not produce one number per colour component.
+    pub fn add_shading(&mut self, resource: &[u8], shading: &Shading) -> bool {
+        let (kind, space, coords, function, extend) = match shading {
+            Shading::Axial {
+                color_space,
+                coords,
+                function,
+                extend,
+            } => {
+                // A zero-length axis has no direction to blend along, so
+                // 8.7.4.5.3's parameter is undefined everywhere and the area
+                // paints in whatever the reader falls back to.
+                if !all_finite(coords) || (coords[0] == coords[2] && coords[1] == coords[3]) {
+                    return false;
+                }
+                (2i64, *color_space, coords.to_vec(), function, *extend)
+            }
+            Shading::Radial {
+                color_space,
+                coords,
+                function,
+                extend,
+            } => {
+                if !all_finite(coords) || coords[2] < 0.0 || coords[5] < 0.0 {
+                    return false;
+                }
+                // Two circles of zero radius in the same place are a point,
+                // and 8.7.4.5.4 has nothing to blend between.
+                if coords[2] == 0.0 && coords[5] == 0.0 {
+                    return false;
+                }
+                (3i64, *color_space, coords.to_vec(), function, *extend)
+            }
+        };
+
+        if !function.is_valid(space.components() as usize) {
+            return false;
+        }
+
+        let function_ref = self.write_function(function);
+        let mut dict = Dict::new();
+        dict.insert(self.names.intern(b"ShadingType"), Object::Int(kind));
+        dict.insert(
+            self.names.intern(b"ColorSpace"),
+            Object::Name(self.names.intern(space.pdf_name())),
+        );
+        dict.insert(
+            self.names.intern(b"Coords"),
+            Object::Array(coords.iter().map(|v| Object::Real(*v)).collect()),
+        );
+        dict.insert(
+            self.names.intern(b"Extend"),
+            Object::Array(vec![Object::Bool(extend.0), Object::Bool(extend.1)]),
+        );
+        dict.insert(self.names.intern(b"Function"), Object::Ref(function_ref));
+
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Dict(dict));
+        self.resources.shadings.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Registers a tiling pattern under a resource name (8.7.3).
+    ///
+    /// The cell's `/Resources` follow [`DocumentBuilder::add_form`]'s rule and
+    /// for the same reasons.
+    ///
+    /// Returns false for a degenerate `/BBox`, a zero or non-finite step, or a
+    /// non-finite `/Matrix`.
+    pub fn add_tiling_pattern(&mut self, resource: &[u8], pattern: &TilingPattern<'_>) -> bool {
+        if !is_box(&pattern.bbox) {
+            return false;
+        }
+        // 8.7.3.1: the steps are the spacing between cells. Zero puts every
+        // cell in one place, which tiles nothing and takes as long as the clip
+        // is large to decide it.
+        if !pattern.x_step.is_finite()
+            || !pattern.y_step.is_finite()
+            || pattern.x_step == 0.0
+            || pattern.y_step == 0.0
+        {
+            return false;
+        }
+        if let Some(matrix) = pattern.matrix {
+            if !all_finite(&matrix) {
+                return false;
+            }
+        }
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Pattern")));
+        dict.insert(self.names.intern(b"PatternType"), Object::Int(1));
+        dict.insert(self.names.intern(b"PaintType"), Object::Int(1));
+        dict.insert(
+            self.names.intern(b"TilingType"),
+            Object::Int(match pattern.tiling_type {
+                TilingType::ConstantSpacing => 1,
+                TilingType::NoDistortion => 2,
+                TilingType::FasterTiling => 3,
+            }),
+        );
+        dict.insert(
+            self.names.intern(b"BBox"),
+            Object::Array(pattern.bbox.iter().map(|v| Object::Real(*v)).collect()),
+        );
+        dict.insert(self.names.intern(b"XStep"), Object::Real(pattern.x_step));
+        dict.insert(self.names.intern(b"YStep"), Object::Real(pattern.y_step));
+        if let Some(matrix) = pattern.matrix {
+            dict.insert(
+                self.names.intern(b"Matrix"),
+                Object::Array(matrix.iter().map(|v| Object::Real(*v)).collect()),
+            );
+        }
+        let resources = self.resources.dict(&self.names);
+        dict.insert(Name::RESOURCES, Object::Dict(resources));
+
+        let reference = self.allocate();
+        self.objects.insert_stream(
+            reference.num,
+            StreamData {
+                dict,
+                data: pattern.content.to_vec(),
+            },
+        );
+        self.resources.patterns.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Writes a function as an indirect object, returning its reference.
+    ///
+    /// Indirect rather than inline so a sub-function is one object rather than
+    /// a dictionary nested inside a dictionary, which is what makes the
+    /// stitching case readable in a dump. Only called once the function has
+    /// been validated, so the recursion here is bounded by
+    /// [`MAX_FUNCTION_DEPTH`] rather than by the caller.
+    fn write_function(&mut self, function: &Function) -> ObjRef {
+        let mut dict = Dict::new();
+        match function {
+            Function::Exponential { domain, c0, c1, n } => {
+                dict.insert(self.names.intern(b"FunctionType"), Object::Int(2));
+                dict.insert(
+                    self.names.intern(b"Domain"),
+                    Object::Array(domain.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                dict.insert(
+                    self.names.intern(b"C0"),
+                    Object::Array(c0.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                dict.insert(
+                    self.names.intern(b"C1"),
+                    Object::Array(c1.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                dict.insert(self.names.intern(b"N"), Object::Real(*n));
+            }
+            Function::Stitching {
+                domain,
+                functions,
+                bounds,
+                encode,
+            } => {
+                let refs: Vec<ObjRef> = functions.iter().map(|f| self.write_function(f)).collect();
+                dict.insert(self.names.intern(b"FunctionType"), Object::Int(3));
+                dict.insert(
+                    self.names.intern(b"Domain"),
+                    Object::Array(domain.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                dict.insert(
+                    self.names.intern(b"Functions"),
+                    Object::Array(refs.iter().map(|r| Object::Ref(*r)).collect()),
+                );
+                dict.insert(
+                    self.names.intern(b"Bounds"),
+                    Object::Array(bounds.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                dict.insert(
+                    self.names.intern(b"Encode"),
+                    Object::Array(
+                        encode
+                            .iter()
+                            .flat_map(|pair| [Object::Real(pair[0]), Object::Real(pair[1])])
+                            .collect(),
+                    ),
+                );
+            }
+        }
+
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Dict(dict));
+        reference
     }
 
     /// Whether embedded fonts are cut down to the glyphs the document draws.
@@ -716,6 +1890,191 @@ impl DocumentBuilder {
         self.objects.insert(font.font_ref.num, Object::Dict(dict));
     }
 
+    /// Writes the composite font dictionaries (9.7.6, 9.7.4).
+    ///
+    /// `drawn` is every glyph every page drew with each composite resource,
+    /// and the text it stood for. Three independent things come out of it and
+    /// they are written from three different places: the **subset** from the
+    /// glyph ids, `/W` from the *original* program's `hmtx` for those ids, and
+    /// `/ToUnicode` from the text. None of the three can stand in for another.
+    fn write_cid_fonts(&mut self, drawn: &BTreeMap<Vec<u8>, BTreeMap<u16, String>>) {
+        let fonts = std::mem::take(&mut self.cid_fonts);
+        let empty = BTreeMap::new();
+
+        for font in fonts {
+            let mapping = drawn.get(&font.resource).unwrap_or(&empty);
+
+            // 9.7.4.2: glyph 0 is `.notdef` and a font without it is a font a
+            // reader cannot fall back through.
+            let mut ids: BTreeSet<u16> = mapping.keys().copied().collect();
+            ids.insert(0);
+
+            let (program, subsetted) = if self.subset_fonts {
+                match tinker_pdf_font::subset(&font.program, &ids) {
+                    Some(reduced) => (reduced, true),
+                    None => (font.program.clone(), false),
+                }
+            } else {
+                (font.program.clone(), false)
+            };
+
+            let base_font = if subsetted {
+                let mut tagged = subset_tag(&program);
+                tagged.extend_from_slice(&font.base_font);
+                tagged
+            } else {
+                font.base_font.clone()
+            };
+
+            self.write_cid_font_objects(&font, &program, &base_font, mapping);
+        }
+    }
+
+    fn write_cid_font_objects(
+        &mut self,
+        font: &CidFont,
+        program: &[u8],
+        base_font: &[u8],
+        mapping: &BTreeMap<u16, String>,
+    ) {
+        // From the **original** program, for `write_font_objects`'s reason:
+        // subsetting never moves a glyph identifier, and reading the metrics
+        // from the face rather than from the cut-down copy says plainly that
+        // the widths do not depend on which glyphs survived.
+        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(&font.program) else {
+            return;
+        };
+        let units = f64::from(sfnt.units_per_em.max(1));
+
+        let mut file_dict = Dict::new();
+        file_dict.insert(
+            self.names.intern(b"Length1"),
+            Object::Int(program.len() as i64),
+        );
+        self.objects.insert_stream(
+            font.file_ref.num,
+            StreamData {
+                dict: file_dict,
+                data: program.to_vec(),
+            },
+        );
+
+        let mut descriptor = Dict::new();
+        descriptor.insert(
+            Name::TYPE,
+            Object::Name(self.names.intern(b"FontDescriptor")),
+        );
+        descriptor.insert(
+            self.names.intern(b"FontName"),
+            Object::Name(self.names.intern(base_font)),
+        );
+        // 9.8.2 Table 123 bit 3: symbolic. A composite font under
+        // `/Identity-H` has no `/Encoding` a code could be looked up in, so it
+        // is symbolic by construction — and bit 6, which the simple-font path
+        // sets, is the flag that says the opposite and requires an encoding.
+        descriptor.insert(self.names.intern(b"Flags"), Object::Int(4));
+        descriptor.insert(
+            self.names.intern(b"FontBBox"),
+            Object::Array(vec![
+                Object::Int(-500),
+                Object::Int(-300),
+                Object::Int(1500),
+                Object::Int(1000),
+            ]),
+        );
+        descriptor.insert(self.names.intern(b"ItalicAngle"), Object::Int(0));
+        descriptor.insert(self.names.intern(b"Ascent"), Object::Int(750));
+        descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
+        descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
+        descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
+        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(font.file_ref));
+        self.objects
+            .insert(font.descriptor_ref.num, Object::Dict(descriptor));
+
+        // 9.7.3: the descendant's registry, ordering and supplement. Identity
+        // ordering is what `/Identity-H` means on the other side of the pair,
+        // and a descendant claiming some other ordering while the encoding
+        // says Identity is a font whose two halves disagree.
+        let mut system = Dict::new();
+        system.insert(
+            self.names.intern(b"Registry"),
+            Object::String(PdfString::literal(b"Adobe".to_vec())),
+        );
+        system.insert(
+            self.names.intern(b"Ordering"),
+            Object::String(PdfString::literal(b"Identity".to_vec())),
+        );
+        system.insert(self.names.intern(b"Supplement"), Object::Int(0));
+
+        let mut descendant = Dict::new();
+        descendant.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
+        descendant.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"CIDFontType2")),
+        );
+        descendant.insert(
+            self.names.intern(b"BaseFont"),
+            Object::Name(self.names.intern(base_font)),
+        );
+        descendant.insert(self.names.intern(b"CIDSystemInfo"), Object::Dict(system));
+        descendant.insert(
+            self.names.intern(b"FontDescriptor"),
+            Object::Ref(font.descriptor_ref),
+        );
+        // 9.7.4.3: the width every CID not in `/W` takes. Written explicitly
+        // so the absence of a `/W` entry has a stated answer rather than one a
+        // reader has to know the default of.
+        descendant.insert(self.names.intern(b"DW"), Object::Int(1000));
+        if let Some(widths) = width_array(&sfnt, units, mapping.keys().copied()) {
+            descendant.insert(self.names.intern(b"W"), Object::Array(widths));
+        }
+        // 9.7.4.2: `/Identity` makes the CID the glyph index. This is the
+        // entry that makes an index addressable, and the reason `subset` may
+        // be applied at all — it preserves glyph ids, so the map stays true.
+        descendant.insert(
+            self.names.intern(b"CIDToGIDMap"),
+            Object::Name(self.names.intern(b"Identity")),
+        );
+        self.objects
+            .insert(font.descendant_ref.num, Object::Dict(descendant));
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"Type0")),
+        );
+        dict.insert(
+            self.names.intern(b"BaseFont"),
+            Object::Name(self.names.intern(base_font)),
+        );
+        dict.insert(
+            self.names.intern(b"Encoding"),
+            Object::Name(self.names.intern(b"Identity-H")),
+        );
+        dict.insert(
+            self.names.intern(b"DescendantFonts"),
+            Object::Array(vec![Object::Ref(font.descendant_ref)]),
+        );
+        // No `/ToUnicode` at all when no glyph stood for anything: 9.10.3's
+        // CMap grammar has no zero-entry `beginbfchar` section, so the only
+        // alternatives are a stream that says something and no stream.
+        if let Some(cmap) = to_unicode_cmap(mapping) {
+            self.objects.insert_stream(
+                font.to_unicode_ref.num,
+                StreamData {
+                    dict: Dict::new(),
+                    data: cmap,
+                },
+            );
+            dict.insert(
+                self.names.intern(b"ToUnicode"),
+                Object::Ref(font.to_unicode_ref),
+            );
+        }
+        self.objects.insert(font.font_ref.num, Object::Dict(dict));
+    }
+
     /// Registers an image under a resource name.
     ///
     /// Returns false when the data does not describe an image of the size it
@@ -794,7 +2153,7 @@ impl DocumentBuilder {
         };
 
         self.objects.insert_stream(r.num, StreamData { dict, data });
-        self.images.push((resource.to_vec(), r));
+        self.resources.images.push((resource.to_vec(), r));
         true
     }
 
@@ -815,7 +2174,7 @@ impl DocumentBuilder {
     /// any page named it is an unreferenced stream, which is the caller's
     /// mistake to avoid rather than this method's to prevent.
     pub fn clear_image_resources(&mut self) {
-        self.images.clear();
+        self.resources.images.clear();
     }
 
     /// Fills an image dictionary for bytes that are already encoded.
@@ -1011,9 +2370,10 @@ impl DocumentBuilder {
             width,
             height,
             content: Vec::new(),
-            fonts: self.fonts.clone(),
-            images: self.images.clone(),
+            resources: self.resources.clone(),
+            composite: self.composite.clone(),
             used: BTreeMap::new(),
+            drawn: BTreeMap::new(),
             crop_box: None,
             bleed_box: None,
         };
@@ -1046,14 +2406,29 @@ impl DocumentBuilder {
         // Every character every page drew, per font resource. Gathered before
         // anything is written because the embedded programs are subset to it.
         let mut used: BTreeMap<Vec<u8>, BTreeSet<char>> = BTreeMap::new();
+        let mut drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>> = BTreeMap::new();
         for page in &pages {
             for (resource, characters) in &page.used {
                 used.entry(resource.clone())
                     .or_default()
                     .extend(characters.iter().copied());
             }
+            // The first non-empty text a glyph is drawn with stands, across
+            // the document as well as within a page — `/ToUnicode` is one
+            // function from code to text and a glyph drawn twice with two
+            // meanings has to resolve to one of them.
+            for (resource, glyphs) in &page.drawn {
+                let into = drawn.entry(resource.clone()).or_default();
+                for (id, text) in glyphs {
+                    let slot = into.entry(*id).or_default();
+                    if slot.is_empty() && !text.is_empty() {
+                        slot.clone_from(text);
+                    }
+                }
+            }
         }
         self.write_embedded_fonts(&used);
+        self.write_cid_fonts(&drawn);
 
         for (page, reference) in pages.iter().zip(page_refs.iter()) {
             let content_ref = self.allocate();
@@ -1065,24 +2440,7 @@ impl DocumentBuilder {
                 },
             );
 
-            let mut font_dict = Dict::new();
-            for (resource, font_ref) in &page.fonts {
-                let name = self.names.intern(resource);
-                font_dict.insert(name, Object::Ref(*font_ref));
-            }
-            let mut xobjects = Dict::new();
-            for (resource, image_ref) in &page.images {
-                let name = self.names.intern(resource);
-                xobjects.insert(name, Object::Ref(*image_ref));
-            }
-
-            let mut resources = Dict::new();
-            if !font_dict.is_empty() {
-                resources.insert(self.names.intern(b"Font"), Object::Dict(font_dict));
-            }
-            if !xobjects.is_empty() {
-                resources.insert(self.names.intern(b"XObject"), Object::Dict(xobjects));
-            }
+            let resources = page.resources.dict(&self.names);
 
             let mut dict = Dict::new();
             dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Page")));
@@ -1904,5 +3262,1845 @@ mod image_tests {
                 data: &[],
             }
         ));
+    }
+}
+
+/// The writer's missing half: `/ExtGState`, groups, shadings, patterns and a
+/// composite font (gap 30 milestone 5).
+///
+/// Everything here is asserted against **the dictionary in the file**, read
+/// back through this crate's own parser, rather than against the bytes the
+/// builder emitted. The renderer's half of the criterion — write it, open it,
+/// draw it, and compare against the same picture built by hand — is in
+/// `crates/tinker-pdf/tests/writer_graphics.rs`, because it needs a renderer
+/// and this crate has none.
+///
+/// # Why so many small tests rather than a few large ones
+///
+/// Almost every entry here has an independent twin that a single test cannot
+/// tell apart. `/ca` and `/CA` are different parameters; `/I` and `/K` are
+/// different flags over one group; `/W` and `/ToUnicode` are different
+/// statements about one glyph; a stitching function can be wrong in the stitch
+/// or in a sub-function. A suite with one test per *feature* passes with half
+/// of each feature deleted, which is the shape this gap's milestones 2, 3 and 4
+/// each found a survivor in.
+#[cfg(test)]
+mod graphics_tests {
+    use super::*;
+    use crate::CosDocument;
+
+    /// A TrueType program with real metrics and a `cmap` that disagrees with
+    /// the glyph a test draws.
+    ///
+    /// Four glyphs. Glyph 0 and glyph 1 are **empty**; glyphs 2 and 3 are
+    /// filled squares. The `cmap` maps `A` to glyph **1**, so a build that
+    /// addressed glyphs through characters would draw nothing where drawing
+    /// glyph 2 draws a square — which is what
+    /// `crates/tinker-pdf/tests/writer_graphics.rs` measures and what a
+    /// composite font exists for.
+    ///
+    /// Advances are 600, 700, 800 and 900 **font units**, and the units per em
+    /// is a parameter, so `/W` is only right if the scaling into PDF's
+    /// thousandths happened.
+    fn metric_font(units_per_em: u16, with_metrics: bool) -> Vec<u8> {
+        let mut square = Vec::new();
+        square.extend_from_slice(&1i16.to_be_bytes()); // one contour
+        for value in [0i16, 0, 700, 700] {
+            square.extend_from_slice(&value.to_be_bytes()); // bounding box
+        }
+        square.extend_from_slice(&3u16.to_be_bytes()); // last point index
+        square.extend_from_slice(&0u16.to_be_bytes()); // no instructions
+        square.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]); // on curve, i16 deltas
+        for dx in [0i16, 700, 0, -700] {
+            square.extend_from_slice(&dx.to_be_bytes());
+        }
+        for dy in [0i16, 0, 700, 0] {
+            square.extend_from_slice(&dy.to_be_bytes());
+        }
+
+        let size = square.len() as u32;
+        let mut glyf = Vec::new();
+        glyf.extend_from_slice(&square);
+        glyf.extend_from_slice(&square);
+        // Glyphs 0 and 1 are empty, so both squares sit at the front and the
+        // offsets below point the last two glyphs at them.
+        let loca_offsets: [u32; 5] = [0, 0, 0, size, size * 2];
+        let mut loca = Vec::new();
+        for offset in loca_offsets {
+            loca.extend_from_slice(&offset.to_be_bytes());
+        }
+
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&units_per_em.to_be_bytes());
+        head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca
+
+        let mut maxp = vec![0u8; 32];
+        maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&4u16.to_be_bytes());
+
+        let mut hhea = vec![0u8; 36];
+        hhea[34..36].copy_from_slice(&4u16.to_be_bytes());
+
+        let mut hmtx = Vec::new();
+        for advance in [600u16, 700, 800, 900] {
+            hmtx.extend_from_slice(&advance.to_be_bytes());
+            hmtx.extend_from_slice(&0i16.to_be_bytes());
+        }
+
+        // cmap format 4: `A` alone, mapping to glyph 1, plus the required
+        // terminating segment at 0xFFFF.
+        let first = u16::from(b'A');
+        let mut sub = Vec::new();
+        for value in [4u16, 32, 0, 4, 4, 1, 0] {
+            sub.extend_from_slice(&value.to_be_bytes());
+        }
+        for value in [
+            first,
+            0xFFFF,
+            0,
+            first,
+            0xFFFF,
+            1u16.wrapping_sub(first),
+            1,
+            0,
+            0,
+        ] {
+            sub.extend_from_slice(&value.to_be_bytes());
+        }
+        let mut cmap = Vec::new();
+        for value in [0u16, 1, 3, 1] {
+            cmap.extend_from_slice(&value.to_be_bytes());
+        }
+        cmap.extend_from_slice(&12u32.to_be_bytes());
+        cmap.extend_from_slice(&sub);
+
+        let mut tables: Vec<(&[u8; 4], &[u8])> = vec![(b"cmap", &cmap), (b"glyf", &glyf)];
+        tables.push((b"head", &head));
+        if with_metrics {
+            tables.push((b"hhea", &hhea));
+            tables.push((b"hmtx", &hmtx));
+        }
+        tables.push((b"loca", &loca));
+        tables.push((b"maxp", &maxp));
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, data) in tables {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// The resource `name` of kind `kind` on the document's first page.
+    fn resource(doc: &CosDocument, kind: &[u8], name: &[u8]) -> Dict {
+        let pages = crate::pages::collect(doc);
+        let page = pages.first().expect("a page");
+        let resources = page.resources.as_ref().expect("the page has resources");
+        let table = doc.resolve_key(resources, doc.intern(kind));
+        let table = table
+            .as_dict()
+            .unwrap_or_else(|| panic!("no /{} sub-dictionary", String::from_utf8_lossy(kind)));
+        let value = doc.resolve_key(table, doc.intern(name));
+        value
+            .as_dict()
+            .cloned()
+            .unwrap_or_else(|| panic!("no {} named", String::from_utf8_lossy(name)))
+    }
+
+    /// The name a key holds, as bytes.
+    fn name_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<Vec<u8>> {
+        doc.resolve_key(dict, doc.intern(key))
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .map(|bytes| bytes.to_vec())
+    }
+
+    /// The numbers an array key holds, flattened one level.
+    fn numbers(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<f64> {
+        doc.resolve_key(dict, doc.intern(key))
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| doc.resolve(v).as_number())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    /// The content stream of the first page, as text.
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    // ---- /ExtGState ------------------------------------------------------
+
+    /// `/ca` and `/CA` are **two** parameters, and each is written only when it
+    /// was asked for.
+    ///
+    /// The failure this guards is not "the alpha is missing" — it is a writer
+    /// that has one alpha and spells it into both keys, which draws every
+    /// document anybody would write correctly and is wrong the moment a caller
+    /// strokes and fills at different opacities. Both directions are asserted,
+    /// because a test that only set the fill alpha would pass on a build that
+    /// wrote `/ca` from `stroke_alpha`.
+    #[test]
+    fn fill_alpha_and_stroke_alpha_are_two_entries_and_not_one() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_ext_gstate(
+            b"GFill",
+            &ExtGState {
+                fill_alpha: Some(0.25),
+                ..ExtGState::default()
+            }
+        ));
+        assert!(builder.add_ext_gstate(
+            b"GStroke",
+            &ExtGState {
+                stroke_alpha: Some(0.75),
+                ..ExtGState::default()
+            }
+        ));
+        assert!(builder.add_ext_gstate(
+            b"GBoth",
+            &ExtGState {
+                fill_alpha: Some(0.1),
+                stroke_alpha: Some(0.9),
+                ..ExtGState::default()
+            }
+        ));
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+
+        let fill = resource(&doc, b"ExtGState", b"GFill");
+        assert_eq!(
+            doc.resolve_key(&fill, doc.intern(b"ca")).as_number(),
+            Some(0.25)
+        );
+        assert!(
+            !fill.contains_key(doc.intern(b"CA")),
+            "a state that said nothing about the stroke alpha says nothing"
+        );
+
+        let stroke = resource(&doc, b"ExtGState", b"GStroke");
+        assert_eq!(
+            doc.resolve_key(&stroke, doc.intern(b"CA")).as_number(),
+            Some(0.75)
+        );
+        assert!(!stroke.contains_key(doc.intern(b"ca")));
+
+        let both = resource(&doc, b"ExtGState", b"GBoth");
+        assert_eq!(
+            (
+                doc.resolve_key(&both, doc.intern(b"ca")).as_number(),
+                doc.resolve_key(&both, doc.intern(b"CA")).as_number()
+            ),
+            (Some(0.1), Some(0.9)),
+            "and neither is read from the other"
+        );
+
+        assert_eq!(
+            name_of(&doc, &both, b"Type").as_deref(),
+            Some(&b"ExtGState"[..])
+        );
+    }
+
+    /// Every one of 11.3.5's sixteen modes reaches `/BM` under its own name.
+    #[test]
+    fn every_blend_mode_reaches_the_state_under_its_own_name() {
+        let modes = [
+            (BlendMode::Normal, &b"Normal"[..]),
+            (BlendMode::Multiply, b"Multiply"),
+            (BlendMode::Screen, b"Screen"),
+            (BlendMode::Overlay, b"Overlay"),
+            (BlendMode::Darken, b"Darken"),
+            (BlendMode::Lighten, b"Lighten"),
+            (BlendMode::ColorDodge, b"ColorDodge"),
+            (BlendMode::ColorBurn, b"ColorBurn"),
+            (BlendMode::HardLight, b"HardLight"),
+            (BlendMode::SoftLight, b"SoftLight"),
+            (BlendMode::Difference, b"Difference"),
+            (BlendMode::Exclusion, b"Exclusion"),
+            (BlendMode::Hue, b"Hue"),
+            (BlendMode::Saturation, b"Saturation"),
+            (BlendMode::Color, b"Color"),
+            (BlendMode::Luminosity, b"Luminosity"),
+        ];
+
+        let mut builder = DocumentBuilder::new();
+        for (index, (mode, _)) in modes.iter().enumerate() {
+            let resource = format!("BM{index}").into_bytes();
+            assert!(builder.add_ext_gstate(
+                &resource,
+                &ExtGState {
+                    blend_mode: Some(*mode),
+                    ..ExtGState::default()
+                }
+            ));
+        }
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+
+        for (index, (_, spelling)) in modes.iter().enumerate() {
+            let name = format!("BM{index}").into_bytes();
+            let state = resource(&doc, b"ExtGState", &name);
+            assert_eq!(
+                name_of(&doc, &state, b"BM").as_deref(),
+                Some(*spelling),
+                "mode {index}"
+            );
+        }
+    }
+
+    /// A soft mask names a transparency group and carries its kind and its
+    /// backdrop; `/None` is a **different** statement from saying nothing.
+    ///
+    /// 11.6.5.2: an absent `/SMask` inherits whatever mask is in force and
+    /// `/None` turns it off. A writer that treated them as one could not stop
+    /// a mask at all.
+    #[test]
+    fn a_soft_mask_is_a_group_a_kind_and_a_backdrop_and_none_is_not_absence() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_form(
+            b"Fm0",
+            &FormXObject {
+                bbox: [0.0, 0.0, 10.0, 10.0],
+                matrix: None,
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Gray,
+                    isolated: true,
+                    knockout: false,
+                }),
+                content: b"1 g 0 0 10 10 re f",
+            }
+        ));
+        assert!(builder.add_ext_gstate(
+            b"GMask",
+            &ExtGState {
+                soft_mask: Some(StateMask::Group {
+                    kind: MaskKind::Luminosity,
+                    form: b"Fm0",
+                    backdrop: Some(&[0.0]),
+                }),
+                ..ExtGState::default()
+            }
+        ));
+        assert!(builder.add_ext_gstate(
+            b"GAlpha",
+            &ExtGState {
+                soft_mask: Some(StateMask::Group {
+                    kind: MaskKind::Alpha,
+                    form: b"Fm0",
+                    backdrop: None,
+                }),
+                ..ExtGState::default()
+            }
+        ));
+        assert!(builder.add_ext_gstate(
+            b"GOff",
+            &ExtGState {
+                soft_mask: Some(StateMask::None),
+                ..ExtGState::default()
+            }
+        ));
+        assert!(builder.add_ext_gstate(
+            b"GSilent",
+            &ExtGState {
+                fill_alpha: Some(1.0),
+                ..ExtGState::default()
+            }
+        ));
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+
+        let mask = doc.resolve_key(
+            &resource(&doc, b"ExtGState", b"GMask"),
+            doc.intern(b"SMask"),
+        );
+        let mask = mask.as_dict().expect("a mask dictionary");
+        assert_eq!(name_of(&doc, mask, b"Type").as_deref(), Some(&b"Mask"[..]));
+        assert_eq!(
+            name_of(&doc, mask, b"S").as_deref(),
+            Some(&b"Luminosity"[..])
+        );
+        assert_eq!(numbers(&doc, mask, b"BC"), vec![0.0]);
+        let group = doc.resolve_key(mask, doc.intern(b"G"));
+        let group = group.as_dict().expect("the mask names a form");
+        assert_eq!(
+            name_of(&doc, group, b"Subtype").as_deref(),
+            Some(&b"Form"[..]),
+            "and it is the form, not a copy of the state"
+        );
+
+        let alpha = doc.resolve_key(
+            &resource(&doc, b"ExtGState", b"GAlpha"),
+            doc.intern(b"SMask"),
+        );
+        let alpha = alpha.as_dict().expect("a mask dictionary");
+        assert_eq!(name_of(&doc, alpha, b"S").as_deref(), Some(&b"Alpha"[..]));
+        assert!(
+            !alpha.contains_key(doc.intern(b"BC")),
+            "a mask given no backdrop states none"
+        );
+
+        let off = resource(&doc, b"ExtGState", b"GOff");
+        assert_eq!(name_of(&doc, &off, b"SMask").as_deref(), Some(&b"None"[..]));
+
+        let silent = resource(&doc, b"ExtGState", b"GSilent");
+        assert!(
+            !silent.contains_key(doc.intern(b"SMask")),
+            "and a state that said nothing about the mask carries no key at all"
+        );
+    }
+
+    /// Every way a graphics state can fail to be one, refused rather than
+    /// written out.
+    ///
+    /// The control comes first for `a_compressed_image_that_does_not_describe
+    /// _an_image_is_refused`'s reason: an `add_ext_gstate` that always returned
+    /// false would satisfy every other line here.
+    #[test]
+    fn a_graphics_state_that_is_not_one_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_form(
+            b"Plain",
+            &FormXObject {
+                bbox: [0.0, 0.0, 10.0, 10.0],
+                matrix: None,
+                group: None,
+                content: b"",
+            }
+        ));
+        assert!(builder.add_form(
+            b"Group",
+            &FormXObject {
+                bbox: [0.0, 0.0, 10.0, 10.0],
+                matrix: None,
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Rgb,
+                    isolated: false,
+                    knockout: false,
+                }),
+                content: b"",
+            }
+        ));
+        assert!(
+            builder.add_ext_gstate(
+                b"Ok",
+                &ExtGState {
+                    fill_alpha: Some(0.0),
+                    stroke_alpha: Some(1.0),
+                    blend_mode: Some(BlendMode::Multiply),
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Luminosity,
+                        form: b"Group",
+                        backdrop: Some(&[0.0, 0.0, 0.0]),
+                    }),
+                }
+            ),
+            "the control is accepted"
+        );
+
+        let cases: Vec<(&str, ExtGState<'_>)> = vec![
+            (
+                "a fill alpha above one",
+                ExtGState {
+                    fill_alpha: Some(1.5),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                "a fill alpha below zero",
+                ExtGState {
+                    fill_alpha: Some(-0.1),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                "a fill alpha that is not a number",
+                ExtGState {
+                    fill_alpha: Some(f64::NAN),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                "a stroke alpha above one",
+                ExtGState {
+                    stroke_alpha: Some(2.0),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                // 11.6.5.2 requires `/G` to be a transparency group. A mask
+                // over a plain form is one a reader cannot evaluate, and the
+                // page it fails to mask looks like a page nobody masked.
+                "a mask over a form that is not a group",
+                ExtGState {
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Luminosity,
+                        form: b"Plain",
+                        backdrop: None,
+                    }),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                "a mask over a form nobody registered",
+                ExtGState {
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Alpha,
+                        form: b"Missing",
+                        backdrop: None,
+                    }),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                "a backdrop with no components",
+                ExtGState {
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Luminosity,
+                        form: b"Group",
+                        backdrop: Some(&[]),
+                    }),
+                    ..ExtGState::default()
+                },
+            ),
+            (
+                "a backdrop that is not numbers",
+                ExtGState {
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Luminosity,
+                        form: b"Group",
+                        backdrop: Some(&[f64::INFINITY]),
+                    }),
+                    ..ExtGState::default()
+                },
+            ),
+        ];
+
+        for (what, state) in cases {
+            assert!(
+                !builder.add_ext_gstate(b"GS", &state),
+                "{what} was accepted"
+            );
+        }
+
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+        let states = crate::pages::collect(&doc);
+        let resources = states[0].resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"ExtGState"));
+        assert_eq!(
+            table.as_dict().map(Dict::len),
+            Some(1),
+            "one accepted state, and nothing a refusal left behind"
+        );
+    }
+
+    // ---- transparency groups --------------------------------------------
+
+    /// `/I` and `/K` are independent, and each is written only when it is true.
+    ///
+    /// 11.6.6 defaults both to false, so an explicit `/I false` says exactly
+    /// what its absence says and would be a second spelling of one group. All
+    /// four combinations are checked because isolation and knockout are
+    /// different mechanisms — one decides the group's backdrop, the other
+    /// decides each element's — and a writer that derived either from the
+    /// other would pass a test that only ever set them together.
+    #[test]
+    fn isolated_and_knockout_are_independent_flags() {
+        let mut builder = DocumentBuilder::new();
+        for (index, (isolated, knockout)) in
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .enumerate()
+        {
+            let name = format!("Fm{index}").into_bytes();
+            assert!(builder.add_form(
+                &name,
+                &FormXObject {
+                    bbox: [0.0, 0.0, 10.0, 10.0],
+                    matrix: None,
+                    group: Some(TransparencyGroup {
+                        color_space: DeviceSpace::Rgb,
+                        isolated,
+                        knockout,
+                    }),
+                    content: b"",
+                }
+            ));
+        }
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+
+        for (index, (isolated, knockout)) in
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .enumerate()
+        {
+            let name = format!("Fm{index}").into_bytes();
+            let form = resource(&doc, b"XObject", &name);
+            let group = doc.resolve_key(&form, doc.intern(b"Group"));
+            let group = group.as_dict().expect("a group dictionary");
+            assert_eq!(
+                name_of(&doc, group, b"S").as_deref(),
+                Some(&b"Transparency"[..])
+            );
+            assert_eq!(
+                name_of(&doc, group, b"CS").as_deref(),
+                Some(&b"DeviceRGB"[..])
+            );
+            assert_eq!(
+                doc.resolve_key(group, doc.intern(b"I")).as_bool(),
+                isolated.then_some(true),
+                "isolated on Fm{index}"
+            );
+            assert_eq!(
+                doc.resolve_key(group, doc.intern(b"K")).as_bool(),
+                knockout.then_some(true),
+                "knockout on Fm{index}"
+            );
+        }
+    }
+
+    /// A form carries its box, its matrix, its content and the resources
+    /// registered before it — and never itself.
+    #[test]
+    fn a_form_carries_its_geometry_its_content_and_the_resources_before_it() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        assert!(builder.add_form(
+            b"Inner",
+            &FormXObject {
+                bbox: [0.0, 0.0, 4.0, 4.0],
+                matrix: None,
+                group: None,
+                content: b"0 g 0 0 4 4 re f",
+            }
+        ));
+        assert!(builder.add_form(
+            b"Outer",
+            &FormXObject {
+                bbox: [1.0, 2.0, 9.0, 8.0],
+                matrix: Some([2.0, 0.0, 0.0, 2.0, 5.0, 6.0]),
+                group: None,
+                content: b"/Inner Do",
+            }
+        ));
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(page.form(b"Outer"));
+        });
+        let doc = opened(builder);
+
+        let outer = resource(&doc, b"XObject", b"Outer");
+        assert_eq!(
+            name_of(&doc, &outer, b"Subtype").as_deref(),
+            Some(&b"Form"[..])
+        );
+        assert_eq!(numbers(&doc, &outer, b"BBox"), vec![1.0, 2.0, 9.0, 8.0]);
+        assert_eq!(
+            numbers(&doc, &outer, b"Matrix"),
+            vec![2.0, 0.0, 0.0, 2.0, 5.0, 6.0]
+        );
+        assert!(
+            !outer.contains_key(doc.intern(b"Group")),
+            "a form given no group is not a transparency group"
+        );
+
+        let resources = doc.resolve_key(&outer, doc.intern(b"Resources"));
+        let resources = resources.as_dict().expect("the form has resources");
+        let xobjects = doc.resolve_key(resources, doc.intern(b"XObject"));
+        let xobjects = xobjects.as_dict().expect("and an /XObject table");
+        assert!(
+            xobjects.contains_key(doc.intern(b"Inner")),
+            "it can name the form registered before it"
+        );
+        assert!(
+            !xobjects.contains_key(doc.intern(b"Outer")),
+            "and never itself, which is what makes a cycle unreachable"
+        );
+        let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
+        assert!(
+            fonts
+                .as_dict()
+                .is_some_and(|d| d.contains_key(doc.intern(b"F0"))),
+            "and the fonts registered before it"
+        );
+
+        assert!(content(&doc).contains("/Outer Do"));
+    }
+
+    /// A form that cannot be one is refused, and nothing it would have written
+    /// reaches the file.
+    #[test]
+    fn a_form_that_cannot_be_one_is_refused_and_leaves_nothing_behind() {
+        let mut builder = DocumentBuilder::new();
+        for (what, form) in [
+            (
+                "a box with no width",
+                FormXObject {
+                    bbox: [4.0, 0.0, 4.0, 4.0],
+                    matrix: None,
+                    group: None,
+                    content: b"the content of a form with no width",
+                },
+            ),
+            (
+                "a box with no height",
+                FormXObject {
+                    bbox: [0.0, 4.0, 4.0, 4.0],
+                    matrix: None,
+                    group: None,
+                    content: b"the content of a form with no height",
+                },
+            ),
+            (
+                "a box back to front",
+                FormXObject {
+                    bbox: [9.0, 9.0, 1.0, 1.0],
+                    matrix: None,
+                    group: None,
+                    content: b"the content of a form written backwards",
+                },
+            ),
+            (
+                "a box that is not numbers",
+                FormXObject {
+                    bbox: [0.0, 0.0, f64::NAN, 4.0],
+                    matrix: None,
+                    group: None,
+                    content: b"the content of a form with no box",
+                },
+            ),
+            (
+                "a matrix that is not numbers",
+                FormXObject {
+                    bbox: [0.0, 0.0, 4.0, 4.0],
+                    matrix: Some([1.0, 0.0, 0.0, 1.0, f64::INFINITY, 0.0]),
+                    group: None,
+                    content: b"the content of a form with no matrix",
+                },
+            ),
+        ] {
+            assert!(!builder.add_form(b"Fm", &form), "{what} was accepted");
+        }
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(!page.form(b"Fm"), "and no page can name what was refused");
+        });
+
+        let bytes = builder.finish();
+        assert!(
+            !bytes.windows(11).any(|w| w == b"the content"),
+            "a refused form wrote a stream anyway"
+        );
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("/Subtype /Form"),
+            "and no form XObject exists at all"
+        );
+    }
+
+    // ---- shadings and functions -----------------------------------------
+
+    /// A type 2 shading and a type 3 shading are different objects with
+    /// different geometry, and each carries the one it was given.
+    ///
+    /// Four coordinates against six is the whole difference in the dictionary,
+    /// and a writer that shared a code path would have to drop the radii —
+    /// producing an axial gradient where a radial one was asked for, which is
+    /// a picture rather than an error.
+    #[test]
+    fn an_axial_shading_is_type_two_and_a_radial_is_type_three() {
+        let ramp = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_shading(
+            b"Sh0",
+            &Shading::Axial {
+                color_space: DeviceSpace::Rgb,
+                coords: [0.0, 0.0, 60.0, 0.0],
+                function: ramp.clone(),
+                extend: (true, false),
+            }
+        ));
+        assert!(builder.add_shading(
+            b"Sh1",
+            &Shading::Radial {
+                color_space: DeviceSpace::Rgb,
+                coords: [30.0, 30.0, 0.0, 30.0, 30.0, 25.0],
+                function: ramp,
+                extend: (false, true),
+            }
+        ));
+        builder.add_page(60.0, 60.0, |page| {
+            assert!(page.shading(b"Sh0"));
+        });
+        let doc = opened(builder);
+
+        let axial = resource(&doc, b"Shading", b"Sh0");
+        assert_eq!(
+            doc.resolve_key(&axial, doc.intern(b"ShadingType")).as_int(),
+            Some(2)
+        );
+        assert_eq!(numbers(&doc, &axial, b"Coords"), vec![0.0, 0.0, 60.0, 0.0]);
+        assert_eq!(
+            name_of(&doc, &axial, b"ColorSpace").as_deref(),
+            Some(&b"DeviceRGB"[..])
+        );
+
+        let radial = resource(&doc, b"Shading", b"Sh1");
+        assert_eq!(
+            doc.resolve_key(&radial, doc.intern(b"ShadingType"))
+                .as_int(),
+            Some(3)
+        );
+        assert_eq!(
+            numbers(&doc, &radial, b"Coords"),
+            vec![30.0, 30.0, 0.0, 30.0, 30.0, 25.0],
+            "both circles, radii included"
+        );
+
+        // `/Extend` is two independent booleans and the pair is asymmetric in
+        // both fixtures, so a writer that wrote one twice is caught.
+        let extend = |dict: &Dict| -> Vec<bool> {
+            doc.resolve_key(dict, doc.intern(b"Extend"))
+                .as_array()
+                .map(|values| values.iter().filter_map(Object::as_bool).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(extend(&axial), vec![true, false]);
+        assert_eq!(extend(&radial), vec![false, true]);
+
+        assert!(content(&doc).contains("/Sh0 sh"));
+    }
+
+    /// A type 3 function is a stitch **over** type 2 functions, and the stitch
+    /// and the sub-functions are two independent things to get right.
+    #[test]
+    fn a_stitching_function_carries_its_stitch_and_its_sub_functions() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_shading(
+            b"Sh0",
+            &Shading::Axial {
+                color_space: DeviceSpace::Rgb,
+                coords: [0.0, 0.0, 60.0, 0.0],
+                function: Function::Stitching {
+                    domain: [0.0, 1.0],
+                    functions: vec![
+                        Function::Exponential {
+                            domain: [0.0, 1.0],
+                            c0: vec![1.0, 0.0, 0.0],
+                            c1: vec![0.0, 1.0, 0.0],
+                            n: 1.0,
+                        },
+                        Function::Exponential {
+                            domain: [0.0, 1.0],
+                            c0: vec![0.0, 1.0, 0.0],
+                            c1: vec![0.0, 0.0, 1.0],
+                            n: 2.0,
+                        },
+                    ],
+                    bounds: vec![0.4],
+                    encode: vec![[0.0, 1.0], [0.0, 1.0]],
+                },
+                extend: (false, false),
+            }
+        ));
+        builder.add_page(60.0, 60.0, |_| {});
+        let doc = opened(builder);
+
+        let shading = resource(&doc, b"Shading", b"Sh0");
+        let function = doc.resolve_key(&shading, doc.intern(b"Function"));
+        let function = function.as_dict().expect("a function");
+        assert_eq!(
+            doc.resolve_key(function, doc.intern(b"FunctionType"))
+                .as_int(),
+            Some(3)
+        );
+        // The stitch: where each sub-function starts, and how its own domain is
+        // reached once it does.
+        assert_eq!(numbers(&doc, function, b"Domain"), vec![0.0, 1.0]);
+        assert_eq!(numbers(&doc, function, b"Bounds"), vec![0.4]);
+        assert_eq!(numbers(&doc, function, b"Encode"), vec![0.0, 1.0, 0.0, 1.0]);
+
+        // The sub-functions: what colour comes out once it is reached. Read
+        // from the array rather than assumed, because a stitch that named the
+        // same sub-function twice would have a correct `/Bounds`.
+        let subs = doc.resolve_key(function, doc.intern(b"Functions"));
+        let subs = subs.as_array().expect("an array of functions").to_vec();
+        assert_eq!(subs.len(), 2);
+        let first = doc.resolve(&subs[0]);
+        let first = first.as_dict().expect("a sub-function");
+        let second = doc.resolve(&subs[1]);
+        let second = second.as_dict().expect("a sub-function");
+        for sub in [first, second] {
+            assert_eq!(
+                doc.resolve_key(sub, doc.intern(b"FunctionType")).as_int(),
+                Some(2)
+            );
+        }
+        assert_eq!(numbers(&doc, first, b"C0"), vec![1.0, 0.0, 0.0]);
+        assert_eq!(numbers(&doc, first, b"C1"), vec![0.0, 1.0, 0.0]);
+        assert_eq!(
+            doc.resolve_key(first, doc.intern(b"N")).as_number(),
+            Some(1.0)
+        );
+        assert_eq!(numbers(&doc, second, b"C0"), vec![0.0, 1.0, 0.0]);
+        assert_eq!(numbers(&doc, second, b"C1"), vec![0.0, 0.0, 1.0]);
+        assert_eq!(
+            doc.resolve_key(second, doc.intern(b"N")).as_number(),
+            Some(2.0),
+            "each sub-function keeps its own exponent"
+        );
+    }
+
+    /// Every way a shading or its function can fail to describe a gradient.
+    #[test]
+    fn a_shading_that_does_not_describe_a_gradient_is_refused() {
+        let ramp = || Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(
+            builder.add_shading(
+                b"Ok",
+                &Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: ramp(),
+                    extend: (false, false),
+                }
+            ),
+            "the control is accepted"
+        );
+
+        let stitch = |bounds: Vec<f64>, encode: Vec<[f64; 2]>, count: usize| Function::Stitching {
+            domain: [0.0, 1.0],
+            functions: (0..count).map(|_| ramp()).collect(),
+            bounds,
+            encode,
+        };
+        let cases: Vec<(&str, Shading)> = vec![
+            (
+                "an axis of no length",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [5.0, 5.0, 5.0, 5.0],
+                    function: ramp(),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "an axis that is not numbers",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, f64::NAN, 0.0],
+                    function: ramp(),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a negative radius",
+                Shading::Radial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, -1.0, 0.0, 0.0, 5.0],
+                    function: ramp(),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "two circles of no radius",
+                Shading::Radial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 0.0, 9.0, 9.0, 0.0],
+                    function: ramp(),
+                    extend: (false, false),
+                },
+            ),
+            (
+                // 7.10.1: one output per component. Two numbers under
+                // `/DeviceRGB` leaves a reader to invent the third.
+                "a function that produces too few components",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: Function::Exponential {
+                        domain: [0.0, 1.0],
+                        c0: vec![0.0, 0.0],
+                        c1: vec![1.0, 1.0],
+                        n: 1.0,
+                    },
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a function whose ends disagree about how many components there are",
+                Shading::Axial {
+                    color_space: DeviceSpace::Gray,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: Function::Exponential {
+                        domain: [0.0, 1.0],
+                        c0: vec![0.0],
+                        c1: vec![1.0, 1.0],
+                        n: 1.0,
+                    },
+                    extend: (false, false),
+                },
+            ),
+            (
+                "an exponent of zero",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: Function::Exponential {
+                        domain: [0.0, 1.0],
+                        c0: vec![0.0, 0.0, 0.0],
+                        c1: vec![1.0, 1.0, 1.0],
+                        n: 0.0,
+                    },
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a domain that does not increase",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: Function::Exponential {
+                        domain: [1.0, 1.0],
+                        c0: vec![0.0, 0.0, 0.0],
+                        c1: vec![1.0, 1.0, 1.0],
+                        n: 1.0,
+                    },
+                    extend: (false, false),
+                },
+            ),
+            // The stitch, wrong in each of its own three ways. None of these
+            // is visible in a test of the sub-functions and none of the
+            // sub-function refusals above is visible in a test of the stitch.
+            (
+                "a stitch with one bound too few",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: stitch(vec![], vec![[0.0, 1.0], [0.0, 1.0]], 2),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a stitch with one encode pair too few",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: stitch(vec![0.5], vec![[0.0, 1.0]], 2),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a stitch whose bounds do not increase",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: stitch(vec![0.5, 0.5], vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]], 3),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a stitch whose bound is outside its domain",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: stitch(vec![2.0], vec![[0.0, 1.0], [0.0, 1.0]], 2),
+                    extend: (false, false),
+                },
+            ),
+            (
+                "a stitch over nothing",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: stitch(vec![], vec![], 0),
+                    extend: (false, false),
+                },
+            ),
+            (
+                // A sub-function that is wrong while the stitch is right: the
+                // other half of the pair above.
+                "a stitch over a sub-function with the wrong component count",
+                Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: Function::Stitching {
+                        domain: [0.0, 1.0],
+                        functions: vec![
+                            ramp(),
+                            Function::Exponential {
+                                domain: [0.0, 1.0],
+                                c0: vec![0.0],
+                                c1: vec![1.0],
+                                n: 1.0,
+                            },
+                        ],
+                        bounds: vec![0.5],
+                        encode: vec![[0.0, 1.0], [0.0, 1.0]],
+                    },
+                    extend: (false, false),
+                },
+            ),
+        ];
+
+        for (what, shading) in cases {
+            assert!(!builder.add_shading(b"Sh", &shading), "{what} was accepted");
+        }
+
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(
+                !page.shading(b"Sh"),
+                "and no page can name what was refused"
+            );
+        });
+        let doc = opened(builder);
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"Shading"));
+        assert_eq!(
+            table.as_dict().map(Dict::len),
+            Some(1),
+            "one accepted shading and nothing else"
+        );
+    }
+
+    /// A nest of stitching functions deeper than this repository's own reader
+    /// will walk is refused rather than written.
+    ///
+    /// Not a resource bound — see [`MAX_FUNCTION_DEPTH`]. It is refused because
+    /// a writer whose output its own reader declines is not a writer, and it is
+    /// checked at a thousand deep as well as at nine to show the validator does
+    /// not recurse.
+    #[test]
+    fn a_function_nested_deeper_than_the_reader_will_walk_is_refused() {
+        let leaf = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![0.0],
+            c1: vec![1.0],
+            n: 1.0,
+        };
+        let wrap = |inner: Function| Function::Stitching {
+            domain: [0.0, 1.0],
+            functions: vec![inner],
+            bounds: vec![],
+            encode: vec![[0.0, 1.0]],
+        };
+
+        let mut builder = DocumentBuilder::new();
+        let mut nest = leaf.clone();
+        for _ in 0..MAX_FUNCTION_DEPTH {
+            nest = wrap(nest);
+        }
+        assert!(
+            builder.add_shading(
+                b"Deep",
+                &Shading::Axial {
+                    color_space: DeviceSpace::Gray,
+                    coords: [0.0, 0.0, 1.0, 0.0],
+                    function: nest.clone(),
+                    extend: (false, false),
+                }
+            ),
+            "exactly as deep as the reader walks is accepted"
+        );
+
+        for extra in [1usize, 1000] {
+            let mut deeper = leaf.clone();
+            for _ in 0..(MAX_FUNCTION_DEPTH as usize + extra) {
+                deeper = wrap(deeper);
+            }
+            assert!(
+                !builder.add_shading(
+                    b"Deeper",
+                    &Shading::Axial {
+                        color_space: DeviceSpace::Gray,
+                        coords: [0.0, 0.0, 1.0, 0.0],
+                        function: deeper,
+                        extend: (false, false),
+                    }
+                ),
+                "{extra} levels past the reader's own limit was accepted"
+            );
+        }
+    }
+
+    // ---- tiling patterns -------------------------------------------------
+
+    /// A tiling pattern carries its cell, its two steps and its matrix, and its
+    /// content is the stream.
+    #[test]
+    fn a_tiling_pattern_carries_its_cell_its_steps_and_its_matrix() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_tiling_pattern(
+            b"P0",
+            &TilingPattern {
+                bbox: [0.0, 0.0, 8.0, 4.0],
+                x_step: 10.0,
+                y_step: 6.0,
+                matrix: Some([1.0, 0.0, 0.0, 1.0, 3.0, 7.0]),
+                tiling_type: TilingType::NoDistortion,
+                content: b"0 0 1 rg 0 0 8 4 re f",
+            }
+        ));
+        builder.add_page(40.0, 40.0, |page| {
+            assert!(page.set_fill_pattern(b"P0"));
+            page.raw(b"0 0 40 40 re f");
+            assert!(page.set_stroke_pattern(b"P0"));
+        });
+        let doc = opened(builder);
+
+        let pattern = resource(&doc, b"Pattern", b"P0");
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"PatternType"))
+                .as_int(),
+            Some(1)
+        );
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"PaintType")).as_int(),
+            Some(1)
+        );
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"TilingType"))
+                .as_int(),
+            Some(2)
+        );
+        assert_eq!(numbers(&doc, &pattern, b"BBox"), vec![0.0, 0.0, 8.0, 4.0]);
+        // The two steps differ from each other and from the cell, so a writer
+        // that wrote one twice or derived either from the box is caught.
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"XStep")).as_number(),
+            Some(10.0)
+        );
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"YStep")).as_number(),
+            Some(6.0)
+        );
+        assert_eq!(
+            numbers(&doc, &pattern, b"Matrix"),
+            vec![1.0, 0.0, 0.0, 1.0, 3.0, 7.0]
+        );
+
+        let text = content(&doc);
+        assert!(text.contains("/Pattern cs /P0 scn"), "{text}");
+        assert!(text.contains("/Pattern CS /P0 SCN"), "{text}");
+    }
+
+    /// Every way a tiling pattern can fail to tile.
+    #[test]
+    fn a_tiling_pattern_that_cannot_tile_is_refused() {
+        let sound = || TilingPattern {
+            bbox: [0.0, 0.0, 4.0, 4.0],
+            x_step: 4.0,
+            y_step: 4.0,
+            matrix: None,
+            tiling_type: TilingType::ConstantSpacing,
+            content: b"the cell that must not be written",
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(
+            builder.add_tiling_pattern(b"Ok", &sound()),
+            "the control is accepted"
+        );
+
+        for (what, pattern) in [
+            (
+                "a cell with no area",
+                TilingPattern {
+                    bbox: [0.0, 0.0, 0.0, 4.0],
+                    ..sound()
+                },
+            ),
+            (
+                "a horizontal step of zero",
+                TilingPattern {
+                    x_step: 0.0,
+                    ..sound()
+                },
+            ),
+            (
+                "a vertical step of zero",
+                TilingPattern {
+                    y_step: 0.0,
+                    ..sound()
+                },
+            ),
+            (
+                "a step that is not a number",
+                TilingPattern {
+                    x_step: f64::NAN,
+                    ..sound()
+                },
+            ),
+            (
+                "a matrix that is not numbers",
+                TilingPattern {
+                    matrix: Some([1.0, 0.0, 0.0, 1.0, 0.0, f64::NEG_INFINITY]),
+                    ..sound()
+                },
+            ),
+        ] {
+            assert!(
+                !builder.add_tiling_pattern(b"P", &pattern),
+                "{what} was accepted"
+            );
+        }
+
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(!page.set_fill_pattern(b"P"));
+            assert!(!page.set_stroke_pattern(b"P"));
+        });
+        let bytes = builder.finish();
+        assert_eq!(
+            bytes.windows(8).filter(|w| *w == b"the cell").count(),
+            1,
+            "exactly the accepted pattern's cell is in the file"
+        );
+    }
+
+    // ---- composite fonts -------------------------------------------------
+
+    /// A composite font is `/Identity-H` over a CIDFontType2 with
+    /// `/CIDToGIDMap /Identity`, which is the pair that makes an index
+    /// addressable.
+    ///
+    /// Asserted against 9.7.4's published structure rather than against
+    /// whatever this writer happens to emit: the Type0 font is the object a
+    /// page names, the descendant is where the metrics and the descriptor
+    /// live, and the encoding and the map are what turn a two-byte code into a
+    /// glyph number.
+    #[test]
+    fn a_composite_font_is_identity_h_over_a_cid_font_with_an_identity_map() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(
+                b"C0",
+                12.0,
+                5.0,
+                20.0,
+                &[Glyph { id: 2, text: "A" }, Glyph { id: 3, text: "B" }]
+            ));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        assert_eq!(
+            name_of(&doc, &font, b"Subtype").as_deref(),
+            Some(&b"Type0"[..])
+        );
+        assert_eq!(
+            name_of(&doc, &font, b"Encoding").as_deref(),
+            Some(&b"Identity-H"[..]),
+            "the code is the CID"
+        );
+
+        let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+        let descendants = descendants.as_array().expect("an array").to_vec();
+        assert_eq!(descendants.len(), 1, "9.7.6: exactly one descendant");
+        let cid = doc.resolve(&descendants[0]);
+        let cid = cid.as_dict().expect("the descendant font");
+        assert_eq!(
+            name_of(&doc, cid, b"Subtype").as_deref(),
+            Some(&b"CIDFontType2"[..])
+        );
+        assert_eq!(
+            name_of(&doc, cid, b"CIDToGIDMap").as_deref(),
+            Some(&b"Identity"[..]),
+            "and the CID is the glyph index"
+        );
+        assert_eq!(
+            doc.resolve_key(cid, doc.intern(b"DW")).as_int(),
+            Some(1000),
+            "9.7.4.3's default, stated rather than left to be known"
+        );
+
+        // 9.7.3: an `/Identity-H` encoding over a descendant claiming some
+        // other ordering is a font whose two halves disagree.
+        let system = doc.resolve_key(cid, doc.intern(b"CIDSystemInfo"));
+        let system = system.as_dict().expect("a CIDSystemInfo");
+        let string = |key: &[u8]| -> Option<Vec<u8>> {
+            doc.resolve_key(system, doc.intern(key))
+                .as_string()
+                .map(|s| s.bytes.to_vec())
+        };
+        assert_eq!(string(b"Registry").as_deref(), Some(&b"Adobe"[..]));
+        assert_eq!(string(b"Ordering").as_deref(), Some(&b"Identity"[..]));
+        assert_eq!(
+            doc.resolve_key(system, doc.intern(b"Supplement")).as_int(),
+            Some(0)
+        );
+
+        // The descriptor hangs off the descendant, not off the Type0 font, and
+        // is symbolic: there is no `/Encoding` a code could be looked up in.
+        let descriptor = doc.resolve_key(cid, doc.intern(b"FontDescriptor"));
+        let descriptor = descriptor.as_dict().expect("a descriptor");
+        assert_eq!(
+            doc.resolve_key(descriptor, doc.intern(b"Flags")).as_int(),
+            Some(4)
+        );
+        assert!(
+            descriptor.get_ref(doc.intern(b"FontFile2")).is_some(),
+            "and the program is embedded"
+        );
+        assert!(
+            !font.contains_key(doc.intern(b"FontDescriptor")),
+            "the Type0 font carries no descriptor of its own"
+        );
+
+        // Two bytes a glyph, big-endian, as a hex string.
+        assert!(
+            content(&doc).contains("<00020003> Tj"),
+            "the string is the glyph indices: {}",
+            content(&doc)
+        );
+    }
+
+    /// `/W` is the font's own `hmtx`, scaled into PDF's thousandths, run
+    /// together where the glyph ids are consecutive.
+    ///
+    /// The units per em is 2048, so every number here is wrong by a factor of
+    /// two if the scaling was skipped — which is the shape of defect that
+    /// renders at the right glyphs and the wrong positions, and which nothing
+    /// that only checks "the text drew" can see.
+    #[test]
+    fn the_width_array_is_the_fonts_own_hmtx_scaled_and_run_together() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(2048, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            // 1, 2 and 3 are consecutive; leaving 0 undrawn is what makes the
+            // first run start at 1 rather than at zero.
+            assert!(page.glyphs(
+                b"C0",
+                12.0,
+                5.0,
+                20.0,
+                &[
+                    Glyph { id: 1, text: "" },
+                    Glyph { id: 2, text: "A" },
+                    Glyph { id: 3, text: "B" },
+                ]
+            ));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+        let descendants = descendants.as_array().expect("an array").to_vec();
+        let cid = doc.resolve(&descendants[0]);
+        let cid = cid.as_dict().expect("the descendant font");
+
+        let widths = doc.resolve_key(cid, doc.intern(b"W"));
+        let widths = widths.as_array().expect("a /W array").to_vec();
+        assert_eq!(widths.len(), 2, "one run: a first CID and its widths");
+        assert_eq!(doc.resolve(&widths[0]).as_int(), Some(1));
+        let run: Vec<f64> = doc
+            .resolve(&widths[1])
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .filter_map(|o| doc.resolve(o).as_number())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 700, 800 and 900 font units at 2048 per em.
+        assert_eq!(run, vec![342.0, 391.0, 439.0]);
+    }
+
+    /// Glyphs that are not consecutive are separate runs, which is the other
+    /// half of Table 116's `c [w...]` form.
+    #[test]
+    fn a_gap_in_the_glyphs_drawn_starts_a_new_width_run() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(
+                b"C0",
+                12.0,
+                5.0,
+                20.0,
+                &[Glyph { id: 1, text: "a" }, Glyph { id: 3, text: "b" }]
+            ));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+        let descendants = descendants.as_array().expect("an array").to_vec();
+        let cid = doc.resolve(&descendants[0]);
+        let cid = cid.as_dict().expect("the descendant font");
+        let widths = doc.resolve_key(cid, doc.intern(b"W"));
+        let widths = widths.as_array().expect("a /W array").to_vec();
+
+        assert_eq!(widths.len(), 4, "two runs: {widths:?}");
+        assert_eq!(doc.resolve(&widths[0]).as_int(), Some(1));
+        assert_eq!(doc.resolve(&widths[2]).as_int(), Some(3));
+        let run = |index: usize| -> Vec<f64> {
+            doc.resolve(&widths[index])
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|o| doc.resolve(o).as_number())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(run(1), vec![700.0]);
+        assert_eq!(run(3), vec![900.0]);
+    }
+
+    /// A font that states no advances gets no `/W` at all, and `/DW` says what
+    /// happens instead.
+    ///
+    /// The alternative is a width array of invented numbers presented as the
+    /// font's, which is what the simple-font path has to do because 9.6.6.4
+    /// leaves it no choice and what a composite font is not forced into.
+    #[test]
+    fn a_font_that_states_no_advances_gets_no_width_array() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Bare", &metric_font(1000, false)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(b"C0", 12.0, 5.0, 20.0, &[Glyph { id: 2, text: "A" }]));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+        let descendants = descendants.as_array().expect("an array").to_vec();
+        let cid = doc.resolve(&descendants[0]);
+        let cid = cid.as_dict().expect("the descendant font");
+        assert!(
+            !cid.contains_key(doc.intern(b"W")),
+            "no widths were stated, so none are claimed"
+        );
+        assert_eq!(doc.resolve_key(cid, doc.intern(b"DW")).as_int(), Some(1000));
+    }
+
+    /// One glyph drawn twice with different text maps to the **first** text,
+    /// and the choice is a choice rather than an accident.
+    ///
+    /// `/ToUnicode` maps a code to one string, so a glyph a caller draws once
+    /// as "fi" and later as "fl" has to lose one of them -- there is no
+    /// spelling of the CMap that says "either". What must not happen is that
+    /// *which* one survives depends on the order the page happened to draw
+    /// them in, because then the same document built from the same glyphs in a
+    /// different order extracts as different text, and the thirteenth
+    /// determinism fingerprint is a hash of exactly that.
+    ///
+    /// This test exists because the injection matrix said it had to. Reversing
+    /// the rule to last-wins was caught by nothing that asserts anything about
+    /// `/ToUnicode`: the only test that failed was the kitchen-sink form
+    /// fixture, and it failed on `the form has resources`, three constructs
+    /// away from the mapping. That is a survivor wearing a passing suite --
+    /// milestone 2's duplicate-attribute pair, milestone 3's case fold and
+    /// milestone 4's cache halves, arrived at from a fourth direction.
+    #[test]
+    fn a_glyph_drawn_twice_with_different_text_keeps_the_first() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(
+                b"C0",
+                12.0,
+                5.0,
+                20.0,
+                &[
+                    Glyph { id: 7, text: "fi" },
+                    Glyph { id: 8, text: "x" },
+                    // The same glyph again, standing for something else.
+                    Glyph { id: 7, text: "fl" },
+                ]
+            ));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        let stream = font
+            .get_ref(doc.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let cmap = doc.stream_decoded(stream).expect("it decodes");
+        let text = String::from_utf8_lossy(&cmap).into_owned();
+
+        assert!(
+            text.contains("<0007> <00660069>"),
+            "glyph 7 keeps the first text it was drawn with: {text}"
+        );
+        assert!(
+            !text.contains("<0007> <0066006c>") && !text.contains("<0007> <0066006C>"),
+            "and does not take the last: {text}"
+        );
+        // Two codes, not three: the repeat is the same glyph.
+        assert!(text.contains("2 beginbfchar"), "{text}");
+    }
+
+    /// `/ToUnicode` takes many glyphs to one character **and** one glyph to
+    /// several, which is the mapping a simple font's `/Encoding` cannot hold.
+    #[test]
+    fn to_unicode_maps_many_glyphs_to_one_character_and_one_glyph_to_many() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(
+                b"C0",
+                12.0,
+                5.0,
+                20.0,
+                &[
+                    // Two glyphs, one character: an alternate or a positional
+                    // form, which is ordinary in every script that has one.
+                    Glyph { id: 1, text: "f" },
+                    Glyph { id: 2, text: "f" },
+                    // One glyph, three characters: a ligature.
+                    Glyph { id: 3, text: "ffi" },
+                ]
+            ));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        let stream = font
+            .get_ref(doc.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let cmap = doc.stream_decoded(stream).expect("it decodes");
+        let text = String::from_utf8_lossy(&cmap).into_owned();
+
+        assert!(text.contains("/CMapType 2"), "{text}");
+        assert!(
+            text.contains("<0000> <FFFF>"),
+            "the codespace is two bytes wide: {text}"
+        );
+        assert!(text.contains("3 beginbfchar"), "{text}");
+        assert!(text.contains("<0001> <0066>"), "glyph 1 is f: {text}");
+        assert!(
+            text.contains("<0002> <0066>"),
+            "and so is glyph 2, which is the many-to-one half: {text}"
+        );
+        assert!(
+            text.contains("<0003> <006600660069>"),
+            "glyph 3 is the three characters of a ligature: {text}"
+        );
+    }
+
+    /// A glyph that stands for nothing gets no entry, and a font whose glyphs
+    /// all stand for nothing gets no `/ToUnicode` at all.
+    ///
+    /// 9.10.3's grammar has no zero-entry `beginbfchar`, so an empty CMap is
+    /// not merely useless — a reader that finds one stops looking for another
+    /// answer, which is worse than finding none.
+    #[test]
+    fn a_font_whose_glyphs_stand_for_nothing_carries_no_to_unicode() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        assert!(builder.add_cid_font(b"C1", b"Metric", &metric_font(1000, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(b"C0", 12.0, 5.0, 20.0, &[Glyph { id: 2, text: "" }]));
+            assert!(page.glyphs(
+                b"C1",
+                12.0,
+                5.0,
+                8.0,
+                &[Glyph { id: 1, text: "" }, Glyph { id: 2, text: "A" }]
+            ));
+        });
+        let doc = opened(builder);
+
+        let silent = resource(&doc, b"Font", b"C0");
+        assert!(
+            !silent.contains_key(doc.intern(b"ToUnicode")),
+            "nothing to say, so nothing said"
+        );
+
+        let partial = resource(&doc, b"Font", b"C1");
+        let stream = partial
+            .get_ref(doc.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let text =
+            String::from_utf8_lossy(&doc.stream_decoded(stream).expect("it decodes")).into_owned();
+        assert!(text.contains("1 beginbfchar"), "one entry, not two: {text}");
+        assert!(text.contains("<0002> <0041>"), "{text}");
+        assert!(!text.contains("<0001>"), "{text}");
+    }
+
+    /// The first non-empty text a glyph is drawn with stands, however many
+    /// times and on however many pages it is drawn afterwards.
+    ///
+    /// `/ToUnicode` is one function from code to text, so a glyph drawn twice
+    /// with two meanings has to resolve to one of them — and the answer has to
+    /// be the same every time the document is written (ruling 4).
+    #[test]
+    fn the_first_non_empty_text_a_glyph_stands_for_wins() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(b"C0", 12.0, 5.0, 20.0, &[Glyph { id: 2, text: "" }]));
+            assert!(page.glyphs(b"C0", 12.0, 5.0, 8.0, &[Glyph { id: 2, text: "A" }]));
+        });
+        builder.add_page(50.0, 50.0, |page| {
+            assert!(page.glyphs(b"C0", 12.0, 5.0, 20.0, &[Glyph { id: 2, text: "Z" }]));
+        });
+        let doc = opened(builder);
+
+        let font = resource(&doc, b"Font", b"C0");
+        let stream = font
+            .get_ref(doc.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let text =
+            String::from_utf8_lossy(&doc.stream_decoded(stream).expect("it decodes")).into_owned();
+        assert!(
+            text.contains("<0002> <0041>") && !text.contains("<005A>"),
+            "the empty text does not win and the later one does not either: {text}"
+        );
+    }
+
+    /// Naming a resource the page does not carry writes **nothing**, rather
+    /// than an operator pointing at a name the `/Resources` has no entry for.
+    #[test]
+    fn naming_a_resource_the_page_does_not_carry_writes_nothing() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(!page.set_ext_gstate(b"GS0"));
+            assert!(!page.form(b"Fm0"));
+            assert!(!page.shading(b"Sh0"));
+            assert!(!page.set_fill_pattern(b"P0"));
+            assert!(!page.set_stroke_pattern(b"P0"));
+            // A simple font is not a composite one, and writing two-byte codes
+            // into it would address the wrong glyphs at the wrong widths and
+            // read as a font problem rather than an encoding one.
+            assert!(!page.glyphs(b"F0", 12.0, 1.0, 1.0, &[Glyph { id: 2, text: "A" }]));
+            assert!(!page.glyphs(b"C0", 12.0, 1.0, 1.0, &[Glyph { id: 2, text: "A" }]));
+        });
+        let doc = opened(builder);
+
+        let text = content(&doc);
+        assert!(text.trim().is_empty(), "nothing was written: {text:?}");
+    }
+
+    /// A page carries only the resource kinds it was given.
+    ///
+    /// 7.8.3 makes every sub-dictionary optional, and an empty `/Shading`
+    /// beside an empty `/Pattern` on every page of a document that uses
+    /// neither is noise a reader has to walk.
+    #[test]
+    fn a_page_carries_only_the_resource_kinds_it_was_given() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(10.0, 10.0, |_| {});
+        let doc = opened(builder);
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("a resources dictionary");
+        for key in [
+            &b"Font"[..],
+            b"XObject",
+            b"ExtGState",
+            b"Shading",
+            b"Pattern",
+        ] {
+            assert!(
+                !resources.contains_key(doc.intern(key)),
+                "/{} on a page that named none",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    /// Nothing this milestone writes declares a `/Filter`, so `maybe_compress`
+    /// still owns every one of them.
+    ///
+    /// That is the contract `ImageData::Compressed` depends on, stated from the
+    /// other side: the rule is "a `/Filter` key means hands off", and a new
+    /// stream kind that declared one to keep its bytes would be a second rule.
+    /// A form, a pattern cell and a `/ToUnicode` CMap are all ordinary streams
+    /// and all compress when the writer is asked to compress.
+    #[test]
+    fn the_new_streams_declare_no_filter_and_the_writer_compresses_them() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        assert!(builder.add_form(
+            b"Fm0",
+            &FormXObject {
+                bbox: [0.0, 0.0, 10.0, 10.0],
+                matrix: None,
+                group: None,
+                content: &vec![b' '; 4096],
+            }
+        ));
+        assert!(builder.add_tiling_pattern(
+            b"P0",
+            &TilingPattern {
+                bbox: [0.0, 0.0, 4.0, 4.0],
+                x_step: 4.0,
+                y_step: 4.0,
+                matrix: None,
+                tiling_type: TilingType::ConstantSpacing,
+                content: &vec![b' '; 4096],
+            }
+        ));
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(page.form(b"Fm0"));
+            assert!(page.glyphs(b"C0", 12.0, 1.0, 1.0, &[Glyph { id: 2, text: "A" }]));
+        });
+
+        let plain = CosDocument::open(builder.finish()).expect("it opens");
+        for (kind, name) in [(&b"XObject"[..], &b"Fm0"[..]), (b"Pattern", b"P0")] {
+            let dict = resource(&plain, kind, name);
+            assert!(
+                !dict.contains_key(Name::FILTER),
+                "{} declares a filter of its own",
+                String::from_utf8_lossy(name)
+            );
+        }
+        let font = resource(&plain, b"Font", b"C0");
+        let stream = font
+            .get_ref(plain.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let cmap = plain
+            .get(stream)
+            .ok()
+            .and_then(|o| o.as_dict().cloned())
+            .expect("a stream dictionary");
+        assert!(!cmap.contains_key(Name::FILTER));
+
+        // And with compression asked for, the same document's streams come out
+        // deflated -- which they could not if any of them had claimed a filter.
+        let editor = crate::DocumentEditor::new(std::sync::Arc::new(plain));
+        let packed = editor.save(&crate::WriteOptions {
+            mode: crate::WriteMode::Rewrite,
+            compress: true,
+            ..crate::WriteOptions::default()
+        });
+        let reopened = CosDocument::open(packed).expect("it reopens");
+        let form = resource(&reopened, b"XObject", b"Fm0");
+        assert!(
+            form.contains_key(Name::FILTER),
+            "the writer compressed the form's content stream"
+        );
     }
 }

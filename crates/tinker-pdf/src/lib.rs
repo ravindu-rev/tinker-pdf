@@ -46,6 +46,10 @@ pub use tinker_pdf_cos::{
     FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
     ScriptSummary, Trapped, Warning, WarningKind,
 };
+pub use tinker_pdf_cos::{
+    BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, Shading, StateMask,
+    TilingPattern, TilingType, TransparencyGroup,
+};
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
@@ -64,6 +68,17 @@ pub use tinker_pdf_cos::{
 ///
 /// Without these on the facade a caller depending only on this crate could
 /// read a document and never produce one, which is half a library.
+///
+/// The second block is gap 30 milestone 5's — the graphics state, transparency
+/// groups, gradients, tiling patterns and glyphs addressed by index. Every one
+/// of them is an *argument* to a [`DocumentBuilder`] method rather than
+/// something a method hands back, and an argument type that cannot be named is
+/// a method that cannot be called: without `ExtGState` on the facade,
+/// `add_ext_gstate` is unreachable from outside this workspace. `DeviceSpace`
+/// comes with them because `TransparencyGroup` and `Shading` are built from
+/// one; it was already needed by `ImageColorSpace::Indexed` and already
+/// missing, which is a gap 29 omission this closes as a side effect rather
+/// than a policy this milestone changed.
 pub use tinker_pdf_cos::{
     DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
     PageBuilder, SkippedWidget, WidgetDefect, WriteMode, WriteOptions,

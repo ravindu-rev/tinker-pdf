@@ -32,7 +32,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    CosDocument, DocumentBuilder, DocumentEditor, Encryption, WriteMode, WriteOptions,
+    BlendMode, CosDocument, DeviceSpace, DocumentBuilder, DocumentEditor, Encryption, ExtGState,
+    FormXObject, Function, Glyph, MaskKind, Shading, StateMask, TilingPattern, TilingType,
+    TransparencyGroup, WriteMode, WriteOptions,
 };
 
 /// Printed once per test that actually invoked qpdf. CI greps for it.
@@ -900,5 +902,541 @@ fn the_encrypted_hint_tables_describe_the_same_pages_at_greater_length() {
     assert!(
         growth > 150,
         "the encrypted file is only {growth} bytes longer"
+    );
+}
+
+// ---- Gap 30 milestone 5: the writer's missing half -------------------------
+//
+// Everything this milestone added is object structure — `/ExtGState`
+// dictionaries, form XObjects with `/Group`, shadings over functions,
+// patterns, and a Type0 font with a descendant and a `/ToUnicode`. Gap 30's
+// oracle section says so in as many words: this plan "writes strictly more
+// object structure than gap 29 did … so there is strictly more that only qpdf
+// can see."
+//
+// That is not an abstract worry. Everything else written for this milestone is
+// this engine reading its own output through its own parser, and this engine's
+// reader is lenient by design: `read_shading` defaults a missing `/Extend` to
+// `(false, false)`, `parse_function` defaults a missing `/Domain` to `[0 1]`,
+// and the tiling reader falls back to the cell's own size for a `/XStep` it
+// cannot find. A shading written with the wrong key names would round-trip
+// through all of them and be an empty dictionary to anybody else.
+
+/// A four-glyph TrueType program with real metrics.
+///
+/// Small enough to read in a dump and complete enough to embed: `glyf`,
+/// `loca`, `head`, `hhea`, `hmtx`, `maxp` and a `cmap`. The advances are 600,
+/// 700, 800 and 900 font units against 1 000 per em, so `/W` is legible in
+/// qpdf's own output rather than being something only this engine can check.
+fn metric_font() -> Vec<u8> {
+    let mut square = Vec::new();
+    square.extend_from_slice(&1i16.to_be_bytes());
+    for value in [0i16, 0, 700, 700] {
+        square.extend_from_slice(&value.to_be_bytes());
+    }
+    square.extend_from_slice(&3u16.to_be_bytes());
+    square.extend_from_slice(&0u16.to_be_bytes());
+    square.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+    for dx in [0i16, 700, 0, -700] {
+        square.extend_from_slice(&dx.to_be_bytes());
+    }
+    for dy in [0i16, 0, 700, 0] {
+        square.extend_from_slice(&dy.to_be_bytes());
+    }
+
+    let size = square.len() as u32;
+    let mut glyf = Vec::new();
+    for _ in 0..3 {
+        glyf.extend_from_slice(&square);
+    }
+    let mut loca = Vec::new();
+    for offset in [0u32, 0, size, size * 2, size * 3] {
+        loca.extend_from_slice(&offset.to_be_bytes());
+    }
+
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    head[50..52].copy_from_slice(&1i16.to_be_bytes());
+
+    let mut maxp = vec![0u8; 32];
+    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    maxp[4..6].copy_from_slice(&4u16.to_be_bytes());
+
+    let mut hhea = vec![0u8; 36];
+    hhea[34..36].copy_from_slice(&4u16.to_be_bytes());
+
+    let mut hmtx = Vec::new();
+    for advance in [600u16, 700, 800, 900] {
+        hmtx.extend_from_slice(&advance.to_be_bytes());
+        hmtx.extend_from_slice(&0i16.to_be_bytes());
+    }
+
+    let first = u16::from(b'A');
+    let mut sub = Vec::new();
+    for value in [4u16, 32, 0, 4, 4, 1, 0] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    for value in [
+        first,
+        0xFFFF,
+        0,
+        first,
+        0xFFFF,
+        1u16.wrapping_sub(first),
+        1,
+        0,
+        0,
+    ] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    let mut cmap = Vec::new();
+    for value in [0u16, 1, 3, 1] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+
+    let tables: [(&[u8; 4], &[u8]); 7] = [
+        (b"cmap", &cmap),
+        (b"glyf", &glyf),
+        (b"head", &head),
+        (b"hhea", &hhea),
+        (b"hmtx", &hmtx),
+        (b"loca", &loca),
+        (b"maxp", &maxp),
+    ];
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// One page using **every** construct this milestone added.
+///
+/// One document rather than nine, because `--check` reads the whole file and
+/// what is being asked is whether a third party can walk all of it at once.
+fn whole_surface_document() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.set_info(b"Title", "the writer's missing half");
+    assert!(builder.add_cid_font(b"C0", b"Oracle", &metric_font()));
+
+    assert!(builder.add_ext_gstate(
+        b"GHalf",
+        &ExtGState {
+            fill_alpha: Some(0.5),
+            stroke_alpha: Some(0.25),
+            blend_mode: Some(BlendMode::Multiply),
+            ..ExtGState::default()
+        }
+    ));
+    assert!(builder.add_form(
+        b"FmMask",
+        &FormXObject {
+            bbox: [0.0, 0.0, 150.0, 200.0],
+            matrix: None,
+            group: Some(TransparencyGroup {
+                color_space: DeviceSpace::Gray,
+                isolated: true,
+                knockout: false,
+            }),
+            content: b"1 g 0 0 150 200 re f",
+        }
+    ));
+    assert!(builder.add_ext_gstate(
+        b"GMask",
+        &ExtGState {
+            soft_mask: Some(StateMask::Group {
+                kind: MaskKind::Luminosity,
+                form: b"FmMask",
+                backdrop: Some(&[0.0]),
+            }),
+            ..ExtGState::default()
+        }
+    ));
+    assert!(builder.add_ext_gstate(
+        b"GOff",
+        &ExtGState {
+            soft_mask: Some(StateMask::None),
+            ..ExtGState::default()
+        }
+    ));
+    assert!(builder.add_form(
+        b"FmKnock",
+        &FormXObject {
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            matrix: Some([1.0, 0.0, 0.0, 1.0, 20.0, 20.0]),
+            group: Some(TransparencyGroup {
+                color_space: DeviceSpace::Rgb,
+                isolated: false,
+                knockout: true,
+            }),
+            content: b"/GHalf gs 1 0 0 rg 0 0 60 60 re f 0 0 1 rg 30 30 60 60 re f",
+        }
+    ));
+    assert!(builder.add_shading(
+        b"ShAxial",
+        &Shading::Axial {
+            color_space: DeviceSpace::Rgb,
+            coords: [0.0, 0.0, 300.0, 0.0],
+            function: Function::Exponential {
+                domain: [0.0, 1.0],
+                c0: vec![1.0, 0.0, 0.0],
+                c1: vec![0.0, 0.0, 1.0],
+                n: 1.0,
+            },
+            extend: (true, true),
+        }
+    ));
+    assert!(builder.add_shading(
+        b"ShRadial",
+        &Shading::Radial {
+            color_space: DeviceSpace::Rgb,
+            coords: [150.0, 100.0, 0.0, 150.0, 100.0, 90.0],
+            function: Function::Stitching {
+                domain: [0.0, 1.0],
+                functions: vec![
+                    Function::Exponential {
+                        domain: [0.0, 1.0],
+                        c0: vec![1.0, 1.0, 0.0],
+                        c1: vec![0.0, 1.0, 0.0],
+                        n: 1.0,
+                    },
+                    Function::Exponential {
+                        domain: [0.0, 1.0],
+                        c0: vec![0.0, 1.0, 0.0],
+                        c1: vec![0.0, 0.0, 1.0],
+                        n: 2.0,
+                    },
+                ],
+                bounds: vec![0.35],
+                encode: vec![[0.0, 1.0], [0.0, 1.0]],
+            },
+            extend: (false, true),
+        }
+    ));
+    assert!(builder.add_tiling_pattern(
+        b"P0",
+        &TilingPattern {
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            x_step: 12.0,
+            y_step: 14.0,
+            matrix: Some([1.0, 0.0, 0.0, 1.0, 3.0, 5.0]),
+            tiling_type: TilingType::NoDistortion,
+            content: b"0 0 1 rg 0 0 10 10 re f",
+        }
+    ));
+
+    builder.add_page(300.0, 200.0, |page| {
+        page.raw(b"q 0 0 300 200 re W n");
+        assert!(page.shading(b"ShAxial"));
+        page.raw(b"Q");
+        page.raw(b"q");
+        assert!(page.set_ext_gstate(b"GMask"));
+        assert!(page.set_fill_pattern(b"P0"));
+        page.raw(b"10 10 120 60 re f");
+        assert!(page.set_ext_gstate(b"GOff"));
+        page.raw(b"Q");
+        page.raw(b"q");
+        assert!(page.set_ext_gstate(b"GHalf"));
+        assert!(page.form(b"FmKnock"));
+        page.raw(b"Q");
+        page.raw(b"q 200 20 80 80 re W n");
+        assert!(page.shading(b"ShRadial"));
+        page.raw(b"Q");
+        page.set_stroke_rgb(0.0, 0.0, 0.0);
+        assert!(page.set_stroke_pattern(b"P0"));
+        page.raw(b"2 w 10 150 m 290 150 l S");
+        assert!(page.glyphs(
+            b"C0",
+            18.0,
+            20.0,
+            170.0,
+            &[
+                Glyph { id: 1, text: "f" },
+                Glyph { id: 2, text: "f" },
+                Glyph { id: 3, text: "ffi" },
+            ]
+        ));
+    });
+    builder.finish()
+}
+
+/// Every object of the document, flattened to single spaces and joined.
+///
+/// Read out of `--show-object` per object rather than out of one dump,
+/// because the object numbering is the writer's business and a test that
+/// hardcoded it would break on a change that is not a defect. Gap 29's
+/// milestone 5 and gap 30's milestone 4 each had to rebuild an assertion
+/// against qpdf's real output after assuming its shape; this walks whatever is
+/// there.
+fn objects(qpdf: &Path, path: &Path) -> Vec<(u32, String)> {
+    (1..64u32)
+        .filter_map(|number| {
+            let (code, text) = run(
+                qpdf,
+                &[
+                    &format!("--show-object={number}"),
+                    &path.display().to_string(),
+                ],
+            );
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            // An object number past the end prints `null` and still exits 0,
+            // which is qpdf saying "no such object" rather than failing.
+            (code == 0 && flat != "null").then_some((number, flat))
+        })
+        .collect()
+}
+
+/// One stream's data, decoded.
+///
+/// `--show-object` prints a stream's **dictionary** and says `Object is
+/// stream.` where the data would be, so a `/ToUnicode` CMap is invisible to
+/// it. `--filtered-stream-data` is the flag that hands the bytes over, and it
+/// was found by running the tool rather than by assuming the first command
+/// showed everything — the same lesson gap 30's milestone 4 recorded about
+/// `--show-pages` and gap 29's milestone 5 recorded before it.
+fn stream_data(qpdf: &Path, path: &Path, number: u32) -> String {
+    let (code, text) = run(
+        qpdf,
+        &[
+            &format!("--show-object={number}"),
+            "--filtered-stream-data",
+            &path.display().to_string(),
+        ],
+    );
+    assert_eq!(code, 0, "qpdf --show-object={number}: {text}");
+    text
+}
+
+/// The object number an indirect reference under `key` names, out of a
+/// dictionary qpdf printed.
+fn referenced(object: &str, key: &str) -> u32 {
+    let rest = object
+        .split_once(key)
+        .unwrap_or_else(|| panic!("no {key} in {object}"))
+        .1;
+    rest.split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{key} is not a reference in {object}"))
+}
+
+/// Everything qpdf printed, one object to a line, for a failure message.
+fn listing(dump: &[(u32, String)]) -> String {
+    dump.iter()
+        .map(|(number, text)| format!("{number}: {text}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// qpdf reads the whole of the writer's new surface without complaint, in both
+/// write modes.
+#[test]
+fn qpdf_check_finds_nothing_wrong_with_the_writers_whole_surface() {
+    let qpdf = oracle!("--check over the writer's whole surface");
+
+    let built = whole_surface_document();
+    let document = Arc::new(CosDocument::open(built.clone()).expect("it opens"));
+    let cases = [
+        ("built.pdf", built),
+        (
+            "rewritten.pdf",
+            DocumentEditor::new(Arc::clone(&document)).save(&WriteOptions {
+                mode: WriteMode::Rewrite,
+                ..WriteOptions::default()
+            }),
+        ),
+        ("linearized.pdf", save(Arc::clone(&document), None)),
+        (
+            "compressed.pdf",
+            DocumentEditor::new(document).save(&WriteOptions {
+                mode: WriteMode::Rewrite,
+                compress: true,
+                object_streams: true,
+                ..WriteOptions::default()
+            }),
+        ),
+    ];
+
+    for (name, bytes) in cases {
+        let path = fixture("surface-check", name, &bytes);
+        let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
+        assert_eq!(code, 0, "qpdf --check on {name}:\n{text}");
+        assert!(
+            text.contains("No syntax or stream encoding errors found"),
+            "{name}: qpdf found something:\n{text}"
+        );
+    }
+}
+
+/// qpdf sees the graphics state, the two groups and the two gradients as they
+/// were written.
+///
+/// The entries chosen are the ones whose *absence* this engine's own reader
+/// would supply a default for, so a comparison here cannot share a mistake
+/// with the round-trip tests: `/Extend`, `/XStep`, `/YStep`, `/Bounds` and
+/// `/Encode` each have a reader-side fallback, and `/I` and `/K` default to
+/// false.
+#[test]
+fn qpdf_reads_back_the_states_the_groups_the_gradients_and_the_pattern() {
+    let qpdf = oracle!("--show-object over the writer's whole surface");
+    let path = fixture("surface-objects", "surface.pdf", &whole_surface_document());
+    let dump = objects(&qpdf, &path);
+    let joined = listing(&dump);
+    let holds = |needle: &str| dump.iter().any(|(_, object)| object.contains(needle));
+
+    // A note on the spelling of everything below. **qpdf sorts a dictionary's
+    // keys**, so it prints `/Group << /CS /DeviceGray /I true /S /Transparency
+    // >>` for a group this writer emits in 11.6.6's own order. Every
+    // expectation here was read off the tool before it was asserted against,
+    // which is what gap 30's milestone 4 and gap 29's milestone 5 each had to
+    // do after assuming a format instead.
+
+    // 11.6.4.4 and 11.3.5: three parameters in one dictionary, and `/ca`
+    // against `/CA` is a distinction qpdf preserves and a case-insensitive
+    // reader would not.
+    assert!(
+        holds("/BM /Multiply") && holds("/CA 0.25") && holds("/ca 0.5"),
+        "the graphics state:\n{joined}"
+    );
+    assert!(holds("/SMask /None"), "and the one that turns a mask off");
+    assert!(
+        holds("/S /Luminosity"),
+        "and the luminosity mask's own kind"
+    );
+    assert!(holds("/BC [ 0 ]"), "with the backdrop it was given");
+
+    // 11.6.6: two flags, written only when true, and this document sets one
+    // group's isolation and the other's knockout so neither can stand in for
+    // the other here either.
+    assert!(
+        holds("/Group << /CS /DeviceGray /I true /S /Transparency >>"),
+        "the isolated luminosity group:\n{joined}"
+    );
+    assert!(
+        holds("/Group << /CS /DeviceRGB /K true /S /Transparency >>"),
+        "the knockout group:\n{joined}"
+    );
+
+    // 8.7.4.5.3 and 8.7.4.5.4: four coordinates against six.
+    assert!(
+        holds("/ShadingType 2") && holds("/Coords [ 0 0 300 0 ]"),
+        "the axial shading:\n{joined}"
+    );
+    assert!(
+        holds("/ShadingType 3") && holds("/Coords [ 150 100 0 150 100 90 ]"),
+        "the radial shading:\n{joined}"
+    );
+    assert!(
+        holds("/Extend [ true true ]") && holds("/Extend [ false true ]"),
+        "and each keeps its own pair:\n{joined}"
+    );
+
+    // 7.10.3 and 7.10.4: the stitch, and the sub-functions it stitches.
+    assert!(
+        holds("/FunctionType 3") && holds("/Bounds [ 0.35 ]"),
+        "the stitching function:\n{joined}"
+    );
+    assert!(
+        holds("/Encode [ 0 1 0 1 ]"),
+        "and its encode pairs:\n{joined}"
+    );
+    assert!(
+        holds("/C0 [ 1 1 0 ] /C1 [ 0 1 0 ] /Domain [ 0 1 ] /FunctionType 2 /N 1")
+            && holds("/C0 [ 0 1 0 ] /C1 [ 0 0 1 ] /Domain [ 0 1 ] /FunctionType 2 /N 2"),
+        "and both sub-functions, each a type 2 with its own exponent:\n{joined}"
+    );
+
+    // 8.7.3.1: the two steps differ from each other and from the cell.
+    assert!(
+        holds("/PatternType 1") && holds("/PaintType 1") && holds("/TilingType 2"),
+        "the tiling pattern:\n{joined}"
+    );
+    assert!(
+        holds("/XStep 12") && holds("/YStep 14") && holds("/BBox [ 0 0 10 10 ]"),
+        "with the cell and the spacing it was given:\n{joined}"
+    );
+    assert!(
+        holds("/Matrix [ 1 0 0 1 3 5 ]"),
+        "and its own matrix:\n{joined}"
+    );
+}
+
+/// qpdf reads the composite font back as 9.7's published structure.
+///
+/// The three entries that make a glyph index addressable are asserted from
+/// outside: `/Encoding /Identity-H` on the Type0 font, `/CIDToGIDMap
+/// /Identity` on the descendant, and a `/W` whose numbers are the font
+/// program's own advances. A `/ToUnicode` stream is there too, and it is read
+/// back rather than assumed — `--show-object` prints a stream's data, so the
+/// CMap's own text is in the dump.
+#[test]
+fn qpdf_reads_back_the_composite_font_as_identity_h_over_a_cid_font() {
+    let qpdf = oracle!("--show-object over a Type0 font");
+    let path = fixture("surface-font", "surface.pdf", &whole_surface_document());
+    let dump = objects(&qpdf, &path);
+    let joined = listing(&dump);
+    let holds = |needle: &str| dump.iter().any(|(_, object)| object.contains(needle));
+
+    assert!(
+        holds("/Subtype /Type0") && holds("/Encoding /Identity-H"),
+        "the code is the CID:\n{joined}"
+    );
+    assert!(
+        holds("/Subtype /CIDFontType2") && holds("/CIDToGIDMap /Identity"),
+        "and the CID is the glyph index:\n{joined}"
+    );
+    assert!(
+        holds("/Ordering (Identity) /Registry (Adobe) /Supplement 0"),
+        "the descendant's ordering agrees with the encoding:\n{joined}"
+    );
+    // 700, 800 and 900 font units at 1 000 per em, run together because the
+    // glyphs the page drew are consecutive.
+    assert!(
+        holds("/W [ 1 [ 700 800 900 ] ]"),
+        "the widths are the font's own hmtx:\n{joined}"
+    );
+    assert!(holds("/DW 1000"), "with a stated default:\n{joined}");
+    assert!(
+        holds("/Flags 4"),
+        "and a symbolic descriptor, since there is no encoding to look a code up in"
+    );
+
+    // The mapping a simple font cannot hold, read out of the CMap stream
+    // itself: two glyphs standing for one character, and one standing for
+    // three.
+    let type0 = dump
+        .iter()
+        .find(|(_, object)| object.contains("/Subtype /Type0"))
+        .map(|(_, object)| object.clone())
+        .unwrap_or_else(|| panic!("no Type0 font:\n{joined}"));
+    let cmap = stream_data(&qpdf, &path, referenced(&type0, "/ToUnicode"));
+    assert!(
+        cmap.contains("/CMapType 2") && cmap.contains("<0000> <FFFF>"),
+        "the CMap is a two-byte /ToUnicode:\n{cmap}"
+    );
+    assert!(
+        cmap.contains("3 beginbfchar"),
+        "with one entry per glyph the page drew:\n{cmap}"
+    );
+    assert!(
+        cmap.contains("<0001> <0066>") && cmap.contains("<0002> <0066>"),
+        "many glyphs to one character:\n{cmap}"
+    );
+    assert!(
+        cmap.contains("<0003> <006600660069>"),
+        "and one glyph to many:\n{cmap}"
     );
 }

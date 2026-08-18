@@ -2108,3 +2108,248 @@ injection was re-run afterwards and is caught.
 - **`docs/STATUS.md` still says 1 872 tests**, and the leaf-count sweep, the
   README rows and the fourteenth fingerprint remain milestone 9's, per this
   plan's own ledger section.
+
+## Progress — 18 August 2026, milestone 5
+
+**The writer's missing half has landed**, and nothing in this repository uses
+it. `/ExtGState` with `/ca`, `/CA`, `/BM` and `/SMask`; form XObjects with
+`/Group`; `/Shading` types 2 and 3 over type 2 and type 3 `/Function`s;
+`/Pattern` PatternType 1; and a Type0 font over a CIDFontType2 descendant with
+`/Encoding /Identity-H`, `/CIDToGIDMap /Identity`, `/W` from the font's own
+`hmtx` and a `/ToUnicode` built from the text each glyph stands for. All of it
+in `crates/tinker-pdf-cos/src/build.rs`, with twenty-three tests beside the
+code, fourteen in the new `crates/tinker-pdf/tests/writer_graphics.rs` and
+three more in `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`. The workspace
+stands at **2 068**, up forty-one.
+
+Row 5's last clause — *"nothing in this milestone mentions XPS, which is the
+test of whether it belongs in the writer"* — holds in the sense it was written
+for. No fixed page, no brush, no `Indices`, no part name and no OPC anything
+reaches this code; the only occurrences of the string are three provenance
+citations of the form "gap 30 milestone 5", which is the register the rest of
+`build.rs` already cites gap 29 in. The API is PDF's vocabulary throughout, and
+the test of it is that the whole of `writer_graphics.rs` is written against
+clause numbers rather than against markup.
+
+### What the design got wrong, and how it was found out
+
+**1. The missing half was not four dictionary writers. It was the resource
+table.** [The writer's missing half](#the-writers-missing-half)'s table lists
+what `DocumentBuilder` cannot emit and answers `stroke state` and
+`paths and clips` with *"`raw` covers it, no API needed"*. That is true of
+operators and **false of everything with a name**: `PageBuilder::raw` appends
+operator bytes and cannot put an entry in `/Resources`, because a page's
+resource dictionary was assembled inside `finish` out of two hard-coded lists,
+`fonts` and `images`. So `/GS0 gs` written through `raw` names a resource no
+page carries, and the first thing this milestone actually built was
+`ResourceSet` — one value holding six kinds, with one assembly.
+
+That is not a detail, because the same value is what a **form XObject** and a
+**pattern cell** need. 8.10 and 8.7.3.1 each give them a `/Resources` of their
+own, and three copies of the assembly would have been three places for a
+resource kind to be forgotten.
+
+**2. A form's resources make a cycle unreachable, and the plan schedules a cap
+for it.** `add_form` gives the form the document's resources *at the moment it
+is called*, which is `add_page`'s own rule. The consequence is that a form
+cannot name itself — it is not registered until the call returns — so a form
+referring to a form is a chain that only points backwards.
+`MAX_XPS_RESOURCE_DEPTH` and `MAX_XPS_VISUAL_DEPTH` still have work to do on
+the **reading** side, where a `{StaticResource}` graph is the file's to choose;
+on the writing side the cycle cannot be constructed, and
+`a_form_carries_its_geometry_its_content_and_the_resources_before_it` asserts
+both halves rather than leaving the property to be rediscovered.
+
+**3. The Type0 row lists four entries and there are five.** 9.7.3's
+`/CIDSystemInfo` has to say `Identity` ordering, and a descendant claiming some
+other ordering while its Type0 parent says `/Encoding /Identity-H` is a font
+whose two halves disagree about what a code means. Nothing in this engine reads
+that entry — `cos/font.rs` keys on `/CIDToGIDMap` and on the CMap — so it is a
+statement only a third party can check, and qpdf is where it is checked.
+
+**4. `/W` has a case the plan has no answer for: a font with no `hmtx`.** The
+simple-font path invents `500` for every code it cannot measure, because
+9.6.6.4 makes `/Widths` mandatory and leaves it nowhere else to go. A composite
+font has `/DW`, so the honest answer is **no `/W` at all**, and that is what
+`width_array` returns `None` for. Writing 500s would have been a number this
+document made up presented as the font's, which is [Where a half-implementation
+is worse than none](#where-a-half-implementation-is-worse-than-none)'s shape in
+the one place the plan did not look for it.
+
+**5. `/PaintType 2` is not written, and that is a decision rather than a
+gap.** An uncoloured pattern is named through a `[/Pattern base]` colour space,
+which has to be a `/ColorSpace` resource, and this writer has no API for one.
+Emitting a `/PaintType 2` pattern that no page could then name would be a
+feature that does not work. Recorded on the type itself, so the next reader
+finds the argument where the omission is.
+
+### This milestone adds no bound, and here is the argument
+
+`bounds_ledger.rs` stays at **thirteen** rows.
+
+Every input to this code is a value the caller already built in memory: an
+`ExtGState`, a `Function`, a `&[Glyph]`. None of it is read from a file, so a
+constant over any of it could never be the thing that stopped an attacker —
+which is gap 18a milestone 8's failure reached from the other side, and the
+same argument milestone 4 made for its three new counts. What bounds this
+writer is whatever bounds the caller: milestone 6's `MAX_XPS_ELEMENTS` and
+`MAX_XPS_SEGMENTS` are where a file-chosen count is refused, and they are that
+milestone's to add.
+
+One constant does arrive and it is deliberately **not** a ledger row.
+`MAX_FUNCTION_DEPTH` is eight, and eight is not a resource budget — it is
+**this repository's own reader's limit**, read out of `resources.rs`'s
+`parse_function`, which stops at depth eight and returns nothing. A writer that
+emitted a deeper nest would produce a file this engine cannot read back, and a
+writer whose output its own reader refuses is not a writer. It is checked
+iteratively rather than recursively, so a caller handing over a nest a thousand
+deep is refused rather than overflowing a stack finding out, and
+`a_function_nested_deeper_than_the_reader_will_walk_is_refused` proves both at
+eight, nine and one thousand and eight. It sits beside `MAX_PAGE_UNITS`, which
+milestone 3 kept out of the ledger for the same class of reason and wrote the
+argument down in the same place.
+
+### What qpdf said
+
+Three tests in `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`, which is the file
+the `qpdf-linearization` CI job already runs — so this milestone needed no CI
+change, unlike milestone 4, which found gap 29's container oracle had never
+been in a job at all. qpdf 12.3.2.
+
+- **`--check` is clean** on a single page using every construct at once, in
+  four write modes: the builder's own output, a rewrite through
+  `DocumentEditor`, a linearised save, and a save with compression and object
+  streams on. The last is the one that matters for `maybe_compress`: the form's
+  content, the pattern cell and the `/ToUnicode` CMap all become
+  `/FlateDecode` streams and qpdf still reads every one of them.
+- **The output format had to be read before it could be asserted against, and
+  it was the same lesson twice.** qpdf **sorts a dictionary's keys**, so a
+  `/Group` this writer emits in 11.6.6's own order prints as
+  `<< /CS /DeviceGray /I true /S /Transparency >>`, and `/CIDSystemInfo` prints
+  as `/Ordering (Identity) /Registry (Adobe) /Supplement 0`. Two of the first
+  assertions written here were wrong for exactly that reason. And
+  `--show-object` prints a stream's **dictionary** and the words `Object is
+  stream.` where the data would be, so the `/ToUnicode` CMap is invisible to
+  it; `--filtered-stream-data` is the flag that hands the bytes over, and it
+  was found by running the tool. Gap 29's milestone 5 and gap 30's milestone 4
+  each recorded having to rebuild an assertion against the real tool after
+  assuming a format; this makes three.
+- **`/ca 0.5` and `/CA 0.25` come back as two entries**, which is a distinction
+  a case-insensitive reader would lose and which no round trip through this
+  engine could have proved on its own.
+- **The entries qpdf was pointed at are the ones this engine's own reader
+  supplies a default for**, chosen on purpose: `read_shading` defaults a
+  missing `/Extend` to `(false, false)`, `parse_function` defaults a missing
+  `/Domain` to `[0 1]`, the tiling reader falls back to the cell's own size for
+  a `/XStep` it cannot find, and `/I` and `/K` default to false. Every one of
+  those would round-trip through this repository unchanged and be an empty
+  dictionary to anybody else.
+- `/W [ 1 [ 700 800 900 ] ]` — the font's own advances, run together, read back
+  by a program that has never seen the font program.
+
+### The injection matrix
+
+Thirty-six defects, one at a time, each reverted before the next, the full
+workspace re-run with `--no-fail-fast`. **All thirty-six are caught.** One of
+them was caught only after a test was written for it, and that one is the
+finding below.
+
+| Defect | Caught by |
+| --- | --- |
+| `/ca` and `/CA` swapped | `an_alpha_from_the_builder_draws_what_a_hand_written_one_draws`, and one more |
+| `/CA` never written | `fill_alpha_and_stroke_alpha_are_two_entries_and_not_one`, and `...reach_different_pixels` |
+| `/BM` always `/Normal` | `a_blend_mode_from_the_builder_draws_what_a_hand_written_one_draws` |
+| A soft mask's `/S` always `/Luminosity` | `a_soft_mask_is_a_group_a_kind_and_a_backdrop_and_none_is_not_absence` |
+| A soft mask accepted over a form with no `/Group` | `a_graphics_state_that_is_not_one_is_refused` |
+| `/BC` never written | the soft-mask test, and qpdf |
+| `/SMask /None` collapsed to saying nothing | `a_soft_mask_of_none_turns_an_inherited_mask_off` |
+| An alpha outside 11.6.4.4's range accepted | `a_graphics_state_that_is_not_one_is_refused` |
+| `/I` and `/K` swapped | `an_isolated_group_from_the_builder_ignores_the_page_and_a_joined_one_does_not` |
+| `/K` never written | `isolated_and_knockout_are_independent_flags` |
+| `/Group` never written | four tests |
+| A degenerate form `/BBox` accepted | `a_form_that_cannot_be_one_is_refused_and_leaves_nothing_behind` |
+| A form's `/Matrix` never written | `a_form_carries_its_geometry_its_content_and_the_resources_before_it` |
+| A form's `/Resources` never written | the same, and the radial-shading comparison |
+| A radial shading written as type 2 | `an_axial_shading_is_type_two_and_a_radial_is_type_three`, and qpdf |
+| `/Extend` written as the first flag twice | `a_shading_that_does_not_describe_a_gradient_is_refused`, and one more |
+| `/Bounds` never written | `a_stitching_functions_bounds_decide_where_its_middle_colour_lands`, and qpdf |
+| Each `/Encode` pair reversed | the same four |
+| 7.10.4's arity check dropped | `a_shading_that_does_not_describe_a_gradient_is_refused` |
+| The sub-functions never validated | `a_function_nested_deeper_than_the_reader_will_walk_is_refused`, and one more |
+| The function depth guard never advancing | the same |
+| `/XStep` written from the vertical step | `a_tiling_pattern_carries_its_cell_its_steps_and_its_matrix`, and qpdf |
+| A pattern's `/Matrix` never written | `a_tiling_pattern_that_cannot_tile_is_refused` |
+| A pattern with a zero step accepted | `a_composite_font_addresses_a_glyph_by_index_and_a_simple_font_cannot`, and one more |
+| `/Encoding` written as `/WinAnsiEncoding` | `a_gap_in_the_glyphs_drawn_starts_a_new_width_run`, and one more |
+| `/CIDToGIDMap` never written | `a_composite_font_is_identity_h_over_a_cid_font_with_an_identity_map`, and qpdf |
+| `/DW` never written | `a_font_that_states_no_advances_gets_no_width_array`, and qpdf |
+| `/W` from a nominal width rather than from `hmtx` | `a_font_whose_glyphs_stand_for_nothing_carries_no_to_unicode`, and one more |
+| `/W` not scaled by the units per em | `the_width_array_is_the_fonts_own_hmtx_scaled_and_run_together` |
+| `/ToUnicode` never written | `to_unicode_maps_many_glyphs_to_one_character_and_one_glyph_to_many` |
+| A `bfchar` destination truncated to one code unit | the same, `page_text_comes_back_through_the_to_unicode_the_writer_wrote`, and qpdf |
+| `/ToUnicode` deduplicated by destination text | the same three |
+| **The last text a glyph is drawn with wins** | **nothing that asserts anything about `/ToUnicode`** — now `a_glyph_drawn_twice_with_different_text_keeps_the_first` |
+| Glyph codes written one byte each | `a_composite_run_positions_its_glyphs_from_the_widths_the_font_states`, and three more |
+| Glyphs accepted into a simple font | `a_radial_shading_from_the_builder_draws_what_a_hand_written_one_draws`, and one more |
+| `/Shading` dropped from a page's resources | the same |
+
+### The survivor, and the shape it shares with the last three milestones
+
+**Reversing the `/ToUnicode` mapping to last-wins was caught by nothing that
+asserts anything about `/ToUnicode`.** The one test that failed was the
+kitchen-sink form fixture, and it failed on `the form has resources` — three
+constructs away from the mapping, for reasons that have nothing to do with the
+defect. A verdict of "caught" that rests on an unrelated assertion in a fixture
+that touches everything is a verdict worth reading twice, and this one did not
+survive reading.
+
+The rule matters because it is the difference between a mapping that is a
+property of the *font* and one that is a property of the *draw order*. A glyph
+a caller draws once as "fi" and later as "fl" has to lose one — `/ToUnicode`
+maps a code to one string and there is no spelling that says "either" — but if
+which one survives depends on the order the page happened to emit them, then
+the same document built from the same glyphs in a different order extracts as
+different text. The thirteenth determinism fingerprint is a hash of exactly
+that.
+
+This is the fourth milestone running to find the same shape, and the four
+together are worth stating as one rule: **when a thing has two independent
+consequences, a test for one of them is not a test.** Milestone 2 had two rules
+sharing a name (XML 1.0 and Namespaces §5.3 on duplicate attributes); milestone
+3 had one clause with two consequences (OPC case folding, on holding a part and
+on looking one up); milestone 4 had one cache with two halves (geometry and
+children); this milestone has one mapping with two orders. Each had tests. Each
+had tests for one side.
+
+### Still owed after milestone 5
+
+- **Nothing consumes any of this.** That is row 5's whole point and milestones
+  6, 7 and 8 are where it is spent; it is named here so that "the writer can
+  emit a gradient now" is not read as "an XPS draws one".
+- **`/PaintType 2` and shading patterns are not written**, argued above. A
+  gradient fills a *clip* through `sh` rather than a *shape* through a pattern,
+  which is enough for 8.7.4.1 and is not the whole of 8.7.3.
+- **Function types 0 and 4 are not written**, and `Shading` covers two of
+  8.7.4.5's seven. Both enums are `#[non_exhaustive]` so each is an addition
+  rather than a break. The structs are not, deliberately: a `#[non_exhaustive]`
+  struct cannot be built with a literal outside this crate at all, which is
+  why `CompressedImage` and `SoftMask` are not marked either, and
+  `..ExtGState::default()` keeps a new field from breaking a caller.
+- **A soft mask's `/TR` transfer function is not written.** 11.6.5.2 allows one
+  and this engine's renderer reads one; no criterion here asks for it and
+  nothing would have exercised it.
+- **The `/ToUnicode` is `bfchar` throughout.** A `bfrange` says consecutive
+  codes map to consecutive characters, which is true of a Latin subset and
+  false of everything else, so emitting one on the evidence of two adjacent
+  glyphs would assert a relationship the font never claimed. The cost is size,
+  and it is a real cost for a document drawing thousands of distinct glyphs.
+- **A form and an image share the `/XObject` namespace and the last
+  registration under a name wins**, which is `add_image`'s existing rule
+  extended rather than changed. `ResourceSet::dict`'s comment says so; nothing
+  refuses the collision, because refusing in `add_form` while `add_image`
+  shadows silently would be two rules for one namespace.
+- **`Page::size()`, the determinism fingerprint and `docs/STATUS.md`** are
+  untouched, as they have been since milestone 3; the ledger sweep is
+  milestone 9's.
+- **The campaign has not run** (milestone 9) and **no non-Windows producer**
+  (milestone 1), both inherited.
