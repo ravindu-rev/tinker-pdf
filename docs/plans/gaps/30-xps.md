@@ -3269,9 +3269,10 @@ That marker exists because milestone 5 and milestone 7 were each bitten by a
 run killed mid-injection, milestone 7's by a *deletion* patch that left the tree
 looking entirely ordinary.
 
-**Of the nine that completed, all nine were caught.** The remaining nineteen are
-owed and are the first thing milestone 9 does; they are listed here so the debt
-is specific rather than a note saying "more testing".
+**Completed in milestone 9: twenty-eight of twenty-eight run, twenty-seven
+caught.** The nine below were caught in this milestone; the other nineteen ran
+first thing in milestone 9 and are recorded in its own section, where ten
+survived and eight tests were written to close them.
 
 | Defect | Caught by |
 | --- | --- |

@@ -65,6 +65,63 @@ fn png_part() -> Part {
     binary_part("Resources/i.png", rgb_png(4, 2, &pixels))
 }
 
+/// The 4 x 2 PNG's bytes, without a `pHYs` chunk.
+fn png_bytes() -> Vec<u8> {
+    let pixels: Vec<u8> = (0..4 * 2 * 3).map(|i| i as u8).collect();
+    rgb_png(4, 2, &pixels)
+}
+
+/// The same PNG with a `pHYs` chunk stating pixels per metre (11.3.5.3).
+///
+/// Inserted immediately after `IHDR`, which is where the chunk has to be: 5.6
+/// makes `pHYs` an ancillary chunk that precedes the first `IDAT`, and a reader
+/// that scanned past the image data for it would not find one there.
+fn with_phys(png: Vec<u8>, x: u32, y: u32) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&x.to_be_bytes());
+    data.extend_from_slice(&y.to_be_bytes());
+    data.push(1); // the unit is the metre
+    let mut chunk = Vec::new();
+    chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(b"pHYs");
+    chunk.extend_from_slice(&data);
+    let mut crc_over = b"pHYs".to_vec();
+    crc_over.extend_from_slice(&data);
+    chunk.extend_from_slice(&tinker_pdf_filters::crc32(&crc_over).to_be_bytes());
+
+    // 8 bytes of signature, then IHDR: 4 length + 4 tag + 13 data + 4 CRC.
+    let at = 8 + 4 + 4 + 13 + 4;
+    let mut out = png[..at].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[at..]);
+    out
+}
+
+/// The horizontal scale out of a pattern's `/Matrix`.
+fn scale(dict: &str) -> f64 {
+    let at = dict.find("/Matrix [").expect("a matrix");
+    dict[at + 9..]
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a number")
+}
+
+/// The tiling pattern's own content stream, out of the saved file.
+fn cell_stream(saved: &str) -> String {
+    let at = saved
+        .find("/PatternType")
+        .unwrap_or_else(|| panic!("no tiling pattern"));
+    let stream = saved[at..]
+        .find("stream")
+        .unwrap_or_else(|| panic!("the pattern has no stream"));
+    let from = at + stream + "stream".len();
+    let end = saved[from..]
+        .find("endstream")
+        .unwrap_or_else(|| panic!("unterminated"));
+    saved[from..from + end].to_string()
+}
+
 /// Every element-level defect a package reported.
 fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
     let document = Document::open(bytes.to_vec()).expect("an XPS");
@@ -295,6 +352,248 @@ fn each_flip_makes_the_cell_large_enough_to_hold_its_reflections() {
         assert!(
             dict.contains(&wanted),
             "{mode}: the cell is {wide} x {tall} image units: {dict}"
+        );
+    }
+}
+
+/// The cell **draws** its reflections, and each sits beside the original rather
+/// than on top of it.
+///
+/// The `/BBox` test above says the cell is large enough; this says something is
+/// in it. They are two rules and the injection matrix proved it: deleting the
+/// mirrored copies, and drawing them at the original's own origin, both left
+/// that test passing. A cell twice the image wide with one copy in it tiles
+/// with a gap; a cell with two copies stacked in the same place tiles with a
+/// gap and a double exposure. Neither is a flip.
+///
+/// The count is the number of `Do` operators and the placement is the `cm`
+/// before each: a mirrored copy has a negative scale and an origin on the far
+/// side of the cell, which is the only arrangement that reflects rather than
+/// translates.
+#[test]
+fn each_flip_draws_its_copies_and_puts_them_beside_the_original() {
+    let cases = [("Tile", 1), ("FlipX", 2), ("FlipY", 2), ("FlipXY", 4)];
+    for (mode, copies) in cases {
+        let bytes = package_with(
+            png_part(),
+            &format!(
+                r#"ViewboxUnits="Absolute" ViewportUnits="Absolute"
+                   Viewbox="0,0,4,2" Viewport="0,0,200,100" TileMode="{mode}""#
+            ),
+            None,
+        );
+        let text = saved(&bytes);
+        let cell = cell_stream(&text);
+        assert_eq!(
+            cell.matches(" Do").count(),
+            copies,
+            "{mode}: {copies} copies of the image: {cell}"
+        );
+        if mode != "Tile" {
+            assert!(
+                cell.contains("-4 0 0 2") || cell.contains("4 0 0 -2"),
+                "{mode}: a copy is mirrored: {cell}"
+            );
+            // 8 across for FlipX and FlipXY, 4 down for FlipY and FlipXY: the
+            // mirrored copy starts on the far side and draws back.
+            let far = if mode == "FlipY" { " 0 4" } else { " 8 0" };
+            assert!(
+                cell.contains(far) || cell.contains("8 4"),
+                "{mode}: the mirror sits beside the original, at {far}: {cell}"
+            );
+        }
+    }
+}
+
+/// 13.4.1's resolution decides how large an image is in XPS units, and 96 dpi
+/// is only the **default**.
+///
+/// The resolution is invisible to an **absolute** viewbox — that one is already
+/// stated in image units, and the scale is viewport over viewbox with no
+/// picture size in it. It is a *relative* viewbox that asks how big the image
+/// is, because `Viewbox="0,0,1,1"` means "all of it". A 4 × 2 pixel PNG is four
+/// units across at 96 dpi and two at 192, so the same relative viewbox names a
+/// different extent and the scale into a 200-unit viewport doubles.
+///
+/// This distinction is why the injection matrix could report "13.4.1's
+/// resolution ignored" as surviving while three tests exercised viewboxes: all
+/// three were absolute, and no absolute viewbox can see it.
+#[test]
+fn an_images_own_resolution_decides_its_size_in_units() {
+    // 192 dpi, as pixels per metre: 192 / 0.0254.
+    let dense = with_phys(png_bytes(), 7559, 7559);
+    let relative = r#"ViewboxUnits="RelativeToBoundingBox" ViewportUnits="Absolute"
+                      Viewbox="0,0,1,1" Viewport="0,0,200,100""#;
+
+    let at_192 = package_with(binary_part("Resources/i.png", dense), relative, None);
+    assert_eq!(defects(&at_192), []);
+    let at_96 = package_with(png_part(), relative, None);
+    assert_eq!(defects(&at_96), []);
+
+    // 96 dpi: the image is 4 x 2 units, so 200 over 4 is 50, and 50 at 18.1's
+    // 0.75 is 37.5. 192 dpi: the same pixels are 2 x 1 units, so 75.
+    //
+    // Compared with a tolerance rather than as text, and the reason is in the
+    // format: `pHYs` states **integral pixels per metre**, so 192 dots to the
+    // inch is 7559.055... and not a number the chunk can hold. The nearest it
+    // has is 7559, which is 191.9986 dpi and comes out as 74.999453. A test
+    // asserting the string "75" would fail on a correct decode, which is the
+    // shape gap 18's own oracle comparison had.
+    assert!(
+        (scale(&pattern(&at_96)) - 37.5).abs() < 0.01,
+        "at 96 dpi the image is four units across: {}",
+        pattern(&at_96)
+    );
+    assert!(
+        (scale(&pattern(&at_192)) - 75.0).abs() < 0.01,
+        "at 192 dpi the same pixels are two units across: {}",
+        pattern(&at_192)
+    );
+    assert_ne!(
+        pattern(&at_96),
+        pattern(&at_192),
+        "one `pHYs` chunk is the whole difference"
+    );
+}
+
+/// An unknown `TileMode` is refused rather than taken for `None`.
+///
+/// 15.3.1 gives five spellings and a sixth is not one of them. Taking an
+/// unrecognised value for `None` would draw one picture where the file asked
+/// for something this build does not know about — plausible, and wrong in a way
+/// nobody would look for.
+#[test]
+fn an_unknown_tile_mode_is_refused_rather_than_taken_for_none() {
+    let bytes = package_with(
+        png_part(),
+        r#"ViewboxUnits="Absolute" ViewportUnits="Absolute"
+           Viewbox="0,0,4,2" Viewport="0,0,200,100" TileMode="FlipZ""#,
+        None,
+    );
+    assert_eq!(defects(&bytes), [XpsElementDefect::BrushUnreadable]);
+}
+
+/// 7.2.3.5's case-insensitive match is what identifies a part whose **bytes**
+/// say nothing.
+///
+/// The injection matrix reported "the content type matched case-sensitively" as
+/// surviving even with a test that opened an `IMAGE/PNG` package, and the reason
+/// is worth keeping: every one of 9.1.5's four formats has magic bytes, so a
+/// mis-cased content type is rescued by the bytes and nothing is observable. The
+/// case that *can* see it is a part whose bytes identify nothing — there the
+/// content type is the only witness, and the difference between believing it and
+/// not is the difference between two named refusals.
+///
+/// `ImageUnreadable` means "this is a PNG and it will not decode".
+/// `ImageFormatUnsupported` means "nothing here says what this is". A reader
+/// deciding whether the package is damaged or merely exotic needs them apart.
+#[test]
+fn a_mis_cased_content_type_still_identifies_a_part_the_bytes_do_not() {
+    let types =
+        content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="IMAGE/PNG" />"#);
+    let bytes = package_with(
+        binary_part("Resources/i.png", vec![0u8; 64]),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        Some(&types),
+    );
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageUnreadable],
+        "the content type was believed, and then the bytes were not a PNG"
+    );
+}
+
+/// A part nothing identifies is refused rather than guessed at.
+///
+/// Neither a content type this build knows nor magic bytes it recognises: 9.1.5
+/// says an image part is one of four formats and this is none of them, so
+/// assuming PNG and letting the decoder fail would report the wrong fault.
+#[test]
+fn a_part_with_no_content_type_and_no_magic_is_refused() {
+    // An `Override` with a media type naming nothing, so 7.2.3.5 resolves and
+    // the answer is still not an image format.
+    let types = content_types_with(
+        r#"<Override PartName="/Resources/i.png" ContentType="application/octet-stream" />"#,
+    );
+    let bytes = package_with(
+        binary_part("Resources/i.png", vec![0u8; 64]),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        Some(&types),
+    );
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
+}
+
+/// 7.2.3.5 matches a content type case-insensitively, and a package that
+/// shouts is still a package.
+#[test]
+fn a_content_type_in_another_case_still_names_its_format() {
+    let types =
+        content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="IMAGE/PNG" />"#);
+    let bytes = package_with(
+        png_part(),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        Some(&types),
+    );
+    assert_eq!(defects(&bytes), [], "IMAGE/PNG is image/png");
+}
+
+/// An `ImageSource` behind a colour profile is refused by its own name.
+///
+/// 9.1.5's `{ColorConvertedBitmap ...}` names an ICC profile, which is a
+/// non-goal of this whole plan, and the syntax has nowhere to put an sRGB
+/// fallback — so drawing the picture unconverted would be colours the file did
+/// not ask for, which is the shape gap 18a's plausible photograph had.
+#[test]
+fn a_colour_converted_bitmap_is_refused_by_its_own_name() {
+    let bytes = package_with(
+        png_part(),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+    // The helper writes a plain `ImageSource`; this rewrites it in place.
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let _ = text;
+    let body = r#"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
+        <ImageBrush ImageSource="{ColorConvertedBitmap /Resources/i.png /Resources/p.icc}"
+                    Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                    ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+        </Path.Fill></Path>"#;
+    let markup = format!(
+        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+    let bytes = archive(before_content_types(parts, png_part()));
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageProfileUnsupported]);
+}
+
+/// A viewport with no extent paints nothing, so it is refused at the brush
+/// rather than handed to a writer that would refuse the pattern.
+///
+/// Both rectangles are checked and they are two rules: a zero viewbox names no
+/// part of the image and a zero viewport names nowhere to put it.
+#[test]
+fn a_rectangle_with_no_extent_is_refused_at_the_brush() {
+    for (attributes, what) in [
+        (r#"Viewbox="0,0,0,2" Viewport="0,0,200,100""#, "viewbox"),
+        (r#"Viewbox="0,0,4,2" Viewport="0,0,0,100""#, "viewport"),
+        (
+            r#"Viewbox="0,0,4,2" Viewport="0,0,200,0""#,
+            "viewport height",
+        ),
+    ] {
+        let bytes = package_with(
+            png_part(),
+            &format!(r#"{attributes} ViewboxUnits="Absolute" ViewportUnits="Absolute""#),
+            None,
+        );
+        assert_eq!(
+            defects(&bytes),
+            [XpsElementDefect::BrushUnreadable],
+            "a degenerate {what} is not a brush"
         );
     }
 }

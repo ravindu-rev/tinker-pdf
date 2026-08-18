@@ -288,7 +288,16 @@ impl Images {
                     dpi: phys_dpi(bytes).unwrap_or((DEFAULT_DPI, DEFAULT_DPI)),
                 }
             }
-            // Refused above, before either decoder was reached.
+            // Refused above, before either decoder was reached — so this arm
+            // is unreachable, and it is here because the alternative is a
+            // `match` that does not cover its own type.
+            //
+            // The redundancy is measured rather than assumed: the injection
+            // matrix's "a TIFF the magic bytes say is drawn" removes the loop's
+            // `actual` and **survives**, because this arm refuses the same file
+            // a line later. That is the one injection of twenty-eight that
+            // changes no answer, and it says the rule is enforced twice rather
+            // than that a test is missing.
             Kind::Tiff | Kind::JpegXr => return Err(XpsElementDefect::ImageFormatUnsupported),
         };
         self.next += 1;
