@@ -141,7 +141,11 @@ pub const DOCUMENT_OVERHEAD: usize = 4_096;
 /// The same 0xBF the renderer paints over an image it could not decode, so a
 /// page that is missing looks the same whichever level lost it. Grey rather
 /// than a diagonal-cross convention because it never reads as content.
-const PLACEHOLDER_GREY: f64 = 191.0 / 255.0;
+///
+/// Shared with [`crate::xps`] rather than copied, so a fixed page whose markup
+/// is not painted yet and a comic page whose image would not decode look the
+/// same — which they should, because they are the same statement.
+pub(crate) const PLACEHOLDER_GREY: f64 = 191.0 / 255.0;
 
 /// The page size a placeholder falls back to when the book never says.
 ///
@@ -253,10 +257,59 @@ pub enum ArchiveRefusal {
     /// Refused rather than opened as zero pages: a host that asks for the page
     /// count, gets 0 and has no error to show has been handed a failure
     /// dressed as a success.
+    ///
+    /// **This is a sentence about a comic archive and never about an XPS.**
+    /// Before gap 30's milestone 3 it was what five of milestone 1's eight real
+    /// packages came back as, including a three-page document, because the
+    /// comic path counted raster parts and a fixed document has none.
     NoImages,
-    /// A bound was spent: [`MAX_CBZ_PAGES`], [`MAX_SYNTHESISED_PDF`], or one
-    /// of the archive reader's own.
+    /// A bound was spent: [`MAX_CBZ_PAGES`], [`MAX_SYNTHESISED_PDF`],
+    /// [`crate::xps::MAX_XPS_PARTS`], [`crate::xps::MAX_XPS_PAGES`], or one of
+    /// the archive reader's own.
     TooLarge,
+    /// An OPC package that claims to be an XPS and whose own structure will not
+    /// read (gap 30, milestone 3).
+    ///
+    /// ECMA-388 E.3's second step held — the archive carries both
+    /// `[Content_Types].xml` and `_rels/.rels` — and its third did not: a
+    /// content-types item or a package relationships part that is not
+    /// well-formed XML, a fixed-representation target naming a part the package
+    /// does not hold, or one whose media type is not the fixed document
+    /// sequence's.
+    ///
+    /// Refused rather than fallen through to the comic path, which is a
+    /// deliberate refinement of E.3 and is argued in [`crate::xps`]'s header: a
+    /// package that carries OPC's own two parts is not a comic, and paging its
+    /// images would be gap 30's headline defect wearing a smaller hat. A ZIP
+    /// carrying a `[Content_Types].xml` and **no** relationships part is still
+    /// a comic archive, and so is an OPC package that names no fixed
+    /// representation at all.
+    UnreadablePackage,
+    /// An interleaved package: OPC 7.2.4's `…/[0].piece` items.
+    ///
+    /// Recognised and refused by name rather than half-assembled. Reassembling
+    /// them is a second addressing model layered on the first, and no package
+    /// in gap 30 milestone 1's corpus uses one — so the refusal is tied to
+    /// evidence rather than to taste, and the plan says what would change it.
+    Interleaved,
+    /// A package holding an item that is not a part name (OPC 6.2.2.2) and is
+    /// not the content-types item.
+    InvalidPartName,
+    /// A package holding two part names equal under OPC 6.2.2.3's ASCII case
+    /// folding, or one name derivable from another — `/a` beside `/A`, or
+    /// `/segment1` beside `/segment1/segment2`.
+    ///
+    /// Refused rather than resolved to whichever came first, because "whichever
+    /// came first" is directory order and directory order is whatever the
+    /// producing tool walked.
+    AmbiguousPartNames,
+    /// An XPS whose fixed payload names no page: a `FixedDocumentSequence` that
+    /// will not read or names no document, or a document set that names no
+    /// `PageContent` between them.
+    ///
+    /// There is no page to degrade *to*, which is the one thing that separates
+    /// this from every page-level defect in [`crate::xps::XpsPageDefect`].
+    NoFixedPages,
 }
 
 impl core::fmt::Display for ArchiveRefusal {
@@ -269,6 +322,13 @@ impl core::fmt::Display for ArchiveRefusal {
             ArchiveRefusal::Zip64OutOfBounds => "a Zip64 value the archive cannot contain",
             ArchiveRefusal::NoImages => "a valid archive with no image entries",
             ArchiveRefusal::TooLarge => "the archive is past a bound this build enforces",
+            ArchiveRefusal::UnreadablePackage => {
+                "an XPS package whose own structure could not be read"
+            }
+            ArchiveRefusal::Interleaved => "an interleaved package, which is not reassembled here",
+            ArchiveRefusal::InvalidPartName => "an item that is not a part name",
+            ArchiveRefusal::AmbiguousPartNames => "two part names one package may not both hold",
+            ArchiveRefusal::NoFixedPages => "a fixed payload that names no page",
         })
     }
 }
@@ -340,6 +400,20 @@ pub enum ArchiveWarning {
         /// Zero-based page index.
         page: u32,
     },
+    /// A synthesised **fixed page** is not the picture the package holds (gap
+    /// 30, milestone 3).
+    ///
+    /// Every page of every XPS carries one of these while gap 30 is being
+    /// built, and [`crate::xps::XpsPageDefect::NotDrawn`] is the honest reason:
+    /// the spine is read, the page is at the size its own markup states, and
+    /// the markup is not painted yet. A page that came back silent would be
+    /// gap 17's blank page reported as success.
+    XpsPage {
+        /// Zero-based page index.
+        page: u32,
+        /// Why.
+        defect: crate::xps::XpsPageDefect,
+    },
 }
 
 /// Where one page came from.
@@ -362,13 +436,42 @@ pub struct ArchiveReport {
     warnings: Vec<ArchiveWarning>,
     pages: Vec<PageOrigin>,
     synthesised_bytes: usize,
+    dialect: Option<crate::xps::Dialect>,
 }
 
 impl ArchiveReport {
+    /// Builds a report. `pub(crate)` because the two synthesisers are the only
+    /// things that can honestly fill one in.
+    pub(crate) fn synthesised(
+        warnings: Vec<ArchiveWarning>,
+        pages: Vec<PageOrigin>,
+        synthesised_bytes: usize,
+        dialect: Option<crate::xps::Dialect>,
+    ) -> ArchiveReport {
+        ArchiveReport {
+            warnings,
+            pages,
+            synthesised_bytes,
+            dialect,
+        }
+    }
+
     /// Everything tolerated, in the order it happened.
     #[must_use]
     pub fn warnings(&self) -> &[ArchiveWarning] {
         &self.warnings
+    }
+
+    /// Which spelling of XPS this document was, or `None` for a comic archive.
+    ///
+    /// Public because gap 30's decision 3 is a claim a caller should be able to
+    /// check rather than take on trust: the two dialects carry **byte-identical
+    /// content types**, which milestone 1 measured, so the namespace is the
+    /// only discriminator there is and this is where the answer it reached
+    /// comes out.
+    #[must_use]
+    pub fn xps_dialect(&self) -> Option<crate::xps::Dialect> {
+        self.dialect
     }
 
     /// One entry per page, in page order.
@@ -626,6 +729,14 @@ struct Plan<'a> {
 ///
 /// # Errors
 /// [`ArchiveRefusal`], one variant per refusal, each of them by name.
+///
+/// # This door is the comic path and nothing else
+///
+/// It opens its own archive and pages whatever it finds, so handing it an XPS
+/// gets a comic made of that package's resources — which is precisely gap 30's
+/// headline defect, and is why [`crate::Document::open`] does **not** come
+/// through here. That route opens the archive once and asks
+/// [`crate::xps::route`] what it is first.
 pub fn synthesise(
     what: Container,
     bytes: &[u8],
@@ -636,15 +747,40 @@ pub fn synthesise(
         // decompressors, two of them encumbered, and none of them a page.
         return Err(ArchiveRefusal::NotAZip);
     }
+    let archive = open_archive(bytes, &limits.zip)?;
+    pages_from_archive(archive, limits)
+}
 
-    let mut archive = Archive::open(bytes, &limits.zip).map_err(|e| match e {
+/// Opens the archive, once, mapping the reader's refusals onto this one's.
+///
+/// Split out of [`synthesise`] so `Document::open` can open a ZIP **once** and
+/// then decide what it is: milestone 3's exit criterion is that the sniff and
+/// the read share one [`Archive`], because opening it twice doubles the work
+/// and creates a window in which the two reads could disagree.
+///
+/// # Errors
+/// [`ArchiveRefusal`], one variant per refusal the archive reader made.
+pub fn open_archive<'a>(
+    bytes: &'a [u8],
+    limits: &ZipLimits,
+) -> Result<Archive<'a>, ArchiveRefusal> {
+    Archive::open(bytes, limits).map_err(|e| match e {
         ArchiveError::NotAZip => ArchiveRefusal::NotAZip,
         ArchiveError::Damaged => ArchiveRefusal::Damaged,
         ArchiveError::MultiDisk => ArchiveRefusal::MultiDisk,
         ArchiveError::Zip64OutOfBounds => ArchiveRefusal::Zip64OutOfBounds,
         ArchiveError::TooManyEntries => ArchiveRefusal::TooLarge,
-    })?;
+    })
+}
 
+/// Pages an already-open archive as a comic.
+///
+/// # Errors
+/// [`ArchiveRefusal`], one variant per refusal, each of them by name.
+pub fn pages_from_archive(
+    mut archive: Archive<'_>,
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
     let order = reading_order(archive.entries());
     let mut plans: Vec<Plan<'_>> = Vec::new();
     let mut spent = DOCUMENT_OVERHEAD;
@@ -747,11 +883,7 @@ pub fn synthesise(
     let synthesised_bytes = pdf.len();
     Ok((
         pdf,
-        ArchiveReport {
-            warnings,
-            pages,
-            synthesised_bytes,
-        },
+        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None),
     ))
 }
 

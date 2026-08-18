@@ -31,6 +31,11 @@ tinker-pdf-raster = { workspace = true }
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-color = { workspace = true }
 tinker-pdf-zip = { workspace = true }
+# Gap 30 milestone 3: `src/xps/opc.rs` reads `[Content_Types].xml` and every
+# `.rels` part through it, which is what milestone 2's manifest comment said
+# would happen here. `xtask dag` already allowed `tinker-pdf -> tinker-pdf-xml`,
+# so promoting it from `[dev-dependencies]` changes no graph.
+tinker-pdf-xml = { workspace = true }
 
 [dev-dependencies]
 tinker-pdf-cos = { workspace = true }
@@ -40,13 +45,9 @@ tinker-pdf-cos = { workspace = true }
 # dependency above (gap 29), so this adds no edge to the graph `xtask dag`
 # checks — only a test target's access to it.
 tinker-pdf-zip = { workspace = true }
-# A dev-dependency and not yet a real one, deliberately. Gap 30's milestone 3
-# is where the facade *uses* the XML reader; milestone 2's need for it is
-# `tests/xml_real_packages.rs`, which parses all forty-six XML parts of the
-# eight committed XPS packages, and `tests/bounds_ledger.rs`, which reads its
-# four constants. Both of those need `tinker-pdf-zip` in the same crate to get
-# at the parts at all, which is why the test lives here rather than in the leaf:
-# a leaf that reaches sideways to test itself is a leaf with an edge it did not
-# need. `xtask dag` already allows `tinker-pdf -> tinker-pdf-xml`, so promoting
-# this to `[dependencies]` in milestone 3 changes no graph.
+# A real dependency since gap 30's milestone 3 (above). It stays listed here as
+# well because `tests/xml_real_packages.rs` and `tests/bounds_ledger.rs` name it
+# directly: both need `tinker-pdf-zip` in the same crate to get at a part at
+# all, which is why those tests live here rather than in the leaf — a leaf that
+# reaches sideways to test itself is a leaf with an edge it did not need.
 tinker-pdf-xml = { workspace = true }

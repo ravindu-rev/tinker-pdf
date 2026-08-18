@@ -1598,3 +1598,268 @@ a target that used it would leave the crate's only total unexplored.
 - **No non-Windows producer**, inherited from milestone 1 and not this
   milestone's to discharge.
 
+## Progress — 18 August 2026, milestone 3
+
+**An `.xps` no longer opens as a comic.** `Document::open` opens a ZIP **once**
+and routes it by ECMA-388 E.3's three steps; `crates/tinker-pdf/src/xps/opc.rs`
+is the package layer and `crates/tinker-pdf/src/xps.rs` is the discrimination,
+the spine and the synthesis. Milestone 1's two `#[ignore]`d tests are green, and
+`today_an_xps_opens_as_a_comic_and_this_is_what_it_reports` is **deleted** —
+which was the point of writing it: it failed the moment the behaviour changed.
+The workspace stands at **2 003**, up forty-four.
+
+All eight real packages now open as the documents they are, in both dialects,
+with the page counts their `PageContent` elements say and every page 612 x 792
+pt from `Width="816" Height="1056"` at 18.1's 1/96 inch. Before this commit five
+of the eight were refused as `NoImages` and three opened as one-page comics
+showing a resource.
+
+### The exit criterion forced the spine a milestone early, and that is a correction
+
+Row 3 says *"milestone 1's two failing tests go green"*, and the first of those
+tests is not satisfiable by a refusal:
+
+```rust
+let document = Document::open(package("wpf-image-and-text.xps"))
+    .expect("today it opens; after milestone 3 it opens as a fixed document");
+assert_eq!(page.size(), (612.0, 792.0));
+```
+
+`.expect` on an `Err` is a failure, so the only way that test goes green is if
+the package **opens** and its first page is the size the markup states — which
+is row 4's `FixedDocumentSequence` → `FixedDocument` → `FixedPage` resolution
+and row 4's geometry. Milestone 1's own progress note reads *"either read as a
+fixed document or refused by a name that is true"*, and the test it committed
+permits only the first.
+
+So this milestone reads the spine and synthesises one page per `FixedPage`, at
+the size the markup states, carrying the neutral placeholder and
+`XpsPageDefect::NotDrawn`. **Row 4 is amended rather than absorbed**: what it
+still owes is the markup-order proof against a package whose document order and
+filename order disagree, `/CropBox` and `/BleedBox` from `ContentBox` and
+`BleedBox`, resolving a fixed page through its **media type** rather than
+through its root element, and qpdf on the produced file.
+
+### E.3 has a hole exactly where this milestone lives, and it is closed on purpose
+
+The plan writes the test as *"all three, or it is not an XPS"* with the comic
+path as the fallthrough. Taken literally, an XPS whose `[Content_Types].xml`
+will not parse fails step 3 and is **paged as a comic** — which is this gap's
+headline defect surviving in the corner where the package is damaged, and a
+damaged package is the one an attacker writes.
+
+The refinement, argued in `xps.rs`'s header and held apart by two fixtures:
+
+- **No fixed representation at all** — a `.docx`, an `.odf`, anything else OPC —
+  is "not an XPS" and falls through to the comic path, unchanged. That is the
+  direction the plan is explicit about and it is untouched:
+  `an_opc_package_that_names_no_fixed_representation_is_still_a_comic` builds a
+  ZIP with a `word/media/image1.png`, a real `officeDocument` relationship and a
+  content-types item, and it still opens as a one-page comic.
+- **A fixed representation that is there and will not resolve** — an unparseable
+  content-types item or relationships part, a target naming a part the package
+  does not hold, an external target, a media type that is not the sequence's —
+  is `ArchiveRefusal::UnreadablePackage`.
+
+Step 2 is what keeps a comic a comic and it wants **both** of OPC's items, so
+`a_comic_carrying_a_content_types_part_is_still_a_comic` never reaches a read at
+all. That is the near miss the plan asked for, and
+`recognising_a_comic_archive_costs_no_read` is the other half of "opens the
+archive once": `xps::route` takes an `Archive` by value and hands the same one
+back as `Routing::NotXps` with `inflated()` still zero.
+
+### The empty-element trap, and milestone 1's corpus paying a second time
+
+The first run of the content-types reader failed on **all eight real packages**
+with `PackageDefect::Unreadable` — *"the part is not the markup it must be"*,
+which is a perfectly plausible thing to say about a file you have mis-parsed.
+
+`tinker-pdf-xml` documents in its header that an empty-element tag produces
+**two** events, `Start` then `End`, *"so a caller matching on starts and ends
+never has to special-case it"*. A caller that tracks depth from `Start` alone
+reads `<Types><Default/><Default/>…</Types>` as a nest six deep, and everything
+below the second `Default` falls into the "an element 7.2.3.2 does not define"
+arm. The leaf's contract is right; the caller's reading of it was not.
+
+A hand-written fixture with one `Default` element would have passed. Six is what
+a real package carries, and that is the milestone-1 investment paying in a place
+nobody planned for it: the fixtures in `tests/xps_opc.rs` are all written by this
+repository, and every one of them was written **after** the corpus had already
+found the defect.
+
+### `MAX_XPS_PAGES` could not be deferred, and the pair is the interesting part
+
+The bounds table schedules `MAX_XPS_PAGES` as *"FixedPages synthesised"*, which
+reads like row 4's. Once the spine is read here the page count is
+attacker-controlled here, and — this is the part worth writing down — **it is
+not bounded by `MAX_XPS_PARTS`**: four thousand `PageContent` elements may name
+**one** part between them. What stands in front of it is
+`tinker_pdf_xml::limits::MAX_XML_TOKENS`, a million events in one part, so a
+single 20 KB `FixedDocument` asks for a million pages.
+
+Both constants land here, and so does the whole relation.
+
+| Constant | Fixtures | A dense fixed document | Cap | In front of it | Proved to fire by |
+| --- | --- | --- | --- | --- | --- |
+| `MAX_XPS_PARTS` | 8 192 | 505 | 8 192 | `MAX_ZIP_ENTRIES`, 16 384 | `a_package_past_the_part_cap_is_refused_by_name` |
+| `MAX_XPS_PAGES` | 4 096 | 200 | 4 096 | `MAX_XML_TOKENS`, 1 048 576 | `a_page_count_past_the_xps_cap_is_refused_by_name` |
+
+Both fire at their **shipped** values against packages built past them — a real
+8 193-part archive and a real 4 097-page `FixedDocument` — never against a
+lowered copy of the constant, and each test also asserts that one fewer opens,
+so the cap is what stopped it rather than something else about a large package.
+`MAX_XPS_PAGES < MAX_XPS_PARTS < MAX_ZIP_ENTRIES` is a `const` block beside the
+constants, so a build that breaks it **does not compile**. Both rows join
+`bounds_ledger.rs`'s existing table and pass all five of its checks; the sweep is
+now thirteen rows and `no_bound_refuses_a_dense_fixed_document` covers six.
+
+`MAX_SYNTHESISED_PDF` is reused rather than duplicated, as the plan asks, and
+`the_synthesised_document_fits_inside_what_was_charged_for_it` measures the
+charge against the produced bytes at one, three and sixty-four pages.
+
+**One cap is deliberately not a cap**, and it is written down where it is
+declared: `MAX_PAGE_UNITS` bounds what a `FixedPage` may state as its `Width` or
+`Height`. It allocates nothing, refuses nothing a document could want — 10 416
+inches is about a sixth of a mile — and a page past it *degrades* to the book's
+own size with `XpsPageDefect::SizeUnusable` rather than refusing. It is a sanity
+check on a number the file chose, not a resource bound, and it stays out of the
+ledger for that reason.
+
+### What the real packages forced that this plan did not predict
+
+- **The package relationship's target is relative in OpenXPS**, which puts
+  relative-reference resolution inside E.3's *third step* rather than after it.
+  [OPC is not "a ZIP with names in it"](#opc-is-not-a-zip-with-names-in-it)
+  predicts a relative `Target` in a **part** relationships part beside an
+  absolute markup reference, and milestone 1 added that markup references are
+  relative in OpenXPS. Neither predicted `Target="FixedDocumentSequence.fdseq"`
+  in `/_rels/.rels`, where WPF writes `/FixedDocumentSequence.fdseq`. A reader
+  that resolved the package relationship by stripping a leading slash refuses
+  every `.oxps` **before it has read a single part** — it fails the
+  discrimination, not the payload, so the symptom is "your file is not an XPS"
+  rather than a page that will not draw.
+- **`_rels/.rels` is stored in WPF's packages and deflated in the object
+  model's**, which milestone 1 measured and which decides how the read-once
+  cache can be tested at all. `Archive::inflated()` is the only public measure of
+  the budget and a **stored** entry spends none of it, so a cache test over a
+  WPF-shaped fixture asserts `0 == 0` and passes with the cache deleted. The
+  fixture in `resolving_a_part_twice_does_not_inflate_it_twice` is deflated and
+  the test asserts `after_one > 0` before it asserts the second read is free.
+- **The two producers disagree about attribute order.** WPF writes
+  `Type Target Id` on a `Relationship`; the object model writes `Target Id Type`.
+  Nothing here reads by position, but a fixture frozen from one producer would
+  have let a positional reader ship.
+- **`[Content_Types].xml` needs no special case.** 7.3.7's brackets fail
+  6.2.2.2's `pchar` production, so `PartName::from_item` refuses it as a
+  consequence of the grammar rather than by a name check —
+  `every_item_name_in_the_inventory_round_trips` asserts that rather than
+  skipping the item, because a reader that special-cased it by name would be
+  papering over a validator that does not work.
+
+### The inventory's media-type column is checked for the first time
+
+Milestone 1 wrote fifty-two `media_type` values through .NET and could not check
+them, because OPC 7.2.3.5's ordered algorithm did not exist. It does now, and
+`inventory_matches_the_packages` resolves every one of them: forty-four parts
+against a committed table, and eight `(none)` — one per package, each of them
+the content-types item, which resolves to nothing because it is not a part.
+
+The upper-case `<Default Extension="ODTTF">` is the case the column was worth
+having for. It appears in **both** dialects against a part named `….ODTTF`, and a
+byte comparison against `odttf` finds nothing.
+
+### The injection matrix, and the one that survived
+
+Twenty-seven defects, each applied alone, reverted before the next, the whole
+workspace re-run with `--no-fail-fast`. Twenty-six were caught. **One survived**,
+and the test that closes it is the most useful thing in this milestone's suite.
+
+| Defect | Caught by |
+| --- | --- |
+| Step 2 needs only the content-types item, not `_rels/.rels` as well | `a_comic_carrying_a_content_types_part_is_still_a_comic` |
+| Step 3 accepts any media type on the fixed representation's target | three, including `a_fixed_representation_naming_the_wrong_media_type_is_refused_by_name` |
+| A broken OPC package falls through to the comic path | `an_xps_whose_package_relationships_part_is_damaged_is_refused_by_name`, and one more |
+| Only XPS 1.0's namespace is a dialect | `every_package_in_the_corpus_opens_as_the_document_it_is`, and one more |
+| Only XPS 1.0's fixed-representation relationship type is recognised | the same two |
+| `..` is ignored when a relative reference is resolved | `a_page_relationship_resolves_three_levels_up_against_its_source_part`, and one more |
+| A `Default` extension is compared byte for byte | `inventory_matches_the_packages`, and one more |
+| A `Default` beats an `Override` | `an_override_beats_a_default_and_both_compare_case_insensitively` |
+| Every percent-escape is decoded, not only the non-ASCII ones | three, including `a_non_ascii_part_name_round_trips_through_percent_encoding` |
+| 6.2.2.2's percent-encoded-unreserved prohibition is dropped | `a_name_that_is_not_a_part_name_is_not_read_as_one`, and one more |
+| **6.2.2.3's equivalence compares spelling rather than the case fold** | **nothing — the survivor, below** |
+| 6.2.2.3's derivability half is dropped | `two_part_names_one_package_may_not_both_hold_are_refused_by_name` |
+| A relationship `Id` may repeat | `a_relationships_part_that_repeats_an_id_is_refused_by_name` |
+| One part may carry two `Override`s | `a_content_types_item_that_declares_one_thing_twice_is_refused_by_name` |
+| `.piece` items are not recognised | `an_interleaved_package_is_refused_by_name` |
+| A directory record is taken for a part name | `directory_records_are_not_parts` |
+| A truncated name is taken as an ordinary part name | `a_truncated_part_name_is_unresolvable_and_an_untruncated_one_is_not` |
+| The read-once cache re-reads on every resolution | `resolving_a_part_twice_does_not_inflate_it_twice` |
+| `validate` does not count the parts | `a_package_past_the_part_cap_is_refused_by_name` |
+| The page cap never fires | `a_page_count_past_the_xps_cap_is_refused_by_name` |
+| A page may be any size the file states | `a_fixed_page_with_no_usable_size_takes_the_books_size` |
+| 18.1's 1/96 inch is read as 1/72 | six, including both of milestone 1's |
+| A synthesised page carries no warning | eight, including `an_xps_with_a_raster_resource_is_not_a_one_page_comic` |
+| The archive's own warnings are not read into the report | `a_truncated_part_name_is_unresolvable_and_an_untruncated_one_is_not` |
+| A `PageContent` that does not resolve is dropped | `a_page_content_that_does_not_resolve_keeps_its_number` |
+| A fixed page part's root element is not checked | `a_fixed_page_part_that_is_not_one_is_a_named_placeholder`, and one more |
+| Any descendant of a fixed document is a page, not only a child | `only_a_direct_child_of_a_fixed_document_is_a_page` |
+
+**The survivor is 6.2.2.3 read as one rule when it is two.** Deleting the case
+fold from `PartName`'s `PartialEq` — so `/a` and `/A` are different names —
+failed **nothing in the workspace**, with three tests already written for the
+clause. The reason is that the clause has two consequences and this suite only
+covered one: a package may not *hold* `/a` beside `/A`, which `validate` checks
+by folding names into a set and never comparing two `PartName`s at all; and a
+*lookup* must find the part however the reference spells its case, which nothing
+asked for, because every fixture spelled every reference the way the part was
+named.
+
+That is gap 29's milestone-5 lesson from a third direction. A positive assertion
+cannot catch a weakened check: every reference in every fixture matched exactly,
+so exact matching passed all of them. `a_part_resolves_however_a_reference_spells_its_case`
+closes it in both places — through `Package::has` and through a `PageContent`
+whose `Source` is spelled `PAGES/1.FPAGE` — and the injection was re-run
+afterwards and is caught.
+
+Five of the twenty-seven exist because the first pass exposed gaps rather than
+defects: nothing had asked what happens to a **directory record** (neither
+Microsoft serialiser writes one, and every general-purpose archiver does, so a
+reader that took `Documents/` for a part name would refuse every repacked
+package), nothing forbade a repeated relationship `Id` or a twice-overridden
+part, nothing pinned that only a *direct* child of a `FixedDocument` is a page,
+and nothing reached `MAX_PAGE_UNITS`.
+
+### Still owed after milestone 3
+
+- **Nothing on a page is drawn.** Every page is the neutral placeholder and says
+  so by name. Milestones 6 to 8 are the markup and milestone 5 is the writer work
+  they need.
+- **A fixed document and a fixed page are resolved by relationship and by root
+  element**, not by media type. Row 4's *"never by extension"* holds already —
+  nothing here reads an extension for the payload — but the media-type
+  corroboration ECMA-388 Table D-4 offers is not asserted for the two payload
+  types, only for the sequence. Row 4.
+- **`Package::relationships` re-parses.** The part's *bytes* are cached and the
+  markup is not, so asking a part for its relationships twice parses twice. It is
+  bounded by `MAX_XML_TOKENS` per call and costs no budget; recorded so it is a
+  decision rather than an oversight.
+- **An item that is not a part name refuses the whole package.** That is the
+  design section's rule (*"a part name that is invalid, duplicated or derivable
+  from another"* refuses at open) and it is stricter than ruling 2 would be on
+  its own. No package in the corpus trips it, and OPC requires a space to be
+  percent-encoded, so a producer that wrote a raw space into an item name would
+  be refused where a leaner reader would simply not resolve that one part. Named
+  here so row 4 can revisit it if a real file turns one up.
+- **No corpus package exercises the recovery route, `.piece` items, a duplicate
+  name or a truncated name**, so every fixture for those is hand-built. That is
+  gap 29's shape in a corner rather than everywhere, and it is the honest limit
+  of what eight conforming packages can prove.
+- **Zip64 is still written and not proven**, inherited from the plan's note on
+  `tinker-pdf-zip`; no package here is one.
+- **`docs/STATUS.md` still says 1 872 tests**, and the leaf-count sweep, the
+  README rows and the fingerprint are milestone 9's, per the plan's own ledger
+  section.
+- **The campaign has not run**, inherited from milestone 2. What did land is the
+  two `.xps` seeds the plan asks for, in `fuzz/corpus/render_page/` — the
+  whole-pipeline target is where `Document::open` routes a `PK\x03\x04`, so it is
+  the only target the OPC layer is reachable from.

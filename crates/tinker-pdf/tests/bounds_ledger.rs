@@ -1,5 +1,13 @@
 //! Gap 29's seven bounds and gap 30's, swept in one place.
 //!
+//! *Amended, 18 August 2026, gap 30 milestone 3.* Two more rows —
+//! `MAX_XPS_PARTS` and `MAX_XPS_PAGES` — and the relation
+//! `MAX_XPS_PAGES < MAX_XPS_PARTS < MAX_ZIP_ENTRIES`, written in a `const`
+//! block beside the constants so a build that breaks it **does not compile**.
+//! The pair is worth having as a pair: two hundred `PageContent` elements may
+//! name one part between them, so the page count is not bounded by the part
+//! count and neither cap could stand in for the other.
+//!
 //! *Amended, 18 August 2026, gap 30 milestone 2.* Four more rows —
 //! `tinker-pdf-xml`'s — and one more relation. Gap 30's bounds section says the
 //! new constants join **this** table rather than getting a sweep of their own,
@@ -49,6 +57,7 @@
 //! comic. A relation that six rows satisfy and one does not is not a relation.
 
 use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
+use tinker_pdf::xps::{MAX_XPS_PAGES, MAX_XPS_PARTS};
 use tinker_pdf_filters::MAX_PNG_SAMPLES;
 use tinker_pdf_xml::limits as xml_limits;
 
@@ -62,6 +71,8 @@ const CBZ: &str = include_str!("../src/cbz.rs");
 const CBZ_TESTS: &str = include_str!("cbz.rs");
 const XML_LIMITS: &str = include_str!("../../tinker-pdf-xml/src/limits.rs");
 const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
+const XPS: &str = include_str!("../src/xps.rs");
+const XPS_TESTS: &str = include_str!("xps_opc.rs");
 
 /// One bound, as its own ledger publishes it.
 struct Bound {
@@ -285,13 +296,52 @@ fn ledger() -> Vec<Bound> {
                 XML_TESTS,
             ),
         },
+        // ---- gap 30, milestone 3 ---------------------------------------
+        Bound {
+            name: "MAX_XPS_PARTS",
+            cap: MAX_XPS_PARTS as u128,
+            published: "8 192",
+            // The package built *past* this cap holds 8 193 parts; 8 192 is the
+            // most any fixture here spends and is allowed. The largest real
+            // package in the corpus holds 7.
+            fixtures: MAX_XPS_PARTS as u128,
+            // A comic archive is not a package at all.
+            comic: 0,
+            // One sequence, one document, two hundred pages, two hundred page
+            // relationships parts, the package relationships part and about a
+            // hundred fonts and images.
+            document: Some(505),
+            reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
+            reachable_because: "every entry the archive reader will hand over could be a part",
+            declared_in: XPS,
+            fires_in: ("a_package_past_the_part_cap_is_refused_by_name", XPS_TESTS),
+        },
+        Bound {
+            name: "MAX_XPS_PAGES",
+            cap: MAX_XPS_PAGES as u128,
+            published: "4 096",
+            fixtures: MAX_XPS_PAGES as u128,
+            comic: 0,
+            document: Some(200),
+            // **Not** the part cap, and this is the row that says why: two
+            // hundred `PageContent` elements may name one part between them, so
+            // the page count is not bounded by the part count at all. What
+            // stands in front of it is the markup reader's own total.
+            reachable: xml_limits::MAX_XML_TOKENS as u128,
+            reachable_because: "every event one fixed document part may produce could be a page",
+            declared_in: XPS,
+            fires_in: (
+                "a_page_count_past_the_xps_cap_is_refused_by_name",
+                XPS_TESTS,
+            ),
+        },
     ]
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
 /// the plan's "per-item caps sit beside them" were built as named constants.
-/// Gap 30's milestone 2 adds four. All eleven are here, and a bound added
-/// without a row fails this.
+/// Gap 30's milestone 2 adds four and its milestone 3 adds two. All thirteen
+/// are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_two_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -309,6 +359,8 @@ fn the_sweep_covers_every_bound_these_two_gaps_added() {
             "MAX_XML_ATTRIBUTES",
             "MAX_XML_NAME_LEN",
             "MAX_XML_TOKENS",
+            "MAX_XPS_PARTS",
+            "MAX_XPS_PAGES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -403,8 +455,9 @@ fn no_bound_refuses_a_dense_fixed_document() {
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
     assert_eq!(
-        measured, 4,
-        "gap 30's yardstick covers {measured} rows, not the four its milestone 2 added"
+        measured, 6,
+        "gap 30's yardstick covers {measured} rows, not the six its milestones \
+         2 and 3 added"
     );
 }
 
@@ -481,7 +534,7 @@ fn every_bound_names_a_test_that_exists() {
     // Not one of them may be a timing assertion. `5adf502` is the scar: a
     // budget proved by a clock passes on a fast machine with the budget
     // removed.
-    for source in [ZIP_TESTS, PNG_TESTS, CBZ_TESTS, XML_TESTS] {
+    for source in [ZIP_TESTS, PNG_TESTS, CBZ_TESTS, XML_TESTS, XPS_TESTS] {
         assert!(
             !source.contains("Instant::now"),
             "a bound in this gap is being proved by a clock"

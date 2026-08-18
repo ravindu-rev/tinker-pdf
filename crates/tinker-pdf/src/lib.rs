@@ -27,6 +27,7 @@ pub mod fonts;
 mod optional;
 pub mod redact;
 mod resources;
+pub mod xps;
 
 use std::sync::Arc;
 
@@ -70,6 +71,8 @@ pub use tinker_pdf_cos::{
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
+/// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
+pub use xps::{Dialect, XpsPageDefect};
 
 /// The engine's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -253,6 +256,33 @@ pub struct Document {
     archive: Option<Arc<ArchiveReport>>,
 }
 
+/// Opens a recognised container **once** and routes it by what it holds.
+///
+/// One `Archive::open` for both formats, which is gap 30 milestone 3's own exit
+/// criterion rather than a nicety: opening it to sniff and again to read
+/// doubles the central-directory walk and creates a window in which the two
+/// reads could disagree about the same bytes. [`xps::route`] hands the archive
+/// back **unread** when the package is not an XPS, and the cheap half of that
+/// decision costs no read at all — a ZIP with no `[Content_Types].xml` item and
+/// no `_rels/.rels` item is every comic archive there has ever been.
+fn open_container(
+    what: Container,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    if what != Container::Zip {
+        // Recognised and refused. RAR, 7z and tar are three more
+        // decompressors, two of them encumbered, and none of them a page.
+        return Err(ArchiveRefusal::NotAZip);
+    }
+    let comic = cbz::Limits::DEFAULT;
+    let archive = cbz::open_archive(bytes, &comic.zip)?;
+    match xps::route(archive, &xps::Limits::DEFAULT) {
+        xps::Routing::Document(pdf, report) => Ok((pdf, report)),
+        xps::Routing::Refused(why) => Err(why),
+        xps::Routing::NotXps(archive) => cbz::pages_from_archive(archive, &comic),
+    }
+}
+
 impl Document {
     /// Opens a document from bytes.
     ///
@@ -264,17 +294,28 @@ impl Document {
     /// [`Document::ladder_level`] and [`Document::warnings`] for what that
     /// cost.
     ///
-    /// # Comic archives
+    /// # Containers
     ///
     /// Bytes that **begin** with a container signature are not read as a PDF.
-    /// A ZIP is synthesised into a document whose pages are its images (gap
-    /// 29); RAR, 7z and tar are refused by name. The signatures are tested at a
-    /// fixed position and nowhere else, so a PDF that happens to carry
-    /// `PK\x03\x04` inside a stream is unaffected — see [`cbz::container`].
+    /// RAR, 7z and tar are refused by name. A ZIP is **one signature over five
+    /// formats**, so it is opened once and then asked what it is: an XPS
+    /// package becomes a document whose pages are its fixed pages (gap 30), and
+    /// anything else is synthesised into a document whose pages are its images
+    /// (gap 29).
+    ///
+    /// The order is not arbitrary and it is argued in [`xps`]: the XPS test is
+    /// ECMA-388 E.3's, all three steps of it, and the comic path is the
+    /// fallthrough — because an XPS mis-routed to the comic path is gap 30's
+    /// headline defect, where a comic mis-routed to XPS would be a refusal
+    /// where a document used to open.
+    ///
+    /// The signatures are tested at a fixed position and nowhere else, so a PDF
+    /// that happens to carry `PK\x03\x04` inside a stream is unaffected — see
+    /// [`cbz::container`].
     ///
     /// # Errors
     /// [`OpenError::Empty`] for no bytes, [`OpenError::UnsupportedArchive`] for
-    /// a container this build recognises and cannot page, and
+    /// a container this build recognises and cannot open as a document, and
     /// [`OpenError::NotAPdf`] when not one indirect object could be found.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
         let bytes: Arc<[u8]> = bytes.into();
@@ -283,8 +324,8 @@ impl Document {
         }
 
         if let Some(container) = cbz::container(&bytes) {
-            let (pdf, report) = cbz::synthesise(container, &bytes, &cbz::Limits::DEFAULT)
-                .map_err(OpenError::UnsupportedArchive)?;
+            let (pdf, report) =
+                open_container(container, &bytes).map_err(OpenError::UnsupportedArchive)?;
             // These bytes came out of this repository's own writer moments
             // ago, so a parse failure is a defect here rather than a claim
             // about the archive — but ruling 1 forbids asserting it, and
