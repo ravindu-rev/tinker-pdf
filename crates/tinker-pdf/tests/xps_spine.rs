@@ -384,12 +384,13 @@ fn a_page_box_that_will_not_read_is_named_rather_than_defaulted() {
             }),
             "{attributes}: {seen:?}"
         );
-        // And the page still says the one thing every page in this milestone
-        // says, so the box warning is an addition rather than a replacement.
-        assert!(seen.contains(&ArchiveWarning::XpsPage {
-            page: 0,
-            defect: XpsPageDefect::NotDrawn,
-        }));
+        // And the box warning is the **only** thing the page says: it read,
+        // and it drew, and one statement it made about itself did not read.
+        let page_level: Vec<&ArchiveWarning> = seen
+            .iter()
+            .filter(|w| matches!(w, ArchiveWarning::XpsPage { .. }))
+            .collect();
+        assert_eq!(page_level.len(), 1, "{attributes}: {seen:?}");
     }
 }
 
@@ -444,10 +445,9 @@ fn a_fixed_page_is_routed_by_media_type_and_not_by_its_name() {
     );
     let document = open(&archive(parts)).expect("an XPS whose page is named `.txt`");
     assert_eq!(document.page(0).map(|p| p.size()), Some((612.0, 792.0)));
-    assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
-        page: 0,
-        defect: XpsPageDefect::NotDrawn,
-    }));
+    assert!(!warnings(&document)
+        .iter()
+        .any(|w| matches!(w, ArchiveWarning::XpsPage { .. })));
 
     // And a part named `.fpage` that an `Override` says is something else. It
     // is not a page, and the extension does not rescue it.
@@ -541,28 +541,62 @@ fn a_payload_part_with_no_media_type_is_not_a_page() {
 
 // ---- the placeholder is grey --------------------------------------------
 
-/// Every page is the neutral 0xBF, and **not white**.
+/// A page that could not be read is the neutral 0xBF; a page that read and
+/// draws nothing is **white**.
 ///
-/// Row 4 asks for the placeholder rather than a blank page, and the two are
-/// indistinguishable from every other test in this file: a page carrying no
-/// content stream at all would have the right size, the right number, the right
-/// warning and a white bitmap. Gap 17 is the whole of why that is not good
-/// enough — a blank page returned as success is the failure this engine names
-/// after itself — so the pixels are read.
+/// *Amended, gap 30 milestone 6.* Row 4's criterion was that every page is the
+/// placeholder rather than blank, and it was right while nothing was drawn. It
+/// is now **two rules**, and the pair is the interesting part: a page that
+/// failed says so in grey, and a page whose markup is an empty `FixedPage` says
+/// nothing and paints nothing, because that is what the file says. A build that
+/// kept the grey would report a document every page of which had failed; a
+/// build that dropped it would be gap 17's blank page returned as success. So
+/// both halves are read, in pixels, from two fixtures that differ in one part.
 ///
 /// 0xBF is the same grey the renderer paints over an image it could not decode
 /// and the same one a comic placeholder carries, which is deliberate: a page
 /// that is missing looks the same whichever level lost it.
 #[test]
-fn every_page_is_the_neutral_grey_rather_than_white() {
+fn a_page_that_will_not_read_is_grey_and_a_page_that_draws_nothing_is_white() {
     // Small on purpose: 16 x 24 XPS units is 12 x 18 pt, so every pixel of the
     // page can be read rather than a sample of them.
-    let bytes = archive(with(
+    let empty = archive(with(
         one_page_package(),
         "Documents/1/Pages/1.fpage",
         &fixed_page("16", "24"),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = open(&empty).expect("an XPS");
+    let bitmap = document
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert_eq!((bitmap.width, bitmap.height), (12, 18));
+    for y in 0..bitmap.height {
+        for x in 0..bitmap.width {
+            assert_eq!(
+                pixel(&bitmap, x, y),
+                (0xFF, 0xFF, 0xFF),
+                "({x}, {y}): an empty `FixedPage` draws nothing, and nothing is white"
+            );
+        }
+    }
+
+    // The same package with a fixed page part whose markup stops mid-element.
+    // The root read — so the page keeps the size the file stated — and the body
+    // did not, which is `ContentUnreadable` and the grey.
+    let broken = archive(with(
+        one_page_package(),
+        "Documents/1/Pages/1.fpage",
+        &format!(
+            r#"<FixedPage xmlns="{}" Width="16" Height="24"><Path Data="M0,0"#,
+            xps_support::XPS_NS
+        ),
+    ));
+    let document = open(&broken).expect("an XPS whose page will not read");
+    assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
+        page: 0,
+        defect: XpsPageDefect::ContentUnreadable,
+    }));
     let bitmap = document
         .page(0)
         .expect("a page")
@@ -576,15 +610,20 @@ fn every_page_is_the_neutral_grey_rather_than_white() {
 
     // And on a package this repository did not write, at a few points, because
     // a 612 x 792 render is 1.4 MB and reading all of it proves nothing more.
+    // The third page of `wpf-three-pages.xps` is one steel-blue rectangle on
+    // white: the corners are the paper and the middle of the rectangle is not.
     let real = Document::open(corpus("wpf-three-pages.xps")).expect("a fixed document");
     let bitmap = real
         .page(2)
         .expect("the third page")
         .render(&RenderOptions::default());
     assert_eq!((bitmap.width, bitmap.height), (612, 792));
-    for (x, y) in [(0, 0), (611, 0), (0, 791), (611, 791), (306, 396)] {
-        assert_eq!(pixel(&bitmap, x, y), (0xBF, 0xBF, 0xBF), "({x}, {y})");
+    for (x, y) in [(0, 0), (611, 0), (0, 791), (611, 791)] {
+        assert_eq!(pixel(&bitmap, x, y), (0xFF, 0xFF, 0xFF), "({x}, {y})");
     }
+    // `M0,0L360,0 360,60 0,60Z` under `1,0,0,1,100,280`, which is 100..460 by
+    // 280..340 in XPS units and 75..345 by 210..255 in points from the top.
+    assert_eq!(pixel(&bitmap, 200, 230), (0x46, 0x82, 0xB4));
 }
 
 // ---- what `cos()` lends -------------------------------------------------

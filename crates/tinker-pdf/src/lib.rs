@@ -87,7 +87,7 @@ pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
-pub use xps::{Dialect, XpsPageDefect};
+pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};
 
 /// The engine's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

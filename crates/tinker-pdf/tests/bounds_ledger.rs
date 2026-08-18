@@ -1,5 +1,15 @@
 //! Gap 29's seven bounds and gap 30's, swept in one place.
 //!
+//! *Amended, 18 August 2026, gap 30 milestone 6.* Three more rows —
+//! `MAX_XPS_ELEMENTS`, `MAX_XPS_SEGMENTS` and `MAX_XPS_RESOURCE_DEPTH`. The
+//! first two are the plan's own **work caps**, the numbers a file chooses when
+//! it decides how much markup a page holds, and milestone 5 recorded that they
+//! are *"where a file-chosen count is refused"*. The third arrives with them
+//! rather than later because row 6's `{StaticResource}` criterion asks for *"a
+//! depth cap and a cycle refused rather than recursed"*, and those are two
+//! rules with two names in the report — a chain of twenty distinct keys is not
+//! a cycle and a cycle of two is not deep.
+//!
 //! *Amended, 18 August 2026, gap 30 milestone 3.* Two more rows —
 //! `MAX_XPS_PARTS` and `MAX_XPS_PAGES` — and the relation
 //! `MAX_XPS_PAGES < MAX_XPS_PARTS < MAX_ZIP_ENTRIES`, written in a `const`
@@ -57,7 +67,9 @@
 //! comic. A relation that six rows satisfy and one does not is not a relation.
 
 use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
-use tinker_pdf::xps::{MAX_XPS_PAGES, MAX_XPS_PARTS};
+use tinker_pdf::xps::{
+    MAX_XPS_ELEMENTS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH, MAX_XPS_SEGMENTS,
+};
 use tinker_pdf_filters::MAX_PNG_SAMPLES;
 use tinker_pdf_xml::limits as xml_limits;
 
@@ -73,6 +85,7 @@ const XML_LIMITS: &str = include_str!("../../tinker-pdf-xml/src/limits.rs");
 const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
+const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
 
 /// One bound, as its own ledger publishes it.
 struct Bound {
@@ -335,13 +348,71 @@ fn ledger() -> Vec<Bound> {
                 XPS_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_XPS_ELEMENTS",
+            cap: MAX_XPS_ELEMENTS as u128,
+            published: "1 048 576",
+            // One short of the cap, which is what
+            // `a_page_past_the_element_cap_is_refused_by_name`'s *opening*
+            // package spends; the one built past it spends three more.
+            fixtures: MAX_XPS_ELEMENTS as u128 - 1,
+            comic: 0,
+            document: Some(400_000),
+            // No **single** part can reach this, which is the whole reason it
+            // is a total: `MAX_XML_TOKENS` bounds one part at a million events,
+            // of which at most half can be start tags. The ceiling is that,
+            // once per part the package may hold.
+            reachable: MAX_XPS_PARTS as u128 * (xml_limits::MAX_XML_TOKENS as u128 / 2),
+            reachable_because: "half a million elements in each of the parts a package may hold",
+            declared_in: XPS,
+            fires_in: (
+                "a_page_past_the_element_cap_is_refused_by_name",
+                XPS_MARKUP_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_XPS_SEGMENTS",
+            cap: MAX_XPS_SEGMENTS as u128,
+            published: "8 388 608",
+            fixtures: MAX_XPS_SEGMENTS as u128,
+            comic: 0,
+            document: Some(8_000_000),
+            // `H1` is two bytes and one segment, in a part this build already
+            // admits at 128 MiB — and that is one path, before the file has
+            // chosen how many paths or how many pages.
+            reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128 / 2,
+            reachable_because: "a two-byte `H` command per segment in one 128 MiB part",
+            declared_in: XPS,
+            fires_in: (
+                "a_geometry_past_the_segment_cap_is_refused_by_name",
+                XPS_MARKUP_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_XPS_RESOURCE_DEPTH",
+            cap: MAX_XPS_RESOURCE_DEPTH as u128,
+            published: "16",
+            fixtures: MAX_XPS_RESOURCE_DEPTH as u128,
+            comic: 0,
+            document: Some(2),
+            // One dictionary may hold as many entries as its part has events,
+            // and a chain through all of them is not a cycle.
+            reachable: xml_limits::MAX_XML_TOKENS as u128,
+            reachable_because: "every entry one resource dictionary part could declare, chained",
+            declared_in: XPS,
+            fires_in: (
+                "a_static_resource_chain_past_the_depth_cap_is_named",
+                XPS_MARKUP_TESTS,
+            ),
+        },
     ]
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
 /// the plan's "per-item caps sit beside them" were built as named constants.
-/// Gap 30's milestone 2 adds four and its milestone 3 adds two. All thirteen
-/// are here, and a bound added without a row fails this.
+/// Gap 30's milestone 2 adds four, its milestone 3 adds two and its milestone
+/// 6 adds three. All sixteen are here, and a bound added without a row fails
+/// this.
 #[test]
 fn the_sweep_covers_every_bound_these_two_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -361,6 +432,9 @@ fn the_sweep_covers_every_bound_these_two_gaps_added() {
             "MAX_XML_TOKENS",
             "MAX_XPS_PARTS",
             "MAX_XPS_PAGES",
+            "MAX_XPS_ELEMENTS",
+            "MAX_XPS_SEGMENTS",
+            "MAX_XPS_RESOURCE_DEPTH",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -455,9 +529,9 @@ fn no_bound_refuses_a_dense_fixed_document() {
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
     assert_eq!(
-        measured, 6,
-        "gap 30's yardstick covers {measured} rows, not the six its milestones \
-         2 and 3 added"
+        measured, 9,
+        "gap 30's yardstick covers {measured} rows, not the nine its milestones \
+         2, 3 and 6 added"
     );
 }
 
@@ -534,7 +608,14 @@ fn every_bound_names_a_test_that_exists() {
     // Not one of them may be a timing assertion. `5adf502` is the scar: a
     // budget proved by a clock passes on a fast machine with the budget
     // removed.
-    for source in [ZIP_TESTS, PNG_TESTS, CBZ_TESTS, XML_TESTS, XPS_TESTS] {
+    for source in [
+        ZIP_TESTS,
+        PNG_TESTS,
+        CBZ_TESTS,
+        XML_TESTS,
+        XPS_TESTS,
+        XPS_MARKUP_TESTS,
+    ] {
         assert!(
             !source.contains("Instant::now"),
             "a bound in this gap is being proved by a clock"

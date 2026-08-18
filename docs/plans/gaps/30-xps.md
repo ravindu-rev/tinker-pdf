@@ -2353,3 +2353,371 @@ had tests for one side.
   milestone 9's.
 - **The campaign has not run** (milestone 9) and **no non-Windows producer**
   (milestone 1), both inherited.
+
+## Progress — 18 August 2026, milestone 6
+
+**A fixed page draws.** 11.2.3's abbreviated geometry and 11.2.1's element
+syntax, 14.4's transforms, 14.3's canvases with composable transforms, clips
+and opacity, 15's solid and gradient brushes, and 14.2's resource dictionaries
+with `{StaticResource}` — `crates/tinker-pdf/src/xps/markup.rs`, `geometry.rs`,
+`brush.rs` and `paint.rs`, with fifty-eight tests in
+`crates/tinker-pdf/tests/xps_markup.rs` and three more in `xps_qpdf.rs`. The
+workspace stands at **2 129**, up sixty-one.
+
+**Two of milestone 1's eight real packages now render with nothing owed at
+all** — `wpf-shapes-only.xps` and `wpf-three-pages.xps` — and two more do in
+both dialects once the gradients are counted: `wpf-gradients.xps` and
+`xpsom-gradients.oxps`. The remaining four owe exactly what milestones 7 and 8
+own, by name, at the element: a `Glyphs` run and an `ImageBrush`.
+`every_package_in_the_corpus_draws_and_says_what_it_does_not` is the table.
+
+### What the design got wrong, and how it was found out
+
+**1. Row 6's headline criterion cannot mean what it says, and the milestone
+table is why.** It asks that *"the whole of the real one-page package in the
+design section renders"*. That package is `wpf-image-and-text.xps`, and its
+body is a `Path` filled with an `ImageBrush` behind a `{StaticResource}` and a
+`Glyphs` run — which are **row 8's** and **row 7's**. Read literally the
+criterion cannot be met before milestone 8, and a milestone whose exit
+criterion depends on two later ones is a milestone that never closes.
+
+What it can mean, and what
+`the_real_one_page_package_from_the_design_section_renders` asserts, is that
+the page **reads whole**: no page-level warning at all, the `Path`'s geometry
+and transform arriving as the markup's own numbers, the `{StaticResource}`
+**resolving** — and the brush behind it going grey under
+`BrushUnsupported`, which is a *different name* from the
+`BrushUnresolved` a dictionary miss would produce. That distinction is the
+whole of what the criterion is worth: the four things the design section calls
+*"not optional, from the first file"* that belong to this milestone all work,
+and the two that do not are named rather than silent. Row 6 is amended in
+place rather than absorbed, the way milestone 3 amended row 4.
+
+**2. "A pull parser, not a tree" is right about the drawing and wrong about the
+values.** The design section says a tree *"would allocate the whole of a fixed
+page before anything looked at it, and a fixed page is the one part of this
+format whose size is chosen by the file"*, and that is exactly the reason
+`Canvas` and `FixedPage` are streamed here — each opens a scope with its own
+content buffer and is folded into its parent at its end tag, and no drawable
+tree exists at any point.
+
+What cannot be streamed is a **property element**. XAML writes a value too big
+for an attribute as a child named `Owner.Property`, and a value has to be
+complete before it can be used: a `GradientStop` list is not a gradient until
+its last stop, and a `ResourceDictionary` cannot answer a lookup until its last
+entry. So those subtrees are materialised and nothing else is, each element
+charged against `MAX_XPS_ELEMENTS`. The buffer earns its keep twice, because it
+is also what makes document order inside a canvas irrelevant: a
+`Canvas.RenderTransform` written *after* a child still wraps it.
+
+**3. `MAX_XPS_ELEMENTS` cannot fire from one part, and that is the proof that
+it is a total rather than a defect in it.** `tinker_pdf_xml::limits::MAX_XML_TOKENS`
+bounds one part at a million events, of which at most half can be start tags —
+so a single fixed page tops out at about 524 288 elements, comfortably under a
+cap of 1 048 576. Only a **document** can reach it.
+`a_page_past_the_element_cap_is_refused_by_name` therefore builds three parts
+rather than one, and a per-page cap set to the same number would never fire at
+all. That is the plan's own sentence arriving from the other side: *"a
+per-element cap times a file-chosen element count is not a bound"* — and the
+converse, that a total set where a per-item cap would sit is not a total.
+
+**4. The bounds table does not say that `MAX_XPS_SEGMENTS` is also the
+peak-memory bound, and that is what decides its value.** A segment has to be
+materialised before it is written — a geometry's bounding box is what fixes a
+transparency group's `/BBox` and what decides whether a canvas's children
+overlap — so the worst case is one `Data` attribute holding the whole total. At
+56 bytes a segment that is about 470 MiB, which sits under `MAX_ZIP_INFLATED`'s
+1 GiB that this build already admits. So the cap is set just above the plan's
+own dense-document yardstick (8 000 000) rather than comfortably above it: the
+headroom a larger constant would buy is over a number nothing has ever reached,
+and it would be paid for in the one number an attacker can drive.
+
+**5. `XpsPageDefect::NotDrawn` had to be deleted, and the report needed a
+second level.** The design section names three levels of refusal — package,
+page and element — and milestones 3 to 5 built two of them, so every page of
+every package carried `NotDrawn`. Keeping it here would leave a variant nothing
+produces; keeping it *and* reporting element defects through it would make "this
+page is a placeholder" and "this page drew and its text did not" one sentence.
+`ArchiveWarning::XpsElement` is the second level, `XpsPageDefect` is now what
+its name says, and `NotDrawn` is gone — which is milestone 3's own argument for
+deleting `today_an_xps_opens_as_a_comic_and_this_is_what_it_reports` one level
+up: a record of old behaviour that does not break when the behaviour changes is
+not a record.
+
+**6. The element-level rules are three bullets over two parsers, and one parser
+has two consequences.** *"Geometry unreadable → the element is not painted"*
+and *"a transform, a clip or an opacity that cannot be read refuses its
+element"* are written as separate rules, and `Path.Data` and `Path.Clip` are
+the **same** call to `geometry::abbreviated` returning the **same**
+`GeometryError::Syntax`. One is a missing shape and the other is every shape
+the clip existed to hide, and a build that answered them the same way would
+pass whichever half its fixtures happened to cover.
+`a_data_that_will_not_read_is_not_painted_and_a_clip_that_will_not_read_refuses`
+is one test over two fixtures for that reason.
+
+**7. `{StaticResource}` has no obvious chain, and without one neither of row
+6's two guards could ever fire.** The bounds table justifies
+`MAX_XPS_RESOURCE_DEPTH` with *"a dictionary entry may reference another"*, and
+in XPS's actual element vocabulary there is no `<StaticResource>` element and
+no brush whose *whole value* is a reference. 14.2.3 does permit a reference on
+any attribute-settable property, and `Color` is the one where a reference names
+a value of the same kind the entry would otherwise carry — so
+`<SolidColorBrush x:Key="a" Color="{StaticResource b}"/>` is read as an alias
+for whatever `b` names. Deliberately **only** `Color`: a reference on a
+`Transform` names a transform and not a brush, and treating one as an alias
+would hand a `MatrixTransform` back where a brush was asked for. Without that
+reading, both guards are decoration with a `MAX_` prefix, which is gap 18a
+milestone 8's failure by another route.
+
+**8. PDF cannot spell two of `SpreadMethod`'s three values.** Row 6 lists
+`SpreadMethod` beside `GradientStops` and `Transform` as though all three were
+attributes to read. 8.7.4.5.3 gives a shading `/Extend` and nothing else, so
+`Pad` is one flag pair and `Repeat` and `Reflect` are **replications**: the axis
+grows eight periods each way and the function is stitched from seventeen copies
+of itself, of which a reflected gradient runs every other one backwards. The
+two differ in nothing but that predicate, which is why they are built from one
+function and one closure rather than from two code paths that would agree by
+accident — and why `the_three_spread_methods_are_three_shadings` asserts three
+distinct files rather than three attributes parsed.
+
+**9. Strokes are in no row of the milestone table, and a `Path` that only
+strokes would have drawn nothing.** Row 6 names brushes for `Fill` and rows 7
+and 8 never mention `Stroke`. A solid stroke is forty lines and the alternative
+is a shape that silently vanishes, so it is built — and a **gradient** stroke
+takes the placeholder grey with `BrushUnsupported`, because a shading pattern
+is what one needs and milestone 5 records in as many words that it writes none.
+That is [07](07-stroked-patterns.md)'s headline defect said from the other
+side: its gradient-stroked rule painted solid black, silently, and the first
+stop of the gradient would have been exactly as plausible and exactly as wrong.
+
+### The bounds
+
+| Constant | Fixtures | A dense fixed document | Cap | In front of it | Proved to fire by |
+| --- | --- | --- | --- | --- | --- |
+| `MAX_XPS_ELEMENTS` | 1 048 575 | 400 000 | 1 048 576 | `MAX_XPS_PARTS` x `MAX_XML_TOKENS`/2 | `a_page_past_the_element_cap_is_refused_by_name` |
+| `MAX_XPS_SEGMENTS` | 8 388 608 | 8 000 000 | 8 388 608 | `MAX_ZIP_ENTRY_BYTES`/2, one path | `a_geometry_past_the_segment_cap_is_refused_by_name` |
+| `MAX_XPS_RESOURCE_DEPTH` | 16 | 2 | 16 | `MAX_XML_TOKENS`, chained | `a_static_resource_chain_past_the_depth_cap_is_named` |
+
+All three fire at their **shipped** values against real packages built past
+them — a three-part document of 1 048 578 elements, a single `Data` of
+8 388 609 segments in an archive that deflates to a hundred kilobytes, and a
+chain of seventeen aliases — and each test also asserts that one fewer opens,
+so the cap is what stopped it rather than something else about a large file.
+`bounds_ledger.rs` is now **sixteen** rows and `no_bound_refuses_a_dense_fixed_document`
+covers nine.
+
+**The third row is here rather than in milestone 8** because row 6's own
+criterion asks for *"a depth cap and a cycle refused rather than recursed"*,
+and those are two rules: a chain of twenty distinct keys is not a cycle and a
+cycle of two is not deep. They answer under different names —
+`BrushTooDeep` and `BrushCyclic` — and deleting either leaves the other passing
+every test written for it, which is why the injection matrix carries both.
+
+**Two counts arrived and neither wanted a constant.** The painting cache is one
+`Drawn` per **part**, for the reason milestone 4 built its own two: a
+`FixedDocument` may show one page part four thousand times and `Source::new`
+walks every character of a part before it yields an event. Cached, the markup
+this synthesis paints totals the distinct parts it read, which the archive
+reader already bounds from both sides. And the overlap test a canvas opacity
+needs is quadratic in the child count, which `MAX_XPS_ELEMENTS` already bounds
+and which stops at the first pair that covers each other.
+
+**The cache has an observable, and it is the element total itself.** Milestone
+4's rule — *"a cache with no observable is a cache a test cannot tell from its
+own absence"* — is satisfied without a counter here:
+`a_part_shown_on_a_thousand_pages_is_painted_once` builds a two-thousand-element
+page part shown a thousand times, which charges two thousand if it is painted
+once and two million if it is not, and two million is past the cap. So the
+package opens with the cache and is refused as `TooLarge` without it. 12.3.1
+permits exactly that document.
+
+### What qpdf said
+
+Three new tests in `tests/xps_qpdf.rs`, qpdf 12.3.2, in the house form gap 29
+established — `RAN`/`SKIPPED` printed so a skipped oracle cannot read as a
+pass, fixtures under `CARGO_TARGET_TMPDIR`, the `oracle!` macro. Milestone 5
+wrote the `/ExtGState`, the form XObject with its `/Group`, the `/Shading` and
+the two `/Function`s and nothing consumed any of them; this is the first
+document in this repository in which all of them are produced **from a file**.
+
+- **`--check` is clean** on `wpf-shapes-only.xps` and `wpf-gradients.xps`
+  synthesised, on a built page that uses a transparency group and a three-stop
+  gradient at once, and on that page saved back through `DocumentEditor` with
+  compression and object streams on and off.
+- **The gradient is an axial shading over a stitching function**, followed from
+  the page's `/Resources` rather than guessed at: `/ShadingType 2`,
+  `/Coords [ 0 300 400 500 ]` — the markup's own `StartPoint` and `EndPoint` —
+  `/Extend [ true true ]`, `/FunctionType 3`, `/Bounds [ 0.5 ]` and
+  `/Encode [ 0 1 0 1 ]`.
+- **The canvas opacity is a transparency group**, and qpdf prints it in its own
+  sorted order: `/Group << /CS /DeviceRGB /I true /S /Transparency >>`, over a
+  `/BBox [ 0 0 150 150 ]` that is the union of what the canvas drew, with
+  `/ca 0.5` and `/CA 0.5` on the `Do`. **The file's own spelling is not qpdf's**
+  — this writer emits `/Bounds [0.5]` with no spaces inside the brackets and
+  qpdf prints `[ 0.5 ]` — so a test written against the bytes would have passed
+  over the tool that is supposed to be checking it. That is the fourth
+  milestone running to record having to read the tool's output before asserting
+  on it.
+- **`--with-images` still finds no image XObject on any page.** This gap's
+  headline defect, said from outside, on a file that used to open as a one-page
+  comic whose page *was* a resource.
+
+### What the real packages forced
+
+- **Two spellings of the geometry, and neither producer is wrong.**
+  `M0,0L200,0 200,200 0,200Z` from WPF against
+  `M 0,0 L 200,0 200,200 0,200 Z` from the XPS object model, for the same page
+  of the same document. `the_two_producers_spellings_of_one_rectangle_are_one_geometry`
+  is one assertion and it is the only one in the geometry tests whose two
+  inputs this repository did not write.
+- **Two spellings of every colour**: `#FFDC143C` against `#dc143c`, eight
+  digits upper case against six lower. A reader that took one length refuses
+  half the corpus, and 15.2.4 defines two more forms nobody in it uses.
+- **The object model drops what is default**, so `SpreadMethod="Pad"` and
+  `ColorInterpolationMode` are present in one dialect's twin of a page and
+  absent from the other's. An absent `SpreadMethod` is `Pad`, and a reader that
+  required the attribute would refuse every OpenXPS gradient.
+- **The image is behind a `{StaticResource}`**, which is the risk table's own
+  entry: *"resource dictionaries are treated as advanced and deferred, so the
+  first real file cannot be drawn"*. The mitigation held — the dictionary,
+  the reference, the geometry and the transform all work on the first real
+  file, and the only thing missing from that page is the raster itself.
+- **A comment sits between `<FixedPage>` and `<FixedPage.Resources>`**, and
+  inter-element whitespace is real. Both fall out of the streaming walk
+  ignoring every event that is not a start or an end, which milestone 2's
+  parser made possible and which no hand-written fixture would have exercised.
+
+### The injection matrix, and the three that survived
+
+Forty-one defects, each applied alone, reverted before the next, the whole
+workspace re-run with `--no-fail-fast`. Thirty-eight were caught. **Three
+survived**, and every one of them is the same shape this gap has now found in
+six milestones running.
+
+**Milestone 5's warning was taken literally**: a verdict of "caught" that rests
+on a broad fixture failing for an unrelated reason is not a verdict, so every
+row below was read for *which* assertion failed. Two of the rows here catch
+sixteen and twenty-one tests each — the omitted-repeat form and the element
+defects that never reach the report — and neither is counted on: each also
+fails the one test written for exactly that rule.
+
+| Defect | Caught by |
+| --- | --- |
+| Relative commands read as absolute | five, including `a_relative_line_names_a_displacement` |
+| Absolute commands read as relative | twelve, including `an_absolute_line_names_a_point` |
+| `Z` leaves the pen where the last command left it | `a_close_returns_the_pen_to_the_figures_first_point`, and one more |
+| A figure re-opened after `Z` starts at the origin | the same two |
+| The omitted-repeat form reads one operand | seventeen, including `the_omitted_repeat_form_re_applies_the_command` |
+| The fill rule defaults to non-zero | four, including `the_fill_rule_defaults_to_even_odd_and_the_operators_differ` |
+| `F0` and `F1` swapped | the same, and two more |
+| The arc's two flags agree the other way round | `an_elliptical_arc_becomes_cubics_that_end_where_the_file_said` |
+| The arc ends where the trigonometry landed | the same |
+| A quadratic's controls sit halfway rather than two thirds | `a_quadratic_is_raised_to_the_cubic_that_draws_it` |
+| A smooth cubic reflects nothing | `a_smooth_cubic_reflects_the_last_cubics_control_point` |
+| `IsFilled` ignored | `a_figure_that_is_not_filled_is_still_stroked` |
+| `IsClosed` ignored | `the_element_syntax_and_the_abbreviated_syntax_produce_the_identical_segment_list` |
+| A transform that will not read defaults to the identity | `a_transform_that_is_not_six_numbers_refuses_its_element` |
+| Path segments not charged against the total | `a_geometry_past_the_segment_cap_is_refused_by_name` |
+| **A property element matched by prefix rather than by segment** | **nothing — a survivor, below** |
+| `#AARRGGBB` read with the alpha last | three, including `a_colour_comes_in_four_hex_lengths_and_two_cases` |
+| `#RGB` expanded by sixteen rather than seventeen | the same |
+| `sc#` written straight, with no transfer function | `an_sc_rgb_colour_goes_through_the_srgb_transfer_function` |
+| `Reflect` behaves as `Repeat` | `the_three_spread_methods_are_three_shadings` |
+| A repeating gradient does not extend its axis | the same |
+| An elliptical radial gradient drawn as a circle | `an_elliptical_radial_gradient_is_a_circle_in_a_scaled_space` |
+| **Gradient stops taken in document order** | **nothing — a survivor, below** |
+| `ContextColor` painted black | `a_context_colour_is_the_placeholder_grey_and_not_black` |
+| A canvas opacity is **always** a transparency group | `a_canvas_opacity_over_children_that_do_not_overlap_is_not_a_group` |
+| A canvas opacity is **never** a transparency group | `a_canvas_opacity_over_overlapping_children_is_a_transparency_group`, and both new qpdf tests |
+| A `Clip` that will not read treated like a `Data` that will not | `a_data_that_will_not_read_is_not_painted_and_a_clip_that_will_not_read_refuses` |
+| A transform that will not read leaves its element in place | `a_transform_that_is_not_six_numbers_refuses_its_element` |
+| `{StaticResource}` searches outermost first | `an_inner_dictionary_shadows_an_outer_one` |
+| `{StaticResource}` searches only the innermost dictionary | `a_canvas_child_finds_a_key_the_page_declared` |
+| The `{StaticResource}` cycle guard dropped | `a_static_resource_cycle_is_refused_rather_than_recursed` |
+| The `{StaticResource}` depth cap never fires | `a_static_resource_chain_past_the_depth_cap_is_named` |
+| Elements not charged against the total | `a_page_past_the_element_cap_is_refused_by_name` |
+| A `Glyphs` run skipped in silence | three, including `a_glyphs_run_is_named_rather_than_silently_skipped` |
+| A canvas's resource dictionary never unbound | `an_inner_dictionary_shadows_an_outer_one`'s second leg |
+| **One alpha serving the fill and the stroke** | **nothing — a survivor, below** |
+| Markup from another vocabulary dropped and its children kept | `markup_from_another_vocabulary_is_skipped_whole_and_named` |
+| The page's own `cm` not flipped | three, including `the_real_one_page_package_from_the_design_section_renders` |
+| A part painted once per page rather than once | `a_part_shown_on_a_thousand_pages_is_painted_once` |
+| Element defects never reaching the report | twenty-one, including every degradation test in the file |
+| A page whose markup will not read is blank rather than grey | `a_page_that_will_not_read_is_grey_and_a_page_that_draws_nothing_is_white` |
+
+### The three survivors, and the one shape they share
+
+**1. `Owner.Property` compared as a prefix rather than as a segment.**
+`Node::property_of` matches the name before the dot exactly, and comparing
+prefixes instead failed nothing in the workspace — because every fixture in it
+spells the owner exactly, which is what every real producer does. What a
+prefix comparison lets through is not cosmetic: a `<CanvasBackdrop.Clip>` an
+unknown vocabulary hangs on a page would be read as the **canvas's** clip, and
+a clip that came out of markup this build does not understand hides whatever
+it hides. `a_property_element_belongs_to_the_element_whose_name_it_carries`
+closes it in both directions — the real property applies and the near miss does
+not — because a positive assertion alone cannot catch a weakened check.
+
+**2. A gradient's stops taken in document order.** 15.4.2 orders a gradient by
+its stops' `Offset` values and says nothing about the order they are *written*
+in. Every fixture in the corpus and in this milestone's own tests writes them
+ascending, so a build that sorted by nothing passed all of them. And what it
+would produce is worse than a refusal: 7.10.4 wants `/Bounds` strictly
+increasing, this reader repairs a non-increasing offset by nudging it — which
+is right for 15.4.2's *hard stop*, two stops at one offset — and that same
+repair silently flattens an out-of-order gradient into a ramp between the wrong
+two colours. `a_gradients_stops_are_read_by_offset_and_not_by_document_order`
+asserts that the shuffled spelling and the ascending one are the **same file**.
+
+**3. One alpha serving the fill and the stroke.** This is milestone 5's own
+`/ca`-and-`/CA` finding arriving one layer up. That milestone built the writer
+around 11.6.4.4's two parameters and proved they are two entries; here the
+*reader* has to keep them apart, because an element carries one `Opacity` and
+**two brushes**, each with an alpha of its own. Every fixture before this either
+filled or stroked, so collapsing the two passed the lot.
+`a_fills_alpha_and_a_strokes_alpha_are_two_numbers` gives one `Path` a
+quarter-opaque fill and a three-quarter-opaque stroke and reads both numbers
+out of the object model, then multiplies both by an element `Opacity` to show
+that 14.3's opacity is a factor rather than a third alpha.
+
+Each was re-run after its test was written and each is now caught by exactly
+that test. **This is the sixth milestone in this gap to find the same shape**,
+and milestone 5's statement of it needs no amendment: *when a thing has two
+independent consequences, a test for one of them is not a test.* Two of the
+three here are literally a pair — a fill alpha and a stroke alpha, an owner and
+a property — and the third is a rule (offset order) whose only observable is a
+document no producer writes.
+
+### Still owed after milestone 6
+
+- **`Glyphs` is not drawn** (milestone 7) and **`ImageBrush` and `VisualBrush`
+  are not painted** (milestone 8). Both are named at the element, in the
+  report, on every page that carries one.
+- **`OpacityMask` refuses its element rather than being applied.** 14.3 allows
+  one, this engine's renderer reads the `/SMask` that would carry it, and
+  milestone 5 wrote the `/ExtGState` entry — what is missing is the brush, which
+  is milestone 8's. Refusing rather than ignoring is the design section's rule
+  for an opacity, and a mask ignored draws a whole shape where a sliver was
+  meant.
+- **11.2.2's `IsStroked` is read for its syntax and not honoured.** This
+  milestone strokes a whole geometry or none of it; a per-segment flag would
+  need a second segment list. `IsFilled` **is** honoured, which is the half a
+  figure can express.
+- **`Repeat` and `Reflect` are finite.** Eight periods each way is past the
+  edge of any page a gradient of that period could be stated on, and past that
+  the `/Extend` pads — but it is a replication rather than a repetition, and a
+  gradient whose period is a hundredth of its shape would show it.
+- **`MappingMode="RelativeToBoundingBox"` is tested and no real file uses it.**
+  Both producers write `Absolute`, so
+  `a_relative_gradient_is_stated_in_fractions_of_the_shape_it_fills` is a
+  hand-built claim about a path no measured file exercises — gap 29's shape, in
+  a corner rather than everywhere.
+- **A gradient fills a clip through `sh` rather than a shape through a
+  pattern**, which is milestone 5's own recorded limit. It is exact for a fill
+  and has no spelling for a stroke, which is why a gradient stroke degrades.
+- **Nothing renders a `Canvas` nested past `MAX_XML_DEPTH`**, and
+  `MAX_XPS_VISUAL_DEPTH` — the cross-part cap — is milestone 8's, with the
+  remote resource dictionary it bounds.
+- **The campaign has not run** (milestone 9), **no non-Windows producer**
+  (milestone 1), and **`docs/STATUS.md` still says 1 872 tests** — the ledger
+  sweep, the README rows and the fourteenth fingerprint are milestone 9's.

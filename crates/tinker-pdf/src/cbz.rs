@@ -400,19 +400,35 @@ pub enum ArchiveWarning {
         /// Zero-based page index.
         page: u32,
     },
-    /// A synthesised **fixed page** is not the picture the package holds (gap
-    /// 30, milestone 3).
+    /// A synthesised **fixed page** is a placeholder rather than the picture
+    /// the package holds (gap 30, milestone 3).
     ///
-    /// Every page of every XPS carries one of these while gap 30 is being
-    /// built, and [`crate::xps::XpsPageDefect::NotDrawn`] is the honest reason:
-    /// the spine is read, the page is at the size its own markup states, and
-    /// the markup is not painted yet. A page that came back silent would be
-    /// gap 17's blank page reported as success.
+    /// The page keeps its number and its neighbours' size, for
+    /// [`ArchiveWarning::PlaceholderPage`]'s reason: dropping it renumbers
+    /// every page after it and a reader sees a document that jumps.
     XpsPage {
         /// Zero-based page index.
         page: u32,
         /// Why.
         defect: crate::xps::XpsPageDefect,
+    },
+    /// One **element** of a fixed page is not the picture its markup describes
+    /// (gap 30, milestone 6).
+    ///
+    /// Distinct from [`ArchiveWarning::XpsPage`] because the two are different
+    /// claims: the page one says *this page is a placeholder*, and this one
+    /// says *this page drew, and this much of it did not*. A page whose
+    /// `Glyphs` are not painted yet and whose paths are is exactly that, and
+    /// collapsing the two would make a page that mostly worked
+    /// indistinguishable from one that did not open.
+    ///
+    /// **Deduplicated per page**: a page of ten thousand `Glyphs` runs has one
+    /// thing wrong with it and not ten thousand.
+    XpsElement {
+        /// Zero-based page index.
+        page: u32,
+        /// Why.
+        defect: crate::xps::XpsElementDefect,
     },
 }
 

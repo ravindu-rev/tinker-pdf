@@ -368,3 +368,200 @@ fn qpdf_sees_the_boxes_a_fixed_page_stated_and_none_where_it_stated_none() {
         "a page that stated no box carries no key:\n{bare}"
     );
 }
+
+// ---- what milestone 6 put in the file -----------------------------------
+
+/// The indirect reference an entry names, out of a flattened qpdf dump.
+///
+/// qpdf **sorts a dictionary's keys**, so nothing here may assume the order
+/// this writer emitted them in — a lesson gap 29's milestone 5, gap 30's
+/// milestone 4 and gap 30's milestone 5 each recorded after asserting against a
+/// format they had assumed. Following the reference is also the only honest way
+/// to reach a shading: its object number is the writer's business and a test
+/// that hardcoded one would break on a change that is not a defect.
+fn reference_after(dump: &str, key: &str) -> Option<String> {
+    let mut tokens = dump.split_whitespace().skip_while(|token| *token != key);
+    tokens.next()?;
+    let number = tokens.next()?.to_string();
+    (tokens.next() == Some("0") && tokens.next() == Some("R")).then_some(number)
+}
+
+/// A one-page package whose markup uses every construct milestone 6 built.
+fn drawn_page() -> Vec<u8> {
+    let body = concat!(
+        // A canvas opacity over children that overlap, which is a group.
+        r##"<Canvas Opacity="0.5">"##,
+        r##"<Path Fill="#FF0000" Data="M0,0L100,0 100,100 0,100Z" />"##,
+        r##"<Path Fill="#0000FF" Data="M50,50L150,50 150,150 50,150Z" />"##,
+        r##"</Canvas>"##,
+        // A three-stop linear gradient, which is a stitching function.
+        r##"<Path Data="M0,300L400,300 400,500 0,500Z"><Path.Fill>"##,
+        r##"<LinearGradientBrush StartPoint="0,300" EndPoint="400,500">"##,
+        r##"<LinearGradientBrush.GradientStops>"##,
+        r##"<GradientStop Color="#FF0000" Offset="0" />"##,
+        r##"<GradientStop Color="#00FF00" Offset="0.5" />"##,
+        r##"<GradientStop Color="#0000FF" Offset="1" />"##,
+        r##"</LinearGradientBrush.GradientStops>"##,
+        r##"</LinearGradientBrush></Path.Fill></Path>"##,
+    );
+    let markup = format!(
+        r#"<FixedPage xmlns="http://schemas.microsoft.com/xps/2005/06" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    archive(with(
+        one_page_package(),
+        "Documents/1/Pages/1.fpage",
+        &markup,
+    ))
+}
+
+/// `--check` is clean on a page that draws, in every write mode.
+///
+/// Milestone 5 wrote the `/ExtGState`, the form XObject with its `/Group`, the
+/// `/Shading` and the two `/Function`s, and nothing consumed any of it. This is
+/// the first document in this repository in which all of them are produced from
+/// a **file** rather than from a test's own literal values, and the object
+/// graph is larger than anything gap 29 ever wrote — so there is strictly more
+/// that only a third party can see.
+#[test]
+fn qpdf_check_is_clean_on_a_page_that_draws() {
+    let qpdf = oracle!("--check over a fixed page that draws");
+
+    // Two real packages whose pages now paint: three solid paths in one, two
+    // gradients in the other.
+    for name in ["wpf-shapes-only.xps", "wpf-gradients.xps"] {
+        let pdf = synthesise(&corpus(name));
+        let path = fixture("drawn", &format!("{name}.pdf"), &pdf);
+        let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
+        assert_eq!(code, 0, "qpdf --check on {name}:\n{text}");
+        assert!(
+            text.contains("No syntax or stream encoding errors"),
+            "{text}"
+        );
+    }
+
+    // And the built page, saved back through the editor in both write modes,
+    // because a group and a shading survive a rewrite or they do not.
+    let pdf = synthesise(&drawn_page());
+    let path = fixture("drawn", "built.pdf", &pdf);
+    let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
+    assert_eq!(code, 0, "qpdf --check on the built page:\n{text}");
+
+    let document = Document::open(pdf).expect("the synthesised document reopens");
+    for (name, compress) in [("rewritten.pdf", false), ("compressed.pdf", true)] {
+        let saved = document.editor().save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            compress,
+            object_streams: compress,
+            ..WriteOptions::default()
+        });
+        let path = fixture("drawn", name, &saved);
+        let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
+        assert_eq!(code, 0, "qpdf --check on {name}:\n{text}");
+    }
+}
+
+/// A `LinearGradientBrush` becomes an **axial** shading over a **stitching**
+/// function, and a third party reads both.
+///
+/// Followed from the page's `/Resources` rather than guessed at, and read as a
+/// value rather than as bytes: the writer emits `/Bounds [0.5]` with no spaces
+/// inside the brackets and qpdf prints `[ 0.5 ]`, so a test written against the
+/// file's own spelling would pass over the tool that is supposed to be checking
+/// it.
+#[test]
+fn qpdf_reads_the_shading_a_gradient_became() {
+    let qpdf = oracle!("--show-object over a gradient");
+
+    let pdf = synthesise(&drawn_page());
+    let path = fixture("shading", "gradient.pdf", &pdf);
+    let (code, dump) = run(&qpdf, &["--show-pages", &path.display().to_string()]);
+    assert_eq!(code, 0, "qpdf --show-pages:\n{dump}");
+    let page = object(&qpdf, &path, page_objects(&dump).first().expect("one page"));
+
+    let shading = reference_after(&page, "/Sh2")
+        .unwrap_or_else(|| panic!("the page carries no shading resource:\n{page}"));
+    let shading = object(&qpdf, &path, &shading);
+    assert!(
+        shading.contains("/ShadingType 2"),
+        "8.7.4.5.3's axial type:\n{shading}"
+    );
+    assert!(
+        shading.contains("/Coords [ 0 300 400 500 ]"),
+        "the axis is `StartPoint` to `EndPoint`, in the markup's own numbers:\n{shading}"
+    );
+    assert!(
+        shading.contains("/Extend [ true true ]"),
+        "a `Pad` spread is 8.7.4.5.3's extend:\n{shading}"
+    );
+
+    let function = reference_after(&shading, "/Function").expect("a function");
+    let function = object(&qpdf, &path, &function);
+    assert!(
+        function.contains("/FunctionType 3"),
+        "three stops are two ramps stitched:\n{function}"
+    );
+    assert!(
+        function.contains("/Bounds [ 0.5 ]"),
+        "the middle stop's own offset:\n{function}"
+    );
+    assert!(
+        function.contains("/Encode [ 0 1 0 1 ]"),
+        "each ramp is reached forwards:\n{function}"
+    );
+}
+
+/// A `Canvas` `Opacity` over overlapping children becomes a **transparency
+/// group**, and the alpha is on the `Do` rather than in the colours.
+///
+/// The entries qpdf is pointed at are the ones this engine's own reader
+/// supplies a default for — 11.6.6 defaults `/I` and `/K` to false, and a form
+/// with no `/Group` is an ordinary form — so a round trip through this
+/// repository would agree with itself about a form that carried none of them.
+#[test]
+fn qpdf_reads_the_transparency_group_a_canvas_opacity_became() {
+    let qpdf = oracle!("--show-object over a canvas opacity");
+
+    let pdf = synthesise(&drawn_page());
+    let path = fixture("group", "group.pdf", &pdf);
+    let (code, dump) = run(&qpdf, &["--show-pages", &path.display().to_string()]);
+    assert_eq!(code, 0, "qpdf --show-pages:\n{dump}");
+    let page = object(&qpdf, &path, page_objects(&dump).first().expect("one page"));
+
+    let form = reference_after(&page, "/Fm0")
+        .unwrap_or_else(|| panic!("the page carries no form XObject:\n{page}"));
+    let form = object(&qpdf, &path, &form);
+    assert!(
+        form.contains("/Subtype /Form"),
+        "8.10's form XObject:\n{form}"
+    );
+    assert!(
+        form.contains("/Group << /CS /DeviceRGB /I true /S /Transparency >>"),
+        "11.6.6's isolated transparency group, in qpdf's sorted order:\n{form}"
+    );
+    assert!(
+        form.contains("/BBox [ 0 0 150 150 ]"),
+        "the box is the union of what the canvas drew:\n{form}"
+    );
+
+    let state =
+        reference_after(&page, "/GS1").unwrap_or_else(|| panic!("no graphics state:\n{page}"));
+    let state = object(&qpdf, &path, &state);
+    assert!(
+        state.contains("/ca 0.5") && state.contains("/CA 0.5"),
+        "11.6.4.4's two alphas are two entries, which a case-insensitive \
+         reader would lose:\n{state}"
+    );
+
+    // And there is no image XObject anywhere, which is this gap's headline
+    // defect said from outside: the same file used to open as a one-page comic
+    // whose page *was* a resource.
+    let (code, images) = run(
+        &qpdf,
+        &["--show-pages", "--with-images", &path.display().to_string()],
+    );
+    assert_eq!(code, 0, "{images}");
+    assert!(
+        !images.contains("image:"),
+        "a fixed page draws its markup, not a raster:\n{images}"
+    );
+}

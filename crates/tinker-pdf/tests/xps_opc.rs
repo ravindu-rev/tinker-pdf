@@ -59,10 +59,15 @@ fn a_hand_built_package_opens_as_a_fixed_document() {
             .collect::<Vec<_>>(),
         ["/Documents/1/Pages/1.fpage"]
     );
-    assert!(report.warnings().contains(&ArchiveWarning::XpsPage {
-        page: 0,
-        defect: XpsPageDefect::NotDrawn,
-    }));
+    // The page reads and draws, so it is not a placeholder and says nothing.
+    assert!(
+        !report
+            .warnings()
+            .iter()
+            .any(|w| matches!(w, ArchiveWarning::XpsPage { .. })),
+        "{:?}",
+        report.warnings()
+    );
 }
 
 // ---- the near misses ----------------------------------------------------
@@ -435,16 +440,12 @@ fn a_part_resolves_however_a_reference_spells_its_case() {
         &document(&["PAGES/1.FPAGE"]),
     ));
     let document = open(&bytes).expect("an XPS");
+    let seen = document.archive().expect("a report").warnings().to_vec();
     assert!(
-        document
-            .archive()
-            .expect("a report")
-            .warnings()
-            .contains(&ArchiveWarning::XpsPage {
-                page: 0,
-                defect: XpsPageDefect::NotDrawn,
-            }),
-        "the part resolved under a different spelling of its own case"
+        !seen
+            .iter()
+            .any(|w| matches!(w, ArchiveWarning::XpsPage { .. })),
+        "the part resolved under a different spelling of its own case: {seen:?}"
     );
 }
 

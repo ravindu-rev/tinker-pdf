@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use tinker_pdf::xps::opc::PartName;
-use tinker_pdf::{ArchiveRefusal, ArchiveWarning, Dialect, Document, OpenError, XpsPageDefect};
+use tinker_pdf::{ArchiveRefusal, ArchiveWarning, Dialect, Document, OpenError};
 
 // ---- the corpus ---------------------------------------------------------
 
@@ -266,23 +266,19 @@ fn every_package_in_the_corpus_opens_as_the_document_it_is() {
                  which is 612 x 792 pt at 18.1's 1/96 inch"
             );
         }
-        // And every page says, by name, that its markup is not painted yet.
-        // Gap 17's finding is that the refusal is the feature; a page that came
-        // back silent would be the blank page reported as success.
-        let drawn: Vec<&ArchiveWarning> = report
+        // And **no page is a placeholder**. Milestones 3 to 5 gave every page
+        // `XpsPageDefect::NotDrawn`; milestone 6 draws the markup, so a page
+        // that still carried a page-level warning would be one that failed to
+        // read rather than one that failed to be drawn.
+        let placeheld: Vec<&ArchiveWarning> = report
             .warnings()
             .iter()
-            .filter(|w| {
-                matches!(
-                    w,
-                    ArchiveWarning::XpsPage {
-                        defect: XpsPageDefect::NotDrawn,
-                        ..
-                    }
-                )
-            })
+            .filter(|w| matches!(w, ArchiveWarning::XpsPage { .. }))
             .collect();
-        assert_eq!(drawn.len(), *pages as usize, "{name}: one warning a page");
+        assert!(
+            placeheld.is_empty(),
+            "{name}: every page reads and draws, and these did not: {placeheld:?}"
+        );
     }
 }
 

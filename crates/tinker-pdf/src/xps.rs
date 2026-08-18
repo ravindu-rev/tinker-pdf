@@ -1,5 +1,5 @@
-//! An XPS package opens as the fixed document it is (gap 30, milestones 3
-//! and 4).
+//! An XPS package opens as the fixed document it is (gap 30, milestones 3, 4
+//! and 6).
 //!
 //! # The defect this module exists to remove
 //!
@@ -68,19 +68,29 @@
 //! So the obvious sniff is the wrong one, and the namespace is the only
 //! discriminator there is.
 //!
-//! # What a page is in this milestone, and what it is not
+//! # What a page is, and what it is not
 //!
 //! The spine is read — `FixedDocumentSequence` to `FixedDocument` to
 //! `FixedPage` — and each page is synthesised **at the size its own markup
-//! states**, carrying the neutral placeholder and a named warning. ECMA-388
-//! 18.1 puts one XPS unit at 1/96 inch against PDF's 1/72, so `Width="816"
-//! Height="1056"` is 612 x 792 pt, which is US Letter to the point.
+//! states**. ECMA-388 18.1 puts one XPS unit at 1/96 inch against PDF's 1/72,
+//! so `Width="816" Height="1056"` is 612 x 792 pt, which is US Letter to the
+//! point.
 //!
-//! Nothing on the page is drawn yet. That is ruling 2's degradation and not a
-//! blank page reported as success: every page carries
-//! [`XpsPageDefect::NotDrawn`], so a host that asks what it got is told. Paths,
-//! brushes, glyphs and images are gap 30's milestones 6 to 8, and the writer
-//! work they need is milestone 5.
+//! **Milestone 6 is where a page first draws.** Paths, brushes, transforms,
+//! clips, canvases and resource dictionaries are [`paint`], [`geometry`],
+//! [`brush`] and [`markup`]; the page's content stream opens with one `cm`
+//! carrying 18.1's unit *and* its top-left origin, so the numbers in the stream
+//! are the numbers in the markup. Two of milestone 1's eight real packages now
+//! render with nothing owed at all.
+//!
+//! What is owed is owed **by name, at the element**: a `Glyphs` run is
+//! milestone 7's and an `ImageBrush` is milestone 8's, and each says so through
+//! [`XpsElementDefect`] rather than leaving a page that quietly drew most of
+//! itself. [`XpsPageDefect`] is now what it says: a page that is a
+//! **placeholder** rather than a page that failed to be finished. Milestones 3
+//! to 5 gave every page `NotDrawn`; that variant is deleted rather than kept as
+//! a shape nothing produces, which is the argument milestone 3 used one level
+//! up when it deleted the test that recorded the old behaviour.
 //!
 //! # Three things milestone 4 decided, each of which has a wrong answer that
 //! looks right
@@ -112,7 +122,11 @@
 //! carries the arithmetic and what each of the plausible mistakes produces
 //! instead.
 
+pub mod brush;
+pub mod geometry;
+pub mod markup;
 pub mod opc;
+pub mod paint;
 
 use std::collections::HashMap;
 
@@ -124,7 +138,9 @@ use crate::cbz::{
     ArchiveRefusal, ArchiveReport, ArchiveWarning, PageOrigin, DOCUMENT_OVERHEAD,
     MAX_SYNTHESISED_PDF, PAGE_OVERHEAD, PLACEHOLDER_GREY,
 };
+use markup::{Budget, Trouble};
 use opc::{Package, PackageProblem, PartName};
+use paint::{Drawn, Painter};
 
 // ---- Bounds -----------------------------------------------------------------
 
@@ -171,6 +187,84 @@ pub const MAX_XPS_PARTS: usize = 8_192;
 /// Reachable: `a_page_count_past_the_xps_cap_is_refused_by_name` builds a fixed
 /// document naming 4 097 pages.
 pub const MAX_XPS_PAGES: usize = 4_096;
+
+/// The most drawable markup elements one package's pages may cost.
+///
+/// **A total, and this is the row that says why one is needed.** A per-page cap
+/// times a page count the file chooses is not a bound — `5adf502`'s finding in
+/// a third format, and gap 30's own sentence about it. Both halves of the work
+/// are charged against this one number: an element materialised into a
+/// property-element value, and an element the drawing walk visits.
+///
+/// | | Elements |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 1 048 576 (the page built *past* this cap holds one more; the largest real package here holds 6 on a page) |
+/// | A 200-page fixed document | 400 000 |
+/// | **This cap** | **1 048 576** |
+///
+/// The yardstick is gap 30's own: a 200-page fixed document at roughly 2 000
+/// drawable elements a page, every page a distinct part, is 400 000 — against a
+/// cap two and a half times that. What stands in front of it is much larger
+/// still: [`MAX_XPS_PARTS`] parts each producing up to
+/// `tinker_pdf_xml::limits::MAX_XML_TOKENS` events, of which every second one
+/// can be a start tag, so the ceiling is in the billions and a cap here can
+/// always be the thing that stopped something.
+///
+/// Reachable: `a_page_past_the_element_cap_is_refused_by_name` builds the real
+/// page rather than lowering the constant.
+pub const MAX_XPS_ELEMENTS: usize = 1 << 20;
+
+/// The most path segments one package's geometry may produce.
+///
+/// **A total, for [`MAX_XPS_ELEMENTS`]'s reason and one of its own**: `L 0,0`
+/// is six bytes, so one `Data` attribute in a part this build already admits —
+/// 128 MiB, [`zip_limits::MAX_ZIP_ENTRY_BYTES`] — is twenty-two million
+/// segments, and a per-path cap does not see it.
+///
+/// | | Segments |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 8 388 608 (the geometry built *past* this cap holds one more) |
+/// | A 200-page fixed document | 8 000 000 |
+/// | **This cap** | **8 388 608** |
+///
+/// The margin over the yardstick is deliberately narrow, and the reason is
+/// that **this cap is also the peak-memory bound**. A segment is materialised
+/// before it is written — it has to be, because a geometry's bounding box is
+/// what decides a transparency group's `/BBox` and a canvas's overlap — so the
+/// worst case is one geometry holding the whole total, which at 56 bytes a
+/// segment is about 470 MiB. That sits under `MAX_ZIP_INFLATED`'s 1 GiB, which
+/// this build already admits, and under what the same segments would become as
+/// operator bytes against [`MAX_SYNTHESISED_PDF`]. A larger cap would buy
+/// headroom over a yardstick nothing has ever reached and pay for it in the
+/// one number an attacker can drive.
+///
+/// Reachable: `a_geometry_past_the_segment_cap_is_refused_by_name`.
+pub const MAX_XPS_SEGMENTS: usize = 1 << 23;
+
+/// How long a chain of `{StaticResource}` aliases may be.
+///
+/// 14.2.5 resolves a reference in the nearest enclosing `ResourceDictionary`
+/// and then outward, and a dictionary entry may itself name another — so the
+/// chain's length is the file's to choose and **a cycle is two lines of
+/// markup**. ECMA-388 18.2 recommends sixteen as a consumer limit and [M11.5]
+/// makes refusing past a consumer's own limit conformant.
+///
+/// | | Aliases deep |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 16 |
+/// | A 200-page fixed document | 2 |
+/// | **This cap** | **16** |
+///
+/// **The depth cap and the cycle guard are two rules and not one.** A chain of
+/// twenty distinct keys is not a cycle, and a cycle of two keys is not deep;
+/// deleting either leaves the other passing every test written for it, which
+/// is the shape gap 30's milestones 2 to 5 each found once. They answer under
+/// different names — [`XpsElementDefect::BrushTooDeep`] and
+/// [`XpsElementDefect::BrushCyclic`] — so a report can tell them apart.
+///
+/// Reachable: `a_static_resource_chain_past_the_depth_cap_is_named`, against
+/// `tinker_pdf_xml::limits::MAX_XML_TOKENS` entries one dictionary could hold.
+pub const MAX_XPS_RESOURCE_DEPTH: usize = 16;
 
 /// The two relations, in `const` blocks so a build that broke either **does not
 /// compile**.
@@ -326,6 +420,11 @@ pub struct Limits {
     pub max_parts: usize,
     /// Fixed pages synthesised. See [`MAX_XPS_PAGES`].
     pub max_pages: usize,
+    /// Drawable markup elements across the document. See
+    /// [`MAX_XPS_ELEMENTS`].
+    pub max_elements: usize,
+    /// Path segments across the document. See [`MAX_XPS_SEGMENTS`].
+    pub max_segments: usize,
     /// Bytes of the document handed to the parser. Shared with the comic path
     /// rather than duplicated — see [`MAX_SYNTHESISED_PDF`], whose argument is
     /// about the writer and not about the container.
@@ -348,6 +447,8 @@ impl Limits {
     pub const DEFAULT: Self = Self {
         max_parts: MAX_XPS_PARTS,
         max_pages: MAX_XPS_PAGES,
+        max_elements: MAX_XPS_ELEMENTS,
+        max_segments: MAX_XPS_SEGMENTS,
         max_synthesised: MAX_SYNTHESISED_PDF,
         xml: XmlLimits::DEFAULT,
         zip_name_len: zip_limits::MAX_ZIP_NAME_LEN,
@@ -364,18 +465,20 @@ impl Default for Limits {
 
 /// Why a synthesised fixed page is not the picture the package holds.
 ///
-/// Every page of every package carries one of these in this milestone, and
-/// [`XpsPageDefect::NotDrawn`] is the honest reason: the spine is read and the
-/// markup is not painted yet. A page that came back silent would be gap 17's
-/// blank page reported as success, which is the failure this whole gap is
-/// about.
+/// **A page that draws carries none of these**, which is milestone 6's whole
+/// change: milestones 3 to 5 gave every page `NotDrawn` because the spine was
+/// read and the markup was not painted, and that variant is **deleted** here
+/// rather than kept as a shape nothing produces. A record of old behaviour
+/// that does not break when the behaviour changes is not a record — which is
+/// the argument milestone 3 used to delete
+/// `today_an_xps_opens_as_a_comic_and_this_is_what_it_reports`, one level up.
+///
+/// What a page can still be silent about is nothing: an element that could not
+/// be drawn reports through [`XpsElementDefect`] instead, so a page whose
+/// markup read and whose `Glyphs` did not is honest about exactly that much.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum XpsPageDefect {
-    /// The page is at the size its own markup states and **its content is not
-    /// drawn**. Gap 30's milestones 6 to 8 are where the markup arrives, and
-    /// milestone 5 is the writer work they need.
-    NotDrawn,
     /// A `PageContent` whose `Source` did not resolve to a part in the package.
     ///
     /// The page is kept anyway and **keeps its number**: a `FixedDocument` that
@@ -390,6 +493,14 @@ pub enum XpsPageDefect {
     /// The fixed page part will not read, or its root element is not a
     /// `FixedPage` in either dialect's namespace.
     Unreadable,
+    /// The root element read and states a size, and the markup **under** it
+    /// does not read (gap 30, milestone 6).
+    ///
+    /// Distinct from [`XpsPageDefect::Unreadable`] because the page keeps the
+    /// size the file stated and its neighbours' shape, where a part that is
+    /// not a `FixedPage` at all has nothing to state one with. The page is the
+    /// neutral placeholder.
+    ContentUnreadable,
     /// `Width` or `Height` is absent, unparseable or outside what a page can
     /// be, so the page took the book's own size instead of a size the file
     /// stated.
@@ -419,7 +530,7 @@ pub enum XpsPageDefect {
 impl core::fmt::Display for XpsPageDefect {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
-            XpsPageDefect::NotDrawn => "the page's markup is not drawn yet",
+            XpsPageDefect::ContentUnreadable => "the fixed page's markup will not read",
             XpsPageDefect::SourceUnresolved => "a `PageContent` naming no part",
             XpsPageDefect::DocumentUnresolved => "a `DocumentReference` naming no readable part",
             XpsPageDefect::Unreadable => "the fixed page part is not a readable `FixedPage`",
@@ -428,6 +539,103 @@ impl core::fmt::Display for XpsPageDefect {
                 "a reference naming a part whose media type is not the payload's"
             }
             XpsPageDefect::PageBoxUnusable => "a `ContentBox` or `BleedBox` that will not read",
+        })
+    }
+}
+
+/// Why one element of a fixed page is not the picture the markup describes
+/// (gap 30, milestone 6).
+///
+/// **Three answers, and which one an element gets is decided by gap 30's
+/// design section rather than by whoever wrote the code.** The asymmetry is
+/// the point:
+///
+/// - *geometry unreadable* — the element is **not painted**, because a missing
+///   shape is visible as a missing shape;
+/// - *paint unreadable* — the element **is painted, in the neutral placeholder
+///   grey**, because the shape and its position are known and only the colour
+///   is not, and gap 07's headline defect was a gradient-stroked rule painting
+///   solid black silently;
+/// - *transform, clip or opacity unreadable* — the element **and everything
+///   under it is refused**, because the identity matrix, the absent clip and
+///   full opacity each draw the right content in the wrong place at the right
+///   size, which reads as a layout bug in the producer.
+///
+/// The names are separate for the reason gap 29's milestone 2 recorded about
+/// refusals: "this archive promised 5 000 bytes and produced 4 000" and
+/// "checksum wrong" both refuse, and a report that could not tell them apart
+/// was no use to anybody. An `ImageBrush` this build does not draw yet, a
+/// `{StaticResource}` that names nothing and a colour string that is not one
+/// are three different things about a document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum XpsElementDefect {
+    /// A `Data` that is absent or will not parse as 11.2's geometry. **Not
+    /// painted.**
+    GeometryUnreadable,
+    /// A `RenderTransform` or `Transform` that is not 14.4.1's six numbers.
+    /// **The element and its descendants are refused.**
+    TransformUnreadable,
+    /// A `Clip` that will not parse. **Refused** — the same parser as
+    /// `GeometryUnreadable` and the opposite consequence, because a shape that
+    /// failed to be a clip draws everything the clip was there to hide.
+    ClipUnreadable,
+    /// An `Opacity` that is not a number in `[0, 1]`. **Refused.**
+    OpacityUnreadable,
+    /// An `OpacityMask`, which this build does not apply (14.3). **Refused**,
+    /// for `OpacityUnreadable`'s reason: a mask ignored draws a whole shape
+    /// where a sliver was meant.
+    OpacityMaskUnsupported,
+    /// A `{StaticResource}` naming a key no dictionary in scope holds.
+    /// **Painted grey.**
+    BrushUnresolved,
+    /// A `{StaticResource}` chain that returns to a key it already passed
+    /// through. **Painted grey**, and refused rather than recursed.
+    BrushCyclic,
+    /// A `{StaticResource}` chain longer than [`MAX_XPS_RESOURCE_DEPTH`].
+    /// **Painted grey.** Not the same as a cycle and never reported as one.
+    BrushTooDeep,
+    /// A brush this milestone does not paint: an `ImageBrush` or a
+    /// `VisualBrush` (gap 30, milestone 8), a `ContextColor` naming an ICC
+    /// profile, or a gradient asked to stroke. **Painted grey.**
+    BrushUnsupported,
+    /// A colour or a gradient that is not 15's syntax. **Painted grey.**
+    BrushUnreadable,
+    /// The brush reached the page and not exactly: gradient stops whose alphas
+    /// differ from each other, which one constant alpha cannot express, or a
+    /// `ColorInterpolationMode` this build does not interpolate in.
+    BrushApproximated,
+    /// A `ResourceDictionary` with a `Source`, naming another part (14.2.4).
+    /// Gap 30's milestone 8; every key in it is unresolvable until then, and
+    /// saying so once beats one `BrushUnresolved` per use.
+    ResourceDictionaryRemote,
+    /// A `Glyphs` run, which is gap 30's milestone 7. **Not painted**, and
+    /// named — a page whose words are missing and whose report says nothing is
+    /// gap 17's blank page one element down.
+    GlyphsNotDrawn,
+    /// Markup this build does not draw: an element from another vocabulary, a
+    /// property element nothing here reads, a dictionary entry with no
+    /// `x:Key`.
+    ElementUnknown,
+}
+
+impl core::fmt::Display for XpsElementDefect {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            XpsElementDefect::GeometryUnreadable => "a `Data` that is not 11.2's geometry",
+            XpsElementDefect::TransformUnreadable => "a transform that is not six numbers",
+            XpsElementDefect::ClipUnreadable => "a `Clip` that is not 11.2's geometry",
+            XpsElementDefect::OpacityUnreadable => "an `Opacity` that is not a number in [0, 1]",
+            XpsElementDefect::OpacityMaskUnsupported => "an `OpacityMask` this build cannot apply",
+            XpsElementDefect::BrushUnresolved => "a `{StaticResource}` naming no resource",
+            XpsElementDefect::BrushCyclic => "a `{StaticResource}` chain that returns to itself",
+            XpsElementDefect::BrushTooDeep => "a `{StaticResource}` chain past the depth cap",
+            XpsElementDefect::BrushUnsupported => "a brush this build does not paint",
+            XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
+            XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
+            XpsElementDefect::ResourceDictionaryRemote => "a `ResourceDictionary` in another part",
+            XpsElementDefect::GlyphsNotDrawn => "a `Glyphs` run, which is not drawn yet",
+            XpsElementDefect::ElementUnknown => "markup this build does not draw",
         })
     }
 }
@@ -554,10 +762,17 @@ struct Plan {
     /// The part name, or the reference that did not resolve to one, for the
     /// report.
     name: String,
+    /// The fixed page part to paint, when the reference resolved to one whose
+    /// media type says it is a page. `None` is a placeholder, and a
+    /// placeholder has no markup to draw.
+    part: Option<PartName>,
     size: Option<(f64, f64)>,
     /// `/CropBox` and `/BleedBox`, in PDF points, from 10.3's two attributes.
     boxes: PageBoxes,
-    defect: XpsPageDefect,
+    /// Why this page is a placeholder, or `None` for a page that draws its own
+    /// markup — which is what milestone 6 made possible and what deleting
+    /// `NotDrawn` records.
+    defect: Option<XpsPageDefect>,
     /// A second warning this page owes beside `defect`. A page has one reason
     /// for being a placeholder and may separately have said something about its
     /// own boxes that would not read, and collapsing the two would lose
@@ -764,13 +979,14 @@ fn synthesise(
                 &mut plans,
                 Plan {
                     name: reference_name(&document, source.as_deref()),
+                    part: None,
                     size: None,
                     boxes: PageBoxes::default(),
-                    defect: if named && !typed {
+                    defect: Some(if named && !typed {
                         XpsPageDefect::MediaTypeMismatch
                     } else {
                         XpsPageDefect::DocumentUnresolved
-                    },
+                    }),
                     extra: None,
                 },
                 limits,
@@ -814,11 +1030,73 @@ fn synthesise(
     let mut warnings: Vec<ArchiveWarning> = Vec::new();
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(plans.len());
 
+    // The two work totals are the document's, spent and never refunded, and
+    // one painter serves the whole document because a resource name has to be
+    // unique across it: `add_page` copies the document's whole resource table
+    // into every page, so two pages naming one `/GS0` would be one state.
+    let mut budget = Budget::new(limits.max_elements, limits.max_segments);
+    let mut painter = Painter::default();
+    // Painted **once per part**, for the reason milestone 4 built its own
+    // caches: a `FixedDocument` may show one page part four thousand times,
+    // and `Source::new` walks every character of a part before it yields an
+    // event. The bytes were already cached a layer down; this is the parse and
+    // the drawing.
+    let mut painted: HashMap<PartName, Option<Drawn>> = HashMap::new();
+
     for (number, plan) in plans.iter().enumerate() {
         let (width, height) = plan.size.unwrap_or(fallback);
         let boxes = plan.boxes;
+        let mut defect = plan.defect;
+        let mut content: Option<Vec<u8>> = None;
+        let mut elements: Vec<XpsElementDefect> = Vec::new();
+
+        if let Some(part) = &plan.part {
+            if !painted.contains_key(part) {
+                let drawn = match package.read_part(part) {
+                    Ok(bytes) => painter.page(&mut builder, bytes, &limits.xml, &mut budget),
+                    Err(_) => Err(Trouble::Markup),
+                };
+                match drawn {
+                    Ok(drawn) => {
+                        painted.insert(part.clone(), Some(drawn));
+                    }
+                    // A work total spent refuses the **package**. Truncating
+                    // instead would produce a document with the right page
+                    // count and the wrong pages, which is this gap's own
+                    // failure mode wearing a smaller hat.
+                    Err(Trouble::Exhausted) => return Err(ArchiveRefusal::TooLarge),
+                    Err(Trouble::Markup) => {
+                        painted.insert(part.clone(), None);
+                    }
+                }
+            }
+            match painted.get(part) {
+                Some(Some(drawn)) => {
+                    content = Some(drawn.content.clone());
+                    elements = drawn.defects.clone();
+                }
+                _ => defect = Some(XpsPageDefect::ContentUnreadable),
+            }
+        }
+
         builder.add_page(width, height, |page| {
-            page.fill_rect(0.0, 0.0, width, height, PLACEHOLDER_GREY);
+            match &content {
+                // 18.1: one XPS unit is 1/96 inch against PDF's 1/72 and the
+                // origin is the **top left** with y increasing downward. One
+                // `cm` says both, so the numbers in the content stream are the
+                // numbers in the markup — the property gap 30's geometry
+                // section asks not to be thrown away by pre-multiplying, and
+                // the one that makes a diff between the two readable.
+                Some(drawn) => {
+                    page.raw(
+                        format!("q {UNITS_TO_POINTS} 0 0 -{UNITS_TO_POINTS} 0 {height} cm")
+                            .as_bytes(),
+                    );
+                    page.raw(drawn);
+                    page.raw(b"Q");
+                }
+                None => page.fill_rect(0.0, 0.0, width, height, PLACEHOLDER_GREY),
+            }
             // 10.3.1 and 10.3.2 are the only statement a fixed page makes about
             // where its content is, and a synthesised document that dropped
             // them would lose it for good.
@@ -830,12 +1108,20 @@ fn synthesise(
             }
         });
         let number = u32::try_from(number).unwrap_or(u32::MAX);
-        warnings.push(ArchiveWarning::XpsPage {
-            page: number,
-            defect: plan.defect,
-        });
+        if let Some(defect) = defect {
+            warnings.push(ArchiveWarning::XpsPage {
+                page: number,
+                defect,
+            });
+        }
         if let Some(defect) = plan.extra {
             warnings.push(ArchiveWarning::XpsPage {
+                page: number,
+                defect,
+            });
+        }
+        for defect in elements {
+            warnings.push(ArchiveWarning::XpsElement {
                 page: number,
                 defect,
             });
@@ -891,9 +1177,10 @@ fn plan_page(
 ) -> Plan {
     let placeholder = |name: String, defect: XpsPageDefect| Plan {
         name,
+        part: None,
         size: None,
         boxes: PageBoxes::default(),
-        defect,
+        defect: Some(defect),
         extra: None,
     };
 
@@ -924,9 +1211,14 @@ fn plan_page(
     match geometry.size {
         Some(size) => Plan {
             name,
+            part: Some(page),
             size: Some(size),
             boxes: geometry.boxes,
-            defect: XpsPageDefect::NotDrawn,
+            // **No defect.** Milestone 5 and everything before it gave every
+            // page `NotDrawn`; this is the milestone in which a page that
+            // reads is a page that draws, and a warning about it would be a
+            // sentence that is no longer true.
+            defect: None,
             extra: box_unusable,
         },
         // A `FixedPage` whose size is missing or unusable is still a page, at
