@@ -720,4 +720,269 @@ mod tests {
         };
         assert!(authenticate(&params, b"x").is_none());
     }
+
+    /// Writes the seeds `fuzz/corpus/crypt/` and `fuzz/corpus/crypt_ciphers/`
+    /// carry, so the seeds and the targets' carve orders cannot drift apart.
+    ///
+    /// Run with `--ignored` when a target's layout changes; the corpora are
+    /// committed, and a run that rewrites them is a diff to look at rather than
+    /// to apply blindly.
+    ///
+    /// **This is why the seeds landed here rather than staying hand-laid.** The
+    /// `crypt` corpus was written by hand in the target's carve order and
+    /// nothing tied the two together, so gap 24 milestone 5's rearrangement of
+    /// that order would have silently turned the one seed that authenticates
+    /// into 232 bytes of noise — and a corpus that no longer reaches what it
+    /// was chosen for looks exactly like one that does.
+    ///
+    /// `crypt`'s layout is five control bytes and then the fields, at widths
+    /// the fourth and fifth bytes choose:
+    ///
+    /// | Byte | Chooses |
+    /// | --- | --- |
+    /// | 0 | `/V` (bits 0-2), `/R` (3-5), `/EncryptMetadata` (6, inverted), and whether the carved password or the empty one is tried (7) |
+    /// | 1 | `/StmF` (bits 0-1) and `/StrF` (2-3) |
+    /// | 2 | `/Length`, as `40 + 8 * (byte % 29)` bits |
+    /// | 3 | the widths of `/O`, `/U`, `/OE` and `/UE`, two bits each |
+    /// | 4 | the widths of `/Perms` and `/ID`, two bits each |
+    ///
+    /// then `/O`, `/U`, `/OE`, `/UE`, `/Perms`, four big-endian bytes of `/P`,
+    /// `/ID`, a password length, the password, and the rest as ciphertext.
+    #[test]
+    #[ignore = "writes into fuzz/corpus/, which is committed"]
+    fn write_the_fuzz_seeds() {
+        #[allow(clippy::too_many_arguments)]
+        fn crypt_seed(
+            control: u8,
+            filters: u8,
+            lengths: u8,
+            widths: u8,
+            more: u8,
+            fields: [&[u8]; 6],
+            p: i32,
+            password: &[u8],
+            body: &[u8],
+        ) -> Vec<u8> {
+            let [o, u, oe, ue, perms, id] = fields;
+            let mut out = vec![control, filters, lengths, widths, more];
+            out.extend_from_slice(o);
+            out.extend_from_slice(u);
+            out.extend_from_slice(oe);
+            out.extend_from_slice(ue);
+            out.extend_from_slice(perms);
+            out.extend_from_slice(&p.to_be_bytes());
+            out.extend_from_slice(id);
+            out.push(u8::try_from(password.len()).expect("under 160 bytes"));
+            out.extend_from_slice(password);
+            out.extend_from_slice(body);
+            out
+        }
+
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus");
+        let filler = |n: usize, seed: u8| -> Vec<u8> {
+            (0..n)
+                .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+                .collect()
+        };
+        let body = filler(48, 0x40);
+
+        // A handler the crate itself built, so the seed that authenticates
+        // authenticates for the same reason a real document does.
+        let mut entropy = [0u8; 48];
+        for (i, slot) in entropy.iter_mut().enumerate() {
+            *slot = (i as u8).wrapping_mul(53).wrapping_add(7);
+        }
+        let permissions = -3904;
+        let built = build_r6(b"sesame", b"open sesame", permissions, true, &entropy)
+            .expect("the writer's own handler builds");
+
+        // Byte 0: /V 5, /R 6, /EncryptMetadata true, the carved password.
+        // Byte 1: /StmF and /StrF both AESV3. Byte 2: 40 + 8 * 27 = 256 bits.
+        // Byte 3: /O and /U at 48, /OE and /UE at 32. Byte 4: /Perms at 16,
+        // no /ID, which revision 6 does not read.
+        let r6 = |perms: &[u8]| {
+            crypt_seed(
+                0xB5,
+                0x0F,
+                27,
+                0xAF,
+                0x02,
+                [&built.o, &built.u, &built.oe, &built.ue, perms, &[]],
+                permissions,
+                b"sesame",
+                &body,
+            )
+        };
+        let mut tampered = built.perms.clone();
+        tampered[0] ^= 0x01;
+
+        // The seed the campaign is the reason for: revision 6 with `/O` and
+        // `/U` at **47** bytes, one short of the width `authenticate_r6`
+        // checks. Every earlier version of this corpus wrote the legal width
+        // into every field, so the early return was unreachable and every
+        // revision-6 execution paid the hardened hash for a control-flow shape
+        // that never varied.
+        let boundary = crypt_seed(
+            0xB5,
+            0x0F,
+            27,
+            0x5A,
+            0x05,
+            [
+                &built.o[..47],
+                &built.u[..47],
+                &built.oe[..16],
+                &built.ue[..16],
+                &built.perms[..8],
+                &filler(8, 0x90),
+            ],
+            permissions,
+            b"sesame",
+            &body,
+        );
+
+        let legacy = |control: u8, filters: u8, lengths: u8| {
+            crypt_seed(
+                control,
+                filters,
+                lengths,
+                // /O and /U at 32, /OE and /UE absent: the widths a
+                // pre-revision-6 document actually carries.
+                0x05,
+                0x08,
+                [
+                    &filler(32, 0x11),
+                    &filler(32, 0x22),
+                    &[],
+                    &[],
+                    &[],
+                    &filler(16, 0x33),
+                ],
+                -44,
+                b"",
+                &body,
+            )
+        };
+
+        // A pre-revision-6 document that **actually authenticates**, and the
+        // only seed in this repository that does.
+        //
+        // It matters because 7.6.2 Algorithm 1 — the per-object key, which
+        // every encrypted PDF written before 2008 uses on every string and
+        // every stream — is behind a `FileKey`, and a `FileKey` only exists
+        // once a password has matched. Coverage over the old corpus put
+        // `object_key` at **0.00 %**: the target had never executed it, and no
+        // mutation ever could, because matching means colliding a 128-bit
+        // digest.
+        //
+        // `/U` is computed here with the crate's own `compute_key_legacy` and
+        // `expected_u` rather than with a restatement of Algorithms 2, 4 and 5
+        // in the fuzz target. That is the same arrangement the `cff` and
+        // `zip_archive` seeds use: the fixture is built by the code that owns
+        // the format, so the two cannot drift, and this test is inside the
+        // module so the private functions are in reach. There is no
+        // `build_legacy` to call because this engine writes revision 6 and
+        // nothing else, which is why the seed has to be built rather than
+        // produced.
+        let authenticating_legacy = {
+            let password = b"open";
+            let mut params = HandlerParams {
+                v: 4,
+                r: 4,
+                length_bits: 128,
+                o: filler(32, 0x11),
+                p: -44,
+                id_first: filler(16, 0x33),
+                encrypt_metadata: true,
+                stream_method: CryptMethod::Rc4,
+                string_method: CryptMethod::AesV2,
+                ..HandlerParams::default()
+            };
+            let key = compute_key_legacy(&params, &pad_password(password), 4);
+            // Revision 3 and later leave `/U`'s last sixteen bytes arbitrary,
+            // and a real file fills them; only the first sixteen are compared.
+            let mut u = expected_u(&params, &key, 4);
+            u.resize(32, 0xEE);
+            params.u = u.clone();
+            assert_eq!(
+                authenticate(&params, password).map(|k| k.outcome()),
+                Some(AuthOutcome::User),
+                "the seed that is supposed to authenticate does not"
+            );
+
+            crypt_seed(
+                // /V 4, /R 4, /EncryptMetadata true, the carved password.
+                0x80 | 4 | (4 << 3),
+                // /StmF /V2 and /StrF /AESV2, so both of Algorithm 1's
+                // branches run — the AES one mixes in `sAlT` and the RC4 one
+                // does not.
+                0x01 | (0x02 << 2),
+                11,
+                0x05,
+                0x08,
+                [&params.o, &u, &[], &[], &[], &params.id_first],
+                params.p,
+                password,
+                &body,
+            )
+        };
+
+        for (name, bytes) in [
+            ("r6-aes256", r6(&built.perms)),
+            ("r6-perms-tampered", r6(&tampered)),
+            ("r6-boundary-widths", boundary),
+            // /V 4, /R 4, AESV2 both ways, 40 + 8 * 11 = 128 bits.
+            ("r4-aes128", legacy(0x24, 0x0A, 11)),
+            // /V 1, /R 2, RC4 both ways, the 40-bit default.
+            ("r2-rc4-40", legacy(0x11, 0x05, 0)),
+            ("r4-authenticates", authenticating_legacy),
+            // Three bytes: revision 6 selected, and every width zero-filled to
+            // "absent", so the handler refuses on `/U`'s length before it
+            // hashes anything. This input cost 184 ms under the old layout,
+            // where the zero fill produced a full-width `/U` instead.
+            ("short-input", vec![0xB5, 0x0F, 27]),
+        ] {
+            std::fs::write(base.join("crypt").join(name), bytes)
+                .expect("the corpus directory is there");
+        }
+
+        // `crypt_ciphers` is a control byte choosing the key width, a byte
+        // choosing where a two-part update splits, then the key, sixteen bytes
+        // of IV, and the body.
+        let cipher_seed = |control: u8, split: u8, key: &[u8], body: &[u8]| -> Vec<u8> {
+            let mut out = vec![control, split];
+            out.extend_from_slice(key);
+            out.extend_from_slice(&filler(16, 0x77));
+            out.extend_from_slice(body);
+            out
+        };
+        for (name, bytes) in [
+            // A body that is already a whole number of blocks, which is where
+            // PKCS#7 adds an entire block of its own.
+            (
+                "aes128-two-blocks",
+                cipher_seed(0x00, 7, &filler(16, 0x01), &filler(32, 0x50)),
+            ),
+            (
+                "aes256-ragged",
+                cipher_seed(0x02, 19, &filler(32, 0x02), &filler(37, 0x60)),
+            ),
+            // Nothing to hash and nothing to encrypt: the zero-length pad. The
+            // key is 24 bytes, which is a FIPS 197 width this crate
+            // deliberately does not expand, so this seed is also the one that
+            // holds the refusal in place.
+            (
+                "aes192-refused-empty-body",
+                cipher_seed(0x01, 0, &filler(24, 0x03), &[]),
+            ),
+            // Five bytes is not any cipher's key. RC4 and the hashes still run.
+            (
+                "key-aes-refuses",
+                cipher_seed(0x03, 3, &filler(5, 0x04), &filler(24, 0x70)),
+            ),
+        ] {
+            std::fs::write(base.join("crypt_ciphers").join(name), bytes)
+                .expect("the corpus directory is there");
+        }
+    }
 }

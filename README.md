@@ -7,7 +7,7 @@ standalone library for Rust, JavaScript/wasm, Python and .NET.
 > **Status: it reads and renders PDFs.** Opens damaged files, decrypts with
 > correct security semantics, extracts text with geometry, renders vector
 > graphics, images and gradients in colour, and writes valid documents —
-> 1872 tests, four CI targets including wasm, with Python, JavaScript and .NET
+> 2243 tests, four CI targets including wasm, with Python, JavaScript and .NET
 > bindings. It has met a real corpus: 4 525 documents from pdf.js, veraPDF,
 > qpdf and the PDF Association, 4 484 of them rendering every page, **not one
 > crash**. The two things it still cannot do: draw text for documents that do
