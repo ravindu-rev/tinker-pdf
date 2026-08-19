@@ -702,6 +702,28 @@ fn build_real(
 }
 
 fn scale_pow10(mut value: f64, mut exponent: i32) -> f64 {
+    // The saturating guards come **first**, and that ordering is the whole of
+    // this fix rather than a tidying.
+    //
+    // Gap 24's first real campaign panicked here on `0.0002E-7700000000000000`
+    // in 1.5 million runs. The exponent's own accumulation saturates at
+    // `i32::MAX`, so a negative one is `i32::MIN + 1` — safe by itself — and
+    // then the caller's `scale.saturating_add(exponent)` takes it the last step
+    // to `i32::MIN` whenever the number also has a fraction. `-i32::MIN` has no
+    // `i32`, so the negation below panicked in any build with overflow checks
+    // and **wrapped to `i32::MIN` in release**, where `POW10.get` misses and the
+    // wrong branch is taken silently. A panic in debug and a wrong number in
+    // release is the worst pair available.
+    //
+    // Clamping first makes both impossible: past ±400 the answer is infinity or
+    // zero whatever the mantissa is, because `f64` has no exponent range left —
+    // and those two returns were already here, three lines too late.
+    if exponent > 400 {
+        return f64::INFINITY;
+    }
+    if exponent < -400 {
+        return 0.0;
+    }
     // Fast path: mantissa and power are both exact, so the result carries a
     // single rounding — the same value a correctly rounded parse produces.
     if value < MAX_EXACT_MANTISSA {
@@ -711,12 +733,6 @@ fn scale_pow10(mut value: f64, mut exponent: i32) -> f64 {
         if let Some(p) = usize::try_from(-exponent).ok().and_then(|e| POW10.get(e)) {
             return value / p;
         }
-    }
-    if exponent > 400 {
-        return f64::INFINITY;
-    }
-    if exponent < -400 {
-        return 0.0;
     }
     while exponent > 0 {
         let step = exponent.min(22);
@@ -991,6 +1007,60 @@ mod tests {
             lex_one(b"---5"),
             (TokenKind::Int(-5), vec![WarningKind::DoubledSign])
         );
+    }
+
+    /// An exponent large enough to reach `i32::MIN` is zero or infinity, and does
+    /// not panic on the way.
+    ///
+    /// Found by gap 24 milestone 5's campaign — the first session `cos_object`
+    /// has ever had — in 1.5 million runs, on `0.0002E-7700000000000000`.
+    ///
+    /// The arithmetic is worth writing down because every step of it looked
+    /// safe. The exponent's own accumulation *saturates*, so a huge negative
+    /// exponent arrives as `i32::MIN + 1` and negating that is fine. Then
+    /// `build_real` adds the fraction's scale with `saturating_add`, which is
+    /// also fine, and lands on exactly `i32::MIN` — for which there is no
+    /// `i32` negation. Two saturating operations, each correct, composing into
+    /// the one value the third could not take.
+    ///
+    /// It panicked in any build with overflow checks and **wrapped in
+    /// release**, where the negation yields `i32::MIN` again, `POW10.get`
+    /// misses, and the slow path runs on a number nothing clamped. A panic in
+    /// debug and a wrong answer in release.
+    ///
+    /// Both crash inputs are asserted, and so is the boundary either side of
+    /// the ±400 clamp, because moving those two returns above the fast path is
+    /// the fix and a test that only covered the extreme would not see them move
+    /// back.
+    #[test]
+    fn an_exponent_that_saturates_is_clamped_rather_than_negated() {
+        let real = |bytes: &[u8]| match lex_one(bytes).0 {
+            TokenKind::Real(v) => v,
+            other => panic!("{other:?}"),
+        };
+
+        // The two inputs libFuzzer produced, verbatim.
+        assert_eq!(real(b"0.0002E-7700000000000000"), 0.0);
+        assert_eq!(real(b"0.00177777777777771e-2029777777777777"), 0.0);
+
+        // The same shape upward. Not infinity: `build_real` clamps a
+        // non-finite result to `f64::MAX` and warns, because 7.3.3's reals are
+        // finite — so the clamp this fix moved and the clamp above it are two
+        // different guards, and the assertion is on what a caller actually
+        // gets.
+        assert_eq!(real(b"0.0002E7700000000000000"), f64::MAX);
+
+        // And the clamp's own edges, so the reordering above cannot silently
+        // come undone: inside it the value is computed, outside it is not.
+        assert_eq!(real(b"1e-400"), 0.0);
+        assert!(real(b"1e-300") > 0.0);
+        assert_eq!(real(b"1e401"), f64::MAX);
+        assert!(real(b"1e300").is_finite() && real(b"1e300") < f64::MAX);
+
+        // Ordinary numbers are untouched by the reordering.
+        assert_eq!(real(b"1.5"), 1.5);
+        assert_eq!(real(b"2e3"), 2000.0);
+        assert_eq!(real(b"-0.25e-2"), -0.0025);
     }
 
     #[test]
