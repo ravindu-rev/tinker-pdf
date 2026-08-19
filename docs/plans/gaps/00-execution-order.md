@@ -233,6 +233,41 @@ on every fixture anybody would write by hand and are wrong on real documents,
 which is this programme's recurring failure and the reason the ordering is
 written down rather than left to whoever picks the plan up.
 
+**The same ZIP signature still mis-opens gap 31's input, and gap 30 did not fix
+it.** *Added while planning [31](31-epub.md), August 2026.* Gap 30 closed the
+XPS half and named EPUB in the same sentence; nobody went back for it. Measured
+on six Project Gutenberg books before a line of gap 31's code: Frankenstein —
+thirty-one XHTML content documents and three stylesheets — **opens**, reports
+**one page**, and renders a 1824 × 2726-point page that is the auto-generated
+cover, with `ArchiveReport::warnings()` **empty**; a book with no image at all is
+refused as `NoImages`. An EPUB fails ECMA-388 E.3 at step 2's *first* check —
+it carries neither `[Content_Types].xml` nor `_rels/.rels`, measured across nine
+files — so gap 30's `UnreadablePackage` is **unreachable** for one and the comic
+fallthrough is exactly what E.3's own text asks for. **Gap 30 is not wrong; EPUB
+is a different question it did not ask.** Gap 31's milestone 3 is the only one
+of that plan's thirteen milestones that improves matters on its own, so it is
+early there for the same reason gap 30's was, and it is the part that must land
+even if the rest of EPUB is descoped.
+
+**Gap 31 changes a leaf gap 30 froze, and the ordering is one-way.** Ruling 8's
+gap 30 amendment says EPUB *"reuses this crate"*, which understates it:
+`tinker-pdf-xml` refuses `<!DOCTYPE` outright, and **100 % of Project
+Gutenberg's EPUB 2 content documents carry one**, as does the cover wrapper of
+every EPUB 3 book. So gap 31's milestone 2 gives that crate a two-valued doctype
+mode before its milestone 3 can read a book, and re-asserts all four of gap 30's
+committed entity bombs *under the new mode* — because the internal DTD subset is
+where all four live, EPUB 3.3 §3.9 forbids exactly that half, and a relaxation
+whose defence is not re-proved is a relaxation nobody checked.
+
+**Gap 31's milestone 5 must land before its milestone 8**, which is the third
+time this programme has scheduled the writer ahead of its consumers, after
+PRE-D and gap 30's milestone 5. `DocumentBuilder` emits **no annotations at
+all** — gap 30 named that as a non-goal — and no outline, and an EPUB's
+cross-references and navigation document are both. A build that reaches the
+first readable book without them renders cross-references as ordinary blue text
+and a book with no table of contents, both of which look like the book rather
+than like a missing feature.
+
 **The commit-boundary rule is per-plan, not global.** CONTRIBUTING says to treat
 each plan's milestone table as the commit boundary set. One commit per gap is
 right for gap 21 and gap 22; it is wrong for gap 01 (five milestones, landed as
@@ -279,8 +314,8 @@ Prerequisites are marked. Sizes are from [README.md](README.md).
 | 32 | [27](27-form-calculations-decision.md) form calculations, option A | Two commits: option B's reader, then the interpreter | |
 | 33 | [28](28-tinker-integration-decisions.md) Tinker integration | M4 is code in a different repository | **done** |
 | 34 | [29](29-cbz.md) CBZ (S) | The first of the three container plans gap 28's decision spawned. Nothing blocks it; it builds `tinker-pdf-zip`, which 30 needs | **done** `5f46fe3`..`b764917` |
-| 35 | [30](30-xps.md) XPS (L) | The second. Needs 29 for `tinker-pdf-zip`, `ImageData::Compressed` and `bounds_ledger.rs`, and needs 09, 10 and 11 because its milestone 5 writes patterns, shadings and groups and the only check on what it writes is that this engine already reads them. **Its own milestone 1 is a corpus of real documents, before any reader** — gap 29 closed owing exactly that, and the ordering is how this one does not | |
-| 36 | 31 EPUB (XL+) | The third, and not written. It reuses 30's `tinker-pdf-xml` and **none** of its OPC layer: EPUB's container is OCF with `META-INF/container.xml`, not OPC | |
+| 35 | [30](30-xps.md) XPS (L) | The second. Needs 29 for `tinker-pdf-zip`, `ImageData::Compressed` and `bounds_ledger.rs`, and needs 09, 10 and 11 because its milestone 5 writes patterns, shadings and groups and the only check on what it writes is that this engine already reads them. **Its own milestone 1 is a corpus of real documents, before any reader** — gap 29 closed owing exactly that, and the ordering is how this one does not | **done** `83d49f3`..`1574767` |
+| 36 | [31](31-epub.md) EPUB (XL+) | The third and last. Needs 29 and 30 for everything both built, and **changes** one of them: `tinker-pdf-xml` grows a doctype mode in this plan's milestone 2, because XHTML in the wild carries doctypes and the crate refuses them. The owner chose the **full reflowable engine** on 19 August 2026 over fixed-layout-only and a bounded subset. Its milestone 3 is the only one of thirteen that improves matters alone, for gap 30 milestone 3's reason; its milestone 5 is the writer's missing half again — link annotations and an outline — and lands before its consumers | |
 
 The three container plans sit after 33 because gap 28 is the decision that
 spawned them, and they are numbered here rather than left out of the ledger
