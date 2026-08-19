@@ -1911,3 +1911,108 @@ from the number alone.
   the second, and both censuses print their per-file answers so a human can
   disbelieve them. Milestone 2's scanner has a position to work from and this
   one does not.
+
+## Progress — 19 August 2026, milestone 2
+
+**`tinker-pdf-xml` has two doctype modes and the four bombs still refuse under
+both.** `Doctype::Refuse` and `Doctype::SkipExternalId`, two values and no
+third. The workspace stands at **2 268**.
+
+### The collision this settles, and why the relaxation is dangerous
+
+Gap 30 milestone 2 made `<!DOCTYPE` `Error::DoctypeUnsupported` **before one
+byte after it is read**, and that refusal *is* the whole defence against entity
+expansion: not a budget, but never entering the grammar that has one.
+
+Milestone 1 then measured what real books do. 100 % of Gutenberg's EPUB 2
+content documents carry `<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' …>`,
+**single-quoted**; every EPUB 3 book carries `<!DOCTYPE html>` on its cover
+wrapper; and the two producers **disagree about whether to write one at all** —
+pandoc always, calibre never. The parser as it stood refused one producer
+entirely and read the other.
+
+**Skipping an external identifier means walking past two literals, and a `>`
+may be inside either one.** A scanner that hunted the next `>` would leave the
+declaration early and resume in the middle of it, which is precisely the hole
+refusing `<!DOCTYPE` had closed. So `Cursor::literal` exists beside
+`Cursor::attribute_value` rather than reusing it: **the quote is the only
+terminator**, `<` is ordinary because §4.2.2's `SystemLiteral` is `[^"]*` where
+`AttValue` is not, and
+`a_greater_than_inside_a_literal_does_not_end_the_declaration` is the test that
+holds it. The injection matrix confirms it is the only test that does.
+
+### The bombs, refused twice over
+
+All four of gap 30's committed bombs — billion laughs, the quadratic-blowup
+variant, an external entity and an internal-subset parameter entity — are
+re-asserted under `SkipExternalId`, and they refuse there by a **second** name:
+`Error::InternalSubset`, because all four of them live in the internal subset
+and the internal subset is what the relaxed mode still will not enter.
+
+`no_bomb_is_read_into_its_internal_subset` asserts the **offset**, not only the
+error, which is the difference between "it refused" and "it refused without
+reading the thing". Under `Refuse` the cursor does not move at all; under
+`SkipExternalId` it stops at the `[`.
+
+A declaration **outside** the prolog is refused in both modes — as
+`MisplacedDoctype` under the relaxed one — and the cursor does not move there
+either, because reading it would mean parsing DTD content in order to report
+that DTD content is not allowed.
+
+### What the census settled against the plan
+
+Milestone 1's census found **zero** uses of named character references in 270
+content documents, against 65 occurrences of `&#160;` and 83 240 literal
+non-ASCII characters. So there is **no entity table and no expander in either
+mode**, an undeclared named reference is refused by name in both, and the plan's
+own working assumption was amended in place rather than only in a Progress
+section.
+
+### The injection matrix
+
+Eight defects, one at a time, each reverted before the next, the full workspace
+re-run with `--no-fail-fast`. **Seven caught; one is an equivalent mutant and is
+recorded rather than killed with an invented fixture.**
+
+| Defect | Caught by |
+| --- | --- |
+| The relaxed mode becomes the default | ten tests |
+| A declaration outside the prolog is skipped rather than refused | `a_declaration_outside_the_prolog_is_still_refused_in_the_relaxed_mode`, and one more |
+| `Refuse` reads the declaration before refusing it | `every_bomb_is_refused_as_a_doctype_and_not_as_a_cap`, and four more |
+| A second declaration is accepted | `a_declaration_the_prolog_has_no_room_for_is_refused_in_both_modes`, and one more |
+| **A literal ends at the first `>` rather than at its quote** | `a_greater_than_inside_a_literal_does_not_end_the_declaration` — **alone** |
+| Only the double quote is a literal delimiter | four tests |
+| The external-identifier keyword matched as a fixed six-character prefix | twelve tests |
+| **XPS stops passing `Refuse` explicitly** | **nothing — an equivalent mutant** |
+
+The survivor is honest rather than a gap, and the pair is worth stating.
+`Source::reader` already defaults to `Refuse`, so removing the explicit argument
+from `xps.rs` changes no answer **while that default holds**. What it protects
+against is the default changing — and *that* is caught, by ten tests, as the
+first row shows. The two together are the property; neither alone is. Killing
+this one would need a fixture that asserts the source text rather than the
+behaviour, which is worse than recording it.
+
+Milestone 1 had already recorded a second equivalent mutant here in the code
+itself: widening `ascii_word` from alphabetic to alphanumeric. The sharper form
+of that injection — a fixed six-character prefix, which reads `PUBLICITY` as
+`PUBLIC` — **is** caught, by twelve tests.
+
+### Still owed
+
+- **The facade end-to-end test over the real books** is not written. The mode is
+  proved at the crate's own level and against the committed corpus's markup; a
+  test that opens a real EPUB and asserts its content documents parse belongs
+  with milestone 3, which is where a book first becomes something other than a
+  comic.
+- **`tinker-pdf-xml`'s fuzz target does not exercise the relaxed mode.** Four new
+  seeds are committed under `fuzz/corpus/xml/` — the HTML5 shape, the
+  single-quoted XHTML 1.1 shape, a `>` inside a literal, and an internal subset
+  — but the target still constructs its reader through `Source::reader`. Making
+  the control byte choose the mode is milestone 13's campaign work, and until it
+  does, the relaxed mode has had no fuzzing at all.
+- **EPUB 3.3 Appendix B's set is small and closed**, and an identifier outside it
+  is named rather than refused. That is the specified behaviour, but it means a
+  book carrying an unknown identifier still parses — the warning is the only
+  signal, and nothing above this crate reads it yet.
+

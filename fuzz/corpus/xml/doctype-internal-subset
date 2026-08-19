@@ -1,0 +1,2 @@
+ÿ<!DOCTYPE a PUBLIC "p" "s" [<!ENTITY x "y">]>
+<a>&x;</a>

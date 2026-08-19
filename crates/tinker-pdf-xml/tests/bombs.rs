@@ -21,8 +21,18 @@
 //! that refuses everything, and the second would pass the first's tests — gap
 //! 29 milestone 5's lesson, that a positive assertion cannot catch a weakened
 //! check, arriving from the other side.
+//!
+//! **Since gap 31's milestone 2 this file has two halves, and the second is the
+//! point of it.** That milestone relaxes `<!DOCTYPE` for XHTML, because 100 %
+//! of one producer's EPUB 2 content documents carry one and refusing loses the
+//! book. Everything above is asserted again below under
+//! [`Doctype::SkipExternalId`], where the four bombs are refused by a *second*
+//! name — [`Error::InternalSubset`], since all four of them live in the
+//! internal subset — and `external-subset.xml`, which has no subset at all, is
+//! skipped and read. A suite that only tested these files under the mode
+//! nothing uses would prove nothing about the mode EPUB does.
 
-use tinker_pdf_xml::{Error, Limits, Source};
+use tinker_pdf_xml::{Doctype, Error, Limits, Source, Warning};
 
 const BILLION_LAUGHS: &[u8] = include_bytes!("bombs/billion-laughs.xml");
 const QUADRATIC_BLOWUP: &[u8] = include_bytes!("bombs/quadratic-blowup.xml");
@@ -176,4 +186,220 @@ fn a_declaration_in_utf_16_is_refused_by_the_same_name() {
     }
     let (error, _, _) = first_refusal(&bytes);
     assert_eq!(error, Some(Error::DoctypeUnsupported));
+}
+
+// ---------------------------------------------------------------------------
+// The same five files under `Doctype::SkipExternalId`, which is the test that
+// says the defence survived the relaxation.
+//
+// Gap 31's milestone 2 relaxes `<!DOCTYPE` for XHTML, because 100 % of one
+// producer's EPUB 2 content documents carry one and refusing loses the book. A
+// suite that only tested these files under `Refuse` would prove nothing about
+// the mode EPUB actually uses — so every one of them is run again here, and
+// the four bombs are asserted by a *second* name: `InternalSubset`, which is
+// where all four of them live.
+//
+// The fifth file is the other direction, and it is the one that must **not**
+// refuse. `external-subset.xml` is a declaration with no internal subset at
+// all, naming a DTD on a host this engine could not reach; under the relaxed
+// mode it is skipped, the document is read, and the identifier is named in a
+// warning rather than swallowed. Four refusals with no reading beside them
+// would pass on a mode that refused every declaration, which is the mode this
+// milestone was written to stop being.
+// ---------------------------------------------------------------------------
+
+/// The four gap 30 names. `external-subset.xml` is deliberately not among them:
+/// it is the twin for this half of the file, the way `no-doctype.xml` is the
+/// twin for the other half.
+const FOUR_BOMBS: [(&str, &[u8]); 4] = [
+    ("billion-laughs.xml", BILLION_LAUGHS),
+    ("quadratic-blowup.xml", QUADRATIC_BLOWUP),
+    ("external-entity.xml", EXTERNAL_ENTITY),
+    ("parameter-entity.xml", PARAMETER_ENTITY),
+];
+
+/// The first refusal under a stated mode, and how far the reader got before it.
+fn first_refusal_as(bytes: &[u8], doctype: Doctype) -> (Option<Error>, usize, usize) {
+    let source = Source::new(bytes).expect("all six files are UTF-8");
+    let mut reader = source.reader_with(&Limits::DEFAULT, doctype);
+    let mut produced = 0usize;
+    for event in reader.by_ref() {
+        match event {
+            Ok(_) => produced += 1,
+            Err(error) => return (Some(error), produced, reader.offset()),
+        }
+    }
+    (None, produced, reader.offset())
+}
+
+/// The exit criterion: each of the four re-asserted **under the new mode**, by
+/// the name that mode refuses them with.
+#[test]
+fn every_bomb_is_refused_as_an_internal_subset_under_the_relaxed_mode() {
+    for (name, bytes) in FOUR_BOMBS {
+        let (error, produced, _) = first_refusal_as(bytes, Doctype::SkipExternalId);
+        assert_eq!(
+            error,
+            Some(Error::InternalSubset),
+            "{name} was not refused as an internal subset in the relaxed mode"
+        );
+        // Not by a bound, for the reason the other half of this file gives:
+        // a cap firing would mean the subset had been parsed and was being
+        // expanded.
+        assert!(
+            !matches!(
+                error,
+                Some(Error::DepthCap | Error::AttributeCap | Error::NameCap | Error::TokenCap)
+            ),
+            "{name} was refused by a cap, which means the subset was parsed"
+        );
+        // And not by the *other* mode's name, which is what says the mode
+        // argument was honoured rather than ignored. A `reader_with` that threw
+        // its parameter away and always refused would pass every assertion
+        // above and fail this one.
+        assert_ne!(
+            error,
+            Some(Error::DoctypeUnsupported),
+            "{name} was refused as though the relaxed mode had not been asked for"
+        );
+        assert_eq!(
+            produced, 0,
+            "{name} produced {produced} events before the subset was refused"
+        );
+    }
+}
+
+/// And refused **at the bracket**, with nothing inside it read.
+///
+/// The other half of the criterion, and the half a name alone cannot show: a
+/// reader that walked the subset looking for the matching `]` and then refused
+/// would answer the same variant from a different place. `billion-laughs.xml`
+/// declares ten entities inside its subset and this says none of them was
+/// looked at.
+#[test]
+fn no_bomb_is_read_into_its_internal_subset() {
+    for (name, bytes) in FOUR_BOMBS {
+        let text = std::str::from_utf8(bytes).expect("UTF-8");
+        let bracket = text.find('[').expect("every bomb has an internal subset");
+        let (_, _, offset) = first_refusal_as(bytes, Doctype::SkipExternalId);
+        assert_eq!(
+            offset,
+            bracket,
+            "{name}: the reader stopped {} bytes past the `[`",
+            offset.saturating_sub(bracket)
+        );
+        // Nothing the subset declares was reached. The first entity name in
+        // each of these is past the bracket by construction, so an offset that
+        // is the bracket is an offset that read none of them.
+        assert!(
+            text.get(bracket..)
+                .is_some_and(|subset| subset.contains("<!ENTITY")),
+            "{name}: this test is asserting nothing, since the subset declares \
+             no entity after the bracket"
+        );
+    }
+}
+
+/// The fifth file, which is the other direction: a declaration with **no**
+/// internal subset is skipped, the document is read, and the identifier it
+/// named is reported rather than swallowed.
+///
+/// Without this, the four assertions above would pass on a mode that refused
+/// every document type declaration — which is the mode this milestone exists to
+/// replace. `http://attacker.invalid/data.dtd` is never opened: this engine
+/// performs no I/O and the literal is a string that happens to look like a URL.
+#[test]
+fn the_declaration_with_no_subset_is_skipped_and_its_identifier_is_named() {
+    let source = Source::new(EXTERNAL_SUBSET).expect("UTF-8");
+    let mut reader = source.reader_with(&Limits::DEFAULT, Doctype::SkipExternalId);
+    let events: Vec<_> = reader
+        .by_ref()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the external subset form is read, not refused");
+    assert!(
+        events.len() >= 3,
+        "the document did not survive the skip: {} events",
+        events.len()
+    );
+    assert_eq!(
+        reader.warnings(),
+        [Warning::ExternalIdentifierNotAllowed],
+        "the identifier was discarded silently"
+    );
+    let identifier = reader
+        .external_identifier()
+        .expect("the declaration named one");
+    assert_eq!(identifier.public(), None);
+    assert_eq!(identifier.system(), "http://attacker.invalid/data.dtd");
+    assert!(!identifier.is_allowed());
+    // And under the shipped mode the same file is still refused by its own
+    // name, which the array at the top of this file already says.
+    assert_eq!(
+        first_refusal_as(EXTERNAL_SUBSET, Doctype::Refuse).0,
+        Some(Error::DoctypeUnsupported)
+    );
+}
+
+/// The twin parses in both modes, and produces the same events in each.
+///
+/// The relaxation is a change to one construct or it is a change to the parser,
+/// and nothing but this says which.
+#[test]
+fn the_bomb_shaped_file_without_a_doctype_parses_identically_in_both_modes() {
+    let source = Source::new(NO_DOCTYPE).expect("UTF-8");
+    let under_refuse: Vec<String> = source
+        .reader(&Limits::DEFAULT)
+        .map(|event| format!("{:?}", event.expect("well formed")))
+        .collect();
+    let under_skip: Vec<String> = source
+        .reader_with(&Limits::DEFAULT, Doctype::SkipExternalId)
+        .map(|event| format!("{:?}", event.expect("well formed")))
+        .collect();
+    assert!(under_refuse.len() > 8);
+    assert_eq!(under_refuse, under_skip);
+}
+
+/// UTF-16 again, on the other side of the mode.
+///
+/// The relaxed mode works over decoded characters like the refusal does, so a
+/// bomb written in UTF-16 reaches the same bracket and stops at it.
+#[test]
+fn a_bomb_in_utf_16_is_refused_as_an_internal_subset_too() {
+    let text = std::str::from_utf8(BILLION_LAUGHS).expect("UTF-8");
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let (error, produced, _) = first_refusal_as(&bytes, Doctype::SkipExternalId);
+    assert_eq!(error, Some(Error::InternalSubset));
+    assert_eq!(produced, 0);
+}
+
+/// A declaration in the two places §2.8 has no room for one is refused in the
+/// relaxed mode as well, by a name that says *where* rather than *what*.
+///
+/// The four bombs all sit in the prolog, so a mode that only guarded the prolog
+/// would pass every assertion above. This is the same sweep the other half of
+/// this file makes, run again under the mode that is allowed to skip one.
+#[test]
+fn a_declaration_outside_the_prolog_is_still_refused_in_the_relaxed_mode() {
+    for document in [
+        b"<a><!DOCTYPE a SYSTEM \"s\"></a>".as_slice(),
+        b"<a/><!DOCTYPE a SYSTEM \"s\">".as_slice(),
+        b"<!DOCTYPE a><!DOCTYPE a><a/>".as_slice(),
+    ] {
+        let (error, _, _) = first_refusal_as(document, Doctype::SkipExternalId);
+        assert_eq!(
+            error,
+            Some(Error::MisplacedDoctype),
+            "{} was not refused",
+            String::from_utf8_lossy(document)
+        );
+    }
+    // And the one place there is room for one is not refused, so the three
+    // above are about position.
+    assert_eq!(
+        first_refusal_as(b"<!DOCTYPE a SYSTEM \"s\"><a/>", Doctype::SkipExternalId).0,
+        None
+    );
 }

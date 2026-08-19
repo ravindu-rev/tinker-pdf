@@ -18,7 +18,10 @@
 use std::borrow::Cow;
 
 use crate::limits::{MAX_XML_ATTRIBUTES, MAX_XML_DEPTH, MAX_XML_NAME_LEN, MAX_XML_TOKENS};
-use crate::{Construct, Encoding, Error, Event, Limits, Reader, Source, Warning, XML_NAMESPACE};
+use crate::{
+    Construct, Doctype, Encoding, Error, Event, Limits, Reader, Source, Warning,
+    ALLOWED_PUBLIC_IDENTIFIERS, XML_NAMESPACE,
+};
 
 /// Parses under the shipped bounds and hands the events to `check`.
 fn read(bytes: &[u8], check: impl FnOnce(&[Event<'_>])) {
@@ -86,6 +89,57 @@ fn starts(bytes: &[u8]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Every event a document produced under a stated mode, as text, so two runs
+/// can be compared without keeping two sources alive at once.
+fn events_as(bytes: &[u8], doctype: Doctype) -> Vec<String> {
+    let source = Source::new(bytes).expect("decodes");
+    source
+        .reader_with(&Limits::DEFAULT, doctype)
+        .map(|event| format!("{:?}", event.expect("well formed")))
+        .collect()
+}
+
+/// The element names a document started, under a stated mode.
+fn starts_as(bytes: &[u8], doctype: Doctype) -> Vec<String> {
+    let source = Source::new(bytes).expect("decodes");
+    let mut names = Vec::new();
+    for event in source.reader_with(&Limits::DEFAULT, doctype) {
+        if let Event::Start(element) = event.expect("well formed") {
+            names.push(element.name().qualified().to_string());
+        }
+    }
+    names
+}
+
+/// The refusal a document produced under a stated mode.
+fn refusal_as(bytes: &[u8], doctype: Doctype) -> Error {
+    stop_as(bytes, doctype).0.expect("expected a refusal")
+}
+
+/// The refusal and where the reader stopped, which is what makes "refused at
+/// the bracket with nothing inside it read" checkable rather than described.
+fn stop_as(bytes: &[u8], doctype: Doctype) -> (Option<Error>, usize) {
+    let source = Source::new(bytes).expect("decodes");
+    let mut reader = source.reader_with(&Limits::DEFAULT, doctype);
+    for event in reader.by_ref() {
+        if let Err(error) = event {
+            return (Some(error), reader.offset());
+        }
+    }
+    (None, reader.offset())
+}
+
+/// The events and the reader afterwards, under a stated mode.
+fn read_as(bytes: &[u8], doctype: Doctype, check: impl FnOnce(&[Event<'_>], &Reader<'_>)) {
+    let source = Source::new(bytes).expect("decodes");
+    let mut reader = source.reader_with(&Limits::DEFAULT, doctype);
+    let events: Vec<Event<'_>> = reader
+        .by_ref()
+        .collect::<Result<_, _>>()
+        .expect("well formed");
+    check(&events, &reader);
 }
 
 fn text_of(bytes: &[u8]) -> String {
@@ -168,6 +222,649 @@ fn the_four_markup_declarations_are_refused_by_their_own_name() {
     ] {
         assert_eq!(refusal(bytes), Error::MarkupDeclaration);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The second mode, and the half of the refusal that has to survive it.
+// ---------------------------------------------------------------------------
+
+/// The three shapes gap 31's milestone 1 measured, verbatim, so a fixture and
+/// the census cannot drift apart.
+///
+/// Two producers and two quote characters. pandoc writes the XHTML 1.1
+/// identifier **double-quoted** on five committed content documents; Project
+/// Gutenberg's EPUB 2 books carry the same identifier **single-quoted** on
+/// every one of thirty fetched ones, and neither corpus shows both. Every EPUB
+/// 3 book carries `<!DOCTYPE html>` on its cover wrapper and nowhere else.
+const HTML5: &str = "<!DOCTYPE html>";
+const XHTML11_DOUBLE: &str = concat!(
+    "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" ",
+    "\"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">"
+);
+const XHTML11_SINGLE: &str = concat!(
+    "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' ",
+    "'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>"
+);
+
+/// `Refuse` is the default, and the relaxed mode has to be asked for by name.
+///
+/// Both halves matter. If [`Doctype::default`] were the relaxed one, every
+/// caller in this repository that never heard of gap 31 would silently acquire
+/// it; if `reader` were anything but `reader_with(Refuse)`, the sixty-one tests
+/// above would be testing a mode nothing ships.
+#[test]
+fn the_default_mode_is_refuse_and_the_relaxed_one_has_to_be_asked_for() {
+    assert_eq!(Doctype::default(), Doctype::Refuse);
+    let document = format!("{HTML5}<page/>");
+    assert_eq!(refusal(document.as_bytes()), Error::DoctypeUnsupported);
+    assert_eq!(
+        refusal_as(document.as_bytes(), Doctype::Refuse),
+        Error::DoctypeUnsupported
+    );
+    assert_eq!(
+        starts_as(document.as_bytes(), Doctype::SkipExternalId),
+        ["page"]
+    );
+}
+
+/// All three shapes the census measured, skipped — and skipped so completely
+/// that the events are the ones the same document produces with no declaration
+/// in it at all.
+///
+/// Comparing against the declaration-free twin rather than against a written
+/// list is what catches a skip that leaves something behind: a stray text
+/// event, an extra element, a warning. A test that only asserted `["html"]`
+/// would pass on a reader that also emitted the tail of the public literal as
+/// character data.
+#[test]
+fn all_three_shapes_the_census_measured_are_skipped_and_leave_nothing_behind() {
+    let twin = "<?xml version=\"1.0\"?>\n<html><body>t</body></html>";
+    for declaration in [HTML5, XHTML11_DOUBLE, XHTML11_SINGLE] {
+        let document =
+            format!("<?xml version=\"1.0\"?>\n{declaration}\n<html><body>t</body></html>");
+        // Refused today, which is why this milestone exists.
+        assert_eq!(
+            refusal(document.as_bytes()),
+            Error::DoctypeUnsupported,
+            "{declaration}"
+        );
+        assert_eq!(
+            events_as(document.as_bytes(), Doctype::SkipExternalId),
+            events_as(twin.as_bytes(), Doctype::SkipExternalId),
+            "{declaration} did not leave the document it came in",
+        );
+    }
+}
+
+/// **The one way this milestone could reintroduce what gap 30 closed.**
+///
+/// Skipping an external identifier means walking past two string literals, and
+/// a `>` may appear inside either — `PubidChar` excludes it and `SystemLiteral`
+/// does not, and neither is checked here, because the point is what a hostile
+/// file may contain rather than what a conformant one does. A scanner that
+/// looked for the next `>` would end the declaration inside the literal and
+/// resume parsing in the middle of it, producing whatever markup the rest of
+/// the literal spells.
+///
+/// So the element the literal spells is asserted **absent**, not merely "the
+/// document parsed" — and the last case is the near miss that says the
+/// assertion can fail at all, since the same bytes with the quotes closed early
+/// really do produce it.
+#[test]
+fn a_greater_than_inside_a_literal_does_not_end_the_declaration() {
+    for declaration in [
+        "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN><injected/>\" \"x.dtd\">",
+        "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN><injected/>' 'x.dtd'>",
+        "<!DOCTYPE html PUBLIC \"p\" \"x.dtd><injected/>\">",
+        "<!DOCTYPE html SYSTEM \"x.dtd><injected/>\">",
+        "<!DOCTYPE html SYSTEM 'x.dtd><injected/>'>",
+        // A `<` too: `SystemLiteral` is `[^\"]*`, where `AttValue` forbids one.
+        "<!DOCTYPE html SYSTEM \"x<injected/>.dtd\">",
+    ] {
+        let document = format!("{declaration}<html/>");
+        assert_eq!(
+            starts_as(document.as_bytes(), Doctype::SkipExternalId),
+            ["html"],
+            "{declaration} let markup out of a literal",
+        );
+    }
+    // The near miss. The declaration really does end at the `>` outside the
+    // quotes, and an element after it really is produced — so the six
+    // assertions above are assertions rather than a shape that cannot fail.
+    assert_eq!(
+        starts_as(
+            b"<!DOCTYPE html PUBLIC \"p\" \"x.dtd\"><injected/>",
+            Doctype::SkipExternalId
+        ),
+        ["injected"],
+    );
+}
+
+/// The identifier set, **in both directions**: one in it produces no warning,
+/// one outside it produces one and is named.
+///
+/// A build that warned about neither would pass the first half alone, and a
+/// build that warned about everything would pass the second half alone. The
+/// two prefix cases are there for the third weakening: a membership test
+/// written with `starts_with` or `contains` rather than equality.
+#[test]
+fn an_identifier_outside_the_allowed_set_is_named_and_one_inside_it_is_not() {
+    for public in ALLOWED_PUBLIC_IDENTIFIERS {
+        let document = format!("<!DOCTYPE svg PUBLIC \"{public}\" \"d.dtd\"><svg/>");
+        read_as(document.as_bytes(), Doctype::SkipExternalId, |_, reader| {
+            assert_eq!(reader.warnings(), [], "{public} is in the set and warned");
+            let identifier = reader.external_identifier().expect("it named one");
+            assert_eq!(identifier.public(), Some(public));
+            assert_eq!(identifier.system(), "d.dtd");
+            assert!(identifier.is_allowed(), "{public}");
+        });
+    }
+    for public in [
+        // The one every measured EPUB 2 content document carries, which EPUB 3
+        // banned from Appendix B deliberately.
+        "-//W3C//DTD XHTML 1.1//EN",
+        "-//W3C//DTD XHTML 1.0 Strict//EN",
+        "-//attacker//EN",
+        // A prefix of an allowed one, and an allowed one with a suffix.
+        "-//W3C//DTD SVG 1.1",
+        "-//W3C//DTD SVG 1.1//ENGLISH",
+        // An allowed one with something in front of it.
+        "x-//W3C//DTD SVG 1.1//EN",
+        // Case, which XML does not fold.
+        "-//w3c//dtd svg 1.1//en",
+    ] {
+        let document = format!("<!DOCTYPE html PUBLIC \"{public}\" \"d.dtd\"><html/>");
+        read_as(document.as_bytes(), Doctype::SkipExternalId, |_, reader| {
+            assert_eq!(
+                reader.warnings(),
+                [Warning::ExternalIdentifierNotAllowed],
+                "{public} is outside the set and was not warned about",
+            );
+            let identifier = reader.external_identifier().expect("it named one");
+            assert_eq!(identifier.public(), Some(public));
+            assert!(!identifier.is_allowed(), "{public}");
+        });
+    }
+    // Appendix B holds three rows and no more, so a fourth identifier arriving
+    // by accident would be caught here rather than by a book being read quietly.
+    assert_eq!(ALLOWED_PUBLIC_IDENTIFIERS.len(), 3);
+}
+
+/// The `SYSTEM`-only form, which the settlement table left terse.
+///
+/// Appendix B's rows are **pairs**, so a declaration naming no public
+/// identifier names nothing the set can contain, and it is warned about like
+/// any other identifier outside it. That is what makes
+/// `external-subset.xml`'s `http://attacker.invalid/data.dtd` a fact a caller
+/// can report rather than a string that was silently swallowed — and milestone
+/// 1 found no real document in 270 writing this form, so the warning costs no
+/// book anything.
+#[test]
+fn a_system_only_declaration_is_skipped_and_its_identifier_is_named() {
+    read_as(
+        b"<!DOCTYPE data SYSTEM \"http://attacker.invalid/data.dtd\"><data/>",
+        Doctype::SkipExternalId,
+        |events, reader| {
+            assert_eq!(events.len(), 2, "the document did not survive the skip");
+            assert_eq!(reader.warnings(), [Warning::ExternalIdentifierNotAllowed]);
+            let identifier = reader.external_identifier().expect("it named one");
+            assert_eq!(
+                identifier.public(),
+                None,
+                "a SYSTEM form has no public half"
+            );
+            assert_eq!(identifier.system(), "http://attacker.invalid/data.dtd");
+            assert!(!identifier.is_allowed());
+        },
+    );
+}
+
+/// The other side of the warning: nothing to warn about produces nothing.
+///
+/// Three documents that must all be silent — the EPUB 3 shape, which names no
+/// identifier; a document with no declaration; and the same declaration under
+/// the mode that never reads one. A build that warned unconditionally would
+/// pass the previous test and fail here.
+#[test]
+fn a_declaration_naming_no_identifier_warns_about_nothing() {
+    for bytes in [b"<!DOCTYPE html><html/>".as_slice(), b"<html/>".as_slice()] {
+        read_as(bytes, Doctype::SkipExternalId, |_, reader| {
+            assert_eq!(
+                reader.warnings(),
+                [],
+                "{} warned",
+                String::from_utf8_lossy(bytes)
+            );
+            assert_eq!(reader.external_identifier(), None);
+        });
+    }
+    // And under `Refuse` the identifier is never read at all, whatever the
+    // declaration says.
+    let source = Source::new(XHTML11_DOUBLE.as_bytes()).expect("decodes");
+    let mut reader = source.reader_with(&Limits::DEFAULT, Doctype::Refuse);
+    assert_eq!(reader.next(), Some(Err(Error::DoctypeUnsupported)));
+    assert_eq!(reader.external_identifier(), None);
+    assert_eq!(reader.warnings(), []);
+}
+
+/// The internal subset, refused **by its own name**, at the bracket, with
+/// nothing inside it read.
+///
+/// The offset is the half a name alone cannot show: a reader that parsed the
+/// subset and then rejected what it found would answer the same variant from
+/// somewhere further on. This is the same assertion `tests/bombs.rs` makes
+/// about `<!DOCTYPE` under the other mode, moved one construct inwards.
+#[test]
+fn an_internal_subset_refuses_by_its_own_name_at_the_bracket() {
+    for document in [
+        "<!DOCTYPE html [<!ENTITY a \"b\">]><html/>",
+        "<!DOCTYPE html [ ]><html/>",
+        "<!DOCTYPE html PUBLIC \"p\" \"s\" [<!ENTITY a \"b\">]><html/>",
+        "<!DOCTYPE html SYSTEM \"s\" [<!ENTITY a \"b\">]><html/>",
+        // No space before the bracket, which the grammar allows.
+        "<!DOCTYPE html SYSTEM \"s\"[<!ENTITY a \"b\">]><html/>",
+        // An allowed identifier does not buy a subset.
+        "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"s\" [<!ENTITY a \"b\">]><svg/>",
+    ] {
+        let (error, offset) = stop_as(document.as_bytes(), Doctype::SkipExternalId);
+        assert_eq!(
+            error,
+            Some(Error::InternalSubset),
+            "{document} was not refused as an internal subset",
+        );
+        assert_eq!(
+            offset,
+            document
+                .find('[')
+                .expect("every one of these has a bracket"),
+            "{document}: the reader read into the subset before refusing it",
+        );
+    }
+}
+
+/// A declaration whose shape the grammar does not admit, refused as malformed
+/// rather than read as something near it.
+#[test]
+fn a_declaration_the_grammar_does_not_admit_refuses_as_malformed() {
+    for document in [
+        // §2.8 requires the space after `<!DOCTYPE`.
+        "<!DOCTYPEhtml><html/>",
+        // `PUBLIC` takes two literals in a document type declaration. XML gives
+        // it one in a notation declaration, and this grammar has no notations.
+        "<!DOCTYPE html PUBLIC \"p\"><html/>",
+        // Unquoted.
+        "<!DOCTYPE html SYSTEM x.dtd><html/>",
+        // Neither keyword.
+        "<!DOCTYPE html FOO \"s\"><html/>",
+        // A third literal.
+        "<!DOCTYPE html PUBLIC \"a\" \"b\" \"c\"><html/>",
+        // No space after the keyword.
+        "<!DOCTYPE html SYSTEM\"s\"><html/>",
+        "<!DOCTYPE html PUBLIC\"a\" \"b\"><html/>",
+        "<!DOCTYPE html PUBLIC \"a\"\"b\"><html/>",
+        // A literal with no keyword in front of it.
+        "<!DOCTYPE html \"s\"><html/>",
+        // Something after the declaration that is not its `>`.
+        "<!DOCTYPE html SYSTEM \"s\" x><html/>",
+    ] {
+        assert_eq!(
+            refusal_as(document.as_bytes(), Doctype::SkipExternalId),
+            Error::MalformedDoctype,
+            "{document}",
+        );
+    }
+    // A name is a name: the near miss the tag parser would call "not a name".
+    assert_eq!(
+        refusal_as(b"<!DOCTYPE 9html><html/>", Doctype::SkipExternalId),
+        Error::MalformedName,
+    );
+}
+
+/// The keyword is matched **whole**, and this is the mutation gap 31's
+/// milestone 1 injected into its own census and could not kill.
+///
+/// A scanner that took `PUBLIC` as a prefix reads `PUBLICITY "a" "b"` as a
+/// `PUBLIC` with `ITY "a" "b"` after it, which is a different declaration from
+/// the one in the file. `<!DOCTYPE publicity >` was in no fixture there; it is
+/// in one here.
+#[test]
+fn the_external_identifier_keyword_is_matched_whole_and_not_as_a_prefix() {
+    for keyword in [
+        "PUBLICITY",
+        "SYSTEMATIC",
+        "PUBLICX",
+        "SYSTEMS",
+        // XML does not fold case, and neither does this.
+        "Public",
+        "public",
+        "System",
+        "system",
+    ] {
+        let document = format!("<!DOCTYPE html {keyword} \"a\" \"b\"><html/>");
+        assert_eq!(
+            refusal_as(document.as_bytes(), Doctype::SkipExternalId),
+            Error::MalformedDoctype,
+            "{keyword} was read as a keyword",
+        );
+    }
+    // And the two spellings that are the keywords, so the eight above are not
+    // passing because everything is refused.
+    assert_eq!(
+        starts_as(
+            b"<!DOCTYPE html PUBLIC \"a\" \"b\"><html/>",
+            Doctype::SkipExternalId
+        ),
+        ["html"],
+    );
+    assert_eq!(
+        starts_as(
+            b"<!DOCTYPE html SYSTEM \"b\"><html/>",
+            Doctype::SkipExternalId
+        ),
+        ["html"],
+    );
+}
+
+/// A declaration that never ends is unterminated rather than swallowing the
+/// document, and the two refusals are told apart.
+///
+/// `<!DOCTYPE html PUBLIC"a"` is a producer that wrote it wrong;
+/// `<!DOCTYPE html PUBLIC` is a file that stopped. Reporting both as the same
+/// thing would make a truncated book and a malformed one indistinguishable —
+/// gap 29's milestone 2 lesson, applied one construct at a time.
+#[test]
+fn a_declaration_that_never_ends_is_unterminated_rather_than_malformed() {
+    for document in [
+        "<!DOCTYPE",
+        "<!DOCTYPE ",
+        "<!DOCTYPE html",
+        "<!DOCTYPE html ",
+        "<!DOCTYPE html PUBLIC",
+        "<!DOCTYPE html PUBLIC \"a",
+        "<!DOCTYPE html PUBLIC \"a\"",
+        "<!DOCTYPE html PUBLIC \"a\" \"b",
+        "<!DOCTYPE html SYSTEM 'a",
+        "<!DOCTYPE html SYSTEM \"a\" ",
+    ] {
+        assert_eq!(
+            refusal_as(document.as_bytes(), Doctype::SkipExternalId),
+            Error::Unterminated(Construct::Doctype),
+            "{document}",
+        );
+    }
+    // A declaration that ends and a document that does not is the other fault,
+    // and it keeps its own name.
+    assert_eq!(
+        refusal_as(b"<!DOCTYPE html><html>", Doctype::SkipExternalId),
+        Error::Unterminated(Construct::Element),
+    );
+}
+
+/// §2.8 gives the prolog room for **one** declaration and gives content and the
+/// epilog room for none, and the relaxed mode does not relax that.
+///
+/// Four positions, both modes: `Refuse` answers by its one name in all four,
+/// and `SkipExternalId` skips the legal one and refuses the other three as
+/// misplaced. Without the pair, a build that skipped a declaration wherever it
+/// found one would pass every other test in this section.
+#[test]
+fn a_declaration_the_prolog_has_no_room_for_is_refused_in_both_modes() {
+    for document in [
+        "<html><!DOCTYPE html></html>",
+        "<html><b><!DOCTYPE html></b></html>",
+        "<html/><!DOCTYPE html>",
+        "<!DOCTYPE html><!DOCTYPE html><html/>",
+    ] {
+        assert_eq!(
+            refusal_as(document.as_bytes(), Doctype::Refuse),
+            Error::DoctypeUnsupported,
+            "{document}",
+        );
+        let (error, offset) = stop_as(document.as_bytes(), Doctype::SkipExternalId);
+        assert_eq!(
+            error,
+            Some(Error::MisplacedDoctype),
+            "{document} was not refused as misplaced",
+        );
+        // And the cursor did not move into it, in this mode either.
+        assert_eq!(
+            document.get(offset..offset + 9),
+            Some("<!DOCTYPE"),
+            "{document}: the reader read into a declaration it was about to refuse",
+        );
+    }
+    // The legal position, which is what says the four above are about position
+    // rather than about declarations.
+    assert_eq!(
+        starts_as(b"<!DOCTYPE html><html/>", Doctype::SkipExternalId),
+        ["html"],
+    );
+}
+
+/// The near misses keep their own names in the relaxed mode too.
+///
+/// `<!doctype` is not `<!DOCTYPE`, and the four markup declarations are not
+/// doorways into a subset by another spelling. A mode that dispatched on `<!`
+/// and a case-insensitive compare would read all five as declarations to skip.
+#[test]
+fn the_near_misses_keep_their_own_names_in_the_relaxed_mode() {
+    assert_eq!(
+        refusal_as(b"<!doctype html><html/>", Doctype::SkipExternalId),
+        Error::MarkupDeclaration,
+    );
+    assert_eq!(
+        refusal_as(b"<!DOCTYP html><html/>", Doctype::SkipExternalId),
+        Error::MarkupDeclaration,
+    );
+    for bytes in [
+        b"<!ENTITY a \"b\"><html/>".as_slice(),
+        b"<!ELEMENT html EMPTY><html/>".as_slice(),
+        b"<!ATTLIST html a CDATA #IMPLIED><html/>".as_slice(),
+        b"<!NOTATION gif SYSTEM \"gif\"><html/>".as_slice(),
+    ] {
+        assert_eq!(
+            refusal_as(bytes, Doctype::SkipExternalId),
+            Error::MarkupDeclaration,
+            "{}",
+            String::from_utf8_lossy(bytes),
+        );
+    }
+}
+
+/// **Skipping the DTD does not declare what the DTD would have declared.**
+///
+/// This is the decision gap 31's milestone 1 settled against this plan's own
+/// working assumption: **zero** uses of a named character reference across all
+/// 270 content documents of both corpora, against 83 240 literal non-ASCII
+/// characters — so the ~250-entry table is not built, and an undeclared name is
+/// [`Error::UnknownEntity`] per XML 1.0 in **both** modes. A reader that
+/// acquired a table along with the relaxed mode would pass every other test in
+/// this file.
+#[test]
+fn an_undeclared_named_reference_is_refused_by_name_in_both_modes() {
+    for name in [
+        "nbsp", "mdash", "ndash", "hellip", "eacute", "aacute", "alpha", "beta", "larr", "rarr",
+        "bull", "dagger", "lsquo", "rsquo", "ldquo", "rdquo", "trade", "hearts", "euro", "middot",
+    ] {
+        let plain = format!("<p>&{name};</p>");
+        assert_eq!(
+            refusal_as(plain.as_bytes(), Doctype::Refuse),
+            Error::UnknownEntity,
+            "&{name};",
+        );
+        assert_eq!(
+            refusal_as(plain.as_bytes(), Doctype::SkipExternalId),
+            Error::UnknownEntity,
+            "&{name};",
+        );
+        // And with the declaration that declares it in front of it, skipped.
+        let declared = format!("{XHTML11_DOUBLE}<p>&{name};</p>");
+        assert_eq!(
+            refusal_as(declared.as_bytes(), Doctype::SkipExternalId),
+            Error::UnknownEntity,
+            "&{name}; was resolved by a DTD this reader discarded",
+        );
+    }
+    // The five that are predefined are still the five, in the relaxed mode.
+    let document = format!("{HTML5}<p>&lt;&gt;&amp;&apos;&quot;</p>");
+    read_as(document.as_bytes(), Doctype::SkipExternalId, |events, _| {
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Text(run) => Some(run.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "<>&'\"");
+    });
+}
+
+/// No entity table and no expander exists in either mode, **asserted against
+/// this crate's own source** rather than against a reading of the diff.
+///
+/// Prose cannot enforce it and the compiler will not: a `static ENTITIES` beside
+/// `text::reference` would compile perfectly and every behavioural test above
+/// would keep passing, because a table that is present and unused is invisible
+/// from outside. So the code — comments stripped, since the comments discuss
+/// the very names the code may not hold — is read back out and checked.
+#[test]
+fn neither_mode_holds_an_entity_table_or_an_expander() {
+    const SOURCES: [(&str, &str); 4] = [
+        ("lib.rs", include_str!("lib.rs")),
+        ("limits.rs", include_str!("limits.rs")),
+        ("scan.rs", include_str!("scan.rs")),
+        ("text.rs", include_str!("text.rs")),
+    ];
+    /// The names option 2 would have vendored, sampled across the Latin-1,
+    /// special and symbol blocks.
+    const NAMED: [&str; 20] = [
+        "nbsp", "mdash", "ndash", "hellip", "eacute", "aacute", "alpha", "beta", "larr", "rarr",
+        "bull", "dagger", "lsquo", "rsquo", "ldquo", "rdquo", "trade", "hearts", "euro", "middot",
+    ];
+
+    let mut checked = 0usize;
+    for (file, source) in SOURCES {
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        checked += code.lines().count();
+        for name in NAMED {
+            // As a string literal, which is the only shape a table could hold
+            // one in — `is_ascii_alphabetic` is not a declaration of `alpha`.
+            let quoted = format!("\"{name}\"");
+            assert!(
+                !code.contains(&quoted),
+                "{quoted} appears in {file}'s code, so a table is being built",
+            );
+        }
+        // Nothing shaped like one, either.
+        for shape in ["HashMap", "BTreeMap", "phf", "ENTITIES", "entity_table"] {
+            assert!(
+                !code.contains(shape),
+                "`{shape}` appears in {file}, which is what a table looks like",
+            );
+        }
+    }
+    // The filter did not strip the file: the five that *are* declared are still
+    // visible, each exactly once, in the one `match` that declares them.
+    let text = SOURCES[3].1;
+    for name in ["\"amp\"", "\"lt\"", "\"gt\"", "\"apos\"", "\"quot\""] {
+        assert_eq!(
+            text.matches(name).count(),
+            1,
+            "{name} is declared somewhere other than `text::reference`",
+        );
+    }
+    assert!(checked > 400, "only {checked} lines of code were read");
+}
+
+/// Away from a declaration the two modes are the same reader, byte for byte.
+///
+/// A mode is a change to one construct or it is a change to the parser, and
+/// nothing but a test says which. Well-formed input, malformed input and every
+/// warning the crate has are all compared across the two.
+#[test]
+fn the_relaxed_mode_changes_nothing_but_the_declaration() {
+    for document in [
+        b"<r xmlns=\"u\" xmlns:p=\"v\"><!-- c --><p:a x=\"1\">t&amp;t</p:a><![CDATA[c]]><?pi v?></r>"
+            .as_slice(),
+        b"<a><!-- -- --></a>".as_slice(),
+        b"<a>]]></a>".as_slice(),
+        b"<a xmlns:p=\"\"/>".as_slice(),
+    ] {
+        assert_eq!(
+            events_as(document, Doctype::Refuse),
+            events_as(document, Doctype::SkipExternalId),
+            "{}",
+            String::from_utf8_lossy(document),
+        );
+        let refuse = Source::new(document).expect("decodes");
+        let mut one = refuse.reader(&Limits::DEFAULT);
+        one.by_ref().for_each(drop);
+        let relaxed = Source::new(document).expect("decodes");
+        let mut two = relaxed.reader_with(&Limits::DEFAULT, Doctype::SkipExternalId);
+        two.by_ref().for_each(drop);
+        assert_eq!(one.warnings(), two.warnings());
+    }
+    for document in [
+        b"<a b=\"1\"c=\"2\"/>".as_slice(),
+        b"<a></b>".as_slice(),
+        b"<a>&nope;</a>".as_slice(),
+        b"<p:a/>".as_slice(),
+    ] {
+        assert_eq!(
+            refusal_as(document, Doctype::Refuse),
+            refusal_as(document, Doctype::SkipExternalId),
+            "{}",
+            String::from_utf8_lossy(document),
+        );
+    }
+}
+
+/// The mode works over decoded characters, not over bytes.
+///
+/// UTF-16 is the encoding a filter written against bytes misses, and this
+/// reader decodes it: `tests/bombs.rs` asserts a declaration in UTF-16 is
+/// refused under the other mode, and this is the same document arriving at the
+/// same scanner from the other side.
+#[test]
+fn a_declaration_in_utf_16_is_skipped_by_the_relaxed_mode() {
+    let document = format!("{XHTML11_SINGLE}<html><body>t</body></html>");
+    let mut bytes = vec![0xFFu8, 0xFE];
+    for unit in document.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    read_as(&bytes, Doctype::SkipExternalId, |events, reader| {
+        assert_eq!(events.len(), 5);
+        assert_eq!(reader.warnings(), [Warning::ExternalIdentifierNotAllowed]);
+        assert_eq!(
+            reader
+                .external_identifier()
+                .and_then(|identifier| identifier.public()),
+            Some("-//W3C//DTD XHTML 1.1//EN"),
+        );
+    });
+}
+
+/// The document type name is bounded by the same cap every other name is, so
+/// the relaxed mode does not open an unbounded read.
+#[test]
+fn the_document_type_name_is_bounded_like_every_other_name() {
+    let long = "a".repeat(MAX_XML_NAME_LEN + 1);
+    let document = format!("<!DOCTYPE {long}><html/>");
+    assert_eq!(
+        refusal_as(document.as_bytes(), Doctype::SkipExternalId),
+        Error::NameCap,
+    );
+    // And one byte shorter reads, so the cap is where it says it is.
+    let at_the_cap = "a".repeat(MAX_XML_NAME_LEN);
+    let document = format!("<!DOCTYPE {at_the_cap}><html/>");
+    assert_eq!(
+        starts_as(document.as_bytes(), Doctype::SkipExternalId),
+        ["html"],
+    );
 }
 
 // ---------------------------------------------------------------------------

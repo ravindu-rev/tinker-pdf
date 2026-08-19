@@ -134,7 +134,7 @@ pub mod paint;
 use std::collections::HashMap;
 
 use tinker_pdf_cos::DocumentBuilder;
-use tinker_pdf_xml::{Event, Limits as XmlLimits, Source};
+use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 use tinker_pdf_zip::{limits as zip_limits, Archive};
 
 use crate::cbz::{
@@ -1407,7 +1407,7 @@ fn child_sources(
     let mut out: Vec<Option<String>> = Vec::new();
     let mut depth = 0usize;
     let mut seen_root = false;
-    for event in source.reader(&limits.xml) {
+    for event in source.reader_with(&limits.xml, Doctype::Refuse) {
         match event.ok()? {
             Event::Start(element) => {
                 depth += 1;
@@ -1436,7 +1436,7 @@ fn child_sources(
 /// forty thousand path segments costs the same here as an empty one.
 fn fixed_page_geometry(bytes: &[u8], limits: &Limits) -> Option<PageGeometry> {
     let source = Source::new(bytes).ok()?;
-    for event in source.reader(&limits.xml) {
+    for event in source.reader_with(&limits.xml, Doctype::Refuse) {
         let Event::Start(element) = event.ok()? else {
             continue;
         };

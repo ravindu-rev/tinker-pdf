@@ -45,7 +45,7 @@ use std::rc::Rc;
 
 use tinker_pdf_cos::DocumentBuilder;
 use tinker_pdf_font::Sfnt;
-use tinker_pdf_xml::{Event, Source};
+use tinker_pdf_xml::{Doctype, Event, Source};
 
 use super::markup::Trouble;
 use super::opc::{Package, PartName};
@@ -323,7 +323,7 @@ fn font_references(
     // document differ between two runs over the same package.
     let mut out: Vec<(PartName, u32)> = Vec::new();
     let mut seen: std::collections::HashSet<(PartName, u32)> = std::collections::HashSet::new();
-    for event in source.reader(&limits.xml) {
+    for event in source.reader_with(&limits.xml, Doctype::Refuse) {
         let element = match event {
             Ok(Event::Start(element)) => element,
             // Comments, whitespace and end tags: a fixed page part is full of

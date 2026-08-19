@@ -33,6 +33,10 @@ use epub_support::{
     mimetype_verdict, named_references, numeric_references, read_at, todays_answer, Doctype,
     TodaysAnswer, RESERVED_META_INF,
 };
+use tinker_pdf_xml::{
+    Doctype as XmlDoctype, Error as XmlError, Limits as XmlLimits, Reader as XmlReader,
+    Source as XmlSource, Warning as XmlWarning,
+};
 
 /// Printed once per test that actually read the fetched corpus. CI greps it.
 const RAN: &str = "epub-corpus: RAN";
@@ -348,6 +352,119 @@ fn the_doctype_census() {
         internal, 0,
         "a fetched book carries an internal DTD subset; milestone 2's refusal now costs a real book"
     );
+}
+
+/// **Milestone 2's mode over the corpus that cannot be committed**, which is
+/// the only place the single-quoted external identifier exists.
+///
+/// The committed corpus supplies the double-quoted form and this one supplies
+/// the single-quoted one — thirty content documents of it, on every content
+/// document of both Project Gutenberg EPUB 2 books. Neither corpus shows both,
+/// which is why milestone 2's own fixtures name both by hand and why this test
+/// and its committed twin are both here.
+///
+/// Corroboration, again, and not the assertion: the rules are pinned by
+/// fixtures inside `tinker-pdf-xml`. What this adds is the count.
+#[test]
+fn the_relaxed_mode_reads_the_fetched_books_the_shipped_parser_refuses() {
+    let books = fetched!("the doctype mode over real books");
+    let mut refused_today = 0usize;
+    let mut unchanged = 0usize;
+    let mut warned = 0usize;
+    let mut still_refused: Vec<String> = Vec::new();
+    let mut identifiers: Vec<(String, usize)> = Vec::new();
+    let mut quotes: Vec<(&'static str, usize)> = Vec::new();
+
+    for (name, bytes) in &books {
+        for (part, text) in content_documents(bytes) {
+            let shape = doctype_shape(&classify_doctype(&text));
+            let Ok(source) = XmlSource::new(text.as_bytes()) else {
+                // Not this test's subject: a part that does not decode has
+                // nothing to say about a document type declaration.
+                continue;
+            };
+            let mut strict = source.reader(&XmlLimits::DEFAULT);
+            let strict_refusal = first_refusal(&mut strict);
+            let mut relaxed = source.reader_with(&XmlLimits::DEFAULT, XmlDoctype::SkipExternalId);
+            let relaxed_refusal = first_refusal(&mut relaxed);
+
+            if strict_refusal != Some(XmlError::DoctypeUnsupported) {
+                // Read today, or refused for a reason that is not a
+                // declaration. Either way the mode must change nothing.
+                unchanged += 1;
+                assert_eq!(
+                    strict_refusal, relaxed_refusal,
+                    "{name} {part}: the mode changed a document with no declaration in it",
+                );
+                continue;
+            }
+
+            refused_today += 1;
+            bump(&mut quotes, shape);
+            match relaxed_refusal {
+                None => {}
+                Some(error) => still_refused.push(format!("{name} {part}: {error}")),
+            }
+            if relaxed
+                .warnings()
+                .contains(&XmlWarning::ExternalIdentifierNotAllowed)
+            {
+                warned += 1;
+            }
+            if let Some(public) = relaxed
+                .external_identifier()
+                .and_then(|identifier| identifier.public())
+            {
+                match identifiers.iter_mut().find(|(k, _)| k == public) {
+                    Some((_, n)) => *n += 1,
+                    None => identifiers.push((public.to_owned(), 1)),
+                }
+            }
+        }
+    }
+
+    quotes.sort();
+    identifiers.sort();
+    println!("  refused today: {refused_today} {quotes:?}");
+    println!("  read today and unchanged: {unchanged}");
+    println!("  identifiers named: {identifiers:?}");
+    println!("  warned about: {warned}");
+    assert!(
+        refused_today > 0,
+        "no fetched content document is refused today, so the relaxation is untested"
+    );
+    assert!(
+        unchanged > 0,
+        "every fetched content document is refused today, so `unchanged` is untested"
+    );
+    assert!(
+        still_refused.is_empty(),
+        "the relaxed mode still refuses {} real content documents: {:?}",
+        still_refused.len(),
+        &still_refused[..still_refused.len().min(8)],
+    );
+    // The shape this corpus alone supplies, and milestone 2's criterion names.
+    assert!(
+        quotes
+            .iter()
+            .any(|(shape, n)| *shape == "public-single-quoted" && *n > 0),
+        "the single-quoted external identifier is no longer in the fetched corpus",
+    );
+    assert_eq!(
+        warned,
+        identifiers.iter().map(|(_, n)| n).sum::<usize>(),
+        "a public identifier was read without a warning beside it",
+    );
+}
+
+/// One reader run to its first refusal, or to the end.
+fn first_refusal(reader: &mut XmlReader<'_>) -> Option<XmlError> {
+    for event in reader.by_ref() {
+        if let Err(error) = event {
+            return Some(error);
+        }
+    }
+    None
 }
 
 /// The named-character-reference census, which settles the plan's one genuinely

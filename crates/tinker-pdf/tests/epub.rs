@@ -44,6 +44,10 @@ use epub_support::{
     XML_PREDEFINED,
 };
 use tinker_pdf::ArchiveRefusal;
+use tinker_pdf_xml::{
+    Doctype as XmlDoctype, Error as XmlError, Limits as XmlLimits, Reader as XmlReader,
+    Source as XmlSource, Warning as XmlWarning,
+};
 
 // ---- the committed corpus ---------------------------------------------------
 
@@ -857,6 +861,124 @@ fn the_committed_doctype_census() {
         0,
         "a committed book carries an internal DTD subset"
     );
+}
+
+/// **Milestone 2's mode, over the books milestone 1 committed**, in both
+/// directions and against real bytes.
+///
+/// The census above says what shape each declaration has. This says what the
+/// parser does with it: every content document the shipped parser refuses as a
+/// declaration is read *whole* by the relaxed one, and every document it
+/// already reads is unchanged, event for event. Both halves are needed — a mode
+/// that read nothing and a mode that read everything each satisfy one of them.
+///
+/// **This sweep is corroboration and not the assertion.** Each rule the mode
+/// rests on — the three shapes, both quote characters, a `>` inside a public
+/// literal, the internal subset, the identifier set — is pinned by its own
+/// fixture in `tinker-pdf-xml`, because a defect caught only by a broad
+/// end-to-end fixture does not say which rule broke. What this adds is that the
+/// fixtures describe the same construct two real producers write.
+#[test]
+fn the_relaxed_mode_reads_the_committed_books_the_shipped_parser_refuses() {
+    let mut refused_today = 0usize;
+    let mut unchanged = 0usize;
+    let mut identifiers: BTreeMap<String, usize> = BTreeMap::new();
+    let mut warned = 0usize;
+    let mut per_producer: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for entry in BOOKS {
+        let bytes = book(entry.file);
+        for (name, text) in content_documents(&bytes) {
+            let where_ = format!("{} {name}", entry.file);
+            let shape = doctype_shape(&classify_doctype(&text));
+            let source =
+                XmlSource::new(text.as_bytes()).unwrap_or_else(|error| panic!("{where_}: {error}"));
+
+            let mut strict = source.reader(&XmlLimits::DEFAULT);
+            let strict_refusal = first_refusal(&mut strict);
+            let mut relaxed = source.reader_with(&XmlLimits::DEFAULT, XmlDoctype::SkipExternalId);
+            let relaxed_refusal = first_refusal(&mut relaxed);
+
+            if shape == "none" {
+                // calibre's books, which read today. The mode must not touch
+                // them: same refusal (none), same warnings.
+                unchanged += 1;
+                assert_eq!(strict_refusal, None, "{where_} does not read today");
+                assert_eq!(relaxed_refusal, None, "{where_} stopped reading");
+                assert_eq!(strict.warnings(), relaxed.warnings(), "{where_}");
+                assert_eq!(relaxed.external_identifier(), None, "{where_}");
+                continue;
+            }
+
+            // pandoc's books, every one of which the shipped parser refuses.
+            refused_today += 1;
+            *per_producer.entry(entry.producer).or_default() += 1;
+            assert_eq!(
+                strict_refusal,
+                Some(XmlError::DoctypeUnsupported),
+                "{where_} is not refused by the shipped parser, so this row proves nothing",
+            );
+            assert_eq!(
+                relaxed_refusal, None,
+                "{where_} is still refused under the relaxed mode",
+            );
+
+            let identifier = relaxed.external_identifier();
+            let says_not_allowed = relaxed
+                .warnings()
+                .contains(&XmlWarning::ExternalIdentifierNotAllowed);
+            match shape {
+                // `<!DOCTYPE html>`: no identifier, so nothing to warn about.
+                "bare" => {
+                    assert_eq!(identifier, None, "{where_}");
+                    assert!(!says_not_allowed, "{where_} warned about nothing");
+                }
+                "public-double-quoted" | "public-single-quoted" => {
+                    let identifier = identifier.expect("a PUBLIC form names one");
+                    let public = identifier.public().expect("a PUBLIC form has one");
+                    *identifiers.entry(public.to_owned()).or_default() += 1;
+                    assert!(
+                        says_not_allowed,
+                        "{where_} names {public}, which Appendix B does not hold, silently",
+                    );
+                    warned += 1;
+                }
+                other => panic!("{where_}: the corpus grew a {other} declaration"),
+            }
+        }
+    }
+
+    println!("  refused today and read now: {refused_today} ({per_producer:?})");
+    println!("  read today and unchanged:   {unchanged}");
+    println!("  identifiers named:          {identifiers:?}");
+    assert!(
+        refused_today > 0,
+        "no committed content document is refused today, so the relaxation is untested"
+    );
+    assert!(
+        unchanged > 0,
+        "every committed content document is refused today, so `unchanged` is untested"
+    );
+    assert_eq!(
+        warned,
+        identifiers.values().sum::<usize>(),
+        "a public identifier was read without a warning beside it"
+    );
+    assert_eq!(
+        identifiers.keys().collect::<Vec<_>>(),
+        ["-//W3C//DTD XHTML 1.1//EN"],
+        "the set of identifiers the committed corpus names changed",
+    );
+}
+
+/// One reader run to its first refusal, or to the end.
+fn first_refusal(reader: &mut XmlReader<'_>) -> Option<XmlError> {
+    for event in reader.by_ref() {
+        if let Err(error) = event {
+            return Some(error);
+        }
+    }
+    None
 }
 
 /// The two producers name their content documents differently, and the census

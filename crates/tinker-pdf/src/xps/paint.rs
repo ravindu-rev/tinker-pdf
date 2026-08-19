@@ -60,7 +60,7 @@ use tinker_pdf_cos::{
     DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Glyph, PlacedGlyph, Shading,
     TilingPattern, TilingType, TransparencyGroup,
 };
-use tinker_pdf_xml::{Event, Limits as XmlLimits, Source};
+use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 
 use super::brush::{self, Brush, BrushError, ImageTile, Paint, TileMode, Units};
 use super::font::Fonts;
@@ -136,7 +136,7 @@ impl Painter {
         budget: &mut Budget,
     ) -> Result<Drawn, Trouble> {
         let source = Source::new(bytes).map_err(|_| Trouble::Markup)?;
-        let mut reader = source.reader(around.xml);
+        let mut reader = source.reader_with(around.xml, Doctype::Refuse);
 
         // The root has already been checked by the spine — it is a `FixedPage`
         // in one of the two dialects, or this part would never have become a

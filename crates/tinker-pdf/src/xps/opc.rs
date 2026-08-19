@@ -74,7 +74,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use tinker_pdf_xml::{Event, Limits as XmlLimits, Source};
+use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 use tinker_pdf_zip::{Archive, EntryError, Warning as ZipWarning};
 
 // ---- The names OPC fixes ----------------------------------------------------
@@ -450,7 +450,7 @@ impl ContentTypes {
         let mut types = ContentTypes::default();
         let mut depth = 0usize;
         let mut root = false;
-        for event in source.reader(limits) {
+        for event in source.reader_with(limits, Doctype::Refuse) {
             let element = match event.map_err(|_| PackageDefect::Unreadable)? {
                 Event::Start(element) => element,
                 // An empty-element tag produces a `Start` and then an `End`, so
@@ -567,7 +567,7 @@ pub fn parse_relationships(
     let mut out: Vec<Relationship> = Vec::new();
     let mut depth = 0usize;
     let mut root = false;
-    for event in source.reader(limits) {
+    for event in source.reader_with(limits, Doctype::Refuse) {
         let element = match event.map_err(|_| PackageDefect::Unreadable)? {
             Event::Start(element) => element,
             Event::End(_) => {

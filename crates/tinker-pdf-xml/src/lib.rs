@@ -25,10 +25,28 @@
 //! depth counter that happened to trip, and the difference between those two is
 //! the whole of this decision.
 //!
-//! What is left cannot expand. The five predefined entities and both radixes of
-//! numeric character reference each produce exactly one character from at least
-//! four bytes of source, so decoded text is never longer than the text it came
-//! from.
+//! **There is a second mode, and the four bombs are re-asserted under it.**
+//! [`Doctype::SkipExternalId`] exists because XHTML in the wild carries a
+//! declaration and a reader that refuses one loses the file — gap 31's
+//! milestone 1 measured 100 % of one producer's EPUB 2 content documents
+//! carrying `<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' …>`. It splits
+//! the construct where the danger is: the external identifier's two literals
+//! are read and thrown away, and an internal subset — where **every one** of
+//! the four attacks lives — is [`Error::InternalSubset`], refused at the `[`
+//! with nothing inside it read. `tests/bombs.rs` asserts all four by that name
+//! **in the relaxed mode too**, which is the test that says the defence
+//! survived the relaxation. [`Doctype::Refuse`] remains the default and
+//! `xps.rs` passes it explicitly.
+//!
+//! What is left cannot expand, in either mode. The five predefined entities and
+//! both radixes of numeric character reference each produce exactly one
+//! character from at least four bytes of source, so decoded text is never
+//! longer than the text it came from — and there is no sixth name, because
+//! there is no table to look one up in. Gap 31's milestone 1 counted **zero**
+//! uses of `&nbsp;` and its relatives across 270 real content documents, so a
+//! table would be a data commitment nobody's book needs;
+//! [`Error::UnknownEntity`] is the answer in both modes and the absence of a
+//! table is asserted against this crate's own source.
 //!
 //! **It is a pull parser, and an empty-element tag produces two events.**
 //! `<a/>` is [`Event::Start`] followed by [`Event::End`], so a caller matching
@@ -128,6 +146,120 @@ impl Default for Limits {
     }
 }
 
+/// What a document type declaration is: **two values and no third**.
+///
+/// [`Doctype::Refuse`] is what this crate shipped with and what [`Default`]
+/// hands back, and it is the whole of the answer to entity expansion — not a
+/// budget, but never entering the grammar that has one. ECMA-388 9.3.2 [M2.71]
+/// makes it the *conformant* reading for a fixed document, and
+/// `tests/bombs.rs` asserts each of four committed attacks against it by name.
+///
+/// [`Doctype::SkipExternalId`] exists because XHTML in the wild carries a
+/// declaration and refusing one loses the file: gap 31's milestone 1 measured
+/// **100 %** of one producer's content documents carrying
+/// `<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' …>` and every EPUB 3
+/// cover wrapper carrying `<!DOCTYPE html>`. It splits the construct exactly
+/// where the danger is:
+///
+/// | | `Refuse` | `SkipExternalId` |
+/// | --- | --- | --- |
+/// | `<!DOCTYPE html>` | [`Error::DoctypeUnsupported`] | skipped |
+/// | `<!DOCTYPE html PUBLIC "…" "…">` | [`Error::DoctypeUnsupported`] | the two literals read and discarded |
+/// | `<!DOCTYPE html SYSTEM "…">` | [`Error::DoctypeUnsupported`] | the literal read and discarded |
+/// | an identifier outside [`ALLOWED_PUBLIC_IDENTIFIERS`] | [`Error::DoctypeUnsupported`] | discarded, and [`Warning::ExternalIdentifierNotAllowed`] |
+/// | `<!DOCTYPE html [ … ]>` | [`Error::DoctypeUnsupported`] | [`Error::InternalSubset`] |
+/// | one of the four bombs | [`Error::DoctypeUnsupported`] | [`Error::InternalSubset`] |
+///
+/// **Every one of the four bombs lives in the internal subset**, which is why
+/// splitting there costs nothing: billion laughs is nested internal general
+/// entities, the quadratic-blowup variant is one large internal entity
+/// referenced many times, XXE is an entity *declaration*, and the
+/// parameter-entity form reaches the same place through the internal subset's
+/// own grammar. What is left — a public and a system literal naming a DTD — is
+/// read as two strings and thrown away, and this engine performs no I/O, so it
+/// names a file that will never be opened.
+///
+/// **Neither mode parses a declaration.** There is no entity table in either,
+/// no expander, and no code path one refactor away from resolving an external
+/// entity: `SkipExternalId` reads the external identifier's two literals *as
+/// literals* — so a `>` inside one does not end the declaration — and refuses
+/// at `[`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Doctype {
+    /// Refused before one byte past `<!DOCTYPE` is read, wherever it appears.
+    #[default]
+    Refuse,
+    /// The external identifier is read and discarded; an internal subset is
+    /// [`Error::InternalSubset`], and a declaration anywhere but the prolog —
+    /// or a second one there — is [`Error::MisplacedDoctype`].
+    SkipExternalId,
+}
+
+/// The closed set of external identifiers EPUB 3.3 Appendix B allows, against
+/// which [`Doctype::SkipExternalId`] decides whether to warn.
+///
+/// Three public identifiers, and this crate holds them as **strings it
+/// compares against** rather than as anything it knows the meaning of. That is
+/// the boundary ruling 8 draws and `no_public_item_names_a_pdf_or_an_xps_concept`
+/// checks: nothing here knows what a spine, a package document or a content
+/// document is, and the only thing the set changes is whether a warning is
+/// recorded.
+///
+/// EPUB 3.3 §3.9 says an XML publication resource *"MAY only specify a document
+/// type declaration that references an external identifier appropriate for its
+/// media type"*; Appendix B is what "appropriate" means. **XHTML 1.1's
+/// identifier is deliberately not in it** — it was banned from EPUB 3 — which is
+/// why an identifier outside the set is warned about rather than refused: every
+/// EPUB 2 content document of one measured producer carries it, and refusing
+/// would lose the book while accepting silently would lose the fact.
+pub const ALLOWED_PUBLIC_IDENTIFIERS: [&str; 3] = [
+    "-//W3C//DTD SVG 1.1//EN",
+    "-//W3C//DTD MathML 3.0//EN",
+    // Added to the table after the first edition, per `epubcheck`'s own commit
+    // history: an EPUB 3 package may still carry an EPUB 2 navigation part.
+    "-//NISO//DTD ncx 2005-1//EN",
+];
+
+/// The external identifier a skipped declaration named, as two strings that
+/// were read and discarded.
+///
+/// It is here so that a caller can *name* what it tolerated —
+/// [`Warning::ExternalIdentifierNotAllowed`] says that something was outside
+/// [`ALLOWED_PUBLIC_IDENTIFIERS`] and this says which something. Nothing is
+/// fetched, opened or resolved: this engine performs no I/O, and the literal
+/// is a string that happens to look like a URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExternalId<'a> {
+    public: Option<&'a str>,
+    system: &'a str,
+}
+
+impl<'a> ExternalId<'a> {
+    /// The public identifier, or `None` for the `SYSTEM`-only form.
+    #[must_use]
+    pub fn public(&self) -> Option<&'a str> {
+        self.public
+    }
+
+    /// The system identifier, which both forms carry.
+    #[must_use]
+    pub fn system(&self) -> &'a str {
+        self.system
+    }
+
+    /// Whether [`ALLOWED_PUBLIC_IDENTIFIERS`] holds this one.
+    ///
+    /// The `SYSTEM`-only form is never in it: Appendix B's rows are pairs, and
+    /// a declaration naming no public identifier names nothing the set can
+    /// contain. Milestone 1 found **no** real document in 270 writing that
+    /// form, so warning about it costs a book nothing.
+    #[must_use]
+    pub fn is_allowed(&self) -> bool {
+        self.public
+            .is_some_and(|public| ALLOWED_PUBLIC_IDENTIFIERS.contains(&public))
+    }
+}
+
 /// How the bytes encoded their characters, as detected rather than as declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Encoding {
@@ -158,6 +290,11 @@ pub enum Construct {
     Reference,
     /// The input ended with elements still open.
     Element,
+    /// A document type declaration under [`Doctype::SkipExternalId`]: the `>`
+    /// never arrived, or a literal inside it was never closed. Under
+    /// [`Doctype::Refuse`] a declaration cannot be unterminated, because no
+    /// byte of it is ever read.
+    Doctype,
 }
 
 impl fmt::Display for Construct {
@@ -171,6 +308,7 @@ impl fmt::Display for Construct {
             Self::AttributeValue => "an attribute value",
             Self::Reference => "a reference",
             Self::Element => "an element",
+            Self::Doctype => "a document type declaration",
         })
     }
 }
@@ -210,7 +348,33 @@ pub enum Error {
     /// variant, an external entity and an internal-subset parameter entity are
     /// each refused as — none of them reaches a cap, because none of them
     /// reaches the grammar that would expand it.
+    ///
+    /// [`Doctype::Refuse`] only. Under [`Doctype::SkipExternalId`] this variant
+    /// is never produced: what a declaration is refused as there is
+    /// [`Error::InternalSubset`], [`Error::MalformedDoctype`] or
+    /// [`Error::MisplacedDoctype`], each of which says something narrower.
     DoctypeUnsupported,
+    /// **`[`.** A document type declaration's internal subset, under
+    /// [`Doctype::SkipExternalId`], refused at the bracket with nothing inside
+    /// it read.
+    ///
+    /// This is where all four of the committed bombs live and it is the reason
+    /// relaxing the external identifier costs nothing: an internal subset is
+    /// the only half of the construct that can declare an entity, and EPUB 3.3
+    /// §3.9 forbids one there in as many words.
+    InternalSubset,
+    /// A document type declaration under [`Doctype::SkipExternalId`] whose
+    /// shape is not `'<!DOCTYPE' S Name (S ExternalID)? S? '>'` — an external
+    /// identifier keyword that is not exactly `PUBLIC` or `SYSTEM`, a `PUBLIC`
+    /// with one literal rather than two, an unquoted literal, or anything but
+    /// `>` where the declaration should end.
+    MalformedDoctype,
+    /// A document type declaration where §2.8's prolog has no room for one:
+    /// inside the root element, after it, or a second one before it. Under
+    /// [`Doctype::SkipExternalId`] only — [`Doctype::Refuse`] answers
+    /// [`Error::DoctypeUnsupported`] in all four places, since it never asks
+    /// where the declaration is.
+    MisplacedDoctype,
     /// `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST` or `<!NOTATION` outside a document
     /// type declaration, which is the only place any of them may appear.
     MarkupDeclaration,
@@ -283,6 +447,13 @@ impl fmt::Display for Error {
             Self::DoctypeUnsupported => {
                 f.write_str("a document type declaration, which is refused rather than parsed")
             }
+            Self::InternalSubset => {
+                f.write_str("a document type declaration with an internal subset")
+            }
+            Self::MalformedDoctype => f.write_str("a malformed document type declaration"),
+            Self::MisplacedDoctype => {
+                f.write_str("a document type declaration where the prolog has no room for one")
+            }
             Self::MarkupDeclaration => f.write_str("a markup declaration outside a DTD"),
             Self::MalformedDeclaration => f.write_str("a malformed XML declaration"),
             Self::ReservedTarget => f.write_str("a processing instruction targeting `xml`"),
@@ -340,6 +511,16 @@ pub enum Warning {
     /// whole part over it would lose a page for a sequence with only one
     /// possible meaning.
     CdataCloseInContent,
+    /// Under [`Doctype::SkipExternalId`]: the declaration named an external
+    /// identifier that [`ALLOWED_PUBLIC_IDENTIFIERS`] does not hold. The two
+    /// literals were discarded like any other pair, and
+    /// [`Reader::external_identifier`] says which they were.
+    ///
+    /// Refusing would lose the book — every EPUB 2 content document of one
+    /// measured producer names XHTML 1.1's identifier, which EPUB 3 banned —
+    /// and accepting silently would lose the fact. Ruling 10's shape: the mode
+    /// reports rather than merely tolerates.
+    ExternalIdentifierNotAllowed,
 }
 
 impl fmt::Display for Warning {
@@ -350,6 +531,9 @@ impl fmt::Display for Warning {
             Self::PrefixUndeclared => "a prefix was undeclared, which XML 1.0 does not allow",
             Self::DoubleHyphenInComment => "`--` inside a comment",
             Self::CdataCloseInContent => "`]]>` in character data",
+            Self::ExternalIdentifierNotAllowed => {
+                "an external identifier outside the set EPUB 3.3 Appendix B allows"
+            }
         })
     }
 }
@@ -599,12 +783,23 @@ impl<'a> Source<'a> {
         &self.warnings
     }
 
-    /// A pull parser over this text.
+    /// A pull parser over this text, refusing a document type declaration.
+    ///
+    /// [`Doctype::Refuse`], which is what this crate shipped with and what
+    /// [`Default`] hands back. A caller that wants the other mode says so, in
+    /// [`Source::reader_with`], rather than getting it by leaving a field out.
     #[must_use]
     pub fn reader(&self, limits: &Limits) -> Reader<'_> {
+        self.reader_with(limits, Doctype::Refuse)
+    }
+
+    /// A pull parser over this text, under a stated [`Doctype`] mode.
+    #[must_use]
+    pub fn reader_with(&self, limits: &Limits, doctype: Doctype) -> Reader<'_> {
         Reader {
             cursor: Cursor::new(&self.text),
             limits: *limits,
+            doctype,
             encoding: self.encoding,
             stage: Stage::Declaration,
             open: Vec::new(),
@@ -612,6 +807,8 @@ impl<'a> Source<'a> {
             pending: None,
             tokens: 0,
             warnings: self.warnings.clone(),
+            external_id: None,
+            saw_doctype: false,
         }
     }
 }
@@ -641,6 +838,7 @@ enum Stage {
 pub struct Reader<'a> {
     cursor: Cursor<'a>,
     limits: Limits,
+    doctype: Doctype,
     encoding: Encoding,
     stage: Stage,
     open: Vec<Open<'a>>,
@@ -651,6 +849,13 @@ pub struct Reader<'a> {
     pending: Option<Name<'a>>,
     tokens: usize,
     warnings: Vec<Warning>,
+    /// The external identifier a skipped declaration named, kept as two
+    /// borrowed strings and nothing else. Never a handle, a path or a fetch.
+    external_id: Option<ExternalId<'a>>,
+    /// Whether the prolog has already spent its one declaration, which is what
+    /// makes a second one [`Error::MisplacedDoctype`] rather than a second
+    /// skip.
+    saw_doctype: bool,
 }
 
 impl<'a> Iterator for Reader<'a> {
@@ -696,6 +901,22 @@ impl<'a> Reader<'a> {
     #[must_use]
     pub fn warnings(&self) -> &[Warning] {
         &self.warnings
+    }
+
+    /// The external identifier the document type declaration named, if it had
+    /// one and it was skipped.
+    ///
+    /// `None` under [`Doctype::Refuse`], always: that mode does not read one.
+    /// `None` under [`Doctype::SkipExternalId`] as well when the document
+    /// carried no declaration, or carried `<!DOCTYPE html>` — which is the
+    /// EPUB 3 shape, and names no identifier at all.
+    ///
+    /// This is what [`Warning::ExternalIdentifierNotAllowed`] leaves out. The
+    /// warning is a closed, copyable set and cannot carry a string; the string
+    /// is here, and a caller that wants to *name* what it tolerated reads both.
+    #[must_use]
+    pub fn external_identifier(&self) -> Option<ExternalId<'a>> {
+        self.external_id
     }
 
     fn warn(&mut self, warning: Warning) {
@@ -832,6 +1053,28 @@ impl<'a> Reader<'a> {
         if self.cursor.at_end() {
             return Err(Error::NoRootElement);
         }
+        // §2.8 gives the prolog room for exactly one document type declaration,
+        // and this is the only place in the whole grammar that has room for
+        // any. [`Doctype::SkipExternalId`] therefore skips one *here* and
+        // nowhere else; `aside` refuses it in the other two stages, so the two
+        // rules are written apart rather than sharing a branch that could get
+        // one of them right.
+        if self.cursor.starts_with("<!DOCTYPE") {
+            match self.doctype {
+                Doctype::Refuse => return Err(Error::DoctypeUnsupported),
+                Doctype::SkipExternalId => {
+                    if self.saw_doctype {
+                        return Err(Error::MisplacedDoctype);
+                    }
+                    self.skip_doctype()?;
+                    self.saw_doctype = true;
+                    // Nothing was produced, so `step` comes back here — which
+                    // is what lets whitespace and comments follow a
+                    // declaration without a second copy of this stage.
+                    return Ok(None);
+                }
+            }
+        }
         if let Some(event) = self.aside()? {
             return Ok(Some(event));
         }
@@ -923,7 +1166,15 @@ impl<'a> Reader<'a> {
     /// claim.
     fn aside(&mut self) -> Result<Option<Event<'a>>, Error> {
         if self.cursor.starts_with("<!DOCTYPE") {
-            return Err(Error::DoctypeUnsupported);
+            // The cursor does not move in either mode. Under `Refuse` that is
+            // the criterion; under `SkipExternalId` it is because a
+            // declaration here is not a declaration this grammar has a place
+            // for, and reading it would be reading DTD content in order to
+            // report that DTD content is not allowed.
+            return Err(match self.doctype {
+                Doctype::Refuse => Error::DoctypeUnsupported,
+                Doctype::SkipExternalId => Error::MisplacedDoctype,
+            });
         }
         if self.cursor.starts_with("<!--") {
             self.cursor.eat("<!--");
@@ -965,6 +1216,109 @@ impl<'a> Reader<'a> {
                 .map(Some);
         }
         Ok(None)
+    }
+
+    /// `'<!DOCTYPE' S Name (S ExternalID)? S? '>'`, read and thrown away.
+    ///
+    /// Only under [`Doctype::SkipExternalId`], and only from the prolog. Three
+    /// things about how this is written are the whole of why it is safe:
+    ///
+    /// - **It does not scan for the next `>`.** The two literals are read *as
+    ///   literals*, terminated by their own quote, so `PUBLIC "a>b" "c"` is one
+    ///   declaration and not a declaration that ended inside a string with the
+    ///   rest of it left to be parsed as markup. A scanner that looked for `>`
+    ///   would re-enter the document mid-declaration, and re-entering
+    ///   mid-declaration is exactly the hole [`Doctype::Refuse`] closed.
+    /// - **It refuses at `[` with nothing inside read.** Not "parses the subset
+    ///   and rejects what it finds" — never enters it. All four committed bombs
+    ///   stop here.
+    /// - **The keyword is matched whole.** `PUBLIC` and `SYSTEM` are compared
+    ///   against a complete run of ASCII letters, so `<!DOCTYPE a PUBLICITY …>`
+    ///   is refused rather than read as a `PUBLIC` with `ITY …` after it. Gap
+    ///   31's milestone 1 injected exactly that mutation into its census and it
+    ///   survived, because no fixture had the shape.
+    fn skip_doctype(&mut self) -> Result<(), Error> {
+        self.cursor.eat("<!DOCTYPE");
+        // `<!DOCTYPEhtml>` is not a declaration: §2.8 requires the space.
+        self.require_space()?;
+        // A file that stopped after `<!DOCTYPE ` is truncated, not malformed,
+        // and `Cursor::name` at the end of the input would call it "not a
+        // name" — which is true of nothing and describes the wrong fault.
+        if self.cursor.at_end() {
+            return Err(Error::Unterminated(Construct::Doctype));
+        }
+        // The document type name, bounded by the same cap every other name is.
+        self.cursor.name(self.limits.max_name_len)?;
+        self.cursor.skip_space();
+
+        if let Some(external) = self.external_id()? {
+            self.external_id = Some(external);
+            if !external.is_allowed() {
+                self.warn(Warning::ExternalIdentifierNotAllowed);
+            }
+            self.cursor.skip_space();
+        }
+
+        if self.cursor.starts_with("[") {
+            return Err(Error::InternalSubset);
+        }
+        if self.cursor.at_end() {
+            return Err(Error::Unterminated(Construct::Doctype));
+        }
+        if !self.cursor.eat(">") {
+            return Err(Error::MalformedDoctype);
+        }
+        Ok(())
+    }
+
+    /// `'SYSTEM' S SystemLiteral | 'PUBLIC' S PubidLiteral S SystemLiteral`,
+    /// or nothing at all.
+    ///
+    /// `PUBLIC` takes **two** literals here and not one. XML gives it one in a
+    /// notation declaration and two in a document type declaration, and this
+    /// grammar only has the second — so `<!DOCTYPE a PUBLIC "x">` is
+    /// [`Error::MalformedDoctype`] rather than a system identifier that
+    /// silently went missing.
+    fn external_id(&mut self) -> Result<Option<ExternalId<'a>>, Error> {
+        let keyword = self.cursor.ascii_word();
+        let public = match keyword {
+            "" => return Ok(None),
+            "PUBLIC" => true,
+            "SYSTEM" => false,
+            _ => return Err(Error::MalformedDoctype),
+        };
+        self.cursor.eat(keyword);
+        self.require_space()?;
+        let first = self.cursor.literal()?;
+        if !public {
+            return Ok(Some(ExternalId {
+                public: None,
+                system: first,
+            }));
+        }
+        self.require_space()?;
+        let system = self.cursor.literal()?;
+        Ok(Some(ExternalId {
+            public: Some(first),
+            system,
+        }))
+    }
+
+    /// The `S` §4.2.2 requires between the parts of an external identifier.
+    ///
+    /// Two refusals rather than one, because the two are different facts about
+    /// the file: `<!DOCTYPE html PUBLIC"a" "b">` is a producer that wrote the
+    /// declaration wrong, and `<!DOCTYPE html PUBLIC` is a file that stopped.
+    /// Collapsing them would make a truncated book and a malformed one report
+    /// the same thing.
+    fn require_space(&mut self) -> Result<(), Error> {
+        if self.cursor.skip_space() {
+            Ok(())
+        } else if self.cursor.at_end() {
+            Err(Error::Unterminated(Construct::Doctype))
+        } else {
+            Err(Error::MalformedDoctype)
+        }
     }
 
     /// `<name (S attribute)* S? '/'? '>'`.

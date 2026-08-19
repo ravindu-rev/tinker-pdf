@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 
 use tinker_pdf_cos::{jpeg_shape, png_image, DocumentBuilder, ImageData, PngRoute};
 use tinker_pdf_filters::Limits as FilterLimits;
-use tinker_pdf_xml::{Event, Source};
+use tinker_pdf_xml::{Doctype, Event, Source};
 
 use super::markup::Trouble;
 use super::opc::{Package, PartName};
@@ -413,7 +413,7 @@ fn image_references(
     };
     let mut out: Vec<PartName> = Vec::new();
     let mut seen: HashSet<PartName> = HashSet::new();
-    for event in source.reader(&limits.xml) {
+    for event in source.reader_with(&limits.xml, Doctype::Refuse) {
         let element = match event {
             Ok(Event::Start(element)) => element,
             Ok(_) => continue,

@@ -112,6 +112,55 @@ impl<'a> Cursor<'a> {
         Ok(body)
     }
 
+    /// The run of ASCII letters at the cursor, **without consuming it**.
+    ///
+    /// For the one place in this grammar that has a keyword rather than a name:
+    /// `PUBLIC` and `SYSTEM` in an external identifier. Looking rather than
+    /// eating is what lets the caller compare the *whole* word and refuse
+    /// `PUBLICITY` — a prefix match there would read the rest of the keyword as
+    /// the start of a literal. Letters only, so `PUBLIC1` is one word and not
+    /// two; no document type declaration in existence puts a digit against
+    /// either keyword, and gap 31's milestone 1 recorded widening this to
+    /// alphanumeric as an equivalent mutant rather than inventing a fixture to
+    /// kill it.
+    pub(crate) fn ascii_word(&self) -> &'a str {
+        let rest = self.rest();
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        rest.get(..end).unwrap_or("")
+    }
+
+    /// A `PubidLiteral` or a `SystemLiteral` (§4.2.2), verbatim, with the
+    /// quotes consumed.
+    ///
+    /// **The quote is the only terminator**, and that is the whole point of
+    /// this function existing beside [`Cursor::attribute_value`] rather than
+    /// reusing it. A `>` inside one of these is an ordinary character, and a
+    /// scanner that ended the declaration at the first `>` would resume parsing
+    /// in the middle of it — which is the one way relaxing `<!DOCTYPE` could
+    /// reintroduce what refusing it closed. `<` is ordinary here too:
+    /// `SystemLiteral` is `[^"]*`, where `AttValue` is not.
+    pub(crate) fn literal(&mut self) -> Result<&'a str, Error> {
+        let quote = match self.peek() {
+            // Both quote characters are real. Gap 31's milestone 1 measured
+            // one producer writing the XHTML 1.1 identifier single-quoted on
+            // thirty content documents and another writing the same identifier
+            // double-quoted, and neither corpus showed both.
+            Some(q @ ('"' | '\'')) => q,
+            _ => return Err(Error::MalformedDoctype),
+        };
+        self.at += quote.len_utf8();
+        let rest = self.rest();
+        let Some(end) = rest.find(quote) else {
+            self.at = self.text.len();
+            return Err(Error::Unterminated(Construct::Doctype));
+        };
+        let body = rest.get(..end).unwrap_or("");
+        self.at += end + quote.len_utf8();
+        Ok(body)
+    }
+
     /// A quoted attribute value, verbatim, with the quotes consumed.
     ///
     /// §3.1's `AttValue` forbids a literal `<` inside one, and that rule is
