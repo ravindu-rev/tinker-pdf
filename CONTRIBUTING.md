@@ -56,6 +56,13 @@ fresh install has not reached your shell yet, give the absolute path rather
 than the bare name — the symptom otherwise is cargo trying to execute a
 `.wasm` directly, which does not say "wasmtime is missing".
 
+On a Windows host the *linux* leg is a `wsl` away and worth running, because
+it covers a different axis from wasm: wasm is the width test, and linux is a
+different `std`, allocator, `libm` and linker over the same arithmetic. Copy
+the tree onto ext4 — building across `/mnt/c` is glacial — and run the ordinary
+command; no target or runner flag is needed, since inside WSL
+`x86_64-unknown-linux-gnu` is native.
+
 **If this disagrees with a native run, do not update the fingerprints.** Two
 targets disagreeing is a determinism bug; the table is the evidence, and
 editing it destroys the only thing in the repository that would ever report

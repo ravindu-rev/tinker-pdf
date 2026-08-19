@@ -104,6 +104,10 @@ not this plan's to do: it belongs to [09](09-tiling-patterns.md),
 [10](10-mesh-shadings.md), [11](11-transparency-groups.md) and
 [12](12-image-sampling.md), each of which adds its own fixture as it lands.
 
+*Amended, 19 August 2026.* **Milestone 4 is now done** — all four of those
+plans landed their fixtures, and the section below closes it. The section
+below also converts the linux leg from claimed to measured.
+
 **The job runs, and it agrees.** The target and wasmtime 47.0.3 are installed
 on the development host now, so the job that had only ever been written was
 executed:
@@ -168,3 +172,144 @@ the user `PATH` may not have reached an already-running shell, and the symptom
 is not "wasmtime not found" but cargo trying to execute a `.wasm` file
 directly. The absolute path works and is what the runs above used;
 `CONTRIBUTING.md` now carries the recipe.
+
+---
+
+## Progress — 19 August 2026, the linux leg and milestone 4
+
+**Two of ruling 4's four targets became three, and milestone 4 closed.** What
+is left is macOS, which this machine cannot settle, and a CI run nobody has
+watched — and both are named below with what would settle them rather than
+left as "still owed".
+
+### Linux, measured
+
+The `As built` above says the linux and macOS legs "come only from the CI
+matrix". Linux does not any more. WSL2 is on this host and
+`x86_64-unknown-linux-gnu` is a native target inside it, so the suite was built
+and run there on **`stable`** — the toolchain `ci.yml`'s three-OS matrix uses,
+rather than the nightly the fuzzing route needs:
+
+```text
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+Linux 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux
+```
+
+`cargo test -p tinker-pdf --test determinism` passes, and so does
+**`cargo test --workspace`: 2 243 passed, 0 failed, 10 ignored**, which is the
+Windows count to the test. That second run is worth more than it looks. The
+determinism file is four tests; the workspace is the whole engine, and running
+it on a second operating system is the first time anything here has done that
+outside CI. It was run twice — once at `a6a4fef`, and again at `9d4ffcf` so
+that the numbers describe the tree they are committed beside rather than the
+tree they were convenient to measure on.
+
+All **fourteen** fingerprints came back byte-identical to the committed table,
+which is `x86_64-pc-windows-msvc`. So did the two byte hashes beside them —
+gap 29's synthesised comic and gap 30's synthesised fixed document, which pin
+object numbering, dictionary key order and stream framing, none of which a
+rendered hash can see.
+
+The values are recorded here rather than left implicit in "it passed", because
+a hash says only that two runs agreed and not what they agreed *about*. The
+page size and the ink count are what say the thing hashed was a picture:
+
+| Fixture | Page | Ink | SHA-256 |
+| --- | --- | --- | --- |
+| `text` | 200 x 100 | 1 486 | `b0bc9383d116d84d7a104afc67b3d5dc8e727323ba30262f67121a32b89004c2` |
+| `curves` | 130 x 100 | 2 363 | `7924b1b282589efa4bbfc39055af40d9f29c9405d0c95381420706b97163968b` |
+| `shading` | 120 x 80 | 9 600 | `813a28f7b119418e76ae52f96f69047b5dec5100a26375294e9de41ed9cc90b5` |
+| `blend` | 80 x 80 | 3 600 | `759840c7df7bad4fc49a2d94f763e8b5eca6d9edb64f3af1cdfcd635b2512258` |
+| `pattern` | 120 x 80 | 3 230 | `18765f39455bc173f00fc6272449402d0c5db445963b5334e3d511a766199af2` |
+| `optional` | 120 x 80 | 4 922 | `e0f2bc33f56dcb85beb7a1770f9cb33e22a1a2cdba1cbb4b838be656370035a1` |
+| `image` | 160 x 120 | 5 262 | `8cca4e2c1380f630e1c85da93b3a6add4349156d704adbffca7d45d917244f38` |
+| `transparency` | 120 x 80 | 8 066 | `c120574918fcfadb0b33f3f9faa4f0c10a10cc760cd9e9830bedf31463e3f059` |
+| `tiling` | 120 x 80 | 4 488 | `aa7b2df6bd7613fb53c696ed4b9018a00d1aa4dece2ffe82775c40bfaa1a5011` |
+| `jbig2` | 128 x 120 | 1 383 | `cd20bc1e5c786e245402ba94d700f2a91a267c36e0922d2bc98be5e897839abd` |
+| `mesh` | 120 x 80 | 9 311 | `546f7f9e61572460b1b76610719e772b69625651d6a6b3b820ab30538be7d693` |
+| `jpx` | 160 x 60 | 5 180 | `d9d0a1f733de50ca06fae32655bc240854d573679698ce7a8e8095640972ef4d` |
+| `cbz` | 40 x 40 | 1 403 | `9e92c73984cff79feef04dcc984c52f04beda91bf3087a50ce9c17b3fc275aea` |
+| `xps` | 612 x 792 | 20 333 | `3e91e30f90903a7b5a91f0442c965acc2519ab22ce7e1c9c5f9b6392e2f74751` |
+
+**The table is printed by a scaffold, not by the suite.** `fingerprint` hashes
+and compares; it does not report. The pristine tree was run first and passed,
+and then a copy — in WSL, never committed — had one `eprintln!` added to
+`fingerprint`'s tail so the values that passed could be written down. That
+distinction is the point of recording it: the pass is the measurement, the
+table is a transcript of it.
+
+**Nothing had to be changed to make it run**, which is itself the finding
+worth having. The list of plausible culprits in this plan's Design section —
+an `as` cast whose overflow behaviour differs, a `usize` width assumption, a
+flattening tolerance, a float comparison that is not the correctly-rounded
+operation it looks like — has now been checked against a third target and
+caught nothing three times.
+
+### What three of four is, and is not
+
+| Target | Status | How |
+| --- | --- | --- |
+| `x86_64-pc-windows-msvc` | **measured** | the committed table is this one |
+| `wasm32-wasip1` | **measured** | wasmtime 47.0.3, this host, August 2026 |
+| `x86_64-unknown-linux-gnu` | **measured** | WSL2, this host, 19 August 2026 |
+| `aarch64-apple-darwin` | **claimed** | `ci.yml`'s `macos-14` leg, never observed |
+
+The pairing that had already been checked — 64-bit Windows against 32-bit
+wasm — is the one most likely to catch a width assumption, and linux against
+Windows is a weaker test in that respect: both are 64-bit little-endian
+x86-64, so the arithmetic is the same instructions. What it *does* cover is
+everything below the arithmetic — a different `std`, a different allocator, a
+different `libm` (which no pixel path may call, and `cargo xtask libm` is what
+enforces that), a different linker and a different set of default codegen
+flags. That is a real axis and it is now closed.
+
+**macOS is not achievable on this machine, and no amount of care makes it so.**
+There is no Apple hardware here, no macOS virtual machine, and Apple's targets
+cannot be cross-*run* from Windows or from Linux — cross-*compiling* to
+`aarch64-apple-darwin` needs the SDK, and even with it, executing the test
+binary needs Darwin. Recorded plainly rather than approximated: **what would
+settle it is one observed CI run** in which `ci.yml`'s `test` job is green on
+`macos-14` and the `wasm-determinism` job is green on the same commit. That is
+also, and separately, the outstanding half of milestone 1 — the job's exit
+criterion is that a *run* shows it executing, and no run of it has been
+watched. Both remaining items are the same act: push, and look at the four
+jobs.
+
+### Milestone 4, closed
+
+Milestone 4 asked each of [09](09-tiling-patterns.md),
+[10](10-mesh-shadings.md), [11](11-transparency-groups.md) and
+[12](12-image-sampling.md) to add a fixture as it landed. All four did, and the
+`As built` above was written before the last of them:
+
+| Owed by | Fixture | What had no fingerprint before it |
+| --- | --- | --- |
+| [09](09-tiling-patterns.md) | `tiling` | a rasterised cell, a lattice, `PaintType 2`. Gap 07's `pattern` is a `PatternType 2` shading evaluated per pixel and reaches none of it |
+| [10](10-mesh-shadings.md) | `mesh` | the only fixture whose hash depends on a *count* chosen from a device-space measure, so a subdivision step landing one different on another target shows here and nowhere else |
+| [11](11-transparency-groups.md) | `transparency` | a `/Group` or an ExtGState `/SMask` — none of the seven before it would have moved if clause 11 had never been written |
+| [12](12-image-sampling.md) | `image` | an image. Every fingerprint report made while image sampling was being rewritten was true and meant nothing |
+
+Six more arrived from plans milestone 4 does not name — gap 06's `optional`,
+gap 07's `pattern`, gap 17's `jbig2`, gap 18a's `jpx`, gap 29's `cbz` and gap
+30's `xps` — each for the same reason stated the same way, which is the habit
+this milestone was trying to instil. Fourteen fingerprints and two byte
+hashes, against the four this plan opened with.
+
+The mechanism the August amendment above asked for is what makes the habit
+safe rather than merely customary: `fingerprint` refuses to hash a page that
+painted fewer than a stated number of pixels or that reported
+`UnreadableFont`, so a fixture that draws nothing fails on the day it is
+added rather than becoming a baseline. Every one of the fourteen carries a
+floor, and the two whose floors are weaker than the rest — `jpx`, because
+both of its failure modes paint, and `cbz`, because ruling 2's placeholder is
+ink on every pixel — say so where they are declared.
+
+### What this plan still leaves open
+
+- **macOS.** Claimed, from `ci.yml`. One observed CI run settles it.
+- **A CI run of `wasm-determinism`.** The job is written, guarded against
+  passing without executing, and has been run by hand; nobody has watched it
+  run *there*. Same act as the above.
+
+Three of four measured on one machine, and the fourth is a push away. That is
+a materially different sentence from the one this section replaces.
