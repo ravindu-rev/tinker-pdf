@@ -581,6 +581,15 @@ This plan's working assumption is (2), and milestone 1's corpus is what
 confirms or refutes it. Milestone 2 does not build it until milestone 1 has
 counted.
 
+**Amended, 19 August 2026, milestone 1: it is refuted, and the answer is (1).**
+Zero named references across all 270 content documents of both corpora, and the
+corroboration this section expected is wrong too — these producers do not write
+`&#160;` either, they write the character. So **milestone 2 refuses an
+undeclared named reference by name, per XML 1.0**, and the ~250-entry table, its
+`THIRDPARTY.md` section and its per-use warning are **not built**. The
+measurement and the reasoning are in
+[Progress — milestone 1](#progress--19-august-2026-milestone-1).
+
 ### OCF is not OPC, and a fifth thing the ZIP reader does not do
 
 Gap 30 wrote `crates/tinker-pdf/src/xps/opc.rs` in the facade with the argument
@@ -1568,3 +1577,337 @@ the programme that document's option D spawned.
 | mutool is used as an oracle the way gap 30 used it, and its disagreements are treated as bugs | Stated in the oracle section as a reversal: MuPDF's EPUB layout is itself partial, so **disagreeing with it is not evidence of a bug**, and the browser is why a fifth oracle is proposed |
 | A phase is quietly narrowed to a subset because the full engine is large | Every deferral is a staged decision that **amends its own row in place with its argument**, the way gap 30's milestone 8 amended row 8 — never a criterion silently unmet |
 | An `As built` that reads as "EPUB works now" | The claim this plan can support is a horizontally-written, unscripted, reflowable or fixed-layout book of XHTML and CSS, at a page box the caller states. Vertical writing modes, bidi, SVG spine items, MathML, scripting, media overlays, DRM, grid and multi-column are refused **by name**, and the `As built` carries the `Unsupported` property census per book, which is the number that says how much of somebody else's format this build actually reads |
+
+## Progress — 19 August 2026, milestone 1
+
+**Two corpora have landed, and no reader.** Six books from two real producers
+sit under `crates/tinker-pdf/tests/epub/` — 49 597 bytes, with per-file
+provenance in a README beside them, an inventory of all seventy-two entries that
+a test recomputes on every run, epubcheck's verdict per file, and the
+present-day failure pinned as three `#[ignore]`d tests that fail when run.
+Twenty more books that **cannot be committed** are fetched by
+`tests/epub/fetch-corpus.sh` into `target/`, behind an env-var gate whose tests
+print `epub-corpus: RAN` or `SKIPPED` and whose CI job goes red on the second.
+Thirty tests in `tests/epub.rs` and eight in `tests/epub_fetched.rs`; the
+workspace stands at **2 242**, up thirty-five, because an ignored test does not
+count.
+
+That was the point of scheduling this first. Gap 29 closed having never opened a
+`.cbz` a real archiver wrote; gap 30 fixed that by obtaining eight genuine
+packages before a reader existed and recorded seven things ECMA-388 did not
+predict. This milestone found **fourteen**, and four of them would have produced
+a reader that refuses one of the two producers outright.
+
+### The producers, and the two corpora the licence gate forces
+
+**pandoc 3.10.2** and **calibre 9.13.0** (`ebook-convert`), over
+`tests/epub/source/book.md` and `source/figures.md` and four PNGs the corpus
+script writes byte by byte from the PNG specification. Six books: EPUB 3 and
+EPUB 2 from each producer, a cover-only book and a no-image book from each, and
+one book of three plates at three different pixel sizes. Every byte of content
+is authored here, so each book is *our input through their tool* — the reading
+`fuzz/README.md` already applies to the JPX seeds and gap 30 applied to
+Windows' XPS serialisers. pandoc is GPL-2.0-or-later and calibre GPL-3.0-only;
+neither licence reaches the document a converter converts, nothing of either is
+vendored or linked, and — unlike gap 30's corpus — **no font is involved at
+all**, so there is nothing here anybody has to licence.
+
+**Row 1's "two producers minimum" earned itself immediately.** Almost every
+finding below is a place where the two disagree, and none of them exists in a
+corpus of one. Gap 30 closed owing one non-Windows package; this milestone did
+not repeat that.
+
+**The licence table's three barred rows are confirmed, and the open one is
+answered — with a sharper answer than the plan expected.**
+
+- Project Gutenberg: unchanged. Clause 1.E.1's display obligation and 1.E.4's
+  no-detach rule; not committed, fetched.
+- `epub3-samples`: **CC-BY-SA 3.0**, confirmed at the repository's own README —
+  *"Unless specified otherwise … all samples are licensed under CC-BY-SA 3.0"*.
+  `deny.toml`'s *"deliberately NO copyleft … not even weak copyleft"* bars it.
+  The obvious source of committable EPUBs is barred by this repository's own
+  gate.
+- `w3c/epub-tests`: the plan guessed *"probably the W3C Software and Document
+  Licence"* and it is right — `LICENSE.md` says so in as many words. **But that
+  is not the whole answer.** `deny.toml`'s allowlist holds eleven SPDX
+  identifiers and **none of them is `W3C` or `W3C-20150513`**, and that list is
+  what `cargo xtask vendor` checks committed **data** trees against. So the
+  corpus is legally committable and mechanically is not: committing it needs an
+  allowlist entry landing in the same commit as the files, in the shape
+  `deny.toml`'s own OFL-1.1 comment prescribes. Recorded rather than done,
+  because nothing needs those files yet.
+
+### The measurement holds to the number
+
+Every figure in [What is wrong](#what-is-wrong) was re-measured on this machine
+against the same six Gutenberg books, and **not one of them moved**: Frankenstein
+one page at 1824 × 2726 pt, Pride and Prejudice 1500 × 2114, Moby-Dick
+780 × 1227, both Alices 800 × 1104, Beowulf 1826 × 2726, `warnings()` empty,
+`parsed_parts()` 0, `ladder_level()` `Trust`, every `PageOrigin.defect` `None`.
+The doctype split holds to the file count as well — sixteen and fourteen EPUB 2
+content documents, all single-quoted XHTML 1.1; one `<!DOCTYPE html>` per
+Gutenberg EPUB 3 book, on the cover wrapper and nowhere else.
+
+**0 of 26** books carry `[Content_Types].xml` or `_rels/.rels`, so
+`ArchiveRefusal::UnreadablePackage` is unreachable for an EPUB and the comic
+fallthrough is exactly what ECMA-388 E.3 asks for. **Gap 30 is not wrong; EPUB
+is a different question it did not ask**, and there is now a test in each corpus
+that says so rather than a paragraph.
+
+**26 of 26** put `mimetype` first in *both* physical and directory order, so no
+real book can tell `header_offset == 0` from `index == 0`. That assertion would
+be a tautology on its own, so `tests/epub.rs` builds the container that does
+distinguish them — physical order `container.xml`, `mimetype`; directory order
+reversed — and asserts the two verdict fields differ on it. Milestone 3 inherits
+the fixture as well as the criterion.
+
+### The mis-read is worse than "one page", away from Gutenberg
+
+The plan's refinement — *"a Project Gutenberg EPUB contains exactly one image,
+whatever its `.images` / `.noimages` variant says"* — is right about Gutenberg
+and is not the general shape. Across the fetched corpus:
+
+- `sample-internallinks.epub` opens as **ten pages** of publisher logos, store
+  badges and screenshots of other reading systems, in filename order.
+- `sample-svg-in-spine.epub` opens as **six**, three of which are decorative
+  table-of-contents ornaments **one point wide** — 1 × 641, 1 × 4 and 1 × 7 pt
+  pages, which is a page a viewer cannot show at all.
+- `sample-linear-algebra.epub` — a megabyte, ninety-four content documents of
+  MathML — is refused as `NoImages`, and so is `sample-hefty-water.epub`.
+
+Eighteen of twenty open, two refuse, **none is read as the book it is**. Add the
+committed six and it is 22 open or refuse and none read.
+
+### What the real books showed that this plan did not predict
+
+Seven of this plan's predictions held and are listed above. These are the ones
+it did not have. Four of them would have produced a reader that refuses one of
+the two producers outright, which is the same shape gap 30's milestone 1 found
+twice.
+
+- **The two producers disagree about whether to write a doctype at all.**
+  pandoc writes one on **every** content document it produces — `<!DOCTYPE
+  html>` under EPUB 3, the XHTML 1.1 public identifier under EPUB 2. calibre
+  writes **none**, in either version. So the census's answer is not a percentage
+  but a partition: on the parser as it stands, every calibre book reads and
+  every pandoc book is refused. Milestone 2 is required by one producer and
+  irrelevant to the other, and a corpus of either alone would have said the
+  wrong thing about it.
+- **Both quote characters are real, and neither corpus shows both.** The plan
+  measured `-//W3C//DTD XHTML 1.1//EN` **single-quoted**, on Gutenberg's EPUB 2
+  books — thirty content documents across the fetched corpus, and **zero**
+  double-quoted. pandoc writes the same identifier **double-quoted**, five
+  documents, and the committed corpus has zero single-quoted. The settlement
+  table's two `PUBLIC` rows are supplied by two different corpora, and milestone
+  2's fixtures need both.
+- **No real document in 270 carries a `SYSTEM`-only declaration or an internal
+  subset.** Milestone 2's fixtures for those two rows have to be written rather
+  than found — and the internal subset being absent from every real book is what
+  makes refusing it by name, with all four of gap 30's bombs behind the refusal,
+  cost nothing at all.
+- **The named-character-reference question is settled, and the answer is option
+  1 rather than the plan's working assumption of option 2.** **Zero** named
+  references across all 270 content documents of both corpora. And the
+  corroboration is weaker than the plan expected, and in the more useful
+  direction. Its sentence was *"producers overwhelmingly write `&#160;`"*. The
+  fetched corpus writes the numeric form **65 times** against **83 240 literal
+  non-ASCII characters** — eight hundredths of one per cent — and the two
+  committed producers write it **not once**: the em dash, the ellipsis, the
+  non-breaking hyphen and the Japanese line in `source/book.md` all reach the
+  content documents as literal UTF-8. So the escaping habit the plan expected to
+  find is a rounding error, and every book in both corpora is a book of
+  characters rather than of references. Both censuses count non-ASCII characters
+  alongside the references precisely so the zero means *"these producers escape
+  nothing"* rather than *"this text is ASCII"* — without that column, a corpus
+  of 83 240 non-ASCII characters and a corpus of none would report the same
+  zero. So milestone 2 refuses an undeclared named reference by name, per XML
+  1.0, and the ~250-entry vendored table and its `THIRDPARTY.md` section are
+  **not built** — with the brittleness measured rather than feared: not one of
+  270 real content documents would be lost by it.
+- **pandoc puts a seventh file in `META-INF`.** Every pandoc book carries
+  `META-INF/com.apple.ibooks.display-options.xml`, which is not one of
+  §4.2.6.3's six reserved names — and **zero of the twenty fetched books carry
+  anything unreserved there at all**. A milestone 3 that refused an unrecognised
+  `META-INF` entry would refuse every book pandoc writes and pass the entire
+  downloaded corpus. This is the single best argument the milestone has for
+  having commissioned a corpus as well as fetched one.
+- **calibre writes a `META-INF/` directory entry** — a name ending in `/`, zero
+  bytes long, and **deflated**. pandoc writes none. A `META-INF` walk that
+  treated every entry there as a file meets an empty one first.
+- **A content document is not named `.xhtml`, and the extension does not agree
+  with itself inside one book.** calibre writes `index_split_000.html` for the
+  four files it split the input into and `.xhtml` for the two it generated
+  itself, and declares all six `application/xhtml+xml` in the manifest. A census
+  or a reader keyed on `.xhtml` sees two-thirds of a calibre book.
+- **The package document is not always under a directory.** calibre puts
+  `content.opf` at the archive root; pandoc puts it under `EPUB/`. §4.2.5's
+  resolution against the *referring document* is load-bearing from the first
+  real file rather than from an exotic one, and milestone 3's `rootfile`
+  resolution meets both on day one.
+- **One producer's EPUB 3 has no NCX and its EPUB 2 has no navigation document;
+  the other's EPUB 3 has both.** calibre's EPUB 3 output ships `nav.xhtml` and
+  no `toc.ncx`; its EPUB 2 output ships `toc.ncx` and no nav. pandoc's EPUB 3
+  ships both. Milestone 5's outline and milestone 8's navigation reading cannot
+  assume either is present.
+- **Both ZIP methods appear inside one archive, from one producer, in one run.**
+  pandoc **stores** two of `pandoc-plates.epub`'s three PNGs and deflates the
+  third, because deflate does not help them. Gap 30 read the same habit in
+  Microsoft's two serialisers as inconsistency; it is what a producer that
+  measures does, and it is why `.gitattributes` gains `*.epub binary` — a
+  normalised line ending inside a stored entry breaks its CRC-32.
+- **The pictures are written in reverse of the order the book names them.**
+  `file2.png`, `file1.png`, `file0.png` by header offset, against `file0`,
+  `file1`, `file2` in the manifest and in the spine. Physical order, directory
+  order and reading order are three different orders in one 8 KB file.
+- **A default invocation of a mainstream producer does not produce a clean
+  book.** calibre 9.13.0's EPUB 3 cover output warns `NAV-011` under epubcheck
+  5.3.0 — *"toc nav must be in reading order"* — because the generated title
+  page precedes the first entry the navigation document links to. Worth knowing
+  before this engine's first disagreement with a producer.
+- **The CSS census is more than twice the plan's list, and what it adds is a
+  non-goal.** Forty-two distinct properties across the committed corpus's eight
+  stylesheets and **eighty-four** across the fetched corpus's fifty-three,
+  against the plan's forty-one names. Present in real books: `column-count`,
+  `column-gap`, `column-rule`, `column-fill` and their `-webkit-` and `-moz-`
+  spellings — **multi-column**, which [Non-goals](#non-goals) names as one of
+  the two *"worth flagging rather than filing under rare, because a book that
+  uses either will lay out as a single column and look entirely reasonable"*.
+  Also `box-shadow`, `text-shadow`, `border-radius`, `content`, `visibility`,
+  `table-layout`, `border-collapse`, `word-wrap`,
+  `-epub-text-emphasis-style`, and Antenna House's `-ah-margin-start` /
+  `-ah-margin-end`. Both producers write `page-break-before` and
+  `page-break-after`, which is milestone 7's fragmentation criterion arriving on
+  the first file.
+- **`tinker_pdf_zip::Entry` has no extra-field accessor**, so §4.3.2's *"no
+  extra field"* clause cannot be checked through it. The plan predicted this and
+  it is confirmed; measured by hand across all twenty-six books, the answer is
+  zero everywhere. Milestone 3 closes it with either an accessor on `Entry` or a
+  byte check in the facade, and the test that owes it says so in a comment
+  rather than skipping quietly.
+
+### epubcheck, and what it is for
+
+Version 5.3.0 under Temurin 21, run over all twenty-six books, verdict recorded
+per file — `tests/epub/EPUBCHECK.tsv` for the six that are committed and this
+section for the twenty that cannot be. Five of six committed are clean and the
+sixth is calibre's `NAV-011`. Eighteen of twenty fetched are clean;
+`sample-georgia-cfi.epub` has **seven `ERROR:RSC-020`**, a malformed URL, so it
+is a book this engine may refuse without apology, and both obfuscated-font
+samples report `INFO:RSC-004` — epubcheck saying it could not read the font,
+which is the same fact milestone 9 de-obfuscates its way past.
+
+`the_recorded_epubcheck_verdicts_still_hold` re-runs the tool when
+`TINKER_EPUBCHECK` names it and compares every count and message code;
+`every_book_has_a_recorded_epubcheck_verdict` checks the record itself and runs
+whether or not Java exists, because a book added without a verdict is a gap in
+the record on a machine with no JVM and that is exactly what a `SKIPPED` would
+hide.
+
+### The three pinned tests, and why there are three
+
+Gap 30's milestone 1 committed two. This one commits three, because the defect
+has three consequences and a test for one of them is not a test:
+
+- `an_epub_whose_only_picture_is_its_cover_is_not_a_one_page_book_of_it` — the
+  mis-read.
+- `an_epub_with_no_picture_at_all_is_not_refused_as_having_no_images` — the
+  false refusal, over both producers' no-image books. A build could fix either
+  of these without the other.
+- `not_one_committed_book_is_read_as_the_book_it_is` — the sweep. Gap 30's
+  equivalent sweep found something its two examples did not, and so does this
+  one: `pandoc-plates.epub` is a book of three chapters that opens as three
+  pages of three different sizes, and neither of the first two would notice it.
+
+All three **fail when run with `--ignored`**, which was checked rather than
+assumed, and each fails with a message naming the book and the wrong answer.
+Each accepts **either** a correct read **or** a refusal by a name that is true
+of a book — gap 30's milestone-3 correction applied before it can bite, since
+that plan's pinned test used `.expect` and so *"forced the spine a milestone
+early"*. The predicate for "true of a book" excludes `NoImages`,
+`UnreadablePackage` and the four damaged-ZIP names, and its catch-all answers
+`true`, so whatever milestone 3 adds satisfies them without this row naming it.
+
+**And the predicate is asserted by a test that runs**, which is the part that is
+easy to miss: an `#[ignore]`d test that would pass is not a pin, and nothing in
+a normal `cargo test` would say so.
+
+`today_an_epub_opens_as_a_comic_and_this_is_what_it_reports` **passes** and
+asserts the wrong answers exactly — the page count is the picture count, the
+pages *are* the pictures in the comic path's own name order, and the three
+silences are zero. `today_a_book_of_two_chapters_is_one_page_of_its_cover`
+asserts the number beside it, because a relation that held while both sides were
+wrong would still pass. Milestone 3 deletes both in the commit that un-ignores
+the three.
+
+### Injection
+
+Twenty-two defects injected into the census logic, the provenance checks, the
+inventory and the gate, over two rounds. **Twenty-one caught.**
+
+Round one: twenty injected, eighteen caught, two survivors, and each survivor
+became an assertion. A named-reference scanner that accepts a name beginning
+with a digit survived, because nothing asserted that `&123;` is not a reference;
+a doctype scanner that matches `PUBLIC` and `SYSTEM` as prefixes survived,
+because `<!DOCTYPE publicity >` was in no fixture. Both are now asserted and
+both mutations are caught.
+
+The one survivor left is an **equivalent mutant**: widening the doctype scan's
+word accumulator from ASCII-alphabetic to ASCII-alphanumeric changes no
+classification for any input in either corpus or any fixture in the suite,
+because no document type declaration in existence puts a digit against `PUBLIC`
+or `SYSTEM`. It is recorded rather than papered over with a fixture invented to
+kill it.
+
+Two of the injections found real defects in code that had already been written
+and reviewed, before they were run as injections: the CSS census read `a:hover`
+inside an `@media` block as a property named `a` — it appeared in the fetched
+corpus's property list on the first run — and `numeric_references` counted
+`&#xZZ;`, because it accepted any alphanumeric where the hexadecimal form allows
+only a hex digit. Both are fixed and both have their own tests; the second is
+the reason a census's own scanner needs a test at all, since a scanner that
+over-counts and a corpus that genuinely uses a construct are indistinguishable
+from the number alone.
+
+### What the later milestones inherit
+
+- **Three failing tests with names, and two passing tests that must break.**
+  Milestone 3 un-ignores the three and deletes the two in the same commit. If
+  either still passes afterwards, the discrimination did not happen.
+- **A container whose physical and directory orders disagree**, already built,
+  for milestone 3's `header_offset`-not-`index` criterion.
+- **A `META-INF` that is not only the six reserved names**, from a producer
+  rather than from a fixture, and a **directory entry** in the same directory
+  from the other producer.
+- **A package document at the archive root and one under `EPUB/`**, so
+  milestone 3's relative resolution is exercised in both directions by real
+  files.
+- **The named-reference decision, made**: option 1, and milestone 2 does not
+  build a table.
+- **Both external-identifier quote forms**, one per corpus, and the two shapes
+  no real book supplies named as fixtures milestone 2 must write.
+- **Forty-two CSS property names committed and eighty-four fetched** to build
+  milestone 6's `Known`
+  enum against, and the multi-column family named as a non-goal that real books
+  use.
+- **Two obfuscated-font books and an `encryption.xml`** in the fetched corpus,
+  which is milestone 9's only real input and milestone 3's only real
+  `encryption.xml`.
+- **A book epubcheck rejects** (`sample-georgia-cfi.epub`, seven `RSC-020`), so
+  the first disagreement between this engine and a book has a party to blame.
+- **`tinker-pdf-zip` in the facade's `[dev-dependencies]` already**, from gap
+  30 — no manifest change, and `xtask -- dag` sees no new edge.
+
+### What is short
+
+- **No fixed-layout book is in the committed corpus.** Milestone 12's criterion
+  asks for one *"if one can be obtained"*; neither producer here emits
+  `rendition:layout: pre-paginated`, and the fetched corpus's fixed-layout
+  samples are the CC-BY-SA ones. Recorded as owed, in the shape gap 30 named its
+  own shortfall rather than dropping it.
+- **The extra-field check is owed**, as above: measured by hand, not by a test,
+  because the accessor does not exist.
+- **The doctype census cannot tell a declaration in the prolog from the text
+  `<!DOCTYPE` inside a `<code>` element.** No book in either corpus contains
+  the second, and both censuses print their per-file answers so a human can
+  disbelieve them. Milestone 2's scanner has a position to work from and this
+  one does not.

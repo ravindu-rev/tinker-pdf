@@ -23,6 +23,15 @@
 *.xps binary
 *.oxps binary
 
+# The EPUB corpus (gap 31 milestone 1). OCF containers -- ZIPs again -- named
+# for the same reason and one more of its own. `mimetype` is a **stored** entry
+# holding exactly twenty ASCII bytes, and OCF 3.3 §4.3.2 requires those twenty
+# and no others; a normalised line ending anywhere in a stored entry breaks its
+# CRC-32, and there would be no way back, because neither producer is
+# reproducible byte for byte -- pandoc and calibre each mint a fresh UUID for
+# the package document's `dc:identifier` on every run.
+*.epub binary
+
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.
 fuzz/corpus/** binary

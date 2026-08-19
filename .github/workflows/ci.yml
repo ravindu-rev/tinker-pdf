@@ -346,6 +346,73 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' jpx-oracle.log
           grep -q 'jpx-oracle: RAN' jpx-oracle.log
 
+  epub-corpus:
+    # Gap 31 milestone 1's second corpus, and the only one CI has to fetch.
+    #
+    # The books this job reads **cannot be committed**: Project Gutenberg's
+    # carry a trademark licence whose clause 1.E.1 requires the boilerplate
+    # wherever a copy is displayed and whose 1.E.4 forbids detaching the terms,
+    # and `epub3-samples` is CC-BY-SA 3.0, which `deny.toml`'s "deliberately NO
+    # copyleft — not even weak copyleft" rule bars. So they are fetched into
+    # `target/`, read, and thrown away with it. Nothing is redistributed.
+    #
+    # That is exactly why this job greps its own output. Gap 20 found that a
+    # skipped oracle exits 0 and reads exactly like a pass, and the risk is
+    # doubled here: the corpus is not in the repository, so the tests over it
+    # can fail to run for a second reason as well as the first, and both look
+    # like a green tick.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the corpus that cannot be committed
+        run: sh crates/tinker-pdf/tests/epub/fetch-corpus.sh
+      - name: Read the fetched corpus
+        env:
+          TINKER_EPUB_CORPUS: ${{ github.workspace }}/target/epub-corpus
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test epub_fetched -- --nocapture \
+            2>&1 | tee epub-corpus.log
+          # The skip is checked first and on its own, so the reason reaches the
+          # log. A bare `grep -q RAN` fails the step too, but under `bash -e` it
+          # fails it *silently* — a red tick with nothing saying the corpus
+          # never arrived is only half of what this job is for.
+          if grep -q 'epub-corpus: SKIPPED' epub-corpus.log; then
+            echo "::error::the fetched EPUB corpus was not read, so the" \
+                 "censuses SKIPPED rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub-corpus.log
+          grep -q 'epub-corpus: RAN' epub-corpus.log
+      # epubcheck, on the EPUB itself — and it checks the **input**, not this
+      # engine. It is the W3C's conformance checker, and what it gives is
+      # exactly one thing: when this engine and a book disagree, epubcheck says
+      # whose fault it is. A book it rejects is one this engine is entitled to
+      # refuse; a book it accepts and this engine mis-reads is this engine's
+      # bug. Ruling 9's posture, unchanged — a subprocess, never linked, its
+      # output transient. Pinned to 5.3.0 and fetched from the release rather
+      # than from a distribution package, so the verdicts in
+      # `tests/epub/EPUBCHECK.tsv` are compared against the same tool that
+      # produced them.
+      - name: Check the committed corpus against epubcheck
+        run: |
+          set -o pipefail
+          curl -fsSL --retry 3 -o epubcheck.zip \
+            https://github.com/w3c/epubcheck/releases/download/v5.3.0/epubcheck-5.3.0.zip
+          unzip -q epubcheck.zip
+          TINKER_EPUBCHECK="$PWD/epubcheck-5.3.0/epubcheck.jar" \
+            cargo test -p tinker-pdf --test epub -- --nocapture \
+            2>&1 | tee epubcheck.log
+          if grep -q 'epubcheck-oracle: SKIPPED' epubcheck.log; then
+            echo "::error::epubcheck did not run, so the recorded verdicts" \
+                 "SKIPPED rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epubcheck.log
+          grep -q 'epubcheck-oracle: RAN' epubcheck.log
+
   licenses:
     runs-on: ubuntu-latest
     steps:
