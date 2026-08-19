@@ -51,6 +51,14 @@ pub(crate) struct LocalHeader {
     ///
     /// So the flag chooses and validation confirms. See [`parse_descriptor`].
     pub zip64: bool,
+    /// How long this header's own extra area is (4.3.7's field at offset 28).
+    ///
+    /// The *local* one, which 4.4.11 lets differ from the central directory's
+    /// and routinely does. It is kept because one caller needs to know the area
+    /// is **empty**: EPUB 3.3 OCF §4.3.2 requires the `mimetype` entry to carry
+    /// no extra field, and that clause is what makes the twenty bytes at offset
+    /// 38 of an OCF container its media type. See [`crate::Archive::local_extra`].
+    pub extra_len: usize,
     /// The first byte of the entry's data.
     pub data_offset: usize,
 }
@@ -104,6 +112,7 @@ pub(crate) fn parse_local(bytes: &[u8], at: usize) -> Option<LocalHeader> {
         uncompressed_size,
         name,
         zip64,
+        extra_len,
         data_offset,
     })
 }

@@ -15,17 +15,22 @@
 //!
 //! # Why the allow, and why the path attribute
 //!
-//! Five test binaries include this module — `xps_opc.rs`, `xps_spine.rs`,
-//! `xps_markup.rs`, `xps_glyphs.rs` and `xps_qpdf.rs` — and each compiles its
-//! own copy and uses a different subset. The ZIP writer comes from
-//! `cbz_support` by path rather than by a second `mod` declaration in each
-//! binary, so an XPS test never has to know that the archive builder it needs
-//! was written for comics.
+//! Six test binaries include this module — `xps_opc.rs`, `xps_spine.rs`,
+//! `xps_markup.rs`, `xps_glyphs.rs`, `xps_qpdf.rs` and gap 31's `epub_ocf.rs`
+//! — and each compiles its own copy and uses a different subset. The ZIP writer
+//! comes from `cbz_support` by path rather than by a second `mod` declaration
+//! in each binary, so an XPS test never has to know that the archive builder it
+//! needs was written for comics.
+//!
+//! The sixth is not an XPS test at all, and that is the point of it: gap 31's
+//! routing puts EPUB **after** ECMA-388 E.3, so the fixture that proves the
+//! order is a conforming XPS package carrying `META-INF/container.xml` — and
+//! building one needs this file's package, not a hand-written near-miss.
 
 #![allow(
     dead_code,
     unused_imports,
-    reason = "shared by five test binaries; each uses a different subset"
+    reason = "shared by six test binaries; each uses a different subset"
 )]
 
 #[path = "../cbz_support/mod.rs"]

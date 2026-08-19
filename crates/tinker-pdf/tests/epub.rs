@@ -15,22 +15,31 @@
 //! two of which would have produced a reader that refuses every OpenXPS file
 //! Windows writes. This file is that device a third time.
 //!
-//! # What is pinned here
+//! # What was pinned here, and what happened to it
 //!
-//! An `.epub` opens today and what comes back is its cover.
-//! `today_an_epub_opens_as_a_comic_and_this_is_what_it_reports` asserts the
-//! wrong answers exactly, so the defect is watched rather than described; it
-//! **passes**, and milestone 3 deletes it in the commit that turns the three
-//! `#[ignore]`d tests below it green. A record of old behaviour that does not
-//! break when the behaviour changes is not a record.
+//! *Amended, gap 31 milestone 3.* When this file landed, an `.epub` opened and
+//! what came back was its cover. Two tests recorded that exactly —
+//! `today_an_epub_opens_as_a_comic_and_this_is_what_it_reports` and
+//! `today_a_book_of_two_chapters_is_one_page_of_its_cover` — and both
+//! **passed**, because a defect that is watched is not the same as one that is
+//! described. Milestone 3 **deleted** them, in this commit, because a record of
+//! old behaviour that does not break when the behaviour changes is not a
+//! record.
 //!
-//! The three ignored tests are written to accept **either** a correct read
-//! **or** a refusal by a name that is true, which is gap 30's own milestone-3
-//! correction applied before it can bite: that plan's pinned test used
-//! `.expect`, so the only way it could go green was for the book to open, and
-//! its milestone 3 progress records that this *"forced the spine a milestone
-//! early"*. A pinned test that over-specifies the fix schedules work its own
-//! row did not ask for.
+//! The three tests below them were `#[ignore]`d and failed under `--ignored`.
+//! They are ordinary tests now. Each was written to accept **either** a correct
+//! read **or** a refusal by a name that is true, which is gap 30's own
+//! milestone-3 correction applied before it could bite: that plan's pinned test
+//! used `.expect`, so the only way it could go green was for the book to open,
+//! and its milestone 3 progress records that this *"forced the spine a
+//! milestone early"*. What milestone 3 delivered is the second of the two — an
+//! EPUB is told from a comic and refused as `UnpaginatedBook` — and none of the
+//! three had to be rewritten to accept it, which is the whole value of having
+//! written them that way.
+//!
+//! What they do **not** assert is which refusal, on purpose. `tests/epub_ocf.rs`
+//! is where the name is pinned, one fixture per refusal; these three are about
+//! the corpus.
 
 mod epub_support;
 
@@ -1265,111 +1274,25 @@ fn the_css_census_does_not_read_a_pseudo_class_as_a_property() {
     assert!(found.iter().any(|p| p == "margin-top"));
 }
 
-// ---- what today does with a book --------------------------------------------
-
-/// **This test passes, and it asserts the wrong answers.**
-///
-/// It exists so the defect is watched rather than described. Every number here
-/// is what `Document::open` returns today, on files a real producer wrote:
-/// a book of chapters comes back as one page that is its cover, at gap 29's one
-/// pixel to the point, with `ArchiveReport::warnings()` empty, `parsed_parts()`
-/// zero and every `PageOrigin.defect` `None`. Nothing anywhere says a book was
-/// lost.
-///
-/// **Milestone 3 deletes this test**, in the same commit that un-ignores the
-/// three below it. A record of old behaviour that does not break when the
-/// behaviour changes is not a record — gap 29's milestone-6 survivor in a
-/// different costume, and gap 30's milestone 1 wrote the same sentence about
-/// XPS.
-#[test]
-fn today_an_epub_opens_as_a_comic_and_this_is_what_it_reports() {
-    let mut opened = 0usize;
-    let mut refused = 0usize;
-    for entry in BOOKS {
-        let bytes = book(entry.file);
-        let pictures = image_entries(&bytes);
-        match todays_answer(&bytes) {
-            TodaysAnswer::Opens {
-                pages,
-                sizes,
-                origins,
-                warnings,
-                parsed_parts,
-                defects,
-            } => {
-                opened += 1;
-                println!("  opens  {:38} pages={pages} sizes={sizes:?}", entry.file);
-                // The page count is the picture count, and the pages are the
-                // pictures, in the archive's own name order.
-                assert_eq!(
-                    pages as usize,
-                    pictures.len(),
-                    "{}: the page count is not the picture count",
-                    entry.file
-                );
-                assert_eq!(
-                    origins, pictures,
-                    "{}: the pages are not the pictures",
-                    entry.file
-                );
-                // And the silence, which is the half a page count cannot show.
-                assert_eq!(warnings, 0, "{}: something warned", entry.file);
-                assert_eq!(parsed_parts, 0, "{}: markup was parsed", entry.file);
-                assert_eq!(defects, 0, "{}: a page defect was reported", entry.file);
-            }
-            TodaysAnswer::Refused(why) => {
-                refused += 1;
-                println!("  refused {:38} {why:?}", entry.file);
-                assert!(pictures.is_empty(), "{}: refused with pictures", entry.file);
-                assert_eq!(
-                    why,
-                    ArchiveRefusal::NoImages,
-                    "{}: refused by a name other than the comic one",
-                    entry.file
-                );
-            }
-            TodaysAnswer::Other(what) => panic!("{}: {what}", entry.file),
-        }
-    }
-    assert_eq!(opened, 4, "a different number of books open today");
-    assert_eq!(refused, 2, "a different number of books are refused today");
-}
-
-/// The exact page this build makes of a thirty-one-chapter novel's smaller
-/// cousin: **one page, 120 × 180 points**, which is the cover PNG's pixel size
-/// at gap 29's CBZ convention.
-///
-/// Separate from the sweep above because the sweep asserts a *relation* — the
-/// pages are the pictures — and this asserts the *number*. A relation that held
-/// while both sides were wrong would still pass, which is the failure mode a
-/// broad end-to-end assertion has and a narrow one does not.
-#[test]
-fn today_a_book_of_two_chapters_is_one_page_of_its_cover() {
-    let bytes = book("pandoc-book-cover.epub");
-    let TodaysAnswer::Opens { pages, sizes, .. } = todays_answer(&bytes) else {
-        panic!("pandoc-book-cover.epub no longer opens");
-    };
-    assert_eq!(pages, 1);
-    assert_eq!(sizes, vec![(120.0, 180.0)]);
-    // The book it is instead. Four content documents and a stylesheet, all of
-    // them discarded without a word.
-    let documents = content_documents(&bytes).len();
-    let sheets = stylesheets(&bytes).len();
-    assert_eq!((documents, sheets), (5, 1));
-    println!("  5 content documents and 1 stylesheet became one 120 x 180 pt page");
-}
-
-// ---- pinned, and failing, until milestone 3 ---------------------------------
+// ---- pinned by milestone 1, resolved by milestone 3 -------------------------
 
 /// Whether a refusal is a sentence that is **true of a book**.
 ///
 /// `NoImages`'s own documentation reads *"a valid archive with no image
 /// entries"*, which is a sentence about a comic archive; the rest of the list
 /// is either about a damaged ZIP or about an OPC package, and none of the six
-/// books is any of those. The catch-all answers `true` on purpose: the honest
-/// name does not exist yet, `ArchiveRefusal` is `#[non_exhaustive]`, and the
-/// point of the pinned tests is to accept **whatever milestone 3 adds** rather
-/// than to name it here and schedule the work.
+/// books is any of those. The catch-all answers `true` on purpose: when this
+/// was written the honest name did not exist, `ArchiveRefusal` is
+/// `#[non_exhaustive]`, and the point of the pinned tests was to accept
+/// **whatever milestone 3 added** rather than to name it here and schedule the
+/// work.
+///
+/// *Milestone 3 added four*, and the list below is unchanged: the catch-all
+/// covers `UnpaginatedBook`, `UnreadableContainer`, `RootfileMissing` and
+/// `EncryptedResources` without this function having to learn them. That is
+/// what the shape bought, and it is why `Encrypted` is on the excluded list —
+/// reusing that variant for a book with an `encryption.xml` would have been the
+/// obvious shortcut and would have failed here.
 fn refusal_is_true_of_a_book(why: ArchiveRefusal) -> bool {
     !matches!(
         why,
@@ -1383,13 +1306,18 @@ fn refusal_is_true_of_a_book(why: ArchiveRefusal) -> bool {
     )
 }
 
-/// The predicate above is checked here, in a test that **runs**, because the
-/// three tests that use it do not.
+/// The predicate above is checked here, in a test that **runs**.
 ///
-/// An `#[ignore]`d test that would pass is not a pin, and nothing in a normal
-/// `cargo test` run would say so. If `NoImages` ever counted as a sentence that
-/// is true of a book, all three would go green today and the milestone-3
-/// criterion they carry would be satisfied by nothing at all.
+/// It was written because the three tests using it did not run: an
+/// `#[ignore]`d test that would pass is not a pin, and nothing in a normal
+/// `cargo test` run would say so. If `NoImages` had ever counted as a sentence
+/// that is true of a book, all three would have gone green with nothing done at
+/// all.
+///
+/// It is still here now that they run, and for a sharper reason: it is what
+/// says the three below are satisfied by a **new** name rather than by
+/// `ArchiveRefusal::Encrypted`, which is the variant a milestone 3 in a hurry
+/// would have reused for a book carrying an `encryption.xml`.
 #[test]
 fn no_images_is_not_a_sentence_that_is_true_of_a_book() {
     assert!(!refusal_is_true_of_a_book(ArchiveRefusal::NoImages));
@@ -1397,22 +1325,32 @@ fn no_images_is_not_a_sentence_that_is_true_of_a_book() {
         ArchiveRefusal::UnreadablePackage
     ));
     assert!(!refusal_is_true_of_a_book(ArchiveRefusal::Damaged));
-    // And the catch-all answers `true`, which is what lets the three pinned
-    // tests accept a name milestone 3 has not invented yet. `TooLarge` stands
-    // for that: "a bound was spent" is a sentence that can be true of a book.
+    // And the catch-all answers `true`, which is what let the three tests below
+    // accept a name milestone 1 had not seen invented. `TooLarge` stood for
+    // that: "a bound was spent" is a sentence that can be true of a book. The
+    // four milestone 3 actually added are asserted here too, so this predicate
+    // cannot drift away from the refusals it is now being satisfied by.
     assert!(refusal_is_true_of_a_book(ArchiveRefusal::TooLarge));
+    assert!(refusal_is_true_of_a_book(ArchiveRefusal::UnpaginatedBook));
+    assert!(refusal_is_true_of_a_book(
+        ArchiveRefusal::UnreadableContainer
+    ));
+    assert!(refusal_is_true_of_a_book(ArchiveRefusal::RootfileMissing));
+    assert!(refusal_is_true_of_a_book(
+        ArchiveRefusal::EncryptedResources
+    ));
 }
 
 /// A book whose only picture is its cover is not a one-page book of that
 /// picture.
 ///
-/// **Fails today**, and milestone 3's exit criterion is where it goes green.
-/// Either the book reads — in which case its pages are not its pictures — or it
-/// is refused by a name that is true of a book, which is what milestone 3
-/// delivers on its own. Both are accepted, so this row does not schedule
-/// milestone 4's pagination.
+/// **Failed until milestone 3**, which is where it went green. Either the book
+/// reads — in which case its pages are not its pictures — or it is refused by a
+/// name that is true of a book, which is what milestone 3 delivers on its own.
+/// Both are accepted, so this row does not schedule milestone 4's pagination,
+/// and it did not have to be rewritten when the second arm was the one that
+/// came true.
 #[test]
-#[ignore = "milestone 3: an EPUB is discriminated from a comic and stops being its cover"]
 fn an_epub_whose_only_picture_is_its_cover_is_not_a_one_page_book_of_it() {
     let bytes = book("pandoc-book-cover.epub");
     let pictures = image_entries(&bytes);
@@ -1438,13 +1376,12 @@ fn an_epub_whose_only_picture_is_its_cover_is_not_a_one_page_book_of_it() {
 
 /// A book with no picture at all is not refused as having no images.
 ///
-/// **Fails today**, and it is the other half of gap 30's pair arriving
-/// verbatim: `ArchiveRefusal::NoImages` reads *"a valid archive with no image
-/// entries"*, said about a book of four chapters. Independent of the test above
-/// — one is a mis-read and one is a false refusal, and a build could fix either
-/// without the other.
+/// **Failed until milestone 3**, and it is the other half of gap 30's pair
+/// arriving verbatim: `ArchiveRefusal::NoImages` reads *"a valid archive with
+/// no image entries"*, said about a book of four chapters. Independent of the
+/// test above — one is a mis-read and one is a false refusal, and a build could
+/// fix either without the other.
 #[test]
-#[ignore = "milestone 3: an EPUB is discriminated from a comic and stops being its cover"]
 fn an_epub_with_no_picture_at_all_is_not_refused_as_having_no_images() {
     for file in ["pandoc-book-nocover.epub", "calibre-book-nocover.epub"] {
         let bytes = book(file);
@@ -1463,7 +1400,7 @@ fn an_epub_with_no_picture_at_all_is_not_refused_as_having_no_images() {
     }
 }
 
-/// And the sweep: not one of the six is read as the book it is.
+/// And the sweep: not one of the six is read as a bag of its pictures.
 ///
 /// The third pinned test rather than a fold of the first two, because the two
 /// above are about the two books that show the defect most sharply and this is
@@ -1473,7 +1410,6 @@ fn an_epub_with_no_picture_at_all_is_not_refused_as_having_no_images() {
 /// that opens as three pages of three different sizes, and neither of the two
 /// tests above would notice it.
 #[test]
-#[ignore = "milestone 3: an EPUB is discriminated from a comic and stops being its cover"]
 fn not_one_committed_book_is_read_as_the_book_it_is() {
     for entry in BOOKS {
         let bytes = book(entry.file);

@@ -643,6 +643,20 @@ resolves against the *referring document's* path, which is the same
 off-by-one-segment gap 30's milestone 3 had to get right for `.rels`, and the
 same fixture shape catches it.
 
+*Amended, 19 August 2026, milestone 3.* **The sentence above is right about
+§4.2.5 and wrong about the one reference milestone 3 actually resolves.**
+`container.xml`'s `full-path` is defined by §4.2.6.3.1 as a path from the
+**container root**, so it is the single reference in this format whose base is
+not the document it is written in — resolving it against the referring document
+yields `META-INF/EPUB/content.opf`, which no book on earth holds. The
+off-by-one-segment analogy survives intact and points the other way: gap 30's
+`.rels` targets resolve against the part that *owns* the relationships part
+rather than the `_rels` directory it sits in, and here `full-path` resolves
+against the root rather than the `META-INF` directory it sits in. Both are a
+segment too many, and both fail in the direction that looks like a missing file.
+The general rule is still the general rule, and it is what milestone 4's
+manifest `href`s use.
+
 **Two constraints OPC imposed that OCF does not.** OPC forbade encryption and
 every method but DEFLATE; OCF permits neither restriction to be assumed. In
 practice `tinker-pdf-zip` refuses an encrypted entry and refuses
@@ -2016,3 +2030,310 @@ of that injection — a fixed six-character prefix, which reads `PUBLICITY` as
   book carrying an unknown identifier still parses — the warning is the only
   signal, and nothing above this crate reads it yet.
 
+## Progress — 19 August 2026, milestone 3
+
+**An EPUB is told from a comic, and the live defect this plan opens with is
+fixed.** All six committed books and all twenty fetched ones now come back as
+`ArchiveRefusal::UnpaginatedBook` — *"an EPUB, which this build recognises and
+does not lay out yet"* — where before this commit `pg84-images.epub` opened as
+one page of 1824 × 2726 pt and `sample-internallinks.epub` as ten pages of
+publisher logos. Milestone 1's three pinned tests are ordinary tests now, and
+the two that recorded the wrong answers are **deleted in this commit**, which is
+the point of having written them. The workspace stands at **2 305**, up
+thirty-seven, with three fewer ignored.
+
+Row 3 said this milestone is *"the only one of the thirteen that improves
+matters on its own"*. It is: nothing here lays out a page, and a host that opens
+a book now gets a refusal it can show instead of a picture of the cover.
+
+### The route, and the one ordering decision in it
+
+`Document::open` opens the ZIP **once** and asks three questions in order —
+ECMA-388 E.3's three steps, then `META-INF/container.xml`, then the comic path
+as the fallthrough — with the archive travelling inside each router's enum so
+nothing walks the central directory twice. Gap 30's E.3 is untouched, and
+milestone 1's measurement is why it can be: **0 of 26 books** carries
+`[Content_Types].xml` or `_rels/.rels`, so an EPUB fails E.3 at step 2's first
+check having read nothing.
+
+**XPS before EPUB is a decision and not a consequence**, and it needed a fixture
+nobody would otherwise build: a conforming one-page XPS package carrying a
+`META-INF/container.xml`. Nothing in OCF forbids a container from also carrying
+OPC's two items, so a file can satisfy both tests — and the format that
+publishes a recipe for recognising itself goes first. Under the opposite order
+that package comes back as `RootfileMissing`, which is what
+`a_package_that_is_both_an_xps_and_a_container_is_read_as_the_xps` catches and
+what nothing else in the suite can see. Its page is 400 × 500 XPS units rather
+than the natural 816 × 1056, because 816 × 1056 at 96 to the inch is US Letter
+to the point — which is also `xps.rs`'s fallback page size, so the obvious
+fixture would have passed with the markup never read.
+
+**The signature is `META-INF/container.xml` and nothing else.** Not the
+`mimetype` rule, which is argued below; not `META-INF/`, because one of
+milestone 1's two producers writes a deflated, zero-byte `META-INF/` directory
+record into every book it makes — so a comic archive that acquired one from an
+archiver that preserves empty directories would be refused as a broken book by a
+reader that tested the directory. And the comparison is byte-exact and
+**case-sensitive**, per §4.2.3: `META-INF/Container.xml` is not the container,
+where OPC 6.2.2.3 one module over folds ASCII case for the same comparison. Both
+near misses have their own fixture and both injections were caught.
+
+### §4.3.2's five clauses, and the pair no real book can separate
+
+The `mimetype` rule is checked and **never refuses**. Five defects, one per
+clause, because a book whose `mimetype` is deflated and a book whose `mimetype`
+is second are two different bugs in two different producers; a container that
+breaks four of them at once is warned about four times and read to exactly the
+same place a conforming one reaches.
+
+The clause the plan singled out is *"first file in the archive"*, and it is
+`header_offset == 0` rather than `index == 0`. Milestone 1 measured all
+twenty-six books putting `mimetype` first in **both** physical and directory
+order, so no real file can tell the two checks apart, and it built the container
+that does. Milestone 3 needed **two** of them and not one, which is this run's
+clearest instance of the rule the last eight milestones keep finding: an archive
+whose physical order is wrong and whose directory order is right catches a build
+checking `index`, and an archive the other way round catches the same build
+failing in the other direction, by warning about a container that conforms. One
+fixture proves half a rule.
+
+### The extra-field question, settled, and by neither of the two ways the plan named
+
+The plan said *"either `Entry` grows a field or the OCF layer reads the local
+header from the archive's own bytes"*, and the second is not available as
+written: `Archive` does not lend its bytes and should not start. The answer is a
+third — **`Archive::local_extra(index)`**, which parses the one local header a
+caller asks about and hands back the area itself rather than its length.
+
+The argument for it over a field on `Entry` is that the two answer different
+questions. §4.3.2's clause is about the **local** header's extra area, which is
+what puts `application/epub+zip` at offset 38 of a conforming container; APPNOTE
+4.4.11 lets the local and central areas differ and routinely they do, so an
+`Entry` field — the directory's view — would be right about a different thing.
+Filling one in from the local header instead would mean parsing every local
+header at `Archive::open`, and that reader's whole posture is that opening a
+700 MB archive costs the directory and not the archive. So it is computed on
+demand, for the entries somebody asks about, and nothing else in this workspace
+has ever needed to know.
+
+The fixture writes the area on the **local** side only, which is legal and is
+what a real Info-ZIP build does with its extended timestamp — and it is what
+tells the two implementations apart: injecting "read the central directory's
+copy" is caught by three tests, one of them in `tinker-pdf-zip` itself.
+
+Measured across all twenty-six books the answer is still zero everywhere, so
+this clause is proved entirely by fixtures. That is the honest state of it, and
+it is why the accessor was worth building rather than skipping: milestone 1
+could only measure the clause by hand.
+
+### The base that is not the referring document
+
+**The plan's own design section was wrong about this and is amended in place.**
+It says relative references resolve against the referring document's path — true
+of every reference in the format except the one milestone 3 actually resolves.
+§4.2.6.3.1 defines `container.xml`'s `full-path` as a path from the **container
+root**, so resolving it against `META-INF/container.xml` yields
+`META-INF/EPUB/content.opf`, which no book on earth holds.
+
+The analogy to gap 30 survives and points the other way: a `.rels` part's
+targets resolve against the part that owns it rather than the `_rels` directory
+it sits in, and `full-path` resolves against the root rather than the `META-INF`
+directory it sits in. Both are one segment too many and both fail in the
+direction that looks like a missing file.
+
+Which is why the fixture is not a book with a package document under `EPUB/`. On
+such a book the wrong base fails visibly and any test would catch it. The
+fixture is a book holding **both** `EPUB/content.opf` and
+`META-INF/EPUB/content.opf`, so the wrong base resolves happily and hands back
+the wrong package document — and the assertion is on which entry the rootfile
+names, not on whether it resolved.
+
+The general rule is still built, and it is exercised at a base milestone 3 has
+no caller for, because a contract exercised only by its first caller means
+whatever that caller happened to want. Milestone 4's manifest `href`s are what
+will use it.
+
+Two more decisions live in that function and both are recorded where they are
+made. An over-climbing `..` is **refused** where RFC 3986 §5.2.4 clamps, and the
+divergence from `xps/opc.rs`'s resolver is asserted in a test that calls both:
+inside a container, discarding the segment renames a reference to a *different*
+resource that may well exist, and §4.2.3 forbids `..` in a container path at
+all, so there is nothing to clamp to. And dot segments are removed **before**
+percent-decoding, per RFC 3986, so `%2E%2E` is a name and not a climb — the
+input that separates the two orders is `a/%2E%2E/b.opf`, which decoding first
+resolves to `b.opf`.
+
+### Four refusals, and the one that is temporary
+
+| Refusal | What it is a sentence about |
+| --- | --- |
+| `UnreadableContainer` | `META-INF`'s own structure: a `container.xml` that is not well formed, a root that is not `container`, no `rootfile` naming a package document, a `full-path` that is not a container path, or an `encryption.xml` that will not read |
+| `RootfileMissing` | a container naming a package document the book does not hold — and the **only** observable difference between the two bases above |
+| `EncryptedResources` | an `encryption.xml` naming something that is not one of OCF's two font obfuscations, or naming no algorithm at all |
+| `UnpaginatedBook` | an EPUB, read as far as its container goes, with no layout engine yet |
+
+Each has a fixture built for it and the sweep asserts each by name.
+`EncryptedResources` is deliberately **not** `ArchiveRefusal::Encrypted`, which
+is a sentence about a comic archive whose every page entry the ZIP reader
+refused — and milestone 1's `refusal_is_true_of_a_book` predicate excludes that
+variant, so reusing it would have failed the pinned tests it was written to
+satisfy. That is a predicate written a milestone early doing the job it was
+written for.
+
+`UnpaginatedBook` is the one milestone 4 removes from the path a valid book
+takes, and its doc comment says so.
+
+### Recognising a name and acting on it are two rules
+
+All six of §4.2.6.3's reserved names are recognised. **Two of them are parsed**
+— `container.xml` and `encryption.xml` — and the other four are recognised and
+*ignored*, which is the act rather than the absence of one. The test puts the
+same unreadable bytes at each of the six names in turn: the two that are parsed
+refuse and the four that are not do not. A build that parsed all six would
+refuse a book over a `signatures.xml` it has no opinion about; a build that
+parsed none would hand ciphertext to a font parser. Only asserting both halves
+tells them apart.
+
+A **seventh** file in `META-INF` is neither refused nor warned about, and that
+is milestone 1's measurement rather than a preference: every pandoc book carries
+`META-INF/com.apple.ibooks.display-options.xml` and zero of the twenty fetched
+books carries anything unreserved there at all, so a refusal would have lost
+every book one producer writes while passing the entire downloaded corpus. A
+warning every book of one producer trips is not a warning either.
+
+### What the real books forced that the plan did not predict
+
+- **Both obfuscated samples write `encryption.xml` with a redeclared *default*
+  namespace**, not a prefix: `<EncryptedData
+  xmlns="http://www.w3.org/2001/04/xmlenc#">` inside an `<encryption>` root that
+  is in OCF's own namespace. Every published example of this file uses an `enc:`
+  prefix. A reader that matched the prefix — or that matched local names without
+  checking the namespace at all — finds nothing and calls the book
+  **unencrypted**, which is the dangerous direction of being wrong. The parser
+  resolves namespaces, so it reads both; the test that says so is written from
+  the real file rather than from the specification's example.
+- **The package document sits in four different places across twenty-six
+  books**, not the two milestone 1 recorded: `EPUB/`, `OEBPS/`, `OPS/` and the
+  archive root. Every one of them is a path from the container root, which is
+  what makes the base question above load-bearing on the first real file rather
+  than on an exotic one.
+- **Not one of the twenty-six books exercises a single one of §4.3.2's five
+  clauses.** All twenty-six put `mimetype` first physically and in the
+  directory, stored, twenty bytes, with no extra field. So every warning this
+  milestone can emit is proved by a fixture and by nothing else — which is worth
+  writing down, because a clause with no real example is a clause whose
+  behaviour is a guess until somebody builds the container.
+- **The fetched corpus is the check on the whole discrimination and it is
+  unanimous.** Twenty books, twenty `UnpaginatedBook`, none refused for a
+  container that would not read and none for a rootfile that named nothing. The
+  sweep asserts the *distribution* and not only the predicate: a build whose
+  resolution regressed would come back as `RootfileMissing` twenty times and
+  would satisfy "a name that is true of a book" without satisfying this.
+
+### The injection matrix
+
+Twenty-four defects, one at a time, each reverted before the next, `cargo test
+-p tinker-pdf -p tinker-pdf-zip --no-fail-fast` re-run over the whole facade and
+the archive reader with the fetched corpus attached. **Twenty-three caught on
+the first pass; the survivor was closed and its injection re-run, and it is now
+twenty-four.**
+
+| Defect | Caught by |
+| --- | --- |
+| EPUB routed before XPS | `a_package_that_is_both_an_xps_and_a_container_is_read_as_the_xps` — **alone** |
+| The discrimination tests `META-INF/` rather than the file in it | `a_comic_that_carries_a_meta_inf_directory_is_still_a_comic`, and one more |
+| The container's name compared with ASCII case folded | `a_comic_carrying_meta_inf_files_that_are_not_the_container_is_still_a_comic` — **alone** |
+| **`index == 0` rather than `header_offset == 0`** | `the_mimetype_rule_is_physical_order_and_not_directory_order` — **alone**, and only because it carries both containers |
+| The extra-field clause deleted | `each_of_the_mimetype_clauses_warns_on_its_own`, and one more |
+| The extra area read from the **central directory's** copy | three, one of them `tinker-pdf-zip`'s own |
+| A broken `mimetype` refuses rather than warns | `a_container_that_breaks_every_mimetype_clause_is_still_read_as_a_book` — **alone** |
+| **`full-path` resolved against the referring document** | six |
+| An over-climbing `..` clamped rather than refused | `a_climb_above_the_container_root_is_refused_where_rfc_3986_clamps`, and one more |
+| Percent-decoding before dot-segment removal | `a_percent_escape_is_decoded_per_segment_and_a_decoded_separator_is_refused` — **alone** |
+| The path length charged only *after* the merge | `a_content_path_past_the_length_cap_is_refused_before_it_is_merged` — **alone** |
+| The path length charged only *before* the merge | the same test — **alone**, by its other half |
+| An `<EncryptedData>` naming no algorithm accepted | `an_encrypted_data_that_names_no_algorithm_is_refused_too` — **alone** |
+| Any encryption algorithm accepted as an obfuscation | three |
+| `encryption.xml` never read at all | three |
+| XML Encryption matched by prefix rather than by namespace | six |
+| The read-once cache deleted | `resolving_a_file_twice_does_not_inflate_it_twice` — **alone** |
+| The first `<rootfile>` taken whatever its media type | `the_default_rendition_is_the_first_rootfile_that_is_a_package_document` — **alone** |
+| **The root element of `container.xml` not checked** | **nothing, on the first pass** — see below |
+| `container.xml` read under the relaxed doctype mode | `a_doctype_on_container_xml_is_refused_rather_than_skipped` — **alone** |
+| An unrecognised file in `META-INF` refused | three, including every committed book |
+| An encrypted book reported as the comic path's `Encrypted` | three |
+| `RootfileMissing` collapsed into `UnreadableContainer` | `every_book_level_refusal_is_returned_by_a_fixture_built_for_it`, and one more |
+| The rootfile not checked against the entries the book holds | the same two |
+
+**The survivor is the best thing the matrix found, and it is the failure mode
+this run was told to watch for: a check that no test could see because every
+fixture was refused by something else first.** Deleting the root-element check
+in `container.xml` — so a file at that name is read whatever its root says —
+changed no answer in the whole suite. All four fixtures the test carried were
+refused by `out.is_empty()` instead: a wrong root over an empty `<rootfiles>`,
+and a wrong root whose children are therefore in the wrong namespace, both yield
+no `<rootfile>` at all and the emptiness check catches them. The check was
+enforced twice and only the second was reachable.
+
+What separates them is a **usable `<rootfile>` under a root that is not a
+container** — the shape a `META-INF/container.xml` holding somebody else's XML
+actually has. Two cases now: the right namespace with the wrong element, and the
+right element with the wrong namespace and its children in OCF's, so the
+`<rootfile>` is found either way. With the correct build both refuse; with the
+injection both hand back a package document. The re-run catches it.
+
+**Two of the twenty-four were written as injections before they had a test, and
+both tests were written before the matrix ran.** Charging the path length only
+after the merge, and taking the first `<rootfile>` whatever its media type,
+were both predicted to survive while the injection list was being drawn up —
+so `a_content_path_past_the_length_cap_is_refused_before_it_is_merged` gained
+the reference that is nine bytes past the cap and five bytes after resolution,
+and `the_default_rendition_is_the_first_rootfile_that_is_a_package_document` was
+written. Both are recorded here rather than reported as clean catches, because
+a matrix that quietly closes its own gaps before it runs is a matrix that
+measures the person writing it.
+
+**The harness itself had a defect worth recording, and it is a methodological
+one.** The first pass reverted each injection with `shutil.copy2`, which
+restores the pristine **mtime** along with the bytes — and cargo decides
+freshness by mtime. A file reverted to a stamp older than the build that used
+the injection looks up to date, so its crate is not rebuilt and the injection
+survives into the next run. Within one crate this is invisible, because the next
+injection's own edit forces a full recompile of that crate; **across a crate
+boundary it is not.** The `tinker-pdf-zip` defect was still in the binary two
+injections later, and the only reason it was noticed is that its failure list
+carried a ZIP test into two runs that could not have touched one. Reverting now
+copies the bytes and stamps the file, and every injection from that one onward
+was re-run. A revert that the build system cannot see is not a revert.
+
+### Still owed
+
+- **The §4.3.2 warnings have nowhere to go through `Document::open`.** A refused
+  book carries no `ArchiveReport`, so `OcfWarning` is reachable only through
+  `epub::ocf::Ocf` and is asserted there. Milestone 4 maps it into
+  `ArchiveWarning` in the same commit that gives a book a report to carry.
+- **Two entries with one name are not detected.** §4.2.3 forbids a container
+  from holding two files at one path, and `Ocf::index_of` takes the first, where
+  `opc::Package::validate` refuses the analogous case outright. The argument for
+  leaving it is that gap 30's refusal is over *part names*, which is the whole
+  addressing model of that format, and OCF's equivalent bites in the package
+  document's manifest rather than in the container. Milestone 4 decides it, with
+  the manifest in front of it.
+- **§4.2.3's 255-byte file-name limit is not enforced**, deliberately: it is an
+  interoperability rule about file systems this engine never writes to, and
+  refusing a path that names an entry the container actually holds would lose a
+  book over somebody else's `PATH_MAX`. Recorded beside `MAX_OCF_PATH_LEN`,
+  which is the bound that is enforced.
+- **No fuzz target reaches the OCF layer.** The archive underneath has one and
+  the XML above it has one; the name arithmetic between them has none, and
+  milestone 13's campaign is where that lands.
+- **Milestone 2's owed facade test is only half discharged.** A real book now
+  reaches `tinker-pdf-xml` through `container.xml` and `encryption.xml` and
+  through no content document at all, so *"a test that opens a real EPUB and
+  asserts its content documents parse"* still has nowhere to live. It moves to
+  milestone 8, which is the first milestone that reads one.
+- **`MAX_OCF_PATH_LEN` is the eighteenth row of `bounds_ledger.rs`** and carries
+  a zero against both existing yardsticks, which is an answer rather than a
+  blank: a comic archive has no container paths and a fixed document has OPC
+  part names, which are a different grammar. The book yardstick milestone 13
+  adds is the one that will give it a real second figure.

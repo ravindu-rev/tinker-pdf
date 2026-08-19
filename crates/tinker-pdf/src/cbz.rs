@@ -310,6 +310,54 @@ pub enum ArchiveRefusal {
     /// There is no page to degrade *to*, which is the one thing that separates
     /// this from every page-level defect in [`crate::xps::XpsPageDefect`].
     NoFixedPages,
+    /// An OCF container whose own `META-INF` will not read (gap 31, milestone
+    /// 3).
+    ///
+    /// `META-INF/container.xml` is present — that is what routed the archive
+    /// here — and is not the file OCF 3.3 §4.2.6.3.1 defines: markup that is
+    /// not well formed, a root element that is not `container`, no `rootfile`
+    /// naming a package document, or a `full-path` that is not a container path
+    /// under §4.2.3. An `encryption.xml` that will not read lands here too,
+    /// because it is the other reserved file this build acts on.
+    ///
+    /// **This is a sentence about a book**, which is the whole point of gap
+    /// 31's milestone 3: before it, such a file opened as however many images
+    /// it happened to hold.
+    UnreadableContainer,
+    /// A container naming a package document the book does not hold (gap 31,
+    /// milestone 3).
+    ///
+    /// Distinct from [`ArchiveRefusal::UnreadableContainer`] because the two
+    /// blame different halves of the file, and because the difference is the
+    /// **only** observable consequence of resolving §4.2.6.3.1's `full-path`
+    /// against the container root rather than against `META-INF/`. A build that
+    /// resolved it against the referring document returns this for every real
+    /// book ever written.
+    RootfileMissing,
+    /// A book whose resources are encrypted rather than obfuscated (gap 31,
+    /// milestone 3).
+    ///
+    /// `META-INF/encryption.xml` names an algorithm that is not one of OCF's
+    /// two font obfuscations — or names none at all, which XML Encryption
+    /// permits and this build cannot agree to. Refused rather than paginated
+    /// into placeholders: a complete-looking book of nothing is the failure gap
+    /// 17 spent itself on.
+    ///
+    /// **Not** [`ArchiveRefusal::Encrypted`], which is a sentence about a comic
+    /// archive whose every page entry the ZIP reader refused.
+    EncryptedResources,
+    /// An EPUB: recognised, read as far as its container goes, and not laid out
+    /// (gap 31, milestone 3).
+    ///
+    /// A reflowable book has no pages until something paginates it, and gap
+    /// 31's milestones 4 to 12 are that engine. Until then this is what a book
+    /// comes back as — *"an EPUB is refused by a name that is true instead of
+    /// opening as its cover"*, which is that plan's own reason for landing the
+    /// discrimination third.
+    ///
+    /// The one variant here a later milestone removes from the path a valid
+    /// book takes. The other three are permanent.
+    UnpaginatedBook,
 }
 
 impl core::fmt::Display for ArchiveRefusal {
@@ -329,6 +377,18 @@ impl core::fmt::Display for ArchiveRefusal {
             ArchiveRefusal::InvalidPartName => "an item that is not a part name",
             ArchiveRefusal::AmbiguousPartNames => "two part names one package may not both hold",
             ArchiveRefusal::NoFixedPages => "a fixed payload that names no page",
+            ArchiveRefusal::UnreadableContainer => {
+                "an OCF container whose META-INF could not be read"
+            }
+            ArchiveRefusal::RootfileMissing => {
+                "a container naming a package document the book does not hold"
+            }
+            ArchiveRefusal::EncryptedResources => {
+                "a book whose resources are encrypted rather than obfuscated"
+            }
+            ArchiveRefusal::UnpaginatedBook => {
+                "an EPUB, which this build recognises and does not lay out yet"
+            }
         })
     }
 }

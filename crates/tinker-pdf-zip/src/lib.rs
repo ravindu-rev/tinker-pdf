@@ -504,6 +504,41 @@ impl<'a> Archive<'a> {
         self.budget.spent
     }
 
+    /// One entry's **local** extra area (4.3.7), as bytes.
+    ///
+    /// `None` when there is no such entry or its local header is not where the
+    /// directory said. An entry with no extra field answers `Some(&[])`, and
+    /// the two are different sentences: "there is no header to ask" and "the
+    /// header says none".
+    ///
+    /// # Why this is a method and not a field on [`Entry`]
+    ///
+    /// 4.4.11 lets the local extra area differ from the central directory's,
+    /// and routinely it does — so a field on `Entry`, which is the directory's
+    /// view, would answer a different question from the one asked. Filling one
+    /// in from the local header instead would mean parsing every local header
+    /// at [`Archive::open`], and this reader's whole posture is that opening a
+    /// 700 MB archive costs the directory and not the archive.
+    ///
+    /// So it is computed on demand, for the entries a caller asks about. The
+    /// caller that asks is EPUB 3.3 OCF §4.3.2, which requires the `mimetype`
+    /// entry to be first, uncompressed and to carry **no extra field** — the
+    /// three clauses together are what put the twenty bytes of
+    /// `application/epub+zip` at a fixed offset in every conforming container.
+    /// Nothing else in this workspace has ever needed to know.
+    ///
+    /// The area is handed back rather than its length, because a caller that
+    /// wants to know it is empty asks `is_empty()` and one that wants to know
+    /// *what* is in it — a Zip64 record, a timestamp, a Unix uid — has it.
+    #[must_use]
+    pub fn local_extra(&self, index: usize) -> Option<&'a [u8]> {
+        let entry = self.entries.get(index)?;
+        let at = le::offset(entry.header_offset, self.bytes.len())?;
+        let header = local::parse_local(self.bytes, at)?;
+        let start = header.data_offset.checked_sub(header.extra_len)?;
+        self.bytes.get(start..header.data_offset)
+    }
+
     /// Reads one entry, checked.
     ///
     /// A stored entry is handed back **borrowed** — it is a subslice of the

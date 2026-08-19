@@ -106,6 +106,46 @@ fn entries_keep_the_order_the_directory_gave_them() {
     assert_eq!(a.entries()[2].index, 2);
 }
 
+/// The local extra area, which is a different area from the directory's.
+///
+/// Three answers and not two, because the three are different sentences: an
+/// entry that has one, an entry whose header says it has none, and an index
+/// there is no entry for. A caller checking EPUB OCF §4.3.2's *"no extra
+/// field"* clause has to be able to tell the second from the third — a
+/// container whose `mimetype` local header is not where the directory said is
+/// a damaged archive, not a conforming one.
+///
+/// The fixture writes the area on the **local** side only, which 4.4.11 allows
+/// and real archivers do, and that is the whole reason this is a method on
+/// `Archive` rather than a field on `Entry`: the directory's copy here is
+/// empty and would have answered the opposite.
+#[test]
+fn the_local_extra_area_is_readable_and_is_not_the_directorys() {
+    let mut with = File::stored(b"mimetype", b"application/epub+zip");
+    // 0x5455 `UT`, three bytes of payload: the extended-timestamp field every
+    // Info-ZIP build writes, which is exactly how a real `mimetype` acquires
+    // one by accident.
+    with.local_extra = vec![0x55, 0x54, 0x03, 0x00, 1, 2, 3];
+    let zip = archive(
+        &[with, File::stored(b"META-INF/container.xml", b"<c/>")],
+        Damage::None,
+    );
+    let a = open(&zip).unwrap();
+    assert_eq!(
+        a.local_extra(0),
+        Some([0x55u8, 0x54, 0x03, 0x00, 1, 2, 3].as_slice())
+    );
+    assert_eq!(a.local_extra(1), Some([].as_slice()));
+    assert_eq!(a.local_extra(2), None);
+
+    // And the entry still reads, because an extra area moves the data and
+    // nothing else. A reader that computed the data offset from the name
+    // length alone would hand back seven bytes of somebody's timestamp.
+    assert_eq!(a.entries()[0].name, "mimetype");
+    let mut a = a;
+    assert_eq!(&*a.read(0).unwrap(), b"application/epub+zip");
+}
+
 // ---------------------------------------------------------------------------
 // The raw door: the case a zlib header sniff gets wrong
 // ---------------------------------------------------------------------------

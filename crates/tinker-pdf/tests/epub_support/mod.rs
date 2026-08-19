@@ -18,15 +18,16 @@
 //!
 //! # Why the allow
 //!
-//! Two test binaries include this module — `epub.rs` over the committed corpus
-//! and `epub_fetched.rs` over the one that cannot be committed — and each
-//! compiles its own copy. The committed corpus has no encrypted font and the
-//! fetched one does, so the two use different subsets and each reports the
-//! other's as dead.
+//! Three test binaries include this module — `epub.rs` over the committed
+//! corpus, `epub_fetched.rs` over the one that cannot be committed, and
+//! milestone 3's `epub_ocf.rs` over containers no producer would write — and
+//! each compiles its own copy. The committed corpus has no encrypted font and
+//! the fetched one does, so the three use different subsets and each reports
+//! the others' as dead.
 
 #![allow(
     dead_code,
-    reason = "shared by two test binaries; each uses a different subset"
+    reason = "shared by three test binaries; each uses a different subset"
 )]
 
 use tinker_pdf_zip::{Archive, Entry, Limits, Method};
@@ -479,11 +480,23 @@ fn strip_css_comments(text: &str) -> String {
 // ---- a container this file built, for the shapes no real book has -----------
 
 /// One entry of a hand-built OCF container.
+#[derive(Clone)]
 pub struct OcfEntry {
     pub name: String,
     pub data: Vec<u8>,
     /// Method 8 rather than method 0.
     pub deflated: bool,
+    /// Bytes for the **local** header's extra area, and only the local one.
+    ///
+    /// OCF 3.3 §4.3.2's third clause is that the `mimetype` entry carries no
+    /// extra field, and it is the local header's field that clause is about:
+    /// together with "first" and "uncompressed" it is what puts
+    /// `application/epub+zip` at offset 38 of a conforming container. APPNOTE
+    /// 4.4.11 lets the two areas differ, so writing one here and not in the
+    /// directory is a legal archive rather than a damaged one — and it is the
+    /// shape that tells a check written against the local header from one
+    /// written against the central directory's copy.
+    pub extra: Vec<u8>,
 }
 
 impl OcfEntry {
@@ -492,6 +505,7 @@ impl OcfEntry {
             name: name.to_owned(),
             data: data.to_vec(),
             deflated: false,
+            extra: Vec::new(),
         }
     }
 
@@ -500,6 +514,11 @@ impl OcfEntry {
             deflated: true,
             ..OcfEntry::stored(name, data)
         }
+    }
+
+    pub fn with_extra(mut self, extra: &[u8]) -> OcfEntry {
+        self.extra = extra.to_vec();
+        self
     }
 }
 
@@ -540,8 +559,9 @@ pub fn ocf_zip(entries: &[OcfEntry], directory: &[usize]) -> Vec<u8> {
         out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         out.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
         out.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes()); // no extra field
+        out.extend_from_slice(&(entry.extra.len() as u16).to_le_bytes());
         out.extend_from_slice(entry.name.as_bytes());
+        out.extend_from_slice(&entry.extra);
         out.extend_from_slice(&payload);
         payloads.push(payload);
     }

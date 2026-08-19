@@ -23,6 +23,7 @@
 
 mod annots;
 pub mod cbz;
+pub mod epub;
 pub mod fonts;
 mod optional;
 pub mod redact;
@@ -273,13 +274,31 @@ pub struct Document {
 
 /// Opens a recognised container **once** and routes it by what it holds.
 ///
-/// One `Archive::open` for both formats, which is gap 30 milestone 3's own exit
-/// criterion rather than a nicety: opening it to sniff and again to read
+/// One `Archive::open` for all three formats, which is gap 30 milestone 3's own
+/// exit criterion rather than a nicety: opening it to sniff and again to read
 /// doubles the central-directory walk and creates a window in which the two
-/// reads could disagree about the same bytes. [`xps::route`] hands the archive
-/// back **unread** when the package is not an XPS, and the cheap half of that
-/// decision costs no read at all — a ZIP with no `[Content_Types].xml` item and
-/// no `_rels/.rels` item is every comic archive there has ever been.
+/// reads could disagree about the same bytes. [`xps::route`] and [`epub::route`]
+/// each hand the archive back **unread** when it is not theirs, and the cheap
+/// half of both decisions costs no read at all.
+///
+/// # The order, and why each step is where it is
+///
+/// **XPS first, unchanged.** ECMA-388 E.3's three steps, all of them, exactly
+/// as gap 30 wrote them. Its step 2 asks for `[Content_Types].xml` and
+/// `_rels/.rels`, and gap 31's milestone 1 measured that **no** EPUB carries
+/// either — 0 of 26 books — so an EPUB fails E.3 at step 2's first check having
+/// read nothing, and this step is a comparison per entry for a book as it
+/// already was for a comic.
+///
+/// **EPUB second**, by the presence of `META-INF/container.xml` (OCF 3.3
+/// §4.2.6.3). It goes after XPS rather than before because E.3 is a
+/// specification's own recipe and this is not: nothing in OCF says a container
+/// may not also carry OPC's two items, and a file that satisfies both tests is
+/// better read by the standard that describes how to recognise itself.
+///
+/// **The comic path is the fallthrough**, which is what E.3's own text asks
+/// for. A ZIP that is neither is a bag of images, and that is the reading gap
+/// 29 shipped.
 fn open_container(
     what: Container,
     bytes: &[u8],
@@ -291,11 +310,16 @@ fn open_container(
     }
     let comic = cbz::Limits::DEFAULT;
     let archive = cbz::open_archive(bytes, &comic.zip)?;
-    match xps::route(archive, &xps::Limits::DEFAULT) {
-        xps::Routing::Document(pdf, report) => Ok((pdf, report)),
-        xps::Routing::Refused(why) => Err(why),
-        xps::Routing::NotXps(archive) => cbz::pages_from_archive(archive, &comic),
-    }
+    let archive = match xps::route(archive, &xps::Limits::DEFAULT) {
+        xps::Routing::Document(pdf, report) => return Ok((pdf, report)),
+        xps::Routing::Refused(why) => return Err(why),
+        xps::Routing::NotXps(archive) => archive,
+    };
+    let archive = match epub::route(archive, &epub::Limits::DEFAULT) {
+        epub::Routing::Refused(why) => return Err(why),
+        epub::Routing::NotEpub(archive) => archive,
+    };
+    cbz::pages_from_archive(archive, &comic)
 }
 
 impl Document {
@@ -314,15 +338,17 @@ impl Document {
     /// Bytes that **begin** with a container signature are not read as a PDF.
     /// RAR, 7z and tar are refused by name. A ZIP is **one signature over five
     /// formats**, so it is opened once and then asked what it is: an XPS
-    /// package becomes a document whose pages are its fixed pages (gap 30), and
-    /// anything else is synthesised into a document whose pages are its images
-    /// (gap 29).
+    /// package becomes a document whose pages are its fixed pages (gap 30), an
+    /// EPUB is recognised and refused by name until gap 31's layout engine
+    /// lands, and anything else is synthesised into a document whose pages are
+    /// its images (gap 29).
     ///
-    /// The order is not arbitrary and it is argued in [`xps`]: the XPS test is
-    /// ECMA-388 E.3's, all three steps of it, and the comic path is the
-    /// fallthrough — because an XPS mis-routed to the comic path is gap 30's
-    /// headline defect, where a comic mis-routed to XPS would be a refusal
-    /// where a document used to open.
+    /// The order is not arbitrary and it is argued in [`open_container`]: the
+    /// XPS test is ECMA-388 E.3's, all three steps of it, the EPUB test is
+    /// OCF's `META-INF/container.xml`, and the comic path is the fallthrough —
+    /// because an XPS or an EPUB mis-routed to the comic path is gap 30's and
+    /// gap 31's headline defect, where a comic mis-routed either way would be a
+    /// refusal where a document used to open.
     ///
     /// The signatures are tested at a fixed position and nowhere else, so a PDF
     /// that happens to carry `PK\x03\x04` inside a stream is unaffected — see

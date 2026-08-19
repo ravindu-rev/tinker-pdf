@@ -36,6 +36,13 @@ pub(crate) struct File {
     pub encrypted: bool,
     /// Bit 11: the name is UTF-8 rather than CP437.
     pub utf8: bool,
+    /// Bytes for the **local** header's extra area, and only the local one.
+    ///
+    /// 4.4.11 lets the two areas differ, so writing one on one side is a legal
+    /// archive rather than a damaged one — and it is the shape
+    /// `Archive::local_extra` exists to answer, since a central-directory field
+    /// would have said the wrong thing about it.
+    pub local_extra: Vec<u8>,
 }
 
 impl File {
@@ -48,6 +55,7 @@ impl File {
             streamed: false,
             encrypted: false,
             utf8: true,
+            local_extra: Vec::new(),
         }
     }
 
@@ -126,8 +134,9 @@ pub(crate) fn archive(files: &[File], damage: Damage) -> Vec<u8> {
         out.extend_from_slice(&header_c.to_le_bytes());
         out.extend_from_slice(&header_u.to_le_bytes());
         out.extend_from_slice(&(file.name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        out.extend_from_slice(&(file.local_extra.len() as u16).to_le_bytes());
         out.extend_from_slice(&file.name);
+        out.extend_from_slice(&file.local_extra);
         out.extend_from_slice(&payload);
 
         if file.streamed {

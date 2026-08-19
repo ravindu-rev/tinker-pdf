@@ -33,6 +33,7 @@ use epub_support::{
     mimetype_verdict, named_references, numeric_references, read_at, todays_answer, Doctype,
     TodaysAnswer, RESERVED_META_INF,
 };
+use tinker_pdf::ArchiveRefusal;
 use tinker_pdf_xml::{
     Doctype as XmlDoctype, Error as XmlError, Limits as XmlLimits, Reader as XmlReader,
     Source as XmlSource, Warning as XmlWarning,
@@ -129,68 +130,94 @@ fn stylesheets(bytes: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
-// ---- what today does with a book that nobody here commissioned --------------
+// ---- what a book nobody here commissioned is read as -----------------------
 
-/// The measurement this milestone exists to make, against files this repository
-/// did not produce.
+/// **Every fetched book is discriminated from a comic and refused as a book.**
+///
+/// *Rewritten by milestone 3.* Until it landed this test was called
+/// `every_fetched_book_is_mis_read_today` and asserted the defect: eighteen of
+/// twenty opened as comics — `sample-internallinks.epub` as ten pages of store
+/// badges, `sample-svg-in-spine.epub` as six, three of them table-of-contents
+/// ornaments **one point wide** — and two were refused as `NoImages`, with
+/// `warnings()`, `parsed_parts()` and the page-defect count all zero on every
+/// one. None of that is true any more, and a record of old behaviour that does
+/// not break when the behaviour changes is not a record.
 ///
 /// The committed corpus is our text through somebody else's tool; this is
 /// somebody else's text through somebody else's tool, which is the only thing
-/// that can catch a habit shared by our own inputs.
+/// that can catch a habit shared by our own inputs. What it catches here is the
+/// **name**: a book this build cannot read yet has to come back as a sentence
+/// about a book, and `UnpaginatedBook` is that sentence for a container whose
+/// `META-INF` read clean.
 #[test]
-fn every_fetched_book_is_mis_read_today() {
-    let books = fetched!("the mis-read sweep");
-    let mut opened = 0usize;
-    let mut refused = 0usize;
+fn every_fetched_book_is_read_as_a_book_and_refused_by_a_name_that_is_true() {
+    let books = fetched!("the discrimination sweep");
+    let mut counts: Vec<(&'static str, usize)> = Vec::new();
     for (name, bytes) in &books {
         match todays_answer(bytes) {
-            TodaysAnswer::Opens {
-                pages,
-                sizes,
-                warnings,
-                parsed_parts,
-                defects,
-                ..
-            } => {
-                opened += 1;
+            TodaysAnswer::Opens { pages, sizes, .. } => {
                 let shown: Vec<String> = sizes
                     .iter()
                     .take(6)
                     .map(|(w, h)| format!("{w}x{h}"))
                     .collect();
-                println!(
-                    "  opens  {name:44} pages={pages:<3} sizes={} warnings={warnings} \
-                     parsed_parts={parsed_parts} page_defects={defects}",
+                panic!(
+                    "{name} still opens as a comic: pages={pages} sizes={}",
                     shown.join(",")
                 );
-                // The silence is the finding, not the page count. Every one of
-                // these is what a caller would have to look at to discover that
-                // a book was lost, and every one of them says nothing.
-                assert_eq!(warnings, 0, "{name} warns today, which would be news");
-                assert_eq!(
-                    parsed_parts, 0,
-                    "{name} parsed markup today, which it cannot"
-                );
-                assert_eq!(defects, 0, "{name} reports a page defect today");
             }
             TodaysAnswer::Refused(why) => {
-                refused += 1;
-                println!("  refused {name:44} {why:?}");
-                assert_eq!(
-                    why,
-                    tinker_pdf::ArchiveRefusal::NoImages,
-                    "{name} is refused by a name other than the comic one"
+                println!("  {name:44} {why}");
+                assert!(
+                    refusal_is_true_of_a_book(why),
+                    "{name} is refused as {why:?}, which is not a sentence about a book"
                 );
+                bump(&mut counts, refusal_name(why));
             }
             TodaysAnswer::Other(what) => panic!("{name} failed to open in a new way: {what}"),
         }
     }
-    println!("  {opened} open as comics, {refused} refused as NoImages, 0 read as books");
+    counts.sort_unstable();
+    println!("  {counts:?} over {} books", books.len());
+    // Not one of them is refused for a reason that would be a defect in this
+    // layer: a container that will not read, or a rootfile that names nothing,
+    // is a claim about the *book* and every one of these twenty is well formed.
+    // A build whose resolution regressed would come back as `RootfileMissing`
+    // for all twenty and would satisfy the assertion above without this one.
     assert_eq!(
-        opened + refused,
-        books.len(),
-        "the sweep did not account for every book"
+        counts,
+        vec![("UnpaginatedBook", books.len())],
+        "a fetched book is refused for something other than the missing layout engine"
     );
+}
+
+/// Whether a refusal is a sentence that is **true of a book**, as
+/// `tests/epub.rs` defines it and for the reasons written there.
+fn refusal_is_true_of_a_book(why: ArchiveRefusal) -> bool {
+    !matches!(
+        why,
+        ArchiveRefusal::NoImages
+            | ArchiveRefusal::NotAZip
+            | ArchiveRefusal::Damaged
+            | ArchiveRefusal::Encrypted
+            | ArchiveRefusal::MultiDisk
+            | ArchiveRefusal::Zip64OutOfBounds
+            | ArchiveRefusal::UnreadablePackage
+    )
+}
+
+/// A stable name for the tally above. `Debug` would do, and a `match` is what
+/// makes an unexpected refusal show up as `other` rather than as its own row.
+fn refusal_name(why: ArchiveRefusal) -> &'static str {
+    match why {
+        ArchiveRefusal::UnpaginatedBook => "UnpaginatedBook",
+        ArchiveRefusal::UnreadableContainer => "UnreadableContainer",
+        ArchiveRefusal::RootfileMissing => "RootfileMissing",
+        ArchiveRefusal::EncryptedResources => "EncryptedResources",
+        ArchiveRefusal::NoImages => "NoImages",
+        ArchiveRefusal::TooLarge => "TooLarge",
+        _ => "other",
+    }
 }
 
 // ---- the route --------------------------------------------------------------

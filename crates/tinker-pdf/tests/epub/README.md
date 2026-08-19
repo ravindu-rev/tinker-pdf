@@ -239,6 +239,13 @@ file somebody reads when they open the directory.
    `content.opf` at the archive root; pandoc puts it under `EPUB/`. §4.2.5's
    resolution against the *referring document* is load-bearing from the first
    real file rather than from an exotic one.
+   *Amended by milestone 3:* the direction was wrong, and the fetched corpus
+   makes it four places rather than two — `EPUB/`, `OEBPS/`, `OPS/` and the
+   archive root. §4.2.6.3.1 defines `full-path` as a path from the **container
+   root**, so it is the one reference in this format whose base is *not* the
+   document it is written in; resolving it against `META-INF/container.xml`
+   yields `META-INF/EPUB/content.opf`, which no book here holds. The general
+   §4.2.5 rule stands and is what milestone 4's manifest `href`s use.
 5. **One producer's EPUB 3 has no NCX and its EPUB 2 has no navigation
    document; the other's EPUB 3 has both.** A reader that expects one of the two
    to be present sees a different book from each producer.

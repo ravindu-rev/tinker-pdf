@@ -1,4 +1,21 @@
-//! Gap 29's seven bounds and gap 30's, swept in one place.
+//! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
+//!
+//! *Amended, 19 August 2026, gap 31 milestone 3.* One more row —
+//! `MAX_OCF_PATH_LEN` — and it is the first here whose number is a
+//! **specification's own**: OCF 3.3 §4.2.3 says a content path must not exceed
+//! 65 535 bytes, so this cap is taken rather than invented. That makes
+//! [`every_bound_can_fire`]'s check the interesting one: the ceiling in front
+//! of it is an XML attribute value in a ZIP entry, 128 MiB, so the spec's own
+//! figure sits two thousand times below what an attacker may ask for and the
+//! cap is a cap.
+//!
+//! Two constants that could have joined it did not, and both absences are
+//! argued where they are declared rather than here: nothing on container-path
+//! **depth**, because nothing in this engine touches a filesystem so depth
+//! bounds no allocation and no recursion; and nothing on a **segment**'s
+//! length, because §4.2.3's 255-byte file-name limit is an interoperability
+//! rule about somebody else's file system and enforcing it would refuse a path
+//! that names an entry the container actually holds.
 //!
 //! *Amended, 19 August 2026, gap 30 milestone 9.* **No new row, and that is the
 //! point of this amendment: what it adds is the missing half of the rows that
@@ -103,6 +120,7 @@
 //! comic. A relation that six rows satisfy and one does not is not a relation.
 
 use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
+use tinker_pdf::epub::MAX_OCF_PATH_LEN;
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
@@ -120,6 +138,8 @@ const CBZ: &str = include_str!("../src/cbz.rs");
 const CBZ_TESTS: &str = include_str!("cbz.rs");
 const XML_LIMITS: &str = include_str!("../../tinker-pdf-xml/src/limits.rs");
 const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
+const EPUB: &str = include_str!("../src/epub.rs");
+const EPUB_TESTS: &str = include_str!("epub_ocf.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
@@ -505,16 +525,45 @@ fn ledger() -> Vec<Bound> {
                 XPS_MARKUP_TESTS,
             ),
         },
+        // ---- gap 31, milestone 3 ---------------------------------------
+        Bound {
+            name: "MAX_OCF_PATH_LEN",
+            cap: MAX_OCF_PATH_LEN as u128,
+            published: "65 535",
+            // The container built *past* this cap names a path of 65 536; the
+            // longest path in any of the twenty-six real books milestone 1
+            // measured is 39 bytes.
+            fixtures: MAX_OCF_PATH_LEN as u128,
+            // A comic archive has no container paths at all, and a fixed
+            // document has OPC part names rather than OCF content paths — two
+            // grammars that disagree about case folding and about `..`, which
+            // is why `PartName` is not reused. Both are a zero that is an
+            // answer rather than a blank, in the shape every gap 30 row above
+            // writes `comic: 0`.
+            comic: 0,
+            document: 0,
+            // An XML attribute value may be as long as the part that holds it,
+            // and a `META-INF/container.xml` reaches this engine as a ZIP entry
+            // — so the ceiling is the per-entry cap, and the specification's own
+            // number sits two thousand times below it.
+            reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
+            reachable_because: "a `full-path` attribute may be as long as the entry that holds it",
+            declared_in: EPUB,
+            fires_in: (
+                "a_content_path_past_the_length_cap_is_refused_by_name",
+                EPUB_TESTS,
+            ),
+        },
     ]
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
 /// the plan's "per-item caps sit beside them" were built as named constants.
 /// Gap 30's milestone 2 adds four, its milestone 3 adds two and its milestone
-/// 6 adds three. All sixteen are here, and a bound added without a row fails
-/// this.
+/// 6 adds three; gap 31's milestone 3 adds one. All eighteen are here, and a
+/// bound added without a row fails this.
 #[test]
-fn the_sweep_covers_every_bound_these_two_gaps_added() {
+fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
     assert_eq!(
         names,
@@ -536,6 +585,7 @@ fn the_sweep_covers_every_bound_these_two_gaps_added() {
             "MAX_XPS_SEGMENTS",
             "MAX_XPS_GLYPHS",
             "MAX_XPS_RESOURCE_DEPTH",
+            "MAX_OCF_PATH_LEN",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -641,7 +691,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 17, "the ledger is seventeen rows");
+    assert_eq!(measured, 18, "the ledger is eighteen rows");
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not
@@ -730,6 +780,7 @@ fn every_bound_names_a_test_that_exists() {
         XPS_TESTS,
         XPS_MARKUP_TESTS,
         XPS_GLYPH_TESTS,
+        EPUB_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),
