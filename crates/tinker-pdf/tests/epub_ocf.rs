@@ -41,13 +41,42 @@ use tinker_pdf_zip::{Archive, Limits as ZipLimits};
 
 // ---- fixtures ---------------------------------------------------------------
 
-/// A package document that is well formed and says nothing. Milestone 4 reads
-/// one; milestone 3 only needs the entry to be there.
+/// The smallest package document that is a **book**: three required Dublin
+/// Core elements, one manifest item and one spine itemref.
+///
+/// *Amended at milestone 4.* Milestone 3's version had an empty `<manifest/>`
+/// and an empty `<spine/>`, because nothing then read either. That fixture is
+/// now `ArchiveRefusal::EmptySpine` — a refusal that is true of it and useless
+/// as a control — so every container test below would have been asserting the
+/// wrong sentence about a container that is fine. The `href` is relative, which
+/// is what makes the fixtures exercise §4.2.5's merge against the package
+/// document's own path rather than against the container root.
 const PACKAGE_OPF: &str = concat!(
     r#"<?xml version="1.0" encoding="utf-8"?>"#,
     r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">"#,
-    r#"<metadata/><manifest/><spine/></package>"#
+    r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+    r#"<dc:identifier id="id">urn:uuid:0d1f3f2e-0000-4000-8000-000000000001</dc:identifier>"#,
+    r#"<dc:title>The Smallest Book</dc:title><dc:language>en</dc:language>"#,
+    r#"</metadata>"#,
+    r#"<manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>"#,
+    r#"<spine><itemref idref="ch1"/></spine></package>"#
 );
+
+/// The one content document [`PACKAGE_OPF`] names.
+const CHAPTER_XHTML: &str = concat!(
+    r#"<?xml version="1.0" encoding="utf-8"?>"#,
+    r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head>"#,
+    r#"<body><p>One paragraph.</p></body></html>"#
+);
+
+/// Where [`CHAPTER_XHTML`] sits, given where the package document sits: the
+/// `href` is relative, so it is a sibling.
+fn chapter_path(full_path: &str) -> String {
+    match full_path.rfind('/') {
+        Some(at) => format!("{}ch1.xhtml", &full_path[..=at]),
+        None => "ch1.xhtml".to_owned(),
+    }
+}
 
 fn container_xml(full_path: &str) -> String {
     container_xml_with(&format!(
@@ -61,7 +90,7 @@ fn container_xml_with(rootfiles: &str) -> String {
     )
 }
 
-/// The three entries of the smallest conforming container, in physical order.
+/// The four entries of the smallest conforming container, in physical order.
 ///
 /// `container.xml` is **deflated**, which is what both committed producers do
 /// and is load-bearing for one test: `Archive::inflated` is the only public
@@ -73,6 +102,7 @@ fn book_entries(full_path: &str) -> Vec<OcfEntry> {
         OcfEntry::stored(MIMETYPE_ITEM, OCF_MEDIA_TYPE),
         OcfEntry::deflated(CONTAINER_ITEM, container_xml(full_path).as_bytes()),
         OcfEntry::deflated(full_path, PACKAGE_OPF.as_bytes()),
+        OcfEntry::deflated(&chapter_path(full_path), CHAPTER_XHTML.as_bytes()),
     ]
 }
 
@@ -117,31 +147,39 @@ fn corpus_book(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
-const COMMITTED: &[&str] = &[
-    "calibre-book-cover.epub",
-    "calibre-book-nocover.epub",
-    "pandoc-book-cover.epub",
-    "pandoc-book-epub2.epub",
-    "pandoc-book-nocover.epub",
-    "pandoc-plates.epub",
+/// Every committed book and the number of `<itemref>`s its spine holds.
+///
+/// Read out of the package documents by hand and written down, rather than
+/// computed here: a test that recomputes the number it is checking agrees with
+/// itself whatever the reader does.
+const COMMITTED_SPINES: &[(&str, u32)] = &[
+    ("calibre-book-cover.epub", 5),
+    ("calibre-book-nocover.epub", 4),
+    ("pandoc-book-cover.epub", 5),
+    ("pandoc-book-epub2.epub", 5),
+    ("pandoc-book-nocover.epub", 4),
+    ("pandoc-plates.epub", 5),
 ];
 
 // ---- the discrimination -----------------------------------------------------
 
-/// Every committed book is recognised as a book, and refused as one.
+/// Every committed book is recognised as a book, and opens as one.
 ///
-/// This is the defect gap 31 exists to fix, closed: before this commit each of
-/// these opened as however many images it happened to hold, with
-/// `warnings()` empty and nothing anywhere saying a book had been lost.
+/// This is the defect gap 31 exists to fix, closed twice over. Before milestone
+/// 3 each of these opened as however many images it happened to hold, with
+/// `warnings()` empty and nothing anywhere saying a book had been lost; after
+/// it, each came back as `UnpaginatedBook`. Now each is **its spine's worth of
+/// pages**, and the numbers are the ones the package documents state rather
+/// than a count this test would accept whatever it was.
+///
+/// The counts are here rather than derived from the package document, so a
+/// build that stopped reading a spine and started counting something else —
+/// manifest items, XHTML entries — would fail rather than agree with itself.
 #[test]
-fn every_committed_book_is_recognised_and_refused_by_a_name_that_is_true() {
-    for name in COMMITTED {
+fn every_committed_book_is_read_as_the_book_it_is() {
+    for (name, spine) in COMMITTED_SPINES {
         let bytes = corpus_book(name);
-        assert_eq!(
-            opened(&bytes),
-            Err(ArchiveRefusal::UnpaginatedBook),
-            "{name} is not read as a book"
-        );
+        assert_eq!(opened(&bytes), Ok(*spine), "{name} is not its own spine");
     }
 }
 
@@ -208,16 +246,9 @@ fn a_comic_carrying_meta_inf_files_that_are_not_the_container_is_still_a_comic()
 /// entries OCF requires.
 #[test]
 fn a_container_with_no_image_at_all_is_a_book_and_not_an_archive_with_no_images() {
-    assert_eq!(
-        opened(&smallest_book()),
-        Err(ArchiveRefusal::UnpaginatedBook)
-    );
+    assert_eq!(opened(&smallest_book()), Ok(1));
     for name in ["pandoc-book-nocover.epub", "calibre-book-nocover.epub"] {
-        assert_eq!(
-            opened(&corpus_book(name)),
-            Err(ArchiveRefusal::UnpaginatedBook),
-            "{name}"
-        );
+        assert_eq!(opened(&corpus_book(name)), Ok(4), "{name}");
     }
 }
 
@@ -412,7 +443,10 @@ fn a_container_that_breaks_every_mimetype_clause_is_still_read_as_a_book() {
         ],
         "the four clauses are not reported in the order the section states them"
     );
-    assert_eq!(opened(&bytes), Err(ArchiveRefusal::UnpaginatedBook));
+    // And it is still the book it is: a container that breaks all four clauses
+    // is warned about four times and paginates to exactly the page a
+    // conforming one does.
+    assert_eq!(opened(&bytes), Ok(1));
 }
 
 // ---- container.xml, and the base its full-path resolves against -------------
@@ -560,10 +594,71 @@ fn the_two_reserved_names_this_build_acts_on_are_the_only_two_that_can_refuse() 
         let want = if refuses {
             Err(ArchiveRefusal::UnreadableContainer)
         } else {
-            Err(ArchiveRefusal::UnpaginatedBook)
+            Ok(1)
         };
         assert_eq!(opened(&bytes), want, "{item}");
     }
+}
+
+/// **Two entries at one path: milestone 3's owed question, decided.**
+///
+/// §4.2.3 forbids a container from holding two files at one path. Milestone 3
+/// recorded that `Ocf::index_of` takes the first and that *"milestone 4 decides
+/// it, with the manifest in front of it"*. With the manifest in front of it the
+/// decision is a **warning**, and the three halves of it are asserted
+/// separately because a build could get any one of them without the others:
+///
+/// - the container **says so**, where before it said nothing;
+/// - the book still **opens**, because refusing would lose it over a ZIP quirk
+///   that changes nothing about the resource anybody meant;
+/// - and the first entry is the one that resolves, which is the behaviour the
+///   warning is *about* — a caller that does nothing with the warning gets the
+///   same book it got before.
+#[test]
+fn two_entries_at_one_path_are_warned_about_and_the_first_one_wins() {
+    let opf = "EPUB/content.opf";
+    let mut entries = book_entries(opf);
+    // A second chapter at the same name, holding different bytes. Legal ZIP,
+    // illegal OCF, and no real book in either corpus does it.
+    entries.push(OcfEntry::deflated(
+        &chapter_path(opf),
+        br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Two</title></head><body><p>The impostor.</p></body></html>"#,
+    ));
+    let bytes = in_order(&entries);
+
+    let book = ocf(&bytes);
+    assert!(
+        book.warnings().contains(&OcfWarning::DuplicatePath),
+        "a container holding one path twice said nothing: {:?}",
+        book.warnings()
+    );
+    // One warning for the container and not one per copy.
+    assert_eq!(
+        book.warnings()
+            .iter()
+            .filter(|w| **w == OcfWarning::DuplicatePath)
+            .count(),
+        1
+    );
+    let first = book.index_of(&chapter_path(opf)).expect("the chapter");
+    assert_eq!(
+        first, 3,
+        "the first entry of that name is the one that wins"
+    );
+
+    // And it is still a book, with its own page.
+    assert_eq!(opened(&bytes), Ok(1));
+    let doc = Document::open(bytes.clone()).expect("a book");
+    assert!(
+        doc.archive()
+            .expect("a report")
+            .warnings()
+            .contains(&tinker_pdf::ArchiveWarning::Ocf(OcfWarning::DuplicatePath)),
+        "the container's warning did not reach the caller's report"
+    );
+
+    // The control: the same book without the second copy says nothing at all.
+    assert!(ocf(&smallest_book()).warnings().is_empty());
 }
 
 /// A seventh file in `META-INF` is neither refused nor warned about.
@@ -586,7 +681,7 @@ fn a_seventh_file_in_meta_inf_is_ignored_rather_than_refused() {
     let book = ocf(&bytes);
     assert!(book.items().contains(&Item::UnreservedMetaInf));
     assert!(book.warnings().is_empty(), "an ordinary book warned");
-    assert_eq!(opened(&bytes), Err(ArchiveRefusal::UnpaginatedBook));
+    assert_eq!(opened(&bytes), Ok(1));
 }
 
 /// The real `encryption.xml` in the fetched corpus is the shape this build had
@@ -616,7 +711,8 @@ fn an_encryption_file_written_with_a_default_namespace_is_read() {
     assert_eq!(read.entries().len(), 1);
     assert_eq!(read.entries()[0].path, "EPUB/OldStandard-Bold.obf.otf");
     assert_eq!(read.entries()[0].algorithm, Obfuscation::Idpf);
-    assert_eq!(opened(&bytes), Err(ArchiveRefusal::UnpaginatedBook));
+    // An obfuscated font is not encryption, so the book opens.
+    assert_eq!(opened(&bytes), Ok(1));
 }
 
 // ---- every book-level refusal, from a fixture built for it ------------------
@@ -665,6 +761,16 @@ fn every_book_level_refusal_is_returned_by_a_fixture_built_for_it() {
         ));
         in_order(&entries)
     };
+    // Milestone 4's three, each from a package document built for it.
+    let unreadable_package = with_package(opf, "<package");
+    let wrong_version = with_package(
+        opf,
+        &PACKAGE_OPF.replace(r#"version="3.0""#, r#"version="4.0""#),
+    );
+    let empty_spine = with_package(
+        opf,
+        &PACKAGE_OPF.replace(r#"<spine><itemref idref="ch1"/></spine>"#, "<spine/>"),
+    );
 
     for (what, bytes, want) in [
         (
@@ -688,9 +794,19 @@ fn every_book_level_refusal_is_returned_by_a_fixture_built_for_it() {
             ArchiveRefusal::EncryptedResources,
         ),
         (
-            "a conforming book, and no layout engine yet",
-            smallest_book(),
-            ArchiveRefusal::UnpaginatedBook,
+            "a package document that is not markup",
+            unreadable_package,
+            ArchiveRefusal::UnreadablePackageDocument,
+        ),
+        (
+            "a package version this build does not read",
+            wrong_version,
+            ArchiveRefusal::UnsupportedPackageVersion,
+        ),
+        (
+            "a spine that names no content",
+            empty_spine,
+            ArchiveRefusal::EmptySpine,
         ),
     ] {
         assert_eq!(opened(&bytes), Err(want), "{what}");
@@ -698,6 +814,18 @@ fn every_book_level_refusal_is_returned_by_a_fixture_built_for_it() {
         // difference this milestone exists to make.
         assert!(!format!("{want}").is_empty());
     }
+
+    // And the control the list used to hold: a conforming book, which is now a
+    // page rather than a refusal. Without it every row above would still pass
+    // on a build that refused every EPUB there is.
+    assert_eq!(opened(&smallest_book()), Ok(1));
+}
+
+/// The smallest book with its package document replaced.
+fn with_package(opf: &str, package: &str) -> Vec<u8> {
+    let mut entries = book_entries(opf);
+    entries[2] = OcfEntry::deflated(opf, package.as_bytes());
+    in_order(&entries)
 }
 
 /// [`MAX_OCF_PATH_LEN`] fires, by its own refusal, on the real length.

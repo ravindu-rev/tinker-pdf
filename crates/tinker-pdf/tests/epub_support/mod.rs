@@ -30,6 +30,8 @@
     reason = "shared by three test binaries; each uses a different subset"
 )]
 
+pub mod conservation;
+
 use tinker_pdf_zip::{Archive, Entry, Limits, Method};
 
 // ---- reading a book ---------------------------------------------------------

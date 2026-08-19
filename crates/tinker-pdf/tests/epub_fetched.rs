@@ -28,12 +28,14 @@ mod epub_support;
 
 use std::path::PathBuf;
 
+use epub_support::conservation::{conservation, spine_text};
 use epub_support::{
     classify_doctype, css_properties, doctype_shape, entries, is_content_document, is_stylesheet,
     mimetype_verdict, named_references, numeric_references, read_at, todays_answer, Doctype,
     TodaysAnswer, RESERVED_META_INF,
 };
-use tinker_pdf::ArchiveRefusal;
+use tinker_pdf::epub::SpineDefect;
+use tinker_pdf::{ArchiveWarning, Document};
 use tinker_pdf_xml::{
     Doctype as XmlDoctype, Error as XmlError, Limits as XmlLimits, Reader as XmlReader,
     Source as XmlSource, Warning as XmlWarning,
@@ -132,92 +134,169 @@ fn stylesheets(bytes: &[u8]) -> Vec<(String, String)> {
 
 // ---- what a book nobody here commissioned is read as -----------------------
 
-/// **Every fetched book is discriminated from a comic and refused as a book.**
+/// **Every fetched book paginates to its own spine, at the box `OpenOptions`
+/// states.**
 ///
-/// *Rewritten by milestone 3.* Until it landed this test was called
+/// *Rewritten twice.* Until milestone 3 this was called
 /// `every_fetched_book_is_mis_read_today` and asserted the defect: eighteen of
 /// twenty opened as comics — `sample-internallinks.epub` as ten pages of store
 /// badges, `sample-svg-in-spine.epub` as six, three of them table-of-contents
-/// ornaments **one point wide** — and two were refused as `NoImages`, with
-/// `warnings()`, `parsed_parts()` and the page-defect count all zero on every
-/// one. None of that is true any more, and a record of old behaviour that does
-/// not break when the behaviour changes is not a record.
+/// ornaments **one point wide** — and two were refused as `NoImages`.
+/// Milestone 3 turned all twenty into `UnpaginatedBook`. Milestone 4 turns them
+/// into books, and the numbers below are the spines those twenty package
+/// documents state.
 ///
 /// The committed corpus is our text through somebody else's tool; this is
 /// somebody else's text through somebody else's tool, which is the only thing
-/// that can catch a habit shared by our own inputs. What it catches here is the
-/// **name**: a book this build cannot read yet has to come back as a sentence
-/// about a book, and `UnpaginatedBook` is that sentence for a container whose
-/// `META-INF` read clean.
+/// that can catch a habit shared by our own inputs. Three of these twenty are
+/// shapes the committed six do not have: a spine of ninety-four, a spine of
+/// SVG content documents, and two books whose fonts are obfuscated.
+///
+/// **The page count and the page box are two claims** and both are asserted,
+/// because a build that paginated correctly into a wrong box, and one that put
+/// the right box on the wrong number of pages, would each satisfy the other's
+/// test.
 #[test]
-fn every_fetched_book_is_read_as_a_book_and_refused_by_a_name_that_is_true() {
-    let books = fetched!("the discrimination sweep");
-    let mut counts: Vec<(&'static str, usize)> = Vec::new();
+fn every_fetched_book_paginates_to_its_own_spine() {
+    let books = fetched!("the pagination sweep");
+    let mut total = 0usize;
     for (name, bytes) in &books {
+        let want = *FETCHED_SPINES
+            .iter()
+            .find(|(book, _)| book == name)
+            .map(|(_, spine)| spine)
+            .unwrap_or_else(|| panic!("{name} has no recorded spine length"));
         match todays_answer(bytes) {
             TodaysAnswer::Opens { pages, sizes, .. } => {
-                let shown: Vec<String> = sizes
-                    .iter()
-                    .take(6)
-                    .map(|(w, h)| format!("{w}x{h}"))
-                    .collect();
-                panic!(
-                    "{name} still opens as a comic: pages={pages} sizes={}",
-                    shown.join(",")
-                );
-            }
-            TodaysAnswer::Refused(why) => {
-                println!("  {name:44} {why}");
+                println!("  {name:44} {pages} pages");
+                assert_eq!(pages, want, "{name} did not paginate to its spine");
                 assert!(
-                    refusal_is_true_of_a_book(why),
-                    "{name} is refused as {why:?}, which is not a sentence about a book"
+                    sizes.iter().all(|size| *size == (432.0, 648.0)),
+                    "{name} has a page that is not the default box: {:?}",
+                    sizes.iter().find(|size| **size != (432.0, 648.0))
                 );
-                bump(&mut counts, refusal_name(why));
+                total += pages as usize;
             }
+            TodaysAnswer::Refused(why) => panic!("{name} is refused as {why:?}"),
             TodaysAnswer::Other(what) => panic!("{name} failed to open in a new way: {what}"),
         }
     }
-    counts.sort_unstable();
-    println!("  {counts:?} over {} books", books.len());
-    // Not one of them is refused for a reason that would be a defect in this
-    // layer: a container that will not read, or a rootfile that names nothing,
-    // is a claim about the *book* and every one of these twenty is well formed.
-    // A build whose resolution regressed would come back as `RootfileMissing`
-    // for all twenty and would satisfy the assertion above without this one.
-    assert_eq!(
-        counts,
-        vec![("UnpaginatedBook", books.len())],
-        "a fetched book is refused for something other than the missing layout engine"
-    );
+    println!("  {total} pages over {} books", books.len());
+    assert_eq!(books.len(), FETCHED_SPINES.len());
 }
 
-/// Whether a refusal is a sentence that is **true of a book**, as
-/// `tests/epub.rs` defines it and for the reasons written there.
-fn refusal_is_true_of_a_book(why: ArchiveRefusal) -> bool {
-    !matches!(
-        why,
-        ArchiveRefusal::NoImages
-            | ArchiveRefusal::NotAZip
-            | ArchiveRefusal::Damaged
-            | ArchiveRefusal::Encrypted
-            | ArchiveRefusal::MultiDisk
-            | ArchiveRefusal::Zip64OutOfBounds
-            | ArchiveRefusal::UnreadablePackage
-    )
-}
+/// Every fetched book and the number of `<itemref>`s its spine holds.
+///
+/// Written down rather than recomputed, for `epub_ocf.rs`'s reason: a test that
+/// derives the number it checks agrees with itself whatever the reader does.
+const FETCHED_SPINES: &[(&str, u32)] = &[
+    ("pg11-alice-images.epub", 15),
+    ("pg11-epub2-images.epub", 14),
+    ("pg1342-noimages.epub", 16),
+    ("pg16328-beowulf.epub", 7),
+    ("pg2701-images.epub", 12),
+    ("pg84-images.epub", 32),
+    ("sample-childrens-literature.epub", 3),
+    ("sample-childrens-media-query.epub", 1),
+    ("sample-epub30-spec.epub", 11),
+    ("sample-georgia-cfi.epub", 2),
+    ("sample-hefty-water.epub", 1),
+    ("sample-internallinks.epub", 7),
+    ("sample-linear-algebra.epub", 94),
+    ("sample-quiz-bindings.epub", 1),
+    ("sample-regime-anticancer-arabic.epub", 3),
+    ("sample-svg-in-spine.epub", 6),
+    ("sample-trees.epub", 3),
+    ("sample-wasteland-otf-obf.epub", 1),
+    ("sample-wasteland-woff-obf.epub", 1),
+    ("sample-wasteland.epub", 1),
+];
 
-/// A stable name for the tally above. `Debug` would do, and a `match` is what
-/// makes an unexpected refusal show up as `other` rather than as its own row.
-fn refusal_name(why: ArchiveRefusal) -> &'static str {
-    match why {
-        ArchiveRefusal::UnpaginatedBook => "UnpaginatedBook",
-        ArchiveRefusal::UnreadableContainer => "UnreadableContainer",
-        ArchiveRefusal::RootfileMissing => "RootfileMissing",
-        ArchiveRefusal::EncryptedResources => "EncryptedResources",
-        ArchiveRefusal::NoImages => "NoImages",
-        ArchiveRefusal::TooLarge => "TooLarge",
-        _ => "other",
+/// Not one page of any fetched book draws anything, and every one of them says
+/// so.
+///
+/// The other half of the pair above. A build that paginated a book correctly
+/// and drew a white page would pass every assertion in this file except this
+/// one — and a white page reported as a success is the failure gap 17 spent
+/// itself on. Every page carries a [`SpineDefect`], and the distribution is
+/// asserted rather than the mere presence: `sample-svg-in-spine.epub`'s six
+/// pages are `SvgContentDocument` and nobody else's are, so a build that
+/// collapsed the two names would fail here.
+#[test]
+fn every_fetched_page_is_a_placeholder_that_says_why() {
+    let books = fetched!("the placeholder sweep");
+    let mut svg = 0usize;
+    let mut not_laid_out = 0usize;
+    for (name, bytes) in &books {
+        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = doc.archive().expect("a book carries a report");
+        let mut named = vec![false; doc.page_count() as usize];
+        for warning in report.warnings() {
+            let ArchiveWarning::SpinePage { page, defect } = warning else {
+                continue;
+            };
+            named[*page as usize] = true;
+            match defect {
+                SpineDefect::SvgContentDocument => svg += 1,
+                SpineDefect::NotLaidOut => not_laid_out += 1,
+                other => panic!("{name} page {page}: {other:?}"),
+            }
+        }
+        assert!(
+            named.iter().all(|said| *said),
+            "{name} has a page nothing said anything about"
+        );
     }
+    println!("  {not_laid_out} unlaid pages and {svg} SVG spine items");
+    assert_eq!(svg, 6, "the six SVG spine items are one book's");
+    assert_eq!(not_laid_out + svg, 231, "every page of every fetched book");
+}
+
+/// Text conservation over books nobody here commissioned.
+///
+/// The committed corpus's figures are written down in
+/// `tests/epub/CONSERVATION.tsv`; these books cannot be committed, so what is
+/// asserted is the half that needs no record and is true at **every**
+/// milestone: **no page carries a character the book does not have there.**
+///
+/// The other half is the number this sweep prints, which is milestone 4's
+/// honest score against somebody else's text: zero of 1.2 million characters.
+/// Every milestone from 8 onward raises it, and the harness that measures it
+/// exists now rather than then.
+///
+/// A source stream that came back **empty** would satisfy "nothing extra" while
+/// measuring nothing at all, so the total is asserted to be large — which is
+/// what says the harness read twenty real books rather than twenty containers
+/// it could not open.
+#[test]
+fn no_fetched_page_carries_a_character_its_book_does_not_have() {
+    let books = fetched!("text conservation");
+    let mut source = 0usize;
+    let mut conserved = 0usize;
+    for (name, bytes) in &books {
+        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let verdict = conservation(bytes, &doc);
+        assert_eq!(
+            verdict.extra, 0,
+            "{name} carries {} characters its book does not have: {:?}",
+            verdict.extra, verdict.divergences
+        );
+        assert_eq!(
+            spine_text(bytes).items.len(),
+            doc.page_count() as usize,
+            "{name}: the harness and the engine disagree about the spine's length"
+        );
+        source += verdict.source;
+        conserved += verdict.conserved;
+    }
+    println!(
+        "  {conserved}/{source} characters conserved over {} books",
+        books.len()
+    );
+    assert!(
+        source > 1_000_000,
+        "the harness read {source} characters out of twenty books, which is not twenty books"
+    );
 }
 
 // ---- the route --------------------------------------------------------------

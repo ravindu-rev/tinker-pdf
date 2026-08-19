@@ -350,14 +350,46 @@ pub enum ArchiveRefusal {
     /// (gap 31, milestone 3).
     ///
     /// A reflowable book has no pages until something paginates it, and gap
-    /// 31's milestones 4 to 12 are that engine. Until then this is what a book
-    /// comes back as — *"an EPUB is refused by a name that is true instead of
-    /// opening as its cover"*, which is that plan's own reason for landing the
-    /// discrimination third.
+    /// 31's milestones 4 to 12 are that engine. Milestone 3 returned this for
+    /// **every** valid book; milestone 4 gave the spine its pages, so nothing
+    /// in this build returns it any more.
     ///
-    /// The one variant here a later milestone removes from the path a valid
-    /// book takes. The other three are permanent.
+    /// It is kept rather than removed for the reason
+    /// [`ArchiveRefusal`]'s `#[non_exhaustive]` exists: a caller that matched on
+    /// it should not fail to compile because a milestone landed, and the doc
+    /// comment is where the history goes. A future build that meets a book it
+    /// recognises and cannot paginate at all may return it again.
     UnpaginatedBook,
+    /// A book whose package document will not read (gap 31, milestone 4).
+    ///
+    /// `container.xml` named it and the container holds it, and it is not the
+    /// file EPUB 3.3 §5.4 defines: markup that is not well formed, a root
+    /// element that is not `package` in the OPF namespace, or a document
+    /// carrying no `<manifest>` or no `<spine>`.
+    ///
+    /// **Not** [`ArchiveRefusal::UnreadablePackage`], which is gap 30's and is a
+    /// sentence about an *OPC* package — a different format's word for a
+    /// different file. Milestone 1 measured 0 of 26 books carrying OPC's two
+    /// items, so the two can never both be true of one archive, and collapsing
+    /// them would tell a caller a book is an XPS.
+    UnreadablePackageDocument,
+    /// A package document declaring a version this build does not read (gap 31,
+    /// milestone 4).
+    ///
+    /// §5.4.1's `version` is required and this build reads `2.0` and `3.x`.
+    /// **An absent attribute lands here too**, and the two are one refusal
+    /// because the consequence is identical: nothing can know which vocabulary
+    /// the markup is written in, and guessing 3.0 for an EPUB 4 is how a reader
+    /// silently mis-reads a format it has never seen.
+    UnsupportedPackageVersion,
+    /// A package document whose spine holds no `itemref` (gap 31, milestone 4).
+    ///
+    /// §5.7.2 requires at least one, and a book with an empty spine has no
+    /// reading order at all. Refused rather than opened as zero pages, for
+    /// [`ArchiveRefusal::NoImages`]'s reason: a host that asks for the page
+    /// count, gets 0 and has no error to show has been handed a failure dressed
+    /// as a success.
+    EmptySpine,
 }
 
 impl core::fmt::Display for ArchiveRefusal {
@@ -389,6 +421,13 @@ impl core::fmt::Display for ArchiveRefusal {
             ArchiveRefusal::UnpaginatedBook => {
                 "an EPUB, which this build recognises and does not lay out yet"
             }
+            ArchiveRefusal::UnreadablePackageDocument => {
+                "a book whose package document could not be read"
+            }
+            ArchiveRefusal::UnsupportedPackageVersion => {
+                "a package version this build does not read"
+            }
+            ArchiveRefusal::EmptySpine => "a book whose spine names no content at all",
         })
     }
 }
@@ -490,6 +529,70 @@ pub enum ArchiveWarning {
         /// Why.
         defect: crate::xps::XpsElementDefect,
     },
+    /// What OCF 3.3 §4.3.2 tolerated about a book's container (gap 31,
+    /// milestone 4).
+    ///
+    /// Milestone 3 could compute every one of these and had **nowhere to put
+    /// them**: a refused book carries no [`ArchiveReport`], so
+    /// [`crate::epub::ocf::OcfWarning`] was reachable only by opening the
+    /// container by hand. This is the commit that gives a book a report to carry
+    /// them in, and closing that is why the variant is a carrier rather than a
+    /// second spelling of the same five clauses.
+    Ocf(crate::epub::ocf::OcfWarning),
+    /// What EPUB 3.3 §5.5.3.1 and §5.6.1 tolerated about a book's package
+    /// document (gap 31, milestone 4).
+    Package(crate::epub::package::PackageDefect),
+    /// A synthesised **spine page** is a placeholder rather than the chapter it
+    /// stands for (gap 31, milestone 4).
+    ///
+    /// The page keeps its number and the book's page box, for
+    /// [`ArchiveWarning::PlaceholderPage`]'s reason with more force: dropping a
+    /// spine item does not renumber a page, it **removes a chapter**, and a book
+    /// that jumps from chapter 4 to chapter 6 reads as a bad conversion rather
+    /// than as a bug.
+    ///
+    /// **Every page of every book carries one at milestone 4**, because there
+    /// is no layout engine yet and a page that draws nothing while saying
+    /// nothing is a book of blank paper reported as a success.
+    SpinePage {
+        /// Zero-based page index.
+        page: u32,
+        /// Why.
+        defect: crate::epub::SpineDefect,
+    },
+    /// A §5.6.2 manifest property naming behaviour this build does not have,
+    /// with the number of manifest items carrying it (gap 31, milestone 4).
+    ///
+    /// **Deduplicated per book and counted**, which is gap 31's third honesty
+    /// device rather than a convenience: the fetched corpus holds a book with
+    /// seventy-one `mathml` items, and seventy-one identical warnings would
+    /// destroy the distinction between "it opened" and "it opened cleanly"
+    /// before anybody had looked at one.
+    UnimplementedFeature {
+        /// Which property.
+        property: crate::epub::package::Property,
+        /// How many manifest items carry it.
+        items: u32,
+    },
+    /// A number the **caller** passed in [`crate::OpenOptions`] could not be
+    /// used, and the default was laid out instead (gap 31, milestone 4).
+    ///
+    /// Not a claim about the file, which is why it is not an
+    /// [`ArchiveRefusal`]: a host that passes a page width of `NaN` should still
+    /// get its book, and should be told which of its numbers was thrown away.
+    UnusableOption(crate::epub::BookOptionDefect),
+    /// A font provider was attached **after** the book was paginated (gap 31,
+    /// milestone 4).
+    ///
+    /// [`crate::Document::with_fonts`] arrives after `open`, and a reflowable
+    /// book's line breaks — and therefore its page count — were decided at
+    /// `open` from the metrics available then. The provider still supplies
+    /// glyphs, so the text draws; what it cannot do is re-paginate.
+    ///
+    /// **Silently accepting it is the failure this warning exists for.**
+    /// `crate::OpenOptions::fonts` is where a provider goes if it is to decide
+    /// anything, and this is the sentence that says the late one did not.
+    FontsAttachedAfterPagination,
 }
 
 /// Where one page came from.
@@ -514,10 +617,11 @@ pub struct ArchiveReport {
     synthesised_bytes: usize,
     dialect: Option<crate::xps::Dialect>,
     parsed_parts: usize,
+    layout: Option<crate::epub::BookLayout>,
 }
 
 impl ArchiveReport {
-    /// Builds a report. `pub(crate)` because the two synthesisers are the only
+    /// Builds a report. `pub(crate)` because the three synthesisers are the only
     /// things that can honestly fill one in.
     pub(crate) fn synthesised(
         warnings: Vec<ArchiveWarning>,
@@ -532,7 +636,44 @@ impl ArchiveReport {
             synthesised_bytes,
             dialect,
             parsed_parts,
+            layout: None,
         }
+    }
+
+    /// Builds a report for a **reflowable book** (gap 31, milestone 4).
+    ///
+    /// A separate constructor rather than a sixth parameter on the one above,
+    /// because the two describe different things: a comic and a fixed document
+    /// have a page geometry the file states, and a book has one the caller
+    /// chose. [`ArchiveReport::layout`] is `Some` exactly for the second, which
+    /// is what [`crate::Document::with_fonts`] keys on.
+    pub(crate) fn book(
+        warnings: Vec<ArchiveWarning>,
+        pages: Vec<PageOrigin>,
+        synthesised_bytes: usize,
+        layout: crate::epub::BookLayout,
+    ) -> ArchiveReport {
+        ArchiveReport {
+            warnings,
+            pages,
+            synthesised_bytes,
+            dialect: None,
+            // No markup part is *cached* by the book path the way gap 30's is —
+            // the OCF layer reads each entry once and the package document is
+            // one file — so this stays the comic path's honest zero rather than
+            // acquiring a second meaning.
+            parsed_parts: 0,
+            layout: Some(layout),
+        }
+    }
+
+    /// Adds a warning after the fact.
+    ///
+    /// The one thing that legitimately happens after synthesis is a caller
+    /// attaching a font provider too late to change the pagination, and saying
+    /// so is [`ArchiveWarning::FontsAttachedAfterPagination`]'s whole job.
+    pub(crate) fn warn(&mut self, warning: ArchiveWarning) {
+        self.warnings.push(warning);
     }
 
     /// Everything tolerated, in the order it happened.
@@ -587,6 +728,20 @@ impl ArchiveReport {
     #[must_use]
     pub fn parsed_parts(&self) -> usize {
         self.parsed_parts
+    }
+
+    /// The page box and base font size a **reflowable** book was laid out at,
+    /// or `None` for a document whose geometry its own file states (gap 31,
+    /// milestone 4).
+    ///
+    /// Public because it is the provenance of the page count. A comic's page
+    /// count is a property of the archive and an XPS's is a property of the
+    /// package; a book's is a function of the numbers in here, and a caller
+    /// looking at `page_count()` has no other way to know which kind of number
+    /// it is holding.
+    #[must_use]
+    pub fn layout(&self) -> Option<crate::epub::BookLayout> {
+        self.layout
     }
 }
 

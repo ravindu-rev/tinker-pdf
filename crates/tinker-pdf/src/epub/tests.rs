@@ -13,7 +13,14 @@ use super::ocf::{
     classify, parse_container, parse_encryption, resolve_reference, Item, Obfuscation, PathDefect,
     Reserved, RootfileRef, ADOBE_OBFUSCATION, CONTAINER_ITEM, IDPF_OBFUSCATION, OCF_ROOT,
 };
-use super::{Limits, MAX_OCF_PATH_LEN};
+use super::package::{
+    parse as parse_package, CoreMediaType, FallbackDefect, Package, PackageDefect, PackageVersion,
+    Property,
+};
+use super::{
+    BookLayout, BookOptionDefect, Limits, DEFAULT_FONT_SIZE, DEFAULT_PAGE, MAX_EPUB_FALLBACK_DEPTH,
+    MAX_OCF_PATH_LEN, MAX_PAGE_SIDE,
+};
 use crate::cbz::ArchiveRefusal;
 
 fn limits() -> Limits {
@@ -598,4 +605,610 @@ fn an_encryption_file_that_will_not_read_is_unreadable_and_not_encrypted() {
 fn an_empty_encryption_file_leaves_the_book_readable() {
     let parsed = parse_encryption(&encryption(""), &limits()).expect("nothing encrypted");
     assert!(parsed.entries().is_empty());
+}
+
+// ---- Section 5: the package document ----------------------------------------
+
+/// A package document around a body, at version 3.0.
+fn opf(body: &str) -> Vec<u8> {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">{body}</package>"#
+    )
+    .into_bytes()
+}
+
+/// §5.5.3.1's three required elements, spelled the way both producers do.
+const METADATA: &str = concat!(
+    r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+    r#"<dc:identifier id="pub-id">urn:uuid:00000000-0000-4000-8000-000000000000</dc:identifier>"#,
+    r#"<dc:title>A Book</dc:title>"#,
+    r#"<dc:language>en</dc:language>"#,
+    r#"<dc:creator>Somebody</dc:creator>"#,
+    r#"</metadata>"#
+);
+
+/// One manifest item and one spine itemref naming it.
+const ONE_CHAPTER: &str = concat!(
+    r#"<manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>"#,
+    r#"<spine><itemref idref="c1"/></spine>"#
+);
+
+fn package(body: &str) -> Result<Package, ArchiveRefusal> {
+    parse_package(&opf(body), "EPUB/content.opf", &limits())
+}
+
+/// §5.5.3.1's three, and the `unique-identifier` milestone 9's key is the SHA-1
+/// of.
+///
+/// Four claims and not one: the three elements are independent, and the fourth
+/// — which `dc:identifier` the `unique-identifier` attribute *points at* — is
+/// independent of all of them. A book may carry three identifiers and name
+/// none of them, which is `PackageDefect::UniqueIdentifierUnresolved` and is
+/// the only one of the four that leaves milestone 9 with no key.
+#[test]
+fn the_three_required_dublin_core_elements_and_the_unique_identifier() {
+    let read = package(&format!("{METADATA}{ONE_CHAPTER}")).expect("a book");
+    assert_eq!(read.title(), Some("A Book"));
+    assert_eq!(read.language(), Some("en"));
+    assert_eq!(read.creator(), Some("Somebody"));
+    assert_eq!(
+        read.unique_identifier(),
+        Some("urn:uuid:00000000-0000-4000-8000-000000000000")
+    );
+    assert!(read.defects().is_empty(), "{:?}", read.defects());
+
+    // Each of the two that stand alone, missing on its own and reported on its
+    // own.
+    for (drop_from, want) in [
+        (r#"<dc:title>A Book</dc:title>"#, PackageDefect::NoTitle),
+        (
+            r#"<dc:language>en</dc:language>"#,
+            PackageDefect::NoLanguage,
+        ),
+    ] {
+        let read = package(&format!("{}{ONE_CHAPTER}", METADATA.replace(drop_from, "")))
+            .expect("still a book");
+        assert_eq!(read.defects(), [want], "dropping {drop_from}");
+    }
+
+    // The identifier is a pair: dropping it loses *two* facts, because the
+    // `unique-identifier` then points at nothing either. A build reporting one
+    // of the two would pass a test that only looked for the other.
+    let no_id = METADATA.replace(
+        r#"<dc:identifier id="pub-id">urn:uuid:00000000-0000-4000-8000-000000000000</dc:identifier>"#,
+        "",
+    );
+    let read = package(&format!("{no_id}{ONE_CHAPTER}")).expect("still a book");
+    assert_eq!(
+        read.defects(),
+        [
+            PackageDefect::NoIdentifier,
+            PackageDefect::UniqueIdentifierUnresolved
+        ]
+    );
+    assert_eq!(read.unique_identifier(), None);
+
+    // And the sharper half: identifiers present, and the attribute names none
+    // of them. Only the second defect fires, and there is still no key.
+    let elsewhere = METADATA.replace(r#"id="pub-id""#, r#"id="somewhere-else""#);
+    let read = package(&format!("{elsewhere}{ONE_CHAPTER}")).expect("still a book");
+    assert_eq!(read.defects(), [PackageDefect::UniqueIdentifierUnresolved]);
+    assert_eq!(read.unique_identifier(), None);
+}
+
+/// A manifest `href` resolves against the **package document**, which is the
+/// general rule milestone 3 built and had no caller for.
+///
+/// Both real shapes are here because both are real: 213 of the 412 hrefs in the
+/// two corpora are flat and 199 name a directory, and one producer puts its
+/// package document at the archive root while the other puts it under `EPUB/`.
+/// A build that resolved against the container root reads every flat book
+/// correctly and loses every nested one, which is the direction that looks like
+/// a missing file.
+#[test]
+fn a_manifest_href_resolves_against_the_package_document() {
+    for (opf_path, href, want) in [
+        ("EPUB/content.opf", "text/ch1.xhtml", "EPUB/text/ch1.xhtml"),
+        ("EPUB/content.opf", "ch1.xhtml", "EPUB/ch1.xhtml"),
+        ("EPUB/content.opf", "../images/a.png", "images/a.png"),
+        ("content.opf", "ch1.xhtml", "ch1.xhtml"),
+        ("OEBPS/content.opf", "ch1.xhtml", "OEBPS/ch1.xhtml"),
+        // A fragment is not part of a path, and milestone 8's cross-references
+        // carry one on nearly every href.
+        ("EPUB/content.opf", "ch1.xhtml#top", "EPUB/ch1.xhtml"),
+        // Percent-decoded per segment, per §4.2.5 and RFC 3986.
+        ("EPUB/content.opf", "a%20b.xhtml", "EPUB/a b.xhtml"),
+    ] {
+        let body = format!(
+            r#"{METADATA}<manifest><item id="c1" href="{href}" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine>"#
+        );
+        let read = parse_package(&opf(&body), opf_path, &limits()).expect("a book");
+        assert_eq!(
+            read.items()[0].path.as_deref(),
+            Some(want),
+            "{href} from {opf_path}"
+        );
+    }
+
+    // And a reference that is not a container path at all leaves no path, which
+    // is a different fact from a path naming no entry.
+    let body = format!(
+        r#"{METADATA}<manifest><item id="c1" href="http://example.invalid/a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine>"#
+    );
+    let read = parse_package(&opf(&body), "EPUB/content.opf", &limits()).expect("a book");
+    assert_eq!(read.items()[0].path, None);
+}
+
+/// §5.4.1's version: 2.0 and 3.x are read, everything else is refused **by
+/// name**, and an absent attribute lands in the same place with the same
+/// argument.
+#[test]
+fn a_package_version_is_two_or_three_and_anything_else_is_refused_by_name() {
+    for (value, want) in [
+        ("2.0", Some(PackageVersion::Epub2)),
+        ("2.0.1", Some(PackageVersion::Epub2)),
+        ("3.0", Some(PackageVersion::Epub3)),
+        ("3.1", Some(PackageVersion::Epub3)),
+        ("3.3", Some(PackageVersion::Epub3)),
+        ("1.0", None),
+        ("4.0", None),
+        ("3", None),
+        ("3.0beta", None),
+        ("", None),
+        ("three", None),
+    ] {
+        assert_eq!(PackageVersion::from_attribute(value), want, "{value:?}");
+    }
+
+    // Through the parser, which is where the refusal is a caller's answer.
+    for value in ["2.0", "3.0"] {
+        let markup = format!(
+            r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="{value}" unique-identifier="pub-id">{METADATA}{ONE_CHAPTER}</package>"#
+        );
+        assert!(parse_package(markup.as_bytes(), "content.opf", &limits()).is_ok());
+    }
+    for value in ["4.0", "1.0", "0.999"] {
+        let markup = format!(
+            r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="{value}" unique-identifier="pub-id">{METADATA}{ONE_CHAPTER}</package>"#
+        );
+        assert_eq!(
+            parse_package(markup.as_bytes(), "content.opf", &limits()),
+            Err(ArchiveRefusal::UnsupportedPackageVersion),
+            "{value}"
+        );
+    }
+    // Absent, which §5.4.1 forbids and which this build cannot guess at.
+    let markup = format!(
+        r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id">{METADATA}{ONE_CHAPTER}</package>"#
+    );
+    assert_eq!(
+        parse_package(markup.as_bytes(), "content.opf", &limits()),
+        Err(ArchiveRefusal::UnsupportedPackageVersion)
+    );
+}
+
+/// EPUB 2.0's OPF reads through the same parser, with the shapes only it has.
+///
+/// `opf:role` and `opf:file-as` on a `dc:` element, `opf:scheme` on the
+/// identifier, a `<guide>` beside the spine and no `properties` anywhere:
+/// exactly what milestone 1 measured both producers writing into their EPUB 2
+/// output. None of it changes what a spine is, which is the whole claim behind
+/// calling EPUB 2 a compatibility surface rather than a second reader.
+#[test]
+fn an_epub_2_package_reads_through_the_same_parser() {
+    let markup = concat!(
+        r#"<?xml version='1.0' encoding='utf-8'?>"#,
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uuid_id">"#,
+        r#"<metadata xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+        r#"<dc:title>A Short Account of Containers</dc:title>"#,
+        r#"<dc:language>en</dc:language>"#,
+        r#"<dc:creator opf:file-as="Unknown" opf:role="aut">The tinker-pdf authors</dc:creator>"#,
+        r#"<dc:identifier id="uuid_id" opf:scheme="uuid">dce0f952-1c42-416b-85ab-c87b15b1125d</dc:identifier>"#,
+        r#"</metadata>"#,
+        r#"<manifest><item id="html4" href="index_split_000.html" media-type="application/xhtml+xml"/>"#,
+        r#"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>"#,
+        r#"<spine toc="ncx"><itemref idref="html4"/></spine>"#,
+        r#"<guide><reference type="toc" title="TOC" href="toc.html"/></guide>"#,
+        r#"</package>"#
+    );
+    let read = parse_package(markup.as_bytes(), "content.opf", &limits()).expect("a book");
+    assert_eq!(read.version(), PackageVersion::Epub2);
+    assert_eq!(read.title(), Some("A Short Account of Containers"));
+    assert_eq!(read.creator(), Some("The tinker-pdf authors"));
+    assert_eq!(
+        read.unique_identifier(),
+        Some("dce0f952-1c42-416b-85ab-c87b15b1125d")
+    );
+    assert_eq!(read.toc(), Some("ncx"));
+    assert_eq!(read.spine().len(), 1);
+    assert!(read.defects().is_empty(), "{:?}", read.defects());
+    // `<guide>` is at depth two and is not a section this build reads; its
+    // `<reference>` is neither an item nor an itemref.
+    assert_eq!(read.items().len(), 2);
+    assert_eq!(read.items()[1].core, Some(CoreMediaType::Ncx));
+}
+
+/// §3.2's core media types, and the two of them that are content documents.
+#[test]
+fn the_core_media_types_are_the_closed_set_section_3_2_names() {
+    for (spelled, want) in [
+        ("application/xhtml+xml", Some(CoreMediaType::Xhtml)),
+        ("image/svg+xml", Some(CoreMediaType::Svg)),
+        ("text/css", Some(CoreMediaType::Css)),
+        // Case-insensitive and parameters discarded, per RFC 2045 §5.1.
+        ("TEXT/CSS", Some(CoreMediaType::Css)),
+        ("text/css; charset=utf-8", Some(CoreMediaType::Css)),
+        ("  text/css  ", Some(CoreMediaType::Css)),
+        ("image/png", Some(CoreMediaType::Png)),
+        ("image/jpeg", Some(CoreMediaType::Jpeg)),
+        ("image/gif", Some(CoreMediaType::Gif)),
+        ("image/webp", Some(CoreMediaType::WebP)),
+        ("audio/mpeg", Some(CoreMediaType::Mp3)),
+        ("audio/ogg; codecs=opus", Some(CoreMediaType::OggOpus)),
+        ("font/otf", Some(CoreMediaType::OpenType)),
+        // 3.0's spelling of the same face, which both obfuscated samples use.
+        ("application/vnd.ms-opentype", Some(CoreMediaType::OpenType)),
+        ("application/font-woff", Some(CoreMediaType::Woff)),
+        ("font/woff2", Some(CoreMediaType::Woff2)),
+        ("text/javascript", Some(CoreMediaType::JavaScript)),
+        ("application/x-dtbncx+xml", Some(CoreMediaType::Ncx)),
+        ("application/pls+xml", Some(CoreMediaType::Pls)),
+        // Real, from the fetched corpus, and in nobody's core set.
+        ("application/x-epub-quiz", None),
+        ("application/pdf", None),
+        ("", None),
+    ] {
+        assert_eq!(CoreMediaType::from_media_type(spelled), want, "{spelled}");
+    }
+
+    // The two that are content documents, and the ones that are not. A build
+    // that answered "core" where §5.7.2 asks "content document" would put a PNG
+    // in the spine and call it a chapter.
+    assert!(CoreMediaType::Xhtml.content_document());
+    assert!(CoreMediaType::Svg.content_document());
+    for other in [
+        CoreMediaType::Css,
+        CoreMediaType::Png,
+        CoreMediaType::Ncx,
+        CoreMediaType::OpenType,
+    ] {
+        assert!(!other.content_document(), "{other:?}");
+    }
+}
+
+/// §5.6.2's `properties`, including a token no version of the specification
+/// defines.
+#[test]
+fn manifest_properties_are_read_and_an_unknown_token_is_kept_as_written() {
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml" properties="mathml scripted"/>
+           <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+           <item id="t" href="t.xhtml" media-type="application/xhtml+xml" properties="svg calibre:title-page"/>
+           <item id="cover" href="c.png" media-type="image/png" properties="cover-image"/>
+           </manifest><spine><itemref idref="c1"/></spine>"#
+    );
+    let read = package(&body).expect("a book");
+    assert!(read.items()[0].has(Property::MathMl));
+    assert!(read.items()[0].has(Property::Scripted));
+    assert!(!read.items()[0].has(Property::Nav));
+    assert_eq!(read.nav().map(|i| i.id.as_str()), Some("nav"));
+    assert_eq!(read.cover_image().map(|i| i.id.as_str()), Some("cover"));
+    // An extension token is kept and matches nothing, which is the honest
+    // answer rather than an eighth property nobody defined.
+    assert_eq!(read.items()[2].properties, ["svg", "calibre:title-page"]);
+    assert_eq!(Property::from_token("calibre:title-page"), None);
+
+    // Counted per book with the count, and `nav` and `cover-image` are absent
+    // because they are honoured rather than unimplemented.
+    let mut counted = read.unimplemented();
+    counted.sort_by_key(|(p, _)| format!("{p:?}"));
+    assert_eq!(
+        counted,
+        vec![
+            (Property::MathMl, 1),
+            (Property::Scripted, 1),
+            (Property::Svg, 1)
+        ]
+    );
+}
+
+/// §3.5.1's fallback chain, and the two rules that bound it.
+///
+/// **A depth cap and a cycle guard are not one rule.** A chain of seventeen
+/// distinct ids is not a cycle, and a cycle of two is not deep; each case is
+/// here with its own name, so deleting either check fails a test the other
+/// cannot.
+#[test]
+fn a_fallback_chain_reaches_a_content_document_or_says_why_it_did_not() {
+    // A foreign resource falling back to XHTML: what §3.5.1 exists for.
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="odd" href="a.pdf" media-type="application/pdf" fallback="c1"/>
+           <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+           </manifest><spine><itemref idref="odd"/></spine>"#
+    );
+    let read = package(&body).expect("a book");
+    let start = read.item_by_id("odd").expect("the foreign item");
+    assert_eq!(
+        read.content_document(start).map(|i| i.id.as_str()),
+        Ok("c1")
+    );
+
+    // A core media type that is not a content document does not terminate a
+    // chain: a PNG is core and is not a chapter.
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="odd" href="a.pdf" media-type="application/pdf" fallback="pic"/>
+           <item id="pic" href="a.png" media-type="image/png"/>
+           </manifest><spine><itemref idref="odd"/></spine>"#
+    );
+    let read = package(&body).expect("a book");
+    let start = read.item_by_id("odd").expect("the foreign item");
+    assert_eq!(
+        read.content_document(start),
+        Err(FallbackDefect::NoFallback)
+    );
+
+    // A fallback naming nothing.
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="odd" href="a.pdf" media-type="application/pdf" fallback="nobody"/>
+           <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+           </manifest><spine><itemref idref="odd"/></spine>"#
+    );
+    let read = package(&body).expect("a book");
+    let start = read.item_by_id("odd").expect("the foreign item");
+    assert_eq!(
+        read.content_document(start),
+        Err(FallbackDefect::Unresolved)
+    );
+
+    // A cycle of two, which is not deep.
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="a" href="a.pdf" media-type="application/pdf" fallback="b"/>
+           <item id="b" href="b.pdf" media-type="application/pdf" fallback="a"/>
+           </manifest><spine><itemref idref="a"/></spine>"#
+    );
+    let read = package(&body).expect("a book");
+    let start = read.item_by_id("a").expect("the foreign item");
+    assert_eq!(read.content_document(start), Err(FallbackDefect::Cyclic));
+
+    // And a chain one past the cap, with every link distinct — which no cycle
+    // guard can see.
+    let links: String = (0..=MAX_EPUB_FALLBACK_DEPTH)
+        .map(|at| {
+            format!(
+                r#"<item id="f{at}" href="f{at}.pdf" media-type="application/pdf" fallback="f{}"/>"#,
+                at + 1
+            )
+        })
+        .collect();
+    let body = format!(
+        r#"{METADATA}<manifest>{links}<item id="f{}" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="f0"/></spine>"#,
+        MAX_EPUB_FALLBACK_DEPTH + 1
+    );
+    let read = package(&body).expect("a book");
+    let start = read.item_by_id("f0").expect("the first link");
+    assert_eq!(read.content_document(start), Err(FallbackDefect::TooDeep));
+
+    // One link shorter and it resolves, which is what says the cap is where it
+    // says it is rather than somewhere near it.
+    let links: String = (0..MAX_EPUB_FALLBACK_DEPTH - 1)
+        .map(|at| {
+            format!(
+                r#"<item id="f{at}" href="f{at}.pdf" media-type="application/pdf" fallback="f{}"/>"#,
+                at + 1
+            )
+        })
+        .collect();
+    let body = format!(
+        r#"{METADATA}<manifest>{links}<item id="f{}" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="f0"/></spine>"#,
+        MAX_EPUB_FALLBACK_DEPTH - 1
+    );
+    let read = package(&body).expect("a book");
+    let start = read.item_by_id("f0").expect("the first link");
+    assert!(read.content_document(start).is_ok());
+}
+
+/// §5.7's spine: order, `linear`, and the spine element's own attributes.
+#[test]
+fn the_spine_is_read_in_document_order_and_non_linear_items_stay_in_it() {
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/>
+           <item id="b" href="b.xhtml" media-type="application/xhtml+xml"/>
+           <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+           </manifest>
+           <spine toc="ncx" page-progression-direction="rtl">
+           <itemref idref="a"/><itemref idref="b" linear="no"/><itemref idref="c" linear="yes"/>
+           </spine>"#
+    );
+    let read = package(&body).expect("a book");
+    let order: Vec<&str> = read.spine().iter().map(|s| s.idref.as_str()).collect();
+    assert_eq!(order, ["a", "b", "c"], "document order is reading order");
+    assert_eq!(
+        read.spine().iter().map(|s| s.linear).collect::<Vec<_>>(),
+        [true, false, true],
+        "a non-linear item is recorded and keeps its place"
+    );
+    assert_eq!(read.toc(), Some("ncx"));
+    assert!(read.right_to_left());
+}
+
+/// A package document with no `<manifest>`, no `<spine>` or an empty spine is
+/// refused, and each by the name that is true of it.
+#[test]
+fn a_package_document_without_a_spine_is_refused_by_its_own_name() {
+    for (body, want) in [
+        (
+            format!("{METADATA}<manifest/><spine/>"),
+            ArchiveRefusal::EmptySpine,
+        ),
+        (
+            format!("{METADATA}<manifest/>"),
+            ArchiveRefusal::UnreadablePackageDocument,
+        ),
+        (
+            format!(r#"{METADATA}<spine><itemref idref="c1"/></spine>"#),
+            ArchiveRefusal::UnreadablePackageDocument,
+        ),
+    ] {
+        assert_eq!(package(&body), Err(want), "{body}");
+    }
+
+    // Markup that is not a package document at all.
+    assert_eq!(
+        parse_package(b"<package", "content.opf", &limits()),
+        Err(ArchiveRefusal::UnreadablePackageDocument)
+    );
+    // The right element in the wrong namespace, which is the near miss a
+    // local-name comparison would take for a package document.
+    let wrong_ns = format!(
+        r#"<package xmlns="http://example.invalid/opf" version="3.0">{METADATA}{ONE_CHAPTER}</package>"#
+    );
+    assert_eq!(
+        parse_package(wrong_ns.as_bytes(), "content.opf", &limits()),
+        Err(ArchiveRefusal::UnreadablePackageDocument)
+    );
+}
+
+/// A `<manifest>` and a `<spine>` past their caps refuse rather than truncate.
+///
+/// Truncating would produce a book with the right shape and the wrong pages,
+/// which is this gap's own failure mode wearing a smaller hat — gap 30's
+/// argument for refusing a package whose work total is spent, one format over.
+#[test]
+fn the_manifest_and_spine_caps_refuse_rather_than_truncate() {
+    let l = limits();
+
+    let items: String = (0..=l.max_manifest_items)
+        .map(|at| {
+            format!(r#"<item id="i{at}" href="c{at}.xhtml" media-type="application/xhtml+xml"/>"#)
+        })
+        .collect();
+    let body =
+        format!(r#"{METADATA}<manifest>{items}</manifest><spine><itemref idref="i0"/></spine>"#);
+    assert_eq!(package(&body), Err(ArchiveRefusal::TooLarge));
+
+    let refs: String = (0..=l.max_spine_items)
+        .map(|_| r#"<itemref idref="c1"/>"#.to_owned())
+        .collect();
+    let body = format!(
+        r#"{METADATA}<manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine>{refs}</spine>"#
+    );
+    assert_eq!(package(&body), Err(ArchiveRefusal::TooLarge));
+
+    // **The spine cap is not bounded by the manifest cap**, which is what this
+    // fixture says out loud: four thousand and ninety-six itemrefs naming
+    // *one* manifest item. Gap 30 found the same shape in `PageContent`.
+    let refs: String = (0..l.max_spine_items)
+        .map(|_| r#"<itemref idref="c1"/>"#.to_owned())
+        .collect();
+    let body = format!(
+        r#"{METADATA}<manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine>{refs}</spine>"#
+    );
+    let read = package(&body).expect("at the cap it is a book");
+    assert_eq!(read.spine().len(), l.max_spine_items);
+    assert_eq!(read.items().len(), 1);
+}
+
+/// §5.6.1 makes an item's `id` unique; two items with one `id` are read as the
+/// first and warned about.
+#[test]
+fn two_manifest_items_with_one_id_are_read_as_the_first() {
+    let body = format!(
+        r#"{METADATA}<manifest>
+           <item id="c1" href="first.xhtml" media-type="application/xhtml+xml"/>
+           <item id="c1" href="second.xhtml" media-type="application/xhtml+xml"/>
+           </manifest><spine><itemref idref="c1"/></spine>"#
+    );
+    let read = package(&body).expect("still a book");
+    assert_eq!(read.defects(), [PackageDefect::DuplicateItemId]);
+    assert_eq!(
+        read.item_by_id("c1").map(|i| i.href.as_str()),
+        Some("first.xhtml")
+    );
+}
+
+/// A package document is read under `Doctype::Refuse`, which is a measurement
+/// rather than milestone 2's relaxation being forgotten.
+///
+/// **Zero of the twenty-six package documents in either corpus carries a
+/// document type declaration**, where 100 % of one producer's XHTML content
+/// documents do. Extending the relaxation to a file that has never needed it
+/// would widen the attack surface for nothing.
+#[test]
+fn a_doctype_on_a_package_document_is_refused_rather_than_skipped() {
+    let markup = format!(
+        r#"<?xml version="1.0"?><!DOCTYPE package><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">{METADATA}{ONE_CHAPTER}</package>"#
+    );
+    assert_eq!(
+        parse_package(markup.as_bytes(), "content.opf", &limits()),
+        Err(ArchiveRefusal::UnreadablePackageDocument)
+    );
+}
+
+// ---- The page box a caller states -------------------------------------------
+
+/// [`BookLayout::sanitised`] replaces each unusable number **on its own**, and
+/// names each on its own.
+///
+/// Three fields, three defects, and a caller that passed a bad width and a bad
+/// font size has two bugs rather than "unusable options". A build that replaced
+/// the whole struct when one field was wrong would throw away a page box the
+/// caller meant.
+#[test]
+fn an_unusable_open_option_is_replaced_on_its_own_and_named_on_its_own() {
+    let (layout, defects) = BookLayout::sanitised(DEFAULT_PAGE, DEFAULT_FONT_SIZE);
+    assert_eq!(layout.page, DEFAULT_PAGE);
+    assert_eq!(layout.font_size, DEFAULT_FONT_SIZE);
+    assert!(defects.is_empty());
+
+    // Each field alone, and the others survive.
+    let (layout, defects) = BookLayout::sanitised((f64::NAN, 800.0), 11.0);
+    assert_eq!(layout.page, (DEFAULT_PAGE.0, 800.0));
+    assert_eq!(layout.font_size, 11.0);
+    assert_eq!(defects, [BookOptionDefect::PageWidth]);
+
+    let (layout, defects) = BookLayout::sanitised((600.0, -1.0), 11.0);
+    assert_eq!(layout.page, (600.0, DEFAULT_PAGE.1));
+    assert_eq!(defects, [BookOptionDefect::PageHeight]);
+
+    let (layout, defects) = BookLayout::sanitised((600.0, 800.0), 0.0);
+    assert_eq!(layout.page, (600.0, 800.0));
+    assert_eq!(layout.font_size, DEFAULT_FONT_SIZE);
+    assert_eq!(defects, [BookOptionDefect::FontSize]);
+
+    // Annex C.2's ceiling: 14 400 is a page and 14 401 is not.
+    let (layout, defects) = BookLayout::sanitised((MAX_PAGE_SIDE, MAX_PAGE_SIDE), 12.0);
+    assert_eq!(layout.page, (MAX_PAGE_SIDE, MAX_PAGE_SIDE));
+    assert!(defects.is_empty());
+    let (_, defects) = BookLayout::sanitised((MAX_PAGE_SIDE + 1.0, MAX_PAGE_SIDE + 1.0), 12.0);
+    assert_eq!(
+        defects,
+        [BookOptionDefect::PageWidth, BookOptionDefect::PageHeight]
+    );
+
+    // A font larger than the page it would be set on is not a book. The bound
+    // is the page rather than a constant, so a tall page keeps a large font.
+    let (layout, defects) = BookLayout::sanitised((432.0, 648.0), 649.0);
+    assert_eq!(layout.font_size, DEFAULT_FONT_SIZE);
+    assert_eq!(defects, [BookOptionDefect::FontSize]);
+    let (layout, defects) = BookLayout::sanitised((432.0, 2000.0), 649.0);
+    assert_eq!(layout.font_size, 649.0);
+    assert!(defects.is_empty());
+
+    // And all three at once, each named.
+    let (layout, defects) = BookLayout::sanitised((f64::INFINITY, f64::NEG_INFINITY), f64::NAN);
+    assert_eq!(layout, BookLayout::default());
+    assert_eq!(
+        defects,
+        [
+            BookOptionDefect::PageWidth,
+            BookOptionDefect::PageHeight,
+            BookOptionDefect::FontSize
+        ]
+    );
 }

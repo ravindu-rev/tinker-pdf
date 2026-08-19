@@ -1,5 +1,30 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 19 August 2026, gap 31 milestone 4.* Three more rows —
+//! `MAX_EPUB_MANIFEST_ITEMS`, `MAX_EPUB_SPINE_ITEMS` and
+//! `MAX_EPUB_FALLBACK_DEPTH` — and one the plan's own bounds table names that
+//! is **deliberately absent**, which is the more interesting half.
+//!
+//! Gap 31's table has a row for `MAX_EPUB_PAGES` and argues that it cannot be
+//! bounded by the spine item count, *"because one spine item of 128 MiB of text
+//! fragments into as many pages as its length divided by the page height"*.
+//! That argument is right and it is about a build that **fragments**. This one
+//! does not: milestone 4 puts exactly one page on each `<itemref>`, so a page
+//! cap above `MAX_EPUB_SPINE_ITEMS` could never fire and one below it would be
+//! the spine cap wearing another name. Adding it now would be gap 18a milestone
+//! 8's failure reached from the direction that writes the constant first, and
+//! it is the same argument `MAX_XPS_VISUAL_DEPTH`'s absence carries below:
+//! **the bound arrives with the fragmentation or not at all**, which is
+//! milestone 7.
+//!
+//! The pair among the three is worth stating for the reason `MAX_XPS_PAGES` and
+//! `MAX_XPS_PARTS` were: **the manifest cap does not bound the spine cap.**
+//! `epubcheck` reports two `<itemref>`s naming one manifest item as `OPF-034`,
+//! which is an error and not a well-formedness failure, so a hostile package
+//! document may name one item four thousand times. The `const` relation in
+//! `epub.rs` orders the two as a matter of policy and says so; neither could
+//! stand in for the other.
+//!
 //! *Amended, 19 August 2026, gap 31 milestone 3.* One more row —
 //! `MAX_OCF_PATH_LEN` — and it is the first here whose number is a
 //! **specification's own**: OCF 3.3 §4.2.3 says a content path must not exceed
@@ -120,7 +145,9 @@
 //! comic. A relation that six rows satisfy and one does not is not a relation.
 
 use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
-use tinker_pdf::epub::MAX_OCF_PATH_LEN;
+use tinker_pdf::epub::{
+    MAX_EPUB_FALLBACK_DEPTH, MAX_EPUB_MANIFEST_ITEMS, MAX_EPUB_SPINE_ITEMS, MAX_OCF_PATH_LEN,
+};
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
@@ -140,6 +167,7 @@ const XML_LIMITS: &str = include_str!("../../tinker-pdf-xml/src/limits.rs");
 const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
 const EPUB: &str = include_str!("../src/epub.rs");
 const EPUB_TESTS: &str = include_str!("epub_ocf.rs");
+const EPUB_UNIT_TESTS: &str = include_str!("../src/epub/tests.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
@@ -554,14 +582,81 @@ fn ledger() -> Vec<Bound> {
                 EPUB_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_EPUB_MANIFEST_ITEMS",
+            cap: MAX_EPUB_MANIFEST_ITEMS as u128,
+            published: "8 192",
+            // The manifest built *past* this cap; the largest real book in
+            // either corpus names ninety-six items.
+            fixtures: MAX_EPUB_MANIFEST_ITEMS as u128,
+            // A comic archive has no package document and a fixed document has
+            // an OPC one, whose `[Content_Types].xml` is a media-type map
+            // rather than a manifest of resources. Both are a zero that is an
+            // answer rather than a blank.
+            comic: 0,
+            document: 0,
+            // `MAX_XML_TOKENS` stands in front of it: an `<item/>` produces two
+            // events, so one package document may name half a million of them.
+            reachable: (xml_limits::MAX_XML_TOKENS / 2) as u128,
+            reachable_because: "an `<item/>` is two XML events and the token cap is a million",
+            declared_in: EPUB,
+            fires_in: (
+                "the_manifest_and_spine_caps_refuse_rather_than_truncate",
+                EPUB_UNIT_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_EPUB_SPINE_ITEMS",
+            cap: MAX_EPUB_SPINE_ITEMS as u128,
+            published: "4 096",
+            fixtures: MAX_EPUB_SPINE_ITEMS as u128,
+            comic: 0,
+            document: 0,
+            // **Not** bounded by the manifest cap, which is why the two are
+            // separate rows rather than one. `epubcheck` reports two itemrefs
+            // naming one manifest item as `OPF-034` — an error, not a
+            // well-formedness failure — so a package document may name one item
+            // four thousand times, exactly as gap 30 found four thousand
+            // `PageContent` elements naming one part.
+            reachable: (xml_limits::MAX_XML_TOKENS / 2) as u128,
+            reachable_because: "an `<itemref/>` is two XML events, and one manifest item may be \
+                                named by every one of them",
+            declared_in: EPUB,
+            fires_in: (
+                "the_manifest_and_spine_caps_refuse_rather_than_truncate",
+                EPUB_UNIT_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_EPUB_FALLBACK_DEPTH",
+            cap: MAX_EPUB_FALLBACK_DEPTH as u128,
+            published: "16",
+            // The chain built past it is seventeen links. **No real book in
+            // either corpus carries a `fallback` attribute at all**, so this
+            // clause is proved entirely by fixtures — which is worth writing
+            // down, because a rule with no real example is a rule whose
+            // behaviour is a guess until somebody builds the input.
+            fixtures: MAX_EPUB_FALLBACK_DEPTH as u128,
+            comic: 0,
+            document: 0,
+            // The longest acyclic chain is one link per manifest item, so the
+            // cap in front of it is the manifest's.
+            reachable: MAX_EPUB_MANIFEST_ITEMS as u128,
+            reachable_because: "a fallback chain may name every manifest item once",
+            declared_in: EPUB,
+            fires_in: (
+                "a_fallback_chain_reaches_a_content_document_or_says_why_it_did_not",
+                EPUB_UNIT_TESTS,
+            ),
+        },
     ]
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
 /// the plan's "per-item caps sit beside them" were built as named constants.
 /// Gap 30's milestone 2 adds four, its milestone 3 adds two and its milestone
-/// 6 adds three; gap 31's milestone 3 adds one. All eighteen are here, and a
-/// bound added without a row fails this.
+/// 6 adds three; gap 31's milestone 3 adds one and its milestone 4 adds three.
+/// All twenty-one are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -586,6 +681,9 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_XPS_GLYPHS",
             "MAX_XPS_RESOURCE_DEPTH",
             "MAX_OCF_PATH_LEN",
+            "MAX_EPUB_MANIFEST_ITEMS",
+            "MAX_EPUB_SPINE_ITEMS",
+            "MAX_EPUB_FALLBACK_DEPTH",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -691,7 +789,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 18, "the ledger is eighteen rows");
+    assert_eq!(measured, 21, "the ledger is twenty-one rows");
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not

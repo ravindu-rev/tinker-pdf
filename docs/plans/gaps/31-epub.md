@@ -1172,7 +1172,7 @@ inputs could ask for, so it could **never fire**.
 | `MAX_LINE_BREAK_WORK` | **A work cap.** Break opportunities evaluated across the book | The same shape one level down |
 | `MAX_EPUB_MANIFEST_ITEMS` | Manifest items admitted | Must sit **below** `MAX_ZIP_ENTRIES`, or the archive refuses first and this can never fire |
 | `MAX_EPUB_SPINE_ITEMS` | Spine itemrefs | Must sit below `MAX_EPUB_MANIFEST_ITEMS` for the same reason |
-| `MAX_EPUB_PAGES` | Pages fragmented out of the book | **Deliberately *not* in the relation above**, and this is the trap. Gap 30 found `MAX_XPS_PAGES` was not bounded by `MAX_XPS_PARTS` because four thousand `PageContent` elements may name one part. Here it is worse: **one** spine item of 128 MiB of text fragments into as many pages as its length divided by the page height, so the page count is bounded by *content length* and not by item count at all |
+| `MAX_EPUB_PAGES` | Pages fragmented out of the book | **Deliberately *not* in the relation above**, and this is the trap. Gap 30 found `MAX_XPS_PAGES` was not bounded by `MAX_XPS_PARTS` because four thousand `PageContent` elements may name one part. Here it is worse: **one** spine item of 128 MiB of text fragments into as many pages as its length divided by the page height, so the page count is bounded by *content length* and not by item count at all. **Amended, 19 August 2026, milestone 4: it arrives with milestone 7's fragmentation and not before.** Milestone 4 puts exactly one page on each `<itemref>`, so a cap above `MAX_EPUB_SPINE_ITEMS` could never fire and one below it would be the spine cap under another name — gap 18a milestone 8's failure reached from the direction that writes the constant first, and the argument `bounds_ledger.rs` already carries for `MAX_XPS_VISUAL_DEPTH`'s absence. The sentence to the left is right about the build that fragments and is a constant that cannot fire in the one that does not |
 | `MAX_EPUB_FONTS` | Faces admitted from `@font-face` and the manifest | Each costs an embedded font program and a subset |
 | `MAX_SYNTHESISED_PDF` | Bytes handed to `CosDocument::open` | Already exists in `cbz.rs`; reused rather than duplicated, and the ledger says so |
 
@@ -2337,3 +2337,130 @@ was re-run. A revert that the build system cannot see is not a revert.
   blank: a comic archive has no container paths and a fixed document has OPC
   part names, which are a different grammar. The book yardstick milestone 13
   adds is the one that will give it a real second figure.
+
+## Progress — 19 August 2026, milestone 4
+
+**A book has pages.** `tpdf info` on a real EPUB reports a spine's worth of
+pages at the stated box, with the book's title, where milestone 3 left an
+honest `UnpaginatedBook` refusal. The workspace stands at **2 355**.
+
+Every page is the neutral grey placeholder carrying a named warning. That is
+not a shortfall to be apologised for — it is what milestones 6 to 12 replace,
+one property at a time, and a page that drew *nothing* and reported success
+would be gap 17's failure in a tenth format.
+
+### `OpenOptions`, and why the seam had to move
+
+The plan found this structurally wrong and it is worth restating where the fix
+lives. `RenderOptions` arrives **after** pagination and `with_fonts` arrives
+**after** `open`, yet advance widths decide every line break — so a reflowable
+book's page count cannot be a property of the file the way a PDF's is.
+
+`Document::open_with(bytes, &OpenOptions)` is the answer, with `open(bytes)`'s
+signature **untouched and asserted so**. The default box is six inches by nine
+at 12 pt, and the doc comment says outright that **the page count is a function
+of that number and not a property of the file**. MuPDF's `-W -H -S` is the same
+shape, arrived at from the same constraint.
+
+A font provider handed to `open_with` reaches the render; one handed to a
+reflowable book *after* opening **warns by name**, because by then the lines
+are already broken. That warning fires on a book and on nothing else — a PDF is
+unaffected — and the injection matrix has a separate defect for each half.
+
+### The text-conservation harness, built now on purpose
+
+*Every character in the spine appears on some page, exactly once, in order.*
+
+It is built here, against thirteen grey placeholders, where it is trivially
+satisfiable — and that is the point rather than a weakness. Nine later
+milestones **inherit** it. Acquiring it at milestone 10 would mean writing it
+against code that already violates it, and the natural response then is to
+weaken the harness rather than the layout.
+
+Both sides are separately attacked in the matrix: the source side reads text
+and not markup, the paginated side reads pages in order, extra text is
+reported, and two elements' text does not run together.
+
+### What the matrix found, and the one that survived
+
+Twenty-nine defects, one at a time, each reverted before the next.
+**Twenty-eight caught on the first pass; the survivor was a real gap and is
+closed.**
+
+| Defect | Caught by |
+| --- | --- |
+| the caller's page box is ignored and every book is the default | `every_committed_book_paginates_to_its_spine_at_the_box_it_was_given`, and 2 more |
+| the default page box is US Letter rather than six by nine | `every_fetched_book_paginates_to_its_own_spine`, and 2 more |
+| a spine item that does not resolve is dropped rather than paged | `a_container_that_breaks_every_mimetype_clause_is_still_read_as_a_book`, and 7 more |
+| the placeholder is white rather than the neutral grey | `every_page_is_the_neutral_placeholder_and_every_page_says_why`, and 1 more |
+| the placeholder page draws nothing at all | `every_page_is_the_neutral_placeholder_and_every_page_says_why`, and 1 more |
+| no page carries a named warning | `an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place`, and 2 more |
+| the container's mimetype warnings never reach the report | `the_mimetype_clauses_reach_a_callers_report_now_that_a_book_has_one`, and 1 more |
+| an unimplemented property is warned about once per item | `an_unimplemented_manifest_property_is_named_once_with_its_count` — **alone** |
+| `nav` and `cover-image` are reported as unimplemented too | `an_unimplemented_manifest_property_is_named_once_with_its_count`, and 1 more |
+| the unique identifier is the first dc:identifier whatever its id | `the_three_required_dublin_core_elements_and_the_unique_identifier` — **alone** |
+| a manifest href resolves against the container root | `an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place`, and 6 more |
+| the fallback chain has no cycle guard | `a_fallback_chain_reaches_a_content_document_or_says_why_it_did_not` — **alone** |
+| the fallback chain has no depth cap | `a_fallback_chain_reaches_a_content_document_or_says_why_it_did_not` — **alone** |
+| a spine item terminates on any core media type, not a content document | `an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place`, and 1 more |
+| any package version is read as EPUB 3 | `a_book_whose_package_document_is_wrong_is_refused_by_name`, and 3 more |
+| an empty spine opens as a book of no pages | `a_book_whose_package_document_is_wrong_is_refused_by_name`, and 2 more |
+| the three required Dublin Core elements are not checked | `the_three_required_dublin_core_elements_and_the_unique_identifier` — **alone** |
+| the book's metadata never reaches the synthesised document | `qpdf_reads_the_books_title_out_of_the_synthesised_documents_info`, and 1 more |
+| `open_with` ignores the options it was handed | `an_unusable_page_box_is_replaced_and_named_rather_than_refused`, and 3 more |
+| a font provider passed at open is dropped for a PDF | `a_font_provider_passed_at_open_reaches_the_render` — **alone** |
+| a late font provider is accepted in silence | `a_late_font_provider_warns_on_a_book_and_on_nothing_else` — **alone** |
+| a late font provider warns on every document, book or not | `a_late_font_provider_warns_on_a_book_and_on_nothing_else` — **alone** |
+| a comic archive's report claims to be reflowable | `a_late_font_provider_warns_on_a_book_and_on_nothing_else` — **alone** |
+| two entries at one path are not detected | `two_entries_at_one_path_are_warned_about_and_the_first_one_wins` — **alone** |
+| the duplicate-path check reports every container | `a_seventh_file_in_meta_inf_is_ignored_rather_than_refused`, and 1 more |
+| the conservation harness reads a stylesheet as the book's text | `the_source_side_reads_the_text_and_not_the_markup` — **alone** |
+| the conservation harness never reports extra text | `a_paragraph_repeated_across_a_page_break_is_extra_text`, and 1 more |
+| the conservation harness reads the pages in reverse | `the_paginated_side_reads_a_real_documents_pages_in_order` — **alone** |
+| the conservation harness lets two elements' text run together | `the_source_side_reads_the_text_and_not_the_markup`, and 1 more |
+
+**The survivor is the session's signature shape, wearing a comment that claimed
+the opposite.** `the_source_side_reads_the_text_and_not_the_markup` excludes
+`head`, `script` and `style`, and carries a comment saying *"each exclusion on
+its own, because a build that dropped one of the three would still pass a test
+that only looked at the joined string."* Its `<style>` was **inside `<head>`**.
+The head rule already excluded it, so the style rule was never the reason, and
+deleting `style` from the skip list changed no answer. A second stylesheet in
+the **body** — which HTML allows in flow content and real books use — is what
+separates them, and it is now there.
+
+That the comment asserted the separation and the fixture did not provide it is
+the whole lesson: a stated intention is not a test.
+
+### The harness itself, twice
+
+Milestone 3 found its injector restoring files with `shutil.copy2`, which
+preserves mtime — and cargo decides freshness by mtime, so an injection in
+another crate was still in the binary two injections later. This milestone's
+injector writes bytes and calls `os.utime`, and that fix held.
+
+The run was then interrupted at defect 16 with the defect **applied**. The
+`APPLIED.json` marker named it, the one red test was the one written to catch
+it, and the tree's state was never in doubt — which is what that marker was
+added for after two earlier milestones were bitten. Reverting it needed care
+the marker could not give: the injection *deleted* a block and set its
+replacement to the empty string, so the harness's own revert had nothing to
+match, and the file was uncommitted milestone work that `git checkout` would
+have destroyed. The `NoTitle` check was reinstated by hand from its neighbours
+and the matrix resumed from 16.
+
+### Still owed
+
+- **Thirteen pages of grey.** Every page is a placeholder until milestone 8
+  reads a content document. The warning says so per page, and the conservation
+  harness currently compares a book's text against nothing being laid out —
+  which it must, because nothing is.
+- **`with_fonts`'s warning has one consumer and no fixture from a real book**:
+  no committed book needs a font this engine lacks, so the path is proved by
+  hand-built fixtures only.
+- **The duplicate-path check is milestone 3's deferral, landed here**, and it
+  reports the first entry as the winner. Which entry a conforming reader should
+  prefer is not specified; the choice is recorded rather than argued.
+- Milestone 2's owed facade test still belongs to milestone 8, which is the
+  first milestone that reads a content document.
+

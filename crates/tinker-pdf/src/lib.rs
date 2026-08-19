@@ -255,6 +255,106 @@ impl core::fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
+/// What a **reflowable** document needs decided before it has any pages.
+///
+/// Every field is ignored by a PDF, a CBZ and an XPS, which have their own page
+/// geometry and always did — except [`OpenOptions::fonts`], which is where a
+/// font provider goes for *any* document and is on this type because for a book
+/// it decides more than glyphs.
+///
+/// # Why this exists at `open` and not later
+///
+/// A PDF page is fixed and a reflowable book is not, so somebody has to choose
+/// the box a book is laid out into — and that choice decides how many pages
+/// there are. Three facts made every later seam wrong:
+///
+/// 1. [`RenderOptions`] is a parameter of [`Page::render`], so it arrives
+///    **after** pagination; its `scale` is a resolution and not a page box.
+/// 2. [`Document::with_fonts`] is a builder that arrives **after** `open`.
+/// 3. Line breaking needs advance widths, so a book laid out at `open` with no
+///    provider is laid out with metrics the render then does not use.
+///
+/// A `with_fonts` that silently does not change the pagination is exactly the
+/// invisible partial implementation gap 31 exists to prevent, so the late path
+/// warns by name — [`ArchiveWarning::FontsAttachedAfterPagination`] — and this
+/// is where a provider goes if it is to decide anything.
+///
+/// **For a reflowable EPUB the page count is a function of these numbers and is
+/// not a property of the file.** Two hosts that pass different boxes get
+/// different books, on purpose, and [`ArchiveReport::layout`] is where a caller
+/// reads back which numbers produced the page count it is holding.
+///
+/// `mutool draw` takes `-W`, `-H` and `-S` for exactly these three fields,
+/// separately from its render resolution. Agreeing with the implementation gap
+/// 28 is removing is evidence the seam is in the right place.
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let bytes = std::fs::read("book.epub")?;
+/// let mut options = tinker_pdf::OpenOptions::default();
+/// options.page = (600.0, 800.0);
+/// let doc = tinker_pdf::Document::open_with(bytes, &options)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct OpenOptions {
+    /// The page box a reflowable document is laid out into, in points.
+    ///
+    /// [`epub::DEFAULT_PAGE`] — 432 × 648, six inches by nine — and that number
+    /// is argued where it is declared rather than here.
+    pub page: (f64, f64),
+    /// The base font size, in points, that `1rem` and an unstyled paragraph
+    /// resolve to. [`epub::DEFAULT_FONT_SIZE`].
+    pub font_size: f64,
+    /// Faces for text the document does not embed.
+    ///
+    /// Here rather than only on [`Document::with_fonts`], because a substituted
+    /// face's advance widths decide where every line breaks and therefore how
+    /// many pages a reflowable document has. For a PDF, a comic and a fixed
+    /// document it does exactly what `with_fonts` does and arrives earlier.
+    pub fonts: Option<Arc<dyn FontProvider>>,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions {
+            page: epub::DEFAULT_PAGE,
+            font_size: epub::DEFAULT_FONT_SIZE,
+            fonts: None,
+        }
+    }
+}
+
+impl OpenOptions {
+    /// Options laying a reflowable document into a page box, in points.
+    #[must_use]
+    pub fn at_page(width: f64, height: f64) -> OpenOptions {
+        OpenOptions {
+            page: (width, height),
+            ..OpenOptions::default()
+        }
+    }
+
+    /// The same options with a font provider attached.
+    #[must_use]
+    pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> OpenOptions {
+        self.fonts = Some(provider);
+        self
+    }
+}
+
+impl core::fmt::Debug for OpenOptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpenOptions")
+            .field("page", &self.page)
+            .field("font_size", &self.font_size)
+            .field("fonts", &self.fonts.is_some())
+            .finish()
+    }
+}
+
 /// An open document.
 ///
 /// Cheap to clone: the bytes and the object store are shared.
@@ -299,9 +399,14 @@ pub struct Document {
 /// **The comic path is the fallthrough**, which is what E.3's own text asks
 /// for. A ZIP that is neither is a bag of images, and that is the reading gap
 /// 29 shipped.
+///
+/// `options` reaches only the EPUB step, because it is the only format here
+/// whose page geometry its own file does not state. The two before it read
+/// their sizes out of the package and ignore every field.
 fn open_container(
     what: Container,
     bytes: &[u8],
+    options: &OpenOptions,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
     if what != Container::Zip {
         // Recognised and refused. RAR, 7z and tar are three more
@@ -315,7 +420,17 @@ fn open_container(
         xps::Routing::Refused(why) => return Err(why),
         xps::Routing::NotXps(archive) => archive,
     };
-    let archive = match epub::route(archive, &epub::Limits::DEFAULT) {
+    // A caller's number is checked once, here, before any book is read: the
+    // defects belong in the report of the document that was laid out at the
+    // replacement, and a book that turns out not to be one never sees them.
+    let (layout, unusable) = epub::BookLayout::sanitised(options.page, options.font_size);
+    let archive = match epub::route(archive, &epub::Limits::DEFAULT, &layout) {
+        epub::Routing::Document(pdf, mut report) => {
+            for defect in unusable {
+                report.warn(ArchiveWarning::UnusableOption(defect));
+            }
+            return Ok((pdf, report));
+        }
         epub::Routing::Refused(why) => return Err(why),
         epub::Routing::NotEpub(archive) => archive,
     };
@@ -339,9 +454,13 @@ impl Document {
     /// RAR, 7z and tar are refused by name. A ZIP is **one signature over five
     /// formats**, so it is opened once and then asked what it is: an XPS
     /// package becomes a document whose pages are its fixed pages (gap 30), an
-    /// EPUB is recognised and refused by name until gap 31's layout engine
-    /// lands, and anything else is synthesised into a document whose pages are
-    /// its images (gap 29).
+    /// EPUB becomes a document whose pages are its spine (gap 31), and anything
+    /// else is synthesised into a document whose pages are its images (gap 29).
+    ///
+    /// **A book paginates at a page box this call does not state**, so it gets
+    /// the default: 432 × 648 points, from [`epub::DEFAULT_PAGE`]. See
+    /// [`Document::open_with`] and [`OpenOptions`], where the page count stops
+    /// being a property of the file.
     ///
     /// The order is not arbitrary and it is argued in [`open_container`]: the
     /// XPS test is ECMA-388 E.3's, all three steps of it, the EPUB test is
@@ -359,14 +478,42 @@ impl Document {
     /// a container this build recognises and cannot open as a document, and
     /// [`OpenError::NotAPdf`] when not one indirect object could be found.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
+        Document::open_with(bytes, &OpenOptions::default())
+    }
+
+    /// Opens a document, stating what a **reflowable** one needs decided before
+    /// it has any pages.
+    ///
+    /// Identical to [`Document::open`] for a PDF, a comic archive and a fixed
+    /// document, whose page geometry their own files state — except that
+    /// [`OpenOptions::fonts`] is honoured for all of them, which is
+    /// [`Document::with_fonts`] arriving early enough to matter.
+    ///
+    /// For an EPUB it is the difference between one book and another: **the
+    /// page count is a function of [`OpenOptions::page`] and is not a property
+    /// of the file.** See that type for why the seam is here rather than at
+    /// `render` or at `with_fonts`.
+    ///
+    /// [`Document::open`]'s own signature is unchanged by this, deliberately:
+    /// ruling 12's `tinker_parity.rs` compares it, and every existing caller
+    /// keeps the defaults. `open(bytes)` *is* `open_with(bytes,
+    /// &OpenOptions::default())`, which is written that way rather than
+    /// duplicated so the two can never drift.
+    ///
+    /// # Errors
+    /// The same three as [`Document::open`].
+    pub fn open_with(
+        bytes: impl Into<Arc<[u8]>>,
+        options: &OpenOptions,
+    ) -> Result<Document, OpenError> {
         let bytes: Arc<[u8]> = bytes.into();
         if bytes.is_empty() {
             return Err(OpenError::Empty);
         }
 
         if let Some(container) = cbz::container(&bytes) {
-            let (pdf, report) =
-                open_container(container, &bytes).map_err(OpenError::UnsupportedArchive)?;
+            let (pdf, report) = open_container(container, &bytes, options)
+                .map_err(OpenError::UnsupportedArchive)?;
             // These bytes came out of this repository's own writer moments
             // ago, so a parse failure is a defect here rather than a claim
             // about the archive — but ruling 1 forbids asserting it, and
@@ -376,7 +523,7 @@ impl Document {
                 .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
             return Ok(Document {
                 inner: Arc::new(inner),
-                fonts: None,
+                fonts: options.fonts.clone(),
                 archive: Some(Arc::new(report)),
             });
         }
@@ -384,7 +531,7 @@ impl Document {
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
         Ok(Document {
             inner: Arc::new(inner),
-            fonts: None,
+            fonts: options.fonts.clone(),
             archive: None,
         })
     }
@@ -409,9 +556,28 @@ impl Document {
     /// reads no font directories: bundling is a licensing decision and
     /// reading a directory is an operating-system dependency, and
     /// `wasm32-unknown-unknown` has neither.
+    ///
+    /// # On a reflowable document this is **too late**, and it says so
+    ///
+    /// A book's line breaks were decided when it was paginated, at `open`, from
+    /// the metrics available then. A provider attached here still supplies
+    /// glyphs; what it cannot do is change how many pages there are or which
+    /// page a sentence is on. Silently accepting a provider that changes
+    /// nothing is precisely the invisible partial implementation gap 31 exists
+    /// to prevent, so this records
+    /// [`ArchiveWarning::FontsAttachedAfterPagination`] on the document's own
+    /// report — and [`OpenOptions::fonts`] is the route that works.
+    ///
+    /// Nothing is warned about for a PDF, a comic or a fixed document, whose
+    /// pages this cannot move.
     #[must_use]
     pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> Document {
         self.fonts = Some(provider);
+        if let Some(report) = self.archive.as_mut() {
+            if report.layout().is_some() {
+                Arc::make_mut(report).warn(ArchiveWarning::FontsAttachedAfterPagination);
+            }
+        }
         self
     }
 

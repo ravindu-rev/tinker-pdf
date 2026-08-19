@@ -144,6 +144,26 @@ milestone 4's work. The column is committed so that when they land they have a
 table of real answers to check against — including the fact that one producer's
 `application/xhtml+xml` items are named `.html`.
 
+## The conservation record
+
+`CONSERVATION.tsv` beside this file records, per book, the number of `<itemref>`s
+its spine holds, the number of **conservable characters** its content documents
+hold, how many of those the paginated document actually carries, and how many
+pages it has. Gap 31 milestone 4 built the harness that measures it, and
+`tests/epub_conservation.rs` recomputes every row on every `cargo test`.
+
+A conservable character is a non-whitespace one. Layout reflows white space by
+construction — `css-text-3` §4.1.1 collapses runs of it and a line break replaces
+a space — so the stream of non-whitespace characters is the largest stream that
+can survive a layout engine, and it is the one gap 31's invariant is stated over:
+*every character of text in every content document in the spine appears exactly
+once in the paginated output, in document order.*
+
+**The conserved column is `0` for every book today**, because milestone 4's pages
+are placeholders. That is the point of committing the file rather than asserting
+a boolean: a milestone that lays text out has to re-measure and update this table
+in the same commit, so the figure is a ratchet rather than a claim.
+
 ## The censuses
 
 ### Doctypes

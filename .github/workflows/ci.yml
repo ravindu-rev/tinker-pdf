@@ -243,22 +243,24 @@ jobs:
           fi
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' qpdf-oracle.log
           grep -q 'qpdf-oracle: RAN' qpdf-oracle.log
-      # The two synthesised-container oracles, in the same job because they
+      # The three synthesised-container oracles, in the same job because they
       # want the same binary and the same posture. Gap 29 milestone 5 wrote
-      # `tests/cbz_qpdf.rs` and gap 30 milestone 4 wrote `tests/xps_qpdf.rs`,
-      # and both are exit criteria of the form "saving it produces a file qpdf
-      # reads clean" — which is a claim CI has to be able to see. Until this
-      # step existed they ran only under `cargo test --workspace`, where a
-      # skipped oracle exits 0 and reads exactly like a pass, which is the
-      # failure gap 20 built the grep for in the first place.
+      # `tests/cbz_qpdf.rs`, gap 30 milestone 4 wrote `tests/xps_qpdf.rs` and
+      # gap 31 milestone 4 wrote `tests/epub_qpdf.rs`, and all three are exit
+      # criteria of the form "saving it produces a file qpdf reads clean" —
+      # which is a claim CI has to be able to see. Until this step existed they
+      # ran only under `cargo test --workspace`, where a skipped oracle exits 0
+      # and reads exactly like a pass, which is the failure gap 20 built the
+      # grep for in the first place.
       - name: Validate synthesised container documents against qpdf
         run: |
           set -o pipefail
-          cargo test -p tinker-pdf --test cbz_qpdf --test xps_qpdf -- \
+          cargo test -p tinker-pdf --test cbz_qpdf --test xps_qpdf \
+            --test epub_qpdf -- \
             --nocapture 2>&1 | tee container-oracle.log
           if grep -q 'qpdf-oracle: SKIPPED' container-oracle.log; then
-            echo "::error::qpdf was not found, so the CBZ and XPS oracles" \
-                 "SKIPPED rather than passed"
+            echo "::error::qpdf was not found, so the CBZ, XPS and EPUB" \
+                 "oracles SKIPPED rather than passed"
             exit 1
           fi
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' container-oracle.log

@@ -228,6 +228,30 @@ pub enum MimetypeDefect {
 pub enum OcfWarning {
     /// §4.3.2, per clause.
     Mimetype(MimetypeDefect),
+    /// §4.2.3 forbids a container from holding two files at one path, and this
+    /// one does (gap 31, milestone 4).
+    ///
+    /// **Milestone 3 left this owed and named milestone 4 as the milestone that
+    /// would decide it, *"with the manifest in front of it"*.** With the
+    /// manifest in front of it the answer is a warning rather than a refusal or
+    /// a silence, and the reason is what the manifest does with a path: an
+    /// `href` resolves to a *name*, [`Ocf::index_of`] hands back the first entry
+    /// of that name, and which of two files a chapter is therefore depends on
+    /// central-directory order — which is whatever the producing tool walked.
+    ///
+    /// Refusing would lose a book over a ZIP quirk that changes nothing about
+    /// the resource anybody meant; staying silent would leave a resource
+    /// resolved by an order nobody chose. `opc::Package::validate` refuses the
+    /// analogous case one format over, and the difference is argued rather than
+    /// inherited: OPC part names are that format's whole addressing model, where
+    /// a container path is a file name and the addressing model is the
+    /// manifest.
+    ///
+    /// Reported **once for the container**, whatever it repeats and however
+    /// often: a book with one file twice has one thing wrong with it, and the
+    /// variant is `Copy` so it carries no name. No real book in either corpus
+    /// trips it.
+    DuplicatePath,
 }
 
 // ---- Paths ------------------------------------------------------------------
@@ -764,6 +788,7 @@ impl<'a> Ocf<'a> {
             encryption: None,
         };
         ocf.check_mimetype();
+        ocf.check_duplicate_paths();
         ocf
     }
 
@@ -904,6 +929,27 @@ impl<'a> Ocf<'a> {
         match self.read(index) {
             Ok(bytes) => parse_encryption(bytes, &limits),
             Err(_) => Err(ArchiveRefusal::UnreadableContainer),
+        }
+    }
+
+    /// §4.2.3's one-file-per-path rule, checked once for the whole container.
+    ///
+    /// A sorted copy of the names rather than a pass per entry, because the
+    /// naive comparison is the archive's entry count squared and
+    /// `MAX_ZIP_ENTRIES` is 16 384 — `5adf502`'s sentence in miniature, at a
+    /// place where the answer costs one sort.
+    fn check_duplicate_paths(&mut self) {
+        let mut names: Vec<&str> = self
+            .archive
+            .entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        names.sort_unstable();
+        // One warning per *repeated name*, so a container holding one file
+        // three times says one thing about it and not two.
+        if names.windows(2).any(|pair| pair[0] == pair[1]) {
+            self.warnings.push(OcfWarning::DuplicatePath);
         }
     }
 
