@@ -231,6 +231,8 @@ struct Builder<'a, M: Metrics> {
 struct Piece {
     text: String,
     style: Consumed,
+    /// The [`BoxNode::anchor`] of the node this piece's text came from.
+    anchor: Option<u32>,
 }
 
 /// Lays a tree out into one continuous column.
@@ -529,6 +531,7 @@ impl<M: Metrics> Builder<'_, M> {
                 pieces.push(Piece {
                     text,
                     style: style.clone(),
+                    anchor: node.anchor,
                 });
                 self.lines(&pieces, style, block, content_x, content_width)
             }
@@ -621,7 +624,11 @@ impl<M: Metrics> Builder<'_, M> {
             Content::Text(source) => {
                 let text = collapser.push(source, style.white_space);
                 if !text.is_empty() {
-                    out.push(Piece { text, style });
+                    out.push(Piece {
+                        text,
+                        style,
+                        anchor: node.anchor,
+                    });
                 }
             }
             Content::Children(children) => {
@@ -670,6 +677,7 @@ impl<M: Metrics> Builder<'_, M> {
                         letter_spacing: 0.0,
                         word_spacing: 0.0,
                         generated: true,
+                        anchor: None,
                     },
                 );
                 return;
@@ -1005,6 +1013,7 @@ impl<M: Metrics> Builder<'_, M> {
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
                 generated: false,
+                anchor: pieces[*index].anchor,
             });
             width += advance;
         }

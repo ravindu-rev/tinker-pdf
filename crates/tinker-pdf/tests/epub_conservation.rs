@@ -364,20 +364,101 @@ fn the_source_side_finds_the_same_spine_the_engine_did() {
         let bytes = corpus_book(name);
         let doc = Document::open(bytes.clone()).expect(name);
         let harness = spine_text(&bytes);
-        let engine: Vec<&str> = doc
-            .archive()
-            .expect("a report")
-            .pages()
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
+        // **Distinct consecutive** names, because since milestone 8 a chapter
+        // takes as many pages as its text needs and `pages()` has one entry
+        // per page. Collapsing runs of the same name is what turns a page list
+        // back into a spine — and it is not a weakening: a chapter that
+        // appeared twice in the spine at *different* positions still shows as
+        // two entries, and a chapter dropped altogether still shows as none.
+        let mut engine: Vec<&str> = Vec::new();
+        for origin in doc.archive().expect("a report").pages() {
+            if engine.last() != Some(&origin.name.as_str()) {
+                engine.push(origin.name.as_str());
+            }
+        }
         let ours: Vec<&str> = harness.items.iter().map(|i| i.path.as_str()).collect();
         assert_eq!(ours, engine, "{name}");
+        assert!(
+            doc.page_count() as usize >= ours.len(),
+            "{name}: a spine item contributes at least one page"
+        );
         assert!(
             harness.items.iter().any(|i| !i.text.trim().is_empty()),
             "{name}: the harness read no text out of any chapter"
         );
     }
+}
+
+/// The source side drops a `hidden` subtree and keeps everything that only
+/// looks like one.
+///
+/// **Both directions, because a scanner that dropped everything would pass
+/// half of this.** `aria-hidden` is on three `<figcaption>`s in the committed
+/// corpus and hides nothing; `data-hidden` and a `class="hidden"` are the two
+/// spellings a hand-written book uses for something the UA sheet does not act
+/// on either. A scan for the substring `hidden` would eat all four.
+#[test]
+fn the_source_side_drops_hidden_and_keeps_everything_else() {
+    let markup = "<body>\
+        <nav hidden=\"hidden\"><p>landmarks</p></nav>\
+        <p aria-hidden=\"true\">aria</p>\
+        <p data-hidden=\"true\">data</p>\
+        <p class=\"hidden\">class</p>\
+        <div hidden><span>bare</span></div>\
+        <div hidden=\"\"><span>empty</span></div>\
+        <p>kept</p></body>";
+    let text = visible_text(markup);
+    for gone in ["landmarks", "bare", "empty"] {
+        assert!(!text.contains(gone), "{gone} should be hidden: {text:?}");
+    }
+    for kept in ["aria", "data", "class", "kept"] {
+        assert!(text.contains(kept), "{kept} should be kept: {text:?}");
+    }
+}
+
+/// A hidden element holding a **nested element of its own name** ends at the
+/// right `</div>`.
+///
+/// The depth counter, on its own. No book in either corpus nests one, so a
+/// fixture built from the corpus could not tell a counter from a flag — and a
+/// flag would let every character after the inner `</div>` back into the
+/// stream while the outer element is still open.
+#[test]
+fn a_hidden_subtree_ends_at_its_own_closing_tag() {
+    let text = visible_text("<body><div hidden><div>inner</div>outer</div><p>after</p></body>");
+    assert!(!text.contains("inner"), "{text:?}");
+    assert!(!text.contains("outer"), "{text:?}");
+    assert!(text.contains("after"), "{text:?}");
+}
+
+/// The source side decodes UTF-8 and does not transliterate it.
+///
+/// **This is the assertion milestone 4 owed and did not write**, and milestone
+/// 8 is where its absence cost something: `visible_text` pushed one `char` per
+/// **byte**, so an em dash became three characters and a kanji three more. No
+/// test could see it while every page was empty — the corpus sweep compared a
+/// mangled source against no pages at all and reported `0` conserved either
+/// way — and the first book that laid out reported 2 454 characters of
+/// spurious divergence.
+#[test]
+fn the_source_side_decodes_and_does_not_transliterate() {
+    let text =
+        visible_text("<p>an em\u{2014}dash, an ellipsis\u{2026} and \u{65e5}\u{672c}\u{8a9e}</p>");
+    assert!(text.contains('\u{2014}'), "{text:?}");
+    assert!(text.contains('\u{2026}'), "{text:?}");
+    assert!(text.contains("\u{65e5}\u{672c}\u{8a9e}"), "{text:?}");
+    assert!(
+        !text.contains('\u{00e2}'),
+        "UTF-8 read as Latin-1 leaves an a-circumflex behind: {text:?}"
+    );
+    // And the count is the count of characters, not of bytes: nine characters
+    // of text plus the two spaces the tag boundaries add.
+    assert_eq!(
+        text.chars().filter(|c| !c.is_whitespace()).count(),
+        "anem\u{2014}dash,anellipsis\u{2026}and\u{65e5}\u{672c}\u{8a9e}"
+            .chars()
+            .count()
+    );
 }
 
 // ---- leg 4: the corpus, and the figure this milestone records ----------------
@@ -389,10 +470,12 @@ fn the_source_side_finds_the_same_spine_the_engine_did() {
 /// - **nothing extra**, ever. No page of any book may carry a character the
 ///   book does not have there, and that is true at this milestone and at every
 ///   one after it.
-/// - **the conserved figure**, recorded in `tests/epub/CONSERVATION.tsv`. Today
-///   it is `0` for every book, because every page is a placeholder. A milestone
-///   that lays text out has to update that file in the same commit, which is
-///   what makes this a ratchet rather than a test written to pass.
+/// - **the conserved figure**, recorded in `tests/epub/CONSERVATION.tsv`. At
+///   milestone 4 it was `0` for every book, because every page was a
+///   placeholder; at milestone 8 it is **every character of every book**. A
+///   milestone that changes it has to update that file in the same commit,
+///   which is what makes this a ratchet rather than a test written to pass —
+///   and now that the figure is total, any regression at all moves it.
 #[test]
 fn every_committed_book_conserves_the_figure_the_record_states() {
     let recorded = record();

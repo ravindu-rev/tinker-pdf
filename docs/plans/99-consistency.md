@@ -108,6 +108,43 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    CLIs in CI; nothing links them, and their outputs are transient
    comparison references, never committed or redistributed.
 
+   **Amended, 21 August 2026, gap 31 milestone 8: a headless browser is a
+   fifth, and only for CSS.** [31](gaps/31-epub.md)'s oracle section works out
+   why the four are not enough for a reflowable format, and the argument is
+   worth keeping rather than the conclusion alone.
+
+   Gap 30 used mutool as its XPS oracle and recorded the risk it was taking:
+   *"where MuPDF is wrong about XPS this engine will agree with it and both
+   will be wrong"*. That is bounded, because XPS markup has one right answer.
+   **CSS does not work like that.** MuPDF reads EPUB — `mutool draw` lists it
+   and takes `-W`, `-H` and `-S` for its layout — but MuPDF's EPUB engine is
+   *itself* a partial CSS implementation, so:
+
+   > For XPS, agreeing with mutool was evidence. For EPUB, disagreeing with
+   > mutool is not evidence of a bug.
+
+   A browser is the reference implementation of CSS, and comparing a CSS
+   implementation against a partial one is comparing it against nothing. So
+   `tests/epub_browser.rs` invokes Chromium — `chrome`, `msedge` or `chromium`,
+   found by path or named by `TINKER_BROWSER` — with `--headless=new`,
+   `--dump-dom` and `--print-to-pdf`.
+
+   **The ruling's substance is unchanged and that is why this is an amendment
+   rather than an exception**: the browser is a subprocess, nothing links it,
+   nothing is vendored, and its output is transient. What is new is only which
+   binary is on the list. Two constraints come with it, both from gap 31's own
+   oracle section rather than discovered afterwards:
+
+   - **It is not a pixel comparison and never becomes one.** A browser lays a
+     content document into one continuous column, so there is no page 3 to
+     compare against page 3; what is compared is `y` offsets and the partition
+     of the text across pages. Gap 18a pre-argued the same point for a
+     fixed-point wavelet against a float reference.
+   - **The job goes red when the browser is missing.** Gap 20's finding, for
+     the fourth time: a skipped oracle exits 0 and reads exactly like a pass.
+     The `browser-oracle: RAN` / `SKIPPED` line is printed and greped, exactly
+     as `qpdf-oracle:` is.
+
 10. **Warnings carry provenance.** Binds all reading phases. Every leniency
     action (repaired xref, truncated stream decoded short, substituted
     font, placeholder image) is a typed warning naming the object it

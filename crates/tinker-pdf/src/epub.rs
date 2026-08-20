@@ -61,21 +61,49 @@
 //! from the implementation gap 28 is removing, which is evidence the seam is in
 //! the right place rather than a coincidence worth hiding.
 //!
-//! # What milestone 4 puts on those pages, and what it does not
+//! # What is on those pages, since milestone 8
 //!
-//! **Nothing but the neutral placeholder, and a named warning per page.** The
-//! spine is read, every itemref becomes a page in its own position, and each
-//! one says [`SpineDefect::NotLaidOut`] — because an empty page reported as a
-//! success is the failure gap 17 spent itself on, and a white page is
-//! indistinguishable from a book of blank paper. The CSS cascade, the layout
-//! engine and the line breaker are milestones 6 to 12; until they land, a
-//! caller that renders this book gets thirteen grey rectangles and thirteen
-//! sentences saying why.
+//! **The book.** A spine item is read into an element tree by
+//! [`xhtml`], cascaded against [`read::UA_STYLESHEET`] and the book's own
+//! stylesheets by `tinker-pdf-css`, laid out and fragmented by
+//! `tinker-pdf-layout`, and drawn by [`paint`]. A chapter takes as many pages
+//! as its text needs, so **the page count is no longer the spine item count**
+//! — which is milestone 4's own sentence read forwards: for a reflowable book
+//! the page count is a function of the box the caller stated.
+//!
+//! What is still a placeholder is what a placeholder was always for: a spine
+//! item this build cannot resolve, and an SVG content document, which is a
+//! named non-goal. [`SpineDefect`] is the list, and it no longer has a variant
+//! meaning *this build has no layout engine* — milestone 4 wrote that one down
+//! in order to delete it here.
+//!
+//! # What the caller is told, and why the census is the number
+//!
+//! Every property a book asked for that this build does not implement reaches
+//! the report as [`ArchiveWarning::UnimplementedProperty`], **counted by the
+//! elements it affected** rather than by the declarations that asked. That is
+//! the figure gap 31 says an `As built` is judged on: it is how much of
+//! somebody else's format this build actually reads, measured on the book in
+//! front of it rather than on a list of specifications.
 
+pub mod nav;
 pub mod ocf;
 pub mod package;
+pub mod paint;
+pub mod read;
+pub mod xhtml;
 
+use tinker_pdf_cos::build::{OutlineEntry, Target};
+use tinker_pdf_cos::dest::is_writable_uri;
 use tinker_pdf_cos::DocumentBuilder;
+use tinker_pdf_css::cascade::ComputedStyle;
+use tinker_pdf_css::media::MediaContext;
+use tinker_pdf_css::parser::{parse as css_parse, Stylesheet};
+use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits, NoImports};
+use tinker_pdf_layout::{
+    layout_with, Budget as LayoutBudget, Limits as LayoutLimits, Options as LayoutOptions,
+    Page as LayoutPage, Warning as LayoutWarning,
+};
 use tinker_pdf_xml::Limits as XmlLimits;
 use tinker_pdf_zip::{limits as zip_limits, Archive};
 
@@ -83,7 +111,9 @@ use crate::cbz::{
     ArchiveRefusal, ArchiveReport, ArchiveWarning, PageOrigin, DOCUMENT_OVERHEAD,
     MAX_SYNTHESISED_PDF, PAGE_OVERHEAD, PLACEHOLDER_GREY,
 };
+use ocf::resolve_reference;
 use package::{FallbackDefect, Package};
+use paint::{draw_page, page_target, run_rect, BookMetrics, Fonts, Frame};
 
 // ---- Bounds -----------------------------------------------------------------
 
@@ -241,6 +271,16 @@ pub struct Limits {
     pub max_synthesised: usize,
     /// What the markup reader is allowed to spend, per file.
     pub xml: XmlLimits,
+    /// What the cascade is allowed to spend, per book.
+    ///
+    /// Held whole rather than flattened into fields here, because
+    /// `tinker_pdf_css::Limits` already says what each of its numbers bounds
+    /// and a copy of that reasoning in a second struct is a copy that goes out
+    /// of date. The same argument [`XmlLimits`] is carried under, one crate
+    /// over.
+    pub css: CssLimits,
+    /// What layout and fragmentation are allowed to spend, per book.
+    pub layout: LayoutLimits,
 }
 
 impl Limits {
@@ -251,6 +291,8 @@ impl Limits {
         max_spine_items: MAX_EPUB_SPINE_ITEMS,
         max_synthesised: MAX_SYNTHESISED_PDF,
         xml: XmlLimits::DEFAULT,
+        css: CssLimits::DEFAULT,
+        layout: LayoutLimits::DEFAULT,
     };
 }
 
@@ -278,6 +320,27 @@ impl Default for Limits {
 ///   not a property of the file.** Two hosts that pass different boxes get
 ///   different books, on purpose.
 pub const DEFAULT_PAGE: (f64, f64) = (432.0, 648.0);
+
+/// The margin between the page box and the text, in points: **36, half an
+/// inch**.
+///
+/// `tinker-pdf-layout`'s `Options` is a **content area** and not a page: that
+/// crate says in as many words that page margins are the caller's, *"because a
+/// reading system's margins are a presentation choice and this crate has no
+/// opinion about them"*. This is the caller, and this is the opinion.
+///
+/// Half an inch is the smallest margin a trade paperback is set with, and the
+/// number matters more than it looks: at 432 points wide it leaves 360 points
+/// of measure, which at 12 point Times is about 66 characters a line — inside
+/// the 45-to-75 band every typographic manual gives. A page with no margin at
+/// all would set 79, and one with an inch would set 53 and add pages to every
+/// book.
+///
+/// **It is not the `body` margin and does not replace it.** HTML's own
+/// `body { margin: 8px }` is in `ua.css` and cascades like any other rule, so
+/// a book that sets `body { margin: 0 }` gets its text 36 points from the page
+/// edge rather than at it.
+pub const PAGE_MARGIN: f64 = 36.0;
 
 /// The base font size a reflowable book is laid out at, in points, when the
 /// caller states none.
@@ -393,12 +456,6 @@ impl BookLayout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SpineDefect {
-    /// The itemref resolved to an XHTML content document and this build has no
-    /// layout engine yet.
-    ///
-    /// **Temporary, and it is the whole of milestone 4's honesty.** Milestone 8
-    /// is where a page that reads is a page that draws.
-    NotLaidOut,
     /// The `idref` names no manifest item — or the attribute is absent, which
     /// §5.7.2 forbids.
     IdrefUnresolved,
@@ -420,6 +477,18 @@ pub enum SpineDefect {
     SvgContentDocument,
     /// §3.5.1's fallback chain does not reach an EPUB content document.
     Fallback(FallbackDefect),
+    /// The cascade refused the document: one of `tinker-pdf-css`'s caps fired.
+    ///
+    /// **Named apart from [`SpineDefect::NotFragmented`]** because the two are
+    /// different halves of the reader and a caller can act on the difference:
+    /// a document with a million selectors is refused here and a document with
+    /// a million line boxes is refused there, and a build that reported both as
+    /// "the chapter did not lay out" would have merged the two things a bound
+    /// exists to tell apart.
+    NotStyled,
+    /// Layout or fragmentation refused the document: one of
+    /// `tinker-pdf-layout`'s caps fired, or the page box has no usable area.
+    NotFragmented,
 }
 
 // ---- Routing ----------------------------------------------------------------
@@ -493,12 +562,116 @@ fn read(
     synthesise(book, &package, limits, layout)
 }
 
-/// Turns a spine into pages.
+/// One spine item, read as far as it went.
+struct Chapter {
+    /// The container path the content document was read from, or the `idref`
+    /// or `href` that named nothing.
+    name: String,
+    /// The container path, when there is one, for resolving a reference
+    /// written **in** this document.
+    path: Option<String>,
+    /// Why this chapter is a placeholder, or `None` when it is a chapter.
+    defect: Option<SpineDefect>,
+    /// The element tree and its computed styles.
+    reading: Option<read::Reading>,
+    /// The pages this chapter's text needed, or empty for a placeholder.
+    pages: Vec<LayoutPage>,
+    /// The index of this chapter's first page in the whole document.
+    first_page: usize,
+}
+
+impl Chapter {
+    /// How many pages this chapter contributes.
+    ///
+    /// **A placeholder still contributes one**, which is the rule milestone 4
+    /// established and this milestone does not get to relax: dropping a spine
+    /// item does not renumber a page, it removes a chapter.
+    fn page_count(&self) -> usize {
+        self.pages.len().max(1)
+    }
+
+    /// The first page carrying text from `element` or from anything under it.
+    ///
+    /// Falls back to the chapter's own first page, which is the honest answer
+    /// for a destination naming an element with no text in it at all: the
+    /// chapter is where the reference points and the exact line is not
+    /// knowable. Writing the page of whichever element happened to be nearest
+    /// would be the plausible-and-wrong answer.
+    fn page_of(&self, element: usize) -> usize {
+        let Some(reading) = &self.reading else {
+            return self.first_page;
+        };
+        for (offset, page) in self.pages.iter().enumerate() {
+            for run in &page.runs {
+                let Some(anchor) = run.anchor else {
+                    continue;
+                };
+                if reading.dom.contains(element, anchor as usize) {
+                    return self.first_page + offset;
+                }
+            }
+        }
+        self.first_page
+    }
+}
+
+/// The user-agent stylesheet, parsed once per book.
 ///
-/// One page per itemref, in the spine's own order, at the box the caller
-/// stated. Every page is the neutral placeholder and every page carries a named
-/// warning; nothing here reads a content document, which is why nothing here
-/// spends the archive's inflation budget on one.
+/// Once per book and not once per spine item: a thirteen-chapter book would
+/// otherwise tokenize the same four kilobytes thirteen times, and the sheet
+/// cannot differ between them.
+///
+/// **The caller's base font size is not in here**, and the first draft of this
+/// milestone put it here as a generated `html { font-size: Npt }` rule. That is
+/// wrong in a way one of the two measured producers demonstrates: pandoc writes
+/// `html, body, div, … { font-size: 100% }` as a reset on every book, an author
+/// declaration that beats any user-agent rule — so a reading system's base size
+/// would be silently discarded by two thirds of this corpus. A percentage on
+/// the root resolves against the **initial** value, and the initial value is
+/// the user's; [`tinker_pdf_css::cascade::cascade_from`] is where it goes.
+fn ua_sheet(media: &MediaContext, limits: &CssLimits, budget: &mut CssBudget) -> Vec<Stylesheet> {
+    match css_parse(
+        read::UA_STYLESHEET.as_bytes(),
+        None,
+        &NoImports,
+        media,
+        limits,
+        budget,
+    ) {
+        Ok(sheet) => vec![sheet],
+        // Unreachable for the committed file, which
+        // `the_committed_sheet_is_what_a_book_is_set_with` parses on every run;
+        // reachable only if a caller lowered `Limits::css` below what four
+        // kilobytes of CSS costs, and a book with no user-agent sheet is a book
+        // with no block structure rather than a refusal.
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The root element's initial values, carrying the caller's base font size.
+///
+/// `ComputedStyle::initial()` at [`crate::OpenOptions::font_size`], converted
+/// from points to the CSS pixels the cascade computes in. Everything else is
+/// the specification's own initial value.
+fn initial_style(font_size: f64) -> ComputedStyle {
+    let mut initial = ComputedStyle::initial();
+    initial.font_size = font_size / read::PX_TO_PT;
+    initial
+}
+
+/// Turns a spine into pages that read.
+///
+/// Three passes, and there are three because each needs the whole of the one
+/// before it:
+///
+/// 1. **Every spine item is read, cascaded and laid out.** Nothing is written
+///    yet, because the page a chapter starts on is not known until every
+///    chapter before it has been fragmented.
+/// 2. **Every face and every character is collected**, because a PDF's font
+///    resources belong to the document rather than to a page, and a character
+///    outside `WinAnsiEncoding` needs a code chosen before anything is drawn.
+/// 3. **The document is written**: pages, link annotations and the outline, all
+///    of which name page indices only the first pass could produce.
 ///
 /// # Errors
 /// [`ArchiveRefusal::TooLarge`] when the synthesised document is past
@@ -531,6 +704,128 @@ pub fn synthesise(
         warnings.push(ArchiveWarning::UnimplementedFeature { property, items });
     }
 
+    let frame = Frame {
+        page: layout.page,
+        margin: PAGE_MARGIN,
+    };
+    let (content_width, content_height) = frame.content_px();
+    let media = MediaContext::screen(content_width, content_height);
+    let options = LayoutOptions::new(content_width, content_height);
+    let mut css_budget = CssBudget::new(&limits.css);
+    let mut layout_budget = LayoutBudget::new(&limits.layout);
+    let ua = ua_sheet(&media, &limits.css, &mut css_budget);
+    let initial = initial_style(layout.font_size);
+    let context = read::Context {
+        ua: &ua,
+        limits,
+        css_limits: &limits.css,
+        media: &media,
+        initial: &initial,
+    };
+
+    // ---- pass 1: read, cascade, lay out ------------------------------------
+    let mut census = read::Census::default();
+    let mut chapters: Vec<Chapter> = Vec::with_capacity(package.spine().len());
+    let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
+    for itemref in package.spine() {
+        let (name, path, mut defect) = plan_page(book, package, &itemref.idref);
+        let mut reading = None;
+        let mut pages = Vec::new();
+        if defect.is_none() {
+            let source = path.clone().unwrap_or_default();
+            let bytes = book
+                .index_of(&source)
+                .and_then(|index| book.read(index).ok().map(<[u8]>::to_vec));
+            match bytes {
+                // Unreachable through `plan_page`, which already resolved the
+                // path to an entry; kept because an entry that will not
+                // *inflate* is a different failure from one that is not there,
+                // and reporting it as the second would be a lie about the book.
+                None => defect = Some(SpineDefect::ResourceMissing),
+                Some(bytes) => {
+                    match read::read_document(book, &source, &bytes, &context, &mut css_budget) {
+                        Err(_) => defect = Some(SpineDefect::NotStyled),
+                        Ok(document) => {
+                            for markup in &document.dom.defects {
+                                warnings.push(ArchiveWarning::Markup {
+                                    item: name.clone(),
+                                    defect: *markup,
+                                });
+                            }
+                            census.absorb(&document.census);
+                            match layout_with(
+                                &document.tree,
+                                &BookMetrics,
+                                &options,
+                                &limits.layout,
+                                &mut layout_budget,
+                            ) {
+                                Err(_) => defect = Some(SpineDefect::NotFragmented),
+                                Ok(laid) => {
+                                    for (warning, count) in laid.warnings {
+                                        match layout_warnings
+                                            .iter_mut()
+                                            .find(|(w, _)| *w == warning)
+                                        {
+                                            Some(slot) => slot.1 += count,
+                                            None => layout_warnings.push((warning, count)),
+                                        }
+                                    }
+                                    pages = laid.pages;
+                                }
+                            }
+                            reading = Some(document);
+                        }
+                    }
+                }
+            }
+        }
+        chapters.push(Chapter {
+            name,
+            path,
+            defect,
+            reading,
+            pages,
+            first_page: 0,
+        });
+    }
+
+    let mut at = 0usize;
+    for chapter in &mut chapters {
+        chapter.first_page = at;
+        at += chapter.page_count();
+    }
+    let total_pages = at;
+
+    // ---- pass 2: every face, and every character that needs a code ---------
+    let mut fonts = Fonts::new();
+    for chapter in &chapters {
+        for page in &chapter.pages {
+            for run in &page.runs {
+                if run.painted {
+                    fonts.note(run);
+                }
+            }
+        }
+    }
+
+    // ---- what the caller is told, before any of it is drawn ----------------
+    for (property, elements) in census.ranked() {
+        warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });
+    }
+    for (warning, count) in &layout_warnings {
+        warnings.push(ArchiveWarning::Layout {
+            warning: warning.clone(),
+            count: *count,
+        });
+    }
+    if fonts.unrepresented() > 0 {
+        warnings.push(ArchiveWarning::UnrepresentedCharacters {
+            characters: fonts.unrepresented(),
+        });
+    }
+
+    // ---- pass 3: write it --------------------------------------------------
     let (width, height) = layout.page;
     let mut builder = DocumentBuilder::new();
     // §5.5.3.1's metadata, reaching the document it describes. Without this the
@@ -542,16 +837,54 @@ pub fn synthesise(
     if let Some(creator) = package.creator() {
         builder.set_info(b"Author", creator);
     }
+    fonts.register(&mut builder);
 
-    let mut pages: Vec<PageOrigin> = Vec::with_capacity(package.spine().len());
-    for (number, itemref) in package.spine().iter().enumerate() {
-        let (name, defect) = plan_page(book, package, &itemref.idref);
-        builder.add_page(width, height, |page| {
-            page.fill_rect(0.0, 0.0, width, height, PLACEHOLDER_GREY);
-        });
-        let page = u32::try_from(number).unwrap_or(u32::MAX);
-        warnings.push(ArchiveWarning::SpinePage { page, defect });
-        pages.push(PageOrigin { name, defect: None });
+    let links = cross_references(&chapters, &frame, limits, total_pages);
+
+    let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
+    for chapter in &chapters {
+        if let Some(defect) = chapter.defect {
+            let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
+            warnings.push(ArchiveWarning::SpinePage { page, defect });
+            builder.add_page(width, height, |page| {
+                page.fill_rect(0.0, 0.0, width, height, PLACEHOLDER_GREY);
+            });
+            pages.push(PageOrigin {
+                name: chapter.name.clone(),
+                defect: None,
+            });
+            continue;
+        }
+        // A content document whose text fitted nowhere — a cover whose only
+        // content is an SVG, which four of the six committed books have — still
+        // gets its page, for the same reason a placeholder does.
+        if chapter.pages.is_empty() {
+            builder.add_page(width, height, |_| {});
+            pages.push(PageOrigin {
+                name: chapter.name.clone(),
+                defect: None,
+            });
+            continue;
+        }
+        for (offset, laid) in chapter.pages.iter().enumerate() {
+            let index = chapter.first_page + offset;
+            let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
+            builder.add_page(width, height, |page| {
+                draw_page(page, laid, &frame, &fonts);
+                for (rect, target) in on_page {
+                    page.link(rect.0, rect.1, rect.2, rect.3, target);
+                }
+            });
+            pages.push(PageOrigin {
+                name: chapter.name.clone(),
+                defect: None,
+            });
+        }
+    }
+
+    let entries = outline(book, package, &chapters, limits, total_pages);
+    if !entries.is_empty() && !builder.set_outline(entries) {
+        warnings.push(ArchiveWarning::OutlineUnwritable);
     }
 
     // Taken after every read, because reading is what most of them come from.
@@ -570,17 +903,243 @@ pub fn synthesise(
     ))
 }
 
-/// What one itemref becomes: the name its page reports, and why that page is a
-/// placeholder.
+/// Where one reference points, once the spine has been paginated.
+///
+/// The one function both an `<a href>` and a table-of-contents entry go
+/// through, which is why it takes a reference and a referring path rather than
+/// an element. A cross-reference and an outline entry naming the same chapter
+/// and disagreeing about which page it is on would be two resolvers, and the
+/// disagreement would be invisible in every rendered comparison there is.
+fn resolve_target(
+    chapters: &[Chapter],
+    referring: Option<&str>,
+    href: &str,
+    limits: &Limits,
+    total_pages: usize,
+) -> Option<Target> {
+    let trimmed = href.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // RFC 3986 §3.1: a scheme is a letter followed by letters, digits, `+`,
+    // `-` and `.`, ending at the first `:` — and it is looked for only in the
+    // reference's first segment, which is how `ocf::resolve_reference` decides
+    // the same question. Asking it the same way in both places is what stops
+    // `ch1.xhtml#a:b` from being read as a scheme.
+    let scheme = trimmed
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split_once(':')
+        .map(|(scheme, _)| scheme)
+        .filter(|scheme| {
+            !scheme.is_empty()
+                && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+    if scheme.is_some() {
+        // 12.6.4.7's `/URI` is 7-bit ASCII; `is_writable_uri` is the writer's
+        // own predicate, asked here so a refusal is a link this build did not
+        // write rather than a `link()` that silently returned false.
+        return is_writable_uri(trimmed).then(|| Target::Uri(trimmed.to_owned()));
+    }
+
+    let (path, fragment) = match trimmed.split_once('#') {
+        Some((path, fragment)) => (path, Some(fragment)),
+        None => (trimmed, None),
+    };
+    // An empty path is a same-document reference, which is what every
+    // `href="#toc"` in this corpus is.
+    let target = if path.is_empty() {
+        referring?.to_owned()
+    } else {
+        resolve_reference(referring?, path, limits).ok()?
+    };
+
+    let chapter = chapters
+        .iter()
+        .find(|chapter| chapter.path.as_deref() == Some(target.as_str()))?;
+    let page = match fragment.filter(|f| !f.is_empty()) {
+        Some(fragment) => {
+            let element = chapter
+                .reading
+                .as_ref()
+                .and_then(|reading| reading.dom.by_id(fragment));
+            match element {
+                Some(element) => chapter.page_of(element),
+                // A fragment naming nothing points at the chapter, which is
+                // what a reading system does and is a different answer from
+                // pointing nowhere: the reference is not broken, the anchor is.
+                None => chapter.first_page,
+            }
+        }
+        None => chapter.first_page,
+    };
+    (page < total_pages).then(|| page_target(u32::try_from(page).unwrap_or(u32::MAX)))
+}
+
+/// One page's link annotations: a rectangle in the page's own points, and
+/// where it goes.
+type PageLinks = Vec<((f64, f64, f64, f64), Target)>;
+
+/// Every `<a href>` in the book, as a rectangle on a page and a target.
+///
+/// Indexed by page, so the writer can hand one page its own annotations
+/// without searching the whole book for them.
+fn cross_references(
+    chapters: &[Chapter],
+    frame: &Frame,
+    limits: &Limits,
+    total_pages: usize,
+) -> Vec<PageLinks> {
+    let mut out: Vec<PageLinks> = vec![Vec::new(); total_pages];
+    for chapter in chapters {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        for (index, node) in reading.dom.nodes.iter().enumerate() {
+            if !node.is_html() || node.name != "a" {
+                continue;
+            }
+            let Some(href) = node.attr("href") else {
+                continue;
+            };
+            let Some(target) =
+                resolve_target(chapters, chapter.path.as_deref(), href, limits, total_pages)
+            else {
+                continue;
+            };
+            // A link's rectangles are its **runs'**, one each, and not one box
+            // round the lot: an anchor broken across a line break occupies two
+            // rectangles with the whole of the line between them, and a single
+            // bounding box would make every word on that line part of the link.
+            for (offset, page) in chapter.pages.iter().enumerate() {
+                let at = chapter.first_page + offset;
+                for run in &page.runs {
+                    let Some(anchor) = run.anchor else {
+                        continue;
+                    };
+                    if !reading.dom.contains(index, anchor as usize) {
+                        continue;
+                    }
+                    if let Some(slot) = out.get_mut(at) {
+                        slot.push((run_rect(run, frame), target.clone()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The document outline, from the navigation document or the NCX.
+///
+/// 5.4's navigation document is asked first because it is what EPUB 3
+/// requires; the NCX is the fallback and not the other way round, so a book
+/// carrying both -- which four of the six committed ones do -- gets the
+/// outline its own version says is authoritative.
+fn outline(
+    book: &mut ocf::Ocf<'_>,
+    package: &Package,
+    chapters: &[Chapter],
+    limits: &Limits,
+    total_pages: usize,
+) -> Vec<OutlineEntry> {
+    let (entries, base) = navigation(book, package, limits);
+    entries
+        .iter()
+        .map(|entry| convert(entry, base.as_deref(), chapters, limits, total_pages))
+        .collect()
+}
+
+/// The table of contents as the book wrote it, and **the document it was
+/// written in**.
+///
+/// The base comes back beside the entries rather than being folded into each
+/// `href`, because it is one fact about the whole tree and folding it in would
+/// mean rewriting every entry's reference into a spelling the book never used.
+/// It matters: a navigation document is not always beside the content it names
+/// -- pandoc puts `nav.xhtml` in `EPUB/` and the chapters in `EPUB/text/` -- so
+/// a build that resolved a navigation `href` against the *chapter* would find
+/// nothing, and one that resolved it against the container root would find
+/// nothing for pandoc at all.
+fn navigation(
+    book: &mut ocf::Ocf<'_>,
+    package: &Package,
+    limits: &Limits,
+) -> (Vec<nav::NavEntry>, Option<String>) {
+    if let Some(path) = package.nav().and_then(|item| item.path.clone()) {
+        if let Some(index) = book.index_of(&path) {
+            if let Ok(bytes) = book.read(index).map(<[u8]>::to_vec) {
+                if let Ok(dom) = xhtml::read(&bytes, &limits.xml) {
+                    let entries = nav::from_navigation_document(&dom);
+                    if !entries.is_empty() {
+                        return (entries, Some(path));
+                    }
+                }
+            }
+        }
+    }
+    let ncx = package
+        .toc()
+        .and_then(|toc| package.item_by_id(toc))
+        .and_then(|item| item.path.clone());
+    let Some(path) = ncx else {
+        return (Vec::new(), None);
+    };
+    let Some(index) = book.index_of(&path) else {
+        return (Vec::new(), None);
+    };
+    let Ok(bytes) = book.read(index).map(<[u8]>::to_vec) else {
+        return (Vec::new(), None);
+    };
+    (nav::from_ncx(&bytes, &limits.xml), Some(path))
+}
+
+/// One navigation entry, with its target resolved.
+fn convert(
+    entry: &nav::NavEntry,
+    base: Option<&str>,
+    chapters: &[Chapter],
+    limits: &Limits,
+    total_pages: usize,
+) -> OutlineEntry {
+    let target = entry
+        .href
+        .as_ref()
+        .and_then(|href| resolve_target(chapters, base, href, limits, total_pages));
+    OutlineEntry {
+        title: entry.title.clone(),
+        target,
+        // 12.3.3 spells "shown expanded" as the sign of `/Count`, and a table
+        // of contents a reader has to expand to see is a table of contents a
+        // reader will not see.
+        open: true,
+        children: entry
+            .children
+            .iter()
+            .map(|child| convert(child, base, chapters, limits, total_pages))
+            .collect(),
+    }
+}
+
+/// What one itemref becomes: the name its page reports, the container path it
+/// was read from, and why that page is a placeholder rather than a chapter.
 ///
 /// **A spine item that does not resolve still produces a page and keeps its
-/// position**, which is why this returns a defect rather than an `Option`.
+/// position**, which is why the defect is a value rather than an absence.
 /// Dropping it would not renumber a page, it would remove a chapter — and a
 /// book that jumps from chapter 4 to chapter 6 reads as a bad conversion rather
 /// than as a bug.
-fn plan_page(book: &ocf::Ocf<'_>, package: &Package, idref: &str) -> (String, SpineDefect) {
+fn plan_page(
+    book: &ocf::Ocf<'_>,
+    package: &Package,
+    idref: &str,
+) -> (String, Option<String>, Option<SpineDefect>) {
     let Some(item) = package.item_by_id(idref) else {
-        return (idref.to_owned(), SpineDefect::IdrefUnresolved);
+        return (idref.to_owned(), None, Some(SpineDefect::IdrefUnresolved));
     };
     // §3.5.1 before §4.2.5: which resource a spine item stands for is decided by
     // the fallback chain, and the *terminus* is the file that would be read.
@@ -588,21 +1147,21 @@ fn plan_page(book: &ocf::Ocf<'_>, package: &Package, idref: &str) -> (String, Sp
     // would report the wrong name.
     let target = match package.content_document(item) {
         Ok(target) => target,
-        Err(defect) => return (item.href.clone(), SpineDefect::Fallback(defect)),
+        Err(defect) => return (item.href.clone(), None, Some(SpineDefect::Fallback(defect))),
     };
     let Some(path) = target.path.as_deref() else {
-        return (target.href.clone(), SpineDefect::HrefUnusable);
+        return (target.href.clone(), None, Some(SpineDefect::HrefUnusable));
     };
     if book.index_of(path).is_none() {
-        return (path.to_owned(), SpineDefect::ResourceMissing);
+        return (path.to_owned(), None, Some(SpineDefect::ResourceMissing));
     }
-    let defect = match target.core {
-        Some(package::CoreMediaType::Svg) => SpineDefect::SvgContentDocument,
-        // The one that goes away. Everything above it is a book being wrong;
-        // this is this build being unfinished, and it says so.
-        _ => SpineDefect::NotLaidOut,
-    };
-    (path.to_owned(), defect)
+    // An SVG content document (§6.2) is a named non-goal: this build reads no
+    // SVG, six spine items in the fetched corpus are one, and laying one out as
+    // though its markup were XHTML would set the `<title>` and the `<desc>` as
+    // body text. It keeps its page and its position.
+    let defect = matches!(target.core, Some(package::CoreMediaType::Svg))
+        .then_some(SpineDefect::SvgContentDocument);
+    (path.to_owned(), Some(path.to_owned()), defect)
 }
 
 #[cfg(test)]

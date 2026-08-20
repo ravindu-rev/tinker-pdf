@@ -832,11 +832,25 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 let layer = self
                     .optional_content_name()
                     .and_then(|name| self.fonts.optional_content(&name));
-                self.open_marked_content(layer);
+                // `BDC` is `tag properties`, so the tag is the operand
+                // **below** the property list — the same position
+                // `optional_content_name` looks in, asked for its own sake
+                // rather than only when the tag happens to be `/OC`.
+                let tag = match self.stack.iter().rev().nth(1) {
+                    Some(Token::Name(tag)) => tag.clone(),
+                    _ => Vec::new(),
+                };
+                self.open_marked_content(&tag, layer);
             }
             // 14.6.1: `BMC` has a tag and no property list, so it can name
             // no layer and always paints.
-            b"BMC" => self.open_marked_content(None),
+            b"BMC" => {
+                let tag = match self.stack.last() {
+                    Some(Token::Name(tag)) => tag.clone(),
+                    _ => Vec::new(),
+                };
+                self.open_marked_content(&tag, None);
+            }
             b"EMC" => self.close_marked_content(),
             // 14.6.1's marked-content *points*, which mark a position rather
             // than open a scope, and 7.8.2's compatibility brackets. All
@@ -883,7 +897,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
 
     /// Opens a marked-content scope and tells the device whether to paint
     /// what follows.
-    fn open_marked_content(&mut self, layer: Option<Layer>) {
+    fn open_marked_content(&mut self, tag: &[u8], layer: Option<Layer>) {
         if self.marked >= MAX_MARKED_CONTENT_DEPTH {
             self.marked_over_cap = self.marked_over_cap.saturating_add(1);
             return;
@@ -891,9 +905,10 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.marked += 1;
         match layer {
             Some(layer) if !layer.visible => {
-                self.device.begin_marked_content(false, Some(&layer.label));
+                self.device
+                    .begin_marked_content(tag, false, Some(&layer.label));
             }
-            _ => self.device.begin_marked_content(true, None),
+            _ => self.device.begin_marked_content(tag, true, None),
         }
     }
 
@@ -980,7 +995,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         // text still extracts and its state changes still happen.
         let hidden = match self.fonts.xobject_optional_content(name) {
             Some(layer) if !layer.visible => {
-                self.open_marked_content(Some(layer));
+                self.open_marked_content(b"OC", Some(layer));
                 true
             }
             _ => false,
@@ -2064,7 +2079,7 @@ mod tests {
     }
 
     impl Device for Scopes {
-        fn begin_marked_content(&mut self, visible: bool, hidden_layer: Option<&str>) {
+        fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
             self.open.push(!visible);
             self.begins
                 .push((visible, hidden_layer.map(str::to_string)));
@@ -2348,7 +2363,7 @@ mod tests {
             open: Vec<bool>,
         }
         impl Device for Images {
-            fn begin_marked_content(&mut self, visible: bool, _layer: Option<&str>) {
+            fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, _layer: Option<&str>) {
                 self.open.push(!visible);
             }
             fn end_marked_content(&mut self) {

@@ -582,7 +582,12 @@ pub(crate) fn destination_array(names: &NameTable, page: ObjRef, view: &DestKind
 /// An **empty** URI is refused too. `/URI ()` is a well-formed action that
 /// resolves to nothing, which is the class of output this repository's plans
 /// call worse than none.
-pub(crate) fn is_writable_uri(uri: &str) -> bool {
+/// Public because a caller that builds a [`crate::build::Target::Uri`] has to
+/// be able to ask **before** it builds one: `PageBuilder::link` refuses an
+/// unwritable target by returning false, and a caller that could not tell that
+/// apart from "the rectangle was degenerate" would report the wrong thing.
+#[must_use]
+pub fn is_writable_uri(uri: &str) -> bool {
     !uri.is_empty() && uri.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
 

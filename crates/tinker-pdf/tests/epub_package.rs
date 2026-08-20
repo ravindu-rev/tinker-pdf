@@ -180,9 +180,12 @@ fn the_page_box_is_the_one_open_options_states_and_the_default_is_six_by_nine() 
     }
     assert_eq!(DEFAULT_PAGE, (432.0, 648.0));
 
-    // And two boxes a caller states. The page *count* does not move here
-    // because milestone 4 does not fragment — one itemref is one page — and
-    // saying so is what milestone 7's own test will have to break.
+    // And two boxes a caller states. The page count still does not move for
+    // *this* fixture, and since milestone 8 that is a fact about the fixture
+    // rather than about the build: three chapters of one sentence each fit on
+    // one page at every box here. `a_chapter_takes_as_many_pages_as_its_text
+    // _needs` in `tests/epub_reading.rs` is where the other half is asserted,
+    // on a chapter long enough to fragment.
     for (width, height) in [(600.0, 800.0), (200.0, 1_000.0)] {
         let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(width, height))
             .expect("a book");
@@ -274,22 +277,37 @@ fn an_unusable_page_box_is_replaced_and_named_rather_than_refused() {
 
 // ---- the placeholder, which is grey and named -------------------------------
 
-/// **Every page is the neutral grey, and every page says why.**
+/// **A page that will not read is grey and says why; a page that reads is
+/// not.**
 ///
 /// Two claims, and gap 30's milestone 6 is why they are two: *"a page that will
 /// not read is grey, a page that draws nothing is white"*. A build that
 /// paginated a book and left the pages blank passes every count in this file
 /// and produces a book of blank paper reported as a success — which is the
 /// failure gap 17 spent itself on.
+///
+/// **Amended at milestone 8**, which is where the second claim acquired a
+/// second side. Until this milestone every page was grey and the test could
+/// not tell a working placeholder from a build that greyed everything; now the
+/// same fixture has one page of each, and asserting only the grey one would
+/// pass on a build that never laid anything out.
 #[test]
-fn every_page_is_the_neutral_placeholder_and_every_page_says_why() {
-    let doc = Document::open(three_chapters()).expect("a book");
-    assert_eq!(doc.page_count(), 3);
+fn a_page_that_will_not_read_is_grey_and_a_page_that_reads_is_not() {
+    // Two itemrefs: one an SVG content document, which is a named non-goal and
+    // stays a placeholder at every milestone, and one an ordinary chapter.
+    let doc = Document::open(book_with(&package(
+        concat!(
+            r#"<item id="drawing" href="text/ch2.xhtml" media-type="image/svg+xml"/>"#,
+            r#"<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>"#
+        ),
+        concat!(r#"<itemref idref="drawing"/>"#, r#"<itemref idref="c1"/>"#),
+    )))
+    .expect("a book");
+    assert_eq!(doc.page_count(), 2);
 
-    // Grey. 0xBF is the same grey the renderer paints over an image it could
-    // not decode, so a page that is missing looks the same whichever level
-    // lost it.
-    for page in 0..doc.page_count() {
+    // 0xBF is the same grey the renderer paints over an image it could not
+    // decode, so a page that is missing looks the same whichever level lost it.
+    let greys = |page: u32| {
         let bitmap = doc
             .page(page)
             .expect("a page")
@@ -302,17 +320,29 @@ fn every_page_is_the_neutral_placeholder_and_every_page_says_why() {
             .collect();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen, [0xBF], "page {page} is not one flat placeholder grey");
-    }
+        seen
+    };
+    assert_eq!(
+        greys(0),
+        [0xBF],
+        "the SVG page is not one flat placeholder grey"
+    );
+    assert_ne!(
+        greys(1),
+        vec![0xBF],
+        "a chapter that laid out is still being painted as a placeholder"
+    );
+    assert!(
+        !doc.page(1).expect("a page").text().plain_text().is_empty(),
+        "a chapter that laid out has text on its page"
+    );
 
-    // And named, once per page, in page order.
+    // And named, once, for the page that is a placeholder and not for the one
+    // that is not.
     assert_eq!(
         spine_defects(&doc),
-        [
-            (0, SpineDefect::NotLaidOut),
-            (1, SpineDefect::NotLaidOut),
-            (2, SpineDefect::NotLaidOut)
-        ]
+        [(0, SpineDefect::SvgContentDocument)],
+        "a placeholder is named and a chapter is not"
     );
 }
 
@@ -358,13 +388,14 @@ fn an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place() {
         let doc = Document::open(book_with(&package(manifest, &spine))).expect("a book");
 
         assert_eq!(doc.page_count(), 3, "{idref} lost a page");
+        // **Named at page 1 and nowhere else**, which since milestone 8 is two
+        // claims rather than one: the broken itemref is still a page and still
+        // in the middle, and the two chapters either side of it are no longer
+        // placeholders at all. A build that greyed the whole book would have
+        // passed this test at milestone 4 and fails it here.
         assert_eq!(
             spine_defects(&doc),
-            [
-                (0, SpineDefect::NotLaidOut),
-                (1, want),
-                (2, SpineDefect::NotLaidOut)
-            ],
+            [(1, want)],
             "{idref} did not keep its place"
         );
 
@@ -633,26 +664,58 @@ fn a_font_provider_passed_at_open_reaches_the_render() {
 // ---- a real book -------------------------------------------------------------
 
 /// The corpus, through the door a host uses, with the page box asserted beside
-/// the count.
+/// the count — **and the count moving when the box does.**
+///
+/// This is the sentence [`tinker_pdf::epub::DEFAULT_PAGE`] has carried since
+/// milestone 4 and could not demonstrate until milestone 8: *for a reflowable
+/// book the page count is a function of that number and is not a property of
+/// the file*. Three claims, and each fails on its own:
+///
+/// - the **spine** does not move, at either box: a chapter that fragmented adds
+///   pages and adds no origin;
+/// - the **page count** does move, and upward, for every book whose text needs
+///   more than one page at the smaller box;
+/// - and every page is the size the caller asked for.
+///
+/// A build that ignored `OpenOptions::page` in layout and honoured it only in
+/// `/MediaBox` would pass the first and third and fail the second, which is
+/// exactly the shape a page box wired to the wrong place takes.
 #[test]
 fn every_committed_book_paginates_to_its_spine_at_the_box_it_was_given() {
-    for (name, spine) in [
-        ("calibre-book-cover.epub", 5u32),
-        ("calibre-book-nocover.epub", 4),
-        ("pandoc-book-cover.epub", 5),
-        ("pandoc-book-epub2.epub", 5),
-        ("pandoc-book-nocover.epub", 4),
-        ("pandoc-plates.epub", 5),
+    for (name, spine, wide, narrow) in [
+        ("calibre-book-cover.epub", 5u32, 5u32, 8u32),
+        ("calibre-book-nocover.epub", 4, 4, 7),
+        ("pandoc-book-cover.epub", 5, 7, 8),
+        ("pandoc-book-epub2.epub", 5, 7, 8),
+        ("pandoc-book-nocover.epub", 4, 6, 7),
+        ("pandoc-plates.epub", 5, 5, 5),
     ] {
         let bytes = corpus_book(name);
-        let doc = Document::open(bytes.clone()).expect(name);
-        assert_eq!(doc.page_count(), spine, "{name}");
+        let spine_of = |doc: &Document| {
+            let mut out: Vec<String> = Vec::new();
+            for origin in doc.archive().expect("a report").pages() {
+                if out.last() != Some(&origin.name) {
+                    out.push(origin.name.clone());
+                }
+            }
+            out
+        };
 
-        let doc = Document::open_with(bytes, &OpenOptions::at_page(300.0, 500.0)).expect(name);
-        assert_eq!(doc.page_count(), spine, "{name} at another box");
-        for page in 0..doc.page_count() {
+        let big = Document::open(bytes.clone()).expect(name);
+        assert_eq!(big.page_count(), wide, "{name} at the default box");
+        assert_eq!(spine_of(&big).len(), spine as usize, "{name}");
+
+        let small = Document::open_with(bytes, &OpenOptions::at_page(300.0, 500.0)).expect(name);
+        assert_eq!(small.page_count(), narrow, "{name} at another box");
+        assert_eq!(
+            spine_of(&small),
+            spine_of(&big),
+            "{name} read a different spine at a different box"
+        );
+        assert!(narrow >= wide, "{name} needs fewer pages in a smaller box");
+        for page in 0..small.page_count() {
             assert_eq!(
-                doc.page(page).expect("a page").size(),
+                small.page(page).expect("a page").size(),
                 (300.0, 500.0),
                 "{name} page {page}"
             );

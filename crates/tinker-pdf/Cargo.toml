@@ -36,6 +36,14 @@ tinker-pdf-zip = { workspace = true }
 # would happen here. `xtask dag` already allowed `tinker-pdf -> tinker-pdf-xml`,
 # so promoting it from `[dev-dependencies]` changes no graph.
 tinker-pdf-xml = { workspace = true }
+# Gap 31 milestone 8: `src/epub/read.rs` cascades a content document against the
+# committed UA stylesheet through this crate, and `src/epub/paint.rs` reads a
+# computed style out of it. Both were `[dev-dependencies]` from milestone 6 so
+# that `tests/bounds_ledger.rs` could read the constants; the graph check counts
+# a dev-dependency as an edge, so promoting them adds no edge `xtask dag` did
+# not already allow and the fifth and sixth amendments already argue.
+tinker-pdf-css = { workspace = true }
+tinker-pdf-layout = { workspace = true }
 
 [dev-dependencies]
 tinker-pdf-cos = { workspace = true }

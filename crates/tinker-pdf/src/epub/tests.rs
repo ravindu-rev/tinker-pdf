@@ -1212,3 +1212,608 @@ fn an_unusable_open_option_is_replaced_on_its_own_and_named_on_its_own() {
         ]
     );
 }
+
+// ---- The element tree (gap 31, milestone 8) ---------------------------------
+
+fn dom(markup: &str) -> super::xhtml::Dom {
+    super::xhtml::read(markup.as_bytes(), &XmlLimits::DEFAULT).expect("markup")
+}
+
+/// **A sibling is an *element* sibling**, and the text between two of them is
+/// not one.
+///
+/// `selectors-4` §14's `+` and `~` walk element siblings; a build that took the
+/// previous *node* would find a text node for every indented producer's output
+/// and would match `li + li` on nothing at all. The fixture is indented the way
+/// milestone 1's real books are, which is the only way this can be seen.
+#[test]
+fn siblings_skip_the_whitespace_between_them() {
+    let tree = dom("<ul>\n  <li>a</li>\n  <li>b</li>\n  <li>c</li>\n</ul>");
+    let items: Vec<usize> = tree
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.name == "li")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(items.len(), 3);
+    assert_eq!(tree.nodes[items[0]].previous, None);
+    assert_eq!(tree.nodes[items[0]].next, Some(items[1]));
+    assert_eq!(tree.nodes[items[1]].previous, Some(items[0]));
+    assert_eq!(tree.nodes[items[1]].next, Some(items[2]));
+    assert_eq!(tree.nodes[items[2]].next, None);
+}
+
+/// Elements arrive in document order with every parent before its child.
+///
+/// `tinker_pdf_css::cascade::cascade` refuses a slice that is not, by name, and
+/// this is the producer that has to satisfy it. The tree is deliberately deep
+/// and wide so that a builder that appended a child before its parent would be
+/// caught rather than happening to agree.
+#[test]
+fn elements_are_in_document_order() {
+    let tree = dom("<a><b><c/></b><d><e><f/></e></d></a>");
+    for (index, node) in tree.nodes.iter().enumerate() {
+        if let Some(parent) = node.parent {
+            assert!(parent < index, "{} is after its parent", node.name);
+        }
+    }
+    let names: Vec<&str> = tree.nodes.iter().map(|node| node.name.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c", "d", "e", "f"]);
+}
+
+/// A CDATA section is character data, and losing it loses a stylesheet.
+///
+/// Not hypothetical: it is where a producer puts a `<style>` element's body.
+#[test]
+fn a_cdata_section_is_text_and_not_markup() {
+    let tree = dom("<style><![CDATA[p { color: red }]]></style>");
+    let text: String = tree.nodes[0]
+        .children
+        .iter()
+        .map(|child| match child {
+            super::xhtml::Child::Text(text) => text.clone(),
+            super::xhtml::Child::Element(_) => String::new(),
+        })
+        .collect();
+    assert_eq!(text, "p { color: red }");
+}
+
+/// **A document that stops half way keeps the tree it had**, and says so.
+///
+/// Ruling 2: a chapter with one unescaped `&` in its last paragraph should lose
+/// the paragraph and not the chapter. Two claims — the defect is named and the
+/// text before it survives — because a build that returned an empty tree with
+/// the defect set would pass a test for either one alone.
+#[test]
+fn truncated_markup_keeps_what_it_read_and_names_the_defect() {
+    let tree = dom("<body><p>kept</p><p>lost");
+    assert!(tree
+        .defects
+        .contains(&super::xhtml::MarkupDefect::Truncated));
+    assert!(tree.nodes.iter().any(|node| node.name == "p"));
+    let text: String = tree
+        .nodes
+        .iter()
+        .flat_map(|node| node.children.iter())
+        .filter_map(|child| match child {
+            super::xhtml::Child::Text(text) => Some(text.as_str()),
+            super::xhtml::Child::Element(_) => None,
+        })
+        .collect();
+    assert!(text.contains("kept"), "{text:?}");
+}
+
+/// `class` is a token list and `id` is not.
+#[test]
+fn the_class_attribute_is_a_token_list() {
+    let tree = dom(r#"<p id="one two" class="  a   b  " style="color: red"/>"#);
+    assert_eq!(tree.nodes[0].id.as_deref(), Some("one two"));
+    assert_eq!(tree.nodes[0].classes, ["a", "b"]);
+    assert_eq!(tree.nodes[0].style.as_deref(), Some("color: red"));
+}
+
+/// An element outside the XHTML namespace is **kept and known to be foreign**.
+///
+/// Two of the six committed books wrap their cover in an SVG `<image>`. Keeping
+/// it costs a handful of nodes; forgetting that it is foreign would let this
+/// build's user-agent rule for HTML's `<title>` hide an SVG one, or — worse —
+/// let an SVG `<a>` become a link annotation.
+#[test]
+fn a_foreign_element_is_kept_and_is_not_html() {
+    let tree = dom(concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml">"#,
+        r#"<body><svg xmlns="http://www.w3.org/2000/svg"><title>a</title></svg></body></html>"#
+    ));
+    let svg = tree
+        .nodes
+        .iter()
+        .find(|node| node.name == "svg")
+        .expect("the svg survived");
+    assert!(!svg.is_html());
+    let title = tree
+        .nodes
+        .iter()
+        .find(|node| node.name == "title")
+        .expect("its title survived");
+    assert!(!title.is_html(), "an SVG title is not HTML's");
+    let body = tree
+        .nodes
+        .iter()
+        .find(|node| node.name == "body")
+        .expect("the body");
+    assert!(body.is_html());
+}
+
+/// A document with no namespace at all is treated as XHTML.
+///
+/// EPUB 2's XHTML 1.1 profile permits it and one committed producer writes it,
+/// so a build that required the namespace would set two of the six books with
+/// no user-agent rules whatever.
+#[test]
+fn a_document_with_no_namespace_is_still_html() {
+    let tree = dom("<html><body><p>a</p></body></html>");
+    assert!(tree.nodes.iter().all(super::xhtml::Node::is_html));
+}
+
+/// `Dom::contains` walks **up**, and it is what turns a positioned run back
+/// into the element it came from.
+#[test]
+fn containment_is_the_ancestor_chain() {
+    let tree = dom("<a><b><c/></b><d/></a>");
+    let at = |name: &str| tree.nodes.iter().position(|n| n.name == name).unwrap();
+    assert!(tree.contains(at("a"), at("c")));
+    assert!(tree.contains(at("b"), at("c")));
+    assert!(
+        tree.contains(at("c"), at("c")),
+        "an element contains itself"
+    );
+    assert!(!tree.contains(at("d"), at("c")));
+    assert!(
+        !tree.contains(at("c"), at("a")),
+        "containment is not symmetric"
+    );
+}
+
+// ---- The anonymous inline box -----------------------------------------------
+
+/// **A paragraph does not pay its own margin twice.**
+///
+/// CSS 2.2 §9.2.2.1 wraps a text node in an anonymous inline box that inherits
+/// from its parent and has no margin, no padding, no border and no background.
+/// Giving the text the parent's own computed style instead is the shortcut that
+/// looks identical on a `<span>` and doubles every margin on a `<p>` —
+/// `tinker-pdf-layout` would see a block-level child and open a second box for
+/// it.
+#[test]
+fn a_paragraph_does_not_pay_its_own_margin_twice() {
+    use tinker_pdf_css::cascade::ComputedStyle;
+    use tinker_pdf_css::property::{
+        Color, Display, LengthPercentage, MarginValue, Sides, TextDecoration,
+    };
+
+    let mut parent = ComputedStyle::initial();
+    parent.display = Display::Block;
+    parent.margin = Sides::all(MarginValue::Length(LengthPercentage::Px(16.0)));
+    parent.background_color = Color::BLACK;
+    parent.text_decoration = TextDecoration::Underline;
+    parent.font_size = 24.0;
+
+    let inline = super::read::inline_box(&parent);
+    assert_eq!(inline.display, Display::Inline, "the text is not a block");
+    assert_eq!(
+        inline.margin,
+        Sides::all(MarginValue::Length(LengthPercentage::ZERO)),
+        "the text carries the paragraph's margin"
+    );
+    assert_eq!(inline.background_color, Color::TRANSPARENT);
+    // Inherited, because §7.2 says so.
+    assert_eq!(inline.font_size, 24.0);
+    // And §16.3.1's decoration, which is **not** inherited and propagates
+    // anyway: an `<a>`'s underline has to reach its own text, and a build that
+    // dropped it here would underline nothing anywhere.
+    assert_eq!(inline.text_decoration, TextDecoration::Underline);
+}
+
+/// `rel` is a token list, and two of its tokens decide whether a sheet is
+/// applied.
+///
+/// **Neither corpus contains an alternate stylesheet**, so this rule is
+/// unreachable from any real book and a defect injected into it survived the
+/// whole suite. It is a function and a test for that reason: `rel="alternate
+/// stylesheet"` is a theme the author marked as *not the default*, and applying
+/// it would set the book in it.
+#[test]
+fn a_rel_token_list_decides_whether_a_stylesheet_is_applied() {
+    use super::read::applies_as_stylesheet;
+    assert!(applies_as_stylesheet("stylesheet"));
+    assert!(applies_as_stylesheet("StyleSheet"), "the tokens fold case");
+    assert!(
+        applies_as_stylesheet("stylesheet next"),
+        "a second token is not a reason to drop the sheet"
+    );
+    assert!(!applies_as_stylesheet("alternate stylesheet"));
+    assert!(!applies_as_stylesheet("stylesheet alternate"));
+    assert!(!applies_as_stylesheet(""));
+    assert!(!applies_as_stylesheet("next"));
+    assert!(
+        !applies_as_stylesheet("stylesheets"),
+        "a token is a whole token"
+    );
+}
+
+/// The reader refuses a document that ends inside an element, so a partial tree
+/// arrives **only** through that refusal.
+///
+/// The other half of the rule whose second enforcement was deleted: the tree
+/// keeps what it read, the defect is named, and there is exactly one place that
+/// names it.
+#[test]
+fn an_unterminated_element_is_the_readers_refusal_and_not_a_second_check() {
+    let tree = dom("<body><p>kept</p><p>lost");
+    assert_eq!(tree.defects, [super::xhtml::MarkupDefect::Truncated]);
+    assert_eq!(
+        tree.nodes.iter().filter(|node| node.name == "p").count(),
+        2,
+        "the element that was open when the document ended is still in the tree"
+    );
+    // And a document that ends properly has no defect at all, which is what
+    // says the assertion above is about the document rather than about every
+    // document.
+    assert!(dom("<body><p>kept</p></body>").defects.is_empty());
+}
+
+// ---- Faces, and the codes a character is drawn with --------------------------
+
+/// The twelve faces are twelve, and their indices are a bijection.
+///
+/// The resource names a document uses are `Bk{index}`, so two faces sharing an
+/// index would draw one in the other's font and neither test nor renderer would
+/// see it.
+#[test]
+fn every_face_has_its_own_index_and_its_own_base_font() {
+    use std::collections::BTreeSet;
+    let faces = super::paint::Face::all();
+    assert_eq!(faces.len(), 12);
+    let indices: BTreeSet<usize> = faces.iter().map(|face| face.index()).collect();
+    assert_eq!(indices.len(), 12);
+    assert_eq!(indices.iter().copied().max(), Some(11));
+    let names: BTreeSet<&[u8]> = faces.iter().map(|face| face.base_font()).collect();
+    assert_eq!(names.len(), 12, "two faces share a /BaseFont");
+    let resources: BTreeSet<Vec<u8>> = faces.iter().map(|face| face.resource()).collect();
+    let overflow: BTreeSet<Vec<u8>> = faces.iter().map(|face| face.overflow_resource()).collect();
+    assert_eq!(resources.len(), 12);
+    assert_eq!(overflow.len(), 12);
+    assert!(
+        resources.is_disjoint(&overflow),
+        "a face's two fonts share a resource name"
+    );
+}
+
+/// `css-fonts-4` §5's list is walked in the author's order, and a family this
+/// build has never heard of moves to the next entry rather than ending the
+/// walk.
+#[test]
+fn a_family_this_build_does_not_have_falls_through_to_the_next() {
+    use super::paint::{Face, Generic};
+    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_layout::metrics::FontRequest;
+
+    let face = |families: Vec<FontFamily>, weight: u16, style: FontStyle| {
+        Face::of(&FontRequest {
+            families: &families,
+            weight,
+            style,
+            size: 16.0,
+        })
+    };
+
+    // `Georgia, serif` is what pandoc writes on every book it produced here.
+    let georgia = face(
+        vec![FontFamily::Named("Georgia".to_owned()), FontFamily::Serif],
+        400,
+        FontStyle::Normal,
+    );
+    assert_eq!(georgia.generic, Generic::Serif);
+
+    // A name nothing recognises, followed by one that is: the walk continues.
+    let unknown = face(
+        vec![
+            FontFamily::Named("Nonesuch Display".to_owned()),
+            FontFamily::Monospace,
+        ],
+        400,
+        FontStyle::Normal,
+    );
+    assert_eq!(unknown.generic, Generic::Monospace);
+
+    // And a list of nothing but names this build has never heard of resolves to
+    // the initial family rather than to no face at all.
+    let none = face(
+        vec![FontFamily::Named("Nonesuch Display".to_owned())],
+        400,
+        FontStyle::Normal,
+    );
+    assert_eq!(none.generic, Generic::Serif);
+
+    // `css-fonts-4` §2.2's threshold, either side of it.
+    assert!(!face(vec![FontFamily::Serif], 500, FontStyle::Normal).bold);
+    assert!(face(vec![FontFamily::Serif], 600, FontStyle::Normal).bold);
+    assert!(face(vec![FontFamily::Serif], 400, FontStyle::Italic).italic);
+    assert!(face(vec![FontFamily::Serif], 400, FontStyle::Oblique).italic);
+}
+
+/// The `WinAnsiEncoding` map, at the three ranges it is made of and at the
+/// characters that are in none of them.
+#[test]
+fn the_encoding_covers_what_it_covers_and_says_so() {
+    use super::paint::winansi_code;
+    // Below 0x80 the encoding is ASCII by construction.
+    assert_eq!(winansi_code('A'), Some(0x41));
+    assert_eq!(winansi_code(' '), Some(0x20));
+    // 0x80..=0x9F is the table, and this is where an em dash lives — the
+    // character milestone 1's books carry ten of.
+    assert_eq!(winansi_code('\u{2014}'), Some(0x97));
+    assert_eq!(winansi_code('\u{2026}'), Some(0x85));
+    assert_eq!(winansi_code('\u{2019}'), Some(0x92));
+    // At and above 0xA0 it is Latin-1 by construction.
+    assert_eq!(winansi_code('\u{e9}'), Some(0xE9));
+    assert_eq!(winansi_code('\u{a0}'), Some(0xA0));
+    // And the ones it does not cover, including the non-breaking hyphen the
+    // corpus carries three of and the Japanese line it carries in five books.
+    assert_eq!(winansi_code('\u{2011}'), None);
+    assert_eq!(winansi_code('\u{65e5}'), None);
+    assert_eq!(winansi_code('\u{4e00}'), None);
+}
+
+/// A character outside the encoding gets an **overflow code**, and the same
+/// character gets the same one twice.
+///
+/// A build that allocated a fresh code per occurrence would exhaust the 224 on
+/// the first paragraph of Japanese and would draw the same kanji from two
+/// codes, which is a page that looks right and a `/Differences` array that is
+/// nonsense.
+#[test]
+fn an_unencodable_character_gets_one_stable_code() {
+    use super::paint::{Face, Fonts, Generic, OVERFLOW_FIRST};
+    use tinker_pdf_css::property::{FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_layout::TextRun;
+
+    let run = |text: &str| TextRun {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        text: text.to_owned(),
+        font_size: 16.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        color: tinker_pdf_css::property::Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: None,
+    };
+
+    let mut fonts = Fonts::new();
+    fonts.note(&run("a\u{65e5}b\u{672c}"));
+    fonts.note(&run("\u{65e5}\u{65e5}"));
+    assert_eq!(fonts.unrepresented(), 0);
+    assert_eq!(
+        fonts.overflow_fonts(),
+        1,
+        "one face needed one overflow font"
+    );
+    // **Two codes for two characters**, over four occurrences across two runs.
+    // A build that allocated a code per occurrence encodes every book
+    // identically -- `encode` finds the first entry either way -- and exhausts
+    // the 224 four times as fast, which no page and no extracted string can
+    // show.
+    assert_eq!(
+        fonts.codes(Face {
+            generic: Generic::Serif,
+            bold: false,
+            italic: false
+        }),
+        2
+    );
+
+    let face = Face {
+        generic: Generic::Serif,
+        bold: false,
+        italic: false,
+    };
+    // The encodable characters stay in the primary font.
+    assert_eq!(fonts.encode(face, 'a'), Some((face.resource(), b'a')));
+    // The others are in the overflow font, in the order they were first met,
+    // and stably.
+    assert_eq!(
+        fonts.encode(face, '\u{65e5}'),
+        Some((face.overflow_resource(), OVERFLOW_FIRST))
+    );
+    assert_eq!(
+        fonts.encode(face, '\u{672c}'),
+        Some((face.overflow_resource(), OVERFLOW_FIRST + 1))
+    );
+    assert_eq!(
+        fonts.encode(face, '\u{65e5}'),
+        Some((face.overflow_resource(), OVERFLOW_FIRST)),
+        "the same character was given two codes"
+    );
+    // A character nothing ever noted has no code at all, which is what stops a
+    // page drawing a glyph the font dictionary does not describe.
+    assert_eq!(fonts.encode(face, '\u{4e00}'), None);
+    // And a face that drew nothing has no font.
+    let bold = Face {
+        generic: Generic::Serif,
+        bold: true,
+        italic: false,
+    };
+    assert_eq!(fonts.encode(bold, '\u{65e5}'), None);
+}
+
+/// Past 224 distinct unencodable characters for one face, the rest are
+/// **counted** rather than silently dropped.
+///
+/// `/Differences` has 256 codes and this build has no font program to embed
+/// until milestone 9. What it must not do is lose the characters without
+/// saying so, because text that is missing from a page and missing from
+/// `Page::text()` is what text conservation exists to find.
+#[test]
+fn characters_past_the_overflow_font_are_counted() {
+    use super::paint::{Fonts, OVERFLOW_CODES};
+    use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_layout::TextRun;
+
+    // 300 distinct CJK ideographs, of which 224 fit.
+    let text: String = (0..300u32)
+        .filter_map(|at| char::from_u32(0x4E00 + at))
+        .collect();
+    let mut fonts = Fonts::new();
+    fonts.note(&TextRun {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        text,
+        font_size: 16.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        color: Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: None,
+    });
+    assert_eq!(fonts.unrepresented(), 300 - OVERFLOW_CODES);
+}
+
+/// An East Asian character is one em wide, and a Latin one is its face's own
+/// advance.
+///
+/// The standard 14 have no CJK glyph at all, so `Standard14::advance` answers
+/// with a Latin space's width — which would set a Japanese line at a third of
+/// its measure and would put the line breaker's UAX #14 work on the wrong
+/// column.
+#[test]
+fn an_east_asian_character_is_one_em_wide() {
+    use super::paint::BookMetrics;
+    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_layout::metrics::{FontRequest, Metrics};
+
+    let families = vec![FontFamily::Serif];
+    let font = FontRequest {
+        families: &families,
+        weight: 400,
+        style: FontStyle::Normal,
+        size: 20.0,
+    };
+    let metrics = BookMetrics;
+    assert!((metrics.advance('\u{65e5}', &font) - 20.0).abs() < 1e-9);
+    // Times-Roman's own published advance for `a` is 444/1000.
+    assert!((metrics.advance('a', &font) - 20.0 * 0.444).abs() < 1e-9);
+    // And the vertical metrics scale with the size rather than being constants.
+    let vertical = metrics.vertical(&font);
+    assert!((vertical.ascent - 20.0 * 0.683).abs() < 1e-9);
+    assert!((vertical.descent - 20.0 * 0.217).abs() < 1e-9);
+}
+
+// ---- The table of contents ---------------------------------------------------
+
+/// An NCX's `navMap`, nested, with the labels and the references it names.
+#[test]
+fn an_ncx_navmap_becomes_nested_entries() {
+    let ncx = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">"#,
+        r#"<head/><docTitle><text>A Book</text></docTitle><navMap>"#,
+        r#"<navPoint id="a" playOrder="1"><navLabel><text>One</text></navLabel>"#,
+        // The NCX DTD gives a `navPoint` an optional `navInfo` beside its
+        // `navLabel`, and both hold a `<text>`. A build that took the last one
+        // it saw would title this entry with its description.
+        r#"<navInfo><text>A description nobody titles a chapter with</text></navInfo>"#,
+        r#"<content src="ch1.xhtml"/>"#,
+        "<navPoint id=\"b\" playOrder=\"2\"><navLabel><text>One  and\n  a half</text></navLabel>",
+        r#"<content src="ch1.xhtml#half"/></navPoint>"#,
+        r#"</navPoint>"#,
+        r#"<navPoint id="c" playOrder="3"><navLabel><text>Two</text></navLabel>"#,
+        r#"<content src="ch2.xhtml"/></navPoint>"#,
+        r#"</navMap></ncx>"#
+    );
+    let entries = super::nav::from_ncx(ncx.as_bytes(), &XmlLimits::DEFAULT);
+    assert_eq!(entries.len(), 2, "two top-level navPoints");
+    assert_eq!(entries[0].title, "One");
+    assert_eq!(entries[0].href.as_deref(), Some("ch1.xhtml"));
+    assert_eq!(entries[0].children.len(), 1, "the nested one is nested");
+    // The `docTitle`'s own `<text>` is outside `navMap` and is not an entry —
+    // a build that took every `<text>` in the file would open every book with a
+    // phantom first chapter.
+    assert!(entries.iter().all(|entry| entry.title != "A Book"));
+    // And the `navInfo` beside the `navLabel` is not the title either.
+    assert_eq!(entries[0].title, "One");
+    // Whitespace in a label is collapsed, because an outline entry is a PDF
+    // text string and not a flow.
+    assert_eq!(entries[0].children[0].title, "One and a half");
+    assert_eq!(
+        entries[0].children[0].href.as_deref(),
+        Some("ch1.xhtml#half")
+    );
+    assert_eq!(entries[1].title, "Two");
+    assert!(entries[1].children.is_empty());
+}
+
+/// A navigation document's `<nav epub:type="toc">` is the one §5.4.1.2
+/// requires, and it is preferred over any other `<nav>` in the file.
+///
+/// Every pandoc book here writes a `landmarks` nav beside the toc, so a build
+/// that took the first `<nav>` in document order would get the right answer on
+/// a book whose toc happens to come first and the wrong one otherwise.
+#[test]
+fn the_toc_nav_wins_over_the_landmarks_nav() {
+    let markup = concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">"#,
+        r#"<body>"#,
+        r#"<nav epub:type="landmarks"><ol><li><a href="cover.xhtml">Cover</a></li></ol></nav>"#,
+        r#"<nav epub:type="toc"><ol>"#,
+        r#"<li><a href="ch1.xhtml">One</a><ol><li><a href="ch1.xhtml#a">One A</a></li></ol></li>"#,
+        r#"<li><span>A heading</span></li>"#,
+        r#"</ol></nav></body></html>"#
+    );
+    let entries = super::nav::from_navigation_document(&dom(markup));
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].title, "One");
+    assert_eq!(entries[0].href.as_deref(), Some("ch1.xhtml"));
+    assert_eq!(entries[0].children.len(), 1);
+    assert_eq!(entries[0].children[0].title, "One A");
+    // §5.4.1.2's second content model: a `<span>` is a heading that groups and
+    // points nowhere, and 12.3.3 makes `/Dest` optional for exactly that.
+    assert_eq!(entries[1].title, "A heading");
+    assert_eq!(entries[1].href, None);
+    assert!(
+        entries.iter().all(|entry| entry.title != "Cover"),
+        "the landmarks nav was read as the table of contents"
+    );
+}
+
+/// A navigation document with **no `epub:type` at all** still yields its list.
+///
+/// pandoc's EPUB 2 output writes a bare `<div>` with an `<ol>` in it, and one
+/// of the six committed books is that. Refusing it would lose a real book's
+/// outline over an attribute.
+#[test]
+fn a_navigation_document_with_no_epub_type_still_has_a_list() {
+    let markup = concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><div id="toc">"#,
+        r#"<ol><li><a href="ch1.xhtml">One</a></li></ol>"#,
+        r#"</div></body></html>"#
+    );
+    let entries = super::nav::from_navigation_document(&dom(markup));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].title, "One");
+}

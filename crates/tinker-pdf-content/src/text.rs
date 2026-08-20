@@ -231,6 +231,21 @@ pub struct TextDevice {
     lines: Vec<PendingLine>,
     current: Option<PendingLine>,
     warnings: Vec<TextWarning>,
+    /// How many `/Artifact` scopes are open (14.8.2.2).
+    ///
+    /// A **counter and not a flag**, because marked content nests and an
+    /// `/Artifact` inside an `/Artifact` closes one of them: a flag cleared by
+    /// the inner `EMC` would put the rest of the outer artifact back into the
+    /// text. The interpreter guarantees one `end_marked_content` per accepted
+    /// begin, so this cannot go negative and cannot leak past a form XObject.
+    artifacts: usize,
+    /// One `depth` entry per open scope: whether it was an artifact.
+    ///
+    /// `EMC` names no tag, so closing correctly needs the stack rather than
+    /// the count — a `/Span` opened inside an `/Artifact` and closed first
+    /// would otherwise decrement the artifact count and let the rest of the
+    /// artifact through.
+    scopes: Vec<bool>,
 }
 
 struct PendingLine {
@@ -383,7 +398,38 @@ fn enclosing(quads: impl Iterator<Item = Quad>) -> Option<Quad> {
 }
 
 impl Device for TextDevice {
+    /// 14.8.2.2: an artifact is *"a graphics object that is not part of the
+    /// author's original content"* — a running head, a rule, a generated list
+    /// marker — and 14.8.2's whole point is that it is **excluded** from the
+    /// logical content a consumer reads.
+    ///
+    /// So text inside one is not extracted, and the asymmetry with the
+    /// renderer is deliberate and is the reason the tag is passed at all: an
+    /// artifact is drawn and not read, and an invisible optional-content layer
+    /// is read and not drawn.
+    fn begin_marked_content(&mut self, tag: &[u8], _visible: bool, _hidden_layer: Option<&str>) {
+        let artifact = tag == b"Artifact";
+        self.scopes.push(artifact);
+        if artifact {
+            // A line may not straddle the boundary: the artifact's glyphs are
+            // dropped, and the ones before it must not be joined to the ones
+            // after as though nothing had been between them.
+            self.flush();
+            self.artifacts += 1;
+        }
+    }
+
+    fn end_marked_content(&mut self) {
+        if let Some(true) = self.scopes.pop() {
+            self.flush();
+            self.artifacts = self.artifacts.saturating_sub(1);
+        }
+    }
+
     fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
+        if self.artifacts > 0 {
+            return;
+        }
         if !glyph.transform.is_finite() || glyph.text.is_empty() {
             return;
         }
@@ -510,6 +556,67 @@ mod tests {
             d.show_glyph(g, &state);
         }
         d.finish()
+    }
+
+    /// 14.8.2.2's artifact: drawn, and **not** part of the logical content.
+    ///
+    /// Three claims, because three different mistakes give three different
+    /// answers: the artifact's own glyphs are dropped, the glyphs either side
+    /// of it are kept, and they are not joined into one line across the hole.
+    #[test]
+    fn an_artifact_is_drawn_and_is_not_extracted() {
+        let mut d = TextDevice::new();
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        d.show_glyph(&glyph("a", 0.0, 700.0, 10.0), &state);
+        d.begin_marked_content(b"Artifact", true, None);
+        d.show_glyph(&glyph("X", 20.0, 700.0, 10.0), &state);
+        d.end_marked_content();
+        d.show_glyph(&glyph("b", 40.0, 700.0, 10.0), &state);
+        let text = d.finish().plain_text();
+        assert!(!text.contains('X'), "an artifact was extracted: {text:?}");
+        assert!(text.contains('a') && text.contains('b'), "{text:?}");
+    }
+
+    /// A scope opened **inside** an artifact does not end it.
+    ///
+    /// A counter — or worse, a flag cleared by any `EMC` — lets the rest of an
+    /// artifact back into the text at the first nested scope's end, and marked
+    /// content nests by construction: 14.6.2's own examples put a `/Span`
+    /// inside a structure element. No content stream this repository writes
+    /// nests one today, which is why a defect that reduced the stack to a flag
+    /// survived the whole suite until this test existed.
+    #[test]
+    fn a_scope_inside_an_artifact_does_not_end_it() {
+        let mut d = TextDevice::new();
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        d.begin_marked_content(b"Artifact", true, None);
+        d.show_glyph(&glyph("X", 0.0, 700.0, 10.0), &state);
+        d.begin_marked_content(b"Span", true, None);
+        d.show_glyph(&glyph("Y", 10.0, 700.0, 10.0), &state);
+        d.end_marked_content();
+        d.show_glyph(&glyph("Z", 20.0, 700.0, 10.0), &state);
+        d.end_marked_content();
+        d.show_glyph(&glyph("a", 30.0, 700.0, 10.0), &state);
+        let text = d.finish().plain_text();
+        for gone in ['X', 'Y', 'Z'] {
+            assert!(
+                !text.contains(gone),
+                "{gone} escaped the artifact: {text:?}"
+            );
+        }
+        assert!(text.contains('a'), "the artifact never ended: {text:?}");
+    }
+
+    /// And an ordinary scope changes nothing, which is what says the two tests
+    /// above are about `/Artifact` rather than about marked content.
+    #[test]
+    fn an_ordinary_marked_content_scope_extracts_normally() {
+        let mut d = TextDevice::new();
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        d.begin_marked_content(b"Span", true, None);
+        d.show_glyph(&glyph("k", 0.0, 700.0, 10.0), &state);
+        d.end_marked_content();
+        assert!(d.finish().plain_text().contains('k'));
     }
 
     #[test]

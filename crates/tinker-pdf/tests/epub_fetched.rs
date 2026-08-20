@@ -168,8 +168,31 @@ fn every_fetched_book_paginates_to_its_own_spine() {
             .unwrap_or_else(|| panic!("{name} has no recorded spine length"));
         match todays_answer(bytes) {
             TodaysAnswer::Opens { pages, sizes, .. } => {
-                println!("  {name:44} {pages} pages");
-                assert_eq!(pages, want, "{name} did not paginate to its spine");
+                println!("  {name:44} {pages} pages for {want} spine items");
+                // **At least one page per itemref, and the spine's own order.**
+                // Since milestone 8 a chapter takes as many pages as its text
+                // needs, so the count is no longer the spine's length — but the
+                // sequence of distinct consecutive page origins still is, and
+                // that is the claim that catches a dropped or reordered
+                // chapter. Asserting only `pages >= want` would pass on a build
+                // that fragmented one chapter into everything.
+                assert!(
+                    pages >= want,
+                    "{name} paginated to {pages} pages for {want} spine items"
+                );
+                let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                let report = doc.archive().expect("a report");
+                let mut spine: Vec<&str> = Vec::new();
+                for origin in report.pages() {
+                    if spine.last() != Some(&origin.name.as_str()) {
+                        spine.push(origin.name.as_str());
+                    }
+                }
+                assert_eq!(
+                    spine.len(),
+                    want as usize,
+                    "{name} did not paginate to its spine: {spine:?}"
+                );
                 assert!(
                     sizes.iter().all(|size| *size == (432.0, 648.0)),
                     "{name} has a page that is not the default box: {:?}",
@@ -212,21 +235,28 @@ const FETCHED_SPINES: &[(&str, u32)] = &[
     ("sample-wasteland.epub", 1),
 ];
 
-/// Not one page of any fetched book draws anything, and every one of them says
-/// so.
+/// **Every page that is a placeholder says why, and the rest have text on
+/// them.**
 ///
 /// The other half of the pair above. A build that paginated a book correctly
 /// and drew a white page would pass every assertion in this file except this
 /// one — and a white page reported as a success is the failure gap 17 spent
-/// itself on. Every page carries a [`SpineDefect`], and the distribution is
-/// asserted rather than the mere presence: `sample-svg-in-spine.epub`'s six
-/// pages are `SvgContentDocument` and nobody else's are, so a build that
-/// collapsed the two names would fail here.
+/// itself on.
+///
+/// **Amended at milestone 8**, and the amendment is the whole point of the
+/// test. Until this milestone every page of all twenty books was a placeholder
+/// and this test asserted so; now the only ones left are
+/// `sample-svg-in-spine.epub`'s six, which are a named non-goal. So the
+/// assertion runs in both directions: six SVG spine items and no others, and
+/// **every page nothing named carries text**. A build that quietly stopped
+/// laying out would fail the second half rather than passing a test about the
+/// first.
 #[test]
-fn every_fetched_page_is_a_placeholder_that_says_why() {
+fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
     let books = fetched!("the placeholder sweep");
     let mut svg = 0usize;
-    let mut not_laid_out = 0usize;
+    let mut read = 0usize;
+    let mut blank = Vec::new();
     for (name, bytes) in &books {
         let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let report = doc.archive().expect("a book carries a report");
@@ -238,18 +268,43 @@ fn every_fetched_page_is_a_placeholder_that_says_why() {
             named[*page as usize] = true;
             match defect {
                 SpineDefect::SvgContentDocument => svg += 1,
-                SpineDefect::NotLaidOut => not_laid_out += 1,
                 other => panic!("{name} page {page}: {other:?}"),
             }
         }
-        assert!(
-            named.iter().all(|said| *said),
-            "{name} has a page nothing said anything about"
-        );
+        for (page, said) in named.iter().enumerate() {
+            if *said {
+                continue;
+            }
+            let text = doc
+                .page(page as u32)
+                .expect("a page")
+                .text()
+                .plain_text()
+                .trim()
+                .to_owned();
+            if text.is_empty() {
+                blank.push(format!("{name} page {page}"));
+            } else {
+                read += 1;
+            }
+        }
     }
-    println!("  {not_laid_out} unlaid pages and {svg} SVG spine items");
+    println!("  {read} pages of text and {svg} SVG spine items");
     assert_eq!(svg, 6, "the six SVG spine items are one book's");
-    assert_eq!(not_laid_out + svg, 231, "every page of every fetched book");
+    // A page with no text and no defect is the shape this test exists to find.
+    // Some are real — a cover whose only content is an `<img>`, which this
+    // build does not draw until milestone 9 — so the number is bounded rather
+    // than zero, and it is bounded tightly enough that a build which stopped
+    // laying out could not hide inside it.
+    assert!(
+        blank.len() <= 40,
+        "{} pages have neither text nor a reason: {blank:?}",
+        blank.len()
+    );
+    assert!(
+        read > 150,
+        "only {read} pages of twenty books carry any text"
+    );
 }
 
 /// Text conservation over books nobody here commissioned.
@@ -259,10 +314,12 @@ fn every_fetched_page_is_a_placeholder_that_says_why() {
 /// asserted is the half that needs no record and is true at **every**
 /// milestone: **no page carries a character the book does not have there.**
 ///
-/// The other half is the number this sweep prints, which is milestone 4's
-/// honest score against somebody else's text: zero of 1.2 million characters.
-/// Every milestone from 8 onward raises it, and the harness that measures it
-/// exists now rather than then.
+/// The other half is the number this sweep prints, which is this build's
+/// honest score against somebody else's text. At milestone 4 it was zero of
+/// 1.2 million characters; milestone 8 is the first that raises it, and it is
+/// **printed rather than asserted** because these books are not committed and a
+/// figure nobody can reproduce is not a ratchet. The committed corpus is where
+/// the ratchet lives.
 ///
 /// A source stream that came back **empty** would satisfy "nothing extra" while
 /// measuring nothing at all, so the total is asserted to be large — which is
@@ -281,9 +338,16 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
             "{name} carries {} characters its book does not have: {:?}",
             verdict.extra, verdict.divergences
         );
+        let report = doc.archive().expect("a report");
+        let mut spine: Vec<&str> = Vec::new();
+        for origin in report.pages() {
+            if spine.last() != Some(&origin.name.as_str()) {
+                spine.push(origin.name.as_str());
+            }
+        }
         assert_eq!(
             spine_text(bytes).items.len(),
-            doc.page_count() as usize,
+            spine.len(),
             "{name}: the harness and the engine disagree about the spine's length"
         );
         source += verdict.source;

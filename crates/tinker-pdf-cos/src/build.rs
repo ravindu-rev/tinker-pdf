@@ -1053,6 +1053,59 @@ impl PageBuilder {
         self.content.extend_from_slice(b") Tj ET\n");
     }
 
+    /// Writes text the caller has already encoded, with a character and a word
+    /// spacing (9.3.2, 9.3.3).
+    ///
+    /// [`PageBuilder::text`] takes a `&str` and writes its **UTF-8 bytes**,
+    /// which is right for a font whose encoding agrees with ASCII and wrong
+    /// the moment one character does not: `é` in a `WinAnsiEncoding` font is
+    /// one byte and `text` would write two. So a caller that chose its own
+    /// codes — see [`DocumentBuilder::add_named_font`] — passes them here, and
+    /// says separately which characters they stand for so that an embedded
+    /// program is still subset to what the page drew.
+    ///
+    /// `characters` is recorded and not written; `codes` is written and not
+    /// interpreted. A caller that passes a `characters` its `codes` do not
+    /// spell gets a document whose subset is wrong, which is why they are two
+    /// parameters rather than one derived from the other.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encoded_text(
+        &mut self,
+        font: &[u8],
+        size: f64,
+        x: f64,
+        y: f64,
+        spacing: (f64, f64),
+        codes: &[u8],
+        characters: &str,
+    ) {
+        self.used
+            .entry(font.to_vec())
+            .or_default()
+            .extend(characters.chars());
+
+        let (character_spacing, word_spacing) = spacing;
+        self.content.extend_from_slice(b"BT /");
+        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(
+            format!(" {size} Tf {character_spacing} Tc {word_spacing} Tw {x} {y} Td (").as_bytes(),
+        );
+        for byte in codes {
+            // 7.3.4.2's three, plus the two that a viewer would read as an
+            // end-of-line inside a literal string and fold away.
+            match byte {
+                b'(' | b')' | b'\\' => {
+                    self.content.push(b'\\');
+                    self.content.push(*byte);
+                }
+                b'\r' => self.content.extend_from_slice(b"\\r"),
+                b'\n' => self.content.extend_from_slice(b"\\n"),
+                _ => self.content.push(*byte),
+            }
+        }
+        self.content.extend_from_slice(b") Tj ET\n");
+    }
+
     /// Fills a rectangle in device grey, from black (0) to white (1).
     pub fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, grey: f64) {
         let grey = grey.clamp(0.0, 1.0);
@@ -1546,6 +1599,92 @@ impl DocumentBuilder {
         );
         self.objects.insert(r.num, Object::Dict(dict));
         self.resources.fonts.push((resource.to_vec(), r));
+    }
+
+    /// Registers one of the standard 14 under an `/Encoding` the caller wrote
+    /// (9.6.6.1, Table 114).
+    ///
+    /// `names` are glyph names, one per code, starting at `first_code`; a
+    /// `/Differences` array is written from them and a `/Widths` array from
+    /// `widths`, in the thousandths of an em 9.6.2.1 measures in.
+    ///
+    /// **Why a caller wants this at all**: a simple font maps one byte to one
+    /// glyph, and `WinAnsiEncoding` reaches 224 characters. A producer with
+    /// text outside that set has three options — embed a font, write a
+    /// composite one, or name the glyphs it wants — and only the third is
+    /// available before there is a font program to embed. The Adobe Glyph
+    /// List's algorithmic `uniXXXX` form names any character in the basic
+    /// multilingual plane, and 9.10.2's second step resolves a code through
+    /// `/Differences` to a name and the name to a character, which is what
+    /// makes the **text** of such a run extractable even where the standard
+    /// face has no **glyph** for it.
+    ///
+    /// That asymmetry is the point and it is not hidden: the page shows the
+    /// notdef the face actually has, and the caller is expected to say so.
+    ///
+    /// Returns false, registering nothing, when `names` and `widths` are
+    /// different lengths, when either is empty, or when the last code would be
+    /// past 255 — each of which would write a font dictionary whose arrays
+    /// disagree with each other.
+    pub fn add_named_font(
+        &mut self,
+        resource: &[u8],
+        base_font: &[u8],
+        first_code: u8,
+        names: &[&str],
+        widths: &[u16],
+    ) -> bool {
+        if names.is_empty() || names.len() != widths.len() {
+            return false;
+        }
+        let Ok(count) = u8::try_from(names.len() - 1) else {
+            return false;
+        };
+        let Some(last_code) = first_code.checked_add(count) else {
+            return false;
+        };
+
+        let r = self.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
+        dict.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(b"Type1")),
+        );
+        dict.insert(
+            self.names.intern(b"BaseFont"),
+            Object::Name(self.names.intern(base_font)),
+        );
+
+        let mut differences = Vec::with_capacity(names.len() + 1);
+        differences.push(Object::Int(i64::from(first_code)));
+        for name in names {
+            differences.push(Object::Name(self.names.intern(name.as_bytes())));
+        }
+        let mut encoding = Dict::new();
+        encoding.insert(Name::TYPE, Object::Name(self.names.intern(b"Encoding")));
+        encoding.insert(
+            self.names.intern(b"Differences"),
+            Object::Array(differences),
+        );
+        dict.insert(self.names.intern(b"Encoding"), Object::Dict(encoding));
+
+        dict.insert(
+            self.names.intern(b"FirstChar"),
+            Object::Int(i64::from(first_code)),
+        );
+        dict.insert(
+            self.names.intern(b"LastChar"),
+            Object::Int(i64::from(last_code)),
+        );
+        dict.insert(
+            self.names.intern(b"Widths"),
+            Object::Array(widths.iter().map(|w| Object::Int(i64::from(*w))).collect()),
+        );
+
+        self.objects.insert(r.num, Object::Dict(dict));
+        self.resources.fonts.push((resource.to_vec(), r));
+        true
     }
 
     /// Registers a TrueType font, embedding its program (9.6.6, 9.9).
@@ -3063,6 +3202,47 @@ impl DocumentBuilder {
 mod tests {
     use super::*;
     use crate::CosDocument;
+
+    /// 7.3.4.2's three escapes, on the operator a caller writes its **own**
+    /// codes through.
+    ///
+    /// `PageBuilder::text` escapes them and has done since it was written;
+    /// `encoded_text` is a second producer of the same syntax and a second
+    /// place to forget. Nothing catches it from a real book — no run in gap
+    /// 31's corpus carries a parenthesis — so a defect that dropped the two
+    /// bracket escapes survived that whole suite, and a content stream with an
+    /// unbalanced `(` in it is a page no reader can lex.
+    #[test]
+    fn encoded_text_escapes_the_three_characters_a_literal_string_cannot_hold() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(200.0, 200.0, |page| {
+            page.encoded_text(
+                b"F0",
+                12.0,
+                10.0,
+                100.0,
+                (0.0, 0.0),
+                br"a(b)c\d",
+                r"a(b)c\d",
+            );
+        });
+        let bytes = builder.finish();
+        let doc = CosDocument::open(bytes).expect("the built document opens");
+        assert_eq!(
+            doc.ladder_level(),
+            crate::LadderLevel::Trust,
+            "an unescaped bracket makes the content stream unlexable"
+        );
+
+        let page = crate::pages::at(&doc, 0).expect("a page");
+        let content =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
+        assert!(
+            content.contains(r"(a\(b\)c\\d) Tj"),
+            "the three characters are not escaped: {content}"
+        );
+    }
 
     #[test]
     fn a_built_document_opens_and_reports_its_pages() {

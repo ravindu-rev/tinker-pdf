@@ -263,25 +263,65 @@ pub fn join(base: &str, href: &str) -> String {
 }
 
 /// The visible characters of an XHTML document: markup removed, `<head>`,
-/// `<script>` and `<style>` contents dropped, references decoded.
+/// `<script>`, `<style>` and `[hidden]` contents dropped, references decoded.
 ///
-/// `<head>` goes because its `<title>` is chrome rather than the book's text —
-/// no reading system sets it into the flow — and `<script>` and `<style>` go
-/// because CSS and JavaScript are not text either. A build that included any of
-/// the three would report *extra* text on every page of every book, which is
-/// the direction that fails loudly rather than quietly.
+/// # The four removals, and where the fourth came from
+///
+/// HTML's rendering section names exactly four things that generate no box at
+/// all for an unstyled document, and this scanner implements the same four out
+/// of the bytes. `<head>` goes because its `<title>` is chrome rather than the
+/// book's text — no reading system sets it into the flow — and `<script>` and
+/// `<style>` go because CSS and JavaScript are not text either.
+///
+/// **`[hidden]` is the fourth and it arrived at milestone 8**, which is the
+/// first milestone at which any of the four could be observed: until there was
+/// a user-agent stylesheet there was nothing on the engine's side that removed
+/// anything, so the list here was a list of three and nothing could tell.
+/// Three of the six committed books carry a `<nav … hidden="hidden">` — the
+/// landmarks list every pandoc book writes — and honouring HTML §15.3.1's own
+/// `[hidden] { display: none }` takes twenty-four to twenty-nine characters out
+/// of each of them.
+///
+/// The alternative was to leave the engine not honouring `hidden`, which would
+/// have meant a book that sets text every reading system and every browser
+/// hides — including the browser this milestone compares `y` offsets against.
+/// So the definition of the conserved stream is what was wrong, and it is the
+/// definition that is corrected. **This scanner still asks nothing of the
+/// engine**: it reads the attribute out of the bytes with its own crude parser,
+/// exactly as it reads `<head>`, and `the_source_side_drops_hidden_and_keeps
+/// _everything_else` asserts it in both directions.
+///
+/// A build that included any of the four would report *extra* text on every
+/// page of every book, and one that dropped more would report *missing* — both
+/// directions fail loudly rather than quietly.
 #[must_use]
 pub fn visible_text(markup: &str) -> String {
     let bytes = markup.as_bytes();
     let mut out = String::with_capacity(markup.len());
     let mut at = 0usize;
-    let mut skipping: Option<&'static str> = None;
+    // The element being skipped and how many **nested copies of the same
+    // name** are open inside it. A counter and not a flag: a `<div hidden>`
+    // holding a `<div>` would otherwise end at the inner one's `</div>` and
+    // let the rest of the hidden subtree through, which is a defect no fixture
+    // written from the corpus would show because no book here nests one.
+    let mut skipping: Option<(String, usize)> = None;
     while at < bytes.len() {
         if bytes[at] != b'<' {
+            // **The character, not the byte.** `markup` is already decoded, so
+            // pushing `bytes[at] as char` reads UTF-8 as Latin-1 and turns one
+            // em dash into three characters. Milestone 8 found it: until pages
+            // carried text there was nothing for the mangled stream to
+            // disagree with, and the corpus sweep compared 0 against 0 and
+            // passed. `the_source_side_decodes_and_does_not_transliterate` is
+            // the assertion that would have caught it at milestone 4.
+            let ch = markup[at..]
+                .chars()
+                .next()
+                .unwrap_or(char::REPLACEMENT_CHARACTER);
             if skipping.is_none() {
-                out.push(bytes[at] as char);
+                out.push(ch);
             }
-            at += 1;
+            at += ch.len_utf8();
             continue;
         }
         // A comment, a CDATA section, a doctype or a processing instruction.
@@ -315,22 +355,26 @@ pub fn visible_text(markup: &str) -> String {
             .next_back()
             .unwrap_or("")
             .to_ascii_lowercase();
-        match skipping {
-            Some(open) => {
-                if closing && local == open {
-                    skipping = None;
+        match &mut skipping {
+            Some((open, depth)) => {
+                if local != *open {
+                    // Not this element's name at all, so it changes nothing
+                    // about where the skip ends.
+                } else if closing {
+                    if *depth == 0 {
+                        skipping = None;
+                    } else {
+                        *depth -= 1;
+                    }
+                } else if !tag.ends_with("/>") {
+                    *depth += 1;
                 }
             }
             None => {
-                if !closing
-                    && !tag.ends_with("/>")
-                    && matches!(local.as_str(), "head" | "script" | "style")
-                {
-                    skipping = Some(match local.as_str() {
-                        "head" => "head",
-                        "script" => "script",
-                        _ => "style",
-                    });
+                let removed = matches!(local.as_str(), "head" | "script" | "style")
+                    || has_hidden_attribute(tag);
+                if !closing && !tag.ends_with("/>") && removed {
+                    skipping = Some((local, 0));
                 } else {
                     // A tag boundary is a place two words may not run together:
                     // `<p>a</p><p>b</p>` is two words and `ab` is one.
@@ -340,6 +384,36 @@ pub fn visible_text(markup: &str) -> String {
         }
     }
     decode_entities(&out)
+}
+
+/// Whether a start tag carries HTML's `hidden` attribute.
+///
+/// Written as a scan for the **name** rather than for `hidden="`, because the
+/// attribute is a boolean one and all three of `hidden`, `hidden=""` and
+/// `hidden="hidden"` mean the same thing — pandoc writes the third and a
+/// hand-written book writes the first. The scan refuses a name that is only a
+/// suffix of another (`aria-hidden`, which is on three `<figcaption>`s in this
+/// corpus and hides nothing), by requiring the character before it to be white
+/// space and the character after it to end the name.
+#[must_use]
+pub fn has_hidden_attribute(tag: &str) -> bool {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0usize;
+    while let Some(at) = lower[from..].find("hidden") {
+        let start = from + at;
+        let end = start + "hidden".len();
+        let before = start.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(end).copied();
+        let opens = matches!(before, Some(b) if b.is_ascii_whitespace());
+        let closes = matches!(after, None | Some(b'=') | Some(b'>') | Some(b'/'))
+            || matches!(after, Some(b) if b.is_ascii_whitespace());
+        if opens && closes {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 /// XML 1.0's five predefined entities and both numeric forms.

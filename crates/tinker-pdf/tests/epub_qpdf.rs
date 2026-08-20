@@ -285,17 +285,21 @@ fn content_objects(dump: &str) -> Vec<String> {
     out
 }
 
-/// **Somebody else decodes the content stream and agrees the page is grey.**
+/// **Somebody else decodes the content stream and agrees which page is which.**
 ///
 /// `--filtered-stream-data` hands over a stream's bytes with its filters
-/// applied, so what comes back is the operators this build wrote. The
-/// assertion is on all three: the grey `0.749…` that is 0xBF, the `re` that
-/// covers the whole page box, and the `f` that fills it. A build whose
-/// placeholder was white would write `1 g`, and one that filled part of the
-/// page would write a smaller rectangle — both render as *something* and only
-/// this reads what it is.
+/// applied, so what comes back is the operators this build wrote.
+///
+/// The fixture is three pages and **two kinds of page**, which since milestone
+/// 8 is what makes this an assertion rather than a description: the middle one
+/// is a spine item that does not resolve and is the neutral grey, and the two
+/// either side are chapters that laid out and carry text. A build whose
+/// placeholder was white would write `1 g`; one that filled part of the page
+/// would write a smaller rectangle; and one that greyed **every** page — which
+/// is what every page of every book was until this milestone — would now fail
+/// on the first and third. Only reading the operators can tell those apart.
 #[test]
-fn qpdf_decodes_a_placeholder_page_and_it_is_the_neutral_grey() {
+fn qpdf_decodes_a_placeholder_page_and_a_page_that_reads() {
     let qpdf = oracle!("--filtered-stream-data over a synthesised EPUB");
 
     let doc = Document::open(book()).expect("a book");
@@ -313,7 +317,7 @@ fn qpdf_decodes_a_placeholder_page_and_it_is_the_neutral_grey() {
         "three pages, three content streams:\n{dump}"
     );
 
-    for object in &contents {
+    let stream_of = |object: &str| {
         let (code, stream) = run(
             &qpdf,
             &[
@@ -323,27 +327,52 @@ fn qpdf_decodes_a_placeholder_page_and_it_is_the_neutral_grey() {
             ],
         );
         assert_eq!(code, 0, "qpdf --show-object={object}:\n{stream}");
-        // `0.7490196078431373 g 0 0 432 648 re f`, decoded by qpdf. The grey is
-        // compared as a **number** rather than as the string it happens to be
-        // printed as, because how many digits a writer emits is a formatting
-        // choice and 191/255 is the claim.
-        let words: Vec<&str> = stream.split_whitespace().collect();
-        let grey: f64 = words
-            .iter()
-            .position(|word| *word == "g")
-            .and_then(|at| words.get(at.wrapping_sub(1)))
-            .and_then(|word| word.parse().ok())
-            .unwrap_or_else(|| panic!("no grey level in: {stream}"));
+        stream
+    };
+
+    // The middle page: the spine item that does not resolve.
+    let stream = stream_of(&contents[1]);
+    let words: Vec<&str> = stream.split_whitespace().collect();
+    // `0.7490196078431373 g 0 0 432 648 re f`, decoded by qpdf. The grey is
+    // compared as a **number** rather than as the string it happens to be
+    // printed as, because how many digits a writer emits is a formatting choice
+    // and 191/255 is the claim.
+    let grey: f64 = words
+        .iter()
+        .position(|word| *word == "g")
+        .and_then(|at| words.get(at.wrapping_sub(1)))
+        .and_then(|word| word.parse().ok())
+        .unwrap_or_else(|| panic!("no grey level in: {stream}"));
+    assert!(
+        (grey - 191.0 / 255.0).abs() < 1e-9,
+        "page content is not the neutral placeholder grey: {grey}"
+    );
+    let flat = words.join(" ");
+    assert!(
+        flat.contains("0 0 432 648 re"),
+        "the placeholder does not cover the page box: {stream}"
+    );
+    assert!(
+        !flat.contains("Tj"),
+        "the placeholder page draws text: {stream}"
+    );
+
+    // And the two pages either side of it, which are chapters.
+    for (at, body) in [(0usize, "One."), (2, "Two.")] {
+        let stream = stream_of(&contents[at]);
+        let flat: String = stream.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            (grey - 191.0 / 255.0).abs() < 1e-9,
-            "page content is not the neutral placeholder grey: {grey}"
+            flat.contains(&format!("({body}) Tj")),
+            "page {at} does not say {body:?}: {stream}"
         );
-        let flat = words.join(" ");
         assert!(
-            flat.contains("0 0 432 648 re"),
-            "the fill does not cover the whole page: {flat}"
+            flat.contains("BT /Bk0"),
+            "page {at} does not set the serif face this build registered: {stream}"
         );
-        assert!(flat.ends_with(" f"), "nothing is filled: {flat}");
+        assert!(
+            !flat.contains(" g "),
+            "page {at} is a chapter and is painted as a placeholder: {stream}"
+        );
     }
 }
 

@@ -2263,7 +2263,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
-    fn begin_marked_content(&mut self, visible: bool, hidden_layer: Option<&str>) {
+    fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
         self.marked_content.push(!visible);
         if !visible {
             self.hidden_depth = self.hidden_depth.saturating_add(1);

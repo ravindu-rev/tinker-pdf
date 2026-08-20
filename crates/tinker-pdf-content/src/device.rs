@@ -109,8 +109,18 @@ pub trait Device {
     /// `hidden_layer` names the layer, and is `Some` exactly when `visible`
     /// is false — ruling 10, so a warning can say which layer it hid rather
     /// than only that something was hidden.
-    fn begin_marked_content(&mut self, visible: bool, hidden_layer: Option<&str>) {
-        let _ = (visible, hidden_layer);
+    ///
+    /// `tag` is the scope's own tag: `/OC` for optional content, `/Artifact`
+    /// for 14.8.2.2's *"graphics objects that are not part of the author's
+    /// original content"*, and a structure element's name for anything else.
+    /// It is carried because **the two devices act on different tags** — the
+    /// renderer on `/OC` and the text device on `/Artifact` — and a build that
+    /// passed only the visibility could express the first and not the second.
+    /// A `BMC` has a tag and no property list, so it is here too; a `BDC`
+    /// whose operand stack is damaged reports an empty tag rather than
+    /// guessing at one.
+    fn begin_marked_content(&mut self, tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
+        let _ = (tag, visible, hidden_layer);
     }
 
     /// `EMC`: the innermost marked-content scope ended.

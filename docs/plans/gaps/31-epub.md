@@ -1451,7 +1451,7 @@ one per milestone, each independently green under the full gate.
 | 5 | **The writer's missing half, before anything needs it** | Link annotations: `/Annots` with `/Subtype /Link`, `/Rect`, `/Border [0 0 0]` and both an explicit `/Dest` and a `/A` URI action, since an EPUB cross-reference is internal and an `href` may be external; a document outline: `/Outlines` with `/First`, `/Last`, `/Count` and the negative-count closed form, nested to a stated depth; both round-tripped through **this repository's own reader** — write it, open it, read it back through the facade's existing outline and annotation surfaces — which is the comparison [21](21-metadata-absent-vs-empty.md) and the annotation work make possible and no other milestone here can; qpdf clean on a document using both; `DocumentBuilder`'s existing validation posture extended rather than bypassed; **nothing in this milestone mentions EPUB**, which is the test of whether it belongs in the writer | M |
 | 6 | **`tinker-pdf-css`, the ninth leaf** | `css-syntax-3`'s tokenizer and the qualified-rule/at-rule grammar, **with its normative error recovery** — a malformed declaration discarded to the next semicolon, a malformed rule to the next block, and the count of each reported rather than swallowed; `selectors-4`'s type, universal, class, id, attribute (§6.1–§6.4) and the four combinators (§14), with **specificity per §15 asserted against a table of at least twenty selectors including the cases that trip a naive A/B/C** — `:not()`'s argument, `:is()`'s most-specific-argument rule, and a pseudo-element's C contribution; matching against a caller-supplied `Element` trait, so ruling 8 holds and no XHTML vocabulary is in the public API; the **whole** of `css-cascade-5` §6.1's sorting order including the `!important` origin reversal, with a fixture per criterion; inheritance as a single top-down pass over computed values (§7.2), with a test that a lazy resolution and this one agree — and a note saying the lazy one is quadratic; `@import` with the depth cap and a **cycle refused rather than recursed**; `@media` evaluated against a plain `MediaContext`, **as `screen`**, with the decision's argument in the module header; **decision 5's `Known`/`Unsupported`/`Unknown` split, and a compile-time proof that a property with no consumer does not build** — injected as a defect and asserted to fail the build, not a test; `@layer` refused by name; every bound firing by its own refusal; `xtask -- dag` green with the fifth amendment's argument; the **twenty-second** fuzz target — **amended, 20 August 2026, milestone 6: the twenty-third**, because gap 24's milestone 5 split `crypt_ciphers` out of `crypt` after this plan was written and took the number; the count in `fuzz/README.md` and in `ci.yml`'s per-PR job goes twenty-two to twenty-three, not twenty-one to twenty-two; `deny.toml` gains the CSS and HTML names | L |
 | 7 | **`tinker-pdf-layout`, the tenth leaf** | The box model (`css-box-3`) with `box-sizing`, and **margin collapsing**, which is the rule a first implementation omits and whose omission moves every block on every page; block and inline formatting contexts (CSS 2.2 §9.4.1, §9.4.2) and line boxes; `css-text-3` §4.1.1 and §4.1.2's white-space processing in both phases, asserted against a fixture whose source is indented the way milestone 1's real books are; **UAX #14 line breaking over the vendored UCD tables**, with `css-text-3` §5.5's required class behaviour for `WJ`, `ZW`, `GL` and `ZWJ`, §5.1's four strictness levels and §5.4's `overflow-wrap` — and a **CJK fixture**, because a space-only breaker passes every English test ever written; §6's alignment and justification; fragmentation into pages, honouring CSS 2.2 §13.3.1's properties, §13.3.2's `orphans` and `widows` and **§13.3.3's rules A to D for where a break is permitted at all**, with `page-break-before` and `page-break-after` asserted because they appear in all six measured books; the `Metrics` trait, so nothing here depends on `font`; whether `math` is needed answered in the `As built` and the DAG edge dropped if it is not — **answered, 20 August 2026, milestone 7: it is not needed and the edge is dropped**, and an edge to `tinker-pdf-css` is taken in its place, both argued as the sixth DAG amendment; the **twenty-third** fuzz target — **amended, 20 August 2026, milestone 7: the twenty-fourth**, because milestone 6's own amendment took the twenty-third for `css` — over a structured generator; `deny.toml` gains the layout and line-breaking names | L |
-| 8 | **The first book that reads** | XHTML through `tinker-pdf-xml`'s new mode into an element tree; **a committed UA stylesheet**, parsed by milestone 6's parser and cascaded like an author's, with a test that removing it produces an undifferentiated book — so its absence is visible rather than merely worse; the cascade over the tree, layout, fragmentation and synthesis into a `CosDocument`; **every book in the committed corpus opens, paginates and passes text conservation**, with the conservation figure recorded per book; `Page::text()` returns the words in reading order; cross-references between spine items reach the page as milestone 5's link annotations, and the navigation document as the outline; qpdf clean; **the browser oracle stands up here** — ruling 9 amended in writing with its argument, the continuous `y`-offset comparison built with a UA sheet injected on both sides, the paginated `--print-to-pdf` comparison beside it, and the job red when the browser is missing; the `Unsupported` census printed per book, which is the number this milestone is actually judged on | L |
+| 8 | **The first book that reads** | XHTML through `tinker-pdf-xml`'s new mode into an element tree; **a committed UA stylesheet**, parsed by milestone 6's parser and cascaded like an author's, with a test that removing it produces an undifferentiated book — so its absence is visible rather than merely worse; the cascade over the tree, layout, fragmentation and synthesis into a `CosDocument`; **every book in the committed corpus opens, paginates and passes text conservation**, with the conservation figure recorded per book; `Page::text()` returns the words in reading order; cross-references between spine items reach the page as milestone 5's link annotations, and the navigation document as the outline; qpdf clean; **the browser oracle stands up here** — ruling 9 amended in writing with its argument, the continuous `y`-offset comparison built with a UA sheet injected on both sides, the paginated `--print-to-pdf` comparison beside it, and the job red when the browser is missing — **amended, 21 August 2026, milestone 8, in two places and both measured rather than assumed.** (a) The paginated comparison is made at **the browser's own default page box** and not at 432 × 648: Chromium honours an `@page { size: … }` for the output page and lays the document out at its own box anyway, then scales — asked for 432 × 648 it wrote a 432 × 648 page whose body text is set at 8.69 points rather than 12, which is 576/792, this page's height over US Letter's. A page count compared across that scale is a comparison of two different documents, so the comparison moves to the box the browser is not scaling and asserts the text size to keep that honest. (b) **A face is held fixed on both sides** as well as a UA sheet, because two faces disagree by about a line per paragraph and a line is worth about as much as a margin: with each side using its own, the tolerance needed (0.033) was larger than the injected dropped-margin defect it exists for (0.033), which is this plan's own *"thresholded into meaninglessness"*. With `Courier New` declared on both, the honest disagreement is 0.036 and the same defect measures 0.105; the census printed per book, which is the number this milestone is actually judged on | L |
 | 9 | **Fonts** | `@font-face` (`css-fonts-4` §4.1) and the `src` descriptor (§4.3) with `format()` and the fallback list; the font matching algorithm (§5) including **per-character fallback** (§2.1, §5.3), with a fixture whose one run needs three faces and becomes three PDF text objects; **SHA-1 in `tinker-pdf-crypto`**, pinned against published vectors, with a second implementation written a different way asserted to agree over every length up to two blocks — gap 29's CRC-32 discipline, because a hash written wrong is self-consistently wrong; **both de-obfuscations, asserted on the de-obfuscated bytes and not on a page that drew** — IDPF's SHA-1 key over 1 040 bytes and Adobe's 16-byte UUID key over 1 024, each from a fixture built for it, with the whitespace-stripping of §4.4.3 proved by an identifier that has some; WOFF and WOFF2 refused **by name**; a character no available face covers producing a named warning rather than a blank; `FontProvider`'s per-family fallback question answered — the trait extended, or the reason it is not recorded; the generic families' standard-14 metrics asserted to make pagination independent of whether a provider is attached | M |
 | 10 | **Floats and `clear`** | CSS 2.2 §9.5.1's **nine numbered constraints, each with its own fixture**, because they are a set and an implementation that satisfies eight produces a page that looks right on the ninth's absence; §9.5.2's `clear` and clearance; float interaction with line boxes — a line box shortened beside a float and restored below it; a float taller than its containing block; two floats that do not fit side by side; **a float that would fall off the page bottom**, which is the fragmentation interaction and the one that loses text; text conservation asserted across every float fixture, since a lost float is a lost paragraph; the browser comparison run over a float-heavy content document and its `y`-offset agreement recorded as a number | M |
 | 11 | **Tables** | CSS 2.2 §17.2's model and **§17.2.1's anonymous table objects**, which is the fixup a real book needs because HTML tables in the wild omit `<tbody>`; §17.5.2.1's fixed layout and §17.5.2.2's automatic layout, the latter asserted to be the two-pass algorithm the spec describes rather than a one-pass approximation; §17.6.1's separated model and §17.6.2's collapsing model with §17.6.2.1's conflict resolution; `colspan` and `rowspan`; a nested table, since it multiplies the layout work cap; **table fragmentation across a page boundary** — or, if it is staged, the row amended in place with its argument, in the shape gap 30's milestone 8 amended its own | L |
@@ -3442,3 +3442,488 @@ buildable here rather than blocked.
 - **The browser oracle is milestone 8's**, and it is the only device that can
   catch a property implemented, honoured and *wrong* — which is the residue gap
   31's honesty machinery names as its own limit.
+
+## Progress — 21 August 2026, milestone 8
+
+**Every one of the six committed books reads, and every character of every one
+of them is on exactly one page.** 2 578 tests, 7 ignored, up from 2 530;
+forty-eight of them are new and ten existing ones were changed, because the
+first real book to reach a page made several of them assertions about something
+else.
+
+The reading path is `xhtml.rs` → `read.rs` → `tinker-pdf-css` →
+`tinker-pdf-layout` → `paint.rs` → `DocumentBuilder`, and none of those arrows
+is new work in a leaf: milestones 2, 6 and 7 built the three engines and this
+milestone is the join. What it had to decide is what neither leaf could —
+where the user-agent stylesheet lives, what a text node's style is, which face
+a run is drawn in, and what happens to a character `WinAnsiEncoding` cannot
+spell.
+
+### The user-agent stylesheet is a file, and it is CSS
+
+`src/epub/ua.css` is 250 lines of HTML §15's own rules, `include_str!`d and
+parsed by milestone 6's parser at `Origin::UserAgent`. It is not a table of
+Rust constants and not a `match` on element names, and the reason is not
+tidiness: **a UA sheet written in Rust is a second style system**, with its own
+specificity, its own cascade order and no way for an author to beat it. Written
+as CSS it loses to a book's own rules by `css-cascade-5` §6.1's ordinary
+machinery, which is what a reading system is required to do — and calibre's
+`.calibre2 { display: block; margin: 1em 0 }` beating `p { margin-top: 1em }`
+on specificity is that rule working on a real book.
+
+**One rule in it is deliberately outside the implemented set.** HTML sets
+`table { display: table }` and this build has no table box until milestone 11.
+The sheet says it anyway, and `tinker-pdf-css` charges it to the census **per
+element it reached** — so `calibre-book-cover.epub` reports `display`,
+unimplemented, 38 elements, and `pandoc-plates.epub`, which has no table,
+reports no `display` at all. A sheet that stayed silent would set every table
+in the corpus as inline text with nothing anywhere saying so, which is the
+failure this whole plan is organised around. The nine `display` values for the
+table box tree are the only such declarations, and `ua.css`'s header lists what
+is *not* there and why.
+
+### What the design got wrong, and how I found out
+
+**1. The box tree was rooted at `<body>`, which made `head { display: none }` a
+rule that changed nothing.** Text conservation passed, the head's `<title>` was
+not on any page, and every assertion about the user-agent sheet was green — for
+the wrong reason. The subtree was gone by *position*, not by `display`, so
+deleting the rule from `ua.css` would have changed no output at all.
+
+What found it was writing the sheet's own test in the direction the plan asks
+for: *removing it produces an undifferentiated book*. The third of the three
+consequences that test asserts is that the `<title>` and the `<style>` element's
+own CSS **do** reach the page once the sheet is gone — and that is an assertion
+that cannot fail if the subtree was never in the tree. The tree is now rooted at
+the document element, `head { display: none }` is load-bearing, and the
+injection matrix's first row is the proof: deleting it takes text conservation
+down on all six books.
+
+This is exactly the failure mode milestone 7 recorded seven of — *a fixture
+giving the right answer for the wrong reason* — and it is the reason the plan
+asks for the sheet's absence to be **visible** rather than merely worse.
+
+**2. `OpenOptions::font_size` did not reach the cascade, and the first way I
+wired it up was silently overridden by two thirds of the corpus.** The obvious
+route is a generated `html { font-size: 12pt }` rule at the user-agent origin.
+pandoc writes `html, body, div, span, … { font-size: 100% }` as a CSS reset on
+every book it produces, which is an **author** declaration and beats any
+user-agent rule — so four of the six books ignored the host's number entirely
+and paginated identically at 8 point and at 18.
+
+The mistake is a real one about CSS rather than about wiring: a percentage
+font-size on the root element resolves against the **initial** value, and
+`css-fonts-4`'s initial value is `medium`, which is *the user's preferred
+size*. `tinker-pdf-css` had it as a constant. So `cascade::cascade_from` takes
+the initial `ComputedStyle` as a parameter and `cascade` is that function at
+`ComputedStyle::initial()`; the facade passes the caller's size in it, and
+`the_callers_base_font_size_changes_the_pagination` is what says it arrives.
+pandoc's reset now means what it says — *whatever the reader chose* — which is
+also what a browser does with it.
+
+**3. The text-conservation harness had been decoding the source as Latin-1
+since milestone 4, and nothing could see it.** `visible_text` pushed one `char`
+per **byte** of an already-decoded `&str`, so every em dash became three
+characters and every kanji three more. At milestone 4 every page was empty: the
+sweep compared a mangled source against no pages at all and reported `0`
+conserved either way. The first book that laid out reported 2 454 characters of
+spurious divergence on `calibre-book-cover.epub` alone.
+
+`the_source_side_decodes_and_does_not_transliterate` is the assertion milestone
+4 owed and did not write, and it is written now rather than only fixed.
+
+**4. The conserved stream's definition was short by one of HTML's four
+removals.** The harness dropped `<head>`, `<script>` and `<style>` — the three
+that generate no box — and said in as many words that they go because *"no
+reading system sets them into the flow"*. HTML §15.3.1 names a fourth:
+`[hidden]`. Three of the six committed books carry a `<nav … hidden="hidden">`
+landmarks list, and honouring the rule takes twenty-four to twenty-nine
+characters out of each of them.
+
+The choice was between an engine that sets text every browser hides — including
+the browser this milestone compares against — and a definition of the conserved
+stream that names three of four exclusions. **The definition was what was
+wrong.** The harness's scanner still asks the engine nothing: it reads the
+attribute out of the bytes with the same crude parser it reads `<head>` with,
+and `the_source_side_drops_hidden_and_keeps_everything_else` asserts it in both
+directions, with `aria-hidden`, `data-hidden` and `class="hidden"` as the three
+near misses a substring scan would eat.
+
+**5. A list marker is drawn and must not be extracted, and there was no PDF-level
+way to say so.** `tinker-pdf-layout` already flags generated content —
+milestone 7 wrote `TextRun::generated` precisely so that *"text conservation
+stays an equality rather than becoming a containment"* — but that flag stops at
+the crate boundary, and a bullet drawn onto a page is a character
+`Page::text()` reports. Nine characters of every book with a list in it.
+
+14.8.2.2 has the answer and this repository's reader did not implement it: an
+**artifact** is *"a graphics object that is not part of the author's original
+content"*, and 14.8.2 excludes it from the logical content a consumer reads. So
+`Device::begin_marked_content` now carries the scope's **tag**, `TextDevice`
+keeps a stack of open `/Artifact` scopes and drops the glyphs inside them, and
+`paint.rs` wraps a generated run in `/Artifact BMC … EMC`. The renderer acts on
+`/OC` and the text device on `/Artifact`; that asymmetry is the reason the tag
+had to be passed at all, and it is why an artifact is drawn and not read while
+an invisible layer is read and not drawn.
+
+### The Japanese line, and the encoding it does not fit in
+
+Milestone 1 put a line of Japanese in five of the six books to catch a
+space-only line breaker. It catches a `WinAnsiEncoding`-only writer too: 25
+kanji and kana are not in Windows code page 1252, and a build that wrote them
+as UTF-8 bytes into a simple font's string would put mojibake on the page and
+lose them from `Page::text()` — text conservation failing on the one sentence
+the corpus exists for.
+
+`DocumentBuilder::add_named_font` writes a standard-14 face under an
+`/Encoding` whose `/Differences` names each glyph by the Adobe Glyph List's
+algorithmic `uniXXXX` form, and `PageBuilder::encoded_text` writes bytes the
+caller chose rather than a `&str`'s UTF-8. 9.10.2's second step resolves a code
+through `/Differences` to a name and the name to a character, so the **text**
+extracts correctly while the standard face has no **glyph** and the page shows
+a notdef. That asymmetry is stated rather than hidden:
+`ArchiveWarning::UnrepresentedCharacters` counts what got no code at all.
+
+**One overflow font per face, 224 codes, and no more.** That is
+`/Differences`'s own size rather than a cap invented here — the array is
+allocated at that size whatever the input says — so it is not a bound in ruling
+1's sense and does not join `bounds_ledger.rs`. A book with more than 224
+distinct out-of-encoding characters for one face loses the excess and says so;
+milestone 9's `@font-face` is where that stops being true, and it is recorded as
+owed below.
+
+### Text conservation, per book
+
+**Six of six, at 100%.** The figures are in `tests/epub/CONSERVATION.tsv`, which
+`every_committed_book_conserves_the_figure_the_record_states` compares against
+on every run, so a milestone that moves one has to re-measure rather than argue.
+
+| Book | Spine | Characters | Conserved | Pages |
+| --- | --- | --- | --- | --- |
+| `calibre-book-cover.epub` | 5 | 2 958 | **2 958** | 5 |
+| `calibre-book-nocover.epub` | 4 | 2 958 | **2 958** | 4 |
+| `pandoc-book-cover.epub` | 5 | 3 156 | **3 156** | 7 |
+| `pandoc-book-epub2.epub` | 5 | 3 156 | **3 156** | 7 |
+| `pandoc-book-nocover.epub` | 4 | 3 156 | **3 156** | 6 |
+| `pandoc-plates.epub` | 5 | 749 | **749** | 5 |
+
+The source figures moved because of finding 3 above — the Latin-1 bug inflated
+every one of them — so the milestone-4 numbers in the same file are not
+comparable to these and the file records the current measurement rather than
+both.
+
+**The page count is no longer the spine's length**, which is milestone 4's own
+sentence read forwards: `pandoc-book-cover.epub`'s five itemrefs need seven
+pages at 432 × 648 and eight at 300 × 500, and the *spine* — the sequence of
+distinct consecutive page origins — is five at both. Three tests were rewritten
+for that and each kept both halves rather than relaxing to the weaker one.
+
+### The `Unsupported` census, per book
+
+**This is the number the milestone is judged on**, and it reaches a caller
+rather than a test: `ArchiveWarning::UnimplementedProperty { property,
+elements }`, counted by the **elements it reached** rather than by the
+declarations that asked. A `float: left` in a rule that matches nothing is not
+a gap the book noticed; `.calibre13 { display: table-cell }` matching eighteen
+cells is eighteen and not one.
+
+| Book | Properties | Elements | The three largest |
+| --- | --- | --- | --- |
+| `calibre-book-cover.epub` | 5 | 67 | `display` 38, `vertical-align` 18, `text-align` 9 |
+| `calibre-book-nocover.epub` | 5 | 67 | `display` 38, `vertical-align` 18, `text-align` 9 |
+| `pandoc-book-cover.epub` | 11 | 150 | `vertical-align` 101, `display` 19, `hyphens` 6 |
+| `pandoc-book-epub2.epub` | 11 | 141 | `vertical-align` 92, `display` 19, `hyphens` 6 |
+| `pandoc-book-nocover.epub` | 11 | 142 | `vertical-align` 96, `display` 19, `hyphens` 6 |
+| `pandoc-plates.epub` | 5 | 67 | `vertical-align` 49, `background-color` 5, `color` 5 |
+
+The full table is `tests/epub/CENSUS.tsv` and
+`the_unsupported_census_is_the_one_the_record_states` is the ratchet.
+
+Two of these are worth reading rather than counting. **`vertical-align` is the
+largest number in every pandoc book and it is one declaration**: their CSS reset
+sets it on ninety-odd element names at once, and almost none of those elements
+would move if it were implemented — which is the honest limit of counting by
+element and is why the property list is printed beside the total.
+**`background-color` and `color` are unsupported on five elements each in every
+pandoc book, and the value is `light-dark()`** — a `css-color-5` function this
+build does not have. The declaration before it in the same rule is a plain hex
+colour that *is* implemented and wins nothing, because §6.1 gives the later
+declaration the win and this build then refuses it. That is
+`css-cascade-5` working correctly and producing a worse page than ignoring the
+rule would have, and it is recorded rather than special-cased.
+
+### The browser oracle, and ruling 9's fifth entry
+
+Ruling 9 is amended in `docs/plans/99-consistency.md`, in writing, with the
+argument rather than the conclusion: MuPDF reads EPUB and is already one of the
+four, but **its EPUB layout is itself a partial CSS implementation**, so
+disagreeing with it names no culprit. The amendment changes nothing about the
+ruling's substance — the browser is a subprocess, nothing links it, its output
+is transient — and it carries two constraints the plan worked out in advance:
+it is never a pixel comparison, and **the job is red when the browser is
+missing**.
+
+**What is installed here is Google Chrome 151.0.7922.169** at
+`C:\Program Files\Google\Chrome\Application\chrome.exe`, and Microsoft Edge
+beside it. The test finds a browser by `TINKER_BROWSER`, then by the four
+Windows paths and four Linux paths a Chromium-family build installs to; CI
+installs `chromium-browser` and passes `TINKER_BROWSER` explicitly. Every test
+prints `browser-oracle: RAN` with the path it used or `browser-oracle: SKIPPED`
+with the reason, and `.github/workflows/ci.yml`'s `browser-oracle` job greps
+for the second and fails with an `::error::`.
+
+**The continuous comparison agrees to 0.036 of the column, and the injected
+defect measures 0.105.** Twenty block boxes of `ch001.xhtml`, in document order,
+each side reporting the first line of every block that has text of its own.
+
+Three things about it are worth writing down because each was got wrong first.
+
+- **The block *sequence* is compared exactly, with no tolerance at all.** A
+  `display` value not honoured, an element the cascade lost, a `<head>` set into
+  the flow: every one changes that list and none changes it by a small amount.
+  The `y` offsets are the second assertion, not the only one.
+- **Normalising each side by its own column cannot see the defect it exists
+  for.** That was the first metric, and it is scale-invariant: dropping every
+  paragraph's margin shortens the column in the same proportion and moves the
+  normalised positions by 0.033 against an honest disagreement of 0.030. Both
+  sides are now divided by **one** denominator — the reference implementation's
+  — and the same defect measures 0.105 against an honest 0.036.
+- **One variable is held fixed on both sides, and it is named.** The two builds
+  set the same text in different faces, so a paragraph takes one more or one
+  fewer line on one side and a line is worth about as much as a margin. Both
+  sides are told `* { font-family: "Courier New", monospace !important }`,
+  whose 600/1000 advances are the Courier this build measures with. It is a
+  rule appended to both stylesheets rather than a fudge factor on one, and the
+  control test is what says the result can still fail.
+
+The remaining 0.036 is itemised rather than tolerated: a constant 13 points
+because the browser reports a line box's **top** and this engine a **baseline**
+(0.007), one `<table>` this build sets as inline text because milestone 11 has
+not landed (0.019), and one paragraph that broke a line differently because
+`<code>`'s `font-size: 85%` is a size this build has one face for (0.010).
+
+**The paginated comparison found something the continuous one structurally
+cannot, and it was Chromium doing it.** Asked for `@page { size: 432pt 648pt }`
+Chromium writes a 432 × 648 page — and lays the document out at its **own**
+default box and scales the result to fit. Reading the printed PDF back through
+this repository's own reader showed the body text set at **8.69 points** rather
+than 12, which is 576/792: this page's height over US Letter's. A page count
+compared across that scale is a comparison of two different documents. So the
+comparison is made at the box the browser is not scaling — its own — and the
+assertion that the body is set at 12 points is what keeps that honest.
+
+At 612 × 792 with a 36-point margin, **the browser makes two pages of the
+chapter and so does this engine**, carrying 1 504 / 1 225 characters against
+1 633 / 1 022. Both sides' pages are asserted to be a contiguous ordered
+partition of their own text: each of four distinctive sentences appears exactly
+once across the pages of each side, which is the fragmentation defect — a
+paragraph repeated across a break, or lost at one — that a page count cannot
+see.
+
+### What qpdf said
+
+qpdf 12.3.2, through the job gap 20 built. `--check` reports *"No syntax or
+stream encoding errors found"* on the synthesised book and on the same document
+after a `Document::cos()` round trip through the writer, with the new
+`/Differences` font dictionaries, the `/Annots` link arrays and the `/Outlines`
+tree in it.
+
+`qpdf_decodes_a_placeholder_page_and_a_page_that_reads` is the one that
+changed, and the change is the point. Until this milestone every page of every
+book was grey, so the test asserted grey on all three pages of its fixture and
+would have passed on a build that greyed everything. The fixture is now two
+kinds of page: `--filtered-stream-data` shows
+`0.7490196078431373 g 0 0 432 648 re f` and no `Tj` on the spine item that does
+not resolve, and `BT /Bk0 12 Tf 0 Tc 0 Tw 42 590.004 Td (One.) Tj ET` with no
+`g` on the two chapters either side of it. Reading the operators is the only
+thing that can tell those apart.
+
+### The injection matrix
+
+**Forty-two defects. Ten survived a pass: eight were real gaps and are closed,
+and two were injections into unreachable code, which is deleted and the
+injections re-pointed at the half that can fire. The matrix as committed is
+forty-two of forty-two.**
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | `head { display: none }` deleted from `ua.css` | `every_committed_book_conserves_the_figure_the_record_states`, and two more |
+| 2 | `[hidden] { display: none }` deleted | `every_committed_book_conserves_the_figure_the_record_states`, `conservation_does_not_depend_on_the_page_box` |
+| 3 | No element is block-level | `the_browser_and_this_engine_lay_the_same_column_out_the_same_way`, and the conservation sweep |
+| 4 | `p { margin: 1em 0 }` deleted | **survived** — closed, see below |
+| 5 | `h1` is body size and body weight | `without_the_ua_stylesheet_a_book_has_no_block_structure_at_all` |
+| 6 | An `<li>` is `block` rather than `list-item` | `the_committed_sheet_is_what_a_book_is_set_with`, and three more |
+| 7 | The table rules say nothing | `the_unsupported_census_is_the_one_the_record_states` |
+| 8 | An anchor is not underlined | `a_list_marker_is_drawn_and_is_not_extracted` |
+| 9 | A text node counts as an element sibling | `siblings_skip_the_whitespace_between_them` |
+| 10 | Every namespace is XHTML | `a_foreign_element_is_kept_and_is_not_html` |
+| 11 | A `<![CDATA[…]]>` section is dropped | `a_cdata_section_is_text_and_not_markup` |
+| 12 | A reader refusal is not recorded as `Truncated` | `an_unterminated_element_is_the_readers_refusal_and_not_a_second_check` — **replaced injection**, see below |
+| 13 | `class` is one token rather than a list | `the_class_attribute_is_a_token_list` |
+| 14 | `Dom::contains` is equality rather than an ancestor walk | `containment_is_the_ancestor_chain` |
+| 15 | A text node takes its parent's whole computed style | `a_paragraph_does_not_pay_its_own_margin_twice` |
+| 16 | `text-decoration` does not reach the text it marks | `a_paragraph_does_not_pay_its_own_margin_twice` |
+| 17 | The box tree is rooted at `<body>` | `without_the_ua_stylesheet_a_book_has_no_block_structure_at_all` |
+| 18 | `rel="alternate stylesheet"` is applied | **survived** — closed, see below |
+| 19 | The census is ranked upwards | `the_census_counts_elements_and_not_declarations` |
+| 20 | The census counts nothing at all | `the_unsupported_census_is_the_one_the_record_states`, and two more |
+| 21 | The root's `rem` is the specification's constant, not the caller's | **survived** — closed, see below |
+| 22 | The root does not start from the caller's values | `the_initial_font_size_is_the_callers_and_rem_follows_it`, `the_callers_base_font_size_changes_the_pagination` |
+| 23 | A character past U+00FF is truncated to a byte | `an_unencodable_character_gets_one_stable_code` |
+| 24 | An East Asian glyph is a Latin space wide | `an_east_asian_character_is_one_em_wide` |
+| 25 | A repeated character is given a fresh code | **survived** — closed, see below |
+| 26 | A list marker is not marked as an artifact | `every_committed_book_conserves_the_figure_the_record_states`, `a_list_marker_is_drawn_and_is_not_extracted` |
+| 27 | A run is drawn in one font whatever its codes | `every_committed_book_conserves_the_figure_the_record_states`, and two more |
+| 28 | A link's rectangle sits on the baseline rather than over the words | **survived** — closed, see below |
+| 29 | Every family resolves to `serif` | `a_family_this_build_does_not_have_falls_through_to_the_next` |
+| 30 | Every fragment resolves to its chapter's first page | `a_cross_reference_becomes_a_link_to_the_page_its_target_is_on` |
+| 31 | A same-document `href="#x"` points nowhere | **survived** — closed, see below |
+| 32 | An SVG content document is laid out as XHTML | `an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place` |
+| 33 | A placeholder page draws nothing rather than grey | `a_page_that_will_not_read_is_grey_and_a_page_that_reads_is_not` |
+| 34 | The caller's font size does not reach the cascade | `the_callers_base_font_size_changes_the_pagination` |
+| 35 | The first `<nav>` wins over `epub:type="toc"` | `the_toc_nav_wins_over_the_landmarks_nav` |
+| 36 | A `navPoint` takes the last `<text>` it saw | `an_ncx_navmap_becomes_nested_entries` — **replaced injection**, see below |
+| 37 | The NCX wins over the navigation document | `every_book_gets_an_outline_from_whichever_toc_it_has` |
+| 38 | An artifact scope is a flag rather than a stack | **survived** — closed, see below |
+| 39 | Artifact content is extracted | `an_artifact_is_drawn_and_is_not_extracted`, and three more |
+| 40 | A literal string's `(` and `)` are not escaped | **survived** — closed, see below |
+| 41 | The harness matches `hidden` as a substring | `the_source_side_drops_hidden_and_keeps_everything_else` |
+| 42 | The harness reads the source as Latin-1 | `the_source_side_decodes_and_does_not_transliterate` |
+
+#### The eight real gaps
+
+**Row 4 — a rule both producers mask.** Deleting `p { margin: 1em 0 }` from the
+user-agent sheet changed nothing about any book in the corpus, because calibre
+and pandoc both set the same rule in their own stylesheets. The only place it
+is reachable is a fixture with no author sheet at all — which the user-agent
+test has — and it now asserts that two paragraphs are more than one line apart,
+which is the difference between a block rule and a block rule with a margin.
+
+**Row 18 — a rule no book in either corpus can reach.** Neither the committed
+nor the fetched corpus contains `rel="alternate stylesheet"`. It is a function
+now, `read::applies_as_stylesheet`, with a test over the spellings that matter:
+`rel="stylesheet next"`, which a build comparing the whole attribute would drop,
+and `rel="stylesheets"`, which a substring scan would accept.
+
+**Row 21 — the one place a seed can be observed.** `cascade_from`'s
+`root_font_size` starts at the caller's size and is immediately overwritten by
+the root element's computed size, so it is visible **only** through a `rem` on
+the root element itself — which `css-values-3` §5.1.1 says refers to
+`font-size`'s *initial* value rather than to the root's own. The first version
+of the test put the `rem` on a descendant and passed with the seed replaced by
+the constant; it now declares `letter-spacing: 2rem` on the root.
+
+**Row 25 — a defect no page and no extracted string can show.** Allocating an
+overflow code per *occurrence* rather than per *character* draws every book
+identically, because `encode` finds the first matching entry either way. What
+it costs is the 224 codes, four times as fast. `Fonts::codes` exists so the
+number can be asserted at all.
+
+**Row 28 — a rectangle that is near the words rather than over them.** A hit
+area beginning at the baseline covers the top of every glyph and none of the
+bottom, and it passes every bound the test had: on the page, narrower than the
+measure, shorter than a line. It now asserts that some glyph's **origin** is
+strictly inside the rectangle, which is what "over the words" means.
+
+**Row 31 — a branch the corpus cannot reach.** pandoc writes `href="#toc"` only
+inside the landmarks `<nav hidden>`, which is `display: none` and generates no
+run to hang an annotation on; every other cross-reference in the corpus carries
+a path. So the same-document branch of the resolver had no input.
+`a_same_document_reference_reaches_the_page_it_points_at` builds a container
+with one chapter long enough to need three pages and asserts the anchor on page
+one resolves to the last.
+
+**Row 38 — a stack nothing in this repository nests.** `/Artifact` scopes are
+counted with a stack because marked content nests; no content stream this build
+writes puts a scope inside one, so a defect reducing it to a flag survived
+everything. `a_scope_inside_an_artifact_does_not_end_it` is the fixture.
+
+**Row 40 — a second producer of the same syntax.** `PageBuilder::text` has
+escaped 7.3.4.2's three characters since it was written and `encoded_text` is a
+second place to forget. No run in gap 31's corpus carries a parenthesis, so the
+defect survived that entire suite — and a content stream with an unbalanced `(`
+is a page no reader can lex. The test also found the *harness* pointing at the
+wrong crate: a defect in `tinker-pdf-cos` was being measured by
+`cargo test -p tinker-pdf`.
+
+#### The two injections into unreachable code
+
+**Row 12.** `xhtml::read` had a second check for elements left open after the
+loop, and a defect that disabled it survived the whole suite — because
+`tinker-pdf-xml` refuses a document that ends inside an element with
+`Error::Unterminated(Construct::Element)`, which the error arm has already
+recorded. **A rule enforced twice hides the reachable half**, which is milestone
+7's own best find. The second enforcement is deleted, the reason is written
+where it was, and the injection now targets the arm that can fire.
+`MarkupDefect::Mismatched` went in the same edit: nothing can produce it,
+because the reader emits one `End` per `Start` and refuses a stray end tag
+before this loop sees it.
+
+**Row 36.** The NCX reader guarded `<text>` on both the `Start` arm and the
+`End` arm, and only the `End` one is reachable — it has to test the stack
+anyway, because it needs a `navPoint` to put the title on. The `Start` guard is
+gone and the injection now targets the guard that decides which of a
+`navPoint`'s two `<text>` elements is its title: the DTD gives it a `navInfo`
+beside its `navLabel`, and a build that took the last one it saw would title
+every chapter with its description. The fixture grew a `navInfo` for it.
+
+#### And one thing the harness itself got wrong
+
+`inject.py` restores by writing the pristine bytes back and stamping the
+original timestamps, which is what earlier passes did and what keeps cargo from
+rebuilding twice per defect. **Cargo decides whether a *dependency* crate needs
+rebuilding by comparing its sources' mtimes against the last build's
+fingerprint, and an mtime that went backwards is not newer.** So the two
+`tinker-pdf-css` defects at rows 21 and 22 left a defective `rlib` linked into
+every later defect's build, and nineteen rows after them reported that css
+defect's failing test as their own catch. Four of them were not caught at all.
+
+The first pass read 38 of 42 and the honest number was 36. The fix is one line —
+stamp the restore with the current time and pay one rebuild per defect — and it
+is written into the harness's own docstring so the next milestone inherits the
+finding rather than the bug.
+
+### Still owed, and what was narrowed
+
+- **Tables are set as inline text**, which conserves every character and puts
+  none of them in a cell. Milestone 11, and the census says so per book:
+  `display`, unimplemented, 38 elements on each calibre book and 19 on each
+  pandoc one.
+- **`vertical-align` is the largest census entry in every pandoc book and none
+  of it is honoured.** Most of it goes with milestone 11's tables and milestone
+  12's flex; `sup` and `sub` are neither, and are owed.
+- **A character no face covers is a notdef on the page**, correct in the text
+  layer and blank in the picture. Row 9's exit criterion asks for *"a character
+  no available face covers producing a named warning rather than a blank"*, and
+  `ArchiveWarning::UnrepresentedCharacters` covers only the ones that got no
+  code at all. A code that draws a notdef is not warned about, and that is
+  milestone 9's along with `@font-face`.
+- **More than 224 distinct out-of-encoding characters for one face lose the
+  excess.** No book in either corpus is near it — the largest is 25 — and
+  milestone 9's embedded faces remove the limit rather than raising it.
+- **`dashed`, `dotted` and `double` borders are drawn solid.** The border is in
+  the right place at the right width in the right colour and the pattern is
+  wrong. Named here rather than left to be found, because it is the one place in
+  this milestone where a value is honoured *approximately* — a third thing from
+  implemented and from `Unsupported`, and the census cannot see it.
+- **`light-dark()` takes a colour with it.** Five elements in every pandoc book
+  declare a plain hex colour and then the same colour through `light-dark()`;
+  §6.1 gives the later declaration the win and this build then refuses it, so
+  the page is worse than if the rule had been absent. That is the cascade
+  working correctly, and the fix is `css-color-5`'s function rather than a
+  special case.
+- **The `<img>` in `pandoc-plates.epub` is not drawn.** Three of its five pages
+  are a figure and a caption and only the caption is on the page. Images in a
+  content document are milestone 9's neighbour rather than this milestone's, and
+  the book still conserves every character it has.
+- **`mutool` is not run over an EPUB anywhere.** Ruling 9's amendment says
+  disagreeing with it is not evidence of a bug, which is a reason not to *gate*
+  on it and not a reason to skip it; a job recording the disagreement as a
+  number would still be worth having and is not built.
+- **Milestone 2's owed facade test is closed here**, which milestone 4 predicted:
+  every content document of every committed book now goes through
+  `Doctype::SkipExternalId` in the facade's own path, including the EPUB 2
+  book's XHTML 1.1 public identifier, and text conservation is what says they
+  parsed. A build that passed `Doctype::Refuse` would refuse all six.
+- **Milestone 4's `with_fonts` warning still has no fixture from a real book**,
+  unchanged: no committed book needs a face this engine lacks.

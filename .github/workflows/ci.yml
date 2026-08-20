@@ -421,6 +421,55 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' epubcheck.log
           grep -q 'epubcheck-oracle: RAN' epubcheck.log
 
+  browser-oracle:
+    # Ruling 9's **fifth** oracle, added by its own amendment in gap 31
+    # milestone 8, and the only one here that exists because a *previous*
+    # oracle is not good enough.
+    #
+    # `mutool-xps-oracle` above compares this engine against MuPDF and gap 30
+    # recorded the risk: where MuPDF is wrong about XPS, this engine will agree
+    # with it and both will be wrong. XPS markup has one right answer so the
+    # risk is bounded. CSS does not work like that — MuPDF's EPUB layout is
+    # itself a partial CSS implementation, so **disagreeing with mutool is not
+    # evidence of a bug** and there is no fourth-oracle answer to fall back on.
+    # A browser is the reference implementation of CSS.
+    #
+    # `ubuntu-latest` ships Chromium via `chromium-browser`, and the test looks
+    # for it by path or by `TINKER_BROWSER`. It is invoked, never linked and
+    # never vendored, and the PDF it prints is read back through this
+    # repository's own reader and thrown away with `target/`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y chromium-browser
+      # A `|| true` here would hide a missing binary, which is the whole
+      # failure this job exists to prevent.
+      - run: chromium-browser --version
+      # The same shape as `qpdf-linearization` above, for the reason gap 20
+      # learned it and row 8 restates: the job is **red when the browser is
+      # missing**, because a skipped oracle exits 0 and reads exactly like a
+      # pass.
+      - name: Compare the EPUB reader against a headless browser
+        env:
+          TINKER_BROWSER: /usr/bin/chromium-browser
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test epub_browser -- --nocapture \
+            --test-threads=1 2>&1 | tee browser-oracle.log
+          # The skip is checked first and on its own, so the reason reaches the
+          # log. A bare `grep -q RAN` fails the step too, but under `bash -e` it
+          # fails it *silently* — a red tick with nothing saying the oracle
+          # never ran is only half of what this job is for.
+          if grep -q 'browser-oracle: SKIPPED' browser-oracle.log; then
+            echo "::error::no headless browser was found, so the EPUB layout" \
+                 "oracle SKIPPED rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' browser-oracle.log
+          grep -q 'browser-oracle: RAN' browser-oracle.log
+
   licenses:
     runs-on: ubuntu-latest
     steps:

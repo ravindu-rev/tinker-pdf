@@ -1,0 +1,261 @@
+/* The user-agent stylesheet, gap 31 milestone 8.
+ *
+ * HTML's own rendering section (§15) is the source for every rule here, and
+ * the numbers are its numbers rather than numbers that looked right. It is
+ * parsed by `tinker-pdf-css` exactly as an author's sheet is, cascaded at
+ * `Origin::UserAgent`, and it is the reason a book has block structure at all:
+ * XHTML carries no presentational markup, so `display` for every element on
+ * every page of every book comes from this file and from nowhere else.
+ *
+ * Two rules govern what may be written here.
+ *
+ * **A declaration outside the implemented set is here only when HTML declares
+ * it and the box tree changes without it.** This sheet is cascaded like an
+ * author's, so `tinker-pdf-css` charges every `Unsupported` declaration to the
+ * census -- per **element it reached**, which is what makes the number a
+ * property of the book rather than of this file. The table rules below are
+ * exactly that case: HTML sets `table { display: table }`, this build has no
+ * table box, and a sheet that stayed silent about it would set every table in
+ * the corpus as inline text with nothing anywhere saying so. Everything else
+ * §15 declares that this build has no consumer for -- `border-spacing`,
+ * `border-collapse`, `vertical-align`, `quotes`, `counter-reset`,
+ * `list-style-position`, `unicode-bidi` -- is **not** here, because none of
+ * them changes which boxes exist and charging them would bury the one that
+ * does. `tests/epub_reading.rs`'s census assertions pin what is charged.
+ *
+ * **`[hidden]` is here and `[hidden=until-found]` is not.** HTML §15.3.1
+ * spells the rule `[hidden]:not([hidden=until-found])`, and the exception is
+ * for a find-in-page this build has no concept of. The `:not()` is dropped and
+ * the fact is recorded rather than the selector being copied and half-honoured.
+ */
+
+/* ---- §15.3.1: the elements that generate no box --------------------------
+ *
+ * `head` takes its whole subtree with it, which is where `title`, `meta`,
+ * `link` and `style` go. The four are named again below because a producer
+ * that puts a `<style>` in the body -- calibre does, in two of the six
+ * committed books -- would otherwise set a stylesheet as text. */
+head, link, meta, style, script, title, base, template, param, source, track {
+  display: none;
+}
+
+[hidden] {
+  display: none;
+}
+
+/* ---- §15.3.3: the block-level elements ---------------------------------- */
+html, body, address, blockquote, center, div, figure, figcaption, footer,
+form, header, hr, legend, listing, main, p, plaintext, pre, search, xmp,
+article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section,
+dir, dd, dl, dt, menu, ol, ul, details, summary, dialog, fieldset, optgroup {
+  display: block;
+}
+
+li {
+  display: list-item;
+}
+
+center {
+  text-align: center;
+}
+
+/* ---- §15.3.8: the table box tree this build does not have ---------------
+ *
+ * Every declaration below is `Unsupported` and every one of them is charged to
+ * the census, per element, on purpose. Milestone 11 is tables; until it lands
+ * a `<table>` is set as inline text, which conserves every character and puts
+ * none of them in a cell -- and the census is where a caller finds that out.
+ * Naming `display: table` and having it refused is a different fact from not
+ * naming it, which is the whole of decision 5 read at the UA sheet. */
+table { display: table; }
+caption { display: table-caption; }
+colgroup { display: table-column-group; }
+col { display: table-column; }
+thead { display: table-header-group; }
+tbody { display: table-row-group; }
+tfoot { display: table-footer-group; }
+tr { display: table-row; }
+td, th { display: table-cell; }
+
+th {
+  text-align: center;
+}
+
+/* ---- §15.3.3: the margins, in the source's own units -------------------- */
+body {
+  margin: 8px;
+}
+
+p, dl {
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+
+blockquote, figure {
+  margin-top: 1em;
+  margin-bottom: 1em;
+  margin-left: 40px;
+  margin-right: 40px;
+}
+
+address {
+  font-style: italic;
+}
+
+ol, ul, menu, dir {
+  margin-top: 1em;
+  margin-bottom: 1em;
+  padding-left: 40px;
+}
+
+/* §15.3.3 makes a nested list's own margins zero, so three levels of nesting
+ * indent by three paddings rather than by three paddings and three margins. */
+ol ol, ol ul, ol menu, ol dir,
+ul ol, ul ul, ul menu, ul dir,
+menu ol, menu ul, menu menu, menu dir,
+dir ol, dir ul, dir menu, dir dir {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+dd {
+  margin-left: 40px;
+}
+
+/* ---- §15.3.6: the headings --------------------------------------------- */
+h1 {
+  font-size: 2em;
+  font-weight: bold;
+  margin-top: 0.67em;
+  margin-bottom: 0.67em;
+}
+
+h2 {
+  font-size: 1.5em;
+  font-weight: bold;
+  margin-top: 0.83em;
+  margin-bottom: 0.83em;
+}
+
+h3 {
+  font-size: 1.17em;
+  font-weight: bold;
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+
+h4 {
+  font-weight: bold;
+  margin-top: 1.33em;
+  margin-bottom: 1.33em;
+}
+
+h5 {
+  font-size: 0.83em;
+  font-weight: bold;
+  margin-top: 1.67em;
+  margin-bottom: 1.67em;
+}
+
+h6 {
+  font-size: 0.67em;
+  font-weight: bold;
+  margin-top: 2.33em;
+  margin-bottom: 2.33em;
+}
+
+/* ---- §15.3.4: the phrasing elements ------------------------------------ */
+b, strong, th {
+  font-weight: bold;
+}
+
+i, cite, em, var, dfn {
+  font-style: italic;
+}
+
+u, ins {
+  text-decoration: underline;
+}
+
+s, strike, del {
+  text-decoration: line-through;
+}
+
+pre, code, kbd, samp, tt, listing, plaintext, xmp {
+  font-family: monospace;
+}
+
+pre, listing, plaintext, xmp {
+  white-space: pre;
+  margin-top: 1em;
+  margin-bottom: 1em;
+}
+
+small {
+  font-size: 0.83em;
+}
+
+big {
+  font-size: 1.17em;
+}
+
+mark {
+  background-color: #ffff00;
+  color: #000000;
+}
+
+/* ---- §15.3.3's list markers -------------------------------------------- */
+ul, menu, dir {
+  list-style-type: disc;
+}
+
+ol {
+  list-style-type: decimal;
+}
+
+ul ul, ul menu, ul dir, menu ul, menu menu, menu dir,
+ol ul, ol menu, ol dir {
+  list-style-type: circle;
+}
+
+ul ul ul, ul ul menu, ul menu ul, ul ol ul, ol ul ul, ol ol ul {
+  list-style-type: square;
+}
+
+/* §15.3.3's own `type` mapping. `ol[type=1]` is what pandoc writes on every
+ * ordered list in every book it produced here, and a build with no rule for it
+ * would set an ordered list with discs. */
+ol[type="1"], li[type="1"] { list-style-type: decimal; }
+ol[type="a"], li[type="a"] { list-style-type: lower-alpha; }
+ol[type="A"], li[type="A"] { list-style-type: upper-alpha; }
+ol[type="i"], li[type="i"] { list-style-type: lower-roman; }
+ol[type="I"], li[type="I"] { list-style-type: upper-roman; }
+ul[type="disc"], li[type="disc"] { list-style-type: disc; }
+ul[type="circle"], li[type="circle"] { list-style-type: circle; }
+ul[type="square"], li[type="square"] { list-style-type: square; }
+
+/* ---- The one rule this file has that HTML's does not --------------------
+ *
+ * §15.3.7 renders `hr` with a border and `border-style: inset`, which this
+ * build does not have. A solid rule one pixel high is the same mark at the
+ * same place, and taking it is a decision recorded here rather than a value
+ * mapped onto its nearest neighbour somewhere in the parser: `inset` is
+ * `Unsupported` and stays so. */
+hr {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  border-top-width: 1px;
+  border-top-style: solid;
+  border-top-color: #808080;
+  height: 0;
+}
+
+/* ---- The anchor ---------------------------------------------------------
+ *
+ * §15.5.3 spells this `:any-link`, which is a pseudo-class this build does not
+ * evaluate; `a[href]` is the same set of elements for a document that has no
+ * scripting, and this build refuses scripting by name. */
+a[href] {
+  color: #0000ee;
+  text-decoration: underline;
+}

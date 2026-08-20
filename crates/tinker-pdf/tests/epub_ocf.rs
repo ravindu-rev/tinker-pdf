@@ -147,18 +147,25 @@ fn corpus_book(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
-/// Every committed book and the number of `<itemref>`s its spine holds.
+/// Every committed book, the number of `<itemref>`s its spine holds, and the
+/// number of pages its text needs at the default box.
 ///
 /// Read out of the package documents by hand and written down, rather than
 /// computed here: a test that recomputes the number it is checking agrees with
 /// itself whatever the reader does.
-const COMMITTED_SPINES: &[(&str, u32)] = &[
-    ("calibre-book-cover.epub", 5),
-    ("calibre-book-nocover.epub", 4),
-    ("pandoc-book-cover.epub", 5),
-    ("pandoc-book-epub2.epub", 5),
-    ("pandoc-book-nocover.epub", 4),
-    ("pandoc-plates.epub", 5),
+///
+/// **The two numbers are different since milestone 8** and both are here for
+/// that reason. The spine is a property of the file; the page count is a
+/// function of the box, and `pandoc-book-cover.epub`'s five itemrefs need seven
+/// pages at 432 x 648. A test that kept only the second could not tell a
+/// chapter that fragmented from a chapter that was duplicated.
+const COMMITTED_SPINES: &[(&str, u32, u32)] = &[
+    ("calibre-book-cover.epub", 5, 5),
+    ("calibre-book-nocover.epub", 4, 4),
+    ("pandoc-book-cover.epub", 5, 7),
+    ("pandoc-book-epub2.epub", 5, 7),
+    ("pandoc-book-nocover.epub", 4, 6),
+    ("pandoc-plates.epub", 5, 5),
 ];
 
 // ---- the discrimination -----------------------------------------------------
@@ -177,9 +184,31 @@ const COMMITTED_SPINES: &[(&str, u32)] = &[
 /// manifest items, XHTML entries — would fail rather than agree with itself.
 #[test]
 fn every_committed_book_is_read_as_the_book_it_is() {
-    for (name, spine) in COMMITTED_SPINES {
+    for (name, spine, pages) in COMMITTED_SPINES {
         let bytes = corpus_book(name);
-        assert_eq!(opened(&bytes), Ok(*spine), "{name} is not its own spine");
+        assert_eq!(
+            opened(&bytes),
+            Ok(*pages),
+            "{name} is not its own page count"
+        );
+
+        // And the spine is still the spine: the distinct consecutive origins of
+        // those pages are the itemrefs, in the itemrefs' order. A chapter that
+        // fragmented adds pages and adds no origin; a chapter that vanished
+        // takes one away.
+        let doc = tinker_pdf::Document::open(bytes).expect("a book");
+        let report = doc.archive().expect("a report");
+        let mut origins: Vec<&str> = Vec::new();
+        for origin in report.pages() {
+            if origins.last() != Some(&origin.name.as_str()) {
+                origins.push(origin.name.as_str());
+            }
+        }
+        assert_eq!(
+            origins.len(),
+            *spine as usize,
+            "{name} is not its own spine: {origins:?}"
+        );
     }
 }
 
@@ -248,7 +277,12 @@ fn a_comic_carrying_meta_inf_files_that_are_not_the_container_is_still_a_comic()
 fn a_container_with_no_image_at_all_is_a_book_and_not_an_archive_with_no_images() {
     assert_eq!(opened(&smallest_book()), Ok(1));
     for name in ["pandoc-book-nocover.epub", "calibre-book-nocover.epub"] {
-        assert_eq!(opened(&corpus_book(name)), Ok(4), "{name}");
+        let pages = COMMITTED_SPINES
+            .iter()
+            .find(|(book, _, _)| book == &name)
+            .map(|(_, _, pages)| *pages)
+            .expect("a recorded page count");
+        assert_eq!(opened(&corpus_book(name)), Ok(pages), "{name}");
     }
 }
 

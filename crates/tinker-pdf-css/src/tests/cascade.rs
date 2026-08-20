@@ -2,10 +2,10 @@
 //! inheritance against the quadratic alternative.
 
 use super::{sheet, tree, Node};
-use crate::cascade::{cascade, rank, resolve_lazily, ComputedStyle, Origin};
+use crate::cascade::{cascade, cascade_from, rank, resolve_lazily, ComputedStyle, Origin};
 use crate::property::{
     Color, Display, Float, FontStyle, LengthPercentage, LineHeight, MarginValue, Side, Size,
-    TextAlign, Visibility,
+    Spacing, TextAlign, Visibility,
 };
 use crate::{Budget, Limits, Refusal, Stylesheet};
 
@@ -569,4 +569,77 @@ fn the_cascade_is_per_property_and_not_per_rule() {
         Display::Inline,
         "and a property neither set is initial"
     );
+}
+
+/// **The initial value of `font-size` is the caller's, and `rem` and a root
+/// percentage both resolve against it.**
+///
+/// `css-fonts-4`'s initial value is `medium`, and what `medium` *is* is a
+/// reading system's preference rather than a constant of the specification. A
+/// build with it as a constant reads `html { font-size: 100% }` — which one of
+/// gap 31's two measured producers writes as a CSS reset on every book — as a
+/// reset to sixteen pixels, and a host's base font size stops mattering for
+/// two thirds of that corpus.
+///
+/// Three claims, because three different mistakes produce three of them:
+///
+/// 1. an element that declares nothing inherits the caller's size;
+/// 2. `font-size: 100%` on the **root** is the caller's size and not the
+///    specification's;
+/// 3. `rem` on a descendant is the root's computed size, which is what
+///    `cascade_from`'s own `root_font_size` decides — a build that seeded that
+///    from the constant instead gets (1) and (2) right and this wrong.
+#[test]
+fn the_initial_font_size_is_the_callers_and_rem_follows_it() {
+    let nodes = tree(&[("html", None), ("div", Some(0)), ("p", Some(1))]);
+    let parsed = sheet(
+        "html { font-size: 100%; letter-spacing: 2rem }          div { font-size: 2em }          p { text-indent: 3rem }",
+    );
+    let limits = Limits::DEFAULT;
+
+    let at = |size: f64| -> Vec<ComputedStyle> {
+        let mut initial = ComputedStyle::initial();
+        initial.font_size = size;
+        let mut budget = Budget::new(&limits);
+        cascade_from(
+            &[(Origin::Author, &parsed)],
+            &nodes,
+            &limits,
+            &mut budget,
+            &initial,
+        )
+        .expect("the fixture is under every cap")
+        .styles
+    };
+
+    let styled = at(24.0);
+    // (2) the root's own percentage.
+    assert_eq!(styled[0].font_size, 24.0);
+    // And `rem` **on the root itself**, which `css-values-3` §5.1.1 says refers
+    // to `font-size`'s *initial* value rather than to the root's computed one —
+    // the only place the seed can be observed at all, because every element
+    // after the root sees the root's computed size instead. A build that seeded
+    // it from the specification's constant gets every other assertion here
+    // right and this one wrong.
+    assert_eq!(styled[0].letter_spacing, Spacing::Px(48.0));
+    // (1) and the `em` under it.
+    assert_eq!(styled[1].font_size, 48.0);
+    // (3) `rem` is the root's, so three of them is 72 and not 48.
+    assert_eq!(styled[2].text_indent, LengthPercentage::Px(72.0));
+
+    // And the whole of it moves with the caller's number rather than being a
+    // constant this test happens to agree with.
+    let small = at(10.0);
+    assert_eq!(small[0].font_size, 10.0);
+    assert_eq!(small[0].letter_spacing, Spacing::Px(20.0));
+    assert_eq!(small[1].font_size, 20.0);
+    assert_eq!(small[2].text_indent, LengthPercentage::Px(30.0));
+
+    // `cascade` is `cascade_from` at the specification's own initial value,
+    // which is what keeps the two from drifting apart.
+    let mut budget = Budget::new(&limits);
+    let default = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap")
+        .styles;
+    assert_eq!(default[0].font_size, crate::cascade::INITIAL_FONT_SIZE);
 }

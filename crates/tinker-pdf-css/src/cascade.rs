@@ -422,6 +422,36 @@ pub fn cascade<E: Element>(
     limits: &Limits,
     budget: &mut Budget,
 ) -> Result<StyleTree, Refusal> {
+    cascade_from(sheets, elements, limits, budget, &ComputedStyle::initial())
+}
+
+/// The same cascade, from a caller's own initial values.
+///
+/// **`css-cascade-5` §7.1's initial value is not a constant of the
+/// specification: it is the user's.** `css-fonts-4` says `font-size: medium`,
+/// and what `medium` *is* is a reading system's preference — which is why a
+/// percentage on the root element resolves against it and why `html
+/// { font-size: 100% }`, which one of gap 31's two measured producers writes
+/// on every book, means *"whatever the reader chose"* rather than *"sixteen
+/// pixels"*.
+///
+/// A build with no way to say so reads that rule as a reset to 16 and a host's
+/// base font size stops mattering. So the initial style is a parameter, and
+/// [`cascade`] is this function at [`ComputedStyle::initial`].
+///
+/// Only the **inherited** properties of `initial` can be observed: a
+/// non-inherited one is reset by [`ComputedStyle::inherit_from`] for every
+/// element below the root, and would be a value the root alone carried.
+///
+/// # Errors
+/// Any [`Refusal`]: a cap, or a slice that is not in document order.
+pub fn cascade_from<E: Element>(
+    sheets: &[Sheet<'_>],
+    elements: &[E],
+    limits: &Limits,
+    budget: &mut Budget,
+    initial: &ComputedStyle,
+) -> Result<StyleTree, Refusal> {
     if elements.len() > limits.max_elements {
         return Err(Refusal::TooManyElements {
             elements: elements.len(),
@@ -438,12 +468,12 @@ pub fn cascade<E: Element>(
     let matcher = Matcher::build(sheets);
     let mut report = Report::default();
     let mut styles: Vec<ComputedStyle> = Vec::with_capacity(elements.len());
-    let mut root_font_size = INITIAL_FONT_SIZE;
+    let mut root_font_size = initial.font_size;
 
     for index in 0..elements.len() {
         let mut style = match elements[index].parent() {
             Some(parent) => ComputedStyle::inherit_from(&styles[parent]),
-            None => ComputedStyle::initial(),
+            None => initial.clone(),
         };
         let winners = matcher.winners(elements, index, &mut report, budget)?;
         apply_winners(&winners, &mut style, root_font_size);

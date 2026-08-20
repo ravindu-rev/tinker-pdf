@@ -57,7 +57,9 @@
 //!     content: Content::Children(vec![BoxNode {
 //!         style: text,
 //!         content: Content::Text("the sea, the sea".into()),
+//!         anchor: None,
 //!     }]),
+//!     anchor: None,
 //! };
 //! let laid = layout(
 //!     &tree,
@@ -104,6 +106,22 @@ pub struct BoxNode {
     pub style: ComputedStyle,
     /// What is inside it.
     pub content: Content,
+    /// An opaque tag the caller chose, carried unchanged to every
+    /// [`TextRun`] this node's text produced.
+    ///
+    /// **It exists because fragmentation destroys the caller's ability to work
+    /// this out for itself.** A caller that knows which element an `<a href>`
+    /// is cannot find the rectangle it ended up occupying: the text was
+    /// collapsed, re-split at UAX #14 opportunities, distributed over line
+    /// boxes and then over pages, and the only thing that survives the walk is
+    /// what this crate carries. A caller that instead searched the output for
+    /// the anchor's text would find the wrong copy the first time a book used
+    /// the same words twice.
+    ///
+    /// This crate never reads it, never compares two of them and never invents
+    /// one — a `u32` rather than a type, so nothing here can acquire an
+    /// opinion about what a tag means.
+    pub anchor: Option<u32>,
 }
 
 /// What a node holds.
@@ -126,6 +144,7 @@ impl BoxNode {
         Self {
             style,
             content: Content::Text(text.into()),
+            anchor: None,
         }
     }
 
@@ -135,7 +154,15 @@ impl BoxNode {
         Self {
             style,
             content: Content::Children(children),
+            anchor: None,
         }
+    }
+
+    /// The same node, tagged. See [`BoxNode::anchor`].
+    #[must_use]
+    pub fn with_anchor(mut self, anchor: u32) -> Self {
+        self.anchor = Some(anchor);
+        self
     }
 
     /// Every character of text under this node, in document order.
@@ -269,6 +296,11 @@ pub struct TextRun {
     /// compared against it, and a build with no such flag either loses the
     /// invariant or loses the markers.
     pub generated: bool,
+    /// The [`BoxNode::anchor`] of the node this run's characters came from,
+    /// carried through collapsing, line breaking and pagination untouched.
+    ///
+    /// `None` for a run this crate generated, which a list marker is.
+    pub anchor: Option<u32>,
 }
 
 /// A whole book, paginated.

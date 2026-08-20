@@ -593,6 +593,73 @@ pub enum ArchiveWarning {
     /// `crate::OpenOptions::fonts` is where a provider goes if it is to decide
     /// anything, and this is the sentence that says the late one did not.
     FontsAttachedAfterPagination,
+    /// A content document's markup could not be read to the end, or had no
+    /// element in it at all (gap 31, milestone 8).
+    ///
+    /// The chapter is **kept** with whatever tree the reader got to, which is
+    /// ruling 2 rather than laziness: a book whose last chapter has one
+    /// unescaped `&` in its last paragraph should lose that paragraph and not
+    /// the chapter. The item is named because a book has many of them and
+    /// "some markup was truncated" is not something a host can act on.
+    Markup {
+        /// The container path of the content document.
+        item: String,
+        /// Which failure.
+        defect: crate::epub::xhtml::MarkupDefect,
+    },
+    /// A CSS property this build does not implement, and **how many elements
+    /// it reached** (gap 31, milestone 8).
+    ///
+    /// **This is the census, and it is the number this reader is judged on.**
+    /// Decision 5 makes a property a parser variant only when a consumer
+    /// exists; everything else is `Unsupported` by name, and this is where that
+    /// name reaches a caller. Counted by element rather than by declaration
+    /// because `float`, unimplemented, affecting 412 elements is a sentence a
+    /// host can show and four hundred identical warnings is not — and because a
+    /// rule that matched nothing is not a gap the book noticed.
+    UnimplementedProperty {
+        /// The property's name, as a specification spells it.
+        property: &'static str,
+        /// How many elements it reached.
+        elements: usize,
+    },
+    /// What `tinker-pdf-layout` could not honour, deduplicated with a count
+    /// (gap 31, milestone 8).
+    ///
+    /// Distinct from [`ArchiveWarning::UnimplementedProperty`] because the two
+    /// answer different questions: that one says a property was never
+    /// implemented, and this one says a property that *is* implemented met a
+    /// case this build does not lay out — a float, a line with nowhere to
+    /// break, content wider than the page.
+    Layout {
+        /// Which one.
+        warning: tinker_pdf_layout::Warning,
+        /// How many times it fired.
+        count: usize,
+    },
+    /// Characters that could not be given a code in any font this document
+    /// carries, and are therefore on no page (gap 31, milestone 8).
+    ///
+    /// A simple font has 256 codes and this build has no font program to
+    /// embed, so a book with more than 224 distinct characters outside
+    /// `WinAnsiEncoding` for one face loses the excess. **Reported rather than
+    /// dropped silently**, because text that is missing from a page and
+    /// missing from `Page::text()` is exactly what text conservation exists to
+    /// find, and a build that lost it without saying so would be a build whose
+    /// own harness had to catch it.
+    UnrepresentedCharacters {
+        /// How many characters.
+        characters: usize,
+    },
+    /// The book has a table of contents and this build could not write it as
+    /// an outline (gap 31, milestone 8).
+    ///
+    /// `DocumentBuilder::set_outline` refuses a tree **this repository's own
+    /// reader** could not read back — deeper than `MAX_NEST_DEPTH`, or a level
+    /// with more than `MAX_TREE_ENTRIES` siblings. A document written with an
+    /// outline it cannot read is worse than one written with none, and this is
+    /// the sentence that says which happened.
+    OutlineUnwritable,
 }
 
 /// Where one page came from.
