@@ -1168,11 +1168,11 @@ inputs could ask for, so it could **never fire**.
 | `MAX_SELECTOR_MATCHES` | **The work cap of the cascade.** Selector-against-element attempts across the whole book. **Amended, 20 August 2026, milestone 6: it counts *compound*-against-element tests, not selector-against-element attempts.** Matching `a b c d` walks the ancestor chain with backtracking, so one attempt is `O(depth^parts)` compound tests and a cap on the attempts bounds a number that is not the work — `5adf502`'s sentence one level further down than this table had it. `MAX_CSS_SELECTOR_PARTS` bounds one attempt's shape and this bounds its cost, and they are different claims | `MAX_CSS_RULES` × `MAX_DOM_NODES` is the product, and **neither factor bounds the other**. This is `5adf502`'s sentence in its purest form and it is the single most important constant in this plan |
 | `MAX_DOM_NODES` | Elements admitted from one content document | — (per-document). `MAX_XML_TOKENS` stands in front of it and is a million, so this must sit below that or it can never fire |
 | `MAX_BOX_TREE_NODES` | **A work cap.** Boxes across the book | Boxes are not elements: anonymous block generation, `::before`/`::after` and table-structure fixup (CSS 2.2 §17.2.1) each create boxes the document did not write |
-| `MAX_LAYOUT_WORK` | **The work cap of layout.** Box-layout operations across the book | A per-box cap is not a total once the file chooses the box count *and* the pass count: automatic table layout is two passes (§17.5.2.2), float placement re-flows a line, shrink-to-fit measures twice, and a nested table multiplies all three |
+| `MAX_LAYOUT_WORK` | **The work cap of layout.** Box-layout operations across the book. **Amended, 20 August 2026, milestone 7: it is not in this build and the absence is argued where it would be declared.** The sentence to the right is right about a build with a second pass, and milestone 7 has none: every unit of layout work is one box or one line box, boxes are bounded by `MAX_BOX_TREE_NODES` and line boxes by `MAX_LINE_BREAK_WORK`, because a line box needs a character and every character is charged before the breaker is entered. A cap here would sit above what its own inputs can ask for — gap 18a milestone 8's failure — or below the box cap, where it would be the box cap under another name. It was written, its firing test was attempted, and it could not be made to fire without lowering itself. **It arrives with the multi-pass layout of milestones 10 and 11 or not at all**, which is the sentence `MAX_EPUB_PAGES` carried at milestone 4 and `MAX_XPS_VISUAL_DEPTH` carries in `bounds_ledger.rs`. Three quadratics were removed rather than charged for in the same milestone | A per-box cap is not a total once the file chooses the box count *and* the pass count: automatic table layout is two passes (§17.5.2.2), float placement re-flows a line, shrink-to-fit measures twice, and a nested table multiplies all three |
 | `MAX_LINE_BREAK_WORK` | **A work cap.** Break opportunities evaluated across the book | The same shape one level down |
 | `MAX_EPUB_MANIFEST_ITEMS` | Manifest items admitted | Must sit **below** `MAX_ZIP_ENTRIES`, or the archive refuses first and this can never fire |
 | `MAX_EPUB_SPINE_ITEMS` | Spine itemrefs | Must sit below `MAX_EPUB_MANIFEST_ITEMS` for the same reason |
-| `MAX_EPUB_PAGES` | Pages fragmented out of the book | **Deliberately *not* in the relation above**, and this is the trap. Gap 30 found `MAX_XPS_PAGES` was not bounded by `MAX_XPS_PARTS` because four thousand `PageContent` elements may name one part. Here it is worse: **one** spine item of 128 MiB of text fragments into as many pages as its length divided by the page height, so the page count is bounded by *content length* and not by item count at all. **Amended, 19 August 2026, milestone 4: it arrives with milestone 7's fragmentation and not before.** Milestone 4 puts exactly one page on each `<itemref>`, so a cap above `MAX_EPUB_SPINE_ITEMS` could never fire and one below it would be the spine cap under another name — gap 18a milestone 8's failure reached from the direction that writes the constant first, and the argument `bounds_ledger.rs` already carries for `MAX_XPS_VISUAL_DEPTH`'s absence. The sentence to the left is right about the build that fragments and is a constant that cannot fire in the one that does not |
+| `MAX_EPUB_PAGES` | Pages fragmented out of the book | **Deliberately *not* in the relation above**, and this is the trap. Gap 30 found `MAX_XPS_PAGES` was not bounded by `MAX_XPS_PARTS` because four thousand `PageContent` elements may name one part. Here it is worse: **one** spine item of 128 MiB of text fragments into as many pages as its length divided by the page height, so the page count is bounded by *content length* and not by item count at all. **Amended, 19 August 2026, milestone 4: it arrives with milestone 7's fragmentation and not before.** Milestone 4 puts exactly one page on each `<itemref>`, so a cap above `MAX_EPUB_SPINE_ITEMS` could never fire and one below it would be the spine cap under another name — gap 18a milestone 8's failure reached from the direction that writes the constant first, and the argument `bounds_ledger.rs` already carries for `MAX_XPS_VISUAL_DEPTH`'s absence. The sentence to the left is right about the build that fragments and is a constant that cannot fire in the one that does not. **Amended again, 20 August 2026, milestone 7: it has arrived, as `MAX_LAYOUT_PAGES` in `tinker-pdf-layout`.** It is declared there rather than in `epub.rs` for `MAX_DOM_NODES`'s reason one milestone earlier — a cap belongs where the thing it bounds is decided, and pages are decided by `layout::fragment` — and the ledger row carries the argument |
 | `MAX_EPUB_FONTS` | Faces admitted from `@font-face` and the manifest | Each costs an embedded font program and a subset |
 | `MAX_SYNTHESISED_PDF` | Bytes handed to `CosDocument::open` | Already exists in `cbz.rs`; reused rather than duplicated, and the ledger says so |
 
@@ -1450,7 +1450,7 @@ one per milestone, each independently green under the full gate.
 | 4 | **The package document, the spine, and an honest blank book** | `package` (§5.4), `metadata` with the three required Dublin Core elements (§5.5.3.1) including the `unique-identifier` milestone 9's obfuscation key needs, `manifest`/`item` with `properties` (§5.6.2), `spine`/`itemref` (§5.7), manifest fallbacks (§3.5.1) and core media types (§3.2); EPUB 2.0's OPF read as a compatibility surface and any other version refused by name; **`OpenOptions` and `Document::open_with` land here**, with `open(bytes)`'s signature unchanged and asserted so; `page_count()` equals the spine item count and every page is the box `OpenOptions` states, at 432 × 648 by default; **every page renders the neutral placeholder with a named warning rather than white**, because an empty page reported as success is what gap 17 spent itself on; a spine item that does not resolve still produces a page and keeps its position; **`with_fonts` on a reflowable document warns by name**; `Document::cos()` returns the synthesised document and **saving it produces a file qpdf reads clean**; **the text-conservation harness exists and is asserted here, against placeholders**, so every later milestone inherits it rather than acquiring it | M |
 | 5 | **The writer's missing half, before anything needs it** | Link annotations: `/Annots` with `/Subtype /Link`, `/Rect`, `/Border [0 0 0]` and both an explicit `/Dest` and a `/A` URI action, since an EPUB cross-reference is internal and an `href` may be external; a document outline: `/Outlines` with `/First`, `/Last`, `/Count` and the negative-count closed form, nested to a stated depth; both round-tripped through **this repository's own reader** — write it, open it, read it back through the facade's existing outline and annotation surfaces — which is the comparison [21](21-metadata-absent-vs-empty.md) and the annotation work make possible and no other milestone here can; qpdf clean on a document using both; `DocumentBuilder`'s existing validation posture extended rather than bypassed; **nothing in this milestone mentions EPUB**, which is the test of whether it belongs in the writer | M |
 | 6 | **`tinker-pdf-css`, the ninth leaf** | `css-syntax-3`'s tokenizer and the qualified-rule/at-rule grammar, **with its normative error recovery** — a malformed declaration discarded to the next semicolon, a malformed rule to the next block, and the count of each reported rather than swallowed; `selectors-4`'s type, universal, class, id, attribute (§6.1–§6.4) and the four combinators (§14), with **specificity per §15 asserted against a table of at least twenty selectors including the cases that trip a naive A/B/C** — `:not()`'s argument, `:is()`'s most-specific-argument rule, and a pseudo-element's C contribution; matching against a caller-supplied `Element` trait, so ruling 8 holds and no XHTML vocabulary is in the public API; the **whole** of `css-cascade-5` §6.1's sorting order including the `!important` origin reversal, with a fixture per criterion; inheritance as a single top-down pass over computed values (§7.2), with a test that a lazy resolution and this one agree — and a note saying the lazy one is quadratic; `@import` with the depth cap and a **cycle refused rather than recursed**; `@media` evaluated against a plain `MediaContext`, **as `screen`**, with the decision's argument in the module header; **decision 5's `Known`/`Unsupported`/`Unknown` split, and a compile-time proof that a property with no consumer does not build** — injected as a defect and asserted to fail the build, not a test; `@layer` refused by name; every bound firing by its own refusal; `xtask -- dag` green with the fifth amendment's argument; the **twenty-second** fuzz target — **amended, 20 August 2026, milestone 6: the twenty-third**, because gap 24's milestone 5 split `crypt_ciphers` out of `crypt` after this plan was written and took the number; the count in `fuzz/README.md` and in `ci.yml`'s per-PR job goes twenty-two to twenty-three, not twenty-one to twenty-two; `deny.toml` gains the CSS and HTML names | L |
-| 7 | **`tinker-pdf-layout`, the tenth leaf** | The box model (`css-box-3`) with `box-sizing`, and **margin collapsing**, which is the rule a first implementation omits and whose omission moves every block on every page; block and inline formatting contexts (CSS 2.2 §9.4.1, §9.4.2) and line boxes; `css-text-3` §4.1.1 and §4.1.2's white-space processing in both phases, asserted against a fixture whose source is indented the way milestone 1's real books are; **UAX #14 line breaking over the vendored UCD tables**, with `css-text-3` §5.5's required class behaviour for `WJ`, `ZW`, `GL` and `ZWJ`, §5.1's four strictness levels and §5.4's `overflow-wrap` — and a **CJK fixture**, because a space-only breaker passes every English test ever written; §6's alignment and justification; fragmentation into pages, honouring CSS 2.2 §13.3.1's properties, §13.3.2's `orphans` and `widows` and **§13.3.3's rules A to D for where a break is permitted at all**, with `page-break-before` and `page-break-after` asserted because they appear in all six measured books; the `Metrics` trait, so nothing here depends on `font`; whether `math` is needed answered in the `As built` and the DAG edge dropped if it is not; the **twenty-third** fuzz target, over a structured generator; `deny.toml` gains the layout and line-breaking names | L |
+| 7 | **`tinker-pdf-layout`, the tenth leaf** | The box model (`css-box-3`) with `box-sizing`, and **margin collapsing**, which is the rule a first implementation omits and whose omission moves every block on every page; block and inline formatting contexts (CSS 2.2 §9.4.1, §9.4.2) and line boxes; `css-text-3` §4.1.1 and §4.1.2's white-space processing in both phases, asserted against a fixture whose source is indented the way milestone 1's real books are; **UAX #14 line breaking over the vendored UCD tables**, with `css-text-3` §5.5's required class behaviour for `WJ`, `ZW`, `GL` and `ZWJ`, §5.1's four strictness levels and §5.4's `overflow-wrap` — and a **CJK fixture**, because a space-only breaker passes every English test ever written; §6's alignment and justification; fragmentation into pages, honouring CSS 2.2 §13.3.1's properties, §13.3.2's `orphans` and `widows` and **§13.3.3's rules A to D for where a break is permitted at all**, with `page-break-before` and `page-break-after` asserted because they appear in all six measured books; the `Metrics` trait, so nothing here depends on `font`; whether `math` is needed answered in the `As built` and the DAG edge dropped if it is not — **answered, 20 August 2026, milestone 7: it is not needed and the edge is dropped**, and an edge to `tinker-pdf-css` is taken in its place, both argued as the sixth DAG amendment; the **twenty-third** fuzz target — **amended, 20 August 2026, milestone 7: the twenty-fourth**, because milestone 6's own amendment took the twenty-third for `css` — over a structured generator; `deny.toml` gains the layout and line-breaking names | L |
 | 8 | **The first book that reads** | XHTML through `tinker-pdf-xml`'s new mode into an element tree; **a committed UA stylesheet**, parsed by milestone 6's parser and cascaded like an author's, with a test that removing it produces an undifferentiated book — so its absence is visible rather than merely worse; the cascade over the tree, layout, fragmentation and synthesis into a `CosDocument`; **every book in the committed corpus opens, paginates and passes text conservation**, with the conservation figure recorded per book; `Page::text()` returns the words in reading order; cross-references between spine items reach the page as milestone 5's link annotations, and the navigation document as the outline; qpdf clean; **the browser oracle stands up here** — ruling 9 amended in writing with its argument, the continuous `y`-offset comparison built with a UA sheet injected on both sides, the paginated `--print-to-pdf` comparison beside it, and the job red when the browser is missing; the `Unsupported` census printed per book, which is the number this milestone is actually judged on | L |
 | 9 | **Fonts** | `@font-face` (`css-fonts-4` §4.1) and the `src` descriptor (§4.3) with `format()` and the fallback list; the font matching algorithm (§5) including **per-character fallback** (§2.1, §5.3), with a fixture whose one run needs three faces and becomes three PDF text objects; **SHA-1 in `tinker-pdf-crypto`**, pinned against published vectors, with a second implementation written a different way asserted to agree over every length up to two blocks — gap 29's CRC-32 discipline, because a hash written wrong is self-consistently wrong; **both de-obfuscations, asserted on the de-obfuscated bytes and not on a page that drew** — IDPF's SHA-1 key over 1 040 bytes and Adobe's 16-byte UUID key over 1 024, each from a fixture built for it, with the whitespace-stripping of §4.4.3 proved by an identifier that has some; WOFF and WOFF2 refused **by name**; a character no available face covers producing a named warning rather than a blank; `FontProvider`'s per-family fallback question answered — the trait extended, or the reason it is not recorded; the generic families' standard-14 metrics asserted to make pagination independent of whether a provider is attached | M |
 | 10 | **Floats and `clear`** | CSS 2.2 §9.5.1's **nine numbered constraints, each with its own fixture**, because they are a set and an implementation that satisfies eight produces a page that looks right on the ninth's absence; §9.5.2's `clear` and clearance; float interaction with line boxes — a line box shortened beside a float and restored below it; a float taller than its containing block; two floats that do not fit side by side; **a float that would fall off the page bottom**, which is the fragmentation interaction and the one that loses text; text conservation asserted across every float fixture, since a lost float is a lost paragraph; the browser comparison run over a float-heavy content document and its `y`-offset agreement recorded as a number | M |
@@ -2949,3 +2949,496 @@ defence against entity expansion.
   colour that is slightly wrong and looks entirely plausible, and a table of a
   hundred and forty-eight hand-entered values is a hundred and forty-eight
   chances at exactly that.
+
+## Progress — 20 August 2026, milestone 7
+
+**`tinker-pdf-layout` is the tenth leaf, and it answers UAX #14's own
+conformance file 19 338 times out of 19 338.** 2 530 tests, 7 ignored, up from
+2 458; seventy-two of them are new — sixty-six the crate's own unit tests, two
+the conformance run, three the compile-time proof and one a doctest — and four
+existing tests were changed because the injection matrix showed they could not
+fail.
+
+The crate takes a tree of plain structs and a `Metrics` trait and returns pages
+of positioned fragments. It knows nothing of PDF, of EPUB, of XHTML or of a
+font file. What it does know is `tinker-pdf-css`, and that edge is the first of
+this milestone's two answers to questions the plan left open.
+
+### The `math` question, answered: no, and the edge is dropped
+
+Gap 31's design section predicts `("tinker-pdf-layout", &["tinker-pdf-math"])`
+and then says, in as many words, that *"whether layout needs one at all is an
+open question milestone 7 answers: if it does not, the edge is dropped and the
+crate joins the empty-list group"*. **It does not.**
+
+The interrogation is written out in `xtask/src/main.rs` as the sixth amendment,
+because an answer is worth what the search behind it was. `tinker-pdf-math`
+exists for ruling 4: a pixel-path crate may not call a platform transcendental,
+since glibc, musl, the MSVC runtime, Apple's libm and the wasm shim each round
+`sin`, `exp` and `ln` their own way. Every arithmetic operation in this crate
+was listed against that rule — the box model is add, subtract and one
+multiply-divide for a percentage; margin collapsing is `max` and `min`;
+half-leading is `(line_height - (ascent + descent)) / 2`; justification is
+`slack / spaces`; fragmentation compares a running `y` against a page height.
+Not one is transcendental and not one is even a `sqrt`, which would have been
+fine anyway since IEEE 754 requires that one to be correctly rounded. Taking
+the edge would have been the failure this file's own history records, from the
+other direction: a dependency in a manifest that nothing needs.
+
+**What it takes instead is `tinker-pdf-css`, which the plan did not predict**,
+and the argument is the plan's own ordering argument read to its conclusion.
+Milestone 6 comes before milestone 7 because *"a layout engine built first has
+to invent its own input representation, and that representation then becomes
+what the cascade must produce — which is how a cascade acquires shortcuts"*. A
+layout crate with no edge to `css` would have to declare a second style type and
+the facade would convert between them, which is precisely that second
+representation; and decision 5's compile-time device would stop at the cascade,
+because the thing layout matched on would no longer be the parser's own output.
+
+### Decision 5, one milestone further than the crate that invented it
+
+Milestone 6's `Still owed` says *"nothing consumes any of this"*. That is the
+hole this closes, and it is the same failure one level up: a property can be
+parsed, cascaded, written into `ComputedStyle` — and read by nobody. The book
+still renders. It renders slightly differently.
+
+`style::consume` destructures `ComputedStyle` with **no `..`**, so a field added
+to that struct without a consumer here is
+
+```text
+error[E0027]: pattern does not mention field `hyphens`
+   --> ...\src\style.rs:130:9
+```
+
+`tests/uncascaded_field_does_not_build.rs` proves it, and it is a real build of
+the real files: `tinker-pdf-css` compiles with a bare `rustc` — milestone 6's
+finding, and still load-bearing — so the harness compiles the css crate to
+metadata, adds `pub hyphens: bool` to `ComputedStyle` and its initial value,
+then compiles the **real** `style.rs`, `metrics.rs`, `uax14.rs` and `unicode.rs`
+against it with `--extern`. Three of the four builds are controls, for
+milestone 6's reasons: the pristine pair must compile or every injection would
+report "the build failed" and the file would pass while proving nothing; the
+same field *with* a binding must compile or the failure would be true of any
+edit; and the error must be `E0027` and must name the field.
+
+The injected property is `hyphens` rather than an invented one, for milestone
+6's reason and with a correction it forced. Milestone 6 injected `widows`
+because it was *"the exact edit somebody will make when that milestone
+arrives"*. That milestone arrived: `widows` is implemented here, so the
+injection became a duplicate variant that fails the build for the wrong reason
+and would have broken the control too. **That the constant had to move is the
+evidence it was the right kind of constant**, and it now names
+`border-collapse`, which is milestone 11's.
+
+**Six properties came out of `UNSUPPORTED_PROPERTIES` and into the enum**, each
+with a layout consumer: `orphans`, `widows`, `page-break-inside`,
+`overflow-wrap`, `line-break` and `word-break`. The committed corpus's
+`Unsupported` set falls from twenty names to sixteen and the longhands read rise
+from 772 to **788**.
+
+One of the six took a decision rather than a reading. **CSS 2.2 §13.3.1's own
+table says `page-break-inside` is inherited, and this build makes it not.**
+`css-break-3` §4.1 defines `break-inside` as non-inherited and makes
+`page-break-inside` a legacy alias of it; gap 31's plan says it *"treats the
+`break-*` longhands as the modern spelling of the same thing"*; and the
+alternative is that one `page-break-inside: avoid` written on a figure cascades
+to every descendant of wherever it lands, forbidding every page break in the
+book — a book that is one enormous page rather than a visible failure. The
+argument is written where the `match` arm is, and the injection matrix attacks
+it from both sides.
+
+### UAX #14, against Unicode's own file
+
+The line breaker is the specification's rules by number over the vendored UCD,
+and it is checked against `LineBreakTest.txt`: **19 338 cases, 19 338 passing**,
+driven through `opportunities` — the same entry point a book goes through — at
+`Tailoring::UAX14`, which is `line-break: strict` and not a private mode. A
+conformance run against a private code path proves that the private code path is
+conformant.
+
+That file is why the vendored tree has five files rather than two. The plan
+names `LineBreak.txt` and `EastAsianWidth.txt`; the other three are what turned
+out to be needed. `DerivedGeneralCategory.txt` supplies `Mn`/`Mc` for LB1's `SA`
+resolution, `Cn` for LB30b's unassigned pictographs and `Pi`/`Pf` for LB15a and
+LB15b — a build without the last pair treats “ and ” alike and breaks after an
+opening quotation mark. `emoji-data.txt` is `Extended_Pictographic`. And
+`LineBreakTest.txt` is the oracle, vendored rather than fetched because gap 20's
+finding holds a third time: a skipped oracle exits 0 and reads exactly like a
+pass.
+
+**It is not a pair table**, and the header of `uax14.rs` says why: eleven of the
+rules are not about a pair at all. LB8, LB14, LB15a, LB16 and LB17 look back
+across a run of spaces; LB25 looks back across `SY`/`IS` and forward past an
+`OP`; LB15b, LB15c and LB19a look forward one unit; LB28a looks two units each
+way; and LB30a counts the **parity** of a run of regional indicators. A table
+indexed by the two classes either side gets about two thirds of it and fails the
+rest quietly.
+
+Two things had to be corrected before the file agreed, and both are worth
+keeping.
+
+**`LineBreak.txt`'s header describes what the file has already done, not what a
+reader must do.** It lists four ranges whose unassigned code points default to
+`ID` or `PR`, and applying them is the careful-looking thing. It is wrong: the
+file already carries those defaults as explicit rows — `1F02C..1F02F ; ID # Cn`
+is a reserved range written out — so a second pass gives U+1F8FF, unassigned and
+inside the header's `1F000..1FAFF`, the class `ID` where the conformance file
+says `XX`. Ten cases failed on exactly that and nothing else in this repository
+would ever have noticed.
+
+**LB20a's right-hand side is `AL | HL` and not `AL`.** `05BE 05D0` — a Hebrew
+maqaf and an alef — is `×` by rule 20.1, and a reading that took the rule text's
+`AL` as the Line_Break class alone breaks between them.
+
+The generated table names `Class::AL` rather than the number `2`, and that costs
+nothing and buys the thing an index cannot: **a Line_Break class this crate has
+never heard of fails to build.** Unicode 16.0 added `HH` and 15.1 added `AK`,
+`AP`, `AS`, `VF` and `VI`; a build that mapped an unknown name onto a default
+would have laid out Brahmi-family scripts and unambiguous hyphens as though the
+additions had never happened.
+
+### The CJK fixture, and what a space-scanner answers
+
+東京都 is three ideographs and three break opportunities. A breaker that splits
+at U+0020 finds **one**, at the end of the string, and the test writes both
+numbers down rather than asserting only the first — because the sentence gap
+31's risk table is about is *"passes every English fixture ever written"*, and
+the way to test that claim is to compute what the heuristic would have said.
+
+Beside it: 「東京、京都」 asserts that no line ends after an opening bracket
+(LB14), before an ideographic comma (LB13) or before a closing bracket; あぁ
+asserts that `strict` and every other value disagree about a small kana, which
+is the whole of what `line-break: strict` means (§6.1 resolves `CJ` to `NS` for
+that style and to `ID` for the others); 日々 asserts that `loose` adds the
+iteration mark and `normal` does not; and `word-break: keep-all` holds 東京都
+together while leaving the space in `ab cd` alone, because an explicit
+opportunity is not an implicit one.
+
+**§5.5's four required classes are asserted under every combination of
+`line-break` and `word-break`**, four classes at a time — `WJ`, `ZW`, `GL` and
+`ZWJ` — because a build that honoured three of them passes any test that looks
+at one. `line-break: anywhere` is tested separately, since it is the only value
+css-text-3 permits to disregard them, and the difference between it and
+`word-break: break-all` is exactly that: `break-all` opens a Latin word and
+still may not open an emoji ZWJ sequence.
+
+That distinction did not hold when it was first written, and the injection
+matrix is not what found it — the test was. The tailorings were applied on top
+of whatever the rules decided, so `break-all` opened every boundary before a
+letter including the one after a word joiner. `decide` now returns a `Verdict`
+carrying whether §5.5 makes the answer untouchable, covering LB4 to LB12a, and
+a tailoring may not change one.
+
+### Margin collapsing: three cases, one accumulator, three tests
+
+Row 7 calls it *"the rule a first implementation omits and whose omission moves
+every block on every page"*, and there is a sharper version: it is the rule
+whose **partial** implementation is most plausible. §8.3.1's three cases are
+adjacent siblings, a parent and its first child, and a box whose own margins
+collapse *through* it.
+
+All three fall out of one object. `Pending` holds the margins adjoining at the
+current position and is not committed until something that is not a margin
+arrives — a border, a padding, a line box. A parent with none of those between
+itself and its first child never commits, so the two meet in the accumulator; a
+box with nothing at all inside it never commits either, so its own two meet
+there. Writing them as three special cases is how an implementation ends up
+with two of them.
+
+Each is asserted on its own, and so are the two clauses that decide *when*
+rather than *that*: a border between a parent and its first child stops case 2,
+and a negative margin is **added** to the largest positive one rather than
+losing a `max` to it — §8.3.1 says *"the maximum of the positive adjoining
+margins, plus the minimum of the negative ones"*, and a build that took `max()`
+over signed values gets every ordinary book right and every drop cap wrong.
+
+### §13.3.3's rules A to D, and the escape
+
+Where a break is *permitted* is a different question from where one is
+*preferred*, and an implementation written from the property list alone answers
+only the second. §13.3.3 gives two kinds of position and four rules over them,
+and all four are implemented and attacked separately.
+
+**Rule B is about a *common* ancestor and not about either side.** That is a
+real difference and not a nicety: the margin between an ordinary paragraph and
+the first child of a `page-break-inside: avoid` figure has no common ancestor
+that avoids anything, so a break there is legal — and a build that recorded
+"either side is inside something that avoids" would refuse the one margin that
+is the natural place for a break and push the whole figure to the next page for
+no reason anybody could see. `Pending` therefore carries the **intersection** of
+the open avoiding ancestors, narrowed once per contributing box, and the test
+asserts both directions.
+
+**`orphans` and `widows` are two constraints that interact**, so one fixture
+answers three ways: the same three-line paragraph breaks after two lines at
+(1, 1), after one line at (1, 2), and cannot be broken at all at (2, 2) — where
+§13.3.3's own escape has to drop rule C and says so through a warning.
+
+**The escape is the part an implementation omits**, and it is three tiers rather
+than two: rules B and D are dropped first, then A and C. Without it, a book with
+`page-break-inside: avoid` on `body` — a thing real stylesheets do — is one page
+as tall as the book and every page after the first is blank.
+
+### What the design got wrong, and how I found out
+
+**LB3 makes the end of the text a mandatory break, and the line filler asked
+"is this mandatory?" before "does this fit?".** So the first candidate it
+examined was the end of the paragraph, and every paragraph was one line. Eight
+tests failed at once and every one of them was about something else — alignment,
+backgrounds, orphans — which is what a defect in the innermost loop looks like.
+The order of those two tests is now the whole of that function and its doc
+comment says so. It is also the reason a fixture shorter than a line proves
+nothing about line breaking.
+
+**`MAX_LAYOUT_WORK` cannot fire in this build, and the plan's row is amended in
+place.** It was written, and its firing test was attempted, and there was no
+input that reached it: with no float re-flow, no two-pass table layout and no
+shrink-to-fit, every unit of layout work is one box or one line box — and boxes
+are bounded by `MAX_BOX_TREE_NODES`, line boxes by `MAX_LINE_BREAK_WORK`,
+because a line box needs a character and every character is charged before the
+breaker is entered. A cap there would sit above what its own inputs can ask for,
+which is gap 18a milestone 8's failure exactly, or below the box cap, where it
+would be the box cap under another name. **The bound arrives with the multi-pass
+layout of milestones 10 and 11 or not at all.**
+
+Earning that absence cost three fixes rather than none, and they are the
+interesting half. *Depth is not work once the recursion branches* has a
+loop-shaped twin, and three places were quadratic: the line filler restarted its
+scan of the break opportunities at zero for every line, which for a page one
+point wide is `O(characters²)`; `piece_at` scanned the span list once per
+boundary, so a paragraph of a thousand `<em>`s cost `O(pieces × characters)`;
+and the list-item ordinal counted from the first child for every item. **A work
+cap would have charged for all three instead of removing them**, which is the
+argument for looking before adding one.
+
+**`MAX_EPUB_PAGES` has arrived, as `MAX_LAYOUT_PAGES`.** Milestone 4 deferred it
+with the sentence *"it arrives with milestone 7's fragmentation and not
+before"*; it is declared in the crate that fragments rather than in `epub.rs`,
+for `MAX_DOM_NODES`'s reason one milestone earlier.
+
+**`MAX_BOX_DEPTH` exists where the plan says a depth cap would not.** That
+plan's *"four deliberately absent"* list argues that `MAX_XML_DEPTH` stands in
+front of every content document, so a second constant could never fire. That is
+right about the facade and wrong about this crate: **its input is a caller-built
+tree rather than a parsed document**, and the twenty-fourth fuzz target builds
+one from a structured generator with no parser anywhere in front of it. It is
+the only row in `bounds_ledger.rs` whose reachable ceiling is unbounded.
+
+**`tab-size` is not a constant here, and that is this crate's own rule applied
+to itself.** A `TAB_SIZE` with no consumer would read as though preserved tabs
+advanced to a tab stop. They do not; under `pre` a tab is measured as one
+character of the element's font, and that is recorded in `Still owed` rather
+than approximated by a number nobody reads.
+
+### The injection matrix
+
+**Fifty-seven defects. Forty-six caught on the first pass, seven real gaps
+closed, two injections repaired, and the whole matrix re-run against the tree as
+committed: fifty-five of fifty-seven, with two survivors that are equivalent
+mutants and are argued below.**
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | `box-sizing: border-box` is `content-box` | `box_sizing_is_the_difference_between_a_hundred_and_a_hundred_and_thirty` |
+| 2 | An `auto` width forgets its own margins | `an_auto_width_block_fills_what_is_left_of_its_containing_block` |
+| 3 | Two `auto` margins do not centre | `two_auto_margins_centre_a_block` |
+| 4 | A percentage margin is of the height | `a_percentage_margin_is_of_the_width_even_at_the_top` |
+| 5 | `border-width` applies with `border-style: none` | `a_border_width_with_no_border_style_moves_nothing` |
+| 6 | Adjoining margins **add** rather than collapsing | all three collapsing tests at once |
+| 7 | A parent commits its margin before its first child | `margins_collapse_between_a_parent_and_its_first_child`, and two more |
+| 8 | An empty box does not collapse through itself | `an_empty_boxs_margins_collapse_through_it` |
+| 9 | A border does not stop the parent collapse | `a_border_stops_a_parent_collapsing_with_its_first_child` |
+| 10 | A collapsed margin is `max()` over the signed values | `a_negative_margin_is_added_rather_than_beaten` |
+| 11 | No anonymous block for mixed children (§9.2.1.1) | `a_background_covers_the_lines_it_holds`, and two more |
+| 12 | A line box has no strut (§10.8.1) | `a_line_height_number_and_a_length_are_different_things`, and two more |
+| 13 | Half-leading is full leading | `a_background_covers_the_lines_it_holds`, and two more |
+| 14 | `visibility: hidden` is not painted **and** not laid out | `hidden_is_laid_out_and_none_is_not` |
+| 15 | `display: none` is laid out | `display_none_removes_exactly_its_own_text` |
+| 16 | Phase I does not collapse a run of spaces | `phase_one_collapses_an_indented_source`, and two more |
+| 17 | Phase I is per element rather than per formatting context | **survived** — closed, see below |
+| 18 | A segment break is removed rather than becoming a space | `phase_one_collapses_an_indented_source` |
+| 19 | `pre` collapses like `normal` | `pre_and_pre_line_differ_about_the_spaces_and_agree_about_the_breaks` |
+| 20 | Phase II does not trim a line's ends | `phase_two_trims_the_space_a_line_broke_at`, and two more |
+| 21 | `nowrap` wraps | `nowrap_collapses_and_does_not_wrap` |
+| 22 | The end of the text is tested before the fit | **survived** — equivalent, see below |
+| 23 | LB1 does not resolve `CJ` by the tailoring | `strict_and_normal_disagree_about_a_small_kana` |
+| 24 | LB9 does not attach a combining mark | the conformance file, and two more |
+| 25 | LB13 lets a line end before closing punctuation | the conformance file, `japanese_punctuation_does_not_start_a_line` |
+| 26 | LB14 does not look across a run of spaces | the conformance file |
+| 27 | LB20a glues a hyphen anywhere | the conformance file |
+| 28 | LB30 ignores East Asian width | the conformance file, `east_asian_width_decides_whether_a_bracket_glues` |
+| 29 | LB30a is a pair rather than a parity | the conformance file |
+| 30 | A tailoring may override a §5.5 required class | `the_four_required_classes_hold_under_every_tailoring`, `break_all_breaks_inside_a_latin_word` |
+| 31 | `LineBreak.txt`'s block defaults are applied twice | the conformance file |
+| 32 | `word-break: keep-all` does not hold a run together | `keep_all_holds_a_cjk_run_together` |
+| 33 | `line-break: loose` is `normal` | `loose_breaks_before_an_iteration_mark_and_normal_does_not` |
+| 34 | `overflow-wrap` never breaks a word | `overflow_wrap_decides_what_happens_to_a_word_longer_than_the_line` |
+| 35 | Justification stretches the last line too | **survived** — closed, see below |
+| 36 | `text-indent` applies to every line | **survived** — closed, see below |
+| 37 | `text-align: center` is `right` | `the_alignments_put_a_line_where_they_say` |
+| 38 | Rule A is not checked | `rule_a_moves_the_break_up_a_block` |
+| 39 | Rule A lets an `avoid` beat a forced break | **survived** — equivalent, see below |
+| 40 | Rule B is either side rather than a common ancestor | `rule_b_refuses_a_margin_inside_an_avoiding_ancestor` |
+| 41 | Rule C checks `orphans` and not `widows` | `orphans_and_widows_are_two_constraints_over_one_paragraph`, and one more |
+| 42 | Rule C checks `widows` and not `orphans` | `orphans_and_widows_are_two_constraints_over_one_paragraph` |
+| 43 | Rule D is not checked | `rule_d_refuses_a_break_between_the_lines_of_an_avoiding_block` |
+| 44 | The rules are never dropped | **survived** — closed, see below |
+| 45 | A forced break is ignored | `a_forced_break_starts_a_page_with_room_to_spare`, and two more |
+| 46 | The margin a page breaks in survives the break | **survived** — closed, see below |
+| 47 | A line taller than the page is dropped | `a_line_taller_than_the_page_is_kept_and_reported` |
+| 48 | The alphabetic counter is ordinary base 26 | `the_marker_counters_are_computed_rather_than_tabled` |
+| 49 | A generated marker joins the conserved stream | `a_marker_is_on_the_page_and_out_of_the_conserved_stream` |
+| 50 | The depth cap is never checked in the block walk | **survived** — closed, see below |
+| 51 | The box total is never charged | `a_tree_past_the_box_cap_is_refused_by_name` |
+| 52 | The break total is refunded per context | **survived** — closed, see below |
+| 53 | The page cap is off by one | `a_book_past_the_page_cap_is_refused_by_name` |
+| 54 | A page with no area is paginated | `a_page_with_no_room_is_refused_by_name` |
+| 55 | `ComputedStyle` is read with a `..` | **the build** — all three compile-time proofs |
+| 56 | `orphans` and `widows` do not inherit | **the build** |
+| 57 | `page-break-inside` inherits | **the build** |
+
+Seven of the eleven first-pass survivors were real gaps and every one has the
+same shape: **a fixture that gives the right answer for the wrong reason.**
+
+- **17** — `<em>a </em><em> b</em>` cannot tell a shared collapser from a
+  per-element one, because the first run *ends* with a space and a fresh
+  collapser deletes the second run's leading space as a *leading* space. The
+  fixture that separates them is `<em>a</em><em> b</em>`, where the shared one
+  keeps the space and the per-element one welds two words into `ab`.
+- **35** — the last line of `aa bb cc dd` is one word, so there is no gap to
+  stretch and a build that justified it answers identically. The fixture now
+  ends `dd ee`.
+- **36** — `text-indent` moves the first line's `x` *and* narrows its measure,
+  and the fixture only checked the `x`. `aa bb cc` at six characters a line sets
+  two lines correctly and three lines if the indent is subtracted from every
+  line.
+- **44** — with rules B and D standing, `choose` finds nothing and falls to its
+  last resort, which cuts at the overflowing item — usually the same place the
+  third tier would cut. The middle tier answers differently exactly when the
+  highest permitted position is **below** the overflow, which `widows: 2` on a
+  four-line paragraph produces.
+- **46** — every fragmentation fixture had zero-height margins, so a build that
+  carried the margin over to the next page put nothing there.
+- **50** — **the best of them, and this session's named failure mode.** The
+  depth cap is enforced twice, in the block walk and in the inline gather, and
+  the fixture was a chain of blocks ending in *text* — which the gather catches
+  one level deeper. Deleting the block walk's check changed no answer. There are
+  two tests now: a chain of blocks with no text anywhere, and a chain of inlines.
+- **52** — the firing test is one paragraph over the cap, so a build that
+  *assigned* the count instead of adding it answered identically. Three
+  paragraphs under the cap and over it together separate them, which is
+  `tinker-pdf-css`'s `the_token_total_is_spent_across_sheets_and_not_per_sheet`
+  one crate up.
+
+Two of the eleven were **bad injections** and are recorded as such rather than
+quietly fixed: number 6 bound a value and discarded it, and number 27 added a
+tautology to a condition that still stood. Both were rewritten into defects that
+change an answer, and both are caught.
+
+Two survive the re-run and both are equivalent mutants:
+
+- **22** — moving the mandatory test to *after* the fit test makes it
+  unreachable for the end of the text, because the end of the text is only
+  examined when everything before it fits, and returning it then is what the
+  loop does anyway. The `justify` flag is unaffected: it already tests
+  `end < content.len()`. Reachable only if a *hard* break could also be the end
+  of the text, which it cannot.
+- **39** — `allowed_by_a` loses its `forced ||`, which matters only where a
+  forced margin is a candidate in `choose`. It never is: `paginate` scans for
+  the first forced margin *before* it scans for an overflow, so a forced margin
+  at or before the overflow has already been taken. The clause is right as
+  written and is unreachable in this build; it becomes reachable the day a
+  forced break can be refused, which `page-break-before: left` will do when
+  spreads land.
+
+### Text conservation still holds, and this is the first build that could break it
+
+Milestone 4 built the harness against thirteen grey placeholders *"so that this
+milestone inherits it rather than acquires it"*. All thirteen of its tests pass
+unchanged, including `every_committed_book_conserves_the_figure_the_record_states` over the six committed books — the facade still paginates placeholders,
+so what that proves is that nothing in this milestone moved the harness.
+
+What is new is the same invariant one level down, where it can now fail.
+`Layout::text` returns every laid-out character in reading order,
+`BoxNode::source_text` returns the tree's own, and the crate asserts they agree
+across a forty-chapter flow at 120 × 60 points — nine pages of real
+fragmentation — and that `display: none` removes **exactly** its own subtree.
+The twenty-fourth fuzz target asserts it on every input, over trees nobody
+wrote, and it is the reason the target computes its own expected text rather
+than calling `source_text`: `display: none` is the one legitimate way to lose
+some, and modelling it in six lines beside the assertion is what keeps the
+assertion an equality rather than a containment.
+
+A marker is generated content and carries `generated: true` so that it reaches
+the page and stays out of the conserved stream. A build with no such flag either
+loses the invariant or loses the markers.
+
+### The fuzz target is the twenty-fourth, not the twenty-third
+
+Row 7 says twenty-third; milestone 6's own amendment took that number for `css`
+after gap 24 split `crypt_ciphers` out of `crypt`. The row is amended in place
+and `fuzz/README.md` and `ci.yml`'s per-PR job go twenty-three to twenty-four.
+
+It is **the only target here whose input is not bytes**, which is one of the two
+crates' reasons for being two. The bytes drive a structured generator: a tree of
+boxes, their styles, and their text out of a twenty-four character alphabet
+chosen for the line breaker's own rules — an ideograph, a small kana, a
+no-break space, a word joiner, a zero-width space, a joiner, an unambiguous
+hyphen, and both a narrow and a full-width bracket. A target that handed these
+bytes to a parser would spend its session being refused at the door.
+
+libFuzzer is not available on `x86_64-pc-windows-msvc`, so the body was lifted
+verbatim into a scratch crate and driven over all six committed seeds, every
+prefix of each, all 256 control bytes against each, and **200 000
+pseudo-random inputs**: 201 578 executions, no assertion failed. That is not a
+campaign — milestone 13's is — but every assertion in the target has executed.
+
+### `deny.toml`, and the licence that already passed
+
+Thirteen names land: four layout engines and nine line-breaking and
+Unicode-data crates, taking the file from eighty denied crates to ninety-three.
+None of the thirteen would have tripped the licence gate — `taffy` is MIT — which
+is the hole rule 1 exists to close, since a licence list has nothing to say
+about what a crate *does*.
+
+The **data** is a different question with a different answer, and the file says
+so: the UCD is vendored under THIRDPARTY.md and compiled by a build script, and
+a table of published facts is not an implementation. Taking a crate that carries
+the table *and* implements the algorithm would take the second along with the
+first. `Unicode-3.0` was already in the allowlist — checked rather than assumed
+before anything was fetched, and it is the single fact that made UAX #14
+buildable here rather than blocked.
+
+### Still owed, and what was narrowed
+
+- **Nothing consumes any of this yet**, which is milestone 8's. The element
+  tree, the UA stylesheet and the synthesis of a laid-out page into a
+  `CosDocument` are that milestone, and until then a book is still thirteen grey
+  placeholders. The `Metrics` a real book needs is milestone 9's.
+- **`display: inline-block` is laid out as a block-level box and warns by
+  name**, and this is a narrowing said out loud rather than a criterion quietly
+  met. Row 7 asks for §9.4.1 and §9.4.2 — block and inline formatting contexts
+  and line boxes — and an atomic inline is neither; doing it properly needs
+  shrink-to-fit, which needs min-content and max-content widths, which is the
+  machinery milestone 11's automatic table layout brings. The warning is the
+  honest half: the box is in the wrong place and something says so.
+- **No replaced content.** An `<img>` has no box here, so a book's figures are
+  milestone 8's or 9's. Row 7 does not name it and it is recorded rather than
+  discovered.
+- **`line-break: loose`'s fourth group is not implemented.** css-text-3 §5.1
+  names four sets of characters `loose` makes breakable; the hyphens and the
+  iteration marks are here, `CJ` resolving to `ID` covers the small kana, and
+  breaks before centred punctuation are **not** there. A list that is nearly
+  right is what device 2 exists to prevent, so the omission is a named constant
+  with the missing group written above it.
+- **`overflow-wrap: break-word` and `anywhere` behave alike here.** They differ
+  only in whether the opportunity counts toward a box's min-content size, and
+  this build computes no min-content sizes. Recorded where the enum is declared
+  rather than collapsed into one variant.
+- **A preserved tab is one character wide**, not a tab stop; see above.
+- **`font-variant: small-caps` and `text-decoration` reach the page and are not
+  measured.** Both are carried on the run for the painter; a small-caps run's
+  advance is the face's own, which is a question for milestone 9's metrics.
+- **The browser oracle is milestone 8's**, and it is the only device that can
+  catch a property implemented, honoured and *wrong* — which is the residue gap
+  31's honesty machinery names as its own limit.

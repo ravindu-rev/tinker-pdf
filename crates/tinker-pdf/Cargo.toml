@@ -59,3 +59,8 @@ tinker-pdf-xml = { workspace = true }
 # edge, which is why `tinker-pdf-css` is in the facade's row in `ALLOWED`
 # already, with the argument for the edge written out beside it.
 tinker-pdf-css = { workspace = true }
+# And milestone 7's four layout constants, for the same reason and under the
+# same rule: the facade does not lay anything out until milestone 8, and the
+# graph check counts a dev-dependency as an edge, so the sixth amendment in
+# `ALLOWED` carries the argument for this one too.
+tinker-pdf-layout = { workspace = true }

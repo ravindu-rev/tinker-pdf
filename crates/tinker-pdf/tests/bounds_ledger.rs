@@ -1,5 +1,53 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 20 August 2026, gap 31 milestone 7.* **Four more rows**, the whole
+//! of `tinker-pdf-layout`'s `limits.rs`, and the table goes from twenty-nine to
+//! thirty-three. Two of them are worth reading before the rest, and one of the
+//! plan's own rows is **not** here.
+//!
+//! `MAX_BOX_DEPTH` exists where gap 31's bounds section says a depth cap would
+//! not. That section's *"four deliberately absent"* list says there is nothing
+//! on DOM depth because `MAX_XML_DEPTH` is 256 and stands in front of every
+//! content document, so a second constant could never fire — and that is right
+//! about the facade and wrong about the crate that lays a tree out. **This
+//! crate's input is a caller-built tree rather than a parsed document.** The
+//! twenty-fourth fuzz target builds one from a structured generator with no
+//! parser anywhere in front of it, and layout recurses over it, so the ceiling
+//! in this row is the only unbounded one in the table.
+//!
+//! `MAX_LAYOUT_PAGES` **is** gap 31's `MAX_EPUB_PAGES`, under the name of the
+//! crate that fragments. Milestone 4 amended that row in place — *"it arrives
+//! with milestone 7's fragmentation and not before"* — and this is that
+//! milestone. It is declared in `tinker-pdf-layout` rather than in `epub.rs`
+//! for `MAX_DOM_NODES`'s reason one milestone earlier: a cap belongs where the
+//! thing it bounds is decided, and pages are decided by `layout::fragment`.
+//!
+//! **`MAX_LAYOUT_WORK` is in gap 31's bounds table and is not in this one**,
+//! and the argument is milestone 7's rather than an omission. In a build with
+//! no float re-flow, no two-pass table layout and no shrink-to-fit, every unit
+//! of layout work is one box or one line box; boxes are bounded by
+//! `MAX_BOX_TREE_NODES` and line boxes by `MAX_LINE_BREAK_WORK`, because a line
+//! box needs a character and every character is charged before the breaker is
+//! entered. A cap there would sit above what its own inputs can ask for — gap
+//! 18a milestone 8's failure — or below the box cap, where it would be the box
+//! cap wearing another name. It was written, its firing test was attempted, and
+//! it could not be made to fire without lowering itself. **The bound arrives
+//! with the multi-pass layout or not at all**, which is milestones 10 and 11,
+//! and it is the same sentence `MAX_XPS_VISUAL_DEPTH`'s absence carries below.
+//!
+//! Earning that absence cost three fixes rather than none, and they are the
+//! interesting half: *depth is not work once the recursion branches* has a
+//! loop-shaped twin, and three places in `layout::flow` were quadratic. The
+//! line filler restarted its scan of the break opportunities at zero for every
+//! line, which for a page one point wide is `O(characters^2)`; `piece_at`
+//! scanned the span list once per boundary; and the list-item ordinal counted
+//! from the first child for every item. A work cap would have **charged** for
+//! all three instead of removing them.
+//!
+//! Every one of the four spends **zero** against gap 29's comic and gap 30's
+//! fixed document, and that is a measured fact rather than an opt-out: neither
+//! format has a box tree.
+//!
 //! *Amended, 20 August 2026, gap 31 milestone 6.* **Eight more rows**, the whole
 //! of `tinker-pdf-css`'s `limits.rs`, and the table goes from twenty-one to
 //! twenty-nine. Two of them are worth reading before the rest.
@@ -185,6 +233,7 @@ use tinker_pdf::xps::{
 };
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::MAX_PNG_SAMPLES;
+use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
 
 /// The sources the ledgers live in, so a number here can be checked against
@@ -202,6 +251,8 @@ const EPUB_TESTS: &str = include_str!("epub_ocf.rs");
 const EPUB_UNIT_TESTS: &str = include_str!("../src/epub/tests.rs");
 const CSS_LIMITS: &str = include_str!("../../tinker-pdf-css/src/limits.rs");
 const CSS_BOUNDS_TESTS: &str = include_str!("../../tinker-pdf-css/src/tests/bounds.rs");
+const LAYOUT_LIMITS: &str = include_str!("../../tinker-pdf-layout/src/limits.rs");
+const LAYOUT_TESTS: &str = include_str!("../../tinker-pdf-layout/src/tests.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
@@ -827,14 +878,103 @@ fn ledger() -> Vec<Bound> {
                 CSS_BOUNDS_TESTS,
             ),
         },
+        // ---- gap 31, milestone 7 ---------------------------------------
+        //
+        // The tenth leaf's four. The first is the only row in this table whose
+        // ceiling is not a field width, a file size or a product but an
+        // **unbounded** input: a box tree is handed to this crate by a caller,
+        // and there is no parser in front of it to refuse one first.
+        Bound {
+            name: "MAX_BOX_DEPTH",
+            cap: layout_limits::MAX_BOX_DEPTH as u128,
+            published: "256",
+            fixtures: layout_limits::MAX_BOX_DEPTH as u128,
+            comic: 0,
+            document: 0,
+            // Nothing. `tinker-pdf-layout` takes a tree of plain structs from a
+            // caller, so the ceiling is whatever that caller builds — which for
+            // the twenty-fourth fuzz target is a structured generator with no
+            // file in front of it at all. A stack overflow is a crash rather
+            // than a refusal, so the number here is the recursion's, not a
+            // budget's.
+            reachable: u128::MAX,
+            reachable_because: "a caller-built tree has no parser in front of it",
+            declared_in: LAYOUT_LIMITS,
+            // **Two** tests fire this one and the ledger can name only one, so
+            // the pair is recorded here: a chain of blocks with no text reaches
+            // the block walk's check, and a chain of inlines reaches the
+            // gather's. They were one test until the injection matrix found
+            // that deleting the block walk's check changed no answer — the
+            // fixture ended in text, so the gather caught it and the block
+            // walk's check had never been the reason. A rule enforced twice
+            // hides the reachable half.
+            fires_in: (
+                "a_tree_of_blocks_past_the_depth_cap_is_refused_by_name",
+                LAYOUT_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_BOX_TREE_NODES",
+            cap: layout_limits::MAX_BOX_TREE_NODES as u128,
+            published: "262 144",
+            fixtures: layout_limits::MAX_BOX_TREE_NODES as u128,
+            comic: 0,
+            document: 0,
+            // Boxes are not elements, which is the whole reason this is not
+            // `MAX_DOM_NODES` under another name: anonymous block generation,
+            // `::before`/`::after` and table-structure fixup each make boxes
+            // the document did not write. The ceiling is every element of every
+            // spine item, at one box apiece before any of that.
+            reachable: css_limits::MAX_DOM_NODES as u128
+                * tinker_pdf::epub::MAX_EPUB_SPINE_ITEMS as u128,
+            reachable_because: "MAX_DOM_NODES elements in each of MAX_EPUB_SPINE_ITEMS documents",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: ("a_tree_past_the_box_cap_is_refused_by_name", LAYOUT_TESTS),
+        },
+        Bound {
+            name: "MAX_LINE_BREAK_WORK",
+            cap: layout_limits::MAX_LINE_BREAK_WORK as u128,
+            published: "4 000 000",
+            fixtures: layout_limits::MAX_LINE_BREAK_WORK as u128,
+            comic: 0,
+            document: 0,
+            // A character is a byte at least, and a book's characters are
+            // bounded only by what the archive will inflate.
+            reachable: zip_limits::MAX_ZIP_INFLATED as u128,
+            reachable_because: "one character per inflated byte of the whole container",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: (
+                "a_paragraph_past_the_line_break_budget_is_refused_by_name",
+                LAYOUT_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_LAYOUT_PAGES",
+            cap: layout_limits::MAX_LAYOUT_PAGES as u128,
+            published: "65 536",
+            fixtures: layout_limits::MAX_LAYOUT_PAGES as u128,
+            comic: 0,
+            document: 0,
+            // **Not** bounded by the spine item count, which is the trap gap
+            // 31's bounds table names: one spine item of 128 MiB fragments into
+            // as many pages as its length allows. A page needs one line box and
+            // a line box needs one character, so the ceiling is the break total
+            // — which is also the `const` relation the crate asserts at compile
+            // time.
+            reachable: layout_limits::MAX_LINE_BREAK_WORK as u128,
+            reachable_because: "one page per line box, and one line box per charged character",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: ("a_book_past_the_page_cap_is_refused_by_name", LAYOUT_TESTS),
+        },
     ]
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
 /// the plan's "per-item caps sit beside them" were built as named constants.
 /// Gap 30's milestone 2 adds four, its milestone 3 adds two and its milestone
-/// 6 adds three; gap 31's milestone 3 adds one and its milestone 4 adds three.
-/// All twenty-one are here, and a bound added without a row fails this.
+/// 6 adds three; gap 31's milestone 3 adds one, its milestone 4 adds three, its
+/// milestone 6 adds eight and its milestone 7 adds four. All thirty-three are
+/// here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -870,6 +1010,10 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_CSS_IMPORT_DEPTH",
             "MAX_DOM_NODES",
             "MAX_SELECTOR_MATCHES",
+            "MAX_BOX_DEPTH",
+            "MAX_BOX_TREE_NODES",
+            "MAX_LINE_BREAK_WORK",
+            "MAX_LAYOUT_PAGES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -975,7 +1119,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 29, "the ledger is twenty-nine rows");
+    assert_eq!(measured, 33, "the ledger is thirty-three rows");
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not

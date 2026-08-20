@@ -242,6 +242,72 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// and for the same reason the commentary above gives: a crate appearing in a
 /// manifest without its argument is the failure this file's own history
 /// records.
+///
+/// **`layout` is the sixth amendment, and it is the first whose argument had to
+/// answer a question the plan left open rather than defend an edge somebody
+/// wanted.** Gap 31's design section predicts
+/// `("tinker-pdf-layout", &["tinker-pdf-math"])` and then says, in as many
+/// words, that *"whether layout needs one at all is an open question milestone
+/// 7 answers: if it does not, the edge is dropped and the crate joins the
+/// empty-list group"*. **It does not, and the edge is dropped.**
+///
+/// The interrogation, because the answer is only worth as much as the search
+/// that produced it. `tinker-pdf-math` exists for ruling 4's reason: a
+/// pixel-path crate may not call a platform transcendental, because glibc,
+/// musl, the MSVC runtime, Apple's libm and the wasm shim each round `sin`,
+/// `exp` and `ln` their own way and a page would then differ by target. Every
+/// arithmetic operation in `tinker-pdf-layout` was listed and checked against
+/// that rule:
+///
+/// - **the box model** is addition and subtraction of used widths, and a
+///   percentage is one multiply and one divide (§8.3, §10.2);
+/// - **margin collapsing** is `max` and `min` over `f64`, which IEEE 754
+///   specifies exactly;
+/// - **line-height half-leading** is `(line_height - (ascent + descent)) / 2`;
+/// - **justification** distributes slack as `slack / spaces`, one divide;
+/// - **fragmentation** compares a running `y` against a page height.
+///
+/// Not one of them is transcendental, and not one is even a `sqrt` — which
+/// would have been fine anyway, since IEEE 754 requires `sqrt` to be correctly
+/// rounded and every target agrees about it. `cargo xtask libm` would have
+/// nothing to object to here even if this crate were on `PIXEL_PATHS`, which
+/// it is not, and the same sentence was true of `css` one milestone earlier.
+/// Taking the edge anyway would have been the failure this file's own history
+/// records from the other direction: an edge in a manifest that nothing needs.
+///
+/// **What it does take is `tinker-pdf-css`, which the plan did not predict**,
+/// and that is the third leaf-to-leaf edge after `font -> filters` and
+/// `zip -> filters`. The argument is the plan's own ordering argument read to
+/// its conclusion. Gap 31 puts milestone 6 before milestone 7 because *"a
+/// layout engine built first has to invent its own input representation, and
+/// that representation then becomes what the cascade must produce — which is
+/// how a cascade acquires shortcuts"*. A `tinker-pdf-layout` with no edge to
+/// `css` would have to declare a second style type and the facade would
+/// convert between them, which is exactly the second representation that
+/// paragraph refuses; and decision 5's compile-time device would stop at the
+/// cascade, because the thing layout matched on would no longer be the
+/// parser's own output.
+///
+/// With the edge, the device goes one level further than the crate that
+/// invented it: `style::consume` destructures `ComputedStyle` with **no `..`**,
+/// so a property that is parsed, cascaded and then laid out by nobody is
+/// `error[E0027]` rather than a page that looks like the book.
+/// `tests/uncascaded_field_does_not_build.rs` injects that defect and asserts
+/// the build fails.
+///
+/// The three properties that made the other leaf-to-leaf edges acceptable hold
+/// here. It points from one leaf to another rather than upward. It cannot
+/// cycle, because `tinker-pdf-css` depends on nothing at all. And a sibling
+/// workspace crate is not a third-party dependency, so ruling 3 and
+/// CONTRIBUTING rule 1 are untouched — which is the whole point of a gap whose
+/// deliverable is that reading a book adds no crate from outside this
+/// repository.
+///
+/// It is a leaf despite having a dependency, on the reading that makes `font`,
+/// `zip` and `color` leaves: bytes and plain parameters in, values out, no PDF
+/// types, independently fuzzable. A tree of plain structs is plain parameters,
+/// and `layout` is the twenty-fourth fuzz target precisely because it can be
+/// driven with no file of any kind in front of it.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -256,6 +322,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // The empty list is what makes the compile-time proof of decision 5
     // possible; see the fifth amendment above.
     ("tinker-pdf-css", &[]),
+    // The tenth, and the third leaf-to-leaf edge. **Not** `tinker-pdf-math`,
+    // which gap 31's plan predicted and milestone 7 answered: nothing here is
+    // transcendental. See the sixth amendment above.
+    ("tinker-pdf-layout", &["tinker-pdf-css"]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
@@ -292,6 +362,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-zip",
             "tinker-pdf-xml",
             "tinker-pdf-css",
+            "tinker-pdf-layout",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

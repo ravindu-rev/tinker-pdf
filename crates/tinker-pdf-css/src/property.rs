@@ -242,7 +242,7 @@ pub enum Display {
 
 /// `float`. `inline-start` and `inline-end` are **not** `left` and `right`:
 /// they depend on the writing mode, which this build refuses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Float {
     /// `none`
     None,
@@ -253,7 +253,7 @@ pub enum Float {
 }
 
 /// `clear`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Clear {
     /// `none`
     None,
@@ -463,6 +463,68 @@ pub enum PageBreak {
     Right,
 }
 
+/// `page-break-inside`, CSS 2.2 §13.3.1.
+///
+/// Two values and not three: `avoid-page` and the `break-inside` longhand's
+/// `avoid-column` are about fragmentation contexts this build has none of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageBreakInside {
+    /// `auto`
+    Auto,
+    /// `avoid`
+    Avoid,
+}
+
+/// `overflow-wrap`, `css-text-3` §5.4.
+///
+/// **`break-word` and `anywhere` are two values and not one**, and the
+/// difference is not what a first implementation guesses. Both allow a break
+/// inside a word that would otherwise overflow; they differ in whether the
+/// opportunity counts when a box's *min-content* size is computed — `anywhere`
+/// counts and `break-word` does not. This build does not compute min-content
+/// sizes at all, so the two behave alike here and the distinction is recorded
+/// where it is made rather than collapsed into one variant, because collapsing
+/// it is what makes a value silently become its neighbour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverflowWrap {
+    /// `normal`
+    Normal,
+    /// `break-word`
+    BreakWord,
+    /// `anywhere`
+    Anywhere,
+}
+
+/// `line-break`, `css-text-3` §5.1.
+///
+/// `auto` is a real value rather than a synonym for `Normal`: it means *"the
+/// UA's own default"*, and a build that computed it away could not later change
+/// its default without changing what an author wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineBreakStrictness {
+    /// `auto`
+    Auto,
+    /// `loose`
+    Loose,
+    /// `normal`
+    Normal,
+    /// `strict`
+    Strict,
+    /// `anywhere`
+    Anywhere,
+}
+
+/// `word-break`, `css-text-3` §5.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordBreak {
+    /// `normal`
+    Normal,
+    /// `break-all`
+    BreakAll,
+    /// `keep-all`
+    KeepAll,
+}
+
 /// One entry of a `font-family` list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FontFamily {
@@ -554,6 +616,18 @@ pub enum Property {
     PageBreakBefore(PageBreak),
     /// `page-break-after`
     PageBreakAfter(PageBreak),
+    /// `page-break-inside`
+    PageBreakInside(PageBreakInside),
+    /// `orphans`
+    Orphans(u16),
+    /// `widows`
+    Widows(u16),
+    /// `overflow-wrap`
+    OverflowWrap(OverflowWrap),
+    /// `line-break`
+    LineBreak(LineBreakStrictness),
+    /// `word-break`
+    WordBreak(WordBreak),
     // <<< the compile-time proof injects a variant directly above this line >>>
 }
 
@@ -621,6 +695,12 @@ impl Property {
             Property::BackgroundColor(_) => "background-color",
             Property::PageBreakBefore(_) => "page-break-before",
             Property::PageBreakAfter(_) => "page-break-after",
+            Property::PageBreakInside(_) => "page-break-inside",
+            Property::Orphans(_) => "orphans",
+            Property::Widows(_) => "widows",
+            Property::OverflowWrap(_) => "overflow-wrap",
+            Property::LineBreak(_) => "line-break",
+            Property::WordBreak(_) => "word-break",
             // <<< the compile-time proof's second arm goes here >>>
         }
     }
@@ -645,7 +725,12 @@ impl Property {
             | Property::TextIndent(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
-            | Property::Visibility(_) => true,
+            | Property::Visibility(_)
+            | Property::Orphans(_)
+            | Property::Widows(_)
+            | Property::OverflowWrap(_)
+            | Property::LineBreak(_)
+            | Property::WordBreak(_) => true,
             Property::TextDecoration(_)
             | Property::Display(_)
             | Property::Float(_)
@@ -660,7 +745,23 @@ impl Property {
             | Property::BorderColor(_, _)
             | Property::BackgroundColor(_)
             | Property::PageBreakBefore(_)
-            | Property::PageBreakAfter(_) => false,
+            | Property::PageBreakAfter(_)
+            // `page-break-inside` is the one row here that disagrees with the
+            // specification the rest of this family is taken from, and the
+            // disagreement is deliberate rather than a slip. CSS 2.2 §13.3.1's
+            // own table says *inherited: yes*; `css-break-3` §4.1 defines
+            // `break-inside` as **not** inherited and makes `page-break-inside`
+            // a legacy alias of it, and gap 31's plan says in as many words
+            // that it *"treats the `break-*` longhands as the modern spelling
+            // of the same thing"*. Inheriting it would mean one
+            // `page-break-inside: avoid` on `body` — which a real book writes
+            // on a figure, and which cascades from wherever it is written —
+            // silently forbidding every page break in the book, and a book that
+            // cannot be broken is one enormous page rather than a visible
+            // failure. `page-break-before` and `page-break-after` are already
+            // not inherited two lines above, so this is also the answer that
+            // keeps the family consistent.
+            | Property::PageBreakInside(_) => false,
             // <<< the compile-time proof's third arm goes here >>>
         }
     }
@@ -793,7 +894,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "justify-items",
     "justify-self",
     "left",
-    "line-break",
     "list-style",
     "list-style-image",
     "list-style-position",
@@ -804,18 +904,15 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "mix-blend-mode",
     "opacity",
     "order",
-    "orphans",
     "outline",
     "outline-color",
     "outline-offset",
     "outline-style",
     "outline-width",
     "overflow",
-    "overflow-wrap",
     "overflow-x",
     "overflow-y",
     "page",
-    "page-break-inside",
     "position",
     "quotes",
     "resize",
@@ -837,8 +934,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "unicode-bidi",
     "unicode-range",
     "vertical-align",
-    "widows",
-    "word-break",
     "word-wrap",
     "writing-mode",
     "z-index",
@@ -1071,6 +1166,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "font-weight",
     "height",
     "letter-spacing",
+    "line-break",
     "line-height",
     "list-style-type",
     "margin",
@@ -1078,6 +1174,8 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "margin-left",
     "margin-right",
     "margin-top",
+    "orphans",
+    "overflow-wrap",
     "padding",
     "padding-bottom",
     "padding-left",
@@ -1085,12 +1183,15 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "padding-top",
     "page-break-after",
     "page-break-before",
+    "page-break-inside",
     "text-align",
     "text-decoration",
     "text-indent",
     "visibility",
     "white-space",
+    "widows",
     "width",
+    "word-break",
     "word-spacing",
 ];
 
@@ -1228,6 +1329,55 @@ fn implemented(
                 })
             })
         }
+        "page-break-inside" => keyword(one, single, |word| {
+            Some(Property::PageBreakInside(match word {
+                "auto" => PageBreakInside::Auto,
+                "avoid" => PageBreakInside::Avoid,
+                _ => return None,
+            }))
+        }),
+        // CSS 2.2 §13.3.2. `<integer>`, and a value that is not one is the
+        // author's error rather than this build's gap — `orphans: 2.5` and
+        // `orphans: red` are both `Malformed`, which §5.4.4 discards, while
+        // `orphans: inherit` is `Unsupported` by the CSS-wide-keyword rule
+        // above. The three outcomes are the same three `length_outcome` draws,
+        // one value type over.
+        "orphans" | "widows" => {
+            let orphans = name == "orphans";
+            integer(one, single, move |count| {
+                Some(if orphans {
+                    Property::Orphans(count)
+                } else {
+                    Property::Widows(count)
+                })
+            })
+        }
+        "overflow-wrap" => keyword(one, single, |word| {
+            Some(Property::OverflowWrap(match word {
+                "normal" => OverflowWrap::Normal,
+                "break-word" => OverflowWrap::BreakWord,
+                "anywhere" => OverflowWrap::Anywhere,
+                _ => return None,
+            }))
+        }),
+        "line-break" => keyword(one, single, |word| {
+            Some(Property::LineBreak(match word {
+                "auto" => LineBreakStrictness::Auto,
+                "loose" => LineBreakStrictness::Loose,
+                "normal" => LineBreakStrictness::Normal,
+                "strict" => LineBreakStrictness::Strict,
+                "anywhere" => LineBreakStrictness::Anywhere,
+                _ => return None,
+            }))
+        }),
+        "word-break" => keyword(one, single, |word| {
+            Some(Property::WordBreak(match word {
+                "normal" => WordBreak::Normal,
+                "break-all" => WordBreak::BreakAll,
+                "keep-all" => WordBreak::KeepAll,
+                _ => return None,
+            }))
+        }),
         "font-weight" => match one {
             Some(ComponentValue::Token(Token::Ident(word))) if single => {
                 match word.to_ascii_lowercase().as_str() {
@@ -1421,6 +1571,36 @@ fn keyword(
             }
         }
         Some(_) if single => Implemented::BadValue,
+        _ => Implemented::Malformed,
+    }
+}
+
+/// One non-negative `<integer>` for an integer-valued property.
+///
+/// A number with a fractional part is **not** an `<integer>` and is
+/// `Malformed`, not `BadValue`: `css-values-3` §5.1 makes `2.5` invalid syntax
+/// for an `<integer>`, which is the author's mistake and not a value type this
+/// build has chosen not to implement. Zero is refused for the same reason — CSS
+/// 2.2 §13.3.2's `orphans` and `widows` are counts of lines and there is no
+/// such thing as a fragment of zero lines.
+fn integer(
+    value: Option<&ComponentValue>,
+    single: bool,
+    map: impl Fn(u16) -> Option<Property>,
+) -> Implemented {
+    match value {
+        Some(ComponentValue::Token(Token::Number {
+            value,
+            integer: true,
+        })) if single => {
+            if *value < 1.0 || *value > f64::from(u16::MAX) {
+                return Implemented::Malformed;
+            }
+            match map(*value as u16) {
+                Some(property) => Implemented::Known(vec![property]),
+                None => Implemented::Malformed,
+            }
+        }
         _ => Implemented::Malformed,
     }
 }

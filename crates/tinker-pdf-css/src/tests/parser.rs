@@ -469,12 +469,12 @@ fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
             -ah-margin-start: 1em;
             --brand: #333;
             colour: red;
-            orphans: 2;
+            hyphens: auto;
          }",
     );
     assert_eq!(
         parsed.report.unsupported,
-        vec![("column-count", 1), ("orphans", 1)]
+        vec![("column-count", 1), ("hyphens", 1)]
     );
     let unknown: Vec<&str> = parsed
         .report

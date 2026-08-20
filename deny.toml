@@ -147,6 +147,39 @@ deny = [
   { name = "tl" },
   { name = "lol_html" },
   { name = "html5gum" },
+  # Layout engines and line breakers, gap 31 milestone 7. The same audit that
+  # found no CSS crate here found no layout engine and no line breaker either,
+  # and the window is again the milestone that writes one.
+  #
+  # `taffy`, `stretch`, `yoga` and `morphorm` are flexbox/grid engines. None of
+  # them is a PDF crate and none of them would trip the licence gate --
+  # `taffy` is MIT -- which is exactly the hole rule 1 exists to close: the
+  # licence list has nothing to say about *what a crate does*.
+  { name = "taffy" },
+  { name = "stretch" },
+  { name = "yoga" },
+  { name = "morphorm" },
+  # The line breaker and the Unicode-data crates around it. CONTRIBUTING rule 1
+  # has no exception for a line breaker, and gap 31's plan names these three by
+  # name in the milestone that writes one. The **data** is a different question
+  # and has a different answer: the UCD is vendored as data under
+  # THIRDPARTY.md, compiled by a build script, and checked against the licence
+  # allowlist above by `cargo xtask vendor`. A table of published facts is not
+  # an implementation, and taking a crate that both carries the table and
+  # implements the algorithm would take the second along with the first.
+  #
+  # `rustybuzz` is already denied twelve lines below, for fonts. It is named
+  # here as well in prose rather than twice in the list, because it is the
+  # crate a line breaker's author reaches for next.
+  { name = "unicode-linebreak" },
+  { name = "xi-unicode" },
+  { name = "unicode-segmentation" },
+  { name = "unicode-width" },
+  { name = "unicode-bidi" },
+  { name = "unicode-normalization" },
+  { name = "icu_segmenter" },
+  { name = "icu_properties" },
+  { name = "harfbuzz_rs" },
   # Fonts and text shaping.
   { name = "ttf-parser" },
   { name = "rustybuzz" },

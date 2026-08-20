@@ -232,11 +232,8 @@ fn the_unsupported_census_over_the_committed_corpus() {
             "hyphens",
             "list-style",
             "max-width",
-            "orphans",
             "overflow",
-            "overflow-wrap",
             "overflow-x",
-            "page-break-inside",
             "quotes",
             // And the third value gap, which is the one the injection matrix
             // found first and this corroborates: calibre writes
@@ -245,7 +242,6 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // `justify`.
             "text-align",
             "vertical-align",
-            "widows",
         ]
     );
 

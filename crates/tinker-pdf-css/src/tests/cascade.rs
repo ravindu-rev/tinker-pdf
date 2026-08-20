@@ -457,6 +457,12 @@ fn every_implemented_property_reaches_the_computed_style() {
             background-color: #778899;
             page-break-before: always;
             page-break-after: avoid;
+            page-break-inside: avoid;
+            orphans: 3;
+            widows: 4;
+            overflow-wrap: break-word;
+            line-break: strict;
+            word-break: keep-all;
          }",
         &nodes,
     )[0];
@@ -478,6 +484,24 @@ fn every_implemented_property_reaches_the_computed_style() {
     assert_eq!(styled.background_color.r, 0x77);
     assert_eq!(styled.page_break_before, crate::property::PageBreak::Always);
     assert_eq!(styled.page_break_after, crate::property::PageBreak::Avoid);
+    assert_eq!(
+        styled.page_break_inside,
+        crate::property::PageBreakInside::Avoid
+    );
+    // Three and four rather than two and two: the initial value of both is 2,
+    // so a build that ignored the declarations would still answer 2 and a test
+    // asserting the initial value would pass without them.
+    assert_eq!(styled.orphans, 3);
+    assert_eq!(styled.widows, 4);
+    assert_eq!(
+        styled.overflow_wrap,
+        crate::property::OverflowWrap::BreakWord
+    );
+    assert_eq!(
+        styled.line_break,
+        crate::property::LineBreakStrictness::Strict
+    );
+    assert_eq!(styled.word_break, crate::property::WordBreak::KeepAll);
 }
 
 /// An `Unsupported` declaration is counted where it **reached an element**,

@@ -42,3 +42,10 @@ fuzz/corpus/** binary
 # `linguist-vendored` collapses eight megabytes of PostScript out of the diff
 # a reviewer has to read, and out of the repository's language statistics.
 crates/tinker-pdf-font/data/** -text linguist-vendored
+
+# The UCD (gap 31 milestone 7, THIRDPARTY.md). `-text` for cmap-resources'
+# reason and one more of its own: the published files are CRLF, the licence
+# asks a redistribution to carry the notice, and normalising line endings is
+# still a modification. `linguist-vendored` keeps four megabytes of Unicode
+# out of the diff a reviewer reads and out of the language statistics.
+crates/tinker-pdf-layout/data/** -text linguist-vendored

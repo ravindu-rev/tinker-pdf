@@ -162,6 +162,19 @@ pub struct ComputedStyle {
     pub page_break_before: PageBreak,
     /// `page-break-after`
     pub page_break_after: PageBreak,
+    /// `page-break-inside`
+    pub page_break_inside: PageBreakInside,
+    /// `orphans`
+    pub orphans: u16,
+    /// `widows`
+    pub widows: u16,
+    /// `overflow-wrap`
+    pub overflow_wrap: OverflowWrap,
+    /// `line-break`
+    pub line_break: LineBreakStrictness,
+    /// `word-break`
+    pub word_break: WordBreak,
+    // <<< the layout proof injects a field directly above this line >>>
 }
 
 /// The initial font size, `css-fonts-4`'s `medium`.
@@ -201,6 +214,17 @@ impl ComputedStyle {
             background_color: Color::TRANSPARENT,
             page_break_before: PageBreak::Auto,
             page_break_after: PageBreak::Auto,
+            page_break_inside: PageBreakInside::Auto,
+            // CSS 2.2 §13.3.2's own initial value for both, and the pair is
+            // what makes them interact: a fragment must leave at least
+            // `orphans` lines behind and carry at least `widows` lines
+            // forward, so a two-line paragraph cannot be broken at all.
+            orphans: 2,
+            widows: 2,
+            overflow_wrap: OverflowWrap::Normal,
+            line_break: LineBreakStrictness::Auto,
+            word_break: WordBreak::Normal,
+            // <<< the layout proof's initial value goes here >>>
         }
     }
 
@@ -227,6 +251,11 @@ impl ComputedStyle {
         style.white_space = parent.white_space;
         style.list_style_type = parent.list_style_type;
         style.visibility = parent.visibility;
+        style.orphans = parent.orphans;
+        style.widows = parent.widows;
+        style.overflow_wrap = parent.overflow_wrap;
+        style.line_break = parent.line_break;
+        style.word_break = parent.word_break;
         style
     }
 }
@@ -340,6 +369,12 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::BackgroundColor(value) => style.background_color = *value,
         Property::PageBreakBefore(value) => style.page_break_before = *value,
         Property::PageBreakAfter(value) => style.page_break_after = *value,
+        Property::PageBreakInside(value) => style.page_break_inside = *value,
+        Property::Orphans(value) => style.orphans = *value,
+        Property::Widows(value) => style.widows = *value,
+        Property::OverflowWrap(value) => style.overflow_wrap = *value,
+        Property::LineBreak(value) => style.line_break = *value,
+        Property::WordBreak(value) => style.word_break = *value,
         // <<< the compile-time proof's fourth arm goes here >>>
     }
 }

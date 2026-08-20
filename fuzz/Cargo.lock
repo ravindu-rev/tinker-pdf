@@ -153,8 +153,16 @@ dependencies = [
  "tinker-pdf-css",
  "tinker-pdf-filters",
  "tinker-pdf-font",
+ "tinker-pdf-layout",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
+]
+
+[[package]]
+name = "tinker-pdf-layout"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-css",
 ]
 
 [[package]]

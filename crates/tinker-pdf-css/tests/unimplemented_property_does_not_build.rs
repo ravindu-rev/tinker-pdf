@@ -54,16 +54,25 @@ const VARIANT_ANCHOR: &str =
 
 /// The property injected, and it is not an arbitrary one.
 ///
-/// `widows` is in `UNSUPPORTED_PROPERTIES` today — CSS 2.2 §13.3.2, present in
-/// real books, and genuinely not implemented because the fragmentation that
-/// would consume it is milestone 7's. So the defect is the exact edit somebody
-/// will make when that milestone arrives: promote the name out of the
-/// unsupported list into the enum. This asserts what happens if they stop
-/// there.
-const VARIANT: &str = "    Widows(u16),";
-const APPLY_ARM: &str = "        Property::Widows(_) => {}";
-const NAME_ARM: &str = "            Property::Widows(_) => \"widows\",";
-const INHERITED_ARM: &str = "            Property::Widows(_) => true,";
+/// It was `widows` when this file was written, for a stated reason: *"the
+/// defect is the exact edit somebody will make when that milestone arrives"*.
+/// Milestone 7 arrived, `widows` is implemented, and the injection stopped
+/// being a defect and became a duplicate variant — which fails the build for
+/// the wrong reason and would have made the control build fail too. **That the
+/// choice had to move is the evidence it was the right kind of choice**, and
+/// this is the third time in this gap that a test written a milestone early has
+/// had to be resolved by the milestone it was written for.
+///
+/// `border-collapse` is the successor and it is chosen the same way: CSS 2.2
+/// §17.6, in `UNSUPPORTED_PROPERTIES` today, present in both producers' books,
+/// and genuinely not implemented because the table model that would consume it
+/// is milestone 11's. When that milestone lands this constant moves again, and
+/// the reason it can be moved without weakening anything is that the *shape* of
+/// the proof is in the harness rather than in the name.
+const VARIANT: &str = "    BorderCollapse(bool),";
+const APPLY_ARM: &str = "        Property::BorderCollapse(_) => {}";
+const NAME_ARM: &str = "            Property::BorderCollapse(_) => \"border-collapse\",";
+const INHERITED_ARM: &str = "            Property::BorderCollapse(_) => true,";
 
 struct Source {
     lib: String,
@@ -222,7 +231,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
         "the build failed for some other reason than a non-exhaustive match:\n{stderr}"
     );
     assert!(
-        stderr.contains("Widows"),
+        stderr.contains("BorderCollapse"),
         "the error does not name the variant that was added:\n{stderr}"
     );
 }

@@ -1,0 +1,549 @@
+//! Layout: a box tree and a source of metrics in, pages of positioned
+//! fragments out.
+//!
+//! Scope, design and exit criteria: `docs/plans/gaps/31-epub.md`, milestone 7.
+//!
+//! **The tenth leaf.** Ruling 8's August 2026 amendment makes the test of a
+//! leaf the definition rather than the list: *a leaf is any crate that takes
+//! bytes and plain parameters and returns bytes and values, whatever the list
+//! says.* A tree of plain structs is plain parameters. Nothing below knows what
+//! a PDF, a page object, an EPUB, an XHTML element or a font file is: the
+//! element tree lives in the facade, and measurement arrives through
+//! [`metrics::Metrics`], five methods wide.
+//!
+//! # The five things worth knowing before reading further
+//!
+//! **Margin collapsing has three cases and they are not one rule.** Adjacent
+//! siblings is the one everybody implements. Parent-and-first-child and a box
+//! whose own margins collapse *through* it are where implementations quietly
+//! differ, and every one of the three moves every block on every page after it.
+//! [`flow`] implements all three with one accumulator, and each is asserted on
+//! its own.
+//!
+//! **Line breaking is UAX #14 over the vendored UCD, checked against Unicode's
+//! own 19 338-case conformance file.** A breaker that splits at spaces passes
+//! every English test ever written. See [`uax14`].
+//!
+//! **White-space processing is `css-text-3` §4.1.1 *and* §4.1.2**, and the two
+//! run at different times over different things. See [`text`].
+//!
+//! **Where a page break is *permitted* is a different question from where one
+//! is *preferred*.** CSS 2.2 §13.3.3's rules A to D say where one may happen at
+//! all, and a fragmenter that implements only the second question breaks inside
+//! things it must not. See [`fragment`].
+//!
+//! **A computed property with no consumer here does not compile.**
+//! [`style::consume`] destructures `ComputedStyle` with no `..`, which is gap
+//! 31's decision 5 carried one milestone further than the crate that invented
+//! it: `tinker-pdf-css` makes a property that is parsed and never *cascaded*
+//! fail to build, and this makes one that is cascaded and never *laid out* fail
+//! to build.
+//!
+//! # Using it
+//!
+//! ```
+//! use tinker_pdf_css::cascade::ComputedStyle;
+//! use tinker_pdf_css::property::Display;
+//! use tinker_pdf_layout::metrics::FixedPitch;
+//! use tinker_pdf_layout::{layout, BoxNode, Content, Limits, Options};
+//!
+//! let mut style = ComputedStyle::initial();
+//! style.display = Display::Block;
+//! let mut text = ComputedStyle::initial();
+//! text.font_size = 12.0;
+//!
+//! let tree = BoxNode {
+//!     style,
+//!     content: Content::Children(vec![BoxNode {
+//!         style: text,
+//!         content: Content::Text("the sea, the sea".into()),
+//!     }]),
+//! };
+//! let laid = layout(
+//!     &tree,
+//!     &FixedPitch::COURIER,
+//!     &Options::new(432.0, 648.0),
+//!     &Limits::DEFAULT,
+//! )?;
+//! assert_eq!(laid.pages.len(), 1);
+//! assert_eq!(laid.text(), "the sea, the sea");
+//! # Ok::<(), tinker_pdf_layout::Refusal>(())
+//! ```
+
+#![forbid(unsafe_code)]
+
+pub mod flow;
+pub mod fragment;
+pub mod limits;
+pub mod metrics;
+pub mod style;
+pub mod text;
+pub mod uax14;
+pub mod unicode;
+
+#[cfg(test)]
+mod tests;
+
+use std::fmt;
+
+use tinker_pdf_css::cascade::ComputedStyle;
+use tinker_pdf_css::property::{
+    BorderStyle, Clear, Color, Float, FontFamily, FontStyle, FontVariant, Sides, TextDecoration,
+};
+
+/// One node of the tree layout is given.
+///
+/// Plain structs, in document order, owning their children — which is what
+/// keeps this crate off the facade's element tree and off `tinker-pdf-xml`.
+/// The style is the **computed** one: everything to do with selectors,
+/// specificity and inheritance happened in `tinker-pdf-css` and none of it is
+/// visible from here.
+#[derive(Clone, Debug)]
+pub struct BoxNode {
+    /// The element's computed style.
+    pub style: ComputedStyle,
+    /// What is inside it.
+    pub content: Content,
+}
+
+/// What a node holds.
+#[derive(Clone, Debug)]
+pub enum Content {
+    /// Child nodes, in document order.
+    Children(Vec<BoxNode>),
+    /// A run of text, as the source wrote it — **before** `css-text-3` §4.1.1's
+    /// collapsing, which is this crate's to do and not the caller's. A caller
+    /// that collapsed first would have thrown away the distinction between a
+    /// preserved newline and a collapsible one before `white-space` was
+    /// consulted.
+    Text(String),
+}
+
+impl BoxNode {
+    /// A text node with a given style, which is what most of a book is.
+    #[must_use]
+    pub fn text(style: ComputedStyle, text: impl Into<String>) -> Self {
+        Self {
+            style,
+            content: Content::Text(text.into()),
+        }
+    }
+
+    /// A node with children.
+    #[must_use]
+    pub fn element(style: ComputedStyle, children: Vec<BoxNode>) -> Self {
+        Self {
+            style,
+            content: Content::Children(children),
+        }
+    }
+
+    /// Every character of text under this node, in document order.
+    ///
+    /// The source side of text conservation, and it deliberately includes text
+    /// under a `display: none` — the caller compares against the *spine*, and
+    /// what this crate did with a subtree is exactly what is being checked.
+    #[must_use]
+    pub fn source_text(&self) -> String {
+        let mut out = String::new();
+        self.collect_text(&mut out);
+        out
+    }
+
+    fn collect_text(&self, out: &mut String) {
+        match &self.content {
+            Content::Text(text) => out.push_str(text),
+            Content::Children(children) => {
+                for child in children {
+                    child.collect_text(out);
+                }
+            }
+        }
+    }
+}
+
+/// The page box layout fills, in points.
+///
+/// This is the **content area** of a page and not the page itself: page
+/// margins are the caller's, because a reading system's margins are a
+/// presentation choice and this crate has no opinion about them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Options {
+    /// The width available to the flow.
+    pub width: f64,
+    /// The height available to the flow.
+    pub height: f64,
+}
+
+impl Options {
+    /// A page of the given content size.
+    #[must_use]
+    pub fn new(width: f64, height: f64) -> Self {
+        Self { width, height }
+    }
+}
+
+/// One page of positioned fragments.
+///
+/// `y` grows **downward** from the top of the page's content area, which is
+/// the direction a flow runs. A PDF's user space grows upward, and the flip is
+/// the caller's — done once, at synthesis, rather than by every producer here.
+#[derive(Clone, Debug, Default)]
+pub struct Page {
+    /// Backgrounds and borders, in paint order: an ancestor before its
+    /// descendants, so a child's background covers its parent's.
+    pub boxes: Vec<BoxFragment>,
+    /// Text, in **reading order**, which is what makes text conservation a
+    /// comparison rather than a search.
+    pub runs: Vec<TextRun>,
+}
+
+/// A block box's decoration on one page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxFragment {
+    /// Border-box left edge.
+    pub x: f64,
+    /// Border-box top edge.
+    pub y: f64,
+    /// Border-box width.
+    pub width: f64,
+    /// Border-box height on **this** page. A box that crosses a page boundary
+    /// has one fragment per page and they are different heights.
+    pub height: f64,
+    /// `background-color`.
+    pub background: Color,
+    /// `border-*-width`, already zero where the style is `none`.
+    pub border_width: Sides<f64>,
+    /// `border-*-style`.
+    pub border_style: Sides<BorderStyle>,
+    /// `border-*-color`.
+    pub border_color: Sides<Color>,
+}
+
+/// One run of text, positioned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextRun {
+    /// The left edge of the run.
+    pub x: f64,
+    /// The **baseline**, not the top: a run's box is decided by its face and
+    /// the caller draws from the baseline, so reporting the top would mean two
+    /// places computing the same offset from different ascents.
+    pub y: f64,
+    /// The advance width the run was measured at.
+    pub width: f64,
+    /// The characters, after `css-text-3` §4.1's processing.
+    pub text: String,
+    /// `font-size`, in points.
+    pub font_size: f64,
+    /// `font-family`, in the author's order.
+    pub families: Vec<FontFamily>,
+    /// `font-weight`.
+    pub weight: u16,
+    /// `font-style`.
+    pub style: FontStyle,
+    /// `font-variant`.
+    pub variant: FontVariant,
+    /// `color`.
+    pub color: Color,
+    /// `text-decoration`.
+    pub decoration: TextDecoration,
+    /// Whether the run is painted at all. A `visibility: hidden` box is laid
+    /// out and not drawn, which is a different thing from `display: none` and
+    /// moves nothing.
+    pub painted: bool,
+    /// Extra advance applied between the run's characters, from
+    /// `letter-spacing` and `word-spacing` and from justification.
+    ///
+    /// Carried as a number rather than baked into `width` because the caller
+    /// draws the run with a `Tc`/`Tw` pair and needs the figure, and because a
+    /// justified line whose runs had the space folded into their widths could
+    /// not be re-measured.
+    pub letter_spacing: f64,
+    /// The extra advance applied at each space in this run.
+    pub word_spacing: f64,
+    /// Whether this run is content the **source did not contain** — a list
+    /// marker, at this milestone.
+    ///
+    /// It exists so text conservation stays an equality rather than becoming a
+    /// containment: generated content is not in the spine and must not be
+    /// compared against it, and a build with no such flag either loses the
+    /// invariant or loses the markers.
+    pub generated: bool,
+}
+
+/// A whole book, paginated.
+#[derive(Clone, Debug, Default)]
+pub struct Layout {
+    /// The pages, in order.
+    pub pages: Vec<Page>,
+    /// What could not be honoured, deduplicated with a count — ruling 10's
+    /// shape, and `tinker_pdf_css::parser::Report`'s.
+    pub warnings: Vec<(Warning, usize)>,
+}
+
+impl Layout {
+    /// Every character of laid-out text, in reading order, excluding generated
+    /// content.
+    ///
+    /// The other half of text conservation. It is a method here rather than a
+    /// helper in a test file so that the fuzz target and the crate's tests
+    /// compare the same thing.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for page in &self.pages {
+            for run in &page.runs {
+                if !run.generated {
+                    out.push_str(&run.text);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Resource ceilings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Box tree depth. See [`limits::MAX_BOX_DEPTH`].
+    pub max_depth: usize,
+    /// Boxes across the book. See [`limits::MAX_BOX_TREE_NODES`].
+    pub max_boxes: usize,
+    /// Break opportunities across the book. See
+    /// [`limits::MAX_LINE_BREAK_WORK`].
+    pub max_break_work: usize,
+    /// Pages. See [`limits::MAX_LAYOUT_PAGES`].
+    pub max_pages: usize,
+}
+
+impl Limits {
+    /// The shipped ceilings.
+    pub const DEFAULT: Self = Self {
+        max_depth: limits::MAX_BOX_DEPTH,
+        max_boxes: limits::MAX_BOX_TREE_NODES,
+        max_break_work: limits::MAX_LINE_BREAK_WORK,
+        max_pages: limits::MAX_LAYOUT_PAGES,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The two totals, spent across a whole book and never refunded.
+///
+/// One object rather than three counters, for `tinker_pdf_css::Budget`'s
+/// reason: a caller that lays out forty spine items makes **one** of these, so
+/// the fortieth cannot start from zero.
+#[derive(Clone, Copy, Debug)]
+pub struct Budget {
+    limits: Limits,
+    boxes: usize,
+    breaks: usize,
+}
+
+impl Budget {
+    /// A fresh budget under the given ceilings.
+    #[must_use]
+    pub fn new(limits: &Limits) -> Self {
+        Self {
+            limits: *limits,
+            boxes: 0,
+            breaks: 0,
+        }
+    }
+
+    /// Charges one generated box.
+    ///
+    /// # Errors
+    /// [`Refusal::TooManyBoxes`] past the cap.
+    pub fn spend_box(&mut self) -> Result<(), Refusal> {
+        self.boxes += 1;
+        if self.boxes > self.limits.max_boxes {
+            return Err(Refusal::TooManyBoxes { boxes: self.boxes });
+        }
+        Ok(())
+    }
+
+    /// Charges break opportunities evaluated.
+    ///
+    /// # Errors
+    /// [`Refusal::TooMuchLineBreaking`] past the cap.
+    pub fn spend_breaks(&mut self, count: usize) -> Result<(), Refusal> {
+        self.breaks = self.breaks.saturating_add(count);
+        if self.breaks > self.limits.max_break_work {
+            return Err(Refusal::TooMuchLineBreaking {
+                evaluations: self.breaks,
+            });
+        }
+        Ok(())
+    }
+
+    /// Boxes generated so far.
+    #[must_use]
+    pub fn boxes(&self) -> usize {
+        self.boxes
+    }
+
+    /// Break opportunities evaluated so far.
+    #[must_use]
+    pub fn breaks(&self) -> usize {
+        self.breaks
+    }
+}
+
+/// What this crate refuses, each by its own name.
+///
+/// `Eq` is deliberately absent where every sibling crate's `Refusal` has it:
+/// [`Refusal::PageTooSmall`] carries the caller's own two `f64`s so a report
+/// can say *which* number was unusable, and a `NaN` page width — which is
+/// exactly the input that produces this variant — is not equal to itself.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// A box tree deeper than [`limits::MAX_BOX_DEPTH`].
+    TooDeep {
+        /// How deep it went.
+        depth: usize,
+    },
+    /// The book's box total is spent.
+    TooManyBoxes {
+        /// How many had been generated.
+        boxes: usize,
+    },
+    /// The book's line-breaking total is spent.
+    TooMuchLineBreaking {
+        /// How many opportunities had been evaluated.
+        evaluations: usize,
+    },
+    /// The flow fragments into more pages than [`limits::MAX_LAYOUT_PAGES`].
+    TooManyPages {
+        /// How many it would have been.
+        pages: usize,
+    },
+    /// A page box with no usable area. A caller error rather than a hostile
+    /// file, and refused by name because the alternative is an infinite number
+    /// of empty pages.
+    PageTooSmall {
+        /// The width asked for.
+        width: f64,
+        /// The height asked for.
+        height: f64,
+    },
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::TooDeep { depth } => write!(f, "a box tree {depth} deep is past the cap"),
+            Refusal::TooManyBoxes { boxes } => {
+                write!(f, "{boxes} boxes is past the book's total")
+            }
+            Refusal::TooMuchLineBreaking { evaluations } => {
+                write!(
+                    f,
+                    "{evaluations} break evaluations is past the book's total"
+                )
+            }
+            Refusal::TooManyPages { pages } => write!(f, "{pages} pages is past the cap"),
+            Refusal::PageTooSmall { width, height } => {
+                write!(f, "a page of {width} by {height} has no room for a line")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// What this crate could not honour, said out loud.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Warning {
+    /// `float`, at a value that is not `none`. Milestone 10.
+    ///
+    /// The box is laid out **in flow**, which is not what the author asked
+    /// for; saying so is the difference between a known gap and a page that
+    /// looks like the book.
+    FloatInFlow(Float),
+    /// `clear`, at a value that is not `none`, with no floats to clear.
+    ClearIgnored(Clear),
+    /// `display: inline-block`, laid out as a block-level box. Milestone 10's
+    /// neighbourhood; see the crate's `Still owed`.
+    InlineBlockAsBlock,
+    /// An inline box with a block-level child, laid out as a block container.
+    /// CSS 2.2 §9.2.1.1 splits the inline instead.
+    BlockInInline,
+    /// A line whose content does not fit and had nowhere to break — the word
+    /// is longer than the line and `overflow-wrap` is `normal`, which is what
+    /// the specification says to do and is still worth reporting.
+    LineOverflowed,
+    /// A block taller than a whole page, which had to be broken somewhere no
+    /// rule permits. CSS 2.2 §13.3.3's own escape: *"if the above does not
+    /// provide enough break points, rules B and D are dropped"*, and then A
+    /// and C.
+    BreakForcedPastTheRules,
+    /// Content that did not fit the width and was drawn outside the page box.
+    ContentOverflowedPage,
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Warning::FloatInFlow(value) => {
+                write!(f, "float: {value:?} is laid out in flow")
+            }
+            Warning::ClearIgnored(value) => write!(f, "clear: {value:?} has nothing to clear"),
+            Warning::InlineBlockAsBlock => {
+                f.write_str("display: inline-block is laid out as a block")
+            }
+            Warning::BlockInInline => {
+                f.write_str("an inline box holds a block, and is laid out as one")
+            }
+            Warning::LineOverflowed => f.write_str("a line had nowhere to break and overflowed"),
+            Warning::BreakForcedPastTheRules => {
+                f.write_str("a page break was taken where CSS 2.2 13.3.3 permits none")
+            }
+            Warning::ContentOverflowedPage => f.write_str("content is wider than the page box"),
+        }
+    }
+}
+
+/// Lays a box tree out into pages.
+///
+/// # Errors
+/// Any [`Refusal`]: a cap, or a page box with no usable area.
+pub fn layout<M: metrics::Metrics>(
+    root: &BoxNode,
+    metrics: &M,
+    options: &Options,
+    limits: &Limits,
+) -> Result<Layout, Refusal> {
+    let mut budget = Budget::new(limits);
+    layout_with(root, metrics, options, limits, &mut budget)
+}
+
+/// The same, against a budget shared across a whole book.
+///
+/// # Errors
+/// Any [`Refusal`].
+pub fn layout_with<M: metrics::Metrics>(
+    root: &BoxNode,
+    metrics: &M,
+    options: &Options,
+    limits: &Limits,
+    budget: &mut Budget,
+) -> Result<Layout, Refusal> {
+    if !(options.width.is_finite() && options.height.is_finite())
+        || options.width <= 0.0
+        || options.height <= 0.0
+    {
+        return Err(Refusal::PageTooSmall {
+            width: options.width,
+            height: options.height,
+        });
+    }
+    let flow = flow::build(root, metrics, options, limits, budget)?;
+    fragment::paginate(flow, options, limits)
+}

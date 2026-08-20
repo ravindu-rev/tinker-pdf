@@ -1,0 +1,29 @@
+[package]
+name = "tinker-pdf-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Layout, hand-rolled: css-box-3's box model with margin collapsing, CSS 2.2's block and inline formatting contexts, css-text-3's white-space processing, UAX #14 line breaking, and fragmentation into pages"
+
+# The vendored UCD ships, for `tinker-pdf-font`'s reason recorded one crate
+# over: build time is *the consumer's* build time, and `build.rs` panics when
+# the tables are missing, so a crate published without `data/` is a crate
+# nobody who downloads it can build. `target/` would otherwise be swept in by
+# the default on a machine that has built here.
+exclude = ["target/"]
+
+[dependencies]
+# The one internal edge, and the sixth DAG amendment argues it in
+# `xtask/src/main.rs`. Layout matches on the **cascade's** computed style
+# rather than on a second style type of its own, which is the whole reason gap
+# 31 put milestone 6 before milestone 7: *"a layout engine built first has to
+# invent its own input representation, and that representation then becomes
+# what the cascade must produce -- which is how a cascade acquires shortcuts."*
+#
+# There is deliberately **no** `tinker-pdf-math` edge, which the plan predicted
+# there would be. Nothing here is transcendental; see `limits.rs`'s header and
+# the amendment.
+tinker-pdf-css = { workspace = true }
