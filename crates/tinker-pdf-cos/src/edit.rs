@@ -1683,20 +1683,23 @@ pub mod annot {
         dict
     }
 
-    /// A link to a page in the same document.
+    /// A link to a page in the same document, fitted to the page.
+    ///
+    /// The destination array and the border come from [`crate::dest`], which
+    /// is where [`crate::build::DocumentBuilder`] gets them too — one spelling
+    /// of Table 151 rather than two that can drift. This entry point states
+    /// `/Fit` because a caller editing an existing document has a page and no
+    /// layout; a caller *building* one has both, and says which view it wants
+    /// through [`crate::build::Target`].
     #[must_use]
     pub fn link(doc: &CosDocument, rect: Rect, page: crate::object::ObjRef) -> Dict {
         let mut dict = base(doc, b"Link", rect);
         // Ruling 6: an explicit destination, never a name that resembles one.
         dict.insert(
             doc.intern(b"Dest"),
-            Object::Array(vec![Object::Ref(page), Object::Name(doc.intern(b"Fit"))]),
+            crate::dest::destination_array(doc.names_table(), page, &crate::dest::DestKind::Fit),
         );
-        // A visible border on a link is rarely wanted and always ugly.
-        dict.insert(
-            doc.intern(b"Border"),
-            Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(0)]),
-        );
+        dict.insert(doc.intern(b"Border"), crate::dest::no_border());
         dict
     }
 }

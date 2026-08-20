@@ -31,10 +31,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use tinker_pdf_cos::dest::DestKind;
 use tinker_pdf_cos::{
     BlendMode, CosDocument, DeviceSpace, DocumentBuilder, DocumentEditor, Encryption, ExtGState,
-    FormXObject, Function, Glyph, MaskKind, Shading, StateMask, TilingPattern, TilingType,
-    TransparencyGroup, WriteMode, WriteOptions,
+    FormXObject, Function, Glyph, MaskKind, OutlineEntry, Shading, StateMask, Target,
+    TilingPattern, TilingType, TransparencyGroup, WriteMode, WriteOptions,
 };
 
 /// Printed once per test that actually invoked qpdf. CI greps for it.
@@ -1438,5 +1439,184 @@ fn qpdf_reads_back_the_composite_font_as_identity_h_over_a_cid_font() {
     assert!(
         cmap.contains("<0003> <006600660069>"),
         "and one glyph to many:\n{cmap}"
+    );
+}
+
+/// A document carrying both a link annotation and an outline, read by qpdf.
+///
+/// The round trip in `tinker-pdf/tests/writer_navigation.rs` proves this
+/// repository can read its own navigation back. This proves somebody else can,
+/// which is a different claim and the one that catches a structure only this
+/// reader is lenient about — gap 29 milestone 5 found a defect **only** qpdf
+/// caught, and gap 30 milestone 4 found `/CropBox` written where it should have
+/// been absent.
+///
+/// The output format was read before it was asserted against. qpdf prints
+/// `/Count -1` with the space, sorts a dictionary's keys, and renders an
+/// outline through `--show-object` rather than any dedicated flag — seven
+/// milestones running have had to rewrite an assertion after assuming
+/// otherwise.
+#[test]
+fn qpdf_reads_a_documents_links_and_its_outline() {
+    let qpdf = oracle!("--check over links and an outline");
+
+    let mut builder = DocumentBuilder::new();
+    for _ in 0..3 {
+        builder.add_page(200.0, 300.0, |_| {});
+    }
+    builder.add_page(200.0, 300.0, |page| {
+        assert!(page.link(
+            10.0,
+            20.0,
+            90.0,
+            40.0,
+            &Target::Page {
+                index: 2,
+                view: DestKind::Fit
+            }
+        ));
+        assert!(page.link(
+            10.0,
+            50.0,
+            90.0,
+            70.0,
+            &Target::Uri("https://example.org/".to_string())
+        ));
+    });
+    assert!(builder.set_outline(vec![
+        OutlineEntry {
+            title: "Open".to_string(),
+            target: None,
+            open: true,
+            children: vec![OutlineEntry {
+                title: "Leaf".to_string(),
+                target: Some(Target::Page {
+                    index: 1,
+                    view: DestKind::Fit
+                }),
+                open: true,
+                children: Vec::new(),
+            }],
+        },
+        OutlineEntry {
+            title: "Closed".to_string(),
+            target: None,
+            open: false,
+            children: vec![OutlineEntry {
+                title: "Hidden".to_string(),
+                target: Some(Target::Page {
+                    index: 2,
+                    view: DestKind::Fit
+                }),
+                open: true,
+                children: Vec::new(),
+            }],
+        },
+    ]));
+
+    let path = fixture("navigation", "nav.pdf", &builder.finish());
+    let (code, text) = run(&qpdf, &["--check", &path.display().to_string()]);
+    assert_eq!(code, 0, "qpdf --check:\n{text}");
+    assert!(
+        text.contains("No syntax or stream encoding errors found"),
+        "qpdf found something:\n{text}"
+    );
+
+    // Read out of qpdf rather than out of the builder. Its `--json` resolves
+    // the outline into a tree with the destinations already followed, which is
+    // a stronger statement than the dictionary: it says the `/First`, `/Last`,
+    // `/Next`, `/Prev` and `/Parent` chain is walkable by somebody else.
+    let (code, dump) = run(&qpdf, &["--json=latest", &path.display().to_string()]);
+    assert_eq!(code, 0, "qpdf --json:\n{dump}");
+    for title in ["Open", "Leaf", "Closed", "Hidden"] {
+        assert!(
+            dump.contains(&format!("\"title\": \"{title}\"")),
+            "qpdf reads the title {title}:\n{dump}"
+        );
+    }
+    assert!(
+        dump.contains("\"open\": true") && dump.contains("\"open\": false"),
+        "and both view states, which is what the sign of /Count means:\n{dump}"
+    );
+    assert!(
+        dump.contains("\"destpageposfrom1\": 2"),
+        "the leaf's destination resolves to the second page:\n{dump}"
+    );
+
+    // And the counts themselves, out of the objects, because the tree above
+    // reports `open` as a boolean and throws the magnitude away. 12.3.3: an
+    // open entry states its visible descendants, a closed one states the
+    // negative of them, and the root states every visible item in the whole
+    // tree -- three here, since `Hidden` sits under a closed parent and is not
+    // one of them.
+    let mut counts: Vec<String> = Vec::new();
+    for number in 1..40 {
+        let (code, text) = run(
+            &qpdf,
+            &[
+                &format!("--show-object={number}"),
+                &path.display().to_string(),
+            ],
+        );
+        if code == 0 && text.contains("/Title") || text.contains("/Type /Outlines") {
+            if let Some(at) = text.find("/Count ") {
+                let rest = &text[at + 7..];
+                let value: String = rest
+                    .chars()
+                    .take_while(|c| *c == '-' || c.is_ascii_digit())
+                    .collect();
+                if !value.is_empty() {
+                    counts.push(value);
+                }
+            }
+        }
+    }
+    assert!(
+        counts.contains(&"1".to_string()),
+        "the open parent states one visible descendant: {counts:?}"
+    );
+    assert!(
+        counts.contains(&"-1".to_string()),
+        "the closed one states minus its own: {counts:?}"
+    );
+    assert!(
+        counts.contains(&"3".to_string()),
+        "and the root states every visible item: {counts:?}"
+    );
+
+    // Both link actions, which are two different dictionaries and not two
+    // spellings of one (12.5.6.5).
+    let (code, page) = run(&qpdf, &["--show-object=6", &path.display().to_string()]);
+    assert_eq!(code, 0, "{page}");
+    assert!(page.contains("/Annots"), "the page carries them:\n{page}");
+    let (_, first) = run(&qpdf, &["--show-object=11", &path.display().to_string()]);
+    let (_, second) = run(&qpdf, &["--show-object=12", &path.display().to_string()]);
+    let both = format!("{first}{second}");
+    assert!(both.contains("/Link"), "as /Link annotations:\n{both}");
+    assert!(both.contains("/Dest"), "one by /Dest:\n{both}");
+    assert!(both.contains("/URI"), "and one by a /URI action:\n{both}");
+    assert!(
+        both.contains("/Border [ 0 0 0 ]"),
+        "with no visible border:\n{both}"
+    );
+
+    // 12.3.3's sibling chain runs **both ways**: `/Next` forward and `/Prev`
+    // back. A reader that walks forward only -- which this repository's does,
+    // and which is enough to build the tree -- cannot tell the back-links are
+    // missing, so the injection matrix found deleting `/Prev` survived every
+    // round trip. A viewer that walks up from a selected entry cannot.
+    let (_, second_item) = run(&qpdf, &["--show-object=15", &path.display().to_string()]);
+    assert!(
+        second_item.contains("/Prev"),
+        "the second top-level entry points back at the first:\n{second_item}"
+    );
+    let (_, first_item) = run(&qpdf, &["--show-object=14", &path.display().to_string()]);
+    assert!(
+        first_item.contains("/Next"),
+        "and the first points forward at the second:\n{first_item}"
+    );
+    assert!(
+        !first_item.contains("/Prev"),
+        "the first has nothing before it:\n{first_item}"
     );
 }

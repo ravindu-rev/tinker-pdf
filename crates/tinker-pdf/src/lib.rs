@@ -80,9 +80,16 @@ pub use tinker_pdf_cos::{
 /// one; it was already needed by `ImageColorSpace::Indexed` and already
 /// missing, which is a gap 29 omission this closes as a side effect rather
 /// than a policy this milestone changed.
+///
+/// `Target` is gap 31 milestone 5's, and it arrives for the same reason: it is
+/// the argument to `PageBuilder::link` and the field an `OutlineEntry` carries,
+/// so without it neither is callable from outside. Its view type is
+/// [`DestKind`] — the **reader's** own, already on this facade — rather than a
+/// second vocabulary for one concept, which is what makes a write followed by
+/// a read an equality rather than a translation.
 pub use tinker_pdf_cos::{
     DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
-    PageBuilder, SkippedWidget, WidgetDefect, WriteMode, WriteOptions,
+    PageBuilder, SkippedWidget, Target, WidgetDefect, WriteMode, WriteOptions,
 };
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;

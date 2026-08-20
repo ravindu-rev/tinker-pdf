@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::dest::DestKind;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
@@ -682,6 +683,22 @@ fn is_box(rect: &[f64; 4]) -> bool {
     all_finite(rect) && rect[2] > rect[0] && rect[3] > rect[1]
 }
 
+/// A rectangle with its corners in 7.9.5's order.
+///
+/// 7.9.5 says a rectangle "should" be written with its corners in lower-left,
+/// upper-right order, and calls one written the other way round *normalised*
+/// by the consumer. Doing it here means the file says what the specification
+/// recommends; leaving it to the consumer means relying on every one of them
+/// doing the same optional thing.
+fn normalised(rect: [f64; 4]) -> [f64; 4] {
+    [
+        rect[0].min(rect[2]),
+        rect[1].min(rect[3]),
+        rect[0].max(rect[2]),
+        rect[1].max(rect[3]),
+    ]
+}
+
 /// How deeply a type 3 function may stitch functions that stitch functions.
 ///
 /// **Not a resource bound, and it stays out of `bounds_ledger.rs` for that
@@ -977,6 +994,11 @@ pub struct PageBuilder {
     crop_box: Option<[f64; 4]>,
     /// `/BleedBox`, likewise.
     bleed_box: Option<[f64; 4]>,
+    /// The page's link annotations, in the order they were added — which is
+    /// the order they reach `/Annots`, and the order the reader reports them
+    /// in. Written at `finish`, because a destination naming a page index
+    /// cannot be resolved until every page exists.
+    links: Vec<LinkAnnotation>,
 }
 
 impl PageBuilder {
@@ -1198,6 +1220,52 @@ impl PageBuilder {
         self.content.extend_from_slice(operators);
         self.content.push(b'\n');
     }
+
+    /// Adds a link annotation over a rectangle (12.5.6.5).
+    ///
+    /// The rectangle is in the page's own coordinates, points from the
+    /// bottom-left, in the same order as [`PageBuilder::set_crop_box`]. It is
+    /// **normalised** to 7.9.5's corner order, so a caller that measured a
+    /// line of text downwards gets a rectangle a viewer can hit-test rather
+    /// than an inverted one.
+    ///
+    /// An annotation is not a drawing operator and does not join the content
+    /// stream: nothing here paints, and `/Border [0 0 0]` keeps a viewer from
+    /// painting either. What it adds is a region of the page that goes
+    /// somewhere.
+    ///
+    /// Returns false, adding nothing, for:
+    ///
+    /// - a rectangle with a `NaN` or an infinity in it, which is not a
+    ///   rectangle a PDF number can spell;
+    /// - a rectangle enclosing no area, which is a region no click can land
+    ///   in — the same refusal [`DocumentBuilder::add_form`] makes of a
+    ///   degenerate `/BBox`;
+    /// - a target that cannot be written: see [`crate::dest::DestKind::is_writable`]
+    ///   and [`crate::dest::is_writable_uri`];
+    /// - a page already carrying [`crate::limits::MAX_ARRAY_LEN`] links, which
+    ///   is where this repository's own reader stops walking an `/Annots`
+    ///   array.
+    pub fn link(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, target: &Target) -> bool {
+        if !all_finite(&[x0, y0, x1, y1]) {
+            return false;
+        }
+        let rect = normalised([x0, y0, x1, y1]);
+        if !is_box(&rect) {
+            return false;
+        }
+        if !target.is_writable() {
+            return false;
+        }
+        if self.links.len() >= crate::limits::MAX_ARRAY_LEN {
+            return false;
+        }
+        self.links.push(LinkAnnotation {
+            rect,
+            target: target.clone(),
+        });
+        true
+    }
 }
 
 /// Reads a JPEG's dimensions and component count from its frame header.
@@ -1245,14 +1313,152 @@ pub fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
     None
 }
 
-/// One outline entry to write.
+/// Where a link annotation or an outline entry goes.
+///
+/// **Two kinds and not three**, which is the writing side of the distinction
+/// [`crate::dest::Destination`] draws on the reading side (ruling 6): a page in
+/// this document, and a URI that leaves it altogether. A *named* destination —
+/// the third thing a `/Dest` may be — is deliberately absent, because a name
+/// is only a destination once the catalog carries a `/Names /Dests` tree to
+/// look it up in, and this builder writes no name tree. Offering a name with
+/// nowhere to resolve it would produce exactly the dead link the header of
+/// `dest.rs` exists to describe.
+///
+/// A [`Target::Page`] naming an index past the end of the document is **not**
+/// an error and is not repaired. Nothing here knows how many pages there will
+/// be: a page's links are written while the page is drawn, and a chapter that
+/// links forward to a chapter not yet added is the ordinary case rather than
+/// the exotic one. What is written for an index that never arrives is *no
+/// destination at all* — a link with a rectangle and nothing behind it, which
+/// [`crate::dest::links`] already reports as `target: None`, and an outline
+/// entry with no destination, which is the shape 12.3.3 gives a heading. The
+/// alternative is a link to whichever page happened to be last, which is the
+/// plausible-and-wrong answer this repository refuses everywhere else.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Target {
+    /// A page in this document, positioned as `view` says (12.3.2.2).
+    Page {
+        /// Zero-based page index.
+        index: u32,
+        /// How the page is positioned when the link is followed (Table 151).
+        view: DestKind,
+    },
+    /// A URI, written as the `/URI` action of 12.6.4.7.
+    ///
+    /// 7-bit ASCII, per that clause; see [`crate::dest::is_writable_uri`] for
+    /// what is refused and why.
+    Uri(String),
+}
+
+impl Target {
+    /// Whether this target can be written.
+    fn is_writable(&self) -> bool {
+        match self {
+            Target::Page { view, .. } => view.is_writable(),
+            Target::Uri(uri) => crate::dest::is_writable_uri(uri),
+        }
+    }
+
+    /// Writes the target into a dictionary that may carry either spelling.
+    ///
+    /// 12.5.6.5 makes `/Dest` and `/A` **alternatives**, and says a link
+    /// carrying both is malformed; 12.3.3 says the same of an outline item. So
+    /// exactly one is inserted, never both — and which one is decided by the
+    /// kind of target rather than by a flag, so the malformed shape is not
+    /// expressible.
+    fn write(&self, names: &NameTable, pages: &[ObjRef], dict: &mut Dict) {
+        match self {
+            Target::Page { index, view } => {
+                // An index past the end writes nothing; see the type's own
+                // documentation for why that is the answer.
+                if let Some(&page) = pages.get(*index as usize) {
+                    dict.insert(
+                        names.intern(b"Dest"),
+                        crate::dest::destination_array(names, page, view),
+                    );
+                }
+            }
+            Target::Uri(uri) => {
+                dict.insert(
+                    names.intern(b"A"),
+                    Object::Dict(crate::dest::uri_action(names, uri)),
+                );
+            }
+        }
+    }
+}
+
+/// One link annotation on a page, held until `finish` (12.5.6.5).
+struct LinkAnnotation {
+    /// `/Rect`, already normalised to 7.9.5's corner order.
+    rect: [f64; 4],
+    /// Where it goes.
+    target: Target,
+}
+
+/// One outline entry to write (12.3.3).
 pub struct OutlineEntry {
     /// The visible text.
     pub title: String,
-    /// Zero-based page index the entry goes to.
-    pub page: u32,
+    /// Where the entry goes, or `None` for a heading that only groups the
+    /// entries beneath it.
+    ///
+    /// 12.3.3 makes `/Dest` optional, and an entry without one is a real
+    /// shape rather than a degraded one: a part title above three chapters
+    /// often points nowhere itself.
+    pub target: Option<Target>,
+    /// Whether the entry is shown expanded when the document is opened.
+    ///
+    /// 12.3.3 spells this as the **sign** of `/Count` rather than as a flag,
+    /// and only for an entry that has descendants: the entry is required to
+    /// carry a count at all only when there is something under it. So this
+    /// field is ignored for an entry with no children — an entry with nothing
+    /// beneath it is neither open nor closed — and an entry that has some
+    /// round-trips through [`crate::outline::outline`]'s own `open` flag.
+    pub open: bool,
     /// Nested entries.
     pub children: Vec<OutlineEntry>,
+}
+
+/// Whether an outline can be written *and read back by this repository*.
+///
+/// Two independent limits, and both are the **reader's** rather than
+/// invented here — the same argument `MAX_FUNCTION_DEPTH` above is written
+/// under, and the reason neither joins `bounds_ledger.rs`. Nothing in an
+/// [`OutlineEntry`] comes from a file, so a constant over one could never be
+/// the thing that stopped an attacker; what these are instead is the shape
+/// [`crate::outline::outline`] can walk:
+///
+/// - it stops recursing past [`crate::limits::MAX_NEST_DEPTH`], counting the
+///   top level as depth zero, and warns `OutlineTruncated`;
+/// - it stops walking one `/Next` chain after
+///   [`crate::limits::MAX_TREE_ENTRIES`] siblings, and warns the same.
+///
+/// A writer whose output its own reader silently truncates is not a writer.
+/// The walk is **iterative**, so a caller handing over a tree a thousand deep
+/// is refused rather than overflowing a stack finding out.
+fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
+    let mut stack: Vec<(&[OutlineEntry], u32)> = vec![(entries, 0)];
+    while let Some((level, depth)) = stack.pop() {
+        if depth > crate::limits::MAX_NEST_DEPTH {
+            return false;
+        }
+        if level.len() > crate::limits::MAX_TREE_ENTRIES {
+            return false;
+        }
+        for entry in level {
+            if let Some(target) = &entry.target {
+                if !target.is_writable() {
+                    return false;
+                }
+            }
+            if !entry.children.is_empty() {
+                stack.push((&entry.children, depth + 1));
+            }
+        }
+    }
+    true
 }
 
 /// Assembles a document.
@@ -2569,6 +2775,7 @@ impl DocumentBuilder {
             drawn: BTreeMap::new(),
             crop_box: None,
             bleed_box: None,
+            links: Vec::new(),
         };
         draw(&mut page);
         self.pages.push(page);
@@ -2583,9 +2790,24 @@ impl DocumentBuilder {
         );
     }
 
-    /// Sets the outline.
-    pub fn set_outline(&mut self, entries: Vec<OutlineEntry>) {
+    /// Sets the document outline (12.3.3).
+    ///
+    /// Returns false, **leaving whatever outline was already set standing**,
+    /// for a tree this repository's own reader could not read back: one nested
+    /// deeper than [`crate::limits::MAX_NEST_DEPTH`], one with a level of more
+    /// than [`crate::limits::MAX_TREE_ENTRIES`] siblings, or one carrying a
+    /// target that cannot be written. See [`outline_is_writable`] for why
+    /// those are the two limits and why neither is new.
+    ///
+    /// An empty vector is accepted and clears the outline: a document with no
+    /// outline is written with no `/Outlines` at all, which is not the same
+    /// file as one with an empty outline dictionary.
+    pub fn set_outline(&mut self, entries: Vec<OutlineEntry>) -> bool {
+        if !outline_is_writable(&entries) {
+            return false;
+        }
         self.outline = entries;
+        true
     }
 
     /// Serializes the document.
@@ -2668,6 +2890,38 @@ impl DocumentBuilder {
             }
             dict.insert(Name::RESOURCES, Object::Dict(resources));
             dict.insert(Name::CONTENTS, Object::Ref(content_ref));
+
+            // 12.5.2: the page's annotations, each an indirect object. `/Annots`
+            // is written only when there are some — an empty array is a
+            // statement where its absence is not, the same rule `/CropBox`
+            // above follows.
+            let mut annots = Vec::with_capacity(page.links.len());
+            for link in &page.links {
+                let mut annot = Dict::new();
+                annot.insert(Name::TYPE, Object::Name(self.names.intern(b"Annot")));
+                annot.insert(
+                    self.names.intern(b"Subtype"),
+                    Object::Name(self.names.intern(b"Link")),
+                );
+                annot.insert(
+                    self.names.intern(b"Rect"),
+                    Object::Array(link.rect.iter().map(|v| Object::Real(*v)).collect()),
+                );
+                annot.insert(self.names.intern(b"Border"), crate::dest::no_border());
+                // 12.5.3 bit position 3: an annotation without it exists on
+                // screen and not on paper, which is `edit::annot`'s rule for
+                // every annotation it builds and is this one's too.
+                annot.insert(self.names.intern(b"F"), Object::Int(4));
+                link.target.write(&self.names, &page_refs, &mut annot);
+
+                let annot_ref = self.allocate();
+                self.objects.insert(annot_ref.num, Object::Dict(annot));
+                annots.push(Object::Ref(annot_ref));
+            }
+            if !annots.is_empty() {
+                dict.insert(self.names.intern(b"Annots"), Object::Array(annots));
+            }
+
             self.objects.insert(reference.num, Object::Dict(dict));
         }
 
@@ -2692,10 +2946,14 @@ impl DocumentBuilder {
             let children = self.write_outline(&outline, &page_refs, root);
             let mut dict = Dict::new();
             dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Outlines")));
-            if let Some((first, last, count)) = children {
+            if let Some((first, last, visible)) = children {
                 dict.insert(self.names.intern(b"First"), Object::Ref(first));
                 dict.insert(self.names.intern(b"Last"), Object::Ref(last));
-                dict.insert(Name::COUNT, Object::Int(count));
+                // 12.3.3 Table 152: the total number of *visible* items at all
+                // levels — every top-level entry, plus everything an open one
+                // exposes. Never negative: the root of an outline is the one
+                // node that cannot be closed.
+                dict.insert(Name::COUNT, Object::Int(visible));
             }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"Outlines"), Object::Ref(root));
@@ -2719,7 +2977,18 @@ impl DocumentBuilder {
         )
     }
 
-    /// Writes one level of outline entries, returning `(first, last, count)`.
+    /// Writes one level of outline entries, returning `(first, last, visible)`.
+    ///
+    /// `visible` is what this level contributes to the count of the node above
+    /// it: one for each entry, since every entry of a level that is shown at
+    /// all is shown — plus, for an entry that is **open**, everything its own
+    /// subtree exposes. A closed entry contributes exactly itself, which is
+    /// what makes the number a count of what a reader can see rather than a
+    /// count of what exists.
+    ///
+    /// Recursion is safe here because [`DocumentBuilder::set_outline`] has
+    /// already walked the tree iteratively and refused anything deeper than
+    /// [`crate::limits::MAX_NEST_DEPTH`].
     fn write_outline(
         &mut self,
         entries: &[OutlineEntry],
@@ -2731,7 +3000,7 @@ impl DocumentBuilder {
         }
 
         let refs: Vec<ObjRef> = entries.iter().map(|_| self.allocate()).collect();
-        let mut total = refs.len() as i64;
+        let mut visible: i64 = 0;
 
         for (index, entry) in entries.iter().enumerate() {
             let Some(&reference) = refs.get(index) else {
@@ -2749,14 +3018,8 @@ impl DocumentBuilder {
             // Ruling 6: an explicit destination, never a name that looks like
             // one. This is the writer side of the defect that made the engine
             // being replaced turn "#page=2" into a dead named destination.
-            if let Some(&page) = pages.get(entry.page as usize) {
-                dict.insert(
-                    self.names.intern(b"Dest"),
-                    Object::Array(vec![
-                        Object::Ref(page),
-                        Object::Name(self.names.intern(b"Fit")),
-                    ]),
-                );
+            if let Some(target) = &entry.target {
+                target.write(&self.names, pages, &mut dict);
             }
 
             if let Some(&previous) = index.checked_sub(1).and_then(|i| refs.get(i)) {
@@ -2765,20 +3028,32 @@ impl DocumentBuilder {
             if let Some(&next) = refs.get(index + 1) {
                 dict.insert(self.names.intern(b"Next"), Object::Ref(next));
             }
-            if let Some((first, last, count)) = children {
+
+            visible += 1;
+            if let Some((first, last, below)) = children {
                 dict.insert(self.names.intern(b"First"), Object::Ref(first));
                 dict.insert(self.names.intern(b"Last"), Object::Ref(last));
-                // A positive count means the entry is open when the document
-                // is opened (12.3.3).
-                dict.insert(Name::COUNT, Object::Int(count));
-                total += count;
+                // 12.3.3 Table 153, and the sign is the whole entry. An open
+                // item states how many descendants are showing; a **closed**
+                // one states the negative of how many would show if it were
+                // reopened. The magnitude is the same number in both cases,
+                // so a writer that got only the sign wrong would produce a
+                // tree that opens the wrong way in every viewer and reads
+                // back identically through any reader that ignores it.
+                dict.insert(
+                    Name::COUNT,
+                    Object::Int(if entry.open { below } else { -below }),
+                );
+                if entry.open {
+                    visible += below;
+                }
             }
 
             self.objects.insert(reference.num, Object::Dict(dict));
         }
 
         match (refs.first(), refs.last()) {
-            (Some(&first), Some(&last)) => Some((first, last, total)),
+            (Some(&first), Some(&last)) => Some((first, last, visible)),
             _ => None,
         }
     }
@@ -2917,6 +3192,15 @@ mod tests {
         assert!(text.contains(r"\(nested\)"), "escaped: {text}");
     }
 
+    /// A whole-page target, which is what an entry that only names a page
+    /// wants.
+    fn page_target(index: u32) -> Target {
+        Target::Page {
+            index,
+            view: DestKind::Fit,
+        }
+    }
+
     /// Ruling 6 on the writer side: an outline destination round-trips as an
     /// explicit one.
     #[test]
@@ -2926,26 +3210,30 @@ mod tests {
         for _ in 0..6 {
             builder.add_page(595.0, 842.0, |_| {});
         }
-        builder.set_outline(vec![
+        assert!(builder.set_outline(vec![
             OutlineEntry {
                 title: "Part One".to_string(),
-                page: 0,
+                target: Some(page_target(0)),
+                open: true,
                 children: vec![OutlineEntry {
                     title: "Chapter 1".to_string(),
-                    page: 1,
+                    target: Some(page_target(1)),
+                    open: true,
                     children: vec![OutlineEntry {
                         title: "Section 1.1".to_string(),
-                        page: 2,
+                        target: Some(page_target(2)),
+                        open: true,
                         children: Vec::new(),
                     }],
                 }],
             },
             OutlineEntry {
                 title: "Part Two".to_string(),
-                page: 4,
+                target: Some(page_target(4)),
+                open: true,
                 children: Vec::new(),
             },
-        ]);
+        ]));
         let bytes = builder.finish();
 
         let doc = CosDocument::open(bytes).expect("it opens");

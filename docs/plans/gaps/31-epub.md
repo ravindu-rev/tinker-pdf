@@ -2464,3 +2464,111 @@ and the matrix resumed from 16.
 - Milestone 2's owed facade test still belongs to milestone 8, which is the
   first milestone that reads a content document.
 
+## Progress — 19 August 2026, milestone 5
+
+**The writer has link annotations and an outline**, and nothing consumes either
+yet. That is row 5's own arrangement and gap 30 milestone 5's: build the writer
+before the milestones that need it, because a fallback which produces plausible
+output is worse than one that produces none. The workspace stands at **2 367**.
+
+`DocumentBuilder::link` takes a rectangle and a `Target`; `set_outline` takes a
+tree of `OutlineEntry`. **Nothing in either mentions EPUB** — row 5's last
+clause, and the test of whether the work belongs in the writer rather than in a
+format. `tests/writer_navigation.rs` says the word once, in a paragraph
+explaining why it appears nowhere else.
+
+### The round trip is through this repository's own reader
+
+Every other milestone here checks a writer by reading its bytes back with an
+assertion written beside the writer. This one does better and is the only one
+that can: the facade **already reads** outlines and link annotations, so a
+document is built, saved through `DocumentEditor::save`, reopened with
+`Document::open`, and compared against what was asked for through the **public**
+`Document::outline()` and `Page::links()`.
+
+That is gap 30 milestone 5's argument about `MAX_FUNCTION_DEPTH` in a second
+place: **a writer whose output its own reader cannot read is not a writer.**
+
+### 12.3.3's `/Count` is a sign and a magnitude, and they are two claims
+
+An open entry states its visible descendants; a closed one states the *negative*
+of them. Get the sign wrong and the tree opens the wrong way in every viewer
+while reading back identically through any reader that turns it into a `bool` —
+which this repository's does. So the sign is attacked from **both** directions
+in the matrix, because a build that wrote one sign for everything passes a test
+that only has the other, and the magnitude is attacked separately again.
+
+qpdf confirms all three numbers from outside: `/Count 1` on the open parent,
+`/Count -1` on the closed one, and `/Count 3` at the root — three *visible*
+items, because the fourth sits under a closed parent and is not one of them.
+
+### What qpdf caught that nothing here could
+
+**Two of the eleven defects are invisible to this repository entirely.**
+
+`/Border [0 0 0]` omitted: the reader does not surface border style, so a link
+that draws a visible box in every viewer round-trips perfectly. And **the `/Prev`
+chain deleted**: 12.3.3's siblings link both ways, this reader walks `/Next`
+forward only — which is enough to build the tree — so no round trip can see the
+back-links missing. A viewer walking *up* from a selected entry can.
+
+That is the third and fourth time in this session an external oracle has caught
+something no internal test could, after gap 29 milestone 5's shared resource
+table and gap 30 milestone 4's `/CropBox`.
+
+The output format was read before it was asserted against, which is now a
+standing habit rather than a precaution: `--json-key=objects` returns nothing
+useful here, and the outline arrives instead as a resolved tree with `title`,
+`open` and `destpageposfrom1`. Eight milestones running have had to rewrite an
+assertion after assuming a format.
+
+### The injection matrix
+
+Eleven defects, one at a time, each reverted before the next. **Six caught on
+the first pass; five survived, every one a real test gap, all five closed.**
+
+| Defect | Caught by |
+| --- | --- |
+| The closed form writes a positive count | qpdf, and the sign test |
+| The open form writes a negative count | the same two |
+| A closed entry's descendants count toward the level above | qpdf — **alone** |
+| An entry contributes nothing of its own to the count | qpdf, and the sign test |
+| The root states its own children rather than every visible item | qpdf — **alone** |
+| A link's `/Border` is left out | **qpdf — alone** |
+| **`/Rect`'s corners written unordered** | survived — now `a_rectangle_given_backwards_is_written_normalised` |
+| **A degenerate `/Rect` accepted** | survived — now `a_rectangle_with_no_area_is_refused_and_leaves_nothing_behind` |
+| **An unwritable link target written anyway** | survived — now the refusal test, which needed a second consequence |
+| **An unwritable outline replaces the one already set** | survived — now `an_unwritable_outline_leaves_the_previous_one_standing` |
+| **The sibling chain has no `/Prev`** | **survived — now qpdf, alone** |
+
+**The five survivors share one shape and it is worth naming.** Each was a
+property visible only from a direction no fixture had come from. Every `/Rect`
+fixture gave its corners already ordered, which is what a writer's own author
+naturally writes. Nobody wrote a zero-area link. Every outline fixture set one
+outline *once*, so a build that cleared the document before validating the
+replacement passed — and that failure is silent, leaving a caller who ignores
+the `false` with no navigation at all rather than the navigation it had.
+
+### One assertion of mine was wrong and the contract was right
+
+`set_outline(vec![])` **clears** an existing outline and answers true. The first
+version of that test asserted it answered false. The contract is explicit and
+the distinction is gap 21's whole subject: a document with no `/Outlines` and a
+document with an empty outline dictionary are different files. The test now sets
+an outline and then clears it, because passing an empty vector to a builder that
+never had one proves nothing — every implementation passes that, including one
+whose empty case is `return true` and nothing else.
+
+### Still owed
+
+- **Nothing consumes any of this.** Milestone 8 is where a content document's
+  `href` becomes a link and its headings become an outline; this is the seam,
+  built early on purpose.
+- **A named destination is not writable.** `Target` has a page and a URI and no
+  third arm: a name is only a destination once the catalog carries a
+  `/Names /Dests` tree, and building one is not this milestone's.
+- **`/GoToR` is not written either** — a destination in another file. An EPUB's
+  cross-references are internal, so nothing here needs it, and writing an
+  action this repository cannot then resolve would be the shape row 5 exists to
+  avoid.
+

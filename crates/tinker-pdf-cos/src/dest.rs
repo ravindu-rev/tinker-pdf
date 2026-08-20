@@ -7,8 +7,8 @@
 //! and this engine never conflates them, in either direction (ruling 6).
 
 use crate::doc::CosDocument;
-use crate::name::Name;
-use crate::object::{Dict, ObjRef, Object};
+use crate::name::{Name, NameTable};
+use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::pages::{Page, Rect};
 
 /// How a destination positions the page it names (12.3.2.2, Table 151).
@@ -459,6 +459,154 @@ pub fn links(doc: &CosDocument, page: ObjRef) -> Vec<Link> {
         });
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// The writing side (gap 31, milestone 5).
+//
+// Everything below turns a value into the bytes 12.3.2.2 and 12.6.4.7 spell,
+// and it lives here rather than in `build.rs` because the *reading* side of
+// each of these entries is the code above it. A destination array written in
+// one file and parsed in another is how the two halves drift apart; keeping
+// them in one file is what makes `kind_of` and [`destination_array`] readable
+// against each other.
+// ---------------------------------------------------------------------------
+
+impl DestKind {
+    /// Whether this view can be written to a file.
+    ///
+    /// Refused rather than repaired, which is [`crate::build::DocumentBuilder`]'s
+    /// posture everywhere else: a `NaN` coordinate would reach the file as the
+    /// token `NaN`, which is not a PDF number at all, and a `/FitR` whose
+    /// rectangle encloses nothing asks a viewer for infinite magnification.
+    ///
+    /// A **negative** zoom is refused for the same reason and a zoom of zero
+    /// is not: 12.3.2.2 gives zero a meaning — "leave the magnification
+    /// unchanged", exactly what `null` means — and gives a negative number
+    /// none.
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        let finite = |v: Option<f64>| v.is_none_or(|v| v.is_finite());
+        match self {
+            DestKind::Fit | DestKind::FitB => true,
+            DestKind::Xyz { left, top, zoom } => {
+                finite(*left) && finite(*top) && zoom.is_none_or(|z| z.is_finite() && z >= 0.0)
+            }
+            DestKind::FitH { top } | DestKind::FitBH { top } => finite(*top),
+            DestKind::FitV { left } | DestKind::FitBV { left } => finite(*left),
+            DestKind::FitR {
+                left,
+                bottom,
+                right,
+                top,
+            } => {
+                [*left, *bottom, *right, *top].iter().all(|v| v.is_finite())
+                    && right > left
+                    && top > bottom
+            }
+        }
+    }
+}
+
+/// One optional coordinate of a destination, as Table 151 spells it.
+///
+/// `null` and not an omission: 12.3.2.2 positions each parameter by its index
+/// in the array, so a `/XYZ` that left out its `left` would make the file's
+/// `top` this reader's `left`.
+fn coordinate(value: Option<f64>) -> Object {
+    value.map_or(Object::Null, Object::Real)
+}
+
+/// The `/Dest` array for a page and a view (12.3.2.2, Table 151).
+///
+/// The page is an **indirect reference**, never the page number 12.3.2.2 also
+/// permits: a number is only correct while nothing renumbers the pages, and
+/// this crate's own editor does.
+pub(crate) fn destination_array(names: &NameTable, page: ObjRef, view: &DestKind) -> Object {
+    let mut out = vec![Object::Ref(page)];
+    match view {
+        DestKind::Xyz { left, top, zoom } => {
+            out.push(Object::Name(names.intern(b"XYZ")));
+            out.push(coordinate(*left));
+            out.push(coordinate(*top));
+            // 12.3.2.2: "a zoom value of 0 has the same meaning as a null
+            // value". Two spellings of one value is a distinction with no
+            // consequence, so the caller's zero is written as the null, and
+            // the round trip through `kind_of` — which filters zero back out
+            // — is an equality rather than an equivalence.
+            out.push(coordinate(zoom.filter(|z| *z != 0.0)));
+        }
+        DestKind::Fit => out.push(Object::Name(names.intern(b"Fit"))),
+        DestKind::FitH { top } => {
+            out.push(Object::Name(names.intern(b"FitH")));
+            out.push(coordinate(*top));
+        }
+        DestKind::FitV { left } => {
+            out.push(Object::Name(names.intern(b"FitV")));
+            out.push(coordinate(*left));
+        }
+        DestKind::FitR {
+            left,
+            bottom,
+            right,
+            top,
+        } => {
+            out.push(Object::Name(names.intern(b"FitR")));
+            out.push(Object::Real(*left));
+            out.push(Object::Real(*bottom));
+            out.push(Object::Real(*right));
+            out.push(Object::Real(*top));
+        }
+        DestKind::FitB => out.push(Object::Name(names.intern(b"FitB"))),
+        DestKind::FitBH { top } => {
+            out.push(Object::Name(names.intern(b"FitBH")));
+            out.push(coordinate(*top));
+        }
+        DestKind::FitBV { left } => {
+            out.push(Object::Name(names.intern(b"FitBV")));
+            out.push(coordinate(*left));
+        }
+    }
+    Object::Array(out)
+}
+
+/// Whether a URI can be written as a `/URI` action (12.6.4.7).
+///
+/// 12.6.4.7 makes the URI "encoded in 7-bit ASCII", so a byte with its top bit
+/// set is refused rather than written: a caller with a non-ASCII URI owes it
+/// RFC 3986's percent-encoding, and doing that here would mean guessing which
+/// encoding the bytes were in. ASCII control characters go the same way, since
+/// no URI contains one and a literal string would carry it into the file
+/// intact.
+///
+/// An **empty** URI is refused too. `/URI ()` is a well-formed action that
+/// resolves to nothing, which is the class of output this repository's plans
+/// call worse than none.
+pub(crate) fn is_writable_uri(uri: &str) -> bool {
+    !uri.is_empty() && uri.bytes().all(|b| (0x20..0x7f).contains(&b))
+}
+
+/// The `/A` dictionary for a URI action (12.6.4.7).
+pub(crate) fn uri_action(names: &NameTable, uri: &str) -> Dict {
+    let mut dict = Dict::new();
+    dict.insert(Name::TYPE, Object::Name(names.intern(b"Action")));
+    dict.insert(names.intern(b"S"), Object::Name(names.intern(b"URI")));
+    dict.insert(
+        names.intern(b"URI"),
+        Object::String(PdfString::literal(uri.as_bytes().to_vec())),
+    );
+    dict
+}
+
+/// `/Border [0 0 0]` — a link a viewer does not draw a box around.
+///
+/// 12.5.2 Table 164 defaults `/Border` to `[0 0 1]`, a one-unit border on
+/// every link that omits it. That default is a viewer artefact rather than
+/// content: a cross-reference inside a paragraph is styled by the document,
+/// and a rectangle drawn around it by the reader is not something any producer
+/// asked for. Written explicitly, because the absence is the box.
+pub(crate) fn no_border() -> Object {
+    Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(0)])
 }
 
 #[cfg(test)]
