@@ -51,3 +51,11 @@ tinker-pdf-zip = { workspace = true }
 # all, which is why those tests live here rather than in the leaf — a leaf that
 # reaches sideways to test itself is a leaf with an edge it did not need.
 tinker-pdf-xml = { workspace = true }
+# `tests/bounds_ledger.rs` reads gap 31 milestone 6's eight CSS constants and
+# the `limits.rs` they publish themselves in, which needs the crate in this one.
+# It is a dev-dependency and not a real one because the facade does not use CSS
+# yet: the element tree, the UA stylesheet and the cascade over a content
+# document arrive at milestone 8. The graph check counts a dev-dependency as an
+# edge, which is why `tinker-pdf-css` is in the facade's row in `ALLOWED`
+# already, with the argument for the edge written out beside it.
+tinker-pdf-css = { workspace = true }

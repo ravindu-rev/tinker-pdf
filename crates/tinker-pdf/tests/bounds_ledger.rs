@@ -1,5 +1,36 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 20 August 2026, gap 31 milestone 6.* **Eight more rows**, the whole
+//! of `tinker-pdf-css`'s `limits.rs`, and the table goes from twenty-one to
+//! twenty-nine. Two of them are worth reading before the rest.
+//!
+//! `MAX_SELECTOR_MATCHES` is the first row here whose reachable ceiling is a
+//! **product** rather than a field width: `MAX_CSS_RULES` bounds the stylesheet
+//! and `MAX_DOM_NODES` bounds the document, a file chooses both independently,
+//! and neither bounds the other. That is `5adf502`'s finding — *depth is not
+//! work once the recursion branches* — in the one place in this engine where
+//! the arithmetic is a multiplication, and gap 31's bounds table calls it the
+//! single most important constant in that plan. It is the only row whose
+//! `reachable` is checked at **compile time** as well as here, by a `const`
+//! block in the crate that declares it.
+//!
+//! `MAX_DOM_NODES` is declared in `tinker-pdf-css` rather than with the element
+//! tree that will admit the elements, and the reason is that `const` block: a
+//! compile-time relation can only name constants its own crate can reach, and
+//! `tinker-pdf-css`'s allow-list is empty by the fifth DAG amendment. So the
+//! **other** half of the relation gap 31's bounds section asks for —
+//! `MAX_DOM_NODES < MAX_XML_TOKENS` — cannot live there and is owed by the
+//! facade at milestone 8, which is the crate that can see both. Until then it
+//! is this row's `reachable` column, which is exactly the check it would be:
+//! 65 536 against 1 048 576, so the element cap fires long before the XML
+//! parser in front of it does.
+//!
+//! Every one of the eight spends **zero** against gap 29's comic and gap 30's
+//! fixed document, and that is a fact rather than an opt-out: neither format
+//! holds a stylesheet. Milestone 9's rule — *a row that opts out of a check is
+//! a row that is not checked* — is satisfied by a measured zero and would not
+//! be by an `Option`.
+//!
 //! *Amended, 19 August 2026, gap 31 milestone 4.* Three more rows —
 //! `MAX_EPUB_MANIFEST_ITEMS`, `MAX_EPUB_SPINE_ITEMS` and
 //! `MAX_EPUB_FALLBACK_DEPTH` — and one the plan's own bounds table names that
@@ -152,6 +183,7 @@ use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
 };
+use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::MAX_PNG_SAMPLES;
 use tinker_pdf_xml::limits as xml_limits;
 
@@ -168,6 +200,8 @@ const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
 const EPUB: &str = include_str!("../src/epub.rs");
 const EPUB_TESTS: &str = include_str!("epub_ocf.rs");
 const EPUB_UNIT_TESTS: &str = include_str!("../src/epub/tests.rs");
+const CSS_LIMITS: &str = include_str!("../../tinker-pdf-css/src/limits.rs");
+const CSS_BOUNDS_TESTS: &str = include_str!("../../tinker-pdf-css/src/tests/bounds.rs");
 const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
@@ -649,6 +683,150 @@ fn ledger() -> Vec<Bound> {
                 EPUB_UNIT_TESTS,
             ),
         },
+        // ---- gap 31 milestone 6: `tinker-pdf-css` ----------------------
+        //
+        // Every one of the eight spends zero against both earlier yardsticks,
+        // because neither a comic nor a fixed XPS document holds a stylesheet.
+        // The book yardstick these were written against — a 400-page novel of
+        // 120 000 words in 40 spine items, with four stylesheets totalling
+        // 40 KB — is milestone 13's third column and is recorded in each
+        // constant's own ledger in the meantime.
+        Bound {
+            name: "MAX_CSS_BYTES",
+            cap: css_limits::MAX_CSS_BYTES as u128,
+            published: "8 388 608",
+            fixtures: css_limits::MAX_CSS_BYTES as u128,
+            comic: 0,
+            document: 0,
+            // Every stylesheet in an EPUB is a ZIP entry, so gap 29's per-entry
+            // cap is what stands in front of this one — sixteen times it.
+            reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
+            reachable_because: "a stylesheet is a ZIP entry, and one may be 128 MiB",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_stylesheet_past_the_byte_cap_is_refused_by_name",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_CSS_TOKENS",
+            cap: css_limits::MAX_CSS_TOKENS as u128,
+            published: "4 000 000",
+            fixtures: css_limits::MAX_CSS_TOKENS as u128,
+            comic: 0,
+            document: 0,
+            // A token is at least one byte, so one sheet at the byte cap can
+            // cross this total on its own — which is what makes a *work* cap
+            // reachable from a single entry rather than only from a manifest
+            // that names four thousand sheets.
+            reachable: css_limits::MAX_CSS_BYTES as u128,
+            reachable_because: "one byte is one token, and a sheet may be MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: ("the_token_total_refuses_by_name", CSS_BOUNDS_TESTS),
+        },
+        Bound {
+            name: "MAX_CSS_RULES",
+            cap: css_limits::MAX_CSS_RULES as u128,
+            published: "20 000",
+            fixtures: css_limits::MAX_CSS_RULES as u128,
+            comic: 0,
+            document: 0,
+            // `a{}` is three bytes.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 3,
+            reachable_because: "a qualified rule is three bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: ("the_rule_total_refuses_by_name", CSS_BOUNDS_TESTS),
+        },
+        Bound {
+            name: "MAX_CSS_DECLARATIONS",
+            cap: css_limits::MAX_CSS_DECLARATIONS as u128,
+            published: "100 000",
+            fixtures: css_limits::MAX_CSS_DECLARATIONS as u128,
+            comic: 0,
+            document: 0,
+            // `a:b;` is four.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 4,
+            reachable_because: "a declaration is four bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: ("the_declaration_total_refuses_by_name", CSS_BOUNDS_TESTS),
+        },
+        Bound {
+            name: "MAX_CSS_SELECTOR_PARTS",
+            cap: css_limits::MAX_CSS_SELECTOR_PARTS as u128,
+            published: "64",
+            fixtures: css_limits::MAX_CSS_SELECTOR_PARTS as u128,
+            comic: 0,
+            document: 0,
+            // A compound plus its combinator is two bytes: `a `.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 2,
+            reachable_because: "`a ` is one compound and one combinator in two bytes",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_selector_past_the_compound_cap_is_dropped_with_its_own_warning",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_CSS_IMPORT_DEPTH",
+            cap: css_limits::MAX_CSS_IMPORT_DEPTH as u128,
+            published: "8",
+            fixtures: css_limits::MAX_CSS_IMPORT_DEPTH as u128,
+            comic: 0,
+            document: 0,
+            // The ceiling is the container's entry count: every level of an
+            // `@import` chain is a sheet the caller's resolver found, and gap
+            // 29's cap is what bounds how many of those there can be. A
+            // *cycle* has no ceiling at all, which is why the guard beside this
+            // cap is a different fact and warns by a different name.
+            reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
+            reachable_because: "an @import chain is as deep as the container has entries",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "an_import_chain_past_the_depth_cap_warns_by_its_own_name",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_DOM_NODES",
+            cap: css_limits::MAX_DOM_NODES as u128,
+            published: "65 536",
+            fixtures: css_limits::MAX_DOM_NODES as u128,
+            comic: 0,
+            document: 0,
+            // The half of gap 31's `const` relation that cannot live in the
+            // crate: `tinker-pdf-css` has an empty allow-list by the fifth DAG
+            // amendment, so it cannot name `MAX_XML_TOKENS`. Here it can.
+            reachable: xml_limits::MAX_XML_TOKENS as u128,
+            reachable_because: "MAX_XML_TOKENS stands in front of every content document",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_tree_past_the_element_cap_is_refused_by_name",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_SELECTOR_MATCHES",
+            cap: css_limits::MAX_SELECTOR_MATCHES as u128,
+            published: "4 000 000",
+            fixtures: css_limits::MAX_SELECTOR_MATCHES as u128,
+            comic: 0,
+            document: 0,
+            // **The product**, and the only row here whose ceiling is one. The
+            // matcher buckets rules by their rightmost compound, so an ordinary
+            // book tests each element against a handful — but a stylesheet
+            // whose every rule names one class defeats the index completely and
+            // gets the whole multiplication, which is the fixture that fires it.
+            // The same relation is asserted at compile time in the crate, in
+            // the opposite direction from an ordinary ordering: the product
+            // must *exceed* the cap or the cap could never fire.
+            reachable: css_limits::MAX_CSS_RULES as u128 * css_limits::MAX_DOM_NODES as u128,
+            reachable_because: "MAX_CSS_RULES x MAX_DOM_NODES, and neither factor bounds the other",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "the_match_budget_refuses_a_stylesheet_that_defeats_the_index",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
     ]
 }
 
@@ -684,6 +862,14 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_EPUB_MANIFEST_ITEMS",
             "MAX_EPUB_SPINE_ITEMS",
             "MAX_EPUB_FALLBACK_DEPTH",
+            "MAX_CSS_BYTES",
+            "MAX_CSS_TOKENS",
+            "MAX_CSS_RULES",
+            "MAX_CSS_DECLARATIONS",
+            "MAX_CSS_SELECTOR_PARTS",
+            "MAX_CSS_IMPORT_DEPTH",
+            "MAX_DOM_NODES",
+            "MAX_SELECTOR_MATCHES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -789,7 +975,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 21, "the ledger is twenty-one rows");
+    assert_eq!(measured, 29, "the ledger is twenty-nine rows");
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not
@@ -879,6 +1065,7 @@ fn every_bound_names_a_test_that_exists() {
         XPS_MARKUP_TESTS,
         XPS_GLYPH_TESTS,
         EPUB_TESTS,
+        CSS_BOUNDS_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

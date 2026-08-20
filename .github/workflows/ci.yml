@@ -81,9 +81,9 @@ jobs:
     #
     # Bounded on purpose, and bounded per target rather than in total, so
     # adding a target adds a known amount of time instead of quietly taking
-    # it from the others: twenty-two targets, twenty seconds each, one build.
-    # Unlike the nightly this is one runner rather than twenty-two, because
-    # holding twenty-two machines for twenty seconds each is worse for everyone
+    # it from the others: twenty-three targets, twenty seconds each, one build.
+    # Unlike the nightly this is one runner rather than twenty-three, because
+    # holding twenty-three machines for twenty seconds each is worse for everyone
     # queueing behind it than holding one for five minutes.
     #
     # `crypt` is the one target for which twenty seconds is not twenty seconds

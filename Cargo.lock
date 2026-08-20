@@ -286,6 +286,7 @@ dependencies = [
  "tinker-pdf-content",
  "tinker-pdf-cos",
  "tinker-pdf-crypto",
+ "tinker-pdf-css",
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-raster",
@@ -322,6 +323,10 @@ dependencies = [
 
 [[package]]
 name = "tinker-pdf-crypto"
+version = "0.0.1"
+
+[[package]]
+name = "tinker-pdf-css"
 version = "0.0.1"
 
 [[package]]

@@ -1165,7 +1165,7 @@ inputs could ask for, so it could **never fire**.
 | `MAX_CSS_DECLARATIONS` | **A work cap.** Declarations admitted across the book | The same |
 | `MAX_CSS_SELECTOR_PARTS` | Compound selectors in one complex selector | — (per-item; it bounds one match attempt's cost) |
 | `MAX_CSS_IMPORT_DEPTH` | `@import` nesting, with a cycle guard | A cycle is two lines of CSS; a depth cap without the guard loops |
-| `MAX_SELECTOR_MATCHES` | **The work cap of the cascade.** Selector-against-element attempts across the whole book | `MAX_CSS_RULES` × `MAX_DOM_NODES` is the product, and **neither factor bounds the other**. This is `5adf502`'s sentence in its purest form and it is the single most important constant in this plan |
+| `MAX_SELECTOR_MATCHES` | **The work cap of the cascade.** Selector-against-element attempts across the whole book. **Amended, 20 August 2026, milestone 6: it counts *compound*-against-element tests, not selector-against-element attempts.** Matching `a b c d` walks the ancestor chain with backtracking, so one attempt is `O(depth^parts)` compound tests and a cap on the attempts bounds a number that is not the work — `5adf502`'s sentence one level further down than this table had it. `MAX_CSS_SELECTOR_PARTS` bounds one attempt's shape and this bounds its cost, and they are different claims | `MAX_CSS_RULES` × `MAX_DOM_NODES` is the product, and **neither factor bounds the other**. This is `5adf502`'s sentence in its purest form and it is the single most important constant in this plan |
 | `MAX_DOM_NODES` | Elements admitted from one content document | — (per-document). `MAX_XML_TOKENS` stands in front of it and is a million, so this must sit below that or it can never fire |
 | `MAX_BOX_TREE_NODES` | **A work cap.** Boxes across the book | Boxes are not elements: anonymous block generation, `::before`/`::after` and table-structure fixup (CSS 2.2 §17.2.1) each create boxes the document did not write |
 | `MAX_LAYOUT_WORK` | **The work cap of layout.** Box-layout operations across the book | A per-box cap is not a total once the file chooses the box count *and* the pass count: automatic table layout is two passes (§17.5.2.2), float placement re-flows a line, shrink-to-fit measures twice, and a nested table multiplies all three |
@@ -1181,9 +1181,17 @@ that it is *not* a work cap, in the register `MAX_SCRIPT_STEPS`,
 `MAX_MESH_TRIANGLES`, `tinker-pdf-zip`'s `limits.rs` and gap 30's XPS constants
 already use.
 
-**Three deliberately absent, argued where they are declared**, because gap 29
+**Four deliberately absent, argued where they are declared** — three when this was written and a fourth added by milestone 6 — because gap 29
 established that writing down why a cap was *not* added is the cheaper half of
 this discipline:
+
+- **Nothing on a stylesheet's block nesting**, added 20 August 2026 by
+  milestone 6 and argued where it is declared: a `{`-in-`(`-in-`[` chain is
+  bounded by `MAX_CSS_TOKENS` for allocation and by a plain 256 for the
+  *recursion*, which is `MAX_XML_DEPTH`'s number taken for `MAX_XML_DEPTH`'s
+  reason — a stack, not a budget — and a construct past it is a malformed one
+  the layer above already discards. It is not a ledger row because it bounds no
+  allocation a cap already here does not.
 
 - **Nothing on DOM depth.** `tinker_pdf_xml::limits::MAX_XML_DEPTH` is 256 and
   stands in front of every content document, so a separate constant could never
@@ -1441,7 +1449,7 @@ one per milestone, each independently green under the full gate.
 | 3 | **OCF, the discrimination, and a book that is no longer a cover** | `Document::open` routes a ZIP by container: XPS first (gap 30's E.3, untouched), then **EPUB by the presence of `META-INF/container.xml`**, then CBZ as the fallthrough — and a comic archive that happens to carry a `META-INF/` directory is still a comic, from a fixture built for it; **milestone 1's pinned tests resolve**, and the passing test that records today's wrong answers is **deleted in this commit**, which is the point of having written it; `mimetype` checked per §4.3.2 with **`header_offset == 0` and not `index == 0`**, proved by a fixture whose central-directory order and physical order disagree, and a violation **warning rather than refusing** per the decision above; the extra-field question settled one way or the other and the choice recorded; `container.xml` parsed and its `rootfile` resolved, with §4.2.3's path restrictions and §4.2.5's relative-reference resolution against the *referring document*; the six `META-INF` reserved names recognised, `encryption.xml` read far enough to refuse a non-obfuscation algorithm **by name**; every book-level `ArchiveRefusal` variant returned by a fixture built for it; `Archive::read`'s inflation budget spent once per part, proved by asserting `inflated()` does not grow on a second resolution | M |
 | 4 | **The package document, the spine, and an honest blank book** | `package` (§5.4), `metadata` with the three required Dublin Core elements (§5.5.3.1) including the `unique-identifier` milestone 9's obfuscation key needs, `manifest`/`item` with `properties` (§5.6.2), `spine`/`itemref` (§5.7), manifest fallbacks (§3.5.1) and core media types (§3.2); EPUB 2.0's OPF read as a compatibility surface and any other version refused by name; **`OpenOptions` and `Document::open_with` land here**, with `open(bytes)`'s signature unchanged and asserted so; `page_count()` equals the spine item count and every page is the box `OpenOptions` states, at 432 × 648 by default; **every page renders the neutral placeholder with a named warning rather than white**, because an empty page reported as success is what gap 17 spent itself on; a spine item that does not resolve still produces a page and keeps its position; **`with_fonts` on a reflowable document warns by name**; `Document::cos()` returns the synthesised document and **saving it produces a file qpdf reads clean**; **the text-conservation harness exists and is asserted here, against placeholders**, so every later milestone inherits it rather than acquiring it | M |
 | 5 | **The writer's missing half, before anything needs it** | Link annotations: `/Annots` with `/Subtype /Link`, `/Rect`, `/Border [0 0 0]` and both an explicit `/Dest` and a `/A` URI action, since an EPUB cross-reference is internal and an `href` may be external; a document outline: `/Outlines` with `/First`, `/Last`, `/Count` and the negative-count closed form, nested to a stated depth; both round-tripped through **this repository's own reader** — write it, open it, read it back through the facade's existing outline and annotation surfaces — which is the comparison [21](21-metadata-absent-vs-empty.md) and the annotation work make possible and no other milestone here can; qpdf clean on a document using both; `DocumentBuilder`'s existing validation posture extended rather than bypassed; **nothing in this milestone mentions EPUB**, which is the test of whether it belongs in the writer | M |
-| 6 | **`tinker-pdf-css`, the ninth leaf** | `css-syntax-3`'s tokenizer and the qualified-rule/at-rule grammar, **with its normative error recovery** — a malformed declaration discarded to the next semicolon, a malformed rule to the next block, and the count of each reported rather than swallowed; `selectors-4`'s type, universal, class, id, attribute (§6.1–§6.4) and the four combinators (§14), with **specificity per §15 asserted against a table of at least twenty selectors including the cases that trip a naive A/B/C** — `:not()`'s argument, `:is()`'s most-specific-argument rule, and a pseudo-element's C contribution; matching against a caller-supplied `Element` trait, so ruling 8 holds and no XHTML vocabulary is in the public API; the **whole** of `css-cascade-5` §6.1's sorting order including the `!important` origin reversal, with a fixture per criterion; inheritance as a single top-down pass over computed values (§7.2), with a test that a lazy resolution and this one agree — and a note saying the lazy one is quadratic; `@import` with the depth cap and a **cycle refused rather than recursed**; `@media` evaluated against a plain `MediaContext`, **as `screen`**, with the decision's argument in the module header; **decision 5's `Known`/`Unsupported`/`Unknown` split, and a compile-time proof that a property with no consumer does not build** — injected as a defect and asserted to fail the build, not a test; `@layer` refused by name; every bound firing by its own refusal; `xtask -- dag` green with the fifth amendment's argument; the **twenty-second** fuzz target; `deny.toml` gains the CSS and HTML names | L |
+| 6 | **`tinker-pdf-css`, the ninth leaf** | `css-syntax-3`'s tokenizer and the qualified-rule/at-rule grammar, **with its normative error recovery** — a malformed declaration discarded to the next semicolon, a malformed rule to the next block, and the count of each reported rather than swallowed; `selectors-4`'s type, universal, class, id, attribute (§6.1–§6.4) and the four combinators (§14), with **specificity per §15 asserted against a table of at least twenty selectors including the cases that trip a naive A/B/C** — `:not()`'s argument, `:is()`'s most-specific-argument rule, and a pseudo-element's C contribution; matching against a caller-supplied `Element` trait, so ruling 8 holds and no XHTML vocabulary is in the public API; the **whole** of `css-cascade-5` §6.1's sorting order including the `!important` origin reversal, with a fixture per criterion; inheritance as a single top-down pass over computed values (§7.2), with a test that a lazy resolution and this one agree — and a note saying the lazy one is quadratic; `@import` with the depth cap and a **cycle refused rather than recursed**; `@media` evaluated against a plain `MediaContext`, **as `screen`**, with the decision's argument in the module header; **decision 5's `Known`/`Unsupported`/`Unknown` split, and a compile-time proof that a property with no consumer does not build** — injected as a defect and asserted to fail the build, not a test; `@layer` refused by name; every bound firing by its own refusal; `xtask -- dag` green with the fifth amendment's argument; the **twenty-second** fuzz target — **amended, 20 August 2026, milestone 6: the twenty-third**, because gap 24's milestone 5 split `crypt_ciphers` out of `crypt` after this plan was written and took the number; the count in `fuzz/README.md` and in `ci.yml`'s per-PR job goes twenty-two to twenty-three, not twenty-one to twenty-two; `deny.toml` gains the CSS and HTML names | L |
 | 7 | **`tinker-pdf-layout`, the tenth leaf** | The box model (`css-box-3`) with `box-sizing`, and **margin collapsing**, which is the rule a first implementation omits and whose omission moves every block on every page; block and inline formatting contexts (CSS 2.2 §9.4.1, §9.4.2) and line boxes; `css-text-3` §4.1.1 and §4.1.2's white-space processing in both phases, asserted against a fixture whose source is indented the way milestone 1's real books are; **UAX #14 line breaking over the vendored UCD tables**, with `css-text-3` §5.5's required class behaviour for `WJ`, `ZW`, `GL` and `ZWJ`, §5.1's four strictness levels and §5.4's `overflow-wrap` — and a **CJK fixture**, because a space-only breaker passes every English test ever written; §6's alignment and justification; fragmentation into pages, honouring CSS 2.2 §13.3.1's properties, §13.3.2's `orphans` and `widows` and **§13.3.3's rules A to D for where a break is permitted at all**, with `page-break-before` and `page-break-after` asserted because they appear in all six measured books; the `Metrics` trait, so nothing here depends on `font`; whether `math` is needed answered in the `As built` and the DAG edge dropped if it is not; the **twenty-third** fuzz target, over a structured generator; `deny.toml` gains the layout and line-breaking names | L |
 | 8 | **The first book that reads** | XHTML through `tinker-pdf-xml`'s new mode into an element tree; **a committed UA stylesheet**, parsed by milestone 6's parser and cascaded like an author's, with a test that removing it produces an undifferentiated book — so its absence is visible rather than merely worse; the cascade over the tree, layout, fragmentation and synthesis into a `CosDocument`; **every book in the committed corpus opens, paginates and passes text conservation**, with the conservation figure recorded per book; `Page::text()` returns the words in reading order; cross-references between spine items reach the page as milestone 5's link annotations, and the navigation document as the outline; qpdf clean; **the browser oracle stands up here** — ruling 9 amended in writing with its argument, the continuous `y`-offset comparison built with a UA sheet injected on both sides, the paginated `--print-to-pdf` comparison beside it, and the job red when the browser is missing; the `Unsupported` census printed per book, which is the number this milestone is actually judged on | L |
 | 9 | **Fonts** | `@font-face` (`css-fonts-4` §4.1) and the `src` descriptor (§4.3) with `format()` and the fallback list; the font matching algorithm (§5) including **per-character fallback** (§2.1, §5.3), with a fixture whose one run needs three faces and becomes three PDF text objects; **SHA-1 in `tinker-pdf-crypto`**, pinned against published vectors, with a second implementation written a different way asserted to agree over every length up to two blocks — gap 29's CRC-32 discipline, because a hash written wrong is self-consistently wrong; **both de-obfuscations, asserted on the de-obfuscated bytes and not on a page that drew** — IDPF's SHA-1 key over 1 040 bytes and Adobe's 16-byte UUID key over 1 024, each from a fixture built for it, with the whitespace-stripping of §4.4.3 proved by an identifier that has some; WOFF and WOFF2 refused **by name**; a character no available face covers producing a named warning rather than a blank; `FontProvider`'s per-family fallback question answered — the trait extended, or the reason it is not recorded; the generic families' standard-14 metrics asserted to make pagination independent of whether a provider is attached | M |
@@ -2572,3 +2580,372 @@ whose empty case is `return true` and nothing else.
   action this repository cannot then resolve would be the shape row 5 exists to
   avoid.
 
+## Progress — 20 August 2026, milestone 6
+
+**`tinker-pdf-css` is the ninth leaf and it has no dependencies at all** — the
+fourth crate in this workspace in that position, beside `filters`, `crypto` and
+`xml`. 2 458 tests, 7 ignored, up from 2 367; ninety-one of them are new —
+eighty-three the crate's own unit tests, five the compile-time proof, one a
+doctest, and two in the facade over the six committed books.
+
+The empty allow-list turned out to be load-bearing rather than tidy, and that is
+the finding this milestone would keep if it could keep only one. Because the
+crate has no internal dependency, no third-party one and no build script, **the
+whole of it compiles with a bare `rustc`** — no dependency resolution, no
+`--extern`, nothing. That is what lets decision 5's proof be a real build of the
+real source with a defect injected into it, rather than a small copy of the
+pattern that would prove only that `match` is exhaustive in Rust.
+
+### The compile-time proof, and it does fail the build
+
+Row 6's unusual exit criterion is that the defect is *"injected as a defect and
+asserted to fail the build, not a test"*. It is, and here is what it says:
+
+```
+error[E0004]: non-exhaustive patterns: `&property::Property::Widows(_)` not covered
+   --> crates\tinker-pdf-css\src\cascade.rs:248:11
+    |
+248 |     match property {
+    |           ^^^^^^^^ pattern `&property::Property::Widows(_)` not covered
+```
+
+`tests/unimplemented_property_does_not_build.rs` copies `src/` into
+`CARGO_TARGET_TMPDIR`, adds one variant to `Property`, withholds one consumer's
+arm, and runs `rustc --emit=metadata` over it. Four things about its shape are
+deliberate:
+
+- **It compiles the pristine copy first and asserts that succeeds.** Without
+  that, a harness that wrote a broken tree — a missing module, a bad path, a
+  `rustc` that is not on `PATH` — would report every injection as "the build
+  failed", which is the answer they are asserting, and the whole file would pass
+  while proving nothing. Gap 20's finding, arriving through a harness instead of
+  through CI.
+- **It compiles the same variant with *all three* arms supplied and asserts that
+  builds.** Otherwise the three failures above would be true of any edit at all,
+  and "the build broke" is not "the build broke *because* the property has no
+  consumer".
+- **The three consumers are injected separately**, because one `match` is one
+  consequence. `cascade::apply` is the one the plan names — a property parsed
+  and never written into a computed style. `Property::name` is the second: a
+  property applied and then anonymous in every warning and in the `Unsupported`
+  census the milestone is judged on. `Property::inherited` is the third, and it
+  is the quietest of them — a property that neither inherits nor does not is
+  right on the element that sets it and wrong on every descendant.
+- **It refuses to guess an anchor.** The injector asserts the marker comment
+  occurs exactly once and panics otherwise, because a silent no-op would make
+  every injection a copy of the pristine build.
+
+The variant injected is `widows`, and that is not arbitrary. `widows` is in
+`UNSUPPORTED_PROPERTIES` today — CSS 2.2 §13.3.2, present in both producers'
+books, genuinely unimplemented because the fragmentation that would consume it
+is milestone 7's. So the defect is the exact edit somebody will make when that
+milestone arrives: promote the name out of the unsupported list into the enum.
+The test asserts what happens if they stop there.
+
+`rustc` is not optional and the test does not skip when it is missing. A proof
+that quietly does not run reads exactly like a proof that passed.
+
+### The specificity table, and the rows that earned it
+
+Thirty-one selectors, against row 6's twenty. Two — `#s12:not(foo)` and `.foo
+:is(.bar, #baz)` — are copied verbatim from `selectors-4` §15's own worked
+table, so part of the arithmetic is the specification's rather than this
+author's. The rows that matter:
+
+| Selector | A/B/C | Why it is in the table |
+| --- | --- | --- |
+| `.a` | 0,1,0 | The control for the row below it |
+| `:not(.a)` | 0,1,0 | **Equal to `.a`.** `:not()` contributes its *argument*'s specificity and nothing of its own; a build that counted it as a pseudo-class makes it one step stronger, and that only shows when the two meet in one cascade |
+| `:not(#a)` | 1,0,0 | The same rule from the other side, so "always 0,1,0" fails too |
+| `:not(em, strong#foo)` | 1,0,1 | The **most specific** argument, not the first and not the sum |
+| `:is(#x, p)` | 1,0,0 | §15's most-specific-argument rule |
+| `:is(p, #x)` | 1,0,0 | The same list reordered, which is what tells "most specific" from "first" |
+| `:where(#x, p)` | 0,0,0 | Zero however specific its argument — the whole reason `:where()` exists |
+| `:is(:not(#a), .b)` | 1,0,0 | Nested: the inner `:not` decides the outer `:is` |
+| `::before` | 0,0,1 | A pseudo-**element** counts in C, like a type selector |
+| `p::before` | 0,0,2 | And adds to the type selector rather than replacing it |
+| `p:before` | 0,0,2 | CSS 2.1's one-colon spelling is the same pseudo-element, and real books write it |
+| `p:hover` | 0,1,1 | A pseudo-class counts in B **even though this build never matches it** |
+| `:has(#x)` | 1,0,0 | §15 gives `:has()` its most specific argument too, and nothing here evaluates it |
+| `*` | 0,0,0 | The universal selector counts nowhere |
+| `p > *` | 0,0,1 | Which is what makes this 1 and not 2 |
+| `#a#b` | 2,0,0 | Two ids in one compound, which a build keeping only one would get wrong twice over |
+| `.a.b.c.d.e.f.g.h.i.j.k` | 0,11,0 | Eleven, and `#x` still beats it — the row that fails for a build packing A/B/C into `a * 100 + b * 10 + c` |
+
+The last is the one worth keeping. Every stylesheet with fewer than ten classes
+on a selector passes a base-ten implementation, and no book announces that it
+has an eleventh.
+
+### What the design got wrong, and how I found out
+
+**The `Unsupported`/invalid line was in the wrong place, and the injection
+matrix is what said so.** The first version classified any value a property
+could not read as `Unsupported` — decision 5's own count — which meant
+`margin-top: red` and `color: rgb(1;2;3)` were filed as gaps in *this build*.
+They are not; they are the author's typos, and §5.4.4 discards them like any
+other malformed declaration. The number the whole milestone is judged on would
+have been inflated by every stylesheet error in every book. Three classifiers
+came out of that — `LenOutcome`, `ColourOutcome` and the CSS-wide keyword
+check — each of which has to say `Unsupported`, `Invalid` or a value, and the
+distinction is written out where they are declared. `width: 50vw` is this
+build's gap and `width: red` is not.
+
+**The tokenizer was right and my test was wrong, once.** `<!--a-->` does not
+produce a CDC: `-` is a name code point, so the identifier runs `a--` and what
+is left is a `>` delim. The test now asserts both spellings and says which one
+is the reason.
+
+**The metric length units cannot be asserted exactly.** `2.54cm` is
+95.999999999999989, because the conversion is a division by a value that is not
+a binary fraction. Asserting 96.0 would be asserting something untrue about IEEE
+754. Ruling 4 asks for the *same* answer on every target, which a correctly
+rounded multiply and divide give; it does not ask for the decimal one. `in`,
+`pt`, `pc` and `px` are whole-number ratios of 96 and are asserted exactly, and
+the three that are not are asserted to 1e-9 with the reason beside them.
+
+**`MAX_SELECTOR_MATCHES` counts the wrong thing in the plan, and the row is
+amended in place.** The bounds table calls it *"selector-against-element
+attempts"*. Matching `a b c d` walks the ancestor chain with backtracking, so
+one attempt costs `O(depth^parts)` compound tests — a cap on the attempts bounds
+a number that is not the work. It charges per **compound**-against-element test,
+which is `5adf502`'s sentence one level further down than the plan had it.
+
+**`MAX_DOM_NODES` had to be declared in the CSS crate**, which is not where gap
+31's table puts it. The `const` block the plan asks for —
+`MAX_CSS_RULES × MAX_DOM_NODES > MAX_SELECTOR_MATCHES` — can only name constants
+its own crate can reach, and this crate's allow-list is empty. So the product
+relation lives here and the *other* half the plan asks for,
+`MAX_DOM_NODES < MAX_XML_TOKENS`, cannot: it is owed by the facade at milestone
+8, and until then it is this row's `reachable` column in `bounds_ledger.rs`,
+which is exactly the check it would be.
+
+### The index, and why it needed a test of its own
+
+The matcher buckets each selector by its rightmost compound's most selective key
+— id, then class, then type, then a universal bucket — and tests an element only
+against the candidates. Without it a 400-page novel would spend on the order of five
+million compound tests and the cap would have to sit above that, which would
+make the firing fixture take a quarter of a minute; with it the same book is
+estimated at about half a million. Both figures are extrapolations and are
+labelled as such in the ledger: nothing in this repository cascades a real book
+until milestone 8, and what *is* measured is the parse side — see below.
+
+**The index is an optimisation and it is not the bound.** A stylesheet whose
+every rule names one class puts every rule in one bucket and gets the full
+rules-times-elements product, which is exactly what a hostile book would write
+and exactly what the firing fixture builds: 2 001 rules against 2 000 elements
+is 4 002 000 tests against a cap of 4 000 000.
+
+And a bucketing bug is invisible in the worst way — it produces a book styled
+slightly *less* than it should be, which reads as a plain stylesheet rather than
+as a defect. So `an_indexed_lookup_and_a_brute_force_one_agree` compares the
+index's answer against testing every selector, per element, and asserts each
+element matched something so the comparison is about more than two empty lists.
+The fuzz target makes the same comparison over stylesheets nobody wrote.
+
+### What the committed books showed that this milestone did not predict
+
+`tests/epub_css.rs` parses all eight stylesheets of all six committed books
+through the real parser at the shipped limits and asserts the maxima, so
+`limits.rs`'s first column is a **measurement** recomputed on every run rather
+than a number somebody remembered. The figures: largest stylesheet **5 009**
+bytes, most tokens in one sheet **1 392**, most rules **45**, most declarations
+**99**, longest selector **5** compounds, largest content document **69**
+elements, and **no book uses `@import` at all** — asserted rather than assumed,
+because the parse is given `NoImports` and one would warn by name. Four
+estimates in the first draft of that column were wrong by two to five times in
+the flattering direction, which is what a measurement is for.
+
+Not one construct is discarded across the whole corpus. That is asserted too: a
+recovery count above zero on two real producers' own output would be evidence
+about this parser rather than about the producers.
+
+**pandoc 3.10.2 writes `light-dark()`.** `css-color-5`'s function, on
+`background-color`, on `color` and inside both `border-*` shorthands —
+`light-dark(transparent, #232629)`. Every one of those properties is
+implemented here and the function is not, so each lands as `Unsupported` with
+the value beside it. That is decision 5's second device meeting real input on
+its first day, and it is the strongest evidence the milestone has that keying
+the implemented set by **(property, value)** was not over-engineering: a build
+keyed by property alone would have taken the first argument, or the second, and
+produced a book that is entirely plausible and the wrong colour throughout.
+
+**calibre 9.13.0 writes `text-align: inherit`.** Which is survivor 41
+corroborated by a real producer inside the same hour it was closed: a
+`css-cascade-5` §7.1 keyword on a property whose own keywords are `left`,
+`right`, `center` and `justify`.
+
+**Two names were missing from `UNSUPPORTED_PROPERTIES` and the corpus found
+both.** `list-style` — the shorthand, where the three longhands were all
+present — and `color-scheme`, which pandoc writes on `:root` because
+`light-dark()` requires it. Both were being reported as `Unknown`, which is to
+say as somebody else's vendor extension rather than as this build's gap. The
+committed corpus's `Unknown` set is now **empty**, and that is the interesting
+answer rather than a boring one: milestone 1 measured `-webkit-column-count`,
+`-epub-text-emphasis-style` and `-ah-margin-start` in the *fetched* corpus, and
+neither producer of the committed six writes a single vendor extension.
+
+The whole `Unsupported` set over the committed corpus is twenty properties, of
+which **six** are value gaps on properties this build implements —
+`background-color`, `border-bottom`, `border-top`, `color`, `display`,
+`text-align` — and fourteen are properties it does not: `border-collapse`,
+`border-spacing`, `color-scheme`, `hyphens`, `list-style`, `max-width`,
+`orphans`, `overflow`, `overflow-wrap`, `overflow-x`, `page-break-inside`,
+`quotes`, `vertical-align`, `widows`. Against 772 longhands it does read.
+
+### The injection matrix
+
+**Fifty-two defects, fifty caught on the first pass.** Both survivors were real
+gaps, both are closed, and the whole matrix was re-run against the tree as
+committed: **fifty-two of fifty-two**.
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | A form feed is not a newline (§3.3) | `preprocessing_folds_three_newlines_and_the_null` |
+| 2 | A newline in a string is consumed rather than reconsumed | `a_newline_in_a_string_is_bad_and_the_newline_survives` |
+| 3 | An escape of `\0` or a surrogate is not U+FFFD | `escapes_resolve_and_three_become_the_replacement_character` |
+| 4 | Non-ASCII does not start a name | `a_no_break_space_is_part_of_an_identifier`, and one more |
+| 5 | Whitespace does not collapse across a comment | `a_comment_between_whitespace_is_one_whitespace_token` |
+| 6 | Every hash is an id, so `#0f0` is a selector | `a_hash_is_an_id_only_when_it_starts_an_identifier`, `malformed_selectors_are_refused_one_at_a_time` |
+| 7 | `!important` is matched case-sensitively | `important_is_the_last_two_values_and_is_case_insensitive` |
+| 8 | A declaration whose name is not an identifier is not counted | **survived** — closed, see below |
+| 9 | A rule that reaches EOF keeps its prelude (§5.4.2) | `a_rule_with_no_block_is_discarded_and_counted` |
+| 10 | The `@import` cycle guard is deleted | `an_import_cycle_is_refused_rather_than_recursed` |
+| 11 | The `@import` depth cap is deleted | `an_import_chain_past_the_depth_cap_warns_by_its_own_name` — **as a stack overflow**, not an assertion |
+| 12 | `@layer` becomes an ordinary unsupported at-rule | `layer_is_refused_by_name` |
+| 13 | A `@media` block is applied unconditionally | `media_queries_are_evaluated_in_both_directions`, and two more |
+| 14 | An `@import` after a rule is honoured | `an_import_after_a_rule_is_named_rather_than_read` |
+| 15 | Warnings are not deduplicated | `an_unsupported_at_rule_carries_its_name` |
+| 16 | The medium is `print` | `media_queries_are_evaluated_in_both_directions`, and two more |
+| 17 | An unknown media feature evaluates true | `an_unreadable_media_query_is_false_and_does_not_spread` |
+| 18 | `min-` and `max-` are swapped | `media_queries_are_evaluated_in_both_directions` |
+| 19 | `:not()` counts as a pseudo-class | `the_specificity_table` |
+| 20 | `:is()` takes its first argument | `the_specificity_table` |
+| 21 | `:where()` carries its argument | `the_specificity_table`, `is_and_where_match_the_same_set` |
+| 22 | A pseudo-element counts in B | `the_specificity_table` |
+| 23 | The universal selector counts | `the_specificity_table` |
+| 24 | "Most specific argument" is the least specific | `the_specificity_table` |
+| 25 | A `::before` rule styles its originating element | `a_pseudo_element_matches_nothing_and_is_named` |
+| 26 | `:not(a, b)` is a disjunction | `not_is_a_conjunction_of_negations` |
+| 27 | The index buckets on the **leftmost** compound | `an_indexed_lookup_and_a_brute_force_one_agree` |
+| 28 | `[href^=""]` matches | `the_attribute_matchers` |
+| 29 | `!important` does not reverse the origin order | `criterion_one_important_reverses_the_origin_order`, `the_six_reachable_ranks_are_in_the_specifications_order` |
+| 30 | Specificity is sorted above origin | **the build** — `CascadeKey`'s field order is the specification's order, and moving it breaks the type |
+| 31 | An inline declaration is an ordinary one | `criterion_three_an_inline_declaration_beats_every_selector` |
+| 32 | `font-size` is applied in cascade order | `font_size_is_resolved_before_anything_relative_to_it` |
+| 33 | `display` inherits | `inheritance_carries_the_computed_value_and_resets_the_rest` |
+| 34 | `font-size` does not inherit | `a_lazy_resolution_and_the_single_pass_agree` |
+| 35 | `bolder` adds a hundred | `bolder_and_lighter_follow_the_table` |
+| 36 | The **first** declaration wins rather than the last | three cascade criteria at once |
+| 37 | The document-order check is dropped | `a_tree_out_of_document_order_is_refused_by_name` |
+| 38 | An unknown `float` value becomes `left` | `a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour` |
+| 39 | A refused unit is filed as a typo | the same |
+| 40 | An unknown colour name is filed as a typo | the same |
+| 41 | The CSS-wide keywords are not reported | **survived** — closed, see below |
+| 42 | `margin: 1px 2px 3px` takes its left from the top | `the_box_shorthand_expands_at_every_arity` |
+| 43 | The `border` shorthand does not reset what it omits | `the_border_shorthand_resets_what_it_does_not_name` |
+| 44 | A `line-height` percentage inherits as a length | `a_line_height_number_inherits_as_a_factor` |
+| 45 | An `hsl()` hue is clamped rather than wrapped | `the_colour_syntaxes` |
+| 46 | An alpha byte is truncated rather than rounded | `the_colour_syntaxes` |
+| 47 | `MAX_SELECTOR_MATCHES` is raised above its own product | **the build** — the `const` block, which is what it is for |
+| 48 | The byte cap refuses one byte early | `a_stylesheet_past_the_byte_cap_is_refused_by_name` |
+| 49 | The token total is refunded per sheet | `the_token_total_is_spent_across_sheets_and_not_per_sheet` |
+| 50 | The match total is never charged | `the_match_budget_refuses_a_stylesheet_that_defeats_the_index` |
+| 51 | `cascade::apply` gains a `_` arm | all three compile-time proofs |
+| 52 | `Property::name` gains a `_` arm | all three compile-time proofs |
+
+Three of them are worth more than a row.
+
+**Number 11 is not caught by an assertion.** Deleting the `@import` depth cap
+leaves the cycle guard in place, and a resolver that answers every href at a
+*deeper* address never repeats one — so the recursion is infinite and the test
+process overflows its stack. That is a finding rather than a failure of the
+test: it is gap 24's `Md5::update` shape, where a missing guard is a hang and
+not a wrong answer, and the reason the fuzz target's `@import` invariant is
+written as a comment saying libFuzzer's `-timeout` is what reports it. The
+matrix reads a non-zero exit code as caught for exactly this case.
+
+**Number 8's survival is the same shape milestone 4 found.** §5.4.4 has two ways
+for a declaration to fail — the name is not an identifier, and the identifier is
+not followed by a colon — and every fixture in the file took the second, because
+`not a declaration` starts with the identifier `not`. The branch rejecting a
+non-identifier name had never run. `p { 42px; color: red }` and four others
+separate them, and the count is asserted alongside the surviving declaration so
+a build that discarded *both* fails too.
+
+**Number 41's survival is milestone 3's shape: the rule was enforced twice and
+only one half was reachable.** Disabling the CSS-wide-keyword branch entirely
+changed no answer for `color: inherit` or `display: initial` — a colour that is
+not a colour and a keyword that is not one of a property's own keywords are
+*already* `Unsupported` under the (property, value) rule. The half nobody
+reached is a **length**-valued property, where an identifier that is not one of
+its keywords is `Invalid`: `margin-top: inherit` would have been filed as the
+author's typo rather than as a gap in this engine, and `inherit` is in every
+real stylesheet. Seven length-valued properties now assert it, and
+`margin-top: red` asserts the other direction so the test is about the five
+keywords rather than about identifiers in general.
+
+### The fuzz target is the twenty-third, not the twenty-second
+
+Row 6 says twenty-second. Gap 24's milestone 5 split `crypt_ciphers` out of
+`crypt` after this plan was written and took that number, so `css` is the
+twenty-third; the row is amended in place and `fuzz/README.md` and `ci.yml`'s
+per-PR job go twenty-two to twenty-three.
+
+It cannot be *run* on this host — libFuzzer is not available on
+`x86_64-pc-windows-msvc` — so its body was lifted verbatim into a scratch crate
+and driven over all six committed seeds and five prefixes of each. Every
+assertion in it has executed at least once, which is the difference between a
+target that type-checks and a target that works. The campaign itself is
+milestone 13's.
+
+Two of the six seeds sit behind a control byte of zero. The tightest value took
+a correction: it started at zero bytes, which refuses every non-empty body at
+the byte cap so the token total is never reached at all — a knob whose tightest
+setting makes the *other* cap unreachable. It reads sixty-four bytes and stops
+at four tokens now, and the second value is the one that fires the byte cap.
+
+### `deny.toml`'s hole, measured before it was closed
+
+The plan says the file denies sixty-six crates and not one is a CSS crate, an
+HTML crate, a layout engine, a line breaker or a Unicode-data crate. Confirmed,
+and fourteen names land here — six CSS and eight HTML. The licence gate would
+have caught two of the six on its own and waved four through: `cssparser` and
+`selectors` are MPL-2.0, which the allowlist already bars, and `lightningcss`,
+`simplecss`, `css-color-parser` and `stylo` are not.
+
+The HTML names carry a second argument beyond rule 1, written into the file: an
+EPUB content document is XHTML, which is XML, and this engine reads it with
+`tinker-pdf-xml` under a doctype mode that refuses the internal subset. An HTML5
+tree builder is a different parser with a different error-recovery model and a
+different threat surface, and adopting one would quietly undo gap 30's whole
+defence against entity expansion.
+
+### Still owed
+
+- **Nothing consumes any of this**, which is milestone 7's and milestone 8's.
+  The `Unsupported` census is a number this crate can produce and no book has
+  been run through it, because there is no element tree yet.
+- **`MAX_DOM_NODES < MAX_XML_TOKENS`** is owed by the facade at milestone 8, for
+  the reason above. It is in the ledger's `reachable` column meanwhile.
+- **The leaf count is still written as eight in four places.** The ledger sweep
+  is milestone 13's and takes it to ten in one edit; taking it to nine here and
+  to ten there would be two edits to four files and a window in which three of
+  them disagree.
+- **The `font` and `list-style` shorthands are `Unsupported` rather than
+  expanded**, deliberately: `font` resets six longhands and this build has three
+  of them, so a partial expansion would set those three and leave the others at
+  whatever they inherited — decision 5's failure one level up from a value.
+- **The viewport units are `Unsupported`.** A reflowable book's viewport is the
+  page box, and whether a *fragmented* page is a viewport at all is milestone
+  7's decision; resolving them against something plausible now is exactly what
+  device 2 exists to prevent.
+- **`currentColor` is not a keyword**, so `border: solid` takes black rather
+  than the computed `color`. It is recorded in `border_shorthand` where the
+  simplification is made rather than left to be discovered on a page.
+- **The named-colour table is the CSS 2.1 sixteen plus about thirty**, not
+  `css-color-4`'s hundred and forty-eight. A name outside it is `Unsupported`
+  and counted; the argument is this gap's own — a typo in a hex value produces a
+  colour that is slightly wrong and looks entirely plausible, and a table of a
+  hundred and forty-eight hand-entered values is a hundred and forty-eight
+  chances at exactly that.

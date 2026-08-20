@@ -1,0 +1,11 @@
+ÿ*{color:red}
+:root :not(.a) :is(#top, p, .lead) span { float: right }
+li:nth-child(2n) , li:first-child, li:last-child, li:only-child { display: list-item }
+a[href], a[href="chapter.xhtml"], a[href^="chap"], a[href$=".xhtml" i] { color: blue }
+a[lang|="en"], a[lang~="en-GB" s], a[lang*="n-G"] { font-style: italic }
+p::before, p::after, p::first-line, p:before { content: "x"; color: #0f0 }
+div > * > .a.b.c#top { visibility: hidden }
+:where(#x, p) em { font-size: 200% }
+:has(#x) { width: 10vw }
+a:quantum, p { color: red }
+p > > q { color: red }

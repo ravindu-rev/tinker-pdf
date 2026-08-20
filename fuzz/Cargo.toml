@@ -21,6 +21,7 @@ tinker-pdf-content = { path = "../crates/tinker-pdf-content" }
 tinker-pdf-crypto = { path = "../crates/tinker-pdf-crypto" }
 tinker-pdf-zip = { path = "../crates/tinker-pdf-zip" }
 tinker-pdf-xml = { path = "../crates/tinker-pdf-xml" }
+tinker-pdf-css = { path = "../crates/tinker-pdf-css" }
 
 # Detaches from the parent workspace so `cargo build` at the root never tries
 # to build a libFuzzer target on a stable toolchain.
@@ -159,5 +160,11 @@ doc = false
 [[bin]]
 name = "xml"
 path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "css"
+path = "fuzz_targets/css.rs"
 test = false
 doc = false

@@ -115,6 +115,38 @@ deny = [
   { name = "sxd-document" },
   { name = "libxml" },
   { name = "rustyxml" },
+  # CSS, and the markup readers that come with it. Gap 31's own audit of this
+  # file found it denying sixty-six crates and **not one of them a CSS crate,
+  # an HTML crate, a layout engine, a line breaker or a Unicode-data crate** --
+  # a hole exactly where that plan works. These land in the milestone that
+  # writes the parser rather than the one that finishes the plan, which is the
+  # rule gap 30 wrote three paragraphs above: the milestone that writes the
+  # parser is the window in which the temptation exists, and it is a wider
+  # window here than it was for XML. `cssparser` and `selectors` are Servo's,
+  # they are excellent, they are MPL-2.0 (which this file's licence allowlist
+  # already bars) and `lightningcss` and `simplecss` are not -- so the licence
+  # gate would have stopped two of six and waved four through.
+  #
+  # `html5ever` and its relatives are here for a second reason beyond rule 1:
+  # an EPUB content document is XHTML, which is XML, and this engine reads it
+  # with `tinker-pdf-xml` under a document-type mode that refuses the internal
+  # subset. An HTML5 tree builder is a *different* parser with a different
+  # error-recovery model and a different threat surface, and adopting one would
+  # quietly undo gap 30's whole defence against entity expansion.
+  { name = "cssparser" },
+  { name = "lightningcss" },
+  { name = "selectors" },
+  { name = "simplecss" },
+  { name = "css-color-parser" },
+  { name = "stylo" },
+  { name = "html5ever" },
+  { name = "markup5ever" },
+  { name = "scraper" },
+  { name = "kuchiki" },
+  { name = "kuchikiki" },
+  { name = "tl" },
+  { name = "lol_html" },
+  { name = "html5gum" },
   # Fonts and text shaping.
   { name = "ttf-parser" },
   { name = "rustybuzz" },

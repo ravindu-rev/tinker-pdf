@@ -207,6 +207,41 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// reuses **none** of gap 30's package layer, because EPUB's container is OCF
 /// rather than OPC — which is the argument for the parser being a crate and the
 /// package layer not being one, and it is recorded in both places.
+///
+/// **`css` is the fifth amendment, and it is the second whose argument is that
+/// it needs nothing.** `xml` set that register — an empty allow-list is a
+/// *finding* rather than an omission — and `tinker-pdf-css` was put through the
+/// same interrogation with the same answer. Not `xml`, because a stylesheet is
+/// not markup: `css-syntax-3` has its own tokenizer, and a `<style>` element's
+/// contents arrive here as a byte slice with no idea what element they came
+/// out of. Not `math`, because there is no transcendental in CSS at all — the
+/// arithmetic is unit conversion, percentage resolution and `css-color-4` §7's
+/// HSL-to-RGB, every one of which is multiply, divide, compare and subtract,
+/// so ruling 4's `cargo xtask libm` rule has nothing here to object to even
+/// though this crate is not on `PIXEL_PATHS`. Not `font`, because `@font-face`
+/// **names** a face and does not read one, and because the element side of
+/// matching arrives through a five-method trait rather than through anything
+/// that knows what a glyph is. Not `filters`, because nothing in a stylesheet
+/// is compressed and nothing in it expands. Not `zip`, for `xml`'s reason
+/// exactly: an `@import` is resolved by a caller-supplied `ImportResolver`,
+/// because the container is the caller's business and a leaf that could open
+/// one would be a leaf with a direction it did not need. And not `cos`, which
+/// is the edge that would invert the layering.
+///
+/// The empty list is load-bearing in a way the other four were not, and this
+/// is the sentence worth keeping: because `tinker-pdf-css` has **no**
+/// dependency, internal or third-party, and no build script, the whole crate
+/// compiles with a bare `rustc` and no dependency resolution — which is what
+/// lets `tests/unimplemented_property_does_not_build.rs` compile the *real*
+/// source with a defect injected and assert that the **build** fails. Gap 31's
+/// decision 5 is the device its whole reflowable scope was accepted on, and the
+/// proof of it is possible here only because this row is empty.
+///
+/// It adds a name to the facade's row too, ahead of the manifest edge that
+/// arrives with gap 31's milestone 8 — the same order gap 30 used for `xml`,
+/// and for the same reason the commentary above gives: a crate appearing in a
+/// manifest without its argument is the failure this file's own history
+/// records.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -217,6 +252,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-zip", &["tinker-pdf-filters"]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
+    // The ninth, and the fourth crate here with no internal dependency at all.
+    // The empty list is what makes the compile-time proof of decision 5
+    // possible; see the fifth amendment above.
+    ("tinker-pdf-css", &[]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
@@ -252,6 +291,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-color",
             "tinker-pdf-zip",
             "tinker-pdf-xml",
+            "tinker-pdf-css",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

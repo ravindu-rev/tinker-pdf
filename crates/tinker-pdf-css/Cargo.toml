@@ -1,0 +1,22 @@
+[package]
+name = "tinker-pdf-css"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CSS, hand-rolled: css-syntax-3's tokenizer and grammar with its normative error recovery, selectors-4 matching and specificity, and css-cascade-5's whole sorting order. No PDF types, no XHTML vocabulary"
+
+# No dependencies, deliberately, and this is the fourth crate in that position
+# beside `filters`, `crypto` and `xml`. The argument is written out in
+# `xtask/src/main.rs`'s `ALLOWED` doc comment as the fifth amendment, because
+# an empty list is a *finding* rather than an omission: this crate was checked
+# against what it might have wanted and wants none of it.
+#
+# It has no `[dev-dependencies]` either, and one of its integration tests
+# invokes `rustc` — see `tests/unimplemented_property_does_not_build.rs`. That
+# is only possible *because* the list above is empty: a crate with no
+# dependencies can be compiled by a bare `rustc`, with no dependency resolution
+# and no `--extern` at all, which is what lets the compile-time proof be a real
+# build of the real source rather than a copy of the pattern.

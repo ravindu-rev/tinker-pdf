@@ -1,0 +1,10 @@
+ÿp { color: red; not a declaration; float: left }
+p { color: rgb(1;2;3); width: 3; margin-top: red }
+@layer base { p { float: left } }
+@font-face { src: url(x.otf); font-family: 'X' }
+"unterminated
+p { color: #zz; background: url(a'b) }
+q { color: red !IMPORTANT; float: left ! }
+r { margin: 1px 2px 3px 4px 5px }
+/* an unterminated comment
+s { color: blue }

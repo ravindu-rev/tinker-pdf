@@ -1,0 +1,7 @@
+ÿ@import url(cycle.css);
+@import "deep.css" screen and (min-width: 1px);
+@import url(gone.css) print;
+p { color: red }
+@import url(too-late.css);
+@media (hover: hover) { p { color: blue } }
+@media (400px < width) { p { color: blue } }
