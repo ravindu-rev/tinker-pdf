@@ -389,6 +389,56 @@ pub const DEFAULT_FONT_SIZE: f64 = 12.0;
 /// should still get its book.
 pub const MAX_PAGE_SIDE: f64 = 14_400.0;
 
+/// What one book spent against the caps that bound it (gap 31, milestone 13).
+///
+/// **A bound nobody can measure is a bound nobody can check**, which is the
+/// argument [`crate::cbz::ArchiveReport::synthesised_bytes`] already carries
+/// for one cap, generalised to the ten this format's own reading path spends
+/// against. Milestone 13's ledger row asks for a **book yardstick** beside gap
+/// 29's comic and gap 30's fixed document, and a yardstick written as arithmetic
+/// alone is a guess that nothing contradicts: this is what turns it into a
+/// figure a test can hold a real book against.
+///
+/// Every field is a **book total** rather than a per-document one, because
+/// [`crate::epub::synthesise`] makes one CSS budget and one layout budget for
+/// the whole spine and never refunds either. The two exceptions carry their own
+/// sentence below.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BookCost {
+    /// Manifest items admitted. See [`MAX_EPUB_MANIFEST_ITEMS`].
+    pub manifest_items: usize,
+    /// Spine `<itemref>`s admitted. See [`MAX_EPUB_SPINE_ITEMS`].
+    pub spine_items: usize,
+    /// CSS tokens charged across the book. See
+    /// [`tinker_pdf_css::limits::MAX_CSS_TOKENS`].
+    pub css_tokens: usize,
+    /// Qualified rules admitted. See [`tinker_pdf_css::limits::MAX_CSS_RULES`].
+    pub css_rules: usize,
+    /// Declarations admitted. See
+    /// [`tinker_pdf_css::limits::MAX_CSS_DECLARATIONS`].
+    pub css_declarations: usize,
+    /// Compound-against-element tests. See
+    /// [`tinker_pdf_css::limits::MAX_SELECTOR_MATCHES`].
+    pub selector_matches: usize,
+    /// Boxes generated. See [`tinker_pdf_layout::limits::MAX_BOX_TREE_NODES`].
+    pub boxes: usize,
+    /// Break opportunities evaluated. See
+    /// [`tinker_pdf_layout::limits::MAX_LINE_BREAK_WORK`].
+    pub break_work: usize,
+    /// Float examinations. See
+    /// [`tinker_pdf_layout::limits::MAX_LAYOUT_WORK`].
+    pub layout_work: usize,
+    /// Pages the spine fragmented into. See
+    /// [`tinker_pdf_layout::limits::MAX_LAYOUT_PAGES`].
+    ///
+    /// **The one figure here that is a function of the caller's page box rather
+    /// than of the book**, which is [`DEFAULT_PAGE`]'s own sentence arriving in
+    /// a measurement: two hosts that pass different boxes get different numbers
+    /// out of the same file, on purpose.
+    pub pages: usize,
+}
+
 /// What a reflowable book needs decided before it has any pages.
 ///
 /// Built from [`crate::OpenOptions`] by [`BookLayout::sanitised`], which is
@@ -1091,9 +1141,23 @@ pub fn synthesise(
         return Err(ArchiveRefusal::TooLarge);
     }
     let synthesised_bytes = pdf.len();
+    // Taken after the last charge and before anything is returned, so the
+    // figures are what the whole book cost rather than what one pass did.
+    let cost = BookCost {
+        manifest_items: package.items().len(),
+        spine_items: package.spine().len(),
+        css_tokens: css_budget.tokens(),
+        css_rules: css_budget.rules(),
+        css_declarations: css_budget.declarations(),
+        selector_matches: css_budget.matches(),
+        boxes: layout_budget.boxes(),
+        break_work: layout_budget.breaks(),
+        layout_work: layout_budget.layout(),
+        pages: total_pages,
+    };
     Ok((
         pdf,
-        ArchiveReport::book(warnings, pages, synthesised_bytes, *layout),
+        ArchiveReport::book(warnings, pages, synthesised_bytes, *layout, cost),
     ))
 }
 

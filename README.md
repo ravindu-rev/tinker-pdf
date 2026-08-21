@@ -80,7 +80,22 @@ instead of a budget. Everything else is refused by name: `VisualBrush`,
 signatures, print tickets, 3D, TIFF and JPEG XR. Nothing in this repository
 wrote any of the eight packages it is tested against.
 [`docs/plans/gaps/30-xps.md`](docs/plans/gaps/30-xps.md) is the plan and its
-record; EPUB is not built.
+record.
+
+**And an `.epub` is a book rather than its cover.** The same signature covered
+it, so until August 2026 Frankenstein — 31 content documents — opened as *one
+page* at the size of its auto-generated cover, with no warning at all. Now an
+OCF container is recognised by `META-INF/container.xml`, its package document
+is read, and the spine is **laid out**: a CSS cascade in `tinker-pdf-css`, a
+box model, floats, tables and flexbox in `tinker-pdf-layout`, UAX #14 line
+breaking over vendored Unicode data, and fragmentation into pages. **A book's
+page count is a function of the page box the caller passes**, not a property of
+the file, which is what `OpenOptions` exists for. How a partial CSS
+implementation is made *visible* is the design: a property parsed with no
+consumer does not compile, every chapter's characters are conserved exactly, and
+what is not implemented is reported by name and counted by elements reached.
+[`docs/plans/gaps/31-epub.md`](docs/plans/gaps/31-epub.md) is the plan and its
+record.
 
 ## The plan
 
@@ -98,9 +113,9 @@ record; EPUB is not built.
 
 ## Workspace
 
-Eight leaf crates (`filters`, `crypto`, `font`, `color`, `raster`, `math`,
-`zip`, `xml`) are bytes-in, values-out, know nothing about PDF, and each is
-independently fuzzable. `cos` owns file syntax; `content` interprets content
+Ten leaf crates (`filters`, `crypto`, `font`, `color`, `raster`, `math`,
+`zip`, `xml`, `css`, `layout`) are bytes-in, values-out, know nothing about
+PDF, and each is independently fuzzable. `cos` owns file syntax; `content` interprets content
 streams and emits to a `Device` trait — the text device needs no rasterizer,
 which is why text parity lands before pixels exist; `render` is the rasterizing
 device; `tinker-pdf` is the facade and the only crate users see; `ffi` and

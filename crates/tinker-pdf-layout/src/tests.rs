@@ -1808,14 +1808,18 @@ fn a_book_past_the_page_cap_is_refused_by_name() {
 ///
 /// A thousand-odd figures in one chapter, each examined against the ones before
 /// it: the work is the square of the float count while every other cap is
-/// satisfied — a thousand floats is four thousand boxes against a cap of
-/// 262 144 and two thousand characters against a break total of four million.
+/// satisfied — three thousand floats is twelve thousand boxes against a cap of
+/// 2 097 152 and three thousand characters against a break total of four
+/// million.
 /// That is the shape [`crate::limits::MAX_LAYOUT_WORK`] exists for and the one
 /// neither of the other two work caps can see, because the work is their
 /// **product** rather than either of them.
 #[test]
 fn a_book_past_the_float_work_total_is_refused_by_name() {
-    let floats: Vec<BoxNode> = (0..2_000)
+    // 17 992 500 examinations, measured rather than derived: milestone 13
+    // raised the cap fourfold and every fixture here was re-measured against
+    // the new one with `Budget::layout()` at an unreachable ceiling.
+    let floats: Vec<BoxNode> = (0..3_000)
         .map(|_| float_box(Float::Left, 40.0, "x"))
         .collect();
     let refusal = layout(
@@ -1834,17 +1838,18 @@ fn a_book_past_the_float_work_total_is_refused_by_name() {
 /// **And it fires the other way too**, because the total is charged in two
 /// places and a total charged in two places has two reachable halves.
 ///
-/// Five hundred figures is a fifth of a million examinations to place — a
-/// long way under the cap — and the two and a half thousand line boxes after
-/// them ask all five hundred for their measure, which is the other three and a
-/// half million. Delete either charge and this book lays out; delete neither
-/// and it is refused by name.
+/// Twelve hundred figures is 3 597 000 examinations to place — a long way
+/// under the cap — and the three thousand six hundred line boxes after them ask
+/// all twelve hundred for their measure, which is the other 15 120 000. Both
+/// halves are **individually** under the cap and together they are over it:
+/// delete either charge and this book lays out; delete neither and it is
+/// refused by name.
 #[test]
 fn a_book_past_the_float_work_total_through_its_line_boxes_is_refused_by_name() {
-    let mut children: Vec<BoxNode> = (0..500)
+    let mut children: Vec<BoxNode> = (0..1_200)
         .map(|_| float_box(Float::Left, 60.0, "x"))
         .collect();
-    children.push(para(&"aaaa bbbb ".repeat(2_500)));
+    children.push(para(&"aaaa bbbb ".repeat(3_600)));
     let refusal = layout(
         &BoxNode::element(block(), children),
         &METRICS,
@@ -1862,9 +1867,10 @@ fn a_book_past_the_float_work_total_through_its_line_boxes_is_refused_by_name() 
 ///
 /// §9.5.2 asks the same question of the same list — *how far down do the floats
 /// on these sides reach* — and a book may ask it once per block. A thousand
-/// figures and two thousand cleared blocks is two million examinations that
-/// neither of the other two fixtures makes, and the scan behind it is the same
-/// quadratic: blocks times floats, with both bounded only by the box cap.
+/// figures and fourteen thousand cleared blocks is fourteen million
+/// examinations that neither of the other two fixtures makes, and the scan
+/// behind it is the same quadratic: blocks times floats, with both bounded only
+/// by the box cap.
 #[test]
 fn a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name() {
     let mut cleared = block();
@@ -1872,7 +1878,7 @@ fn a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name() 
     let mut children: Vec<BoxNode> = (0..1_000)
         .map(|_| float_box(Float::Left, 60.0, "x"))
         .collect();
-    children.extend((0..2_000).map(|_| BoxNode::element(cleared.clone(), Vec::new())));
+    children.extend((0..14_000).map(|_| BoxNode::element(cleared.clone(), Vec::new())));
     let refusal = layout(
         &BoxNode::element(block(), children),
         &METRICS,
@@ -3043,13 +3049,13 @@ fn a_nested_table_is_laid_out_inside_its_cell() {
 /// of the three places tables charge it.
 ///
 /// A `colspan` is a number in the file and the slots it claims are the work, so
-/// five boxes can ask for five million slots — a quantity neither the box cap
-/// nor the line-break cap can see, because it is neither a box nor a
+/// five boxes can ask for five and a half million slots — a quantity neither the
+/// box cap nor the line-break cap can see, because it is neither a box nor a
 /// character.
 #[test]
 fn a_hostile_colspan_is_refused_by_the_work_total() {
     let rows: Vec<BoxNode> = (0..5)
-        .map(|_| row_of(vec![cell_of("x").with_span(1_000_000, 1)]))
+        .map(|_| row_of(vec![cell_of("x").with_span(1_100_000, 1)]))
         .collect();
     let refusal = layout(
         &table_of(rows),
@@ -3067,15 +3073,15 @@ fn a_hostile_colspan_is_refused_by_the_work_total() {
 /// **The second of the three places**, and it has its own fixture because a
 /// total charged in three places has three reachable halves.
 ///
-/// The grid is rows by columns and neither factor bounds the other. Two
-/// thousand rows whose first one holds a cell spanning two thousand columns is
-/// four thousand slots to *place* — a long way under the total — and four
-/// million to *hold*. Delete the grid charge and this book lays out; delete the
-/// placement charge and it still refuses.
+/// The grid is rows by columns and neither factor bounds the other. Four
+/// thousand one hundred rows whose first one holds a cell spanning as many
+/// columns is 8 199 slots to *place* — a long way under the total — and
+/// 16 810 000 to *hold*. Delete the grid charge and this book lays out; delete
+/// the placement charge and it still refuses.
 #[test]
 fn a_grid_of_many_rows_and_many_columns_is_refused_by_the_work_total() {
-    let mut rows = vec![row_of(vec![cell_of("x").with_span(2_000, 1)])];
-    rows.extend((0..1_999).map(|_| row_of(vec![cell_of("y")])));
+    let mut rows = vec![row_of(vec![cell_of("x").with_span(4_100, 1)])];
+    rows.extend((0..4_099).map(|_| row_of(vec![cell_of("y")])));
     let refusal = layout(
         &table_of(rows),
         &METRICS,
@@ -3092,14 +3098,14 @@ fn a_grid_of_many_rows_and_many_columns_is_refused_by_the_work_total() {
 /// **And the third**: §17.5.2.2 spreads every spanning cell over every column
 /// it touches, and that is a third quantity again.
 ///
-/// One row of 1 200 000 columns is 1 200 000 slots to place and 1 200 000 to
-/// hold — 2 400 000 together, under the total — and 2 400 000 more to
+/// One row of 4 200 000 columns is 4 200 000 slots to place and 4 200 000 to
+/// hold — 8 400 000 together, under the total — and 8 400 000 more to
 /// distribute. It refuses only with all three charged, which is what makes this
 /// the fixture for the third rather than a second copy of the first.
 #[test]
 fn the_width_distribution_is_charged_as_well_as_the_grid() {
     let refusal = layout(
-        &table_of(vec![row_of(vec![cell_of("x").with_span(1_200_000, 1)])]),
+        &table_of(vec![row_of(vec![cell_of("x").with_span(4_200_000, 1)])]),
         &METRICS,
         &Options::new(200.0, 400.0),
         &Limits::DEFAULT,
@@ -3126,7 +3132,9 @@ fn a_nested_table_multiplies_the_work_total() {
             cell_of("y"),
         ])])
     };
-    let span = 900_000;
+    // 8 000 004 alone and 24 000 016 nested, either side of a cap of
+    // 16 000 000: the pair only proves the multiplication while both are true.
+    let span = 2_000_000;
     let alone = layout(
         &inner(span),
         &METRICS,

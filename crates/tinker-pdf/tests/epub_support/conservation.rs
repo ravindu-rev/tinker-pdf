@@ -388,30 +388,99 @@ pub fn visible_text(markup: &str) -> String {
 
 /// Whether a start tag carries HTML's `hidden` attribute.
 ///
-/// Written as a scan for the **name** rather than for `hidden="`, because the
-/// attribute is a boolean one and all three of `hidden`, `hidden=""` and
+/// The attribute is a boolean one and all three of `hidden`, `hidden=""` and
 /// `hidden="hidden"` mean the same thing — pandoc writes the third and a
-/// hand-written book writes the first. The scan refuses a name that is only a
-/// suffix of another (`aria-hidden`, which is on three `<figcaption>`s in this
-/// corpus and hides nothing), by requiring the character before it to be white
-/// space and the character after it to end the name.
+/// hand-written book writes the first — so what is looked for is an attribute
+/// **name** rather than a string.
+///
+/// # This walked the tag as text until milestone 13, and it was wrong
+///
+/// **The fifth harness bug this gap has found, and the first that made the
+/// harness accuse the engine.** It scanned the whole start tag for the token
+/// `hidden` with white space on the left and a delimiter on the right, which is
+/// right about `aria-hidden` and `class="hidden"` — both of which have a
+/// non-space character in front of the word — and wrong about an attribute
+/// *value* that contains the word with spaces around it.
+///
+/// `sample-epub30-spec.epub` has one:
+/// `<section class="section" title="2.2.4.3 The hidden attribute" …>`, the
+/// section of EPUB 3.0 that specifies `hidden`. The harness dropped the whole
+/// subtree, and the engine — which resolves `[hidden]` through a real attribute
+/// selector in `ua.css` and was right all along — was reported as putting
+/// **1 757 characters on the page that the book does not have**. A corpus sweep
+/// that says the engine invented text is exactly the report nobody double
+/// checks, and it took milestone 13's cap raise to make the section reachable
+/// at all before anyone could see it.
+///
+/// So the tag is now **parsed** rather than searched: the element name, then
+/// name/value pairs with quoted values skipped whole. `hidden` counts when it
+/// is a name and never when it is inside a value.
 #[must_use]
 pub fn has_hidden_attribute(tag: &str) -> bool {
     let lower = tag.to_ascii_lowercase();
     let bytes = lower.as_bytes();
-    let mut from = 0usize;
-    while let Some(at) = lower[from..].find("hidden") {
-        let start = from + at;
-        let end = start + "hidden".len();
-        let before = start.checked_sub(1).map(|i| bytes[i]);
-        let after = bytes.get(end).copied();
-        let opens = matches!(before, Some(b) if b.is_ascii_whitespace());
-        let closes = matches!(after, None | Some(b'=') | Some(b'>') | Some(b'/'))
-            || matches!(after, Some(b) if b.is_ascii_whitespace());
-        if opens && closes {
+    // Past `<` and the element name.
+    let mut at = 1usize;
+    while at < bytes.len() && !bytes[at].is_ascii_whitespace() && bytes[at] != b'>' {
+        at += 1;
+    }
+    while at < bytes.len() {
+        while at < bytes.len() && (bytes[at].is_ascii_whitespace() || bytes[at] == b'/') {
+            at += 1;
+        }
+        if at >= bytes.len() || bytes[at] == b'>' {
+            return false;
+        }
+        let start = at;
+        while at < bytes.len()
+            && !bytes[at].is_ascii_whitespace()
+            && bytes[at] != b'='
+            && bytes[at] != b'>'
+            && bytes[at] != b'/'
+        {
+            at += 1;
+        }
+        let name = &lower[start..at];
+        // XML allows white space either side of the `=`, and both corpora are
+        // XHTML rather than HTML: the value belongs to this name whatever the
+        // spacing.
+        let mut after = at;
+        while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+            after += 1;
+        }
+        if after < bytes.len() && bytes[after] == b'=' {
+            after += 1;
+            while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+                after += 1;
+            }
+            match bytes.get(after) {
+                Some(quote @ (b'"' | b'\'')) => {
+                    let quote = *quote;
+                    after += 1;
+                    while after < bytes.len() && bytes[after] != quote {
+                        after += 1;
+                    }
+                    after = (after + 1).min(bytes.len());
+                }
+                // An unquoted value, which XML forbids and a hand-written book
+                // may still carry: it ends at white space or at the tag.
+                Some(_) => {
+                    while after < bytes.len()
+                        && !bytes[after].is_ascii_whitespace()
+                        && bytes[after] != b'>'
+                    {
+                        after += 1;
+                    }
+                }
+                None => {}
+            }
+        }
+        at = after;
+        // The local name, so `epub:hidden` would count and `aria-hidden` would
+        // not: a prefix is a namespace and a hyphen is part of the name.
+        if name.split(':').next_back().unwrap_or("") == "hidden" {
             return true;
         }
-        from = end;
     }
     false
 }

@@ -226,11 +226,41 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
 /// A subtree. The generator's own depth is capped well below the layout crate's
 /// so that a hostile input exercises the crate's cap rather than this file's
 /// stack.
+///
+/// # Nine rather than twelve, and gap 31 milestone 13's session is why
+///
+/// **Layout work is exponential in nesting depth**, and the first campaign this
+/// target ever ran measured it: a **107-byte** input built a tree of about
+/// twenty elements and cost **443 137 boxes, 3 899 421 break evaluations and
+/// 354 618 float examinations**, on a single page, in **22 seconds**. The
+/// mechanism is the one `MAX_LAYOUT_WORK`'s ledger already names for tables —
+/// a shrink-to-fit container lays its contents out three times, twice to
+/// measure and once to set — applied at every level, so twelve levels is 3^12
+/// and 3^12 is 531 441. The measured box count is within a fifth of it.
+///
+/// The engine is not wrong here and the caps are not either: the work **is**
+/// bounded, and the input above is refused by name if any of the three totals
+/// is lowered. What twelve levels bought was a session that spent its whole
+/// budget on a handful of inputs, which is gap 24 milestone 5's finding about
+/// `crypt` arriving in a different crate — a target that survives without
+/// executing anything has not been fuzzed.
+///
+/// Nine keeps every branch reachable. `Refusal::TooDeep` fires from the
+/// `max_depth` knob's two small values, exactly as it did at twelve — the
+/// knob's roomiest value is 256 and this generator could never reach that from
+/// either number — and 3^9 is twenty-seven times cheaper.
+///
+/// **What is not fixed is that the multiplier exists**, and it is written down
+/// in `MAX_LAYOUT_WORK`'s own ledger rather than here: a hostile chapter can
+/// still buy the whole work budget out of a few hundred bytes of deeply nested
+/// markup, and what stands between that and an unbounded engine is the budget
+/// alone. Memoising a sublayout's measurement is the fix and it is not this
+/// milestone's.
 fn node(bytes: &mut Bytes<'_>, depth: usize) -> BoxNode {
     let shape = bytes.next();
     let block = depth == 0 || shape & 1 != 0;
     let style = style(bytes, block);
-    if depth >= 12 || shape & 2 != 0 || bytes.spent() {
+    if depth >= 9 || shape & 2 != 0 || bytes.spent() {
         let count = usize::from(shape >> 3) + 1;
         let mut text = String::new();
         for _ in 0..count {
@@ -272,9 +302,22 @@ fn expected(node: &BoxNode, out: &mut String) {
     }
 }
 
+// **Two control bytes, not one, and that is milestone 13's correction.**
+//
+// This target took one byte and read five two-bit fields out of it. Five
+// two-bit fields need ten bits, and the fifth was written `(knobs >> 8) & 3` —
+// a `u8` shifted right by eight, which `#[deny(arithmetic_overflow)]` refuses.
+// **So this target never compiled**, and nothing said so: `cargo fuzz build`
+// needs libFuzzer, which is unavailable on `x86_64-pc-windows-msvc`, and the
+// `cargo check` job that stands in for it does not reach the body of a
+// `fuzz_target!` without `--cfg fuzzing`. Gap 29 found four of eleven targets
+// in the same state and made `cargo check` on this crate a CI job for it; this
+// is the hole that check still has, found by the first session that ran the
+// target on Linux.
 fuzz_target!(|data: &[u8]| {
-    let (control, body) = data.split_at(data.len().min(1));
+    let (control, body) = data.split_at(data.len().min(2));
     let knobs = control.first().copied().unwrap_or(0);
+    let more = control.get(1).copied().unwrap_or(0);
 
     // Small enough that every cap is crossable inside one iteration, and varied
     // enough that both sides of each are reachable from one corpus.
@@ -282,7 +325,7 @@ fuzz_target!(|data: &[u8]| {
         0 => (2, 4),
         1 => (8, 32),
         2 => (64, 4_096),
-        _ => (256, 262_144),
+        _ => (256, 2_097_152),
     };
     let max_break_work = match (knobs >> 2) & 3 {
         0 => 8,
@@ -299,11 +342,11 @@ fuzz_target!(|data: &[u8]| {
     // Milestone 10's third work total. The small values are the interesting
     // ones: a book of floats past this refuses, and the assertion that matters
     // is that it refuses **by name** rather than by running for ever.
-    let max_layout_work = match (knobs >> 8) & 3 {
+    let max_layout_work = match more & 3 {
         0 => 0,
         1 => 64,
         2 => 4_096,
-        _ => 4_000_000,
+        _ => 16_000_000,
     };
     let (width, height) = match (knobs >> 6) & 3 {
         // A page one point wide is where `overflow-wrap`, the last-resort

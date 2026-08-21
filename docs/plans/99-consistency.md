@@ -102,6 +102,25 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    `META-INF/container.xml` rather than OPC: the leaf is the reusable part
    precisely because it is a leaf.
 
+   *Amended a third time, 22 August 2026, [gap 31](gaps/31-epub.md) milestone
+   13.* **Ten**, and one word of the amendment above is corrected in the same
+   edit. It said gap 31 *"reuses this crate"*, and the truth is **reuses, after
+   changing**: `tinker-pdf-xml` as gap 30 froze it refuses every Project
+   Gutenberg EPUB 2 content document and the cover wrapper of every EPUB 3 one,
+   on `<!DOCTYPE`, so gap 31's milestone 2 gave it a two-valued doctype mode
+   before a single book could be read. Reuse of a leaf that must first grow a
+   mode is a different claim from reuse of a leaf as frozen. The dangerous half
+   — the internal subset, where all four of gap 30's bombs live — stays refused
+   by name under both modes, and all four refusals are re-asserted under the new
+   one.
+
+   The two new leaves are `tinker-pdf-css` and `tinker-pdf-layout`. They are two
+   crates rather than one because a parser and an algorithm need different fuzz
+   targets: `css` takes bytes and `layout` takes a caller-built tree, which
+   makes it the only leaf here that is a leaf by the definition and not by the
+   shape. The definition is what binds, which is what this ruling has said since
+   its first amendment.
+
 9. **Oracles are subprocesses, never dependencies.** Binds
    [14](14-testing-and-corpora.md) and every phase that cites an oracle
    diff. mutool, pdftoppm, pdfium_test and qpdf are invoked as external

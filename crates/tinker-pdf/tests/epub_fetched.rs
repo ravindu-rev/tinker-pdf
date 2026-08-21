@@ -325,6 +325,39 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
 /// measuring nothing at all, so the total is asserted to be large — which is
 /// what says the harness read twenty real books rather than twenty containers
 /// it could not open.
+///
+/// # Two books are exceptions, for two different reasons, and both are pinned
+///
+/// *Added by milestone 13, with the figures.* Eighteen of the twenty conserve
+/// every character in order. Two do not, and **the two are not the same kind of
+/// failure**, so they are pinned with different assertions rather than with one
+/// allowance that would cover either.
+///
+/// **`pg16328-beowulf.epub` is reordered.** 2 280 characters come out in the
+/// wrong place, which this harness counts twice — once as absent where the book
+/// has them and once as present where it does not — and reports as 4 560. The
+/// text that moves is Project Gutenberg's **marginal glosses**: a
+/// `<span class="sidenote">` beside almost every chapter heading, set as a
+/// float. What comes out is the gloss before the heading's own words in reading
+/// order, so a page reads "III." then "He drags off thirty of them, and devours
+/// them" then "GRENDEL THE MURDERER." **Nothing is lost and nothing is
+/// invented**, and that is asserted rather than claimed: the pages carry
+/// exactly as many conservable characters as the book holds, and every
+/// character in the wrong place is one absent from the right one. A build that
+/// dropped a gloss, or drew one twice, fails this as loudly as it would without
+/// the exception. It is pinned rather than fixed because it is a
+/// **reading-order** defect in the float path — milestone 10's — and gap 31's
+/// closing statement names it as owed.
+///
+/// **`sample-internallinks.epub` has no glyphs.** It is Japanese, this engine
+/// bundles no faces by design, and nothing attached a [`tinker_pdf::FontProvider`]
+/// here — so 3 474 of its 6 678 characters have no glyph to be set with. That
+/// is not a silent loss: the report says `UncoveredCharacters` and
+/// `UnrepresentedCharacters` by name, and **the assertion below requires it
+/// to**, which is what keeps this exception from covering a book that lost text
+/// for some other reason. Once the aligner loses synchronisation on the first
+/// dropped run it counts the remainder wholesale, which is why 3 474 missing
+/// glyphs are reported as 4 464 missing and 3 872 extra.
 #[test]
 fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     let books = fetched!("text conservation");
@@ -333,12 +366,45 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     for (name, bytes) in &books {
         let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let verdict = conservation(bytes, &doc);
+        let pinned = NOT_CONSERVED.iter().find(|book| book.name == *name);
+        let allowed = pinned.map_or((0, 0), |book| (book.extra, book.missing));
         assert_eq!(
-            verdict.extra, 0,
-            "{name} carries {} characters its book does not have: {:?}",
-            verdict.extra, verdict.divergences
+            (verdict.extra, verdict.missing),
+            allowed,
+            "{name} carries {} characters its book does not have and is missing \
+             {}; {allowed:?} is pinned: {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
         );
         let report = doc.archive().expect("a report");
+        if let Some(book) = pinned {
+            match book.because {
+                // Reordering has one property that tells it from every other
+                // way of getting this wrong, and it is the one asserted: the
+                // pages hold exactly the characters the book does.
+                Why::Reordered => assert_eq!(
+                    verdict.paginated, verdict.source,
+                    "{name} is pinned as reordered, and its pages carry {} of {} \
+                     characters: something was lost or invented",
+                    verdict.paginated, verdict.source
+                ),
+                // And a book pinned for missing glyphs has to **say so**. Ruling
+                // 10: "it opened" and "it opened cleanly" stay distinguishable,
+                // and without this the exception would cover a book that lost
+                // its text for any other reason at all.
+                Why::NoGlyphs => assert!(
+                    report.warnings().iter().any(|warning| matches!(
+                        warning,
+                        ArchiveWarning::UncoveredCharacters { .. }
+                            | ArchiveWarning::UnrepresentedCharacters { .. }
+                    )),
+                    "{name} is pinned as having no glyphs and says nothing about \
+                     them: {:?}",
+                    report.warnings()
+                ),
+            }
+        }
         let mut spine: Vec<&str> = Vec::new();
         for origin in report.pages() {
             if spine.last() != Some(&origin.name.as_str()) {
@@ -362,6 +428,66 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
         "the harness read {source} characters out of twenty books, which is not twenty books"
     );
 }
+
+/// Why a pinned book does not conserve.
+///
+/// Two names rather than one flag, because the two need **different**
+/// assertions beside them and a single "known exception" would let either
+/// failure wear the other's evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Why {
+    /// Every character is on a page and some are on the wrong one.
+    Reordered,
+    /// Characters were dropped because no face covers them, and the report says
+    /// so by name.
+    NoGlyphs,
+}
+
+/// One fetched book this build does not conserve exactly.
+struct NotConserved {
+    /// The book.
+    name: &'static str,
+    /// The harness's `extra` figure.
+    extra: usize,
+    /// Its `missing` figure.
+    missing: usize,
+    /// Which failure it is, which decides what else is asserted.
+    because: Why,
+}
+
+/// The fetched books whose text does not come back exactly, with their figures
+/// (gap 31, milestone 13).
+///
+/// Written down rather than tolerated as a range, for `FETCHED_SPINES`'s
+/// reason: a test that derives the number it checks agrees with itself whatever
+/// the reader does. **Both numbers**, so a build that fixed one direction and
+/// broke the other fails here.
+const NOT_CONSERVED: &[NotConserved] = &[
+    NotConserved {
+        name: "pg16328-beowulf.epub",
+        extra: 4_560,
+        missing: 4_560,
+        because: Why::Reordered,
+    },
+    NotConserved {
+        name: "sample-internallinks.epub",
+        extra: 3_872,
+        missing: 4_464,
+        because: Why::NoGlyphs,
+    },
+    // The same float reordering as Beowulf's, three characters of it: the
+    // line number `170` in the margin of *The Waste Land*, which comes out
+    // before the line it numbers rather than after. Both obfuscated-font
+    // spellings of that book carry it; only the OTF one reaches this, because
+    // the WOFF one's face does not de-obfuscate to a readable table and its
+    // text takes the `NoGlyphs` route instead.
+    NotConserved {
+        name: "sample-wasteland-otf-obf.epub",
+        extra: 3,
+        missing: 3,
+        because: Why::Reordered,
+    },
+];
 
 // ---- the route --------------------------------------------------------------
 

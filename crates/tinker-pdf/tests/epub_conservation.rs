@@ -406,14 +406,47 @@ fn the_source_side_drops_hidden_and_keeps_everything_else() {
         <p class=\"hidden\">class</p>\
         <div hidden><span>bare</span></div>\
         <div hidden=\"\"><span>empty</span></div>\
+        <div hidden = \"hidden\"><span>spaced</span></div>\
         <p>kept</p></body>";
     let text = visible_text(markup);
-    for gone in ["landmarks", "bare", "empty"] {
+    for gone in ["landmarks", "bare", "empty", "spaced"] {
         assert!(!text.contains(gone), "{gone} should be hidden: {text:?}");
     }
     for kept in ["aria", "data", "class", "kept"] {
         assert!(text.contains(kept), "{kept} should be kept: {text:?}");
     }
+}
+
+/// **The word `hidden` inside an attribute value hides nothing** (gap 31,
+/// milestone 13).
+///
+/// The fifth harness bug, as a fixture. `has_hidden_attribute` searched the
+/// start tag as a string, so any value with ` hidden ` in it dropped the
+/// element's whole subtree — and the tag that does it is real:
+/// `sample-epub30-spec.epub` titles a section *"2.2.4.3 The hidden attribute"*,
+/// and the harness reported the 1 757 characters underneath it as text the
+/// engine had **invented**.
+///
+/// Both directions are asserted, because a parser that fixed this by requiring
+/// `hidden` to be first, or last, or unquoted would pass a one-sided test.
+#[test]
+fn a_hidden_word_in_an_attribute_value_is_not_the_hidden_attribute() {
+    let text = visible_text(
+        "<body>\
+         <section title=\"2.2.4.3 The hidden attribute\"><p>spec</p></section>\
+         <p title=\"hidden\">exact</p>\
+         <p alt=\"a hidden thing\">middle</p>\
+         <p data-x=\"x hidden\">last</p>\
+         <section title=\"The hidden attribute\" hidden><p>both</p></section>\
+         </body>",
+    );
+    for kept in ["spec", "exact", "middle", "last"] {
+        assert!(text.contains(kept), "{kept} should be kept: {text:?}");
+    }
+    // And a tag that carries **both** a value with the word in it and the real
+    // attribute is still hidden: the fix must not overshoot into never seeing
+    // one.
+    assert!(!text.contains("both"), "{text:?}");
 }
 
 /// A hidden element holding a **nested element of its own name** ends at the

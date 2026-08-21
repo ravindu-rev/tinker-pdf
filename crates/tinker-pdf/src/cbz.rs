@@ -750,6 +750,7 @@ pub struct ArchiveReport {
     dialect: Option<crate::xps::Dialect>,
     parsed_parts: usize,
     layout: Option<crate::epub::BookLayout>,
+    cost: Option<crate::epub::BookCost>,
 }
 
 impl ArchiveReport {
@@ -769,6 +770,7 @@ impl ArchiveReport {
             dialect,
             parsed_parts,
             layout: None,
+            cost: None,
         }
     }
 
@@ -784,11 +786,13 @@ impl ArchiveReport {
         pages: Vec<PageOrigin>,
         synthesised_bytes: usize,
         layout: crate::epub::BookLayout,
+        cost: crate::epub::BookCost,
     ) -> ArchiveReport {
         ArchiveReport {
             warnings,
             pages,
             synthesised_bytes,
+            cost: Some(cost),
             dialect: None,
             // No markup part is *cached* by the book path the way gap 30's is —
             // the OCF layer reads each entry once and the package document is
@@ -874,6 +878,26 @@ impl ArchiveReport {
     #[must_use]
     pub fn layout(&self) -> Option<crate::epub::BookLayout> {
         self.layout
+    }
+
+    /// What a **reflowable** book spent against the ten caps its reading path
+    /// charges, or `None` for a document whose pages this engine did not lay
+    /// out (gap 31, milestone 13).
+    ///
+    /// Public for [`ArchiveReport::synthesised_bytes`]'s reason, one gap later
+    /// and nine caps wider: **a bound nobody can measure is a bound nobody can
+    /// check.** `bounds_ledger.rs`'s third yardstick is a 300-page book, and
+    /// what stops that column from being a number somebody made up is
+    /// `the_book_yardstick_is_not_below_a_real_book`, which opens every book in
+    /// both corpora and reads these figures out.
+    ///
+    /// `None` for a comic archive and for a fixed document, and that is an
+    /// answer rather than a gap: neither format has a stylesheet, a box tree or
+    /// a caller-chosen page box, so a zero here would claim a measurement that
+    /// was never taken.
+    #[must_use]
+    pub fn book_cost(&self) -> Option<crate::epub::BookCost> {
+        self.cost
     }
 }
 

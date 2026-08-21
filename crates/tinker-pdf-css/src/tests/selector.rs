@@ -437,3 +437,69 @@ fn an_indexed_lookup_and_a_brute_force_one_agree() {
         );
     }
 }
+
+/// **A repeated class does not return its rules twice** (gap 31, milestone 13).
+///
+/// `cargo fuzz run css` found this in 428 executions of its first real session,
+/// as `the index and brute force disagree`, and minimised it to nine bytes:
+/// a `.note` rule and an element carrying `note` twice.
+///
+/// `class="note note"` is valid HTML — the DOM's `classList` is a *set*, and a
+/// producer that writes one by accident is writing an ordinary book. The visible
+/// consequence is nothing: applying the same declaration twice lands on the same
+/// computed value. The consequence that is not nothing is the **budget**, and it
+/// is asserted here beside the list rather than left implied, because the two
+/// are independent: `MAX_DOM_NODES` counts elements and nothing counts class
+/// tokens, so one attribute of a thousand repeats used to multiply the whole
+/// cascade's cost by a thousand.
+#[test]
+fn an_index_does_not_return_a_rule_twice_for_a_repeated_class() {
+    let parsed = sheet(".note { color: red } p { color: blue } * { color: green }");
+    let flat: Vec<&crate::selector::Selector> = parsed
+        .rules
+        .iter()
+        .flat_map(|rule| rule.selectors.iter())
+        .collect();
+    let mut index = Index::default();
+    for (handle, selector) in flat.iter().enumerate() {
+        index.insert(selector, handle);
+    }
+
+    let mut nodes = tree(&[("p", None)]);
+    nodes[0].classes = vec!["note".to_string()];
+    let once = index.candidates(&nodes[0]);
+    // The control: three rules, three candidates, and the element really does
+    // match all three -- so a comparison against the repeated case is a
+    // comparison of something.
+    assert_eq!(once.len(), 3, "{once:?}");
+
+    nodes[0].classes = vec!["note".to_string(), "note".to_string()];
+    let twice = index.candidates(&nodes[0]);
+    assert_eq!(
+        twice, once,
+        "a class written twice returned its bucket twice: {twice:?}"
+    );
+
+    // And the budget, which is the half a rendered page cannot show. Ten
+    // repetitions of one class cost what one costs.
+    nodes[0].classes = vec!["note".to_string(); 10];
+    let ten = index.candidates(&nodes[0]);
+    assert_eq!(ten, once, "ten repeats cost more than one: {ten:?}");
+
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    for handle in index.candidates(&nodes[0]) {
+        matches(flat[handle], &nodes, 0, &mut budget).expect("under every cap");
+    }
+    let repeated = budget.matches();
+    nodes[0].classes = vec!["note".to_string()];
+    let mut budget = Budget::new(&limits);
+    for handle in index.candidates(&nodes[0]) {
+        matches(flat[handle], &nodes, 0, &mut budget).expect("under every cap");
+    }
+    assert_eq!(
+        repeated,
+        budget.matches(),
+        "a repeated class charged the match budget more than once"
+    );
+}

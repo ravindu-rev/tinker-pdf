@@ -1,5 +1,44 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 22 August 2026, gap 31 milestone 13.* **No new row, and a third
+//! yardstick on every one of the thirty-four — which found two caps set below a
+//! real book.**
+//!
+//! Gap 29's yardstick is a 200-page comic and gap 30's is a dense fixed
+//! document. Both are estimates: arithmetic about a plausible file, written down
+//! so it can be argued with. Gap 31's is a 300-page reflowable book and it is
+//! **not** an estimate, because this is the first format here whose reading path
+//! publishes what it spent. [`tinker_pdf::cbz::ArchiveReport::book_cost`] gives
+//! ten figures and the archive gives five more, so
+//! [`the_book_yardstick_is_not_below_a_real_book`] opens every book in both
+//! corpora on every run and measures sixteen of these rows against what a real
+//! book actually costs.
+//!
+//! **Two rows failed the first time it ran, and neither could have been found
+//! from the committed corpus.** `MAX_BOX_TREE_NODES` was 262 144 and
+//! `sample-linear-algebra.epub` — 94 content documents of MathML — needs
+//! **993 349**; `MAX_LAYOUT_WORK` was 4 000 000 and `sample-epub30-spec.epub`,
+//! the EPUB 3.0 specification published as a book, spends **4 233 567**. The
+//! six books this repository commissioned spend 326 and 39. A yardstick
+//! calibrated on our own corpus would have agreed with both wrong numbers and
+//! called the margin comfortable.
+//!
+//! Neither cap was quiet: both refuse by name. But the layout budget is spent
+//! across a **whole book** and never refunded, so the chapter that crossed the
+//! box cap refused and so did every chapter after it — a 94-chapter book that
+//! opened, paginated to its spine, and lost two thirds of its text with a
+//! warning per page nobody had to read. That is
+//! [`no_bound_refuses_a_real_book`]'s whole reason for existing, reached from
+//! the direction this file has always warned about: **a cap that refuses the
+//! thing the format is for is not a bound, it is a missing feature.**
+//!
+//! [`Bound::book`] is not an `Option` and no row opts out. Gap 30's milestone 9
+//! had to go back and fill in seven `None`s that had stood for seven
+//! milestones; this one is filled in at the milestone that adds it, and where
+//! the honest figure is zero it is a zero with a comment saying what makes it
+//! one — a book holds no comic page and no XPS part, and that is a fact about
+//! the format rather than an absence of measurement.
+//!
 //! *Amended, 20 August 2026, gap 31 milestone 7.* **Four more rows**, the whole
 //! of `tinker-pdf-layout`'s `limits.rs`, and the table goes from twenty-nine to
 //! thirty-three. Two of them are worth reading before the rest, and one of the
@@ -287,6 +326,24 @@ struct Bound {
     /// them with — and a row that opts out of a check is a row that is not
     /// checked, which is the shape of every failure this file exists for.
     document: u128,
+    /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
+    ///
+    /// The third yardstick, and unlike the first two it is not an estimate.
+    /// Sixteen of these thirty-four rows are figures a real book can be
+    /// *measured* against, and
+    /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
+    /// both corpora against them on every run — the committed six always, the
+    /// fetched twenty when `TINKER_EPUB_CORPUS` names them. Each of those
+    /// sixteen is the largest figure any of the twenty-six actually spends,
+    /// rounded up; the other eighteen carry a derivation in their own comment.
+    ///
+    /// **Not an `Option`, and no row opts out.** Gap 30's milestone 9 had to go
+    /// back and fill in seven `None`s that had stood for seven milestones, and
+    /// wrote down why: *a row that opts out of a check is a row that is not
+    /// checked*. Where the honest figure is zero it is a zero and the comment
+    /// says what makes it one — a book holds no comic page and no XPS part, and
+    /// that is a fact about the format rather than an absence of measurement.
+    book: u128,
     /// The most this bound's own inputs can ask for, which must exceed the cap
     /// or the cap can never fire.
     reachable: u128,
@@ -303,6 +360,25 @@ struct Bound {
 /// is how large an ordinary archive can be.
 const ARCHIVE_CEILING: u128 = 1 << 32;
 
+/// Gap 31's yardstick, where three rows share a number.
+///
+/// **A 300-page reflowable book of 128 spine items**, which is the shape of the
+/// densest thing either corpus holds and then some: `sample-linear-algebra.epub`
+/// is 94 content documents and 96 manifest items, and no other book comes near
+/// it. The manifest and the spine take the same figure because a book that
+/// names every item it reads has one of each, and the row for each says why the
+/// two caps still cannot stand in for one another.
+const BOOK_SPINE_ITEMS: u128 = 128;
+
+/// The book's entries: its 128 documents, 24 pictures, four stylesheets, and
+/// the eight files an OCF container and an EPUB 3 package need between them.
+const BOOK_ENTRIES: u128 = BOOK_SPINE_ITEMS + 24 + 4 + 8;
+
+/// The longest container path, which is the longest real one doubled: 45 bytes
+/// is the most any book in either corpus spends and a yardstick is a plausible
+/// book rather than the corpus.
+const BOOK_PATH_LEN: u128 = 90;
+
 fn ledger() -> Vec<Bound> {
     vec![
         Bound {
@@ -318,6 +394,12 @@ fn ledger() -> Vec<Bound> {
             // images between them. The same 505 `MAX_XPS_PARTS` counts, because
             // in this format a part *is* an entry.
             document: 505,
+            // 128 content documents, 24 pictures, four stylesheets, the
+            // package document, the navigation document, the NCX,
+            // `container.xml`, `mimetype` and pandoc's seventh `META-INF`
+            // entry. The densest real book in either corpus holds **99**:
+            // `sample-linear-algebra.epub`, 94 of them content documents.
+            book: BOOK_ENTRIES,
             // A central directory record is 46 bytes plus a name, so a name of
             // one byte is the densest an archive can be.
             reachable: ARCHIVE_CEILING / 47,
@@ -340,6 +422,12 @@ fn ledger() -> Vec<Bound> {
             // about sixty. A comic's largest entry is a scan and is seventy
             // times this, which is why the two yardsticks disagree most here.
             document: 40_000 * 14 + 2_000 * 60,
+            // Two mebibytes: the largest single entry, which for a book is a
+            // full-page plate or a very long chapter rather than markup. The
+            // largest any real book here holds is **2 020 786** bytes, which is
+            // `sample-linear-algebra.epub`'s MathML — markup after all, and the
+            // one place the two guesses cross.
+            book: 2 << 20,
             reachable: u32::MAX as u128,
             reachable_because: "the uncompressed-size field is 32 bits, and Zip64's is 64",
             declared_in: ZIP_LIMITS,
@@ -359,6 +447,11 @@ fn ledger() -> Vec<Bound> {
             // an XPS part reaches this engine as a ZIP entry, so nothing gap 30
             // reads is admitted without being charged here first.
             document: 200 * (40_000 * 14 + 2_000 * 60) + 20_000_000,
+            // Thirty-two mebibytes, and this is the row every byte of gap 31
+            // is admitted through: an EPUB entry reaches this engine as a ZIP
+            // entry exactly as an XPS part does. The densest real book inflates
+            // to **25 473 290**.
+            book: 32 << 20,
             // The work cap's whole argument: a per-entry ceiling times a
             // file-chosen entry count is not a bound, and this is the product
             // it would otherwise be.
@@ -384,6 +477,11 @@ fn ledger() -> Vec<Bound> {
             // headroom, because the yardstick is a *plausible* document rather
             // than the corpus.
             document: 104,
+            // The longest container path a book here holds is **45** bytes —
+            // `sample-wasteland-otf-obf.epub`'s and `pg16328-beowulf.epub`'s
+            // agree on the figure — and the yardstick doubles it, because a
+            // yardstick is a plausible book rather than the corpus.
+            book: BOOK_PATH_LEN,
             reachable: u16::MAX as u128,
             reachable_because: "the name-length field is 16 bits",
             declared_in: ZIP_LIMITS,
@@ -403,6 +501,12 @@ fn ledger() -> Vec<Bound> {
             // it is what WPF's serialiser writes, so it is the colour type
             // every real package in this repository uses.
             document: 2_550 * 3_300 * 4,
+            // A full-page 300 dpi RGBA plate, which is gap 30's figure for gap
+            // 30's reason: an illustrated book and a report carry the same
+            // picture. Every picture in the committed corpus is far smaller,
+            // because milestone 1's own PNGs are written byte by byte from the
+            // specification.
+            book: 2_550 * 3_300 * 4,
             // Thirteen bytes of IHDR: two 31-bit dimensions, charged at the
             // widest layout the colour type can produce.
             reachable: 0x7FFF_FFFFu128 * 0x7FFF_FFFF * 4,
@@ -428,6 +532,11 @@ fn ledger() -> Vec<Bound> {
             // two paths had been confused, which is the defect this whole gap
             // exists to fix.
             document: 0,
+            // **Zero, measured rather than assumed.** `epub::route` runs
+            // before `cbz::pages_from_archive` in `open_container`, so a book
+            // never reaches the comic path at all and no book can spend one
+            // page against this cap.
+            book: 0,
             reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
             reachable_because: "every entry the archive reader will hand over could be an image",
             declared_in: CBZ,
@@ -446,6 +555,11 @@ fn ledger() -> Vec<Bound> {
             // `xps.rs` reuses it, which is the ledger entry the plan asked for
             // in as many words.
             document: 200 * 40_000 * 20 + 20_000_000,
+            // Twenty megabytes. `epub::Limits` reuses this constant rather than
+            // declaring its own, so a book is charged here exactly as a comic
+            // is; the largest real book writes **19 781 810** bytes, which is
+            // `sample-linear-algebra.epub` at the default box.
+            book: 20_000_000,
             reachable: MAX_CBZ_PAGES as u128
                 * (PAGE_OVERHEAD as u128 + zip_limits::MAX_ZIP_ENTRY_BYTES as u128),
             reachable_because: "every page the page cap allows, each carrying a whole entry",
@@ -476,6 +590,10 @@ fn ledger() -> Vec<Bound> {
             // ECMA-388 18.2 recommends 16 canvases; a path geometry adds four
             // and a resource dictionary two.
             document: 24,
+            // Element nesting in one content document. The deepest in either
+            // corpus is **24**, `sample-linear-algebra.epub`'s MathML, and no
+            // prose book passes ten.
+            book: 32,
             reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 3,
             reachable_because: "`<a>` is three bytes, in a part of at most MAX_ZIP_ENTRY_BYTES",
             declared_in: XML_LIMITS,
@@ -489,6 +607,10 @@ fn ledger() -> Vec<Bound> {
             comic: 0,
             // A `Glyphs` with every optional attribute ECMA-388 12.1 gives it.
             document: 24,
+            // Attributes on one element. The most any real book puts on one is
+            // **seven**, which is a `<div>` with `epub:type`, `class`, `id`,
+            // `title`, `lang`, `xml:lang` and `role`.
+            book: 16,
             reachable: (zip_limits::MAX_ZIP_ENTRY_BYTES as u128) / 5,
             reachable_because: "` a=\"\"` is five bytes, and they may all sit on one element",
             declared_in: XML_LIMITS,
@@ -502,6 +624,11 @@ fn ledger() -> Vec<Bound> {
             comic: 0,
             // `LinearGradientBrush.GradientStops` is 33, plus room for a prefix.
             document: 48,
+            // The longest element or attribute name. The longest in either
+            // corpus is **19** — `preserveAspectRatio`, on an SVG cover — and
+            // the vendor-prefixed CSS property names that are longer are not
+            // XML names.
+            book: 32,
             reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
             reachable_because: "a name may be as long as the part that holds it",
             declared_in: XML_LIMITS,
@@ -520,6 +647,11 @@ fn ledger() -> Vec<Bound> {
             // 40 000 path segments as `PolyLineSegment` children, at two events
             // an element.
             document: 2_000 * 3 * 2 + 40_000 * 2,
+            // Tokens in **one** content document, which is where this cap is
+            // spent. `sample-linear-algebra.epub` spends a million across all
+            // ninety-four of its documents and its largest one is a fifth of
+            // that.
+            book: 262_144,
             // The work cap's argument, in this format's terms: `<a/>` is four
             // bytes and produces two events, so a per-element cap times a
             // file-chosen element count is not a bound and this is the product
@@ -547,6 +679,11 @@ fn ledger() -> Vec<Bound> {
             // relationships parts, the package relationships part and about a
             // hundred fonts and images.
             document: 505,
+            // Zero, and it is a fact about the format rather than a gap in the
+            // measurement: an EPUB container holds neither of OPC's two items,
+            // which `no_fetched_book_carries_either_of_opcs_two_items` asserts
+            // over all twenty fetched books.
+            book: 0,
             reachable: zip_limits::MAX_ZIP_ENTRIES as u128,
             reachable_because: "every entry the archive reader will hand over could be a part",
             declared_in: XPS,
@@ -559,6 +696,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_XPS_PAGES as u128,
             comic: 0,
             document: 200,
+            // Zero, and it is a fact about the format rather than a gap in the
+            // measurement: an EPUB container holds neither of OPC's two items,
+            // which `no_fetched_book_carries_either_of_opcs_two_items` asserts
+            // over all twenty fetched books.
+            book: 0,
             // **Not** the part cap, and this is the row that says why: two
             // hundred `PageContent` elements may name one part between them, so
             // the page count is not bounded by the part count at all. What
@@ -581,6 +723,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_XPS_ELEMENTS as u128 - 1,
             comic: 0,
             document: 400_000,
+            // Zero, and it is a fact about the format rather than a gap in the
+            // measurement: an EPUB container holds neither of OPC's two items,
+            // which `no_fetched_book_carries_either_of_opcs_two_items` asserts
+            // over all twenty fetched books.
+            book: 0,
             // No **single** part can reach this, which is the whole reason it
             // is a total: `MAX_XML_TOKENS` bounds one part at a million events,
             // of which at most half can be start tags. The ceiling is that,
@@ -600,6 +747,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_XPS_SEGMENTS as u128,
             comic: 0,
             document: 8_000_000,
+            // Zero, and it is a fact about the format rather than a gap in the
+            // measurement: an EPUB container holds neither of OPC's two items,
+            // which `no_fetched_book_carries_either_of_opcs_two_items` asserts
+            // over all twenty fetched books.
+            book: 0,
             // `H1` is two bytes and one segment, in a part this build already
             // admits at 128 MiB — and that is one path, before the file has
             // chosen how many paths or how many pages.
@@ -618,6 +770,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_XPS_GLYPHS as u128,
             comic: 0,
             document: 1_000_000,
+            // Zero, and it is a fact about the format rather than a gap in the
+            // measurement: an EPUB container holds neither of OPC's two items,
+            // which `no_fetched_book_carries_either_of_opcs_two_items` asserts
+            // over all twenty fetched books.
+            book: 0,
             // `1;` is two bytes and one more mapping, in one attribute of one
             // element, in a part this build already admits at 128 MiB — and a
             // `Glyphs` costs one element and no segments, so neither cap
@@ -637,6 +794,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_XPS_RESOURCE_DEPTH as u128,
             comic: 0,
             document: 2,
+            // Zero, and it is a fact about the format rather than a gap in the
+            // measurement: an EPUB container holds neither of OPC's two items,
+            // which `no_fetched_book_carries_either_of_opcs_two_items` asserts
+            // over all twenty fetched books.
+            book: 0,
             // One dictionary may hold as many entries as its part has events,
             // and a chain through all of them is not a cycle.
             reachable: xml_limits::MAX_XML_TOKENS as u128,
@@ -664,6 +826,12 @@ fn ledger() -> Vec<Bound> {
             // writes `comic: 0`.
             comic: 0,
             document: 0,
+            // The same 45 bytes `MAX_ZIP_NAME_LEN` measures, doubled, because
+            // in this format a container path **is** an entry name — which is
+            // why the two rows agree and why neither could stand in for the
+            // other: one is 16 bits of ZIP field and one is §4.2.3's own
+            // number.
+            book: BOOK_PATH_LEN,
             // An XML attribute value may be as long as the part that holds it,
             // and a `META-INF/container.xml` reaches this engine as a ZIP entry
             // — so the ceiling is the per-entry cap, and the specification's own
@@ -689,6 +857,10 @@ fn ledger() -> Vec<Bound> {
             // answer rather than a blank.
             comic: 0,
             document: 0,
+            // The manifest of a 128-document book. The largest real one is
+            // **96**, and the pair below it is why the two are not one row:
+            // §5.7.2 lets four thousand itemrefs name one item.
+            book: BOOK_SPINE_ITEMS,
             // `MAX_XML_TOKENS` stands in front of it: an `<item/>` produces two
             // events, so one package document may name half a million of them.
             reachable: (xml_limits::MAX_XML_TOKENS / 2) as u128,
@@ -706,6 +878,10 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_EPUB_SPINE_ITEMS as u128,
             comic: 0,
             document: 0,
+            // 128 itemrefs. The longest real spine is **94**,
+            // `sample-linear-algebra.epub`'s, and the committed corpus's
+            // longest is five.
+            book: BOOK_SPINE_ITEMS,
             // **Not** bounded by the manifest cap, which is why the two are
             // separate rows rather than one. `epubcheck` reports two itemrefs
             // naming one manifest item as `OPF-034` — an error, not a
@@ -733,6 +909,12 @@ fn ledger() -> Vec<Bound> {
             fixtures: MAX_EPUB_FALLBACK_DEPTH as u128,
             comic: 0,
             document: 0,
+            // **Zero, and measured.** Not one of the twenty-six books in either
+            // corpus writes a `fallback` attribute at all: §3.5.1's chain is a
+            // hostile-input surface rather than a thing producers use, which is
+            // exactly what makes a cap on it worth having and a yardstick
+            // figure for it a zero.
+            book: 0,
             // The longest acyclic chain is one link per manifest item, so the
             // cap in front of it is the manifest's.
             reachable: MAX_EPUB_MANIFEST_ITEMS as u128,
@@ -758,6 +940,10 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_CSS_BYTES as u128,
             comic: 0,
             document: 0,
+            // Sixty-four kibibytes of stylesheet across the book. The most any
+            // real book carries is **39 413**, `sample-internallinks.epub`'s
+            // three sheets.
+            book: 64 << 10,
             // Every stylesheet in an EPUB is a ZIP entry, so gap 29's per-entry
             // cap is what stands in front of this one — sixteen times it.
             reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
@@ -775,6 +961,10 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_CSS_TOKENS as u128,
             comic: 0,
             document: 0,
+            // The densest real book charges **191 656**, which is
+            // `sample-linear-algebra.epub`. This is the row where the two
+            // corpora disagree most: the committed six charge at most 8 300.
+            book: 200_000,
             // A token is at least one byte, so one sheet at the byte cap can
             // cross this total on its own — which is what makes a *work* cap
             // reachable from a single entry rather than only from a manifest
@@ -791,6 +981,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_CSS_RULES as u128,
             comic: 0,
             document: 0,
+            // **9 167** in `sample-linear-algebra.epub`, against a cap of
+            // 20 000 — the tightest margin in this table for any row a real
+            // book reaches, and the reason this figure is measured rather than
+            // guessed.
+            book: 10_000,
             // `a{}` is three bytes.
             reachable: css_limits::MAX_CSS_BYTES as u128 / 3,
             reachable_because: "a qualified rule is three bytes, in a sheet of MAX_CSS_BYTES",
@@ -804,6 +999,8 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_CSS_DECLARATIONS as u128,
             comic: 0,
             document: 0,
+            // **20 861**, the same book.
+            book: 21_000,
             // `a:b;` is four.
             reachable: css_limits::MAX_CSS_BYTES as u128 / 4,
             reachable_because: "a declaration is four bytes, in a sheet of MAX_CSS_BYTES",
@@ -817,6 +1014,10 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_CSS_SELECTOR_PARTS as u128,
             comic: 0,
             document: 0,
+            // Compounds in one complex selector. Real book stylesheets stay
+            // under five — `body > section p.first` is four — and the
+            // hand-written sheet that fires this cap is the fixture's.
+            book: 8,
             // A compound plus its combinator is two bytes: `a `.
             reachable: css_limits::MAX_CSS_BYTES as u128 / 2,
             reachable_because: "`a ` is one compound and one combinator in two bytes",
@@ -833,6 +1034,11 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_CSS_IMPORT_DEPTH as u128,
             comic: 0,
             document: 0,
+            // One. Not one book in either corpus writes an `@import` at all;
+            // both producers link their sheets from the content document. The
+            // yardstick allows one because a book that did would be ordinary,
+            // and the chain that fires the cap is the fixture's.
+            book: 1,
             // The ceiling is the container's entry count: every level of an
             // `@import` chain is a sheet the caller's resolver found, and gap
             // 29's cap is what bounds how many of those there can be. A
@@ -853,6 +1059,12 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_DOM_NODES as u128,
             comic: 0,
             document: 0,
+            // Elements in **one** content document, which is where this cap is
+            // spent — the cascade runs per document. The largest real one is
+            // **20 160**, `sample-linear-algebra.epub`'s longest chapter; the
+            // book's total across ninety-four documents is 272 628 and is not
+            // what this bounds.
+            book: 24_576,
             // The half of gap 31's `const` relation that cannot live in the
             // crate: `tinker-pdf-css` has an empty allow-list by the fifth DAG
             // amendment, so it cannot name `MAX_XML_TOKENS`. Here it can.
@@ -871,6 +1083,13 @@ fn ledger() -> Vec<Bound> {
             fixtures: css_limits::MAX_SELECTOR_MATCHES as u128,
             comic: 0,
             document: 0,
+            // **521 101** compound-against-element tests, and the book that
+            // spends them is not the one with the most elements: it is
+            // `sample-epub30-spec.epub`, whose stylesheet defeats the
+            // rightmost-compound index more often. The product of the two caps
+            // is 1.3e9, so a real book spends four ten-thousandths of what this
+            // row's own ceiling allows.
+            book: 525_000,
             // **The product**, and the only row here whose ceiling is one. The
             // matcher buckets rules by their rightmost compound, so an ordinary
             // book tests each element against a handful — but a stylesheet
@@ -900,6 +1119,10 @@ fn ledger() -> Vec<Bound> {
             fixtures: layout_limits::MAX_BOX_DEPTH as u128,
             comic: 0,
             document: 0,
+            // Box tree depth, which is element depth plus whatever anonymous
+            // boxes and table fixup add. The deepest real document nests **24**
+            // elements.
+            book: 48,
             // Nothing. `tinker-pdf-layout` takes a tree of plain structs from a
             // caller, so the ceiling is whatever that caller builds — which for
             // the twenty-fourth fuzz target is a structured generator with no
@@ -925,10 +1148,21 @@ fn ledger() -> Vec<Bound> {
         Bound {
             name: "MAX_BOX_TREE_NODES",
             cap: layout_limits::MAX_BOX_TREE_NODES as u128,
-            published: "262 144",
+            published: "2 097 152",
             fixtures: layout_limits::MAX_BOX_TREE_NODES as u128,
             comic: 0,
             document: 0,
+            // **993 349 boxes**, `sample-linear-algebra.epub`, and this row is
+            // the reason milestone 13's yardstick exists. The cap was 262 144
+            // until this milestone and that book crossed it partway through:
+            // the budget is spent across a whole book and never refunded, so
+            // the chapter that crossed it refused by name and **so did every
+            // chapter after it** — a 94-chapter W3C sample book that opened,
+            // paginated to its spine, and came back with two thirds of its text
+            // replaced by grey pages and a warning each. Three boxes per element
+            // is right for prose and wrong for MathML, where `<mi>` and `<mo>`
+            // put an inline box on every symbol.
+            book: 1_000_000,
             // Boxes are not elements, which is the whole reason this is not
             // `MAX_DOM_NODES` under another name: anonymous block generation,
             // `::before`/`::after` and table-structure fixup each make boxes
@@ -947,6 +1181,9 @@ fn ledger() -> Vec<Bound> {
             fixtures: layout_limits::MAX_LINE_BREAK_WORK as u128,
             comic: 0,
             document: 0,
+            // **1 234 335 charged characters**, which is `pg2701-images.epub` —
+            // Moby-Dick, the longest book in either corpus, at 701 pages.
+            book: 1_250_000,
             // A character is a byte at least, and a book's characters are
             // bounded only by what the archive will inflate.
             reachable: zip_limits::MAX_ZIP_INFLATED as u128,
@@ -960,10 +1197,15 @@ fn ledger() -> Vec<Bound> {
         Bound {
             name: "MAX_LAYOUT_WORK",
             cap: layout_limits::MAX_LAYOUT_WORK as u128,
-            published: "4 000 000",
+            published: "16 000 000",
             fixtures: layout_limits::MAX_LAYOUT_WORK as u128,
             comic: 0,
             document: 0,
+            // **4 233 567 float examinations**, `sample-epub30-spec.epub`, and
+            // the second row this milestone had to raise a cap for: at
+            // 4 000 000 the EPUB 3.0 specification refused to lay out from page
+            // 601 of 777, by name, as `NotFragmented`.
+            book: 4_500_000,
             // The **square** of the box cap, which is what makes this row
             // exist: a book may float every box it is allowed, and placing the
             // last of them examines all the others. Neither work cap below
@@ -985,6 +1227,13 @@ fn ledger() -> Vec<Bound> {
             fixtures: layout_limits::MAX_LAYOUT_PAGES as u128,
             comic: 0,
             document: 0,
+            // **856 pages**, `sample-linear-algebra.epub` at the default box
+            // once the box cap above stopped truncating it. The figure is a
+            // function of the caller's page box rather than of any file, which
+            // is this format's own determinism question and
+            // `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ`'s
+            // subject.
+            book: 1_000,
             // **Not** bounded by the spine item count, which is the trap gap
             // 31's bounds table names: one spine item of 128 MiB fragments into
             // as many pages as its length allows. A page needs one line box and
@@ -1152,6 +1401,208 @@ fn no_bound_refuses_a_dense_fixed_document() {
         ledger().len(),
     );
     assert_eq!(measured, 34, "the ledger is thirty-four rows");
+}
+
+/// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
+///
+/// A third test rather than a third assertion inside either of the other two,
+/// for `no_bound_refuses_a_dense_fixed_document`'s reason: the three yardsticks
+/// measure three different documents and a row's three figures are genuinely
+/// three numbers. A comic holds no stylesheet, a fixed document holds no box
+/// tree, and a book holds neither a comic page nor an XPS part — and all three
+/// of those are recorded as a measured zero rather than as an absence.
+///
+/// **Two rows failed this the first time it ran**, which is the whole reason
+/// the yardstick is worth the milestone. `MAX_BOX_TREE_NODES` was 262 144 and
+/// `sample-linear-algebra.epub` needs 993 349; `MAX_LAYOUT_WORK` was 4 000 000
+/// and `sample-epub30-spec.epub` spends 4 233 567. Neither was quiet about it
+/// — both refuse by name — but a refusal aimed at a book W3C publishes is a
+/// missing feature wearing a `MAX_` prefix, which is exactly what this pair of
+/// directions exists to make impossible.
+#[test]
+fn no_bound_refuses_a_real_book() {
+    for bound in ledger() {
+        assert!(
+            bound.book < bound.cap,
+            "{} is {} and a 300-page reflowable book spends {}: this cap \
+             refuses a real book",
+            bound.name,
+            bound.cap,
+            bound.book,
+        );
+    }
+    // A sweep that found nothing to sweep is a sweep that does not run.
+    assert_eq!(ledger().len(), 34, "the ledger is thirty-four rows");
+}
+
+/// **And the yardstick is not a number somebody made up.**
+///
+/// The comic and the fixed document are estimates — arithmetic about a
+/// plausible file, written down so it can be argued with. This one does not
+/// have to be, because gap 31 is the first format in this repository whose own
+/// reading path publishes what it spent:
+/// [`tinker_pdf::cbz::ArchiveReport::book_cost`] carries ten of the figures
+/// above, and the archive carries five more.
+///
+/// So every book in both corpora is opened here and measured against the row
+/// that bounds it. The committed six always; the fetched twenty when
+/// `TINKER_EPUB_CORPUS` names the directory `fetch-corpus.sh` filled — and the
+/// difference between the two is the finding rather than a detail. **The
+/// committed six are a hundred times smaller than the fetched twenty on every
+/// row that matters**: they spend 326 boxes against 993 349 and 39 float
+/// examinations against 4 233 567. A yardstick calibrated on the corpus this
+/// repository commissioned would have agreed with the caps that were wrong.
+///
+/// Printed as well as asserted, because the figure a partial build is judged on
+/// is the margin rather than the boolean.
+#[test]
+fn the_book_yardstick_is_not_below_a_real_book() {
+    let mut books = corpus_books(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("epub"),
+    );
+    let committed = books.len();
+    assert_eq!(committed, 6, "milestone 1 committed six books");
+    match std::env::var("TINKER_EPUB_CORPUS") {
+        Ok(dir) => books.extend(corpus_books(std::path::Path::new(&dir))),
+        Err(_) => println!(
+            "  epub-corpus: SKIPPED — the fetched twenty are not here, so this \
+             sweep measured the committed six only"
+        ),
+    }
+    println!("  measuring {} books", books.len());
+
+    let rows = ledger();
+    let row = |name: &str| {
+        rows.iter()
+            .find(|bound| bound.name == name)
+            .unwrap_or_else(|| panic!("{name} has no row"))
+    };
+    let mut worst: Vec<(&str, u128, String)> = Vec::new();
+    let mut note = |name: &'static str, spent: u128, book: &str| match worst
+        .iter_mut()
+        .find(|(row, _, _)| *row == name)
+    {
+        Some(slot) if slot.1 >= spent => {}
+        Some(slot) => *slot = (name, spent, book.to_owned()),
+        None => worst.push((name, spent, book.to_owned())),
+    };
+
+    for (name, bytes) in &books {
+        // The five the container itself decides, read through `tinker-pdf-zip`
+        // rather than through the book: these bound what is admitted, and what
+        // is admitted is measured before anything is read.
+        let archive = tinker_pdf::cbz::open_archive(bytes, &tinker_pdf_zip::Limits::DEFAULT)
+            .unwrap_or_else(|e| panic!("{name} is not a readable ZIP: {e:?}"));
+        note("MAX_ZIP_ENTRIES", archive.entries().len() as u128, name);
+        note(
+            "MAX_ZIP_ENTRY_BYTES",
+            archive
+                .entries()
+                .iter()
+                .map(|entry| entry.uncompressed_size as u128)
+                .max()
+                .unwrap_or(0),
+            name,
+        );
+        note(
+            "MAX_ZIP_INFLATED",
+            archive
+                .entries()
+                .iter()
+                .map(|entry| entry.uncompressed_size as u128)
+                .sum(),
+            name,
+        );
+        let longest = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.len() as u128)
+            .max()
+            .unwrap_or(0);
+        note("MAX_ZIP_NAME_LEN", longest, name);
+        note("MAX_OCF_PATH_LEN", longest, name);
+
+        // And the ten the reading path spends, published by the report for
+        // exactly this reason.
+        let layout = tinker_pdf::epub::BookLayout::default();
+        let (_, report) =
+            match tinker_pdf::epub::route(archive, &tinker_pdf::epub::Limits::DEFAULT, &layout) {
+                tinker_pdf::epub::Routing::Document(pdf, report) => (pdf, report),
+                tinker_pdf::epub::Routing::Refused(why) => {
+                    panic!("{name} was refused: {why:?}")
+                }
+                _ => panic!("{name} is not an EPUB"),
+            };
+        let cost = report.book_cost().expect("a book publishes its cost");
+        note(
+            "MAX_SYNTHESISED_PDF",
+            report.synthesised_bytes() as u128,
+            name,
+        );
+        note("MAX_EPUB_MANIFEST_ITEMS", cost.manifest_items as u128, name);
+        note("MAX_EPUB_SPINE_ITEMS", cost.spine_items as u128, name);
+        note("MAX_CSS_TOKENS", cost.css_tokens as u128, name);
+        note("MAX_CSS_RULES", cost.css_rules as u128, name);
+        note("MAX_CSS_DECLARATIONS", cost.css_declarations as u128, name);
+        note("MAX_SELECTOR_MATCHES", cost.selector_matches as u128, name);
+        note("MAX_BOX_TREE_NODES", cost.boxes as u128, name);
+        note("MAX_LINE_BREAK_WORK", cost.break_work as u128, name);
+        note("MAX_LAYOUT_WORK", cost.layout_work as u128, name);
+        note("MAX_LAYOUT_PAGES", cost.pages as u128, name);
+    }
+
+    assert_eq!(
+        worst.len(),
+        16,
+        "sixteen rows are measured against a real book rather than argued"
+    );
+    for (name, spent, book) in &worst {
+        let bound = row(name);
+        println!(
+            "  {name:26} book yardstick {:>12}  worst real {:>12}  ({book})",
+            bound.book, spent
+        );
+        assert!(
+            *spent <= bound.book,
+            "{name}: {book} spends {spent} and the book yardstick says {}. The \
+             yardstick is the row that is wrong, not the book — raise it, and \
+             check whether the cap above it still stands over the new figure",
+            bound.book,
+        );
+        // And the cap, from the other side, which is the assertion that would
+        // have caught `MAX_BOX_TREE_NODES` at milestone 10 rather than here.
+        assert!(
+            *spent < bound.cap,
+            "{name}: {book} spends {spent} against a cap of {}, so a real book \
+             is refused",
+            bound.cap,
+        );
+    }
+}
+
+/// Every `.epub` in a directory, by name, or nothing if there is no such
+/// directory.
+fn corpus_books(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Vec<u8>)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("epub"))
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {name}: {e}"));
+            (name, bytes)
+        })
+        .collect();
+    out.sort_by(|left, right| left.0.cmp(&right.0));
+    out
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not

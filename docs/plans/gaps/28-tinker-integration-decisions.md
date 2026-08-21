@@ -223,6 +223,31 @@ argues for at length. The size is unchanged because the work is the same size;
 what moved is which part of it is the work. The corrected sentence is also in
 [gaps/README.md](README.md)'s row for 30, which is where a reader arrives from.
 
+*Amended in place, 22 August 2026, by [31](31-epub.md) milestone 13.* **EPUB is
+still XL+ and the sentence above is right and incomplete.** *"XHTML plus a CSS
+cascade, a box model, line breaking, pagination and font fallback — a layout
+engine rather than a renderer"* is every word true, and it names only the
+layout. It leaves out two things the plan found before it started:
+
+- **the container was a live defect rather than a missing feature.** An `.epub`
+  opened, showed its auto-generated cover as a single page at the cover's own
+  pixel size, and warned about nothing. That is the same one-signature-five-
+  formats defect gap 30 closed for XPS and named EPUB in the same sentence;
+- **the writer was missing a half again.** Gap 30's whole correction to this
+  entry was that the reader was ahead and the writer behind. It was behind here
+  too, in a different place: `DocumentBuilder` emitted **no annotations at all**
+  — gap 30 named that as a non-goal in as many words — and no document outline.
+  An EPUB's navigation document and its intra-book cross-references are both, so
+  gap 31's milestone 5 is gap 30's milestone 5 over again and lands before its
+  consumers.
+
+The size is unchanged; what moved is which part of it is the work. Two things
+the sentence did *not* get wrong are worth recording beside it: font fallback is
+real work and the engine still bundles no faces, so a book with no embedded face
+draws nothing without a host `FontProvider`; and the risk the owner accepted —
+that a half-built cascade renders *plausibly and wrong* — is what the plan's
+five visibility devices exist for.
+
 **Three new gap plans will be written for them — CBZ, XPS and EPUB — after
 this gap closes.** That is where the work is planned; it is not in this
 document and it is not in plan 15.

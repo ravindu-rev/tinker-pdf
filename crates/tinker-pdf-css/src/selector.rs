@@ -918,6 +918,32 @@ impl Index {
     /// brute_force_one_agree` is what says the first half is true, because a
     /// bucketing bug produces a book that is styled slightly less than it
     /// should be — which reads as a plain stylesheet rather than as a defect.
+    ///
+    /// # A superset **without repeats**, and gap 31 milestone 13's campaign
+    /// found out why that matters
+    ///
+    /// [`bucket_for`] puts every selector in exactly one bucket, so the four
+    /// lists below are disjoint and nothing here can return a handle twice —
+    /// except through the loop over classes, because an element may carry the
+    /// **same class twice**. `class="note note"` is valid HTML that real books
+    /// write by accident, and this function used to return every rule in that
+    /// bucket once per repetition.
+    ///
+    /// The visible half is small: applying one declaration twice lands on the
+    /// same computed value, so the page is unchanged. The half that is not
+    /// small is the budget. Every repeat is charged against
+    /// [`crate::limits::MAX_SELECTOR_MATCHES`], and the element cap counts
+    /// *elements* rather than class tokens — so `class="a a a a …"` with a
+    /// thousand repetitions multiplies the whole cascade's cost by a thousand
+    /// out of one attribute, which is a cap nothing was enforcing.
+    ///
+    /// `cargo fuzz run css` found it in 428 executions, as the index and brute
+    /// force disagreeing; `an_index_does_not_return_a_rule_twice_for_a_repeated
+    /// _class` is the reproducer as a test.
+    ///
+    /// The fix is here rather than in whatever builds the element, and
+    /// deliberately: [`Element`] is a trait a caller implements, so a rule
+    /// enforced in the caller is a rule enforced nowhere this crate can see.
     pub fn candidates<E: Element>(&self, element: &E) -> Vec<usize> {
         let mut out = self.universal.clone();
         if let Some(id) = element.id() {
@@ -925,8 +951,14 @@ impl Index {
                 out.extend_from_slice(handles);
             }
         }
+        let mut seen: Vec<&str> = Vec::new();
         for class in element.classes() {
-            if let Some(handles) = self.by_class.get(class.as_str()) {
+            let class = class.as_str();
+            if seen.contains(&class) {
+                continue;
+            }
+            seen.push(class);
+            if let Some(handles) = self.by_class.get(class) {
                 out.extend_from_slice(handles);
             }
         }

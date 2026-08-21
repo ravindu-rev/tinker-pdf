@@ -90,7 +90,8 @@ now, and reviews enforce all four.
    fuzzers enforce it — a fuzz crash blocks a release.
 
 3. **Leaf crates stay PDF-free.** `filters`, `crypto`, `font`, `color`,
-   `raster`, `math`, `zip` and `xml` — **eight** — take bytes and plain
+   `raster`, `math`, `zip`, `xml`, `css` and `layout` — **ten** — take bytes
+   and plain
    parameter structs, return bytes and values. No COS types, no PDF vocabulary in their
    public APIs. That is what keeps them independently fuzzable, testable and
    publishable. This is ruling 8 in

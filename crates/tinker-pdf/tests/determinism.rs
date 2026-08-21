@@ -43,12 +43,44 @@
 //! may paint and is checked against it before it is hashed. A page that
 //! stops drawing fails here rather than quietly becoming the new baseline.
 
-use tinker_pdf::{Bitmap, Document, DocumentBuilder, RenderOptions, RenderWarning};
+use std::sync::Arc;
+
+use tinker_pdf::{
+    Bitmap, Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning,
+    SimpleFontProvider,
+};
+
+/// How a fixture's document is opened, and which of its pages is hashed.
+///
+/// *Added by milestone 13.* Every fixture above the fifteenth is a PDF, a comic
+/// archive or a fixed document, and all three have one thing in common that
+/// nothing in this file had to say out loud: **their page count is a property
+/// of the file.** `Document::open` is the whole of what they need and page 0 is
+/// the only page a caller could mean.
+///
+/// A reflowable book is not like that. Its page box is the *caller's* number,
+/// its page count is a function of that number, and it has no face of its own
+/// unless the book carries one — so opening it needs two decisions this enum
+/// makes explicit rather than defaulting.
+enum Open {
+    /// `Document::open`, page 0. The first fourteen.
+    Closed,
+    /// A reflowable book at a page box, with this file's own synthetic face,
+    /// hashing the page at `at`.
+    Book {
+        /// The page box in points, which decides the page count.
+        page: (f64, f64),
+        /// Which page is hashed.
+        at: u32,
+    },
+}
 
 /// A named page: how to build it, and the least ink it may draw.
 struct Fixture {
     name: &'static str,
     build: fn() -> Vec<u8>,
+    /// How it is opened. See [`Open`].
+    open: Open,
     /// The fewest non-background pixels this page may paint.
     ///
     /// A floor, not a measurement — roughly half of what the page draws
@@ -68,11 +100,40 @@ fn ink(bitmap: &Bitmap) -> usize {
         .count()
 }
 
-/// The rendered bytes of the first page, hashed.
+/// The face every reflowable fixture here is set in.
+///
+/// [`curvy_font`], the six-shape synthetic face this file already builds for
+/// the `text` fixture, handed to the engine as a host would hand it a system
+/// font. **A book that embeds no face has no closed answer without one**: the
+/// engine bundles no faces by design, so every glyph of every committed book
+/// resolves to nothing and its pages come out blank — which is the exact
+/// failure this file's own documentation describes, a fixture measuring
+/// nothing being indistinguishable from a fixture measuring something.
+///
+/// A provider is *usually* an arrangement made outside the document, and
+/// `text_page`'s doc comment refuses one for that reason. This one is not: the
+/// face is written byte by byte forty lines from here, so it is as much a part
+/// of this file as the page is, and ruling 4 still holds over every target
+/// including `wasm32`, where there are no font directories to read.
+fn book_face() -> Arc<SimpleFontProvider> {
+    Arc::new(SimpleFontProvider::new(curvy_font()))
+}
+
+/// The rendered bytes of one page, hashed.
 fn fingerprint(fixture: &Fixture) -> String {
-    let bitmap = Document::open((fixture.build)())
-        .expect("it opens")
-        .page(0)
+    let (document, at) = match fixture.open {
+        Open::Closed => (Document::open((fixture.build)()).expect("it opens"), 0),
+        Open::Book { page, at } => (
+            Document::open_with(
+                (fixture.build)(),
+                &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
+            )
+            .expect("it opens"),
+            at,
+        ),
+    };
+    let bitmap = document
+        .page(at)
         .expect("a page")
         .render(&RenderOptions::default());
 
@@ -1843,6 +1904,52 @@ fn xps_package() -> Vec<u8> {
     include_bytes!("xps/wpf-image-and-text.xps").to_vec()
 }
 
+/// **The fifteenth fingerprint's book, and the first page here whose page
+/// number is a caller's decision.**
+///
+/// `pandoc-book-cover.epub` from [milestone 1's corpus](epub/README.md): pandoc
+/// 3.10.2 wrote every byte of it on 19 August 2026, from `source/book.md` in
+/// that directory. It is the second real producer's file in this file — gap 30's
+/// XPS was the first — and `include_bytes!` rather than `std::fs` for the same
+/// reason, because this test runs on `wasm32-wasip1` under wasmtime with no
+/// preopened directory.
+///
+/// # Why this book and not one of the other five
+///
+/// All six read with nothing owed, so any of them would hash stably. This is
+/// the only one that puts the whole of gap 31 on one spine:
+///
+/// - OCF — `META-INF/container.xml`, a `full-path` resolved from the container
+///   root, and pandoc's seventh `META-INF` entry that §4.2.6.3 does not reserve;
+/// - the package document — EPUB 3.0, a manifest of eight, a spine of five, and
+///   **both** a navigation document and an NCX, which milestone 1 found only
+///   this producer writes;
+/// - the doctype — `<!DOCTYPE html>` on every content document, which the
+///   parser refused outright until milestone 2 gave it a mode;
+/// - the cascade — 276 qualified rules and 582 declarations out of pandoc's own
+///   stylesheet, over the user-agent sheet milestone 8 wrote;
+/// - layout — 326 boxes, 3 845 charged break opportunities, UAX #14's line
+///   breaking over an em dash, an ellipsis, a non-breaking hyphen and a
+///   Japanese line, and pagination into **seven** pages from five itemrefs;
+/// - the writer — eight `/Link` annotations and an outline, which is milestone
+///   5's work and reaches no other fixture in this file.
+///
+/// So a change anywhere from the ZIP reader to the line breaker moves it, which
+/// is a wider blast radius than `cbz_page`'s or `xps_package`'s: neither of
+/// those reaches a stylesheet, a box tree or a line break at all.
+///
+/// # What a move in this hash means
+///
+/// The same attribution problem the other two carry, one format wider again.
+/// [`the_synthesised_book_is_the_same_bytes_on_every_target`] is what narrows
+/// it: if that hash moved too, the reader or the writer changed; if it did not,
+/// the renderer did. And
+/// [`a_book_is_stable_at_each_page_box_and_the_two_boxes_differ`] is what says
+/// the page this hash is over is the page the caller's box produced.
+fn epub_book() -> Vec<u8> {
+    include_bytes!("epub/pandoc-book-cover.epub").to_vec()
+}
+
 /// The committed fingerprints.
 ///
 /// Every entry is a claim that this page renders to these exact bytes on
@@ -1854,26 +1961,31 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "text",
         build: text_page,
+        open: Open::Closed,
         least_ink: 700,
     },
     Fixture {
         name: "curves",
         build: curves_page,
+        open: Open::Closed,
         least_ink: 1100,
     },
     Fixture {
         name: "shading",
         build: shading_page,
+        open: Open::Closed,
         least_ink: 4500,
     },
     Fixture {
         name: "blend",
         build: blend_page,
+        open: Open::Closed,
         least_ink: 1700,
     },
     Fixture {
         name: "pattern",
         build: pattern_page,
+        open: Open::Closed,
         least_ink: 1600,
     },
     // 4922 today, and most of it is inside layers that are *on*, so this
@@ -1884,6 +1996,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "optional",
         build: optional_content_page,
+        open: Open::Closed,
         least_ink: 2400,
     },
     // 5262 today, out of 19 200. The five placements are disjoint, so this
@@ -1893,6 +2006,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "image",
         build: image_page,
+        open: Open::Closed,
         least_ink: 2600,
     },
     // 8066 today, of 9600. The floor guards over-suppression: a soft mask
@@ -1904,6 +2018,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "transparency",
         build: transparency_page,
+        open: Open::Closed,
         least_ink: 4000,
     },
     // 4488 today, of 9600, and most of it is the wedge's lattice. The floor
@@ -1915,6 +2030,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "tiling",
         build: tiling_page,
+        open: Open::Closed,
         least_ink: 2200,
     },
     // The frame is thin, so this page paints little relative to its area and
@@ -1926,6 +2042,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "jbig2",
         build: jbig2_page,
+        open: Open::Closed,
         least_ink: 900,
     },
     // 9 311 today, of 9 600: the three `sh` bands cover the page between them
@@ -1937,6 +2054,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "mesh",
         build: mesh_page,
+        open: Open::Closed,
         least_ink: 4600,
     },
     // 5 180 today, of 9 600: three disjoint 1 728-pixel rectangles, less the
@@ -1957,6 +2075,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "jpx",
         build: jpx_page,
+        open: Open::Closed,
         least_ink: 3600,
     },
     // 1 403 today, of 1 600: the indexed picture covers the whole page and the
@@ -1975,6 +2094,7 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "cbz",
         build: cbz_page,
+        open: Open::Closed,
         least_ink: 700,
     },
     // 20 333 today, of 484 704: a 612 x 792 page, most of it white.
@@ -2000,7 +2120,33 @@ const GOLDEN: &[Fixture] = &[
     Fixture {
         name: "xps",
         build: xps_package,
+        open: Open::Closed,
         least_ink: 10_000,
+    },
+    // 44 483 today, of 279 936: page **3** of seven, which is the first page of
+    // chapter one and the densest page of running text the book has. Pages 0
+    // to 2 are a cover this build refuses as SVG, a title page and a navigation
+    // document, and none of them would notice if line breaking stopped working.
+    //
+    // The floor is doing a job no other floor here does. A reflowable book has
+    // two independent ways to come out empty and a hash cannot tell them
+    // apart: **the text may fail to lay out**, which leaves the page white, and
+    // **the face may fail to arrive**, which leaves it white as well. The
+    // second is guarded by `fingerprint`'s `UnreadableFont` check and by
+    // [`book_face`]; this floor guards the first, and it guards it in the
+    // direction a hash cannot — losing the paragraphs after the heading takes
+    // this page to about 3 000.
+    //
+    // The opposite failure adds ink: a page box ignored sets the whole chapter
+    // on one page, and the hash catches that at once.
+    Fixture {
+        name: "epub",
+        build: epub_book,
+        open: Open::Book {
+            page: (432.0, 648.0),
+            at: 3,
+        },
+        least_ink: 22_000,
     },
 ];
 
@@ -2130,6 +2276,21 @@ fn rendering_is_stable_across_targets() {
         (
             "xps",
             "3e91e30f90903a7b5a91f0442c965acc2519ab22ce7e1c9c5f9b6392e2f74751",
+        ),
+        // Added August 2026 with gap 31 milestone 13, and **the first entry
+        // here whose page number is not a property of the file**: this is page
+        // 3 of the seven a 432 x 648 box paginates
+        // `pandoc-book-cover.epub` into, and a caller who passed 600 x 800
+        // would get six pages and a different page 3. Read `epub_book`'s doc
+        // comment before treating a move in this one as a rendering change --
+        // its blast radius is the ZIP reader, the XML parser with milestone 2's
+        // doctype mode, the OCF layer, the package document, the cascade, the
+        // box tree, UAX #14's line breaker, fragmentation,
+        // `DocumentBuilder`'s links and outline, and `CosDocument`'s parse of
+        // what it wrote, as well as the renderer every other row here covers.
+        (
+            "epub",
+            "601b099fe7ff948adda1e1d8649c383cc7f8e9a999e64b9d7cda7d1a2c745b3e",
         ),
     ];
     assert_eq!(
@@ -2444,4 +2605,314 @@ fn rendering_is_stable_within_one_process() {
             "{name} renders the same twice"
         );
     }
+}
+
+/// The bytes the EPUB reader hands `CosDocument::open`, hashed.
+///
+/// *Added August 2026, with gap 31 milestone 13,* in the pair gap 29's
+/// milestone 6 established and gap 30's milestone 9 repeated, and for the
+/// reason they established it: **a rendered hash cannot see object numbering,
+/// dictionary key order or stream framing**, because a document renumbered or
+/// re-keyed parses to the same page tree and draws the same picture. Ruling 4
+/// is a claim about rendering; this is the third place in this repository where
+/// a *written* document is an input to it.
+///
+/// What it covers that the `epub` fingerprint above cannot:
+///
+/// - **milestone 5's annotations and outline.** Eight `/Link` annotations and
+///   an `/Outlines` tree are in these bytes and on **no** rendered page: an
+///   annotation is not content, so a build that wrote none would render this
+///   book identically. That is a whole milestone of gap 31 that no fingerprint
+///   in this file can see;
+/// - **the pages nobody renders.** This hash is over all seven, so the cover
+///   this build refuses as SVG, the title page and the navigation document are
+///   in it. The fingerprint renders page 3 and sees none of them;
+/// - **the page count itself**, which for a book is a function of the caller's
+///   argument rather than of the file, and is the subject of
+///   [`a_book_is_stable_at_each_page_box_and_the_two_boxes_differ`].
+///
+/// The two hashes together attribute a failure. If both move, the reader or the
+/// writer changed; if only the fingerprint moved, the renderer did; if only
+/// this one moved, the document changed in a way that draws the same --- which
+/// is a real change and worth a sentence in the commit either way.
+#[test]
+fn the_synthesised_book_is_the_same_bytes_on_every_target() {
+    let (pdf, report) = synthesise_book(BOOK_BOX);
+
+    // The document this hash is about, asserted rather than assumed. A hash
+    // over the wrong document is stable and worthless, and for a book the wrong
+    // document has two names: before milestone 3 these bytes opened as a
+    // one-page *comic* whose page was the cover, and before milestone 8 they
+    // opened as five grey placeholders.
+    assert_eq!(
+        report.layout(),
+        Some(tinker_pdf::epub::BookLayout::default()),
+        "the report says which box it was laid out at, and it is the default"
+    );
+    assert_eq!(
+        report
+            .pages()
+            .iter()
+            .map(|page| page.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "EPUB/text/cover.xhtml",
+            "EPUB/text/title_page.xhtml",
+            "EPUB/nav.xhtml",
+            "EPUB/text/ch001.xhtml",
+            "EPUB/text/ch001.xhtml",
+            "EPUB/text/ch001.xhtml",
+            "EPUB/text/ch002.xhtml",
+        ],
+        "seven pages from five itemrefs, and chapter one takes three of them"
+    );
+    assert!(
+        report.pages().iter().all(|page| page.defect.is_none()),
+        "no page is a placeholder: {:?}",
+        report.pages().iter().find(|page| page.defect.is_some())
+    );
+    assert_eq!(report.synthesised_bytes(), pdf.len());
+
+    // What the book cost, entry by entry. Milestone 13 published these so that
+    // `bounds_ledger.rs`'s third yardstick could be checked against a real book
+    // rather than argued, and pinning them here is what stops the yardstick's
+    // input from drifting under it.
+    let cost = report.book_cost().expect("a book has a cost");
+    assert_eq!(
+        [
+            cost.manifest_items,
+            cost.spine_items,
+            cost.css_tokens,
+            cost.css_rules,
+            cost.css_declarations,
+            cost.selector_matches,
+            cost.boxes,
+            cost.break_work,
+            cost.layout_work,
+            cost.pages,
+        ],
+        [8, 5, 8_296, 276, 582, 1_211, 326, 3_845, 0, 7],
+        "the book did not cost what this hash was taken over"
+    );
+
+    // The structure only a byte hash pins, named entry by entry so a failure
+    // says which half moved.
+    for (needle, count, what) in [
+        (
+            &b"/Link"[..],
+            8,
+            "milestone 5's annotations, on no rendered page",
+        ),
+        (b"/Outlines", 2, "the navigation document, as an outline"),
+        (
+            b"/FontFile2",
+            0,
+            "the book embeds no face, so the writer has none to subset: this is \
+             the `FontProvider` handover, as a zero",
+        ),
+        (b"/DCTDecode", 0, "the cover is SVG and is refused by name"),
+        (b"/ImageMask", 0, "nothing here is a stencil"),
+    ] {
+        assert_eq!(
+            pdf.windows(needle.len()).filter(|w| *w == needle).count(),
+            count,
+            "{what}: {} in the synthesised book",
+            String::from_utf8_lossy(needle),
+        );
+    }
+
+    let hash = sha(&pdf);
+    assert_eq!(
+        hash,
+        "b2a11a163496b7982dedb1ecf924464d509e7b3b214aa0efaceafa54bd58c6a7",
+        "the synthesised book is not the bytes it was; see this test's doc \
+         comment for what that means and how to tell it apart from a rendering \
+         change. The document is {} bytes.",
+        pdf.len()
+    );
+}
+
+/// The default page box, which is [`tinker_pdf::epub::DEFAULT_PAGE`]'s.
+const BOOK_BOX: (f64, f64) = (432.0, 648.0);
+/// A second box, and the whole point of it is that it is a different one.
+const OTHER_BOOK_BOX: (f64, f64) = (600.0, 800.0);
+
+/// Hex of a SHA-256, which three tests here want.
+fn sha(bytes: &[u8]) -> String {
+    tinker_pdf_crypto::sha2::sha256(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The book, read and written at one page box.
+fn synthesise_book(page: (f64, f64)) -> (Vec<u8>, tinker_pdf::cbz::ArchiveReport) {
+    let bytes = epub_book();
+    let archive = tinker_pdf::cbz::open_archive(&bytes, &tinker_pdf_zip::Limits::DEFAULT)
+        .expect("the book is a readable ZIP");
+    let layout = tinker_pdf::epub::BookLayout {
+        page,
+        font_size: tinker_pdf::epub::DEFAULT_FONT_SIZE,
+    };
+    match tinker_pdf::epub::route(archive, &tinker_pdf::epub::Limits::DEFAULT, &layout) {
+        tinker_pdf::epub::Routing::Document(pdf, report) => (pdf, report),
+        tinker_pdf::epub::Routing::Refused(why) => panic!("the book was refused: {why:?}"),
+        tinker_pdf::epub::Routing::NotEpub(_) => panic!("the book is an EPUB"),
+        // `Routing` is `#[non_exhaustive]` and a wildcard here would swallow a
+        // variant a later gap added, so it says so.
+        _ => panic!("a routing this test has never seen"),
+    }
+}
+
+/// **This format's own determinism question, which no earlier one had.**
+///
+/// *Added August 2026, with gap 31 milestone 13.* Fourteen fingerprints stood
+/// in this file before the fifteenth and not one of them could ask this,
+/// because in every format before EPUB the page count is a property of the
+/// file. A comic's pages are its entries; a fixed document's are its
+/// `FixedPage` parts; a PDF's are its page tree. **A book's are a function of
+/// an argument the caller passed**, which is what
+/// [`tinker_pdf::epub::DEFAULT_PAGE`]'s doc comment says in as many words.
+///
+/// So ruling 4 has a second half here, and it takes **three** assertions rather
+/// than one:
+///
+/// 1. the same book at 432 x 648 is the same bytes every time and on every
+///    target;
+/// 2. the same book at 600 x 800 is the same bytes every time and on every
+///    target;
+/// 3. **and the two are not the same bytes.**
+///
+/// The third is the one that carries the weight, and the rule eighteen
+/// milestones have found is why it is written down: *when a thing has two
+/// independent consequences, a test for one of them is not a test.* A build
+/// that ignored the page box entirely --- that paginated every book at the
+/// default and reported the caller's numbers back unchanged --- would satisfy
+/// "stable" twice over and be exactly as wrong as a build that laid the book
+/// out at random. Stability is not evidence that the argument was used.
+///
+/// What differs is asserted in three places rather than trusted to the hash,
+/// because a hash that moved for some *other* reason would let this pass while
+/// the page box was still ignored: the page count (seven against six), the
+/// number of cross-reference annotations the writer emitted (eight against
+/// seven, because a link's target page changes with the pagination), and the
+/// rendered page itself.
+#[test]
+fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
+    let (first, report) = synthesise_book(BOOK_BOX);
+    let (again, _) = synthesise_book(BOOK_BOX);
+    let (other, other_report) = synthesise_book(OTHER_BOOK_BOX);
+    let (other_again, _) = synthesise_book(OTHER_BOOK_BOX);
+
+    // (1) and (2): each box is stable, in this process and --- through the
+    // committed hashes below --- on every target.
+    assert_eq!(sha(&first), sha(&again), "432 x 648 is not stable");
+    assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
+    assert_eq!(
+        sha(&first),
+        "b2a11a163496b7982dedb1ecf924464d509e7b3b214aa0efaceafa54bd58c6a7",
+        "the book at 432 x 648 is not the bytes it was"
+    );
+    assert_eq!(
+        sha(&other),
+        "7530969d466b6060db99b7ef7722461a207b36352c61368ea7a3505c24589dac",
+        "the book at 600 x 800 is not the bytes it was"
+    );
+
+    // (3): and they differ. This is the assertion a build that ignored the box
+    // fails, and it is the only one here that it fails.
+    assert_ne!(
+        sha(&first),
+        sha(&other),
+        "the same book at two page boxes produced the same bytes, which means \
+         the box did not reach the pagination"
+    );
+
+    // Named differences, so a failure says *what* stopped depending on the box
+    // rather than only that something did.
+    assert_eq!(
+        (report.pages().len(), other_report.pages().len()),
+        (7, 6),
+        "the page count is a function of the page box"
+    );
+    assert_eq!(
+        report.layout().map(|layout| layout.page),
+        Some(BOOK_BOX),
+        "the report says which box it was"
+    );
+    assert_eq!(
+        other_report.layout().map(|layout| layout.page),
+        Some(OTHER_BOOK_BOX),
+        "and so does the other"
+    );
+    let links = |pdf: &[u8]| pdf.windows(5).filter(|w| *w == b"/Link").count();
+    assert_eq!(
+        (links(&first), links(&other)),
+        (8, 7),
+        "a cross-reference names the page its target landed on, so the writer's \
+         annotation count moves with the pagination"
+    );
+
+    // **Through the facade as well**, which the injection matrix had to find.
+    // Everything above goes straight to `epub::route`, and on that path the
+    // caller's two numbers are already a `BookLayout`. The path a *caller*
+    // takes has one more step in it — `BookLayout::sanitised`, where an
+    // arbitrary pair of `f64`s becomes a usable box — and the matrix injected
+    // "the caller's page width is ignored" there and **nothing above failed**:
+    // a build that replaced the width with the default still produced two
+    // different documents, because the height still differed. Two independent
+    // consequences, and a test for one of them is not a test.
+    //
+    // So the page a caller is handed is asserted to be the page a caller asked
+    // for, in both directions, which is the assertion that defect fails.
+    for (box_, pages) in [(BOOK_BOX, 7u32), (OTHER_BOOK_BOX, 6)] {
+        let document = Document::open_with(
+            epub_book(),
+            &OpenOptions::at_page(box_.0, box_.1).with_fonts(book_face()),
+        )
+        .expect("it opens");
+        assert_eq!(
+            document.page_count(),
+            pages,
+            "a book opened at {box_:?} paginated into {} pages",
+            document.page_count()
+        );
+        assert_eq!(
+            document.page(0).expect("a page").size(),
+            box_,
+            "the page a caller is handed is not the box the caller asked for"
+        );
+        assert_eq!(
+            document
+                .archive()
+                .and_then(|report| report.layout())
+                .map(|layout| layout.page),
+            Some(box_),
+            "the report a caller is handed does not say which box it was"
+        );
+    }
+
+    // And the rendered page, which is the other half of ruling 4: the same
+    // page **index** at two boxes is two different pages, and both are stable.
+    let render = |page: (f64, f64)| {
+        let fixture = Fixture {
+            name: "epub",
+            build: epub_book,
+            open: Open::Book { page, at: 3 },
+            least_ink: 22_000,
+        };
+        fingerprint(&fixture)
+    };
+    let at_default = render(BOOK_BOX);
+    assert_eq!(at_default, render(BOOK_BOX), "the render is not stable");
+    let at_other = render(OTHER_BOOK_BOX);
+    assert_eq!(
+        at_other,
+        render(OTHER_BOOK_BOX),
+        "the render at the second box is not stable"
+    );
+    assert_ne!(
+        at_default, at_other,
+        "page 3 renders identically at two page boxes"
+    );
 }

@@ -5226,3 +5226,479 @@ Milestone 11's list stands except where noted, and this milestone adds:
   emitted at the viewport's own size in points, so a host that wanted every page
   of a mixed book to be one size has to do that itself — which is honest, and
   is the reason `Page::size()` differs between two pages of one document.
+
+## Progress — 22 August 2026, milestone 13
+
+**A third yardstick, and the first thing it did was find two caps set below a
+real book.** `bounds_ledger.rs`'s thirty-four rows each carry three recorded
+figures now rather than two — gap 29's 200-page comic, gap 30's dense fixed
+document, and gap 31's 300-page reflowable book — and **no row opts out**, which
+is gap 30 milestone 9's rule applied before it had to be applied twice. Beside
+them the fifteenth determinism fingerprint, its written-bytes twin, and a claim
+no earlier format could make: the same book at two page boxes, stable at each
+and **different between them**. **2 787 tests, 8 ignored**, up from 2 780 and 7
+at milestone 12.
+
+### The yardstick is measured, and that is the whole of why it worked
+
+The first two yardsticks are estimates. They are arithmetic about a plausible
+file, written down so a reader can argue with them, and gap 30's milestone 9
+filled seven of them in by hand. This one did not have to be, because gap 31 is
+the first format in this repository whose reading path can be asked what it
+spent: [`ArchiveReport::book_cost`] publishes ten figures — manifest items,
+spine items, the four CSS budget totals, the three layout budget totals, and the
+page count — for the reason `synthesised_bytes` was published one gap earlier
+and in the same words. *A bound nobody can measure is a bound nobody can check.*
+
+So `the_book_yardstick_is_not_below_a_real_book` opens **every book in both
+corpora** on every run and measures sixteen of the thirty-four rows against what
+each one actually costs: five the container decides, read through
+`tinker-pdf-zip` before anything is parsed, and eleven the reading path spends.
+The committed six always; the fetched twenty when `TINKER_EPUB_CORPUS` names
+them, and printing `epub-corpus: SKIPPED` by name when it does not.
+
+**And the gap between the two corpora is the finding rather than a detail.**
+
+| Row | Committed six | Fetched twenty | The cap, before this milestone |
+| --- | --- | --- | --- |
+| `MAX_BOX_TREE_NODES` | 326 | **993 349** (`sample-linear-algebra.epub`) | 262 144 |
+| `MAX_LAYOUT_WORK` | 39 | **4 233 567** (`sample-epub30-spec.epub`) | 4 000 000 |
+| `MAX_LINE_BREAK_WORK` | 3 845 | 1 234 335 (`pg2701-images.epub`) | 4 000 000 |
+| `MAX_SELECTOR_MATCHES` | 1 211 | 521 101 (`sample-epub30-spec.epub`) | 4 000 000 |
+| `MAX_CSS_RULES` | 276 | 9 167 | 20 000 |
+| `MAX_LAYOUT_PAGES` | 7 | 856 | 65 536 |
+
+The books this repository commissioned are a **thousand** times smaller than the
+books it did not, on the two rows that matter. A yardstick calibrated on the
+committed corpus would have agreed with both wrong caps and written the margin
+down as comfortable.
+
+### The two caps, and what they were actually doing
+
+**`MAX_BOX_TREE_NODES` was 262 144 and `sample-linear-algebra.epub` needs
+993 349.** It is a W3C sample book: 94 content documents of MathML, where
+`<mi>`, `<mo>` and `<mrow>` put an inline box on every symbol. Three boxes per
+element is right for prose and wrong for mathematics.
+
+It was not quiet about it, and it was not loud either. The layout budget is
+spent **across a whole book** and never refunded, so the chapter that crossed
+the cap refused by name — and so did every chapter after it. A 94-chapter book
+opened, paginated to its spine, reported `NotFragmented` per page, and lost two
+thirds of its text. That is the shape of failure `bounds_ledger.rs` exists for,
+arriving from the direction it always warned about: *a cap that refuses the thing
+the format is for is not a bound, it is a missing feature.*
+
+**`MAX_LAYOUT_WORK` was 4 000 000 and `sample-epub30-spec.epub` spends
+4 233 567** — the EPUB 3.0 specification, published as an EPUB, refused from page
+601 of 777. Six per cent over, which is the least comfortable margin there is:
+enough to be certain the cap is wrong and not enough for anyone to have guessed
+it.
+
+Both are raised with the margin written down — 2 097 152 and 16 000 000, 2.1 and
+3.8 times the measured book — and both ledgers say in place what they were, what
+crossed them and why the new number is not simply the measurement plus a little.
+Seven firing fixtures were re-measured against the new totals with
+`Budget::layout()` at an unreachable ceiling rather than rescaled by arithmetic,
+because the three table charges are three different quantities and a guess at any
+of them is how a firing fixture stops firing without saying so.
+
+**What raising the box cap costs is written down too**, because it is not free:
+`sample-linear-algebra.epub` is 1 075 489 bytes and reading it peaks at **952 MB**
+of working set. See the peak-memory section below.
+
+### The fifteenth fingerprint, and this format's own determinism question
+
+`pandoc-book-cover.epub` — pandoc 3.10.2's output over text authored in this
+repository — is the fifteenth fixture, page 3 of the seven a 432 × 648 box
+paginates it into. It is the widest blast radius in the file: a change anywhere
+from the ZIP reader through the doctype mode, the OCF layer, the package
+document, the cascade, the box tree, UAX #14's line breaker, fragmentation, the
+writer's links and outline, and `CosDocument`'s parse of what it wrote moves it.
+Beside it `the_synthesised_book_is_the_same_bytes_on_every_target`, in the pair
+gap 29's milestone 6 established: eight `/Link` annotations and an `/Outlines`
+tree are in those bytes and on **no rendered page at all**, so a whole milestone
+of this gap is invisible to every hash but that one.
+
+**The book has no face of its own, and that had to be solved rather than
+tolerated.** This engine bundles no faces by design, so every glyph of every
+committed book resolves to nothing and the pages come out blank — which is
+exactly the failure this file's own documentation describes, a fixture measuring
+nothing being indistinguishable from a fixture measuring something. The answer is
+`book_face()`: `curvy_font()`, the six-shape synthetic face this file already
+builds forty lines away, handed in as a host would hand in a system font. A
+provider is *usually* an arrangement made outside the document and `text_page`'s
+comment refuses one for that reason; this one is written byte by byte in the same
+file, so the page stays closed and ruling 4 still holds on `wasm32`, where there
+are no font directories to read.
+
+**And the third test is the one no earlier format could have.** In every format
+before EPUB the page count is a property of the file: a comic's pages are its
+entries, a fixed document's are its `FixedPage` parts, a PDF's are its page tree.
+A book's are a function of an argument. So ruling 4 has a second half here and it
+takes three assertions rather than one — 432 × 648 stable, 600 × 800 stable, **and
+the two different** — because *a build that ignored the page box entirely would
+satisfy "stable" twice over and be exactly as wrong as one that paginated at
+random.* What differs is asserted in four places rather than trusted to the hash:
+the page count (seven against six), the annotation count (eight against seven,
+because a cross-reference names the page its target landed on), the rendered
+page, and — after the injection matrix insisted — the size of the page a caller
+is actually handed.
+
+All six determinism tests reproduce on `wasm32-wasip1` under wasmtime, with
+**none of the other fourteen moving**.
+
+### Three things that were already broken, and nothing was saying so
+
+**1. `cargo test --target wasm32-wasip1` has not compiled `tinker-pdf-layout`
+since milestone 10.** That milestone's `const` block asserted
+`MAX_LAYOUT_WORK < MAX_BOX_TREE_NODES * MAX_BOX_TREE_NODES` in `usize`, and
+262 144 squared is 6.9e10 — which fits a 64-bit `usize` and does not fit a 32-bit
+one. A `const` assertion that cannot be *evaluated* is a build failure rather
+than a silent pass, so the gate's own last line has been red for three
+milestones. The product is formed in `u128` now, and the ledger beside it says
+why: a relation about a product has to be formed in a width that holds the
+product, on every target the engine claims.
+
+**2. The `layout` fuzz target has never been built.** It read five two-bit fields
+out of **one** control byte; the fifth was `(knobs >> 8) & 3`, which
+`#[deny(arithmetic_overflow)]` refuses. That is gap 29's *"four of eleven fuzz
+targets never compiled"* repeating, and it repeated through the one hole gap 29's
+own fix left: `cargo fuzz build` needs libFuzzer, which is unavailable on
+`x86_64-pc-windows-msvc`, and the `cargo check --manifest-path fuzz/Cargo.toml`
+job that stands in for it **does not reach the body of a `fuzz_target!` without
+`--cfg fuzzing`**. The target takes two control bytes now and its six seeds carry
+the second, shifted rather than left to be re-minimised.
+
+**3. The conservation harness had a fifth bug, and it was the first that made the
+harness accuse the engine.** `has_hidden_attribute` scanned the whole start tag
+for the token `hidden` with white space on the left and a delimiter on the right
+— which is right about `aria-hidden` and `class="hidden"` and wrong about an
+attribute *value* containing the word with spaces around it.
+`sample-epub30-spec.epub` has one:
+`<section class="section" title="2.2.4.3 The hidden attribute" …>`, the section
+of EPUB 3.0 that specifies `hidden`. The harness dropped the whole subtree and
+reported the engine as putting **1 757 characters on the page that the book does
+not have**. A corpus sweep saying the engine invented text is exactly the report
+nobody double-checks, and it took the box cap being raised to make that section
+reachable before anyone could see it. The tag is parsed now rather than searched.
+
+### The fetched corpus, and three books that are pinned
+
+With the caps raised and the harness fixed, `epub_fetched.rs` is green over all
+twenty books — and it is green with **three named exceptions** rather than by
+having its assertion relaxed, because the three are three different things and
+one "known exception" would let any of them wear another's evidence:
+
+| Book | `extra` | `missing` | What it is |
+| --- | --- | --- | --- |
+| `pg16328-beowulf.epub` | 4 560 | 4 560 | **Reordered.** Project Gutenberg's marginal glosses — a floated `<span class="sidenote">` beside almost every chapter heading — come out before the heading's own words in reading order. 2 280 characters of 213 809, counted twice because a character in the wrong place is also absent from the right one |
+| `sample-wasteland-otf-obf.epub` | 3 | 3 | The same defect, three characters of it: the line number `170` in the margin of *The Waste Land* |
+| `sample-internallinks.epub` | 3 872 | 4 464 | **No glyphs.** It is Japanese, this engine bundles no faces, and nothing attached a `FontProvider`: 3 474 of its 6 678 characters have no glyph to be set with |
+
+Each pin asserts its own cause as well as its size. A book pinned as *reordered*
+must have pages carrying exactly as many conservable characters as the book holds
+— nothing lost, nothing invented — and a book pinned for *no glyphs* must say so
+by name in its report, which is ruling 10 doing the work of keeping the exception
+from covering a book that lost its text some other way.
+
+The reordering is milestone 10's, not this row's, and gap 31's close names it.
+
+### Peak memory, for the largest book in both corpora
+
+`tests/epub_memory.rs`, in `xps_memory.rs`'s shape and with one measurement it
+could not make. The assertion that runs on every build is gap 29's pass-through
+in bytes: a hand-built book whose only content is a 2000 × 3000 plate synthesises
+to far less than the 18 MB its decoded raster would be, so the picture was never
+expanded. **No committed book can test that** — every PNG in milestone 1's corpus
+is written byte by byte from the specification and is tiny — which is gap 30's
+situation exactly.
+
+The figures, taken on the release build by polling the process's peak working
+set:
+
+| Corpus | Largest book | On disk | Pages | Boxes | Synthesised | **Peak working set** |
+| --- | --- | --- | --- | --- | --- | --- |
+| Committed (6) | `pandoc-book-cover.epub` | 9 661 B | 7 | 326 | 24 379 B | **6.9 MB** |
+| Fetched (20) | `sample-linear-algebra.epub` | 1 075 489 B | 856 | 993 349 | 19 781 810 B | **952 MB** |
+
+The committed figure is almost entirely the process baseline and says nothing.
+The fetched one says something and it is not comfortable: **a one-megabyte book
+costs nine hundred times its own size to read**, and none of it is a raster —
+gap 29's pass-through holds, and what is expensive here is the box tree and 856
+pages of laid-out runs. With `MAX_BOX_TREE_NODES` at 2 097 152 the worst case a
+book may ask for is roughly **2 GB**, which is the price of not refusing
+`sample-linear-algebra.epub` and is stated rather than buried. A build that
+wanted a tighter ceiling has to fragment chapter by chapter and free as it goes,
+which is a design this gap does not have.
+
+### The campaign
+
+**Two twenty-minute sessions on WSL2, and the first one found a real defect in
+each target.** libFuzzer is unavailable on `x86_64-pc-windows-msvc`, so the
+route is gap 29 milestone 6's and gap 30 milestone 9's: copy the sources into
+WSL2, `cargo fuzz build`, `cargo fuzz run` with `-max_total_time=1200
+-timeout=25 -rss_limit_mb=2048 -print_final_stats=1`.
+
+**`cargo fuzz build layout` failed on the first attempt**, and that is written up
+above: the target had never compiled. The `css` target built and crashed in **428
+executions** on `the index and brute force disagree`, minimised to **nine bytes**
+— a `.note` rule and an element carrying the class `note` twice.
+`Index::candidates` extended its candidate list once per class, so a repeated
+class returned every rule in that bucket once per repetition. The page is
+unaffected, because applying one declaration twice lands on the same computed
+value; the **match budget** is not, because `MAX_DOM_NODES` counts elements and
+nothing counts class tokens, so `class="a a a a …"` with a thousand repeats
+multiplied the whole cascade's cost by a thousand out of one attribute. Fixed in
+`selector.rs`, with the reproducer as a test and as the corpus's seventh seed.
+
+The `layout` target's first session ended on a **22-second unit**, which is the
+finding recorded under `MAX_LAYOUT_WORK` above: 443 137 boxes and 3 899 421 break
+evaluations out of 107 bytes, because a shrink-to-fit container measures its
+contents twice and sets them once at every level and the generator nested twelve
+deep. The engine's totals bound it and refuse it by name; what twelve levels
+bought was a session that spent itself on a handful of inputs. The generator
+nests nine now.
+
+The second session, on the fixed build:
+
+| Target | Executions | Exec/s | New corpus units | Slowest unit | Peak RSS | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| `css` | **139 482** | 116 | 7 143 | 0 s | 1 036 MB | no crash, no OOM, no timeout |
+| `layout` | **38 426** | 31 | 1 809 | 0 s | 1 559 MB | no crash, no OOM, no timeout |
+
+**What the sessions actually explored, rather than only that they survived** —
+which is gap 24 milestone 5's rule, written after it found that `crypt` bought
+almost no coverage per session. `css` grew its corpus from seven seeds to 7 150
+units, a thousandfold, at 116 inputs a second: that is a parser being explored
+properly. `layout` is the thin one and the reason is structural rather than a
+defect: **every input is a whole layout**, so 31 a second is what a target costs
+when one execution paginates a document. 38 426 inputs and 1 809 new units is a
+real session and it is not a parser's session, and a nightly with a hundredfold
+budget is where this target's coverage will actually come from.
+
+**Peak RSS is worth an eye.** Both sessions ran within 200 MB and 500 MB of the
+2 048 MB ceiling, on caps this milestone raised eightfold and fourfold. A tighter
+ceiling would report OOM rather than a finding, and the same arithmetic is what
+the 952 MB peak-memory measurement above says about a real book.
+
+### The injection matrix
+
+**Twenty-three defects, twenty-one caught on the first pass, two survivors — and
+the two survivors were the point.**
+
+| Defect | Caught by |
+| --- | --- |
+| the caller's page width is ignored | **nothing**, until the facade leg was added; then `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ` |
+| the caller's page height is ignored | **nothing**, and then the same |
+| the box reaches the writer but not the layout | `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ` — **alone**, and by its page-count assertion rather than by a hash |
+| the content area is the page, so the margin does not shrink it | `the_synthesised_book_is_the_same_bytes_on_every_target`, and 3 more |
+| the report does not say which box the book was laid at | `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ` — **alone** |
+| the writer emits no link annotations | `the_synthesised_book_is_the_same_bytes_on_every_target`, and 1 more — **no rendered hash moved** |
+| the writer emits no outline | `the_synthesised_book_is_the_same_bytes_on_every_target`, and 1 more — **no rendered hash moved** |
+| the user-agent stylesheet is dropped | `the_synthesised_book_is_the_same_bytes_on_every_target`, and 6 more |
+| the page margin is a point wider | `the_synthesised_book_is_the_same_bytes_on_every_target`, and 3 more |
+| the base font size is a point larger | `the_book_yardstick_is_not_below_a_real_book`, and 4 more |
+| the report's box count is zero | `the_synthesised_book_is_the_same_bytes_on_every_target` — **alone** |
+| the report's page count is the spine's length | `the_synthesised_book_is_the_same_bytes_on_every_target` — **alone** |
+| the report's selector-match count is the rule count | `the_synthesised_book_is_the_same_bytes_on_every_target` — **alone** |
+| the box cap goes back to 262 144 | `no_bound_refuses_a_real_book`, `every_bound_publishes_the_number_it_is`, `the_book_yardstick_is_not_below_a_real_book` |
+| the float-work cap goes back to 4 000 000 | `a_nested_table_multiplies_the_work_total`, and 6 more |
+| a box is charged only when it holds text | `a_tree_past_the_box_cap_is_refused_by_name`, and 1 more |
+| the break budget is never charged | `the_break_total_is_spent_across_paragraphs_and_not_per_paragraph`, and 1 more |
+| the float budget is never charged | `a_book_past_the_float_work_total_is_refused_by_name`, and 3 more |
+| a ledger row's book figure is a hundred times too small | `the_book_yardstick_is_not_below_a_real_book` — **alone** |
+| a ledger row's book figure opts out with a zero | `the_book_yardstick_is_not_below_a_real_book` — **alone** |
+| the fingerprint hashes page 0 rather than page 3 | `rendering_is_stable_across_targets`, and 1 more — by the **ink floor** |
+| the book fixture is opened with no face | `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ`, and 2 more |
+| `hidden` is searched for as a string again | `the_source_side_drops_hidden_and_keeps_everything_else`, and 2 more |
+
+**The two that survived were `BookLayout::sanitised` ignoring the caller's page
+width, and ignoring its height.** Nothing failed, and the reason is the rule
+eighteen milestones have found wearing a new coat: everything the two-page-box
+test does goes straight to `epub::route`, where the caller's two numbers are
+*already* a `BookLayout`. The path a **caller** takes has one more step in it —
+the facade, where an arbitrary pair of `f64`s becomes a usable box — and a build
+that replaced the width with the default still produced two different documents,
+because the height still differed. Two independent consequences; a test for one
+of them is not a test.
+
+The fix is three assertions through `Document::open_with` rather than through
+`epub::route`: the page count at each box, **the size of the page a caller is
+handed**, and the box the report says it was. Both defects are caught by the
+first of those, and the re-run is in the table above.
+
+Three other rows are worth reading rather than counting:
+
+- **"the box reaches the writer but not the layout"** produces a document whose
+  `MediaBox` is the caller's and whose pagination is the default's. Every byte
+  hash still differs between the two boxes — so `assert_ne` passes — and the
+  page count assertion is what fails. That is why the differences are asserted
+  by name rather than left to the hash.
+- **"the writer emits no link annotations"** and **"the writer emits no
+  outline"** are caught by the byte hash and by nothing else. Neither is on a
+  rendered page, which is the whole argument for the pair of hashes gap 29
+  established.
+- **"the report's box count is zero"** is caught by the fingerprint's
+  companion, which pins the ten cost figures. Without it the yardstick would
+  have been measured against a report that could lie about what it measured.
+
+### The ledger sweep
+
+- **The leaf count goes eight to ten**, in the four places gap 29 found it can
+  drift and none of which the compiler can reach: `README.md`'s Workspace
+  section, `CONTRIBUTING.md` rule 3, `docs/plans/00-architecture.md`'s
+  enumeration, and `99-consistency.md` ruling 8. `xtask/src/main.rs`'s `ALLOWED`
+  already carried both crates with their arguments, added by the milestones that
+  wrote them.
+- **Ruling 8's own amendment is corrected by one word in the same edit.** Gap 30
+  milestone 9 wrote that gap 31 *"reuses this crate"*; the truth is **reuses,
+  after changing** — `tinker-pdf-xml` as gap 30 froze it refuses every Project
+  Gutenberg EPUB 2 content document and the cover wrapper of every EPUB 3 one.
+- **Gap 28's EPUB sizing sentence is amended in place**, dated: the size is
+  unchanged and the sentence is right and incomplete, leaving out that the
+  container was a live defect rather than a missing feature and that the writer
+  was missing a half again.
+- **`fuzz/README.md`**'s `layout` rows say two control bytes and say why the
+  target never compiled. The count was already twenty-four and `ci.yml`'s budget
+  comment already says so; both moved with the milestones that added the targets.
+- **`docs/STATUS.md`** gains an EPUB row, moves the test count, the fingerprint
+  count and the fuzz-target count, and replaces *"the first of the three is
+  built"* with *"all three are built"*.
+- **`docs/plans/gaps/README.md`** and **`00-execution-order.md`** mark 31 done.
+- **`THIRDPARTY.md`** needed nothing: milestone 7 added the UCD tree under
+  `Unicode-3.0` and `cargo xtask vendor` has accepted it since.
+- `docs/plans/13-bindings.md` is **deliberately not amended**, for the reason
+  gaps 29 and 30 both recorded: that list is a publishing plan naming the crates
+  gap 26 dry-ran to crates.io, and adding to it is a claim about publishing.
+
+## Gap 31, closed — what it delivered and what it did not
+
+**An `.epub` opens as a `Document` whose pages are its laid-out spine.** Six
+books from two real producers and twenty more fetched all read; text
+conservation holds exactly over the committed six and over eighteen of the
+twenty fetched, with the other two pinned by name and by number; `Page::text()`
+returns the book's words in reading order; and `Document::cos()` returns a
+synthesised document qpdf reads clean.
+
+**It closed the last third of a live defect that had been shipping.** Gap 29
+taught `Document::open` to sniff `PK\x03\x04` and one signature covers CBZ, XPS,
+EPUB, ODF, OOXML and every JAR ever built. Gap 30 closed the XPS third and named
+EPUB in the same sentence. Until this gap, Frankenstein — 31 content documents
+and 3 stylesheets — opened as **one page at 1824 × 2726 points**, which is its
+auto-generated cover at gap 29's pixel-to-point convention, with **no warning at
+all**; a book with no image at all was refused as `NoImages`. Milestone 1
+measured both before milestone 3 fixed them, and the tests that pinned them are
+still in the suite.
+
+**It is a layout engine, and that is what gap 28 sized it as.** Two new leaf
+crates, the ninth and tenth: `tinker-pdf-css` is `css-syntax-3`'s tokenizer with
+its normative error recovery, `selectors-4` matching and specificity,
+`css-cascade-5`'s whole sorting order, `@media` evaluation and `@font-face`;
+`tinker-pdf-layout` is CSS 2.2's box model, §8.3.1's collapsing margins, §9.4's
+formatting contexts, §9.5's nine float rules, §17's table model with §17.2.1's
+anonymous table objects, `css-flexbox-1`, §13.3's fragmentation, and **UAX #14
+line breaking against vendored Unicode 17.0.0 data — 19 338 of the UCD's own
+19 338 pair-table cells**. `tinker-pdf-xml` grew a doctype mode without which
+every pandoc book and every Project Gutenberg EPUB 2 content document is refused
+on its first line. `DocumentBuilder` grew link annotations and a document
+outline, which is gap 30's milestone 5 happening again in a different place.
+
+**How a partial implementation is made visible is the design, not an
+afterthought.** The owner accepted one risk on 19 August 2026 — that a half-built
+cascade does not fail, it renders plausibly and wrong, and nobody can tell by
+looking — and five devices answer it. A CSS property is a parser variant only
+when a consumer exists and every consumer matches exhaustively, so **a property
+parsed and ignored does not compile**. Every character of every content document
+appears exactly once, in order, in the paginated output, and the harness that
+says so was built at milestone 4 against thirteen grey placeholder pages, before
+there was anything to make it pass. Everything unimplemented is reported by name
+and **counted by elements reached**, per book, and written into
+`tests/epub/CENSUS.tsv` so a milestone that implements a property has to say so
+in the same commit. A headless browser is a fifth oracle, because comparing a
+partial CSS implementation against another partial one is comparing it against
+nothing. And every bound is in one table with three yardsticks against it.
+
+### What a reader should not assume
+
+- **No fixed-layout book from a real producer has ever been opened.** Milestone
+  1 predicted it and milestone 12 confirmed it: neither committed producer emits
+  `rendition:layout`, and the fetched corpus's fixed-layout samples are the
+  CC-BY-SA ones `deny.toml`'s no-copyleft rule bars. Everything §8.2 is asserted
+  against is **synthesised here**, which gives complete control of the
+  arrangement and no evidence at all about what a real producer writes. This is
+  gap 30's *"no non-Windows producer"* in a different format, and it is the
+  largest single thing this gap leaves open.
+- **No real producer's font has been through the `@font-face` path.** Milestone
+  9 built it — `src`, `format()`, `local()`, the four descriptors, and both
+  obfuscation algorithms — and the only real obfuscated faces are in the fetched
+  corpus, which is not committed. The committed six embed no face at all.
+- **The engine still bundles no faces**, so a book that embeds none draws
+  nothing without a host `FontProvider`. That is by design and it is why the
+  fifteenth determinism fixture hands in a synthetic face built in the same
+  file. One fetched book is pinned as unconserved for exactly this reason.
+- **Fragmentation is staged in two places, and both are named.** A table breaks
+  between its row bands and not inside one (`TableRowTallerThanPage`); a flex
+  container breaks between its lines and not inside one
+  (`FlexLineTallerThanPage`). `css-break-3`'s fragmentation *within* a row or a
+  line — every cell sliced at one height and continued — is not here.
+- **`inline-flex` is laid out as a block-level flex container** and warned by
+  name, because this build has no inline-level box that is not text.
+  `display: inline-block` is a block for the same reason, since milestone 7.
+- **`gap`, `row-gap` and `column-gap` are unsupported by name**;
+  **`min-width`, `max-width`, `min-height` and `max-height` are unimplemented**,
+  so `css-flexbox-1` §9.7's max violations are unreachable; **`vertical-align`
+  is unimplemented**, which is the property the compile-time proof injects and
+  the one every producer in the corpus writes most; **`position` other than
+  static, multi-column, `content`, `box-shadow` and `border-radius`** are named
+  and not implemented. The census counts every one of them per book.
+- **SVG content documents are a named non-goal.** Six spine items in the fetched
+  corpus are one, and four of the six committed books have a cover that is one,
+  so four committed covers are blank pages.
+- **Text is reordered around a float.** `pg16328-beowulf.epub`'s marginal
+  glosses come out before the heading they sit beside — 2 280 characters of
+  213 809 — and `sample-wasteland-otf-obf.epub` has three characters of the same
+  thing. Nothing is lost and nothing is invented, and both are pinned with their
+  exact figures so they cannot grow. It is milestone 10's defect and it is not
+  fixed.
+- **Layout work is exponential in nesting depth.** A shrink-to-fit container
+  lays its contents out three times, at every level, so a 107-byte input nested
+  twelve deep costs 443 137 boxes and 3 899 421 break evaluations. The work
+  totals bound it and refuse by name, and they are **all** that bounds it:
+  memoising a sublayout's measurement is the fix and it is not here.
+- **A one-megabyte book costs nine hundred times its size to read.**
+  `sample-linear-algebra.epub` peaks at 952 MB, none of it a raster. With the
+  box cap at 2 097 152 the worst case a book may ask for is roughly 2 GB, which
+  is the price of not refusing a book W3C publishes.
+- **The campaign is two targets and one session each.** It found a real
+  bucketing defect in the selector index and a 22-second unit, both recorded and
+  both fixed; it is not a nightly's budget and it is the first session either
+  target has ever had.
+- **`epubcheck` has verified the committed six and the fetched twenty**, and
+  nothing this engine *writes* has been through it, because what it writes is a
+  PDF.
+- **Media overlays, scripted content, encryption other than font obfuscation,
+  remote resources, and EPUB's `rendition:spread` vocabulary** are out of scope
+  by name, as the plan's non-goals said from the start.
+
+## The gap programme, closed
+
+**This is the last of thirty-six.** Gaps 01 to 28 closed between June and August
+2026; 29, 30 and 31 are the three formats gap 28 decided on 16 August and they
+are all built. What was a PDF-only engine reads comic archives, fixed documents
+and books, each by synthesising a real PDF at open so that every capability the
+engine already had — cancellation, warnings, `at_dpi`, bounded painting,
+`Document::cos()` as a borrow — arrives for nothing rather than being wired a
+second time.
+
+**One thing outside gap 31 is still open, and it is not code.** Ruling 4 claims
+byte-identical rendering on Linux, Windows, macOS and wasm. Three of the four are
+**measured on this machine**: the fifteen fingerprints and the three synthesised
+byte hashes reproduce on `x86_64-pc-windows-msvc`, on `wasm32-wasip1` under
+wasmtime and on `x86_64-unknown-linux-gnu` under WSL2. **macOS is not settleable
+here** — there is no Apple hardware, no VM, and a Darwin target cannot be
+cross-*run*, only cross-*built* — so it remains a claim from `ci.yml`'s
+`macos-14` leg. What would settle it is one thing and it is worth stating
+exactly: **one observed CI run with `test` green on `macos-14` beside a green
+`wasm-determinism` job on the same commit.** Until somebody looks at that run,
+the fourth target is a claim rather than a measurement, and this document says so
+rather than rounding it up.
