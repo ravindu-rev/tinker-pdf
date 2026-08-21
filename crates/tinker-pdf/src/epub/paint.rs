@@ -1,50 +1,68 @@
 //! Measurement, encoding and the page a laid-out book is drawn on (gap 31,
-//! milestone 8).
+//! milestones 8 and 9).
 //!
 //! Two things live here because they are one decision seen from either end:
 //! **which face a run is measured with** and **which font resource it is drawn
 //! with** have to be the same answer, and a build with two of them sets a page
-//! whose glyphs do not fit the boxes it computed. [`Face::of`] is that one
+//! whose glyphs do not fit the boxes it computed. [`choose`] is that one
 //! answer, and [`BookMetrics`] and [`draw_page`] both go through it.
 //!
-//! # The metrics are real, and they are not a font file
+//! # The matching is per character, not per run
 //!
-//! Nothing here parses an sfnt. The advances are Adobe's published AFM numbers
-//! for the standard 14, which `tinker-pdf-font` already holds because a PDF may
-//! omit `/Widths` for those faces and this repository's reader has to lay such
-//! a document out. So a book set in Times is measured with **Times's own
-//! advances** and set with **Times**, and the pagination is the pagination a
-//! reader will see. Milestone 9 is where `@font-face` and a real embedded face
-//! arrive; until then this is a correct answer for a restricted set of faces
-//! rather than an approximation of a general one.
+//! `css-fonts-4` §5.3 makes font matching a **per-character** algorithm: the
+//! `font-family` list is walked for each character in turn and the first family
+//! with a face that *has a glyph for that character* wins. A build that
+//! resolved the list once per run — which milestone 8's did, and said so —
+//! draws a run in one face and leaves a notdef wherever that face is short,
+//! which is the difference between fallback and a face with holes in it.
 //!
-//! # A character `WinAnsiEncoding` cannot spell
+//! The consequence is visible in the content stream rather than only in the
+//! picture. A PDF string is bytes in **one** font, so a run needing three faces
+//! is three `BT … ET` text objects at three origins, each starting where the
+//! one before it left off. `a_run_needing_three_faces_becomes_three_text_objects`
+//! is what says so, and it asserts the count rather than the appearance because
+//! a single face with two notdefs also looks like something.
+//!
+//! # The metrics are the face's own, whichever face that is
+//!
+//! For an embedded face the advances come from the file's own `hmtx` and the
+//! line height from its `hhea`. For the standard 14 they are Adobe's published
+//! AFM numbers, which `tinker-pdf-font` already holds because a PDF may omit
+//! `/Widths` for those faces. **Both are real numbers and neither is a
+//! placeholder**, which is what makes the pagination the pagination a reader
+//! will see — and what makes [`BookMetrics::STANDARD`] a complete answer for a
+//! book with no `@font-face` in it rather than a fallback that happens to
+//! produce a page.
+//!
+//! That is also the answer to milestone 4's question. `OpenOptions::fonts` may
+//! be `None` and the page count is the same either way, because nothing in this
+//! file asks whether a [`crate::FontProvider`] is attached;
+//! `the_page_count_does_not_depend_on_whether_a_provider_is_attached` holds it.
+//!
+//! # A character no face covers
 //!
 //! Milestone 1's corpus contains a line of Japanese in five of its six books,
 //! placed there so that a space-only line breaker would be caught. It catches
 //! something else too: a simple font maps one byte to one glyph, and 25 kanji
-//! and kana are not in Windows code page 1252. A build that wrote them as
-//! UTF-8 bytes into a `WinAnsiEncoding` string would put mojibake on the page
-//! **and** lose the characters from `Page::text()`, which is text conservation
-//! failing on the one sentence the corpus was built around.
+//! and kana are not in Windows code page 1252.
 //!
-//! So a character outside the encoding is given a code in an **overflow font**
-//! — the same base face under an `/Encoding` whose `/Differences` names the
-//! glyph by the Adobe Glyph List's algorithmic `uniXXXX` form. 9.10.2's second
-//! step resolves that back to the character, so the text extracts correctly;
-//! the standard face has no such glyph, so the page shows a notdef. **That
-//! asymmetry is stated rather than hidden**: [`Fonts::unrepresented`] counts
-//! every character drawn that way, and the caller warns by name.
+//! So a character outside the encoding that **no available face covers** is
+//! given a code in an **overflow font** — the same base face under an
+//! `/Encoding` whose `/Differences` names the glyph by the Adobe Glyph List's
+//! algorithmic `uniXXXX` form. 9.10.2's second step resolves that back to the
+//! character, so the text extracts correctly; the standard face has no such
+//! glyph, so the page shows a notdef. **That asymmetry is stated rather than
+//! hidden**: [`Fonts::uncovered`] counts every character drawn that way and the
+//! caller warns by name, which is the gap milestone 8 recorded as owed.
 //!
-//! **One overflow font per face, and no more**, which is 224 codes and is
-//! `/Differences`'s own size rather than a cap invented here — the array is
-//! allocated at that size whatever the input says, so it is not a bound in
-//! ruling 1's sense and does not join `bounds_ledger.rs`. A book with more
-//! than 224 distinct characters outside the encoding for one face loses the
-//! excess and says so, and milestone 9's `@font-face` is where that stops
-//! being true.
+//! A character an embedded face *does* cover never reaches the overflow font at
+//! all, so a book that brings its own CJK face has neither the notdef nor the
+//! 224-code ceiling. That ceiling is `/Differences`'s own size rather than a
+//! cap invented here — the array is allocated at that size whatever the input
+//! says, so it is not a bound in ruling 1's sense and does not join
+//! `bounds_ledger.rs`.
 
-use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder, Target};
+use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PageBuilder, Target};
 use tinker_pdf_css::property::{BorderStyle, Color, FontFamily, FontStyle, Side, TextDecoration};
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
@@ -52,6 +70,7 @@ use tinker_pdf_layout::metrics::{FontRequest, Metrics, Vertical};
 use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, TextRun};
 
 use super::read::PX_TO_PT;
+use super::typeface::FaceSet;
 
 /// How many codes one overflow font holds: 32 through 255.
 ///
@@ -69,8 +88,8 @@ pub const OVERFLOW_FIRST: u8 = 32;
 /// no face for, and they resolve to `serif` — **which is what a reading system
 /// with no such face does**, and is the one place here where a value is mapped
 /// onto a neighbour. It is recorded rather than silent: the resolution is a
-/// property of having only the standard 14, and milestone 9 is where a
-/// provider can answer differently.
+/// property of having only the standard 14, and a book that embeds a face
+/// under a family name it also lists gets that face instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Generic {
     /// `serif`, and the initial value.
@@ -95,51 +114,119 @@ pub struct Face {
     pub italic: bool,
 }
 
-impl Face {
-    /// Which face a request resolves to.
-    ///
-    /// The family list is walked **in the author's order** and the first entry
-    /// this build can answer wins, which is `css-fonts-4` §5's rule read down
-    /// to three faces. A named family goes through
-    /// [`Standard14::from_base_font`], so `Georgia` — which pandoc sets on
-    /// every book it produced here — resolves through its `serif` substitution
-    /// rather than falling off the end of the list.
-    #[must_use]
-    pub fn of(font: &FontRequest<'_>) -> Face {
-        let bold = font.weight >= 600;
-        let italic = font.style != FontStyle::Normal;
-        for family in font.families {
-            let generic = match family {
-                FontFamily::Serif | FontFamily::Cursive | FontFamily::Fantasy => Generic::Serif,
-                FontFamily::SansSerif => Generic::SansSerif,
-                FontFamily::Monospace => Generic::Monospace,
-                FontFamily::Named(name) => match Standard14::from_base_font(name) {
-                    Some(Standard14::Courier) => Generic::Monospace,
-                    Some(Standard14::Helvetica | Standard14::HelveticaBold) => Generic::SansSerif,
-                    Some(
-                        Standard14::TimesRoman
-                        | Standard14::TimesBold
-                        | Standard14::TimesItalic
-                        | Standard14::TimesBoldItalic,
-                    ) => Generic::Serif,
-                    // Symbol and ZapfDingbats are not text faces, and a family
-                    // this build has never heard of is not a match at all:
-                    // §5's algorithm moves to the next entry rather than
-                    // stopping, which is what makes `Georgia, serif` fall
-                    // through to `serif` when `Georgia` is absent.
-                    _ => continue,
-                },
-            };
-            return Face {
+/// Which face one character is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chosen {
+    /// One of the book's own `@font-face` faces, by index into
+    /// [`FaceSet::faces`].
+    Embedded(usize),
+    /// One of the standard 14.
+    Standard(Face),
+}
+
+/// Whether the standard 14 can draw a character.
+///
+/// The `WinAnsiEncoding` repertoire, exactly — which is not an approximation of
+/// the Adobe Standard Latin set but the set a simple font under that encoding
+/// can *address*, and therefore the set this build can put on a page through
+/// one. A character outside it has no code in the primary font and no glyph in
+/// the face, which are the same fact seen twice.
+#[must_use]
+pub fn standard_covers(ch: char) -> bool {
+    winansi_code(ch).is_some()
+}
+
+/// `css-fonts-4` §5's matching algorithm, for one character.
+///
+/// The family list is walked **in the author's order** and each family is asked
+/// twice: for one of the book's own `@font-face` faces, and then for a standard
+/// face this build substitutes for the name. The first that can draw `ch` wins.
+///
+/// `ch` of `None` asks the same question ignoring coverage, which is what a
+/// **line height** needs: leading is a property of a run's nominal face and
+/// must not change part way along because one character fell through to
+/// another face. A build that used the per-character answer for `vertical` too
+/// would give a paragraph a different line height depending on where its
+/// accented characters happened to fall.
+///
+/// When the list is exhausted, §5.3's system fallback is the book's own faces —
+/// the only ones a reading system with no installed fonts has — and after those
+/// the initial `serif` face, which may not cover `ch` at all. The caller is
+/// what says so: [`Fonts::note`] counts a character that arrives here
+/// uncovered, and the reader warns by name rather than leaving a blank.
+#[must_use]
+pub fn choose(faces: &FaceSet, font: &FontRequest<'_>, ch: Option<char>) -> Chosen {
+    let bold = font.weight >= 600;
+    let italic = font.style != FontStyle::Normal;
+    for family in font.families {
+        if let FontFamily::Named(name) = family {
+            if let Some(index) = faces.best(name, font.weight, font.style, ch) {
+                return Chosen::Embedded(index);
+            }
+        }
+        let generic = match family {
+            FontFamily::Serif | FontFamily::Cursive | FontFamily::Fantasy => Generic::Serif,
+            FontFamily::SansSerif => Generic::SansSerif,
+            FontFamily::Monospace => Generic::Monospace,
+            FontFamily::Named(name) => match Standard14::from_base_font(name) {
+                Some(Standard14::Courier) => Generic::Monospace,
+                Some(Standard14::Helvetica | Standard14::HelveticaBold) => Generic::SansSerif,
+                Some(
+                    Standard14::TimesRoman
+                    | Standard14::TimesBold
+                    | Standard14::TimesItalic
+                    | Standard14::TimesBoldItalic,
+                ) => Generic::Serif,
+                // Symbol and ZapfDingbats are not text faces, and a family
+                // this build has never heard of is not a match at all:
+                // §5's algorithm moves to the next entry rather than
+                // stopping, which is what makes `Georgia, serif` fall
+                // through to `serif` when `Georgia` is absent.
+                _ => continue,
+            },
+        };
+        if ch.is_none_or(standard_covers) {
+            return Chosen::Standard(Face {
                 generic,
                 bold,
                 italic,
-            };
+            });
         }
-        Face {
-            generic: Generic::Serif,
-            bold,
-            italic,
+    }
+    // §5.3's last resort. The book's own faces are tried before giving up,
+    // because they are the only faces this reading system has that the standard
+    // 14 are not — a book that ships a CJK face under a family its `body` rule
+    // never mentions still gets its Japanese line drawn.
+    if let Some(ch) = ch {
+        if let Some(index) = faces.any_covering(ch) {
+            return Chosen::Embedded(index);
+        }
+    }
+    Chosen::Standard(Face {
+        generic: Generic::Serif,
+        bold,
+        italic,
+    })
+}
+
+impl Face {
+    /// Which of the standard 14 a request resolves to, with no embedded face
+    /// in the question.
+    ///
+    /// [`choose`] with an empty [`FaceSet`] and no character, which is what
+    /// makes this one reading of §5 rather than a second: a build with the
+    /// family walk written out twice would eventually have one copy learn
+    /// something the other did not.
+    #[must_use]
+    pub fn of(font: &FontRequest<'_>) -> Face {
+        match choose(&FaceSet::new(), font, None) {
+            Chosen::Standard(face) => face,
+            // Unreachable: an empty face set has no embedded face to return.
+            Chosen::Embedded(_) => Face {
+                generic: Generic::Serif,
+                bold: font.weight >= 600,
+                italic: font.style != FontStyle::Normal,
+            },
         }
     }
 
@@ -260,27 +347,73 @@ pub fn winansi_code(c: char) -> Option<u8> {
     (0x80..=0x9F).find(|code| base_char(BaseEncoding::WinAnsi, *code) == Some(c))
 }
 
-/// Advances and line heights for a book set in the standard 14.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BookMetrics;
+/// Advances and line heights for a book, through whichever face each character
+/// resolves to.
+#[derive(Clone, Copy, Debug)]
+pub struct BookMetrics<'a> {
+    faces: Option<&'a FaceSet>,
+}
 
-impl Metrics for BookMetrics {
+impl BookMetrics<'_> {
+    /// The standard 14 alone, which is what a book with no `@font-face` in it
+    /// is set with.
+    ///
+    /// A `const` rather than a `Default`, and the difference is the point:
+    /// `tinker-pdf-layout` deliberately has no `Default` metrics so that a
+    /// caller cannot get a pagination without saying what it was measured
+    /// with. This is a caller saying so.
+    pub const STANDARD: BookMetrics<'static> = BookMetrics { faces: None };
+
+    /// Metrics that may reach a book's own embedded faces.
+    #[must_use]
+    pub fn with(faces: &FaceSet) -> BookMetrics<'_> {
+        BookMetrics { faces: Some(faces) }
+    }
+
+    /// The face set, or the empty one.
+    #[must_use]
+    pub fn faces(&self) -> &FaceSet {
+        self.faces.unwrap_or(FaceSet::EMPTY)
+    }
+}
+
+impl Metrics for BookMetrics<'_> {
     fn advance(&self, ch: char, font: &FontRequest<'_>) -> f64 {
-        // An East Asian character is one em wide in every face that has one,
-        // and the standard 14 have none at all — so the number cannot come
-        // from `Standard14`, which would answer with a Latin space's advance
-        // and set a Japanese line at a third of its width. UAX #11's own
-        // classification is what decides, through the table
-        // `tinker-pdf-layout` already vendors for UAX #14.
-        if tinker_pdf_layout::unicode::is_east_asian(ch) {
-            return font.size;
+        match choose(self.faces(), font, Some(ch)) {
+            // The file's own `hmtx`, which is the only number that can agree
+            // with the glyphs a viewer will draw from the program this
+            // document embeds.
+            Chosen::Embedded(index) => match self.faces().faces().get(index) {
+                Some(face) => face.advance_em(ch) * font.size,
+                None => font.size * 0.5,
+            },
+            Chosen::Standard(face) => {
+                // An East Asian character is one em wide in every face that has
+                // one, and the standard 14 have none at all — so the number
+                // cannot come from `Standard14`, which would answer with a
+                // Latin space's advance and set a Japanese line at a third of
+                // its width. UAX #11's own classification is what decides,
+                // through the table `tinker-pdf-layout` already vendors for
+                // UAX #14.
+                if tinker_pdf_layout::unicode::is_east_asian(ch) {
+                    return font.size;
+                }
+                let (advance, _) = face.standard().advance(ch);
+                f64::from(advance) / 1000.0 * font.size
+            }
         }
-        let (advance, _) = Face::of(font).standard().advance(ch);
-        f64::from(advance) / 1000.0 * font.size
     }
 
     fn vertical(&self, font: &FontRequest<'_>) -> Vertical {
-        let (ascent, descent) = Face::of(font).vertical_fractions();
+        let (ascent, descent) = match choose(self.faces(), font, None) {
+            Chosen::Embedded(index) => self
+                .faces()
+                .faces()
+                .get(index)
+                .and_then(super::typeface::EmbeddedFace::vertical_fractions)
+                .unwrap_or_else(|| Face::of(font).vertical_fractions()),
+            Chosen::Standard(face) => face.vertical_fractions(),
+        };
         Vertical {
             ascent: ascent * font.size,
             descent: descent * font.size,
@@ -288,49 +421,115 @@ impl Metrics for BookMetrics {
     }
 }
 
-/// The font resources a book needs, and the codes its out-of-encoding
-/// characters were given.
-#[derive(Clone, Debug, Default)]
-pub struct Fonts {
-    /// Per face, in [`Face::all`] order, the characters that needed an
-    /// overflow code, in the order they were first met.
-    overflow: Vec<Vec<char>>,
-    /// Which faces drew anything at all, so a book of Times does not carry
-    /// twelve font dictionaries.
-    used: Vec<bool>,
-    /// Characters that could not be given a code at all.
-    unrepresented: usize,
+/// How one character reaches the page: a code in a simple font, or a glyph
+/// index in a composite one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Coded {
+    /// A byte in a `WinAnsiEncoding` or `/Differences` font.
+    Simple {
+        /// The resource name.
+        resource: Vec<u8>,
+        /// The code.
+        code: u8,
+    },
+    /// A glyph index in a `/Identity-H` composite font.
+    ///
+    /// A composite font is what lets an embedded face draw a character the
+    /// standard 14 have no code for at all: under `/Identity-H` the two-byte
+    /// code *is* the glyph index, so the 224-code ceiling the overflow font
+    /// lives under does not exist here.
+    Composite {
+        /// The resource name.
+        resource: Vec<u8>,
+        /// The glyph index in the embedded program.
+        id: u16,
+    },
 }
 
-impl Fonts {
-    /// An empty registry.
+impl Coded {
+    /// The resource name, whichever kind this is.
     #[must_use]
-    pub fn new() -> Fonts {
+    pub fn resource(&self) -> &[u8] {
+        match self {
+            Coded::Simple { resource, .. } | Coded::Composite { resource, .. } => resource,
+        }
+    }
+}
+
+/// The font resources a book needs, the codes its out-of-encoding characters
+/// were given, and what no face could draw.
+#[derive(Clone, Debug)]
+pub struct Fonts<'a> {
+    faces: &'a FaceSet,
+    /// Per standard face, in [`Face::all`] order, the characters that needed an
+    /// overflow code, in the order they were first met.
+    overflow: Vec<Vec<char>>,
+    /// Which standard faces drew anything at all, so a book of Times does not
+    /// carry twelve font dictionaries.
+    used: Vec<bool>,
+    /// Which embedded faces drew anything, so a book that declares six faces
+    /// and uses two embeds two.
+    used_embedded: Vec<bool>,
+    /// Characters that could not be given a code at all.
+    unrepresented: usize,
+    /// Characters drawn in a face that has no glyph for them.
+    uncovered: usize,
+}
+
+impl<'a> Fonts<'a> {
+    /// An empty registry over a book's faces.
+    #[must_use]
+    pub fn new(faces: &'a FaceSet) -> Fonts<'a> {
         Fonts {
+            faces,
             overflow: vec![Vec::new(); 12],
             used: vec![false; 12],
+            used_embedded: vec![false; faces.faces().len()],
             unrepresented: 0,
+            uncovered: 0,
         }
+    }
+
+    /// The faces this registry chooses from.
+    #[must_use]
+    pub fn faces(&self) -> &FaceSet {
+        self.faces
     }
 
     /// Records every character one run will draw.
     pub fn note(&mut self, run: &TextRun) {
         let font = request(run);
-        let face = Face::of(&font);
-        let index = face.index();
-        self.used[index] = true;
         for ch in run.text.chars() {
-            if winansi_code(ch).is_some() {
-                continue;
+            match choose(self.faces, &font, Some(ch)) {
+                Chosen::Embedded(index) => {
+                    if let Some(slot) = self.used_embedded.get_mut(index) {
+                        *slot = true;
+                    }
+                }
+                Chosen::Standard(face) => {
+                    let index = face.index();
+                    self.used[index] = true;
+                    if winansi_code(ch).is_some() {
+                        continue;
+                    }
+                    if !self.overflow[index].contains(&ch) {
+                        if self.overflow[index].len() >= OVERFLOW_CODES {
+                            // No code at all: it is not on the page and not in
+                            // `Page::text()` either, which is a different fact
+                            // from being drawn as a notdef and is counted
+                            // separately.
+                            self.unrepresented += 1;
+                            continue;
+                        }
+                        self.overflow[index].push(ch);
+                    }
+                    // It has a code, so it extracts; the face has no glyph, so
+                    // the page shows a notdef. Counted **per occurrence**,
+                    // because the number a host wants is how much of the book
+                    // is blank rather than how many distinct characters are.
+                    self.uncovered += 1;
+                }
             }
-            if self.overflow[index].contains(&ch) {
-                continue;
-            }
-            if self.overflow[index].len() >= OVERFLOW_CODES {
-                self.unrepresented += 1;
-                continue;
-            }
-            self.overflow[index].push(ch);
         }
     }
 
@@ -340,10 +539,30 @@ impl Fonts {
         self.unrepresented
     }
 
+    /// How many characters are drawn as a notdef because no available face has
+    /// a glyph for them.
+    ///
+    /// Distinct from [`Fonts::unrepresented`] and the distinction is the whole
+    /// of milestone 9's honesty here: an unrepresented character is missing
+    /// from the page **and** from the text, and an uncovered one is missing
+    /// from the picture and present in the text. A reader that reported them as
+    /// one number would make a book whose text can still be searched
+    /// indistinguishable from one whose cannot.
+    #[must_use]
+    pub fn uncovered(&self) -> usize {
+        self.uncovered
+    }
+
     /// How many overflow fonts the document carries.
     #[must_use]
     pub fn overflow_fonts(&self) -> usize {
         self.overflow.iter().filter(|set| !set.is_empty()).count()
+    }
+
+    /// How many embedded faces the document actually carries.
+    #[must_use]
+    pub fn embedded_fonts(&self) -> usize {
+        self.used_embedded.iter().filter(|used| **used).count()
     }
 
     /// How many codes one face's overflow font spends.
@@ -400,20 +619,68 @@ impl Fonts {
                 &widths,
             );
         }
+        for (index, face) in self.faces.faces().iter().enumerate() {
+            if !self.used_embedded.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            // A composite font, not a simple one, and the reason is the whole
+            // point of embedding: `/Identity-H` makes the code the glyph index,
+            // so a face can draw a character no encoding this build writes has
+            // a code for. `add_cid_font` writes `/W` from the program's own
+            // `hmtx` and `/ToUnicode` from the characters each glyph was drawn
+            // with, so the widths cannot disagree with the outlines and the
+            // text still extracts.
+            builder.add_cid_font(&face.resource, &base_font_name(&face.family), &face.program);
+        }
     }
 
-    /// The resource and the code one character is drawn with.
+    /// The resource and the code or glyph one character is drawn with.
     ///
     /// `None` for a character that got neither, which is the only case a page
     /// silently loses text in — and it is counted, not silent.
     #[must_use]
-    pub fn encode(&self, face: Face, ch: char) -> Option<(Vec<u8>, u8)> {
-        if let Some(code) = winansi_code(ch) {
-            return Some((face.resource(), code));
+    pub fn encode(&self, chosen: Chosen, ch: char) -> Option<Coded> {
+        match chosen {
+            Chosen::Embedded(index) => {
+                let face = self.faces.faces().get(index)?;
+                Some(Coded::Composite {
+                    resource: face.resource.clone(),
+                    id: face.glyph(ch)?,
+                })
+            }
+            Chosen::Standard(face) => {
+                if let Some(code) = winansi_code(ch) {
+                    return Some(Coded::Simple {
+                        resource: face.resource(),
+                        code,
+                    });
+                }
+                let at = self.overflow[face.index()].iter().position(|c| *c == ch)?;
+                let code = OVERFLOW_FIRST.checked_add(u8::try_from(at).ok()?)?;
+                Some(Coded::Simple {
+                    resource: face.overflow_resource(),
+                    code,
+                })
+            }
         }
-        let at = self.overflow[face.index()].iter().position(|c| *c == ch)?;
-        let code = OVERFLOW_FIRST.checked_add(u8::try_from(at).ok()?)?;
-        Some((face.overflow_resource(), code))
+    }
+}
+
+/// A `/BaseFont` name for an embedded face, from the family the book declared.
+///
+/// Reduced to the characters a PDF name may hold without escaping, because a
+/// family name is an author's string and may contain a space, a `#` or a
+/// parenthesis. An empty result becomes `Embedded`, so a face declared under a
+/// family of punctuation still gets a name rather than an empty one.
+fn base_font_name(family: &str) -> Vec<u8> {
+    let cleaned: String = family
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if cleaned.is_empty() {
+        b"Embedded".to_vec()
+    } else {
+        cleaned.into_bytes()
     }
 }
 
@@ -472,7 +739,7 @@ impl Frame {
 /// parent's — and then the text, in **reading order**, which is what makes
 /// `Page::text()` return the words in the order the book wrote them rather
 /// than in the order a painter found convenient.
-pub fn draw_page(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, fonts: &Fonts) {
+pub fn draw_page(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, fonts: &Fonts<'_>) {
     for fragment in &laid.boxes {
         draw_box(page, fragment, frame);
     }
@@ -561,94 +828,130 @@ fn drawable(style: BorderStyle) -> bool {
     !matches!(style, BorderStyle::None | BorderStyle::Hidden)
 }
 
-fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts) {
+/// One stretch of a run sharing a font resource: what will become one text
+/// object.
+struct Segment {
+    resource: Vec<u8>,
+    composite: bool,
+    codes: Vec<u8>,
+    glyphs: Vec<(u16, char)>,
+    characters: String,
+    x: f64,
+}
+
+fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts<'_>) {
     let font = request(run);
-    let face = Face::of(&font);
-    let metrics = BookMetrics;
+    let metrics = BookMetrics::with(fonts.faces());
     let size = run.font_size * PX_TO_PT;
     let baseline = frame.y(run.y);
     let mut x = run.x;
 
     set_fill(page, run.color);
-    // One `Tj` per contiguous stretch of characters sharing a font resource,
-    // because a PDF string is bytes in **one** font: a run that mixes an
-    // encodable character with an unencodable one is two show operations and
-    // not one, and the second's origin is wherever the first's advance left it.
-    let mut codes: Vec<u8> = Vec::new();
-    let mut characters = String::new();
-    let mut resource: Option<Vec<u8>> = None;
-    let mut start = x;
+    // One text object per contiguous stretch of characters sharing a font
+    // resource, because a PDF string is bytes in **one** font: a run that mixes
+    // two faces is two show operations and not one, and the second's origin is
+    // wherever the first's advance left it. This is where `css-fonts-4` §5.3's
+    // per-character matching becomes something a content stream can be asked
+    // about.
+    let mut segment: Option<Segment> = None;
 
     for ch in run.text.chars() {
-        let encoded = fonts.encode(face, ch);
-        let Some((next, code)) = encoded else {
+        let chosen = choose(fonts.faces(), &font, Some(ch));
+        let Some(coded) = fonts.encode(chosen, ch) else {
             // No code at all: the character is not drawn. Counted by
             // `Fonts::note` when the run was walked, so the page is short of
             // exactly as many characters as the report says.
             continue;
         };
-        if resource.as_ref() != Some(&next) {
-            flush(
-                page,
-                &resource,
-                size,
-                frame.x(start),
-                baseline,
-                run,
-                &codes,
-                &characters,
-            );
-            codes.clear();
-            characters.clear();
-            start = x;
-            resource = Some(next);
+        let same = segment
+            .as_ref()
+            .is_some_and(|open| open.resource == coded.resource());
+        if !same {
+            flush(page, segment.take(), size, baseline, run, frame);
+            segment = Some(Segment {
+                resource: coded.resource().to_vec(),
+                composite: matches!(coded, Coded::Composite { .. }),
+                codes: Vec::new(),
+                glyphs: Vec::new(),
+                characters: String::new(),
+                x,
+            });
         }
-        codes.push(code);
-        characters.push(ch);
+        if let Some(open) = segment.as_mut() {
+            match coded {
+                Coded::Simple { code, .. } => open.codes.push(code),
+                Coded::Composite { id, .. } => open.glyphs.push((id, ch)),
+            }
+            open.characters.push(ch);
+        }
         x += metrics.advance(ch, &font) + run.letter_spacing;
         if ch == ' ' {
             x += run.word_spacing;
+            // 9.3.3: word spacing applies to **byte code 32 in a single-byte
+            // encoding**, and a composite font under `/Identity-H` has none —
+            // so `Tw` is inert there and the space has to be paid by starting a
+            // new text object at the position this build already computed. A
+            // build that set `Tw` on a composite font and moved on would put
+            // every word after the first space in the wrong place.
+            if run.word_spacing != 0.0 && segment.as_ref().is_some_and(|open| open.composite) {
+                flush(page, segment.take(), size, baseline, run, frame);
+            }
         }
     }
-    flush(
-        page,
-        &resource,
-        size,
-        frame.x(start),
-        baseline,
-        run,
-        &codes,
-        &characters,
-    );
+    flush(page, segment.take(), size, baseline, run, frame);
 
     decorate(page, run, frame, x);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Writes one segment as one text object.
 fn flush(
     page: &mut PageBuilder,
-    resource: &Option<Vec<u8>>,
+    segment: Option<Segment>,
     size: f64,
-    x: f64,
     y: f64,
     run: &TextRun,
-    codes: &[u8],
-    characters: &str,
+    frame: &Frame,
 ) {
-    let Some(resource) = resource else {
+    let Some(segment) = segment else { return };
+    let x = frame.x(segment.x);
+    if segment.composite {
+        if segment.glyphs.is_empty() {
+            return;
+        }
+        // `PageBuilder::glyphs` writes no `Tc` and no `Tw` of its own, and both
+        // are **text state** that survives a `BT`/`ET` pair — so a composite
+        // draw after a simple one would inherit the simple one's spacing.
+        // Setting them here is what keeps a composite segment's spacing the
+        // run's own rather than whatever was set last.
+        page.raw(format!("{} Tc 0 Tw", run.letter_spacing * PX_TO_PT).as_bytes());
+        let texts: Vec<String> = segment
+            .glyphs
+            .iter()
+            .map(|(_, ch)| ch.to_string())
+            .collect();
+        let drawn: Vec<Glyph<'_>> = segment
+            .glyphs
+            .iter()
+            .zip(texts.iter())
+            .map(|((id, _), text)| Glyph {
+                id: *id,
+                text: text.as_str(),
+            })
+            .collect();
+        page.glyphs(&segment.resource, size, x, y, &drawn);
         return;
-    };
-    if codes.is_empty() {
+    }
+    if segment.codes.is_empty() {
         return;
     }
     page.encoded_text(
-        resource,
+        &segment.resource,
         size,
         x,
         y,
         (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT),
-        codes,
-        characters,
+        &segment.codes,
+        &segment.characters,
     );
 }
 

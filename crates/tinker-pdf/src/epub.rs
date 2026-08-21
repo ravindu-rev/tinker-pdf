@@ -87,16 +87,19 @@
 //! front of it rather than on a list of specifications.
 
 pub mod nav;
+pub mod obfuscation;
 pub mod ocf;
 pub mod package;
 pub mod paint;
 pub mod read;
+pub mod typeface;
 pub mod xhtml;
 
 use tinker_pdf_cos::build::{OutlineEntry, Target};
 use tinker_pdf_cos::dest::is_writable_uri;
 use tinker_pdf_cos::DocumentBuilder;
 use tinker_pdf_css::cascade::ComputedStyle;
+use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::{parse as css_parse, Stylesheet};
 use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits, NoImports};
@@ -114,6 +117,32 @@ use crate::cbz::{
 use ocf::resolve_reference;
 use package::{FallbackDefect, Package};
 use paint::{draw_page, page_target, run_rect, BookMetrics, Fonts, Frame};
+use typeface::{FaceDefect, FaceSet};
+
+/// Every `@font-face` that did not become a face, deduplicated by family and
+/// defect with a count.
+///
+/// Sorted by count and then by family and defect, which is what
+/// [`read::Census::ranked`] does for a property and for the same reason: a
+/// report is read top-down and the entry a producer should act on first is the
+/// one that cost the most faces. Sorting also makes the warning list a function
+/// of the book rather than of the order the reader met its stylesheets in,
+/// which a determinism fingerprint depends on.
+fn ranked_face_defects(faces: &FaceSet) -> Vec<(String, FaceDefect, usize)> {
+    let mut out: Vec<(String, FaceDefect, usize)> = Vec::new();
+    for (family, defect) in faces.defects() {
+        match out.iter_mut().find(|(f, d, _)| f == family && d == defect) {
+            Some(slot) => slot.2 += 1,
+            None => out.push((family.clone(), defect.clone(), 1)),
+        }
+    }
+    out.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.describe().cmp(&b.1.describe()))
+    });
+    out
+}
 
 // ---- Bounds -----------------------------------------------------------------
 
@@ -723,14 +752,14 @@ pub fn synthesise(
         initial: &initial,
     };
 
-    // ---- pass 1: read, cascade, lay out ------------------------------------
+    // ---- pass 1: read and cascade ------------------------------------------
     let mut census = read::Census::default();
     let mut chapters: Vec<Chapter> = Vec::with_capacity(package.spine().len());
     let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
+    let mut declared: Vec<FontFace> = Vec::new();
     for itemref in package.spine() {
         let (name, path, mut defect) = plan_page(book, package, &itemref.idref);
         let mut reading = None;
-        let mut pages = Vec::new();
         if defect.is_none() {
             let source = path.clone().unwrap_or_default();
             let bytes = book
@@ -753,25 +782,25 @@ pub fn synthesise(
                                 });
                             }
                             census.absorb(&document.census);
-                            match layout_with(
-                                &document.tree,
-                                &BookMetrics,
-                                &options,
-                                &limits.layout,
-                                &mut layout_budget,
-                            ) {
-                                Err(_) => defect = Some(SpineDefect::NotFragmented),
-                                Ok(laid) => {
-                                    for (warning, count) in laid.warnings {
-                                        match layout_warnings
-                                            .iter_mut()
-                                            .find(|(w, _)| *w == warning)
-                                        {
-                                            Some(slot) => slot.1 += count,
-                                            None => layout_warnings.push((warning, count)),
-                                        }
-                                    }
-                                    pages = laid.pages;
+                            // Deduplicated across the spine, because a book's
+                            // chapters share one stylesheet: thirteen chapters
+                            // that all `<link>` the same sheet declare the same
+                            // face thirteen times, and a build that loaded each
+                            // one would report every failure thirteen times.
+                            //
+                            // **This catches the linked sheet and not the
+                            // `<style>` element.** A linked sheet's faces carry
+                            // that sheet's own address, so thirteen chapters
+                            // produce thirteen equal rules; a `<style>`
+                            // element's carry the content document's, which is
+                            // a different string per chapter, so they are not
+                            // equal here and cannot be. `typeface::load`
+                            // deduplicates those against the **resolved
+                            // container path**, which is the only place the two
+                            // are the same thing.
+                            for face in document.font_faces.iter() {
+                                if !declared.contains(face) {
+                                    declared.push(face.clone());
                                 }
                             }
                             reading = Some(document);
@@ -785,9 +814,59 @@ pub fn synthesise(
             path,
             defect,
             reading,
-            pages,
+            pages: Vec::new(),
             first_page: 0,
         });
+    }
+
+    // ---- pass 2: the book's own faces, before anything is measured ---------
+    //
+    // Before the layout and not after it, and that ordering is the milestone's
+    // whole point: an embedded face's advances come from its own `hmtx`, so a
+    // book laid out first and given its fonts afterwards would be paginated
+    // with the wrong widths — which is `ArchiveWarning::FontsAttachedAfterPagination`'s
+    // complaint about a *caller* doing the same thing, and it would be no less
+    // wrong done here.
+    let encryption = book.encryption().cloned().unwrap_or_default();
+    let faces = typeface::load(
+        book,
+        &declared,
+        package.unique_identifier(),
+        &encryption,
+        limits,
+    );
+    for (family, defect, rules) in ranked_face_defects(&faces) {
+        warnings.push(ArchiveWarning::FontFace {
+            family,
+            defect,
+            rules,
+        });
+    }
+
+    // ---- pass 3: lay every chapter out -------------------------------------
+    let metrics = BookMetrics::with(&faces);
+    for chapter in &mut chapters {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        match layout_with(
+            &reading.tree,
+            &metrics,
+            &options,
+            &limits.layout,
+            &mut layout_budget,
+        ) {
+            Err(_) => chapter.defect = Some(SpineDefect::NotFragmented),
+            Ok(laid) => {
+                for (warning, count) in laid.warnings {
+                    match layout_warnings.iter_mut().find(|(w, _)| *w == warning) {
+                        Some(slot) => slot.1 += count,
+                        None => layout_warnings.push((warning, count)),
+                    }
+                }
+                chapter.pages = laid.pages;
+            }
+        }
     }
 
     let mut at = 0usize;
@@ -797,8 +876,8 @@ pub fn synthesise(
     }
     let total_pages = at;
 
-    // ---- pass 2: every face, and every character that needs a code ---------
-    let mut fonts = Fonts::new();
+    // ---- pass 4: every face, and every character that needs a code ---------
+    let mut fonts = Fonts::new(&faces);
     for chapter in &chapters {
         for page in &chapter.pages {
             for run in &page.runs {
@@ -822,6 +901,11 @@ pub fn synthesise(
     if fonts.unrepresented() > 0 {
         warnings.push(ArchiveWarning::UnrepresentedCharacters {
             characters: fonts.unrepresented(),
+        });
+    }
+    if fonts.uncovered() > 0 {
+        warnings.push(ArchiveWarning::UncoveredCharacters {
+            characters: fonts.uncovered(),
         });
     }
 

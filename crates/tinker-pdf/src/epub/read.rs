@@ -37,6 +37,7 @@
 use std::cell::RefCell;
 
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, StyleTree};
+use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
 use tinker_pdf_css::{
@@ -175,6 +176,14 @@ pub struct Reading {
     pub styles: StyleTree,
     /// What the cascade could not honour.
     pub census: Census,
+    /// Every `@font-face` this document's author sheets declared, in source
+    /// order, each carrying the address it must be resolved against (gap 31,
+    /// milestone 9).
+    ///
+    /// Per **document** and not per book, because a spine item's sheets are
+    /// its own — and folded into one set by the caller, because a PDF's font
+    /// resources belong to the document rather than to a page.
+    pub font_faces: Vec<FontFace>,
 }
 
 /// Reads one content document: markup, stylesheets, cascade, box tree.
@@ -241,12 +250,29 @@ pub fn read_document(
         census.discarded_rules += sheet.report.discarded_rules;
     }
 
+    // A `<style>` element's sheet has no address of its own, so `parse` left
+    // the base `None` even though the element is inside a document that does
+    // have one. Filling it in here rather than in `tinker-pdf-css` is ruling 8:
+    // the CSS crate knows what the sheet said and this one knows where the
+    // sheet was.
+    let mut font_faces: Vec<FontFace> = Vec::new();
+    for sheet in &author {
+        for face in &sheet.font_faces {
+            let mut face = face.clone();
+            if face.base.is_none() {
+                face.base = Some(path.to_owned());
+            }
+            font_faces.push(face);
+        }
+    }
+
     let tree = box_tree(&dom, &styles);
     Ok(Reading {
         dom,
         tree,
         styles,
         census,
+        font_faces,
     })
 }
 

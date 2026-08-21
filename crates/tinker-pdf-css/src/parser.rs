@@ -107,6 +107,15 @@ pub struct Stylesheet {
     /// the position of the `@import` itself, which is what
     /// `css-cascade-5` §6.4.1 requires.
     pub rules: Vec<StyleRule>,
+    /// Every `@font-face` that survived, in source order, including those
+    /// pulled in by `@import` and those inside a `@media` block that matched
+    /// (gap 31, milestone 9).
+    ///
+    /// A **separate list** rather than an entry in `rules`, because a
+    /// `@font-face` is not a qualified rule: it has no selector, it matches no
+    /// element, and the cascade never sees it. Splicing it into `rules` would
+    /// give it a position in a sort whose criterion it has no value for.
+    pub font_faces: Vec<crate::font_face::FontFace>,
     /// What was discarded, counted rather than swallowed.
     pub report: Report,
 }
@@ -277,6 +286,13 @@ struct Parse<'a> {
     /// The `@import` hrefs on the stack, so a cycle is refused rather than
     /// recursed. A depth cap alone reads the same two files eight times.
     stack: Vec<String>,
+    /// Every `@font-face` met, in source order across every sheet reached.
+    ///
+    /// On the parse rather than returned from [`Parse::sheet`] because an
+    /// `@import`ed sheet's faces belong to the importing sheet's book: a
+    /// caller gets one list and does not have to walk an import tree to find
+    /// the faces a book actually declared.
+    font_faces: Vec<crate::font_face::FontFace>,
 }
 
 /// Parses one stylesheet, resolving `@import` through `resolver`.
@@ -299,10 +315,12 @@ pub fn parse(
         report: Report::default(),
         depth: 0,
         stack: href.map(|h| vec![h.to_string()]).unwrap_or_default(),
+        font_faces: Vec::new(),
     };
     let rules = parse.sheet(bytes, href, budget)?;
     Ok(Stylesheet {
         rules,
+        font_faces: parse.font_faces,
         report: parse.report,
     })
 }
@@ -444,7 +462,7 @@ impl Parse<'_> {
                     return Ok(());
                 };
                 if crate::media::evaluate(&prelude, self.media) {
-                    self.nested_rules(block, rules, budget)?;
+                    self.nested_rules(block, href, rules, budget)?;
                 }
             }
             "import" => {
@@ -469,6 +487,19 @@ impl Parse<'_> {
                 *imports_still_allowed = false;
                 self.report.warn(Warning::LayerRefused);
             }
+            // `css-fonts-4` §4.1. Read rather than warned about, and the
+            // difference from every other at-rule here is that this one has a
+            // consumer: `tinker-pdf`'s EPUB reader opens the `url()` in the
+            // container the sheet came out of.
+            "font-face" => {
+                *imports_still_allowed = false;
+                let Some(block) = block else {
+                    // §4.1 needs a block; `@font-face;` is a parse error.
+                    self.report.discarded_rules += 1;
+                    return Ok(());
+                };
+                self.font_face(&block, href, budget)?;
+            }
             other => {
                 *imports_still_allowed = false;
                 self.report
@@ -478,31 +509,83 @@ impl Parse<'_> {
         Ok(())
     }
 
+    /// One `@font-face` block to a face, or to a discarded rule.
+    ///
+    /// Charged against the **rule** budget rather than being unbounded, which
+    /// is not an approximation: a `@font-face` costs a parse and a `Vec` the
+    /// same way a style rule does, and a book that declared a hundred thousand
+    /// of them would otherwise be refused for neither. It keeps the face list
+    /// bounded by `MAX_CSS_RULES` with no second constant to justify.
+    fn font_face(
+        &mut self,
+        block: &[ComponentValue],
+        href: Option<&str>,
+        budget: &mut Budget,
+    ) -> Result<(), Refusal> {
+        budget.spend_rule()?;
+        match crate::font_face::parse_rule(block, href) {
+            Some(face) => self.font_faces.push(face),
+            // §4.1: no `font-family` or no `src` makes the rule invalid, and an
+            // invalid rule is a discarded one. Counted rather than silent,
+            // because a producer that wrote `src` with a typo in the URL
+            // function gets a book set in the fallback face and no reason why.
+            None => self.report.discarded_rules += 1,
+        }
+        Ok(())
+    }
+
     /// The rules inside a `@media` block that matched.
     fn nested_rules(
         &mut self,
         block: Vec<ComponentValue>,
+        href: Option<&str>,
         rules: &mut Vec<StyleRule>,
         budget: &mut Budget,
     ) -> Result<(), Refusal> {
         let mut at = 0usize;
         while at < block.len() {
+            // Whitespace before a rule is not part of it. Skipping it here is
+            // what lets the at-keyword test below see `@page` at all: `@media
+            // screen { @page … }` puts a whitespace token between the `{` and
+            // the `@`, and a build that tested only the token it happened to be
+            // standing on read the at-keyword as the first half of a selector
+            // and discarded the construct as a malformed qualified rule —
+            // which counts a discard and produces **no name**, so the warning
+            // the branch below exists for never fired.
+            if block[at].is_whitespace() {
+                at += 1;
+                continue;
+            }
             // A nested at-rule inside `@media` — `@media print { @page {} }` —
             // is dropped with its name, rather than being read as a selector.
+            // **Except `@font-face`**, which a producer writes inside a
+            // `@media` block often enough that dropping it would lose a book's
+            // fonts on the one construct that says when to use them; and a
+            // media query that did not match never reaches here at all.
             if let ComponentValue::Token(Token::AtKeyword(name)) = &block[at] {
-                self.report
-                    .warn(Warning::AtRuleUnsupported(name.to_ascii_lowercase()));
+                let nested_font_face = name.eq_ignore_ascii_case("font-face");
+                if !nested_font_face {
+                    self.report
+                        .warn(Warning::AtRuleUnsupported(name.to_ascii_lowercase()));
+                }
                 at += 1;
                 while at < block.len() {
                     match &block[at] {
                         ComponentValue::Block {
                             kind: BlockKind::Curly,
-                            ..
+                            values,
                         } => {
+                            if nested_font_face {
+                                let values = values.clone();
+                                self.font_face(&values, href, budget)?;
+                            }
                             at += 1;
                             break;
                         }
                         ComponentValue::Token(Token::Semicolon) => {
+                            if nested_font_face {
+                                self.report.discarded_rules += 1;
+                            }
                             at += 1;
                             break;
                         }

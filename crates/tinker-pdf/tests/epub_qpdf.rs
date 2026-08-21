@@ -35,6 +35,7 @@ mod epub_support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use epub_support::typeface::Face;
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::{Document, OpenOptions, WriteMode, WriteOptions};
 
@@ -420,4 +421,191 @@ fn qpdf_reads_the_books_title_out_of_the_synthesised_documents_info() {
         text.contains("The tinker-pdf authors"),
         "the book's creator did not reach /Author:\n{text}"
     );
+}
+
+// ---- milestone 9: a book's own faces, read by somebody else ---------------------
+
+/// A book whose one paragraph needs three embedded faces, each covering three
+/// of its nine characters and none covering another's.
+///
+/// The same shape as `tests/epub_fonts.rs`'s, built here rather than shared
+/// because what is asserted below is the **document** and not the reader: this
+/// file exists so that a page tree only this parser walks and a font dictionary
+/// only this interpreter accepts cannot pass.
+fn three_face_book() -> Vec<u8> {
+    let faces = [
+        ("alpha", "ABC", 500u16),
+        ("beta", "DEF", 750),
+        ("gamma", "GHI", 250),
+    ];
+    let mut style = String::new();
+    let mut items = String::new();
+    let mut entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+    ];
+    let mut programs: Vec<Vec<u8>> = Vec::new();
+    for (family, covers, advance) in faces {
+        style.push_str(&format!(
+            "@font-face {{ font-family: \"{family}\"; src: url(fonts/{family}.ttf) format(\"truetype\"); }}"
+        ));
+        items.push_str(&format!(
+            r#"<item id="{family}" href="fonts/{family}.ttf" media-type="font/ttf"/>"#
+        ));
+        programs.push(Face::new(family, covers).with_advance(advance).build());
+    }
+    style.push_str("p { font-family: \"alpha\", \"beta\", \"gamma\"; }");
+
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:2b6c0a10-0000-4000-8000-00000000000c</dc:identifier>"#,
+            r#"<dc:title>A Book Of Three Faces</dc:title>"#,
+            r#"<dc:language>en</dc:language>"#,
+            r#"<dc:creator>The tinker-pdf authors</dc:creator></metadata>"#,
+            r#"<manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>{}</manifest>"#,
+            r#"<spine><itemref idref="c1"/></spine></package>"#
+        ),
+        items
+    );
+    let chapter = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title>"#,
+            r#"<style>{}</style></head><body><p>ABCDEFGHI</p></body></html>"#
+        ),
+        style
+    );
+    entries.push(OcfEntry::deflated("EPUB/content.opf", package.as_bytes()));
+    entries.push(OcfEntry::deflated("EPUB/ch1.xhtml", chapter.as_bytes()));
+    for ((family, _, _), program) in faces.iter().zip(programs.iter()) {
+        entries.push(OcfEntry::deflated(
+            &format!("EPUB/fonts/{family}.ttf"),
+            program,
+        ));
+    }
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
+/// **qpdf reads the three text objects, the three font resources, and the three
+/// `/W` arrays the three faces' own `hmtx` tables state.**
+///
+/// Row 9's headline is asserted in `tests/epub_fonts.rs` against this engine's
+/// own content-stream decoder. That is this repository reading its own output,
+/// and gap 29's milestone 5 found a defect qpdf alone caught because the
+/// renderer drew the right picture either way. Here it is a third party's
+/// reading, and there are three claims:
+///
+/// - **three `BT … ET` objects naming three resources**, decoded by qpdf's own
+///   filter rather than by this build's;
+/// - **each `/W` is the face's own advance**, which is what says the widths a
+///   viewer will place text by and the advances this build paginated with are
+///   the same numbers — 500, 750 and 250 thousandths, one per face, and a build
+///   that wrote one face's metrics into all three passes every count-based test
+///   there is;
+/// - and the file **checks clean**, so the composite fonts, their descendants,
+///   their `/FontFile2` streams and their `/ToUnicode` maps are all things
+///   somebody else will accept.
+#[test]
+fn qpdf_reads_a_books_three_embedded_faces_and_their_own_widths() {
+    let qpdf = oracle!("--check and --filtered-stream-data over three embedded faces");
+
+    let doc = Document::open(three_face_book()).expect("a book");
+    let pdf = doc.editor().save(&WriteOptions::default());
+    let path = fixture("faces", "three.pdf", &pdf);
+    let at = path.display().to_string();
+
+    let (code, report) = run(&qpdf, &["--check", &at]);
+    assert_eq!(code, 0, "qpdf --check:\n{report}");
+    assert!(
+        report.contains("No syntax or stream encoding errors found"),
+        "qpdf --check:\n{report}"
+    );
+
+    // The page's own resources, as qpdf reads them.
+    let (code, pages) = run(&qpdf, &["--show-pages", &at]);
+    assert_eq!(code, 0, "qpdf --show-pages:\n{pages}");
+    let content = pages
+        .split_whitespace()
+        .skip_while(|word| *word != "content:")
+        .nth(1)
+        .expect("a content object")
+        .to_owned();
+
+    let (code, stream) = run(
+        &qpdf,
+        &[
+            &format!("--show-object={content}"),
+            "--filtered-stream-data",
+            &at,
+        ],
+    );
+    assert_eq!(code, 0, "qpdf --show-object={content}:\n{stream}");
+    let objects: Vec<&str> = stream.match_indices("BT /").map(|(_, s)| s).collect();
+    assert_eq!(
+        objects.len(),
+        3,
+        "qpdf sees {} text objects and not three:\n{stream}",
+        objects.len()
+    );
+    for resource in ["BT /Bf0 ", "BT /Bf1 ", "BT /Bf2 "] {
+        assert!(
+            stream.contains(resource),
+            "{resource} is not in the stream qpdf decoded:\n{stream}"
+        );
+    }
+
+    // And the widths, from the descendant font of each resource. `--show-object`
+    // takes an object number, so the page's `/Font` dictionary is walked first.
+    let (code, page) = run(
+        &qpdf,
+        &[
+            &format!(
+                "--show-object={}",
+                pages
+                    .split_whitespace()
+                    .nth(2)
+                    .expect("a page object number")
+            ),
+            &at,
+        ],
+    );
+    assert_eq!(code, 0, "qpdf --show-object of the page:\n{page}");
+
+    let mut widths: Vec<String> = Vec::new();
+    for name in ["/Bf0", "/Bf1", "/Bf2"] {
+        let font = page
+            .split_whitespace()
+            .skip_while(|word| *word != name)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name} is not in the page's resources:\n{page}"))
+            .to_owned();
+        let (code, dict) = run(&qpdf, &[&format!("--show-object={font}"), &at]);
+        assert_eq!(code, 0, "qpdf --show-object={font}:\n{dict}");
+        assert!(
+            dict.contains("/Identity-H") && dict.contains("/Type0"),
+            "{name} is not a composite font:\n{dict}"
+        );
+        // `/DescendantFonts [ 5 0 R ]`: the array bracket is its own token in
+        // qpdf's output, so the object number is the first one that is a
+        // number rather than the token after the key.
+        let descendant = dict
+            .split_whitespace()
+            .skip_while(|word| *word != "/DescendantFonts")
+            .find(|word| word.parse::<u32>().is_ok())
+            .unwrap_or_else(|| panic!("{name} names no descendant font:\n{dict}"))
+            .to_owned();
+        let (code, child) = run(&qpdf, &[&format!("--show-object={descendant}"), &at]);
+        assert_eq!(code, 0, "qpdf --show-object={descendant}:\n{child}");
+        let start = child
+            .find("/W ")
+            .unwrap_or_else(|| panic!("{name} has no /W array:\n{child}"));
+        widths.push(child[start..].to_owned());
+    }
+    assert!(widths[0].contains("500"), "Bf0's /W is {:?}", widths[0]);
+    assert!(widths[1].contains("750"), "Bf1's /W is {:?}", widths[1]);
+    assert!(widths[2].contains("250"), "Bf2's /W is {:?}", widths[2]);
 }

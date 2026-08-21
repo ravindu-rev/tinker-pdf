@@ -1575,7 +1575,7 @@ fn the_encoding_covers_what_it_covers_and_says_so() {
 /// nonsense.
 #[test]
 fn an_unencodable_character_gets_one_stable_code() {
-    use super::paint::{Face, Fonts, Generic, OVERFLOW_FIRST};
+    use super::paint::{Chosen, Coded, Face, Fonts, Generic, OVERFLOW_FIRST};
     use tinker_pdf_css::property::{FontFamily, FontStyle, FontVariant, TextDecoration};
     use tinker_pdf_layout::TextRun;
 
@@ -1598,7 +1598,8 @@ fn an_unencodable_character_gets_one_stable_code() {
         anchor: None,
     };
 
-    let mut fonts = Fonts::new();
+    let faces = super::typeface::FaceSet::new();
+    let mut fonts = Fonts::new(&faces);
     fonts.note(&run("a\u{65e5}b\u{672c}"));
     fonts.note(&run("\u{65e5}\u{65e5}"));
     assert_eq!(fonts.unrepresented(), 0);
@@ -1626,33 +1627,49 @@ fn an_unencodable_character_gets_one_stable_code() {
         bold: false,
         italic: false,
     };
+    let chosen = Chosen::Standard(face);
     // The encodable characters stay in the primary font.
-    assert_eq!(fonts.encode(face, 'a'), Some((face.resource(), b'a')));
+    assert_eq!(
+        fonts.encode(chosen, 'a'),
+        Some(Coded::Simple {
+            resource: face.resource(),
+            code: b'a'
+        })
+    );
     // The others are in the overflow font, in the order they were first met,
     // and stably.
     assert_eq!(
-        fonts.encode(face, '\u{65e5}'),
-        Some((face.overflow_resource(), OVERFLOW_FIRST))
+        fonts.encode(chosen, '\u{65e5}'),
+        Some(Coded::Simple {
+            resource: face.overflow_resource(),
+            code: OVERFLOW_FIRST
+        })
     );
     assert_eq!(
-        fonts.encode(face, '\u{672c}'),
-        Some((face.overflow_resource(), OVERFLOW_FIRST + 1))
+        fonts.encode(chosen, '\u{672c}'),
+        Some(Coded::Simple {
+            resource: face.overflow_resource(),
+            code: OVERFLOW_FIRST + 1
+        })
     );
     assert_eq!(
-        fonts.encode(face, '\u{65e5}'),
-        Some((face.overflow_resource(), OVERFLOW_FIRST)),
+        fonts.encode(chosen, '\u{65e5}'),
+        Some(Coded::Simple {
+            resource: face.overflow_resource(),
+            code: OVERFLOW_FIRST
+        }),
         "the same character was given two codes"
     );
     // A character nothing ever noted has no code at all, which is what stops a
     // page drawing a glyph the font dictionary does not describe.
-    assert_eq!(fonts.encode(face, '\u{4e00}'), None);
+    assert_eq!(fonts.encode(chosen, '\u{4e00}'), None);
     // And a face that drew nothing has no font.
     let bold = Face {
         generic: Generic::Serif,
         bold: true,
         italic: false,
     };
-    assert_eq!(fonts.encode(bold, '\u{65e5}'), None);
+    assert_eq!(fonts.encode(Chosen::Standard(bold), '\u{65e5}'), None);
 }
 
 /// Past 224 distinct unencodable characters for one face, the rest are
@@ -1672,7 +1689,8 @@ fn characters_past_the_overflow_font_are_counted() {
     let text: String = (0..300u32)
         .filter_map(|at| char::from_u32(0x4E00 + at))
         .collect();
-    let mut fonts = Fonts::new();
+    let faces = super::typeface::FaceSet::new();
+    let mut fonts = Fonts::new(&faces);
     fonts.note(&TextRun {
         x: 0.0,
         y: 0.0,
@@ -1714,7 +1732,7 @@ fn an_east_asian_character_is_one_em_wide() {
         style: FontStyle::Normal,
         size: 20.0,
     };
-    let metrics = BookMetrics;
+    let metrics = BookMetrics::STANDARD;
     assert!((metrics.advance('\u{65e5}', &font) - 20.0).abs() < 1e-9);
     // Times-Roman's own published advance for `a` is 444/1000.
     assert!((metrics.advance('a', &font) - 20.0 * 0.444).abs() < 1e-9);

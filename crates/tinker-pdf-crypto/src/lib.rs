@@ -23,6 +23,7 @@ pub mod aes;
 pub mod handler;
 pub mod md5;
 pub mod rc4;
+pub mod sha1;
 pub mod sha2;
 
 pub use handler::{authenticate, AuthOutcome, CryptMethod, FileKey, HandlerNote, HandlerParams};

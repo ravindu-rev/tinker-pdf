@@ -535,7 +535,7 @@ fn engine_layout(
 
     let laid = layout(
         &box_tree(&dom, &styles),
-        &BookMetrics,
+        &BookMetrics::STANDARD,
         &Options::new(width_px, height_px),
         &LayoutLimits::DEFAULT,
     )

@@ -3927,3 +3927,354 @@ finding rather than the bug.
   parsed. A build that passed `Doctype::Refuse` would refuse all six.
 - **Milestone 4's `with_fonts` warning still has no fixture from a real book**,
   unchanged: no committed book needs a face this engine lacks.
+
+## Progress — 21 August 2026, milestone 9
+
+**A run needing three faces is three PDF text objects, at three origins each
+starting where the last one left off, and qpdf agrees.** 2 626 tests, 7
+ignored, up from 2 578 at milestone 8 and from 2 599 for the implementation
+that was in the tree when this milestone's testing began.
+
+The implementation reached this milestone already written — `sha1.rs`,
+`obfuscation.rs`, `typeface.rs`, `paint.rs`'s per-character rewrite and
+`tinker-pdf-css`'s `font_face.rs` — and compiling, and passing. What it did not
+have was the assertion row 9 is actually judged on. Writing that assertion, and
+the fixture it needs, found **two bugs in the new code and one rule one crate
+down that this feature's own success turns into a regression**, none of which
+any existing test could see. That is what the rest of this section is about: the
+feature was written, and it was not finished, and the difference is a fixture
+that can state its own coverage.
+
+### The headline, and why it is a count
+
+`css-fonts-4` §5.3 makes font matching **per character**: the `font-family`
+list is walked for each character in turn and the first family with a face that
+*has a glyph for that character* wins. Milestone 8 resolved the list once per
+run and said so; this build resolves it per character, and the consequence is
+visible in the content stream rather than only in the picture. A PDF string is
+bytes in **one** font, so a run needing three faces is three `BT … ET` objects.
+
+`a_run_needing_three_faces_becomes_three_text_objects` asserts four things, and
+each fails on its own:
+
+- **three objects**, because a build that resolved the list once per run writes
+  one with six notdefs in it;
+- **three different resources**, in the faces' declaration order, so the three
+  segments are not three copies of one font;
+- **the glyphs are the `cmap`'s** — each face numbers its own from 1, so `ABC`,
+  `DEF` and `GHI` are `<000100020003>` three times over, and a build that
+  passed the character through as a code would write `<004100420043>`;
+- **the origins continue**, each by exactly the advance the previous face's own
+  `hmtx` states. The three faces are given three different advances — 500, 750
+  and 250 thousandths — precisely so this can fail: a build that measured every
+  character with the first face's metrics puts objects two and three in the
+  wrong place and draws a perfectly plausible page.
+
+Beside it are two controls, because the count on its own is not a measurement.
+`one_face_that_covers_the_whole_run_is_one_text_object` is the same nine
+characters through a face that covers all of them: a build that started a new
+object per character passes the first test and fails this one.
+`a_declared_family_that_covers_nothing_is_stepped_over` declares a family whose
+face exists and covers none of the run, and asserts the **resource** as well as
+the count — because drawing the whole paragraph in that face is also one text
+object, and is the exact failure §5.3's per-character step exists to prevent.
+
+**qpdf reads the same three objects.** `epub_qpdf.rs` grew
+`qpdf_reads_a_books_three_embedded_faces_and_their_own_widths`: `--check` is
+clean, `--filtered-stream-data` decodes three `BT /Bf0`, `/Bf1`, `/Bf2` objects,
+and each descendant font's `/W` is that face's own advance — `[1 [500 500
+500]]`, `[1 [750 750 750]]`, `[1 [250 250 250]]`. That last one is the claim
+this repository cannot make about itself: the widths a viewer will place text by
+and the advances this build paginated with are the same numbers, because one is
+computed from the other.
+
+### Writing the fixture is what found the bugs
+
+`tests/epub_package.rs`'s `boxy_font` emits `head`, `loca` and `glyf` and
+nothing else. That is exactly enough to answer *"did a glyph get drawn"* for a
+`FontProvider`, which reaches a glyph by the code a document wrote and asks no
+`cmap` anything. It cannot answer *"which characters does this face have"*, and
+§5.3's matching is that question and nothing else.
+
+So `tests/epub_support/typeface.rs` builds a real minimal TrueType —
+`cmap` format 4 in the (3, 1) Windows BMP encoding, `hmtx`, `hhea`, `maxp`,
+`loca`, `glyf`, `head`, `name` — **parameterised by which characters it
+covers**, so three faces with disjoint coverage can be made and a test can state
+its own premise. `epub_package.rs`'s copy of `boxy_font` moved there beside it
+rather than being replaced by it, and the module says why: the two answer
+different questions, and giving the provider fixture a `cmap` would change what
+four existing tests mean. `tests/substitute_fonts.rs` keeps its own, because it
+is a test binary that includes no `epub_support` and the face it needs is
+plan 05's rather than this one's.
+
+Three of the four things that fixture made assertable were wrong.
+
+**1. `hhea`'s ascender was read from the table's version field.** `ascender` is
+at byte 4 and `descender` at byte 6; bytes 0 to 3 are the version, which is
+`0x0001_0000` in every font there has ever been. So every embedded face got an
+ascent of **one unit** — a thousandth of an em — and a descent of zero,
+identically, whatever the file said. It is exactly the shape this plan keeps
+finding: the page still has its text on it, every line is simply set a little
+high, and no test in the tree could tell. `an_embedded_faces_baseline_is_placed_by_its_own_hhea`
+is what says so now, with **three** faces rather than two: one face cannot
+separate the file's numbers from a plausible constant, and two faces with both
+fields changed cannot separate the ascent from the descent.
+
+**2. `Page::text()` broke a paragraph at every face change.**
+`tinker-pdf-content`'s text device treated `ET` as a hard line break, with that
+comment beside it. It is a defensible rule until something produces the
+counter-example, and per-character fallback is that counter-example: `ABCDEFGHI`
+in three faces extracted as `"ABC\nDEF\nGHI\n"`, three lines, on one baseline —
+so `search("ABCDEFGHI")` found nothing, because `search` matches within a line.
+It is not an EPUB-only shape either: a producer that emits a text object per
+styled span writes the same page, and every bold word in the middle of a
+sentence is one.
+
+The fix is that an `ET` puts the **pen** down rather than ending the line: the
+line is held open and the next glyph has to *continue* it — same baseline, same
+direction, and within half an em of where the last glyph's box ended — rather
+than merely land somewhere on the same line, which is what two cells of a table
+row do. `a_text_object_boundary_is_not_a_line_break_and_a_gap_still_is` asserts
+both halves, because a build that never broke at all joins the table row.
+Nothing else in the workspace moved.
+
+**3. The `@font-face` de-duplication did not work for a `<style>` element.**
+`synthesise` collapses equal rules across the spine, with a comment saying that
+thirteen chapters sharing one stylesheet declare one face. That is true for a
+`<link>`ed sheet, whose faces carry **that sheet's** address. A `<style>`
+element has no address of its own, so `read.rs` fills in the **content
+document's** — a different string in every chapter — and the rules are not equal
+and cannot be. Thirteen chapters with the same `<style>` block were thirteen
+rules, thirteen inflations and thirteen parses of the same font program.
+
+The fix is in `typeface::load`, against the **resolved container path**, which
+is the only place the two are the same thing; the defect list is deliberately
+*not* collapsed with it, because thirteen rules that all failed are thirteen
+rules and `ArchiveWarning::FontFace`'s count is where that is said. The test
+asserts both: two chapters produce one face, and two chapters produce one
+warning saying `rules: 2`.
+
+### And one assertion of mine was wrong
+
+The first version of the `hhea` test measured the **line height** — the gap
+between two baselines — and found 14.4 points for a face with a 0.8 ascent and
+for a face with a 1.6 ascent alike. That is not a bug: CSS 2.1 §10.8 makes the
+line *box* `line-height`, which is `normal` here and so a multiple of the font
+size whatever face is used, and what the face's metrics decide is where the
+baseline sits **inside** it, by the half-leading rule. The test moved to the
+baseline, and the half-leading constant cancels out of a difference of two —
+which is why the assertion is arithmetic the test states rather than a number
+copied out of a run.
+
+### `FontProvider`'s per-family question, answered: the trait is not extended
+
+Row 9 asks for *"`FontProvider`'s per-family fallback question answered — the
+trait extended, or the reason it is not recorded"*. **It is not extended, and
+the reason is that the trait already answers per family.**
+
+`FontRequest` carries `base_font`, and this build's synthesis writes a
+**distinct** `/BaseFont` per generic family — `Times-Roman`, `Helvetica`,
+`Courier`, twelve names across the standard 14 — so a host with a serif face and
+a sans face is already asked for each by name and can already answer
+differently. Extending the trait would add a second way to say the same thing
+and a second way for the two to disagree.
+
+That is evidence rather than an assertion:
+`a_provider_is_asked_per_family_and_the_three_generics_arrive_by_name` attaches
+a recording provider to a book with a `serif`, a `sans-serif` and a `monospace`
+paragraph, renders a page, and asserts the three names that arrived — sorted and
+deduplicated, so a build that asked once with one name fails.
+
+What a provider **cannot** do is change the pagination, and that is deliberate
+rather than a limitation of the trait. It is milestone 4's whole argument for
+`OpenOptions::fonts`, and it now has both halves asserted:
+
+- `the_page_count_does_not_depend_on_whether_a_provider_is_attached` opens three
+  committed books twice, with and without a provider, and compares the page
+  count **and the first page's whole content stream** — byte for byte, so a
+  build in which a provider moved one glyph fails;
+- `the_three_generic_families_measure_at_their_own_published_advances` is the
+  reason it can hold: Times-Roman's `a` is 444 thousandths, Helvetica's 556 and
+  Courier's 600, and the three ascent-and-descent pairs are the three families'
+  own AFM numbers. A build that gave all three the same numbers would paginate
+  consistently and wrongly, and the first test would still pass.
+
+### The font census, per book
+
+Milestone 8's `Still owed` named this milestone's two: *"a notdef glyph unwarned
+and more than 224 out-of-encoding characters per face lost"*. Both moved.
+
+| Book | Notdefs drawn | Characters lost | `@font-face` defects |
+| --- | --- | --- | --- |
+| `calibre-book-cover.epub` | **24** | 0 | 0 |
+| `calibre-book-nocover.epub` | **24** | 0 | 0 |
+| `pandoc-book-cover.epub` | **25** | 0 | 0 |
+| `pandoc-book-epub2.epub` | **25** | 0 | 0 |
+| `pandoc-book-nocover.epub` | **25** | 0 | 0 |
+| `pandoc-plates.epub` | **0** | 0 | 0 |
+
+The record is `tests/epub/FONTS.tsv` and
+`the_font_census_is_the_one_the_record_states` is the ratchet, in `CENSUS.tsv`'s
+shape and for its reason: a milestone that gives this build a CJK face has to
+re-measure rather than argue.
+
+**Every one of those twenty-four was there at milestone 8 and none was
+reported.** The number is not new work on the page — it is the line of Japanese
+milestone 1 put in five of the six books, drawn as a notdef through the overflow
+font — it is new work in the *report*, and the distinction it rests on is the
+one `ArchiveWarning` now makes: an **unrepresented** character is missing from
+the picture *and* from `Page::text()`, and an **uncovered** one is missing from
+the picture and present in the text. A reader that reported them as one number
+would make a book whose text can still be searched indistinguishable from one
+whose cannot. `pandoc-plates.epub` is the control: it is the one committed book
+with no Japanese in it, it reports zero, and
+`the_notdef_count_is_a_property_of_the_book_and_not_a_constant` is what stops
+the whole table being satisfied by a constant.
+
+**The 224-code ceiling is gone for a book that brings its own face**, which is
+the second half. An embedded face draws through a **composite** font under
+`/Identity-H`, where the two-byte code *is* the glyph index, so `/Differences`'s
+224 codes are not in the question.
+`an_embedded_face_removes_the_overflow_ceiling_and_the_warning` sets three
+hundred distinct characters — past the ceiling by seventy-six — twice: the
+control loses seventy-six and draws two hundred and twenty-four notdefs, and the
+same book with a face covering all three hundred reports **neither** warning and
+extracts every character. It is not raised for a book without a face, and that
+is recorded rather than fixed: the ceiling is `/Differences`'s own size and the
+answer to it is an embedded face, not a larger array.
+
+### The injection matrix
+
+**Forty-five defects, forty-three caught on the first pass.** One survivor was a
+defect that changed no behaviour; the other was a real gap in the fixtures, and
+it is closed. The whole matrix was re-run against the tree as committed:
+**forty-five of forty-five**.
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | paint: the family list is resolved once per run | `a_face_the_family_list_never_mentions_is_still_the_system_fallback`, and three more |
+| 2 | paint: a segment never ends, so a run is one object | `every_committed_book_conserves_the_figure_the_record_states`, and six more |
+| 3 | paint: every segment starts at the run origin | `a_run_needing_three_faces_becomes_three_text_objects` |
+| 4 | paint: the advance is one character wide for all | `a_run_needing_three_faces_becomes_three_text_objects` |
+| 5 | paint: an embedded face measures at half an em | `a_run_needing_three_faces_becomes_three_text_objects` |
+| 6 | paint: an unknown family falls straight to serif | `a_family_this_build_does_not_have_falls_through_to_the_next`, and three more |
+| 7 | paint: §5.3 has no system fallback | `a_face_the_family_list_never_mentions_is_still_the_system_fallback` |
+| 8 | paint: a notdef is counted per distinct character | `a_character_no_face_covers_is_named_rather_than_left_blank`, `the_font_census_is_the_one_the_record_states` |
+| 9 | paint: a notdef is not counted at all | `a_character_no_face_covers_is_named_rather_than_left_blank`, and three more |
+| 10 | paint: a lost character is reported as a notdef | `characters_past_the_overflow_font_are_counted`, `an_embedded_face_removes_the_overflow_ceiling_and_the_warning` |
+| 11 | paint: an overflow code is spent per occurrence | `an_unencodable_character_gets_one_stable_code` |
+| 12 | paint: the standard 14 claim every character | `a_face_the_family_list_never_mentions_is_still_the_system_fallback` |
+| 13 | face: hhea ascender read from the version field | `an_embedded_faces_baseline_is_placed_by_its_own_hhea` |
+| 14 | face: hhea descender read from the ascender slot | `an_embedded_faces_baseline_is_placed_by_its_own_hhea` |
+| 15 | face: a cmap answering notdef is a match | `a_declared_family_that_covers_nothing_is_stepped_over`, and two more |
+| 16 | face: best ignores coverage | `a_declared_family_that_covers_nothing_is_stepped_over`, and two more |
+| 17 | face: a format hint is never refused | `a_face_declared_in_every_chapter_is_loaded_once_and_every_rule_is_counted`, and two more |
+| 18 | face: an unknown format keyword is refused | `an_unrecognised_format_hint_does_not_refuse_a_perfectly_good_file` |
+| 19 | face: a wOFF signature is not sniffed | `woff_and_woff2_are_refused_by_name_on_the_hint_and_on_the_bytes` |
+| 20 | face: wOF2 is sniffed as woff | `woff_and_woff2_are_refused_by_name_on_the_hint_and_on_the_bytes` |
+| 21 | face: the src list stops at the first failure | `a_src_list_is_walked_past_a_refused_entry_and_the_refusal_is_still_named` |
+| 22 | face: a rule that worked is reported as a whole failure | `a_face_declared_in_every_chapter_is_loaded_once_and_every_rule_is_counted`, and three more |
+| 23 | face: local() is reported as a missing url | `a_local_source_is_refused_under_its_own_name` |
+| 24 | face: one file declared twice is loaded twice | `a_face_declared_in_every_chapter_is_loaded_once_and_every_rule_is_counted` |
+| 25 | obfuscation: IDPF covers 1024 bytes | `a_pretty_printed_identifier_still_opens_its_own_obfuscated_font`, `the_idpf_obfuscation_is_undone_over_its_own_thousand_and_forty_bytes` |
+| 26 | obfuscation: Adobe covers 1040 bytes | `the_adobe_obfuscation_is_undone_over_its_own_thousand_and_twenty_four_bytes` |
+| 27 | obfuscation: the identifier is trimmed, not stripped | `the_idpf_key_strips_the_whitespace_section_4_4_3_says_to_strip` |
+| 28 | obfuscation: the empty identifier is hashed anyway | `the_idpf_key_strips_the_whitespace_section_4_4_3_says_to_strip` |
+| 29 | obfuscation: a UUID of any length is a key | `an_identifier_that_is_not_a_uuid_has_no_adobe_key_and_says_so` |
+| 30 | obfuscation: the key's nibbles are swapped | `the_adobe_obfuscation_is_undone_over_its_own_thousand_and_twenty_four_bytes` |
+| 31 | obfuscation: the xor uses one key byte throughout | `a_font_shorter_than_the_obfuscated_run_is_covered_to_its_end`, and three more |
+| 32 | content: an ET is a hard line break again | `a_text_object_boundary_is_not_a_line_break_and_a_gap_still_is` |
+| 33 | content: a closed line resumes anywhere on its baseline | `a_text_object_boundary_is_not_a_line_break_and_a_gap_still_is` |
+| 34 | sha1: the message schedule is not rotated (SHA-0) | `the_two_implementations_agree_over_every_length_to_two_blocks`, and two more |
+| 35 | sha1: b is not rotated by thirty | `the_two_implementations_agree_over_every_length_to_two_blocks`, and two more |
+| 36 | sha1: the reference implementation drifts | `the_reference_implementation_is_pinned_to_a_published_vector`, `the_two_implementations_agree_over_every_length_to_two_blocks` |
+| 37 | css: an src that parses to nothing is still an src | `a_src_that_parses_to_nothing_makes_the_rule_invalid` |
+| 38 | css: the src list keeps only its first entry | `the_src_fallback_list_keeps_every_entry_in_order` |
+| 39 | epub: a face defect never reaches the report | `a_local_source_is_refused_under_its_own_name`, and three more |
+| 40 | epub: the notdef warning is never raised | `a_character_no_face_covers_is_named_rather_than_left_blank`, and three more |
+| 41 | harness: the fixture cmap maps every code to glyph one | `a_fixture_face_covers_what_it_says_and_reads_back_through_sfnt`, and three more |
+| 42 | harness: the fixture advance is written as zero | `a_fixture_face_covers_what_it_says_and_reads_back_through_sfnt`, and two more |
+| 43 | harness: the fixture numbers its glyphs from zero | `a_fixture_face_covers_what_it_says_and_reads_back_through_sfnt`, and nine more |
+| 44 | harness: text_objects sees only the first object | `a_run_needing_three_faces_becomes_three_text_objects` |
+| 45 | harness: origin_of reads the operands after Td | `a_run_needing_three_faces_becomes_three_text_objects`, `an_embedded_faces_baseline_is_placed_by_its_own_hhea` |
+
+#### The survivor that was mine, not the build's
+
+`face: a rule that worked is reported as a whole failure` replaced `None =>`
+with `_ =>` in a match whose other arm is `Some(...)`. After a `Some` arm, `_`
+**is** the `None` arm: the injection compiled, changed nothing, and read as a
+survivor. Rewritten to push the defect unconditionally, it is caught by four
+tests. A defect that changes no behaviour is not a defect, and it is worth
+naming because it costs a pass to notice.
+
+#### The survivor that was real: a fixture and a reader sharing one derivation
+
+`obfuscation: the key's nibbles are swapped` survived every assertion in the
+file. Every fixture obfuscated its font with the key `adobe_key` handed it and
+then asked this build to undo it — with the key the **same function** handed it.
+A wrong key XORs and un-XORs exactly, so the bytes came back right and the page
+came out right and the test proved that the function agrees with itself.
+
+This plan's own list of ways a milestone can be lost has it: *"a fixture giving
+the right answer for the wrong reason"*. The fix is to state both keys as
+constants — `ADOBE_KEY`, the sixteen bytes of the identifier's UUID read straight
+off it, and `IDPF_KEY`, the SHA-1 digest `0abddf6a…` — obfuscate with those, and
+assert the two functions against them. That is the only form of the assertion a
+shared derivation cannot satisfy, and it is what a second implementation is for
+one crate down: `tinker-pdf-crypto`'s SHA-1 has one, and the matrix confirms it
+works in both directions — a defect in the primary implementation and a defect
+in the reference one are each caught, the second by
+`the_reference_implementation_is_pinned_to_a_published_vector` as well as by the
+agreement test.
+
+#### The harness
+
+The copy in the scratchpad has none of the three bugs earlier milestones found
+in it, and its docstring now names all three so the next one inherits the
+finding rather than the bug: milestone 3's `shutil.copy2` preserving an mtime
+(nothing is copied), milestone 4's unrevertable empty-string replacement
+(nothing is reversed — the restore writes pristine bytes), and milestone 8's
+restore stamping the *original* mtime and leaving a defective dependency rlib
+linked (the restore stamps the current time and pays one rebuild per defect).
+Every anchor was read out of the file it names before it was written, and all
+forty-five matched exactly once on the first verification pass.
+
+### Still owed
+
+- **The fetched corpus is not here, so no *real* book's fonts were read.**
+  `tests/epub/README.md` names `wasteland-otf-obf` and `wasteland-woff-obf` as
+  milestone 9's real-book evidence and `TINKER_EPUB_CORPUS` is unset on this
+  machine, so `epub_fetched.rs` skipped and every `@font-face` this milestone
+  read came from a fixture. The fixtures are honest about what they are —
+  synthesised, with their coverage stated — but a real producer's obfuscated OTF
+  has not been through this path. It is the same gap milestone 8 recorded for
+  `with_fonts`, one file further along.
+- **WOFF and WOFF2 are refused rather than decoded**, which is the plan's own
+  scope decision and not a defect. What is owed is the number: no committed book
+  has one, so how much of a real corpus this loses is unmeasured until the
+  fetched corpus runs.
+- **`local()` is always unavailable.** A reading system with no installed faces
+  is what this build is, and the defect names it; a host that *has* faces has no
+  way to offer them to the `@font-face` path, because `FontProvider` is consulted
+  at render and this resolution happens at `open`. Answering it would mean a
+  second seam and it is not built.
+- **`unicode-range` is not read**, so a book that splits one family across four
+  subsetted files gets all four as candidates for every character and the first
+  that covers it wins. That is the right glyph in every case this build can
+  construct — coverage is what §5.3 asks about and the files do not overlap — but
+  it is not §4.4's algorithm and a book with deliberately overlapping ranges
+  would resolve to the wrong file.
+- **`font-stretch`, `font-feature-settings`, `font-variation-settings` and
+  `font-display` are parsed past rather than read**, unchanged from the CSS
+  crate's own record.
+- **A `<style>` element's faces are deduplicated by container path and a
+  `<link>`ed sheet's by rule**, which is two mechanisms for one property. They
+  agree on every book that can be built today; a single mechanism would be
+  better and is not worth a public type change yet.
+- **The `hhea` fallback is the standard face's proportions**, not the file's
+  `OS/2` `sTypoAscender`, which is what a browser prefers when `USE_TYPO_METRICS`
+  is set. No fixture and no committed book has an `OS/2` at all.
+- Milestone 8's list is otherwise unchanged: tables set as inline text,
+  `vertical-align` unhonoured, dashed and dotted borders drawn solid,
+  `light-dark()` taking a colour with it, `pandoc-plates.epub`'s `<img>`
+  undrawn, and `mutool` never run over an EPUB.

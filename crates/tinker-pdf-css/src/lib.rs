@@ -116,6 +116,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cascade;
+pub mod font_face;
 pub mod limits;
 pub mod media;
 pub mod parser;

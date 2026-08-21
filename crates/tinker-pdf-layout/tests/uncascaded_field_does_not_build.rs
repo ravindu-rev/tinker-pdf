@@ -102,17 +102,30 @@ fn build_css(name: &str, with_field: bool) -> PathBuf {
     let src = scratch.join("src");
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&src).expect("the scratch directory");
-    for file in [
-        "lib.rs",
-        "limits.rs",
-        "media.rs",
-        "parser.rs",
-        "property.rs",
-        "selector.rs",
-        "tokenizer.rs",
-    ] {
-        std::fs::write(src.join(file), read(&root.join("src").join(file))).expect("write");
+    // Enumerated rather than listed, and that is a correction rather than a
+    // tidying. The list used to be seven names in a literal, and milestone 9
+    // added `font_face.rs` to the crate — so this proof stopped building at
+    // all, with an error about a module the temporary copy did not have. A
+    // proof that breaks when the crate grows is a proof somebody eventually
+    // deletes.
+    //
+    // `cascade.rs` and `style.rs` are the two this test rewrites, so they are
+    // skipped here and written below.
+    let rewritten = ["cascade.rs", "style.rs"];
+    let mut copied = Vec::new();
+    for entry in std::fs::read_dir(root.join("src")).expect("the css source directory") {
+        let entry = entry.expect("a directory entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || rewritten.contains(&name.as_str()) {
+            continue;
+        }
+        std::fs::write(src.join(&name), read(&entry.path())).expect("write");
+        copied.push(name);
     }
+    assert!(
+        copied.iter().any(|n| n == "lib.rs"),
+        "the crate root was copied: {copied:?}"
+    );
     let mut cascade = read(&root.join("src/cascade.rs"));
     if with_field {
         cascade = inject(&cascade, FIELD_ANCHOR, FIELD);

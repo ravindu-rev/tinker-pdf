@@ -651,6 +651,40 @@ pub enum ArchiveWarning {
         /// How many characters.
         characters: usize,
     },
+    /// Characters drawn in a face that has no glyph for them, so the page shows
+    /// a notdef where the text is (gap 31, milestone 9).
+    ///
+    /// **A different fact from [`ArchiveWarning::UnrepresentedCharacters`]**,
+    /// and the two are kept apart because a host can act on one and not the
+    /// other: an unrepresented character is missing from the picture *and* from
+    /// `Page::text()`, and an uncovered one is missing from the picture and
+    /// present in the text — so the book is still searchable and still wrong to
+    /// look at. Milestone 8 reported only the first, and a notdef went
+    /// unwarned; row 9 asks for *"a character no available face covers
+    /// producing a named warning rather than a blank"*, and this is it.
+    ///
+    /// Counted per occurrence rather than per distinct character, because the
+    /// number a host wants is how much of the book is blank.
+    UncoveredCharacters {
+        /// How many characters.
+        characters: usize,
+    },
+    /// An `@font-face` did not become a usable face, with the family it named
+    /// and why (gap 31, milestone 9).
+    ///
+    /// **Deduplicated per family and defect**, for
+    /// [`ArchiveWarning::UnimplementedFeature`]'s reason: a book that declares
+    /// one family across thirteen chapters' stylesheets would otherwise produce
+    /// thirteen identical warnings, and a book whose fonts are all WOFF2 would
+    /// bury the one sentence a producer needs under a list.
+    FontFace {
+        /// The `font-family` the rule declared, as the sheet wrote it.
+        family: String,
+        /// Why no face came of it.
+        defect: crate::epub::typeface::FaceDefect,
+        /// How many rules met this.
+        rules: usize,
+    },
     /// The book has a table of contents and this build could not write it as
     /// an outline (gap 31, milestone 8).
     ///

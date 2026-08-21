@@ -2,6 +2,7 @@
 
 mod bounds;
 mod cascade;
+mod font_face;
 mod parser;
 mod selector;
 mod tokenizer;

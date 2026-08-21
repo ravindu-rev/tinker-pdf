@@ -255,7 +255,17 @@ struct PendingLine {
     /// line or starts a new one.
     direction: (f64, f64),
     origin: (f64, f64),
+    /// Where the last glyph's box ended along the baseline, which is where the
+    /// pen would be if the run continued.
+    pen: f64,
     font_id: u64,
+    /// Whether an `ET` closed the text object this line was collected in.
+    ///
+    /// Not a line break by itself — see [`TextDevice::end_text`] — but the next
+    /// glyph has to **continue** the line rather than merely share its
+    /// baseline, because within a text object the pen carries the position and
+    /// across one it does not.
+    closed: bool,
 }
 
 impl TextDevice {
@@ -491,7 +501,17 @@ impl Device for TextDevice {
                     WritingMode::Horizontal => origin.0 + expected_gap < line.origin.0,
                     WritingMode::Vertical => origin.1 - expected_gap > line.origin.1,
                 };
-                turned || far || backwards || (line.wmode != wmode && !same_font)
+                // A line that an `ET` closed is resumed only where the last one
+                // stopped. Half an em of slack, which is a space and is not a
+                // column: two cells of a table row sit on one baseline and are
+                // two lines, and a paragraph that changed font mid-word is one.
+                let slack = size.max(1.0) * 0.5;
+                let disjoint = line.closed
+                    && match wmode {
+                        WritingMode::Horizontal => origin.0 > line.pen + slack,
+                        WritingMode::Vertical => origin.1 < line.pen - slack,
+                    };
+                turned || far || backwards || disjoint || (line.wmode != wmode && !same_font)
             }
         };
 
@@ -502,13 +522,24 @@ impl Device for TextDevice {
                 wmode,
                 direction,
                 origin,
+                pen: match wmode {
+                    WritingMode::Horizontal => origin.0,
+                    WritingMode::Vertical => origin.1,
+                },
                 font_id: glyph.font_id,
+                closed: false,
             });
         }
 
         if let Some(line) = &mut self.current {
             line.origin = origin;
             line.font_id = glyph.font_id;
+            line.closed = false;
+            let (x0, y0, x1, y1) = quad.bounds();
+            line.pen = match wmode {
+                WritingMode::Horizontal => x1.max(x0),
+                WritingMode::Vertical => y0.min(y1),
+            };
             line.chars.push(TextChar {
                 text: glyph.text.clone(),
                 quad,
@@ -519,9 +550,24 @@ impl Device for TextDevice {
     }
 
     fn end_text(&mut self) {
-        // A text object's end is a hard line break: nothing after it continues
-        // the same run.
-        self.flush();
+        // **A text object's end is not a line break.** It was, until gap 31's
+        // milestone 9 made this build produce the counter-example: a PDF string
+        // is bytes in *one* font, so `css-fonts-4` §5.3's per-character
+        // matching turns one paragraph into one `BT … ET` object per stretch of
+        // characters sharing a face — and a rule that broke a line at every
+        // `ET` broke that paragraph wherever its font changed, which is
+        // wherever the fallback did its job. It is not an EPUB-only shape: a
+        // producer that emits a text object per styled span writes the same
+        // page, and every bold word in the middle of a sentence is one.
+        //
+        // What an `ET` does mean is that the pen is put down. So the line is
+        // held open and the next glyph has to **continue** it — same baseline,
+        // same direction, and within half an em of where the last one ended —
+        // rather than merely land somewhere on the same line, which is what two
+        // cells of a table row do.
+        if let Some(line) = &mut self.current {
+            line.closed = true;
+        }
     }
 }
 
@@ -631,6 +677,52 @@ mod tests {
         let p = page(&[glyph("A", 0.0, 700.0, 10.0), glyph("B", 0.0, 680.0, 10.0)]);
         assert_eq!(p.lines().len(), 2);
         assert_eq!(p.plain_text(), "A\nB\n");
+    }
+
+    /// **A text object's end is not a line break, and a gap on one baseline
+    /// still is.**
+    ///
+    /// Two independent consequences of [`TextDevice::end_text`], and a test for
+    /// one of them is not a test: a build that flushed at every `ET` breaks a
+    /// paragraph wherever its font changes, and a build that never broke at all
+    /// joins two cells of a table row into one line.
+    ///
+    /// The first half is not hypothetical. Gap 31's milestone 9 makes this
+    /// build write one `BT … ET` object per stretch of characters sharing a
+    /// face, because a PDF string is bytes in one font — so `ABCDEFGHI` set in
+    /// three faces is three objects on one baseline, and used to extract as
+    /// three lines.
+    #[test]
+    fn a_text_object_boundary_is_not_a_line_break_and_a_gap_still_is() {
+        let mut resumed = TextDevice::new();
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        // Three objects, each ending where the last left off: 10-point glyphs
+        // at half an em.
+        for (at, text) in [(0.0, "AB"), (10.0, "CD"), (20.0, "EF")] {
+            for (offset, ch) in text.chars().enumerate() {
+                let x = at + offset as f64 * 5.0;
+                resumed.show_glyph(&glyph(&ch.to_string(), x, 700.0, 10.0), &state);
+            }
+            resumed.end_text();
+        }
+        assert_eq!(
+            resumed.finish().plain_text(),
+            "ABCDEF\n",
+            "a run split across three text objects extracted as three lines"
+        );
+
+        // And the same baseline with a real gap in it stays two lines: two
+        // cells of a table row, or a heading and a page number.
+        let mut apart = TextDevice::new();
+        apart.show_glyph(&glyph("A", 0.0, 700.0, 10.0), &state);
+        apart.end_text();
+        apart.show_glyph(&glyph("B", 200.0, 700.0, 10.0), &state);
+        apart.end_text();
+        assert_eq!(
+            apart.finish().plain_text(),
+            "A\nB\n",
+            "two text objects far apart on one baseline became one line"
+        );
     }
 
     #[test]

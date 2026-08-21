@@ -195,14 +195,19 @@ fn layer_is_refused_by_name() {
 
 /// Every other at-rule is dropped **with its name**, which is decision 5's
 /// shape one level up from a property.
+///
+/// `@font-face` used to be one of these and is read as of milestone 9, so the
+/// fixture now uses two at-rules that are still unimplemented — and
+/// `a_font_face_is_no_longer_an_unsupported_at_rule` below is what says the
+/// name left this list rather than the warning quietly changing shape.
 #[test]
 fn an_unsupported_at_rule_carries_its_name() {
-    let parsed = sheet("@font-face { src: url(x.otf) } @page { margin: 1cm } @font-face { }");
+    let parsed = sheet("@page { margin: 1cm } @supports (x: y) { p { float: left } } @page { }");
     assert_eq!(
         parsed.report.warnings,
         vec![
-            (Warning::AtRuleUnsupported("font-face".to_string()), 2),
-            (Warning::AtRuleUnsupported("page".to_string()), 1),
+            (Warning::AtRuleUnsupported("page".to_string()), 2),
+            (Warning::AtRuleUnsupported("supports".to_string()), 1),
         ],
         "deduplicated by name, with the count beside each"
     );

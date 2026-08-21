@@ -212,14 +212,14 @@ fn without_the_ua_stylesheet_a_book_has_no_block_structure_at_all() {
     let options = Options::new(400.0 / PX_TO_PT, 100_000.0);
     let laid_with = layout(
         &box_tree(&dom, &with),
-        &BookMetrics,
+        &BookMetrics::STANDARD,
         &options,
         &LayoutLimits::DEFAULT,
     )
     .expect("a layout with the sheet");
     let laid_without = layout(
         &box_tree(&dom, &without),
-        &BookMetrics,
+        &BookMetrics::STANDARD,
         &options,
         &LayoutLimits::DEFAULT,
     )

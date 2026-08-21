@@ -31,6 +31,7 @@
 )]
 
 pub mod conservation;
+pub mod typeface;
 
 use tinker_pdf_zip::{Archive, Entry, Limits, Method};
 
