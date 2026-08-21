@@ -233,6 +233,17 @@ struct Block {
     text: String,
     /// How far down the column its first line sits.
     top: f64,
+    /// How far across the measure its first line starts.
+    ///
+    /// **Milestone 12 added this and the reason is the whole of why a flex
+    /// comparison is not the table comparison over a different document.**
+    /// Every oracle in this file until now compared *y* offsets, because every
+    /// specification it was about — margin collapsing, floats, §17 — puts its
+    /// boxes one under another. `justify-content` puts them one *beside*
+    /// another: a build that ignored the property entirely, or that read
+    /// `space-between` as `flex-start`, moves nothing at all in `y` and would
+    /// pass a column comparison exactly.
+    left: f64,
 }
 
 /// The page a browser is asked to lay out, with the same UA sheet on it.
@@ -299,7 +310,9 @@ const MEASURE: &str = r#"<script>
       range.selectNodeContents(node);
       var rects = range.getClientRects();
       var top = rects.length > 0 ? rects[0].top : node.getBoundingClientRect().top;
-      out.push([node.tagName.toLowerCase(), (top + window.scrollY).toFixed(2), text]);
+      var left = rects.length > 0 ? rects[0].left : node.getBoundingClientRect().left;
+      out.push([node.tagName.toLowerCase(), (top + window.scrollY).toFixed(2), text,
+                (left + window.scrollX).toFixed(2)]);
     }
     for (var i = 0; i < node.children.length; i++) walk(node.children[i]);
   };
@@ -427,7 +440,13 @@ fn browser_blocks(browser: &Path, slot: &str, html: &str, width: f64) -> Vec<Blo
             let tag = parts.next().unwrap_or_default().to_owned();
             let top: f64 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
             let text = unescape(parts.next().unwrap_or_default());
-            Block { tag, text, top }
+            let left: f64 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
+            Block {
+                tag,
+                text,
+                top,
+                left,
+            }
         })
         .collect()
 }
@@ -471,18 +490,26 @@ fn engine_blocks(document: &str, author: &str, width_px: f64) -> Vec<Block> {
             continue;
         }
         let anchor = index as u32;
-        let top = laid
-            .pages
-            .iter()
-            .flat_map(|page| page.runs.iter())
-            .filter(|run| run.anchor == Some(anchor) && !run.generated)
-            .map(|run| run.y)
-            .fold(f64::INFINITY, f64::min);
+        let mine = || {
+            laid.pages
+                .iter()
+                .flat_map(|page| page.runs.iter())
+                .filter(|run| run.anchor == Some(anchor) && !run.generated)
+        };
+        let top = mine().map(|run| run.y).fold(f64::INFINITY, f64::min);
+        // The **first** run's left edge and not the leftmost, which are two
+        // different numbers the moment a block has more than one line: the
+        // browser reports the first client rect, so taking a minimum here would
+        // compare a justified block's narrowest line against its first.
+        let left = mine()
+            .min_by_key(|run| run.order)
+            .map_or(f64::INFINITY, |run| run.x);
         if top.is_finite() {
             out.push(Block {
                 tag: node.name.clone(),
                 text,
                 top,
+                left,
             });
         }
     }
@@ -1328,4 +1355,338 @@ fn deviation(theirs: &[Block], ours: &[Block], table: bool) -> f64 {
         }
     }
     worst
+}
+
+// ---- the flex comparison ---------------------------------------------------
+
+/// How far the flex document's two columns may disagree, in each axis.
+///
+/// **Two numbers measured and one cap, and the two numbers are not alike:**
+///
+/// | | Of the measure (x) | Of the column (y) |
+/// | --- | --- | --- |
+/// | The measured disagreement over 46 blocks and eighteen containers | **0.0000** | **0.0004** |
+/// | `display: block` on every container — what this build did until milestone 12 | 0.8000 | 0.2068 |
+/// | `justify-content` read as its initial value, every container still flexed | 0.6333 | 0.0004 |
+///
+/// The x row of the first line is exact rather than rounded: every item in this
+/// fixture is where Chrome put it to the two decimal places the browser
+/// reports, which is what happens when §9.7's loop, §4.5's automatic minimum
+/// and §8.2's six distributions are implemented rather than approximated. The
+/// y row's 0.0004 is one twenty-fifth of a line, carried from the first
+/// container and never added to.
+///
+/// The cap is 0.02 and it is **one line of this column**: `line-height: 1.2` at
+/// 16 px is 19.2 px of the 984 px the browser's column spans, which is 0.0195.
+/// A cap tighter than a line would fail the first time a browser wrapped one
+/// item's text one word differently; a looser one would admit a whole flex
+/// line. [`MAX_TABLE_DEVIATION`] is set by the same rule.
+///
+/// The third row is the one this file could not have measured before milestone
+/// 12: it is a real defect that moves **nothing** down the column, and it is
+/// why [`Block::left`] exists. See
+/// [`the_flex_comparison_notices_a_container_that_was_not_flexed`] and
+/// [`the_flex_comparison_notices_an_ignored_justify_content`], which fail if
+/// either ratio stops holding.
+const MAX_FLEX_DEVIATION: f64 = 0.02;
+
+/// The flex-heavy content document, written for this comparison.
+///
+/// **Every item holds a `<p>`**, for [`TABLE_DOCUMENT`]'s reason: both sides of
+/// this oracle report `display: block` and `display: list-item` boxes and
+/// nothing else, and a flex *container* is neither — so a document whose items
+/// held bare text would be compared on the blocks around the containers and
+/// would agree with a build that had no flex model at all. The paragraph inside
+/// each item is what puts the item's own position into the comparison.
+///
+/// **Every item is a `<div>` and none is a `<span>`.** `css-flexbox-1` §4
+/// blockifies an item's `display`, and Chrome reports the blockified value from
+/// `getComputedStyle` while this engine's cascade still reports `inline` — so a
+/// `<span>` item would be in one side's block list and not the other's, and the
+/// sequence assertion would fail for a reason that is not a layout fault.
+///
+/// It holds what §5 to §9 distinguish, one container each and **never all at
+/// their initial values**: milestone 10's float section was built entirely of
+/// left floats and three rules' right-hand halves were never tested, and the
+/// flex equivalent is a fixture where every container is `row`, `nowrap` and
+/// `flex-start`.
+const FLEX_DOCUMENT: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Flex</title></head><body>\n",
+    "<h1>The flex containers and the text around them</h1>\n",
+    "<p>The first paragraph is set at the full measure and has no container beside it, ",
+    "which is what makes the ones after it worth measuring against it.</p>\n",
+    // §9.7 growing: three items sharing the measure in the ratio 1:2:1.
+    "<div class=\"row\"><div class=\"g1\"><p>Grow one</p></div>",
+    "<div class=\"g2\"><p>Grow two</p></div><div class=\"g1\"><p>Grow three</p></div></div>\n",
+    // §9.7 shrinking, scaled by the base size: 300 and 100 into 380.
+    "<div class=\"row\"><div class=\"wide\"><p>Wide and shrinking</p></div>",
+    "<div class=\"narrow\"><p>Narrow and shrinking</p></div></div>\n",
+    // §9.2 step 3: `flex-basis` beating a stated `width`.
+    "<div class=\"row\"><div class=\"basis\"><p>Basis fifty</p></div>",
+    "<div class=\"fixed\"><p>Fixed one twenty</p></div></div>\n",
+    // §8.2, each of the six values.
+    "<div class=\"row start\"><div class=\"fixed\"><p>Start one</p></div>",
+    "<div class=\"fixed\"><p>Start two</p></div></div>\n",
+    "<div class=\"row end\"><div class=\"fixed\"><p>End one</p></div>",
+    "<div class=\"fixed\"><p>End two</p></div></div>\n",
+    "<div class=\"row centre\"><div class=\"fixed\"><p>Centre one</p></div>",
+    "<div class=\"fixed\"><p>Centre two</p></div></div>\n",
+    "<div class=\"row between\"><div class=\"fixed\"><p>Between one</p></div>",
+    "<div class=\"fixed\"><p>Between two</p></div></div>\n",
+    "<div class=\"row around\"><div class=\"fixed\"><p>Around one</p></div>",
+    "<div class=\"fixed\"><p>Around two</p></div></div>\n",
+    "<div class=\"row evenly\"><div class=\"fixed\"><p>Evenly one</p></div>",
+    "<div class=\"fixed\"><p>Evenly two</p></div></div>\n",
+    // §5.1's reversed row: the first item goes on the right.
+    "<div class=\"row reverse\"><div class=\"fixed\"><p>Reverse first</p></div>",
+    "<div class=\"fixed\"><p>Reverse second</p></div></div>\n",
+    // §5.2's wrapping, and §5.2's reversed wrapping.
+    "<div class=\"row wrap\"><div class=\"fixed\"><p>Wrap one</p></div>",
+    "<div class=\"fixed\"><p>Wrap two</p></div><div class=\"fixed\"><p>Wrap three</p></div>",
+    "<div class=\"fixed\"><p>Wrap four</p></div></div>\n",
+    "<div class=\"row wrapback\"><div class=\"fixed\"><p>Back one</p></div>",
+    "<div class=\"fixed\"><p>Back two</p></div><div class=\"fixed\"><p>Back three</p></div>",
+    "<div class=\"fixed\"><p>Back four</p></div></div>\n",
+    // §8.3 and §8.3's per-item override, against a tall neighbour.
+    "<div class=\"row bottom\"><div class=\"fixed tall\"><p>Tall neighbour</p></div>",
+    "<div class=\"fixed\"><p>Aligned to the end</p></div>",
+    "<div class=\"fixed middle\"><p>Aligned to the centre</p></div></div>\n",
+    // §8.4 over two lines in a container with a stated height.
+    "<div class=\"row wrap deep\"><div class=\"fixed\"><p>Content one</p></div>",
+    "<div class=\"fixed\"><p>Content two</p></div><div class=\"fixed\"><p>Content three</p></div>",
+    "<div class=\"fixed\"><p>Content four</p></div></div>\n",
+    // §5.4: the last item written is the first item drawn.
+    "<div class=\"row\"><div class=\"fixed\"><p>Written first</p></div>",
+    "<div class=\"fixed\"><p>Written second</p></div>",
+    "<div class=\"fixed first\"><p>Written third</p></div></div>\n",
+    // §5.1's column, which is the axis every fixture above holds fixed.
+    "<div class=\"column\"><div><p>Column one</p></div><div><p>Column two</p></div>",
+    "<div><p>Column three</p></div></div>\n",
+    "<h2>After the containers</h2>\n",
+    "<p>A closing paragraph at the full measure, which is where the two columns have to ",
+    "agree again if they agreed anywhere.</p>\n",
+    "</body></html>\n"
+);
+
+/// The flex document's own stylesheet, given to both sides unchanged.
+///
+/// The same four variables the table comparison holds fixed are held fixed
+/// here, for the same reasons and with the same consequences if they are not:
+/// the face ([`SAME_FACE`]), `line-height` — this build resolves `normal` as
+/// 1.2 and Chrome resolves it from Courier New's metrics as 1.133, which is six
+/// per cent of every line — the heading size, so `deviation`'s subtraction of
+/// the first block cancels one constant rather than two, and the paragraph
+/// margins inside the items, so an item's height is its text's.
+///
+/// **`min-width: 0` is deliberately *not* stated**, which is the one variable
+/// this fixture leaves free on purpose. `css-flexbox-1` §4.5's automatic
+/// minimum size is implemented here and is exactly the kind of clause an
+/// implementation skips; stating `min-width: 0` on the items would neutralise
+/// it on both sides and the shrinking container would then agree for the wrong
+/// reason.
+const FLEX_STYLESHEET: &str = concat!(
+    "* { line-height: 1.2; }\n",
+    "h1, h2 { font-size: 1em; margin: 8px 0; }\n",
+    "p { margin: 8px 0; }\n",
+    "div p { margin: 0; }\n",
+    ".row { display: flex; margin: 8px 0; }\n",
+    ".column { display: flex; flex-direction: column; margin: 8px 0; }\n",
+    ".g1 { flex: 1 1 0px; }\n",
+    ".g2 { flex: 2 1 0px; }\n",
+    ".wide { flex: 0 1 300px; }\n",
+    ".narrow { flex: 0 1 100px; }\n",
+    ".basis { width: 150px; flex: 0 0 50px; }\n",
+    ".fixed { flex: 0 0 80px; }\n",
+    ".start { justify-content: flex-start; }\n",
+    ".end { justify-content: flex-end; }\n",
+    ".centre { justify-content: center; }\n",
+    ".between { justify-content: space-between; }\n",
+    ".around { justify-content: space-around; }\n",
+    ".evenly { justify-content: space-evenly; }\n",
+    ".reverse { flex-direction: row-reverse; }\n",
+    ".wrap { flex-wrap: wrap; }\n",
+    ".wrapback { flex-wrap: wrap-reverse; }\n",
+    ".bottom { align-items: flex-end; }\n",
+    ".tall { height: 60px; }\n",
+    ".middle { align-self: center; }\n",
+    ".deep { height: 120px; align-content: space-between; }\n",
+    ".first { order: -1; }\n"
+);
+
+/// The worst disagreement between two flex layouts, in **both** axes.
+///
+/// Written once so that the comparison and its control cannot drift apart, for
+/// [`deviation`]'s reason — and separate from `deviation` rather than a
+/// parameter on it because the two denominators are different quantities: a
+/// `y` offset is a fraction of the browser's own column and an `x` offset is a
+/// fraction of the measure, which is the same on both sides by construction.
+///
+/// The first block's `top` is subtracted from both sides, cancelling the
+/// baseline-against-line-box constant, and `left` is **not**: there is no such
+/// constant in the inline axis, and subtracting the first block's `left` would
+/// hide a container that put its whole line in the wrong place.
+fn flex_deviation(theirs: &[Block], ours: &[Block], measure: f64) -> (f64, f64) {
+    let span = (theirs.last().map_or(1.0, |block| block.top)
+        - theirs.first().map_or(0.0, |block| block.top))
+    .max(1.0);
+    let their_first = theirs.first().map_or(0.0, |block| block.top);
+    let our_first = ours.first().map_or(0.0, |block| block.top);
+    let mut worst_y = 0.0f64;
+    let mut worst_x = 0.0f64;
+    for (at, (a, b)) in theirs.iter().zip(ours).enumerate() {
+        let dy = ((a.top - their_first) - (b.top - our_first)).abs() / span;
+        let dx = (a.left - b.left).abs() / measure;
+        worst_y = worst_y.max(dy);
+        worst_x = worst_x.max(dx);
+        if std::env::var_os("TINKER_BROWSER_FLEX").is_some() {
+            println!(
+                "    {at:3} {:6} browser ({:8.2}, {:8.2}) ours ({:8.2}, {:8.2}) \
+                 dx {dx:+.4} dy {dy:+.4}  {}",
+                b.tag,
+                a.left,
+                a.top,
+                b.left,
+                b.top,
+                &b.text[..b.text.len().min(32)]
+            );
+        }
+    }
+    (worst_x, worst_y)
+}
+
+/// **The flex-heavy document, block by block, against the browser's — in two
+/// axes.**
+///
+/// The same two assertions as the other three comparisons, plus the one this
+/// specification needs: the block sequence exactly, the *y* offsets to within a
+/// stated fraction, and the *x* offsets to within a stated fraction of the
+/// measure.
+#[test]
+fn the_browser_and_this_engine_lay_the_same_flex_containers_out_the_same_way() {
+    let browser = oracle!("the flex-heavy two-axis comparison");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "flex.html",
+        &oracle_page(FLEX_DOCUMENT, FLEX_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let ours = engine_blocks(FLEX_DOCUMENT, FLEX_STYLESHEET, width_px);
+
+    assert!(
+        ours.len() >= 35,
+        "the fixture produced {} block boxes, which is not a flex-heavy document",
+        ours.len()
+    );
+    let theirs_text: Vec<(&str, &str)> = theirs
+        .iter()
+        .map(|block| (block.tag.as_str(), block.text.as_str()))
+        .collect();
+    let ours_text: Vec<(&str, &str)> = ours
+        .iter()
+        .map(|block| (block.tag.as_str(), block.text.as_str()))
+        .collect();
+    if theirs_text != ours_text {
+        let at = theirs_text
+            .iter()
+            .zip(&ours_text)
+            .position(|(a, b)| a != b)
+            .unwrap_or(theirs_text.len().min(ours_text.len()));
+        panic!(
+            "the browser and this engine disagree about which blocks exist, \
+             first at {at} of {}/{}:\n  browser: {:?}\n  ours:    {:?}",
+            theirs_text.len(),
+            ours_text.len(),
+            theirs_text.get(at),
+            ours_text.get(at)
+        );
+    }
+
+    let (worst_x, worst_y) = flex_deviation(&theirs, &ours, width_px);
+    println!("  worst flex deviation: x {worst_x:.4}, y {worst_y:.4} of the column");
+    assert!(
+        worst_x <= MAX_FLEX_DEVIATION,
+        "the two flex layouts differ across the measure by {worst_x:.4}, which \
+         is past {MAX_FLEX_DEVIATION}"
+    );
+    assert!(
+        worst_y <= MAX_FLEX_DEVIATION,
+        "the two flex layouts differ down the column by {worst_y:.4}, which is \
+         past {MAX_FLEX_DEVIATION}"
+    );
+}
+
+/// And the flex comparison **can** fail: the same document with the containers
+/// laid out as ordinary blocks.
+///
+/// `display: block` on every container is not an arbitrary defect. It is
+/// exactly what this build did until milestone 12 — every item on a line of its
+/// own, one under another, in a column that reads correctly and looks nothing
+/// like the page the author wrote — and it is the failure the milestone exists
+/// to end. The number it produces is what [`MAX_FLEX_DEVIATION`] is judged
+/// against.
+#[test]
+fn the_flex_comparison_notices_a_container_that_was_not_flexed() {
+    let browser = oracle!("the flex control");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "flex-control.html",
+        &oracle_page(FLEX_DOCUMENT, FLEX_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let injected = format!("{FLEX_STYLESHEET}\n.row, .column {{ display: block; }}\n");
+    let ours = engine_blocks(FLEX_DOCUMENT, &injected, width_px);
+
+    let (worst_x, worst_y) = flex_deviation(&theirs, &ours, width_px);
+    println!("  worst deviation with the containers unflexed: x {worst_x:.4}, y {worst_y:.4}");
+    assert!(
+        worst_y > MAX_FLEX_DEVIATION,
+        "laying the containers out as blocks moved the column by only \
+         {worst_y:.4}, so the comparison would not have noticed"
+    );
+    assert!(
+        worst_x > MAX_FLEX_DEVIATION,
+        "and it moved nothing across the measure ({worst_x:.4}), which is the \
+         half a y-only oracle cannot see"
+    );
+}
+
+/// And the second half of the same question: a build that laid the containers
+/// out as flex containers and **ignored `justify-content`** moves nothing down
+/// the column at all.
+///
+/// This is the control the other three comparisons in this file could not have:
+/// [`Block::left`] exists for it. Every container in the fixture keeps its flex
+/// layout and every `justify-content` declaration is replaced by the initial
+/// value, and what fails is the *x* assertion alone.
+#[test]
+fn the_flex_comparison_notices_an_ignored_justify_content() {
+    let browser = oracle!("the justify-content control");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "flex-justify.html",
+        &oracle_page(FLEX_DOCUMENT, FLEX_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let injected = format!("{FLEX_STYLESHEET}\n.row, .column {{ justify-content: flex-start; }}\n");
+    let ours = engine_blocks(FLEX_DOCUMENT, &injected, width_px);
+
+    let (worst_x, worst_y) = flex_deviation(&theirs, &ours, width_px);
+    println!("  worst deviation with justify-content ignored: x {worst_x:.4}, y {worst_y:.4}");
+    assert!(
+        worst_x > MAX_FLEX_DEVIATION,
+        "ignoring justify-content moved the items across the measure by only \
+         {worst_x:.4}"
+    );
+    assert!(
+        worst_y <= MAX_FLEX_DEVIATION,
+        "and it is invisible down the column ({worst_y:.4}), which is what says \
+         a y-only oracle would have passed it"
+    );
 }

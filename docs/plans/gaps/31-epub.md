@@ -1455,7 +1455,7 @@ one per milestone, each independently green under the full gate.
 | 9 | **Fonts** | `@font-face` (`css-fonts-4` §4.1) and the `src` descriptor (§4.3) with `format()` and the fallback list; the font matching algorithm (§5) including **per-character fallback** (§2.1, §5.3), with a fixture whose one run needs three faces and becomes three PDF text objects; **SHA-1 in `tinker-pdf-crypto`**, pinned against published vectors, with a second implementation written a different way asserted to agree over every length up to two blocks — gap 29's CRC-32 discipline, because a hash written wrong is self-consistently wrong; **both de-obfuscations, asserted on the de-obfuscated bytes and not on a page that drew** — IDPF's SHA-1 key over 1 040 bytes and Adobe's 16-byte UUID key over 1 024, each from a fixture built for it, with the whitespace-stripping of §4.4.3 proved by an identifier that has some; WOFF and WOFF2 refused **by name**; a character no available face covers producing a named warning rather than a blank; `FontProvider`'s per-family fallback question answered — the trait extended, or the reason it is not recorded; the generic families' standard-14 metrics asserted to make pagination independent of whether a provider is attached | M |
 | 10 | **Floats and `clear`** | CSS 2.2 §9.5.1's **nine numbered constraints, each with its own fixture**, because they are a set and an implementation that satisfies eight produces a page that looks right on the ninth's absence; §9.5.2's `clear` and clearance; float interaction with line boxes — a line box shortened beside a float and restored below it; a float taller than its containing block; two floats that do not fit side by side; **a float that would fall off the page bottom**, which is the fragmentation interaction and the one that loses text; text conservation asserted across every float fixture, since a lost float is a lost paragraph; the browser comparison run over a float-heavy content document and its `y`-offset agreement recorded as a number | M |
 | 11 | **Tables** | CSS 2.2 §17.2's model and **§17.2.1's anonymous table objects**, which is the fixup a real book needs because HTML tables in the wild omit `<tbody>`; §17.5.2.1's fixed layout and §17.5.2.2's automatic layout, the latter asserted to be the two-pass algorithm the spec describes rather than a one-pass approximation; §17.6.1's separated model and §17.6.2's collapsing model with §17.6.2.1's conflict resolution; `colspan` and `rowspan`; a nested table, since it multiplies the layout work cap; **table fragmentation across a page boundary** — or, if it is staged, the row amended in place with its argument, in the shape gap 30's milestone 8 amended its own. **Amended, 21 August 2026, milestone 11, twice.** *(1)* Fragmentation across a page boundary is **built between the rows and staged inside one**: a table breaks at any of its row bands and a band is the maximal run of rows a `rowspan` joins, which is where §13.3.3 puts a break position and is what every table in a real book needs. A band taller than a whole page has no break position inside it, is drawn where it is, and says `TableRowTallerThanPage`; slicing every cell of a band at one height and continuing them on the next page is `css-break-3`'s and is not here. *(2)* **The fixup a real book needs is not the missing `<tbody>`** — not for this corpus. Pandoc and calibre both write `<thead>` and `<tbody>` in full; what they write that needs §17.2.1 is *indentation*, so the step that fires on every table in the committed corpus is rule 3 and the row group fires on none of them. The bare-`<tr>` table is hand-written and legacy HTML's shape, is implemented, and has its own fixtures | L |
-| 12 | **Flexbox, and fixed-layout renditions** | `css-flexbox-1`: `display: flex` and `inline-flex`, `flex-direction`, `flex-wrap`, the `flex` shorthand and its three components, `justify-content`, `align-items`, `align-self`, `align-content` and `order`, each with a fixture; the flex layout algorithm's line-breaking and free-space distribution asserted against the browser oracle rather than against arithmetic done twice; **fixed-layout renditions** (§8.2) — `rendition:layout: pre-paginated`, which EPUB RS 3.3 §8.1 makes *"exactly one page per spine itemref"*, §8.2.2.6's content-document dimensions from the viewport meta, and the initial containing block of RS §8.1.2 with content outside it clipped; a fixed-layout book from milestone 1's corpus if one can be obtained, and **recorded as owed rather than quietly dropped** if not — gap 30's own shortfall, named so it is not repeated by accident | M |
+| 12 | **Flexbox, and fixed-layout renditions** | `css-flexbox-1`: `display: flex` and `inline-flex`, `flex-direction`, `flex-wrap`, the `flex` shorthand and its three components, `justify-content`, `align-items`, `align-self`, `align-content` and `order`, each with a fixture; the flex layout algorithm's line-breaking and free-space distribution asserted against the browser oracle rather than against arithmetic done twice; **fixed-layout renditions** (§8.2) — `rendition:layout: pre-paginated`, which EPUB RS 3.3 §8.1 makes *"exactly one page per spine itemref"*, §8.2.2.6's content-document dimensions from the viewport meta, and the initial containing block of RS §8.1.2 with content outside it clipped; a fixed-layout book from milestone 1's corpus if one can be obtained, and **recorded as owed rather than quietly dropped** if not — gap 30's own shortfall, named so it is not repeated by accident. **Amended at the milestone, with the arguments in the progress note.** (a) `display: inline-flex` is laid out as a **block-level** flex container and warned by name: this build has no inline-level box that is not text, and the only other answer throws the whole flex layout away. (b) A **flex line** is the unit of fragmentation, so a row container breaks between its lines and a `column` container is one unbreakable item that says `FlexLineTallerThanPage` when it is taller than a page; `css-break-3`'s fragmentation *inside* a line is not here. (c) `gap`, `row-gap` and `column-gap` stay `Unsupported` by name -- they are `css-align-3`'s and the row does not ask for them. (d) **No fixed-layout book was obtained**, exactly as milestone 1 predicted, and it is recorded as owed with the synthesised fixtures that stand in its place named as synthesised | M |
 | 13 | **Bounds, determinism, ledgers, campaign** | Every constant joins `bounds_ledger.rs`'s **existing** table and passes all five checks, with three recorded numbers each; **the book yardstick added as the third, and every one of the seventeen existing rows given a figure for it** — no row opts out, because gap 30's milestone 9 had to fix exactly that; the three `const`-block relations, so a bad one **does not compile**, including the product relation for `MAX_SELECTOR_MATCHES`; the **fifteenth** determinism fingerprint — gap 30's XPS is the fourteenth — whose fixture is a real producer's book from milestone 1, plus a byte hash of the synthesised document beside it in the pair gap 29 established, reproduced on `wasm32-wasip1` with none of the other fourteen moving; **a fingerprint at a second page box**, which is this format's own determinism question and no earlier one had it: the same bytes at 432 × 648 and at 600 × 800 must each be stable and must differ; `cargo fuzz run css` and `cargo fuzz run layout` each surviving a session with no crash, no OOM and no timeout; peak memory recorded for the largest book in both corpora; the ledger sweep below | M |
 
 **Milestone 1 comes first, and it is not gap 30's answer copied.** That plan
@@ -4867,3 +4867,362 @@ fifty-two matched exactly once.
   a float met inside a paragraph floats to the top of it, `overflow` establishes
   no formatting context, and `mutool` has never been run over an EPUB.
 
+
+## Progress — 21 August 2026, milestone 12
+
+**Ten flexbox properties, two pagination rules, and a comparison against Chrome
+that agrees to 0.0000 across the measure.** `css-flexbox-1` is laid out rather
+than named: §5.1's four directions, §5.2's three wraps, §5.4's `order`,
+§7's `flex` shorthand and its three components, §8.2's six distributions,
+§8.3's five alignments with its per-item override, §8.4's line distribution,
+§9.2's base sizing, §9.3's line breaking, §9.7's flexible-length **loop** and
+§9.4 step 11's stretch — each with a fixture that fails when that step alone
+is wrong. Beside it, EPUB 3.3 §8.2's fixed-layout renditions: `rendition:layout`
+in the package and in the itemref, §8.2.2.6's viewport, EPUB RS 3.3 §8.1's
+*"exactly one page per spine itemref"* and §8.1.2's initial containing block
+with what falls outside it clipped. **2 780 tests, 7 ignored**, up from 2 722 at
+milestone 11.
+
+`display` has sixteen values where it had fourteen; `tinker-pdf-css` implements
+seventy-six property names where it implemented sixty-five, and
+`UNSUPPORTED_PROPERTIES` is eleven names shorter.
+
+### What the design got wrong, and how it found out
+
+**1. Every oracle in this repository compared *y* offsets, and `justify-content`
+does not move anything in *y*.** The browser oracle has run over four
+specifications — margin collapsing, floats, §17, and the corpus chapter —
+and every one of them compared the shape of a **column**: a list of block boxes
+and how far down each one sits. That is the right measurement for every
+specification the plan had reached, because all of them put their boxes one
+*under* another. §8.2 puts them one *beside* another.
+
+The consequence is neither subtle nor hypothetical.
+`the_flex_comparison_notices_an_ignored_justify_content` replaces every
+`justify-content` declaration in the fixture with its initial value, leaves the
+flex layout otherwise intact, and measures **0.6333 across the measure and
+0.0004 down the column** — the defect is two thirds of the page wide and
+*entirely invisible* to the oracle as it stood. `Block::left` was added for it,
+`flex_deviation` returns two numbers rather than one, and that control is the
+test which says a *y*-only oracle would have passed a build that ignored the
+property.
+
+**2. `flex: 1` and `flex-grow: 1` are different declarations, and the difference
+is the whole of what a three-column layout is.** §7.2's shorthand gives an
+omitted `flex-basis` a specified value of **`0%`**, where the longhand's initial
+value is `auto`. With `auto` an item is sized to its content and then grown, so
+three items of different content lengths end up three different widths; with
+`0%` the line is shared out in proportion to the factors and they end up equal.
+A build that expanded the shorthand to its longhands' initial values — which
+is what every other shorthand in this crate does, and what `flex-flow` two
+functions away correctly does — gets the first. It is the one shorthand in the
+file whose omitted component is not its longhand's initial value, and it is
+written out as a paragraph where the function is because it reads like a bug.
+
+**3. §9.7 is a loop, and the one-pass answer differs by the whole of the
+second item's overflow.** Distributing the free space once and clamping the
+answers to each item's minimum loses the space the clamped items gave back. Two
+items at `flex-shrink: 1` and a base size of 100 in a container of 100: one pass
+gives 50 and 50, clamps the first to its 90-pixel minimum, and stops at 140 in a
+container of 100. The specification freezes the item that violated its minimum
+and **redistributes**, which gives 90 and 10. `resolve` is asserted at that
+arrangement directly rather than through a page, because a page would agree with
+either answer to within a line.
+
+**4. The comment explaining why §9.7 step 2 exists was wrong, and the injection
+matrix said so twice before the right answer appeared.** Step 2 freezes the
+items whose flex factor is zero and the items already on the wrong side of their
+hypothetical size. The first draft's comment said this stops a zero-factor item
+absorbing a share of the distribution — which is false: a zero factor divides
+to a zero share, and step 4's loop clamps by the same minimum step 2's
+hypothetical size already encodes, so **deleting the freeze changes nothing** in
+every ordinary arrangement. Both halves survived the first pass and both
+survived the second, and the argument for calling them equivalent mutants was
+already drafted.
+
+It was wrong. `initial_free` is computed **once**, in step 3, out of the
+frozen/unfrozen split as it then stood: a frozen item contributes its
+hypothetical size and an unfrozen one contributes its base size, and those
+differ exactly when a minimum bit. Step 4b then multiplies that number by the
+flex factors when they sum to **less than one**, and the two answers part
+company — 75 against 100 for the growing half, 77.5 against 87.5 for the
+shrinking one. `step_two_freezes_before_step_three_measures_the_free_space` is
+one arrangement per half, and the comment is corrected in place.
+
+**5. §4.5's automatic minimum size is the clause that decides whether a real
+book's flex row overflows, and it is the easiest one to skip.** A flex item's
+`min-width: auto` resolves to its content-based minimum, so `flex-shrink` cannot
+take an item below its longest word — *unless* the item states a size, which
+§4.5 makes the clamp on the clamp. It is deliberately **not** neutralised in
+the browser fixture: stating `min-width: 0` on the items would switch it off on
+both sides and the shrinking container would then agree for the wrong reason.
+
+**6. Fixed layout is a second pagination rule and it contradicts milestone 4's
+premise — both have to hold.** `OpenOptions`'s own documentation says *"for a
+reflowable EPUB the page count is a function of these numbers and is not a
+property of the file"*. EPUB RS 3.3 §8.1 says a pre-paginated content document
+is *"exactly one page per spine itemref"*. Neither is a special case of the
+other, and `reflowable_paginates_by_the_box_and_pre_paginated_by_the_spine`
+opens the **same three content documents** four times — reflowable and
+pre-paginated, at two page boxes each — so the two rules are asserted against
+each other rather than one at a time.
+
+The structural consequence is that the page box stopped being a property of a
+book and became a property of a **chapter**: §8.2.2.6 puts the dimensions in
+the *content* document, one `<meta name="viewport">` per spine item, so two
+items of one book may legitimately be two different sizes, and
+`two_fixed_chapters_may_be_two_different_page_sizes` asserts three.
+
+**7. The spine rule was enforced twice and only one half was reachable.**
+`Chapter::page_count` returned 1 for a fixed chapter *and* the layout truncated
+a fixed chapter's pages to the first. The matrix deleted the first and nothing
+failed, because the truncation had already made the vector one page long. That
+is milestone 11's own finding met again — *a rule enforced twice hides the
+reachable half* — and the answer is the same: the sentence lives where the
+pages are decided, `page_count` answers only what it is holding, and the
+truncation has an injected defect of its own.
+
+**8. §3's *"`float` does not create floating for flex items"* needed no code at
+all**, and the code that was there could not be reached. A float is placed by
+`Builder::children` when a block container walks its children; a flex item never
+goes through that function, because the driver hands each item straight to
+`sublayout`, which establishes a formatting context with an empty float set. The
+two assignments zeroing `float` and `clear` were deleted, the fixture stayed,
+and it now asserts the behaviour rather than the assignment.
+
+**9. A fixed-layout document has to be *cascaded* against its own viewport, and
+the viewport is inside the document.** `@media (max-width: 500px)` in a
+pre-paginated book is a question about that document's initial containing block
+and not about the reading system's page. The dimensions are not knowable until
+the markup has been read, so the substitution happens inside `read_document`
+after the tree exists rather than at the caller — a caller could only supply
+them by parsing the markup a second time.
+`media_queries_in_a_fixed_document_are_about_its_viewport` opens two books whose
+only difference is the viewport, at one caller page box wider than the query's
+threshold, and asserts they disagree.
+
+**10. §8.1.2's clipping is two mechanisms and a test for one is not a test for
+the other.** Vertically it is pagination's answer: the second page a reflowable
+document would get does not exist, so the characters are dropped — and
+*counted*, because they are gone from `Page::text()` as well as from the
+picture, which is text conservation's business.
+`ArchiveWarning::FixedLayoutContentClipped` carries the number. Horizontally
+nothing about pagination can see the problem at all: a box wider than the
+viewport is on the page it belongs to at an `x` past its right edge, and only a
+clip path in the content stream stops it being drawn.
+`a_fixed_page_clips_to_its_initial_containing_block` reads the operators out of
+the stream through this repository's own reader, and its control is a reflowable
+page with no clip in it.
+
+**11. §5.2's `wrap-reverse` has two consequences and applying the flip once
+gets one of them.** It stacks the *lines* the other way **and** exchanges what
+`align-items: flex-start` means inside each line. The first draft flipped the
+keyword as well as the line position, which double-flips and is wrong for
+`baseline` and `stretch`; the shipped design computes every cross-axis offset
+relative to cross-start and applies `cross_position` **twice** — once for a
+line inside the container and once for an item inside its line — so the
+keyword keeps its meaning and the coordinate system moves, which is what §5.2
+actually says.
+
+### The injection matrix
+
+**Seventy-three injections in three passes, fifty-two caught on first
+presentation, and one recorded as an equivalent mutant.** The three passes are
+listed because the second and third are where the milestone's own argument was
+tested: the first pass' sixteen survivors were closed with twelve new fixtures,
+two deleted rules and — after a wrong equivalence argument was written down
+and then disproved — one more fixture covering two of them.
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | §5.4: the order sort is unstable | `a_flex_container_puts_its_items_on_one_line` and two more |
+| 2 | §9.3: `nowrap` wraps like `wrap` | `a_flex_line_always_takes_one_item`, `flex_wrap_is_the_difference_between_overflowing_and_a_second_line` |
+| 3 | §9.3: a line may be collected empty | `a_flex_line_always_takes_one_item` |
+| 4 | §9.7 step 1 always grows | `flex_shrink_is_scaled_by_the_base_size` |
+| 5 | §9.7 step 2 does not freeze a zero factor | **survived twice** — closed by `step_two_freezes_before_step_three_measures_the_free_space`, see finding 4 |
+| 6 | §9.7 step 2 does not freeze the wrong side | **survived twice** — closed the same way |
+| 7 | §9.7: shrinking uses the raw factor | `flex_shrink_is_scaled_by_the_base_size` |
+| 8 | §9.7: the shrink share is not scaled by the base size | `flex_shrink_is_scaled_by_the_base_size` |
+| 9 | §9.7 step 4b drops the factors-below-one clause | `flex_factors_below_one_leave_the_rest_of_the_space_empty` |
+| 10 | §9.7 step 4 is one pass rather than a loop | `the_flexible_length_resolution_redistributes_after_a_minimum_bites` |
+| 11 | §8.2: `space-between` divides by the item count | `justify_content_puts_the_line_where_it_says` |
+| 12 | §8.2: `space-around` has no half share at the ends | `justify_content_puts_the_line_where_it_says` |
+| 13 | §8.2: `space-evenly` is `space-around` | `justify_content_puts_the_line_where_it_says` |
+| 14 | §9.3 fallback: `space-between` does not fall back | **survived** — closed by `an_overflowing_line_falls_back_to_a_different_alignment` |
+| 15 | §9.3 fallback: `space-around` does not fall back | added in the second pass; caught by the same fixture |
+| 16 | §8.3: `align-items: flex-end` is `flex-start` | `align_items_puts_a_short_item_where_it_says` |
+| 17 | §8.3: `align-items: center` does not halve | `align_items_puts_a_short_item_where_it_says` |
+| 18 | §8.3: `align-items: baseline` is `flex-start` | **survived** — closed by `align_items_baseline_lines_the_text_up` |
+| 19 | §8.3: the line's baseline is not the largest ascent | added in the second pass, **survived**, closed by the same fixture's second assertion |
+| 20 | §8.4: `align-content: stretch` does not stretch | **survived** — closed by `align_content_stretch_makes_the_lines_taller` |
+| 21 | §8.3: `align-self` does not override `align-items` | `align_self_overrides_the_containers_align_items` |
+| 22 | §5.1: `row-reverse` is `row` | `row_reverse_puts_the_first_item_last` |
+| 23 | §5.2: `wrap-reverse` is `wrap` | `wrap_reverse_stacks_the_lines_upwards` |
+| 24 | §3: `float` applies to a flex item | **survived** — the rule was unreachable and is deleted, see finding 8 |
+| 25 | §4: an `inline` item is not blockified | **survived twice — an equivalent mutant, recorded** in `FlexPass::apply`: `Builder::block` reads `display` to ask four questions and an inline item answers all four the way a block one does |
+| 26 | §4: an `inline-flex` item is not blockified | added in the second pass; caught by `an_inline_flex_item_is_blockified_and_does_not_warn` |
+| 27 | `box-sizing` is ignored on a flex base size | **survived** — closed by `box_sizing_border_box_shrinks_a_flex_basis_by_its_padding` |
+| 28 | §9.2: `flex-basis` is read after `width` | `flex_basis_beats_the_width_property` |
+| 29 | §4.5: the minimum is not clamped by the stated size | **survived** — closed by `the_automatic_minimum_is_clamped_by_a_stated_size` |
+| 30 | §9.2 step 4: the hypothetical size is not clamped | **survived** — closed by `the_hypothetical_size_decides_where_a_line_wraps` |
+| 31 | §5.4: the items are laid out in order-modified order | `order_moves_the_boxes_and_not_the_reading_order`, `a_flex_container_conserves_its_text` |
+| 32 | §9.4 step 8: a single line ignores the container cross size | `align_content_moves_the_lines_and_only_when_there_are_two` |
+| 33 | §9.4 step 11 does not stretch | `stretch_makes_an_item_as_tall_as_its_line` |
+| 34 | §5.2: the lines are emitted in line order, not physical order | `wrap_reverse_stacks_the_lines_upwards` |
+| 35 | §4: a whitespace-only run becomes an anonymous item | **survived** — closed by `a_whitespace_run_is_not_an_item_and_the_spacing_says_so` |
+| 36 | §4: a run of child text is not wrapped at all | `a_run_of_child_text_is_an_anonymous_flex_item` |
+| 37 | §7.2: the shorthand's omitted basis is `auto` | `the_flex_shorthands_omitted_basis_is_zero_and_not_auto` |
+| 38 | §5.3: `flex-flow` does not reset the omitted longhand | `flex_flow_resets_the_longhand_that_was_left_out` |
+| 39 | §5.4: `order` refuses the negative integers | `order_takes_the_negative_integers_the_other_integer_reader_refuses` |
+| 40 | §7.1: a negative flex factor is accepted | `a_negative_flex_factor_is_malformed_and_not_a_gap` |
+| 41 | the flexbox properties inherit | `no_flexbox_property_inherits` |
+| 42 | §7.2.3: `flex-basis: auto` computes to zero | **survived** — closed by `flex_basis_computes_to_a_size_and_auto_stays_auto` |
+| 43 | §7.2.3: a negative `flex-basis` is not clamped | added in the second pass; caught by the same fixture |
+| 44 | RS §8.1: a pre-paginated item paginates by the box | **survived** — the rule was enforced twice and this half was unreachable, see finding 7 |
+| 45 | RS §8.1: a fixed chapter is not truncated to one page | added in the second pass; caught by four fixtures |
+| 46 | §8.2.2: the itemref property does not override the book | `an_itemrefs_property_overrides_the_books_declaration_both_ways` |
+| 47 | §8.2.2: the itemref vocabulary is the metadata one | `an_itemrefs_property_overrides_the_books_declaration_both_ways` |
+| 48 | §8.2.1: an unknown `rendition:layout` is silently reflowed | `an_unknown_rendition_layout_is_named_and_reflowed` |
+| 49 | §8.2.2.6: `device-width` is read as a viewport | **survived** — the fixture named only one axis; closed by naming both |
+| 50 | §8.2.2.6: a fixed document is cascaded against the caller box | `media_queries_in_a_fixed_document_are_about_its_viewport` |
+| 51 | RS §8.1.2: the initial containing block is not clipped | `a_fixed_page_clips_to_its_initial_containing_block` |
+| 52 | RS §8.1.2: the clipped characters are not counted | `content_below_the_initial_containing_block_is_clipped_and_counted` |
+| 53 | §8.2.2.6: a fixed page keeps the reading system margin | **survived** — closed by `a_fixed_page_has_no_reading_system_margin` |
+| 54 | §8.2.2.6: a fixed item with no viewport is not named | `a_fixed_item_with_no_viewport_is_named_and_still_one_page` |
+| 55 | §8.2.2.6: a fixed chapter is laid into the book box | **survived** — closed by `a_fixed_chapter_is_set_at_its_viewports_measure` |
+
+Rows 5, 6, 14, 15, 18–20, 24–27, 29, 30, 35, 42–45, 49, 53 and 55 are the
+survivors and the rows added to chase them; every other row was caught on its
+first presentation.
+
+**The one recorded equivalent mutant is row 25**, and its argument is written
+where the code is rather than only here: §4 blockifies a flex item's `display`,
+and in this build `Builder::block` reads `display` only to ask whether the box
+generates no box, is a `list-item`, is a table or is a flex container — an
+`inline` or `inline-block` item answers all four the way a `block` one does. The
+arm is kept because it is what §4 says; it is recorded as unobservable so a
+later reader does not go looking for the fixture.
+
+### The browser oracle, and what is pinned
+
+`the_browser_and_this_engine_lay_the_same_flex_containers_out_the_same_way`
+compares **46 block boxes across eighteen flex containers** against Chrome 151,
+in two axes.
+
+| | Of the measure (x) | Of the column (y) |
+| --- | --- | --- |
+| The measured disagreement | **0.0000** | **0.0004** |
+| Injected defect: `display: block` on every container | 0.8000 | 0.2068 |
+| Injected defect: `justify-content` at its initial value, everything still flexed | 0.6333 | 0.0004 |
+
+The x row of the first line is exact rather than rounded: every item in the
+fixture is where Chrome put it to the two decimal places the browser reports.
+The cap is **0.02, which is one line of this column** — `line-height: 1.2` at
+16 px is 19.2 px of the 984 px the browser's column spans, or 0.0195 — which
+is the rule `MAX_TABLE_DEVIATION` was set by one milestone earlier. A cap
+tighter than a line would fail the first time Chrome wrapped one item's text one
+word differently; a looser one would admit a whole flex line.
+
+**What is pinned, on both sides:**
+
+- **The face.** `SAME_FACE`'s `* { font-family: "Courier New", monospace
+  !important }`, milestone 8's variable and the one this build cannot share
+  until it embeds a face of its own.
+- **`line-height: 1.2`.** This build resolves `normal` as 1.2 and Chrome
+  resolves it from Courier New's own metrics as 1.133 — six per cent of every
+  line in the document, accumulating down the column, and nothing whatever to do
+  with §9.
+- **The heading size**, at `1em`. `deviation` cancels the browser's line-box-top
+  against this engine's baseline by subtracting the first block; that works only
+  while every block shares one constant, and a heading at 2em does not.
+- **The paragraph margins inside the items**, at zero, so an item's height is
+  its text's.
+
+**What is deliberately *not* pinned, and why:** `min-width`. §4.5's automatic
+minimum size is implemented here, it is exactly the clause an implementation
+skips, and stating `min-width: 0` on the items would switch it off on **both**
+sides — the shrinking container would then agree for the wrong reason. The
+table comparison one milestone earlier found the opposite lesson about
+`vertical-align`, which measured 0.1070 unpinned and was *larger than the defect
+the oracle exists to catch*; the difference is that `vertical-align` is a gap
+this build has and §4.5 is a rule it implements, so pinning the first was
+honest and pinning the second would be hiding.
+
+### Was a fixed-layout book obtained?
+
+**No, and it is recorded as owed rather than dropped.** Milestone 1's `What is
+short` predicted this and the prediction held: neither producer of the committed
+six emits `rendition:layout`, `TINKER_EPUB_CORPUS` is unset on this machine, and
+the fetched corpus's fixed-layout samples are the CC-BY-SA ones `deny.toml`'s
+no-copyleft rule bars. Nothing was bought and nothing was smuggled in.
+
+What stands in its place is **built rather than borrowed**, and the difference
+is stated so nobody reads more into it than it says.
+`tests/epub_fixed_layout.rs` synthesises its books from the same
+`epub_support::ocf_zip` every OCF fixture in this plan uses. That gives complete
+control of the arrangement — a book-wide declaration, a per-itemref override
+in each direction, three different viewports, a missing viewport, a
+`width=device-width` viewport, a misspelt `rendition:layout` — and gives **no**
+evidence at all about what a real producer writes. Gap 30 closed with *"no
+non-Windows producer"* named for exactly this reason; this is the same sentence
+about a different absence.
+
+The concrete consequences, so a later milestone can act on them:
+
+- **No claim is made about how a real fixed-layout book is packaged.** In
+  particular this build has never seen `rendition:spread`,
+  `rendition:orientation`, `rendition:page-spread-left`/`-right`, or the
+  `rendition:` prefix declared through a `prefix` attribute pointing somewhere
+  unexpected.
+- **The `<meta property="rendition:layout">` reader assumes the OPF namespace
+  and a `property` attribute.** Real books also carry the EPUB 2
+  `<meta name="…" content="…">` form for other vocabularies, and a
+  producer that wrote the rendition vocabulary that way would be silently
+  reflowed here — with no warning, because the `<meta>` would match nothing at
+  all rather than matching at a value outside the vocabulary.
+- **Nothing here has been through epubcheck**, and a fixed-layout book has
+  conformance requirements a reflowable one does not.
+
+### Still owed, and what was narrowed
+
+Milestone 11's list stands except where noted, and this milestone adds:
+
+- **`inline-flex` is laid out as a block-level flex container**, warned by name
+  as `Warning::InlineFlexAsBlock`. This build has no inline-level box that is
+  not text; the only other answer is to set the container as inline text, which
+  throws the whole flex layout away. `inline-table` took that other answer one
+  milestone earlier, for the opposite reason — a table's contents are nothing
+  like a line of text either way, so there was nothing to keep.
+- **A flex line is the unit of fragmentation.** A row container may be broken
+  between its lines, which is where a real page break in one goes; a `column`
+  container is **one** line whatever its length, so a long one is drawn where it
+  is and says `Warning::FlexLineTallerThanPage`. `css-break-3`'s fragmentation
+  *inside* a line — every item cut at the same height and continued on the next
+  page — is not here, and is the same staged half `Warning::TableRowTallerThanPage`
+  names.
+- **A wrapping `column` container's items are measured at their fit-content
+  cross size and stretched to their line's afterwards**, so a multi-line column
+  container's main sizes were resolved against a slightly different width from
+  the one the items end up at. A single-line column container — which is what
+  `flex-direction: column` without `flex-wrap` is, and what a book writes — is
+  exact.
+- **`baseline` in a `wrap-reverse` container aligns from the flipped
+  cross-start**, which is the coordinate system doing the right thing and is not
+  asserted against a browser; `css-align-3` arguably makes it a last-baseline
+  alignment. No fixture combines the two.
+- **`gap`, `row-gap` and `column-gap` stay `Unsupported` by name.** They are
+  `css-align-3`'s, the row does not ask for them, and a build that mapped them
+  onto margins would put the gap outside the container's edges as well as
+  between its items.
+- **`min-width`, `max-width`, `min-height` and `max-height` are still
+  unimplemented**, so §9.7's max violations are unreachable and §9.2 step 4's
+  clamp is a floor rather than a range. The automatic minimum of §4.5 *is*
+  implemented, which is the half a book depends on.
+- **`rendition:spread`, `rendition:orientation` and the page-spread properties
+  are unread**, and an itemref carrying one is not warned about: they are
+  §8.2's other vocabulary and a two-page spread is a page-pairing decision
+  this build has no concept for.
+- **A fixed-layout page is not scaled to the reading system's page.** It is
+  emitted at the viewport's own size in points, so a host that wanted every page
+  of a mixed book to be one size has to do that itself — which is honest, and
+  is the reason `Page::size()` differs between two pages of one document.

@@ -36,10 +36,11 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, Display, Float,
-    FontFamily, FontStyle, FontVariant, LengthPercentage, LineHeight, ListStyleType, MarginValue,
-    OverflowWrap, PageBreak, PageBreakInside, Sides, Size, Spacing, TableLayout, TextAlign,
-    TextDecoration, Visibility, WhiteSpace,
+    AlignContent, AlignItems, AlignSelf, BorderCollapse, BorderSpacing, BorderStyle, BoxSizing,
+    Clear, Color, Display, FlexDirection, FlexWrap, Float, FontFamily, FontStyle, FontVariant,
+    JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, OverflowWrap,
+    PageBreak, PageBreakInside, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration,
+    Visibility, WhiteSpace,
 };
 
 use crate::metrics::FontRequest;
@@ -135,6 +136,33 @@ pub struct Consumed {
     pub border_spacing: BorderSpacing,
     /// `table-layout`, §17.5.2.
     pub table_layout: TableLayout,
+    /// `flex-direction`, `css-flexbox-1` §5.1. Read by [`crate::flex`].
+    pub flex_direction: FlexDirection,
+    /// `flex-wrap`, §5.2.
+    pub flex_wrap: FlexWrap,
+    /// `flex-grow`, §7.1.
+    pub flex_grow: f64,
+    /// `flex-shrink`, §7.1.
+    pub flex_shrink: f64,
+    /// `flex-basis`, §7.2.3.
+    pub flex_basis: Size,
+    /// `justify-content`, §8.2.
+    pub justify_content: JustifyContent,
+    /// `align-items`, §8.3.
+    pub align_items: AlignItems,
+    /// `align-self`, §8.3, still `auto` where the author wrote nothing.
+    ///
+    /// **Unresolved here and not there.** §8.3 makes `auto` mean *"the value of
+    /// the parent's `align-items`"*, and this struct is one element's style
+    /// with no parent in it -- so resolving it would mean either reading a
+    /// style that is not this one or picking a default, and the default is
+    /// `stretch`, which is a visible answer rather than a missing one.
+    /// [`crate::flex::self_alignment`] is where the two meet.
+    pub align_self: AlignSelf,
+    /// `align-content`, §8.4.
+    pub align_content: AlignContent,
+    /// `order`, §5.4.
+    pub order: i32,
 }
 
 /// Reads a computed style, exhaustively.
@@ -183,6 +211,16 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         border_collapse,
         border_spacing,
         table_layout,
+        flex_direction,
+        flex_wrap,
+        flex_grow,
+        flex_shrink,
+        flex_basis,
+        justify_content,
+        align_items,
+        align_self,
+        align_content,
+        order,
         // <<< the layout proof's binding goes here >>>
     } = style;
 
@@ -266,6 +304,16 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
             BorderCollapse::Collapse => BorderSpacing::ZERO,
         },
         table_layout: *table_layout,
+        flex_direction: *flex_direction,
+        flex_wrap: *flex_wrap,
+        flex_grow: *flex_grow,
+        flex_shrink: *flex_shrink,
+        flex_basis: *flex_basis,
+        justify_content: *justify_content,
+        align_items: *align_items,
+        align_self: *align_self,
+        align_content: *align_content,
+        order: *order,
     }
 }
 
@@ -289,12 +337,34 @@ impl Consumed {
     /// two halves are separate predicates for that reason — a build that folded
     /// the internal values in here would put a stray `<td>` on a line of its
     /// own as a block, which is a page that looks entirely reasonable.
+    /// **`inline-flex` is here and it is not block-level**, which is the one
+    /// disagreement with the specification in this predicate and is deliberate.
+    /// `css-flexbox-1` §3 makes it inline-level, and this build has no
+    /// inline-level box that is not text — so the two available answers are to
+    /// set it as inline text, which throws the whole flex layout away, or to
+    /// lay it out as a block-level flex container, which gets the *outside*
+    /// wrong and the inside right. It takes the second and says so by name:
+    /// [`crate::Warning::InlineFlexAsBlock`]. `inline-table` took the first
+    /// answer one milestone earlier for the opposite reason — a table's
+    /// contents are nothing like a line of text either way, so there was
+    /// nothing to keep.
     #[must_use]
     pub fn is_block_level(&self) -> bool {
         matches!(
             self.display,
-            Display::Block | Display::ListItem | Display::Table
+            Display::Block
+                | Display::ListItem
+                | Display::Table
+                | Display::Flex
+                | Display::InlineFlex
         )
+    }
+
+    /// Whether this element establishes a flex formatting context,
+    /// `css-flexbox-1` §3.
+    #[must_use]
+    pub fn is_flex(&self) -> bool {
+        self.display.is_flex_container()
     }
 
     /// Whether this element generates a table box, CSS 2.2 §17.2.

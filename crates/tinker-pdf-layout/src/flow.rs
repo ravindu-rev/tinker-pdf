@@ -64,11 +64,12 @@ use std::collections::HashMap;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderCollapse, BorderStyle, BoxSizing, Clear, Color, Display, Float, LengthPercentage,
-    ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size,
-    TableLayout, TextAlign,
+    AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, Display, Float,
+    LengthPercentage, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side,
+    Sides, Size, TableLayout, TextAlign,
 };
 
+use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
 use crate::metrics::Metrics;
 use crate::style::{consume, Consumed};
@@ -153,13 +154,25 @@ pub(crate) struct LineBox {
     pub avoid_inside: bool,
 }
 
-/// One band of table rows that cannot be separated, CSS 2.2 §17.
+/// A set of boxes that sit **beside** one another and cannot be separated.
 ///
-/// **A band and not a row**, and the difference is `rowspan`. A page may break
-/// between two rows and may not break across a cell that spans them, so the
-/// unit the fragmenter sees is the maximal run of grid rows joined by a
-/// spanning cell. A table with no `rowspan` in it has one band per row, which
-/// is where a real book's table breaks.
+/// Two things in this crate are that shape and they arrived one milestone
+/// apart, so the type is named for what it is rather than for the first of
+/// them:
+///
+/// - **One band of table rows**, CSS 2.2 §17. A band and not a row, and the
+///   difference is `rowspan`: a page may break between two rows and may not
+///   break across a cell that spans them, so the unit the fragmenter sees is
+///   the maximal run of grid rows joined by a spanning cell. A table with no
+///   `rowspan` in it has one band per row, which is where a real book's table
+///   breaks.
+/// - **One flex line**, `css-flexbox-1` §9. A row container's items sit beside
+///   each other along the main axis; a column container's whole content is one
+///   of these, because its lines sit beside each other too.
+///
+/// They are separate [`ItemKind`] variants over one payload rather than one
+/// variant, because the fragmenter has a different sentence to say about each
+/// when it is taller than a page.
 ///
 /// Its items are in **band-local** coordinates and are not in [`Flow::items`],
 /// for [`FloatRecord`]'s reason one milestone earlier: the page cutter walks a
@@ -167,10 +180,10 @@ pub(crate) struct LineBox {
 /// beside each other rather than under each other. Keeping them here is what
 /// lets a two-column row be one item.
 #[derive(Clone, Debug)]
-pub(crate) struct RowBand {
+pub(crate) struct Abreast {
     /// The cells' items, at the band's own origin.
     pub items: Vec<Item>,
-    /// The row and cell decorations, indexing [`RowBand::items`].
+    /// The row and cell decorations, indexing [`Abreast::items`].
     pub blocks: Vec<BlockRecord>,
 }
 
@@ -186,7 +199,11 @@ pub(crate) enum ItemKind {
     /// One band of table rows, whole. §13.3.3 gives no break position inside
     /// one, which is why it is one item and not its cells' items spliced into
     /// the column.
-    Rows(Box<RowBand>),
+    Rows(Box<Abreast>),
+    /// One flex line, whole, `css-flexbox-1` §9. Its items sit beside one
+    /// another along the main axis, so the page cutter cannot order them and
+    /// they are kept out of the column for [`Abreast`]'s reason.
+    FlexLine(Box<Abreast>),
 }
 
 /// One piece of the continuous column.
@@ -336,6 +353,16 @@ struct Builder<'a, M: Metrics> {
     /// size, which is this plan's own definition of the failure worth
     /// preventing.
     cell: Option<CellPass>,
+    /// What the flex driver has decided about the very next box
+    /// [`Builder::block`] lays out, `css-flexbox-1` §9.
+    ///
+    /// A second one-shot slot beside [`Builder::cell`] rather than a field on
+    /// it, because the two impose **different** things and a shared one would
+    /// have to carry a flag saying which: a table cell's margins do not apply
+    /// (§17.5.3) and a flex item's do, and a flex item is blockified (§4) and a
+    /// cell is not. A build that merged them would zero a flex item's margins,
+    /// which is invisible on every fixture written without one.
+    flex_pass: Option<FlexPass>,
     /// Document order, stamped on every run as it is made.
     ///
     /// **Reading order stops being emission order the moment a float exists.**
@@ -409,6 +436,155 @@ impl CellPass {
     }
 }
 
+/// What the flex driver imposes on one item box. See [`Builder::flex_pass`].
+///
+/// Two variants and not one struct with optional fields, because the two are
+/// asked at different times for different reasons and share nothing: the
+/// measuring trials want the item's box **taken off** so the number that comes
+/// back is its content's, and the real pass wants exact sizes put **on**.
+#[derive(Clone, Copy, Debug)]
+enum FlexPass {
+    /// §9.2's content-size trials. The item's own `width`, margins, padding and
+    /// borders are stripped, so [`Builder::measure_content`] returns the
+    /// content extent rather than the extent plus whichever of those happen to
+    /// be on the left.
+    Measure,
+    /// The real layout. `width` is a **border-box** size and `height` is a
+    /// **content** one, which is the split [`Builder::block`] already has:
+    /// `box_sizing` decides the first and the second is compared against the
+    /// content height directly.
+    Used {
+        /// The used border-box width, or `None` to leave the item's own.
+        width: Option<f64>,
+        /// The used content height, or `None` to leave the item's own.
+        height: Option<f64>,
+    },
+}
+
+impl FlexPass {
+    /// Applies the decision to a consumed style, `css-flexbox-1` §3 and §4.
+    ///
+    /// # §3's `float` rule holds **structurally**, and there is no assignment
+    ///
+    /// §3 says in as many words that `float` and `clear` *"do not create
+    /// floating or clearance for flex items"*, and the first draft of this
+    /// function zeroed both here. The injection matrix deleted the assignment
+    /// and **nothing failed**, which is the finding rather than a gap in the
+    /// fixtures: a float is placed by [`Builder::children`] when a block
+    /// container walks its children, and a flex item never goes through that
+    /// function at all -- the driver hands each item straight to
+    /// [`Builder::sublayout`], which establishes a formatting context with an
+    /// empty float set. `clear` is inert for the same reason: there is nothing
+    /// in that set to clear.
+    ///
+    /// So the two assignments were a rule enforced in a place it could not be
+    /// reached from, which is milestone 11's finding in the other direction and
+    /// is exactly what hides the reachable half. They are gone;
+    /// `a_float_declaration_on_a_flex_item_does_nothing` stays and now asserts
+    /// the behaviour rather than the assignment.
+    ///
+    /// # Blockification, and the one half of it that is observable
+    ///
+    /// §4 blockifies every item's `display`, and in this build only the
+    /// `inline-flex` arm changes anything: [`Builder::block`] reads `display`
+    /// to ask whether the box is `none`, a `list-item`, a table or a flex
+    /// container, and an `inline` or `inline-block` item answers all four the
+    /// same way a `block` one does. The `inline-flex` arm is what stops a
+    /// nested inline-flex item raising [`crate::Warning::InlineFlexAsBlock`]
+    /// about a box whose outside §4 has already made block-level, and
+    /// `an_inline_flex_item_is_blockified_and_does_not_warn` is its fixture.
+    /// The other two arms are kept because they are what §4 says, and recorded
+    /// here as unobservable so a later reader does not go looking for the test.
+    fn apply(&self, style: &mut Consumed) {
+        style.display = match style.display {
+            Display::Inline | Display::InlineBlock => Display::Block,
+            Display::InlineFlex => Display::Flex,
+            other => other,
+        };
+        match self {
+            FlexPass::Measure => {
+                style.width = Size::Auto;
+                style.height = Size::Auto;
+                style.margin = Sides::all(MarginValue::Length(LengthPercentage::ZERO));
+                style.padding = Sides::all(LengthPercentage::ZERO);
+                style.border_width = Sides::all(0.0);
+            }
+            FlexPass::Used { width, height } => {
+                if let Some(width) = width {
+                    style.width = Size::Length(LengthPercentage::Px(*width));
+                    style.box_sizing = BoxSizing::BorderBox;
+                }
+                if let Some(height) = height {
+                    style.height = Size::Length(LengthPercentage::Px(*height));
+                }
+            }
+        }
+    }
+}
+
+/// One flex item's box, which the document may not contain.
+///
+/// `css-flexbox-1` §4: *"each contiguous sequence of child text runs is wrapped
+/// in an anonymous block container flex item"*. A container written as
+/// `<div class="row">text<span>more</span></div>` therefore has **two** items
+/// and the first is not an element -- and a build that skipped the anonymous
+/// one would drop the text out of the flow entirely, which text conservation
+/// would catch and nothing else would.
+enum ItemBox<'a> {
+    /// A child element.
+    Element(&'a BoxNode),
+    /// §4's anonymous block container around a run of text.
+    ///
+    /// Boxed because a `BoxNode` is four hundred bytes of computed style and
+    /// an anonymous item is the rare case: an unboxed variant would make every
+    /// entry in a container's item vector that size, including the elements.
+    Anonymous(Box<BoxNode>),
+}
+
+impl ItemBox<'_> {
+    fn node(&self) -> &BoxNode {
+        match self {
+            ItemBox::Element(node) => node,
+            ItemBox::Anonymous(node) => node,
+        }
+    }
+}
+
+/// What the driver worked out about one item before any of it was positioned.
+struct FlexItem {
+    /// §9's inputs, [`flex::resolve`]'s and [`flex::lines`]'s.
+    sizes: flex::Item,
+    /// `order`, §5.4.
+    order: i32,
+    /// `align-self`, §8.3, already resolved against the container's
+    /// `align-items`.
+    align: AlignItems,
+    /// Whether the item's cross size property is `auto`, which is §9.4 step
+    /// 11's condition for stretching it: an item with a stated height is
+    /// **not** stretched however the container is aligned.
+    cross_auto: bool,
+    /// The cross-axis margin, border and padding.
+    cross_extra: f64,
+    /// The cross-axis margins alone, which a stretched item's border box has
+    /// to give back.
+    cross_margins: f64,
+    /// The **cross-start** margin on its own.
+    ///
+    /// Four edge figures and not two, because §8 positions a *margin* box and
+    /// a background paints a *border* box, and the two differ by exactly this
+    /// on each axis. A build carrying only the totals paints every item that
+    /// has an asymmetric margin in the wrong place, which is invisible on every
+    /// fixture written with `margin: 0`.
+    cross_lead: f64,
+    /// The main-axis border and padding, which turns a used content size into
+    /// the border-box size [`FlexPass::Used`] takes.
+    main_inset: f64,
+    /// The main-axis margins.
+    main_margins: f64,
+    /// The main-start margin on its own.
+    main_lead: f64,
+}
+
 /// One run of text in an inline formatting context, after phase I.
 struct Piece {
     text: String,
@@ -446,6 +622,7 @@ pub(crate) fn build<M: Metrics>(
         ceiling_line: f64::NEG_INFINITY,
         content_top: 0.0,
         cell: None,
+        flex_pass: None,
         sequence: 0,
     };
     builder.block(root, options.width, 0.0, 0, false, 0)?;
@@ -556,6 +733,9 @@ impl<M: Metrics> Builder<'_, M> {
         // Exactly one box, and the one the table driver just decided about.
         // See [`Builder::cell`].
         if let Some(pass) = self.cell.take() {
+            pass.apply(&mut style);
+        }
+        if let Some(pass) = self.flex_pass.take() {
             pass.apply(&mut style);
         }
         let style = style;
@@ -678,6 +858,13 @@ impl<M: Metrics> Builder<'_, M> {
             // reusing it is what stops a table from being a second, quietly
             // different, box model.
             self.table(node, &style, content_x, content_width, depth, avoid, block)?;
+        } else if style.is_flex() {
+            // `css-flexbox-1` §9, and the same sentence as the table above it:
+            // a flex container is an ordinary block box on the outside.
+            if style.display == Display::InlineFlex {
+                self.warn(Warning::InlineFlexAsBlock);
+            }
+            self.flex(node, &style, content_x, content_width, depth, avoid)?;
         } else {
             self.children(node, &style, content_x, content_width, depth, avoid, block)?;
         }
@@ -1160,7 +1347,9 @@ impl<M: Metrics> Builder<'_, M> {
                             *width = width.max(run.x + run.width);
                         }
                     }
-                    ItemKind::Rows(band) => extend(&band.items, width),
+                    ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+                        extend(&band.items, width);
+                    }
                     ItemKind::Margin(_) | ItemKind::Edge => {}
                 }
             }
@@ -1604,6 +1793,499 @@ impl<M: Metrics> Builder<'_, M> {
         Ok(())
     }
 
+    /// A `display: flex` box's content, `css-flexbox-1` §9.
+    ///
+    /// §9's own numbered order, and every step is separable:
+    ///
+    /// 1. §4 generates the items, wrapping each run of child text in an
+    ///    anonymous block container;
+    /// 2. §9.2 sizes each item along the main axis — `flex-basis`, then the
+    ///    main size property, then the content — and clamps it by §4.5's
+    ///    automatic minimum;
+    /// 3. §5.4 puts the items into order-modified document order;
+    /// 4. §9.3 collects them into flex lines;
+    /// 5. §9.7 resolves each line's flexible lengths;
+    /// 6. every item is laid out at its used main size, **in document order**,
+    ///    so the reading-order stamps ascend with the source;
+    /// 7. §9.4 sizes the lines in the cross axis and stretches the items that
+    ///    asked for it;
+    /// 8. §8.2 and §8.3 position the items, §8.4 the lines, and the items are
+    ///    emitted in **order-modified** order.
+    ///
+    /// Steps 6 and 8 being different orders is §5.4's own note — `order` *"does
+    /// not affect ordering in non-visual media"* — and is the third time this
+    /// crate has met the same shape: a float, a `<tfoot>`, and now this.
+    fn flex(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        content_x: f64,
+        content_width: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        let row = style.flex_direction.is_row();
+        let wrap = style.flex_wrap;
+        let boxes = flex_boxes(node);
+        if boxes.is_empty() {
+            return Ok(());
+        }
+        // The layout total, charged before the loop on what the items have
+        // undertaken to cost: three trials and up to two layouts each, which is
+        // `MAX_LINE_BREAK_WORK`'s posture and the reason a container with four
+        // million items is a refusal rather than a memory graph.
+        self.budget.spend_layout(boxes.len().saturating_mul(5))?;
+        for item in &boxes {
+            if matches!(item, ItemBox::Anonymous(_)) {
+                self.budget.spend_box()?;
+            }
+        }
+
+        // A column container's cross axis is the inline one, so its cross size
+        // is the measure and is always definite; a row container's is the block
+        // one, and is definite only where the container states a height.
+        let stated_height = match style.height {
+            Size::Length(length) => Some(resolve_length(length, content_width).max(0.0)),
+            Size::Auto => None,
+        };
+        let (container_main_definite, container_cross_definite) = if row {
+            (Some(content_width), stated_height)
+        } else {
+            (stated_height, Some(content_width))
+        };
+
+        // ---- steps 1 and 2: the items, sized along the main axis ------------
+        let mut items: Vec<FlexItem> = Vec::with_capacity(boxes.len());
+        let mut cross_inner: Vec<f64> = Vec::with_capacity(boxes.len());
+        for item in &boxes {
+            let inner = item.node();
+            let consumed = consume(&inner.style);
+            // CSS 2.2 §8.3: a percentage margin or padding is a percentage of
+            // the containing block's **width**, on all four sides. §9 changes
+            // nothing about that, so a `margin-top: 10%` on an item in a column
+            // container is still ten per cent of the container's width.
+            let (main_lead, main_trail, cross_lead, cross_trail) = if row {
+                (Side::Left, Side::Right, Side::Top, Side::Bottom)
+            } else {
+                (Side::Top, Side::Bottom, Side::Left, Side::Right)
+            };
+            let margin = |side| consumed.margin_px(side, content_width);
+            let inset =
+                |side| consumed.padding_px(side, content_width) + consumed.border_width.get(side);
+            let margin_main = margin(main_lead) + margin(main_trail);
+            let margin_cross = margin(cross_lead) + margin(cross_trail);
+            let inset_main = inset(main_lead) + inset(main_trail);
+            let inset_cross = inset(cross_lead) + inset(cross_trail);
+
+            let (main_property, cross_property) = if row {
+                (consumed.width, consumed.height)
+            } else {
+                (consumed.height, consumed.width)
+            };
+            // A percentage of an indefinite main size behaves as `auto`, which
+            // is CSS 2.2 §10.5's rule for a height against an `auto` containing
+            // block and `css-flexbox-1` §9.2's for a percentage `flex-basis`.
+            let definite_main = |size: Size| -> Option<f64> {
+                match size {
+                    Size::Length(LengthPercentage::Px(px)) => Some(px),
+                    Size::Length(LengthPercentage::Percent(percent)) => {
+                        container_main_definite.map(|main| main * percent / 100.0)
+                    }
+                    Size::Auto => None,
+                }
+            };
+            // `box-sizing: border-box` measures `width` — and `flex-basis`,
+            // which §7.2.3 sizes *"as for `width`"* — from the border box, and
+            // every size in §9 is a content one.
+            let to_content = |value: f64| match consumed.box_sizing {
+                BoxSizing::ContentBox => value.max(0.0),
+                BoxSizing::BorderBox => (value - inset_main).max(0.0),
+            };
+            let specified_main = definite_main(main_property).map(to_content);
+            // §9.2 step 3: `flex-basis` first, and the main size property only
+            // where it is `auto`. The two are read in that order rather than
+            // the other because that is the whole point of the property: an
+            // item with `width: 200px; flex-basis: 0` is flexed from zero.
+            let basis = match consumed.flex_basis {
+                Size::Auto => specified_main,
+                other => definite_main(other).map(to_content),
+            };
+
+            let available_cross = (content_width - margin_cross - inset_cross).max(0.0);
+            let (min_main, max_main, item_cross) = if row {
+                self.flex_pass = Some(FlexPass::Measure);
+                let min = self.measure_content(inner, 0.0, depth + 1, avoid)?;
+                self.flex_pass = Some(FlexPass::Measure);
+                let max = self.measure_content(inner, MAX_MEASURE, depth + 1, avoid)?;
+                // A row container's cross size is a height, which is not known
+                // until the item has been laid out at its used main size. Zero
+                // is a placeholder the layout below replaces.
+                (min, max, 0.0)
+            } else {
+                // A column container's main size is a **height**, so the two
+                // content sizes §9.2 asks for are the same number: a box's
+                // height at a stated width is not a range. What is a range is
+                // the cross axis, and that is what the two trials measure here.
+                self.flex_pass = Some(FlexPass::Measure);
+                let min_cross = self.measure_content(inner, 0.0, depth + 1, avoid)?;
+                self.flex_pass = Some(FlexPass::Measure);
+                let max_cross = self.measure_content(inner, MAX_MEASURE, depth + 1, avoid)?;
+                // `css-sizing-3`'s fit-content: the max-content size, floored
+                // by the min-content size and capped by what there is room for.
+                let fit = max_cross.min(available_cross.max(min_cross));
+                let stretched = consumed.align_self.resolve(style.align_items)
+                    == AlignItems::Stretch
+                    && matches!(cross_property, Size::Auto)
+                    && !wrap.wraps();
+                let cross = if stretched { available_cross } else { fit };
+                let height = self.trial_height(inner, cross, depth + 1, avoid)?;
+                (height, height, cross)
+            };
+            let base = basis.unwrap_or(max_main);
+            // §4.5's automatic minimum main size, *"further clamped by"* the
+            // item's own specified size where it has one — without which a
+            // `flex: 0 0 40px` item holding one long word could not be made
+            // narrower than the word, which is not what the declaration says.
+            let min = match specified_main {
+                Some(specified) => min_main.min(specified),
+                None => min_main,
+            };
+            // §9.2 step 4: the hypothetical main size is the base size clamped
+            // by the used minimum, which is what makes `flex: 1` on three items
+            // of different content lengths still wrap where they must.
+            let hypothetical = base.max(min);
+
+            items.push(FlexItem {
+                sizes: flex::Item {
+                    grow: consumed.flex_grow,
+                    shrink: consumed.flex_shrink,
+                    base,
+                    hypothetical,
+                    min,
+                    extra: margin_main + inset_main,
+                },
+                order: consumed.order,
+                align: flex::self_alignment(consumed.align_self, style.align_items),
+                cross_auto: matches!(cross_property, Size::Auto),
+                cross_extra: margin_cross + inset_cross,
+                cross_margins: margin_cross,
+                cross_lead: margin(cross_lead),
+                main_inset: inset_main,
+                main_margins: margin_main,
+                main_lead: margin(main_lead),
+            });
+            cross_inner.push(item_cross);
+        }
+
+        // ---- steps 3, 4 and 5: order, lines, flexible lengths ---------------
+        let orders: Vec<i32> = items.iter().map(|item| item.order).collect();
+        let placement = flex::ordered(&orders);
+        let sizes: Vec<flex::Item> = placement.iter().map(|at| items[*at].sizes).collect();
+        // An indefinite main size has no free space in it: §9.7 against a
+        // container sized to its own content distributes nothing, which is what
+        // using the sum of the hypothetical sizes as the measure produces.
+        let total_hypothetical: f64 = sizes.iter().map(flex::Item::outer_hypothetical).sum();
+        let available_main = container_main_definite.unwrap_or(total_hypothetical);
+        let ranges = flex::lines(&sizes, available_main, wrap);
+        let mut used_main = vec![0.0f64; sizes.len()];
+        for &(from, to) in &ranges {
+            for (offset, size) in flex::resolve(&sizes[from..to], available_main)
+                .into_iter()
+                .enumerate()
+            {
+                used_main[from + offset] = size;
+            }
+        }
+        // Position in `placement` for each item, so the two loops below can
+        // walk the same items in their two different orders.
+        let mut slot = vec![0usize; items.len()];
+        for (position, at) in placement.iter().enumerate() {
+            slot[*at] = position;
+        }
+
+        // ---- step 6: laid out in document order -----------------------------
+        let mut laid: Vec<Option<Sublayout>> = (0..items.len()).map(|_| None).collect();
+        let mut outer_cross = vec![0.0f64; items.len()];
+        let mut baseline = vec![0.0f64; items.len()];
+        for at in 0..items.len() {
+            let main = used_main[slot[at]];
+            let item = &items[at];
+            let pass = if row {
+                FlexPass::Used {
+                    width: Some(main + item.main_inset),
+                    height: None,
+                }
+            } else {
+                FlexPass::Used {
+                    width: Some(cross_inner[at] + item.cross_extra - item.cross_margins),
+                    height: Some(main),
+                }
+            };
+            self.flex_pass = Some(pass);
+            let sub = self.sublayout(boxes[at].node(), content_width, depth + 1, avoid)?;
+            outer_cross[at] = if row {
+                sub.height
+            } else {
+                cross_inner[at] + item.cross_extra
+            };
+            baseline[at] = first_baseline(&sub).unwrap_or(outer_cross[at]);
+            laid[at] = Some(sub);
+        }
+
+        // ---- step 7: the lines' cross sizes, and §9.4 step 11's stretch -----
+        let single = ranges.len() == 1;
+        let mut line_cross: Vec<f64> = Vec::with_capacity(ranges.len());
+        let mut line_baseline: Vec<f64> = Vec::with_capacity(ranges.len());
+        for &(from, to) in &ranges {
+            let mut ascent = 0.0f64;
+            let mut descent = 0.0f64;
+            let mut plain = 0.0f64;
+            for &at in &placement[from..to] {
+                if items[at].align == AlignItems::Baseline {
+                    ascent = ascent.max(baseline[at]);
+                    descent = descent.max(outer_cross[at] - baseline[at]);
+                } else {
+                    plain = plain.max(outer_cross[at]);
+                }
+            }
+            let content = plain.max(ascent + descent);
+            // §9.4 step 8's own exception: a **single-line** container with a
+            // definite cross size gives its line that size, whatever the items
+            // came to. A build without it makes `align-items: center` in a
+            // `height: 300px` container centre nothing, because the line is
+            // exactly as tall as its tallest item.
+            let cross = match (single, container_cross_definite) {
+                (true, Some(definite)) => definite,
+                _ => content,
+            };
+            line_cross.push(cross);
+            line_baseline.push(ascent);
+        }
+
+        // §8.4: the lines in the cross axis. `free` is zero unless the
+        // container's cross size is definite, which is §8.4's *"has no effect
+        // on a single-line flex container"* arriving as arithmetic rather than
+        // as a special case.
+        let lines_total: f64 = line_cross.iter().sum();
+        let container_cross = container_cross_definite.unwrap_or(lines_total);
+        let (lead, gap, extra) = flex::align_content(
+            style.align_content,
+            container_cross - lines_total,
+            ranges.len(),
+        );
+        for cross in &mut line_cross {
+            *cross += extra;
+        }
+
+        // §9.4 step 11: an item whose cross size property is `auto` and whose
+        // resolved alignment is `stretch` takes its line's cross size. It is a
+        // **size** change and therefore a second layout, which is why it is
+        // here and not folded into the positions below.
+        for (line, &(from, to)) in ranges.iter().enumerate() {
+            for (position, &at) in placement.iter().enumerate().take(to).skip(from) {
+                let item = &items[at];
+                if item.align != AlignItems::Stretch || !item.cross_auto {
+                    continue;
+                }
+                let wanted = line_cross[line];
+                if wanted <= outer_cross[at] + EPSILON {
+                    continue;
+                }
+                let inner = (wanted - item.cross_extra).max(0.0);
+                let pass = if row {
+                    FlexPass::Used {
+                        width: Some(used_main[position] + item.main_inset),
+                        height: Some(inner),
+                    }
+                } else {
+                    FlexPass::Used {
+                        width: Some(inner + item.cross_extra - item.cross_margins),
+                        height: Some(used_main[position]),
+                    }
+                };
+                self.flex_pass = Some(pass);
+                let sub = self.sublayout(boxes[at].node(), content_width, depth + 1, avoid)?;
+                baseline[at] = first_baseline(&sub).unwrap_or(wanted);
+                laid[at] = Some(sub);
+                outer_cross[at] = wanted;
+            }
+        }
+
+        // ---- step 8: positions ---------------------------------------------
+        let mut main_at = vec![0.0f64; items.len()];
+        let mut cross_at = vec![0.0f64; items.len()];
+        let mut line_top = vec![0.0f64; ranges.len()];
+        let mut logical = lead;
+        for (line, &(from, to)) in ranges.iter().enumerate() {
+            let used: f64 = (from..to)
+                .map(|position| used_main[position] + sizes[position].extra)
+                .sum();
+            // §9 has no `overflow` in it: a line whose items do not fit is
+            // drawn where they were put. Saying so is the difference between a
+            // known gap and a figure that quietly runs off the page.
+            if used > available_main + EPSILON {
+                self.warn(Warning::ContentOverflowedPage);
+            }
+            let (offset, between) =
+                flex::justify(style.justify_content, available_main - used, to - from);
+            let mut running = offset;
+            for position in from..to {
+                let at = placement[position];
+                let outer = used_main[position] + sizes[position].extra;
+                main_at[at] =
+                    flex::main_position(style.flex_direction, running, outer, available_main);
+                running += outer + between;
+                let inside = flex::align(
+                    items[at].align,
+                    line_cross[line],
+                    outer_cross[at],
+                    baseline[at],
+                    line_baseline[line],
+                );
+                cross_at[at] =
+                    flex::cross_position(wrap, inside, outer_cross[at], line_cross[line]);
+            }
+            line_top[line] = flex::cross_position(wrap, logical, line_cross[line], container_cross);
+            logical += line_cross[line] + gap;
+        }
+
+        if row {
+            self.emit_flex_rows(
+                &items,
+                &ranges,
+                &placement,
+                &mut laid,
+                &line_cross,
+                &line_top,
+                &main_at,
+                &cross_at,
+                &outer_cross,
+                content_x,
+                avoid,
+            );
+        } else {
+            self.emit_flex_column(
+                &items, &placement, &mut laid, &main_at, &cross_at, &used_main, &sizes, content_x,
+            );
+        }
+        Ok(())
+    }
+
+    /// One trial layout's height, with the item's own box stripped — §9.2's
+    /// content size along a **block** axis, which [`Builder::measure_content`]
+    /// cannot give because it answers about widths.
+    fn trial_height(
+        &mut self,
+        node: &BoxNode,
+        measure: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<f64, Refusal> {
+        // A trial's warnings are not the book's, for `measure_content`'s
+        // reason: a paragraph set at a measure of nothing reports a line that
+        // overflowed on every word.
+        let warnings = std::mem::take(&mut self.warnings);
+        self.flex_pass = Some(FlexPass::Measure);
+        let trial = self.sublayout(node, measure, depth, avoid);
+        self.warnings = warnings;
+        Ok(trial?.height)
+    }
+
+    /// A row container's lines, emitted one flow item each.
+    ///
+    /// **In physical top-to-bottom order and not in line order**, because
+    /// `flex-wrap: wrap-reverse` stacks the lines the other way and the page
+    /// cutter walks a column whose `y` never goes backwards.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_flex_rows(
+        &mut self,
+        items: &[FlexItem],
+        ranges: &[(usize, usize)],
+        placement: &[usize],
+        laid: &mut [Option<Sublayout>],
+        line_cross: &[f64],
+        line_top: &[f64],
+        main_at: &[f64],
+        cross_at: &[f64],
+        outer_cross: &[f64],
+        content_x: f64,
+        avoid: bool,
+    ) {
+        let mut order: Vec<usize> = (0..ranges.len()).collect();
+        order.sort_by(|a, b| line_top[*a].total_cmp(&line_top[*b]));
+        self.commit_margin();
+        let separator = MarginBreak {
+            forced: false,
+            allowed_by_a: true,
+            allowed_by_b: !avoid,
+        };
+        let mut y = 0.0f64;
+        for line in order {
+            let (from, to) = ranges[line];
+            // The space above this line is a `Margin` item and not an `Edge`,
+            // so §13.3.3's case (1) applies to it: a container of several lines
+            // may be broken between two of them, which is what `css-break-3` §5
+            // says of a row flex container and is where a real page break in
+            // one goes.
+            let above = (line_top[line] - y).max(0.0);
+            self.emit(above, ItemKind::Margin(separator.clone()), true);
+            y = line_top[line] + line_cross[line];
+            let mut band = Abreast {
+                items: Vec::new(),
+                blocks: Vec::new(),
+            };
+            for &at in &placement[from..to] {
+                place_flex_item(
+                    &mut band,
+                    laid[at].take(),
+                    content_x + main_at[at],
+                    cross_at[at],
+                    cross_at[at] + items[at].cross_lead,
+                    (outer_cross[at] - items[at].cross_margins).max(0.0),
+                );
+            }
+            self.emit(line_cross[line], ItemKind::FlexLine(Box::new(band)), true);
+        }
+    }
+
+    /// A column container's whole content, as one flow item.
+    ///
+    /// One and not one per line: a column container's lines sit **beside** each
+    /// other, so there is no position between two of them the page cutter could
+    /// order — which is [`Abreast`]'s own reason, met from the other direction.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_flex_column(
+        &mut self,
+        items: &[FlexItem],
+        placement: &[usize],
+        laid: &mut [Option<Sublayout>],
+        main_at: &[f64],
+        cross_at: &[f64],
+        used_main: &[f64],
+        sizes: &[flex::Item],
+        content_x: f64,
+    ) {
+        let mut band = Abreast {
+            items: Vec::new(),
+            blocks: Vec::new(),
+        };
+        let mut height = 0.0f64;
+        for (position, &at) in placement.iter().enumerate() {
+            let outer_main = used_main[position] + sizes[position].extra;
+            height = height.max(main_at[at] + outer_main);
+            place_flex_item(
+                &mut band,
+                laid[at].take(),
+                content_x + cross_at[at],
+                main_at[at],
+                main_at[at] + items[at].main_lead,
+                (outer_main - items[at].main_margins).max(0.0),
+            );
+        }
+        self.commit_margin();
+        self.emit(height, ItemKind::FlexLine(Box::new(band)), true);
+    }
+
     /// One band of rows, as one flow item's worth of content.
     #[allow(clippy::too_many_arguments)]
     fn band(
@@ -1622,7 +2304,7 @@ impl<M: Metrics> Builder<'_, M> {
         table_width: f64,
         hspacing: f64,
         vspacing: f64,
-    ) -> Result<RowBand, Refusal> {
+    ) -> Result<Abreast, Refusal> {
         let mut items: Vec<Item> = Vec::new();
         let mut blocks: Vec<BlockRecord> = Vec::new();
         let band_top = tops[from];
@@ -1725,7 +2407,7 @@ impl<M: Metrics> Builder<'_, M> {
                 }
             }
         }
-        Ok(RowBand { items, blocks })
+        Ok(Abreast { items, blocks })
     }
 
     /// A block record for a box this module lays out itself — a row or a row
@@ -2528,6 +3210,159 @@ fn collapsed_borders(
 }
 
 /// §17.2.1 rule 9's anonymous table, around a run of misparented boxes.
+/// `css-flexbox-1` §4: a flex container's items.
+///
+/// Every in-flow child is one, and **each contiguous run of child text is
+/// wrapped in an anonymous block container** — except a run that is all white
+/// space, which §4 says *"is not rendered"*. A build that skipped the wrapping
+/// would drop a container's bare text out of the flow entirely, and a build
+/// that skipped the exception would make a flex item out of the newline between
+/// two `<div>`s, which every producer writes.
+fn flex_boxes(container: &BoxNode) -> Vec<ItemBox<'_>> {
+    let mut out: Vec<ItemBox<'_>> = Vec::new();
+    match &container.content {
+        Content::Text(text) => {
+            if !text.trim().is_empty() {
+                out.push(ItemBox::Anonymous(Box::new(anonymous_flex_item(
+                    &container.style,
+                    vec![BoxNode::text(container.style.clone(), text.clone())],
+                ))));
+            }
+        }
+        Content::Children(children) => {
+            let mut run: Vec<BoxNode> = Vec::new();
+            let mut any = false;
+            for child in children {
+                if consume(&child.style).is_none() {
+                    continue;
+                }
+                if let Content::Text(text) = &child.content {
+                    run.push(child.clone());
+                    any = any || !text.trim().is_empty();
+                    continue;
+                }
+                if any {
+                    out.push(ItemBox::Anonymous(Box::new(anonymous_flex_item(
+                        &container.style,
+                        std::mem::take(&mut run),
+                    ))));
+                }
+                run.clear();
+                any = false;
+                out.push(ItemBox::Element(child));
+            }
+            if any {
+                out.push(ItemBox::Anonymous(Box::new(anonymous_flex_item(
+                    &container.style,
+                    run,
+                ))));
+            }
+        }
+    }
+    out
+}
+
+/// §4's anonymous block container around a run of text.
+fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
+    let mut style = ComputedStyle::inherit_from(parent);
+    style.display = Display::Block;
+    BoxNode {
+        style,
+        content: Content::Children(run),
+        anchor: None,
+        span: crate::CellSpan::ONE,
+    }
+}
+
+/// The distance from a sub-flow's top to its **first** baseline, `css-align-3`
+/// §9.
+///
+/// `None` when there is no line box in it at all — an item holding one empty
+/// box — which §8.3 answers by synthesising a baseline from the box's cross-end
+/// edge. That is the caller's fallback and not this function's, because the
+/// box's size is the caller's to know.
+fn first_baseline(sub: &Sublayout) -> Option<f64> {
+    for item in &sub.items {
+        match &item.kind {
+            ItemKind::Line(line) => return Some(item.y + line.baseline),
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+                for inner in &band.items {
+                    if let ItemKind::Line(line) = &inner.kind {
+                        return Some(item.y + inner.y + line.baseline);
+                    }
+                }
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+    None
+}
+
+/// One flex item's sub-flow, moved into a line at the position §8 gave it.
+///
+/// The spacer is the same device the table band uses and is here for the same
+/// reason: an item's background and border are its **box's**, which is the size
+/// §9 gave it and not the extent its text happened to reach. A stretched item
+/// holding one word would otherwise be painted one line tall inside a box three
+/// lines tall.
+///
+/// `box_top` is the **border** box's top and `x`/`top` move the *margin* box,
+/// which are two different edges and differ by the item's cross-start margin. A
+/// build that used one for both paints every item that has a margin on it in
+/// the wrong place.
+fn place_flex_item(
+    band: &mut Abreast,
+    sub: Option<Sublayout>,
+    x: f64,
+    top: f64,
+    box_top: f64,
+    box_height: f64,
+) {
+    let Some(Sublayout {
+        items: mut inner,
+        blocks: mut records,
+        floats,
+        height: _,
+    }) = sub
+    else {
+        return;
+    };
+    translate(&mut inner, &mut records, x, top);
+    let spacer = band.items.len();
+    band.items.push(Item {
+        y: box_top,
+        height: box_height,
+        kind: ItemKind::Edge,
+    });
+    let base = band.items.len();
+    for (index, mut record) in records.into_iter().enumerate() {
+        if index == 0 {
+            record.first = Some(spacer);
+            record.last = spacer + 1;
+        } else if let Some(first) = record.first {
+            record.first = Some(first + base);
+            record.last += base;
+        }
+        band.blocks.push(record);
+    }
+    band.items.append(&mut inner);
+    // A float inside a flex item stays inside the line: §3 makes a flex item
+    // establish a formatting context of its own, so nothing it contains can
+    // reach past the item.
+    for mut float in floats {
+        translate(&mut float.items, &mut float.blocks, x, top);
+        let float_base = band.items.len();
+        for mut record in float.blocks {
+            if let Some(first) = record.first {
+                record.first = Some(first + float_base);
+                record.last += float_base;
+            }
+            band.blocks.push(record);
+        }
+        band.items.extend(float.items);
+    }
+}
+
 fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
     let mut style = ComputedStyle::inherit_from(parent);
     style.display = Display::Table;
@@ -2556,7 +3391,9 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
             // A band's items are already relative to the band, so only the
             // horizontal half of the move reaches inside it. A build that
             // passed `dy` down as well would move a table inside a float twice.
-            ItemKind::Rows(band) => translate(&mut band.items, &mut band.blocks, dx, 0.0),
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+                translate(&mut band.items, &mut band.blocks, dx, 0.0);
+            }
             ItemKind::Margin(_) | ItemKind::Edge => {}
         }
     }

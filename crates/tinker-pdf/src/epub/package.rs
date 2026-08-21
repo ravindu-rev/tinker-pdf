@@ -299,6 +299,57 @@ impl Item {
     }
 }
 
+/// EPUB 3.3 §8.2's `rendition:layout`, which is **a pagination rule and not a
+/// styling option**.
+///
+/// EPUB Reading Systems 3.3 §8.1: a pre-paginated content document produces
+/// *"exactly one page per spine itemref"*. That contradicts the premise
+/// `crate::OpenOptions` is built on — that a reflowable book's page count is a
+/// function of the box the caller stated — and both have to hold at once. So
+/// this is not a value the layout engine reads: it decides which of two
+/// paginations a spine item goes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RenditionLayout {
+    /// `reflowable`, §8.2.1. The default, and the one every book in both
+    /// corpora declares by saying nothing.
+    Reflowable,
+    /// `pre-paginated`, §8.2.1.
+    PrePaginated,
+}
+
+impl RenditionLayout {
+    /// The value a `rendition:layout` metadata expression states, or `None` for
+    /// a string outside the vocabulary.
+    ///
+    /// **`None` rather than `Reflowable`**, because the two are different
+    /// facts: a book that said nothing is reflowable by §8.2.1's own default,
+    /// and a book that said `rendition:layout: pre-pagenated` said something
+    /// this build did not understand. Only the second is worth a warning.
+    #[must_use]
+    pub fn from_property(value: &str) -> Option<RenditionLayout> {
+        match value.trim() {
+            "reflowable" => Some(RenditionLayout::Reflowable),
+            "pre-paginated" => Some(RenditionLayout::PrePaginated),
+            _ => None,
+        }
+    }
+
+    /// The value one `<itemref>`'s `properties` token states, §8.2.2.
+    ///
+    /// A different vocabulary from the metadata one — `rendition:layout-pre-paginated`
+    /// rather than `pre-paginated` — and reading it with the wrong one is how a
+    /// build honours the book-wide declaration and silently ignores every
+    /// per-item override.
+    #[must_use]
+    pub fn from_itemref_property(token: &str) -> Option<RenditionLayout> {
+        match token {
+            "rendition:layout-reflowable" => Some(RenditionLayout::Reflowable),
+            "rendition:layout-pre-paginated" => Some(RenditionLayout::PrePaginated),
+            _ => None,
+        }
+    }
+}
+
 /// One `<itemref>` of the spine (§5.7.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpineItem {
@@ -313,10 +364,26 @@ pub struct SpineItem {
     /// page after it — gap 29's renumbering hazard, at book scale. Two books in
     /// the fetched corpus carry three between them.
     pub linear: bool,
-    /// The itemref's own `properties`, which override the manifest item's
-    /// rendition properties. Recorded; milestone 12's fixed-layout renditions
-    /// are what read them.
+    /// The itemref's own `properties`, §8.2.2, which override the package's
+    /// own `rendition:layout`.
     pub properties: Vec<String>,
+}
+
+impl SpineItem {
+    /// Which pagination this itemref goes through, §8.2.2.
+    ///
+    /// The itemref's own property wins over the book's declaration, which is
+    /// §8.2.2's whole reason for existing: a reflowable book with one
+    /// fixed-layout cover is the arrangement the vocabulary was added for, and
+    /// a build that read only the metadata expression paginates that cover as
+    /// text.
+    #[must_use]
+    pub fn layout(&self, book: RenditionLayout) -> RenditionLayout {
+        self.properties
+            .iter()
+            .find_map(|token| RenditionLayout::from_itemref_property(token))
+            .unwrap_or(book)
+    }
 }
 
 /// Which of §5.5.3.1's three required elements a package document is missing,
@@ -346,6 +413,13 @@ pub enum PackageDefect {
     /// §5.6.1 makes an item's `id` unique in the document. Two items with one
     /// `id` are read as the first, and this says so.
     DuplicateItemId,
+    /// §8.2.1's `rendition:layout` at a value outside its two-word vocabulary.
+    ///
+    /// The book is paginated as **reflowable**, which is §8.2.1's own default,
+    /// and the fact that a declaration was thrown away is said out loud: a
+    /// misspelt `pre-paginated` would otherwise be a fixed-layout book silently
+    /// reflowed, which is a complete-looking book of the wrong shape.
+    UnknownRenditionLayout,
 }
 
 /// A package document, read.
@@ -361,6 +435,7 @@ pub struct Package {
     spine: Vec<SpineItem>,
     toc: Option<String>,
     right_to_left: bool,
+    rendition_layout: RenditionLayout,
     defects: Vec<PackageDefect>,
 }
 
@@ -435,6 +510,13 @@ impl Package {
     #[must_use]
     pub fn toc(&self) -> Option<&str> {
         self.toc.as_deref()
+    }
+
+    /// EPUB 3.3 §8.2's book-wide `rendition:layout`, or
+    /// [`RenditionLayout::Reflowable`] where the book declared none.
+    #[must_use]
+    pub fn rendition_layout(&self) -> RenditionLayout {
+        self.rendition_layout
     }
 
     /// Whether §5.7.1's `page-progression-direction` is `rtl`.
@@ -608,6 +690,10 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
     let mut spine: Vec<SpineItem> = Vec::new();
     let mut toc: Option<String> = None;
     let mut right_to_left = false;
+    let mut rendition_layout = RenditionLayout::Reflowable;
+    let mut unknown_layout: Option<String> = None;
+    let mut capturing_layout = false;
+    let mut layout_text = String::new();
     let mut saw_manifest = false;
     let mut saw_spine = false;
 
@@ -625,8 +711,18 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
                 if let Some((_, _, gathered)) = &mut capturing {
                     gathered.push_str(&text);
                 }
+                if capturing_layout {
+                    layout_text.push_str(&text);
+                }
             }
             Event::End(_) => {
+                if capturing_layout {
+                    capturing_layout = false;
+                    match RenditionLayout::from_property(&layout_text) {
+                        Some(value) => rendition_layout = value,
+                        None => unknown_layout = Some(layout_text.trim().to_owned()),
+                    }
+                }
                 if let Some((kind, id, gathered)) = capturing.take() {
                     let value = gathered.trim().to_owned();
                     match kind {
@@ -697,6 +793,20 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
                                     let id = element.attribute(None, "id").map(str::to_owned);
                                     capturing = Some((kind, id, String::new()));
                                 }
+                            }
+                            // §8.2's metadata expression, which is an OPF
+                            // `<meta>` with a `property` attribute and **not**
+                            // an HTML `<meta name>`: the EPUB 2 form has no
+                            // `property` at all, so reading `name` here would
+                            // give a `<meta name="cover">` the vocabulary's
+                            // meaning.
+                            if element.namespace() == Some(OPF_NAMESPACE)
+                                && element.local() == "meta"
+                                && element.attribute(None, "property").map(str::trim)
+                                    == Some("rendition:layout")
+                            {
+                                capturing_layout = true;
+                                layout_text.clear();
                             }
                         }
                         Section::Manifest => {
@@ -782,6 +892,9 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
     if (1..items.len()).any(|at| items[..at].iter().any(|other| other.id == items[at].id)) {
         defects.push(PackageDefect::DuplicateItemId);
     }
+    if unknown_layout.is_some() {
+        defects.push(PackageDefect::UnknownRenditionLayout);
+    }
 
     Ok(Package {
         version,
@@ -794,6 +907,7 @@ pub fn parse(bytes: &[u8], path: &str, limits: &Limits) -> Result<Package, Archi
         spine,
         toc,
         right_to_left,
+        rendition_layout,
         defects,
     })
 }

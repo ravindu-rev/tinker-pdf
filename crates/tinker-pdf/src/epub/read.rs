@@ -159,7 +159,16 @@ pub struct Context<'a> {
     /// What the cascade may spend.
     pub css_limits: &'a CssLimits,
     /// What `@media` is evaluated against.
+    ///
+    /// The book's page box for a reflowable document. A **pre-paginated** one
+    /// is cascaded against its own §8.2.2.6 viewport instead, which
+    /// [`read_document`] substitutes once it has the tree: the dimensions are
+    /// in the content document, so they are not knowable until it has been
+    /// read, and a `@media (max-width: 600px)` block in a fixed-layout book is
+    /// about that document's viewport and not about the reading system's page.
     pub media: &'a MediaContext,
+    /// Whether this spine item is EPUB 3.3 §8.2's `pre-paginated`.
+    pub pre_paginated: bool,
     /// The root element's initial values, carrying the caller's base font
     /// size. See [`tinker_pdf_css::cascade::cascade_from`].
     pub initial: &'a ComputedStyle,
@@ -185,6 +194,13 @@ pub struct Reading {
     /// its own — and folded into one set by the caller, because a PDF's font
     /// resources belong to the document rather than to a page.
     pub font_faces: Vec<FontFace>,
+    /// §8.2.2.6's viewport, where the document states one.
+    ///
+    /// Read for **every** document rather than only for a pre-paginated one,
+    /// because a reflowable book that carries the element is not thereby
+    /// fixed-layout — §8.2.1's `rendition:layout` is what decides that — and
+    /// reading it here keeps the two questions apart.
+    pub viewport: Option<super::xhtml::Viewport>,
 }
 
 /// Reads one content document: markup, stylesheets, cascade, box tree.
@@ -214,6 +230,7 @@ pub fn read_document(
         limits,
         css_limits,
         media,
+        pre_paginated,
         initial,
     } = context;
     let dom = match super::xhtml::read(bytes, &limits.xml) {
@@ -225,6 +242,20 @@ pub fn read_document(
             defects: vec![super::xhtml::MarkupDefect::Truncated],
             ..Dom::default()
         },
+    };
+
+    // §8.2.2.6's viewport, and the media context that follows from it. The
+    // substitution happens **here** rather than at the caller because the
+    // dimensions are inside the document: a caller could only supply them by
+    // parsing the markup a second time.
+    let viewport = dom.viewport();
+    let own_media;
+    let media: &MediaContext = match (pre_paginated, viewport) {
+        (true, Some(view)) => {
+            own_media = MediaContext::screen(view.width, view.height);
+            &own_media
+        }
+        _ => media,
     };
 
     let author = author_sheets(book, path, &dom, limits, css_limits, budget, media);
@@ -273,6 +304,7 @@ pub fn read_document(
         tree,
         styles,
         census,
+        viewport,
         font_faces,
     })
 }

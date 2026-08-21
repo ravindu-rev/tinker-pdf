@@ -104,9 +104,18 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
     // cell cut at the same height and continued on the next page -- is
     // `css-break-3`'s and is the staged half of milestone 11; see
     // [`Warning::TableRowTallerThanPage`] and gap 31's row, amended in place.
+    //
+    // **Two sentences and not one.** A flex line is the same shape and the same
+    // staged half, and a build that raised the table's warning for both would
+    // tell a host with no table in its book that a table row overflowed.
     for item in &flow.items {
-        if matches!(item.kind, ItemKind::Rows(_)) && item.height > options.height + EPSILON {
-            warn(&mut warnings, Warning::TableRowTallerThanPage);
+        if item.height <= options.height + EPSILON {
+            continue;
+        }
+        match item.kind {
+            ItemKind::Rows(_) => warn(&mut warnings, Warning::TableRowTallerThanPage),
+            ItemKind::FlexLine(_) => warn(&mut warnings, Warning::FlexLineTallerThanPage),
+            ItemKind::Line(_) | ItemKind::Margin(_) | ItemKind::Edge => {}
         }
     }
 
@@ -341,10 +350,11 @@ fn permitted(flow: &Flow, index: usize, tier: Tier) -> Option<Cut> {
         // either. A table breaks between its bands, which are the `Margin`
         // items §17.6.1's vertical spacing emits, and a band that is the whole
         // page's worth is drawn where it is.
-        ItemKind::Edge | ItemKind::Rows(_) => (tier == Tier::WithoutAc).then_some(Cut {
-            end: index,
-            next: index,
-        }),
+        ItemKind::Edge | ItemKind::Rows(_) | ItemKind::FlexLine(_) => (tier == Tier::WithoutAc)
+            .then_some(Cut {
+                end: index,
+                next: index,
+            }),
     }
 }
 
@@ -409,7 +419,7 @@ fn emit(
             // same shape a float is and is drawn by the same function. One
             // function and not two, so a nested table's backgrounds cannot
             // quietly stop being drawn.
-            ItemKind::Rows(band) => emit(
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) => emit(
                 &band.items,
                 &band.blocks,
                 0,

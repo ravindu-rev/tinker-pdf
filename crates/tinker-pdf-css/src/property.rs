@@ -221,11 +221,20 @@ impl<T: Copy> Sides<T> {
     }
 }
 
-/// `display`, at the fourteen values this build lays out.
+/// `display`, at the sixteen values this build lays out.
 ///
-/// `flex`, `grid` and the rest are `Unsupported` **by name and by value**,
-/// which is the whole of device 2: mapping `display: flex` onto `block`
-/// produces a page that looks entirely reasonable and is wrong.
+/// `grid`, `contents`, `run-in` and the rest are `Unsupported` **by name and
+/// by value**, which is the whole of device 2: mapping `display: grid` onto
+/// `block` produces a page that looks entirely reasonable and is wrong.
+///
+/// # `flex` and `inline-flex` arrived together, and they had to
+///
+/// `css-flexbox-1` §3 defines the two as *"the same layout inside, a different
+/// outside"*: both establish a flex formatting context and differ only in
+/// whether the container itself is block-level or inline-level. A build with
+/// one and not the other would have to map the missing one onto something,
+/// and the only candidates are the value it is not and `block` — which is
+/// device 2's own example of the wrong answer.
 ///
 /// # The nine table values arrived together, and they had to
 ///
@@ -272,6 +281,10 @@ pub enum Display {
     TableColumnGroup,
     /// `table-caption`
     TableCaption,
+    /// `flex`, `css-flexbox-1` §3. A block-level flex container.
+    Flex,
+    /// `inline-flex`, §3. The same formatting context, inline-level outside.
+    InlineFlex,
 }
 
 impl Display {
@@ -305,6 +318,168 @@ impl Display {
             Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
         )
     }
+
+    /// Whether this value establishes a **flex formatting context**,
+    /// `css-flexbox-1` §3.
+    ///
+    /// The two values differ in what the container is *outside* — which is
+    /// [`Display`]'s block-level question and is asked elsewhere — and are the
+    /// same thing inside, which is what this predicate is for.
+    #[must_use]
+    pub fn is_flex_container(self) -> bool {
+        matches!(self, Display::Flex | Display::InlineFlex)
+    }
+}
+
+/// `flex-direction`, `css-flexbox-1` §5.1.
+///
+/// **Four values and not two.** The reverse pair is not a styling flourish: §5.1
+/// makes `row-reverse` swap the *main-start* and *main-end* edges, so
+/// `justify-content: flex-start` puts the first item on the **right**. A build
+/// with `row` and `column` only would lay a reversed container out forwards and
+/// the page would look entirely reasonable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlexDirection {
+    /// `row`. The initial value: main axis is inline, main-start is the left.
+    Row,
+    /// `row-reverse`. Main axis is inline, main-start is the right.
+    RowReverse,
+    /// `column`. Main axis is block, main-start is the top.
+    Column,
+    /// `column-reverse`. Main axis is block, main-start is the bottom.
+    ColumnReverse,
+}
+
+impl FlexDirection {
+    /// Whether the main axis is the inline one, §5.1.
+    #[must_use]
+    pub fn is_row(self) -> bool {
+        matches!(self, FlexDirection::Row | FlexDirection::RowReverse)
+    }
+
+    /// Whether main-start is the far end of the axis, §5.1.
+    #[must_use]
+    pub fn is_reversed(self) -> bool {
+        matches!(
+            self,
+            FlexDirection::RowReverse | FlexDirection::ColumnReverse
+        )
+    }
+}
+
+/// `flex-wrap`, `css-flexbox-1` §5.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlexWrap {
+    /// `nowrap`. The initial value: one line, whatever it costs.
+    NoWrap,
+    /// `wrap`. Lines stack towards cross-end.
+    Wrap,
+    /// `wrap-reverse`. Lines stack towards cross-start, which is §5.2's own
+    /// wording: the cross-start and cross-end directions are swapped.
+    WrapReverse,
+}
+
+impl FlexWrap {
+    /// Whether the container is multi-line, §9.3.
+    #[must_use]
+    pub fn wraps(self) -> bool {
+        matches!(self, FlexWrap::Wrap | FlexWrap::WrapReverse)
+    }
+}
+
+/// `justify-content`, `css-align-3` as `css-flexbox-1` §8.2 uses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JustifyContent {
+    /// `flex-start`. The initial value.
+    FlexStart,
+    /// `flex-end`
+    FlexEnd,
+    /// `center`
+    Center,
+    /// `space-between`
+    SpaceBetween,
+    /// `space-around`
+    SpaceAround,
+    /// `space-evenly`
+    SpaceEvenly,
+}
+
+/// `align-items`, `css-flexbox-1` §8.3 — the container's default cross-axis
+/// alignment for its items.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignItems {
+    /// `flex-start`
+    FlexStart,
+    /// `flex-end`
+    FlexEnd,
+    /// `center`
+    Center,
+    /// `baseline`, §8.3: the items' first baselines are aligned.
+    Baseline,
+    /// `stretch`. The initial value.
+    Stretch,
+}
+
+/// `align-self`, §8.3 — one item's own answer, or `auto` to take the
+/// container's.
+///
+/// **A separate type from [`AlignItems`] and not the same one with a spare
+/// variant.** `auto` is not an alignment: §8.3 makes it *"the value of the
+/// parent's `align-items`"*, so a build that stored it as an alignment would
+/// have to resolve it at every reader or silently pick one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignSelf {
+    /// `auto`. The initial value: defer to the container's `align-items`.
+    Auto,
+    /// `flex-start`
+    FlexStart,
+    /// `flex-end`
+    FlexEnd,
+    /// `center`
+    Center,
+    /// `baseline`
+    Baseline,
+    /// `stretch`
+    Stretch,
+}
+
+impl AlignSelf {
+    /// §8.3's resolution: `auto` computes to the container's `align-items`.
+    #[must_use]
+    pub fn resolve(self, container: AlignItems) -> AlignItems {
+        match self {
+            AlignSelf::Auto => container,
+            AlignSelf::FlexStart => AlignItems::FlexStart,
+            AlignSelf::FlexEnd => AlignItems::FlexEnd,
+            AlignSelf::Center => AlignItems::Center,
+            AlignSelf::Baseline => AlignItems::Baseline,
+            AlignSelf::Stretch => AlignItems::Stretch,
+        }
+    }
+}
+
+/// `align-content`, `css-flexbox-1` §8.4 — how the **lines** are distributed in
+/// the cross axis.
+///
+/// **Not the same question as `align-items`**, and §8.4 says so in its first
+/// sentence: this one *"has no effect on a single-line flex container"*. A
+/// build that folded the two together would move every item in a `nowrap`
+/// container the moment an author wrote `align-content: center`, which is a
+/// declaration every browser ignores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignContent {
+    /// `flex-start`
+    FlexStart,
+    /// `flex-end`
+    FlexEnd,
+    /// `center`
+    Center,
+    /// `space-between`
+    SpaceBetween,
+    /// `space-around`
+    SpaceAround,
+    /// `stretch`. The initial value.
+    Stretch,
 }
 
 /// `border-collapse`, CSS 2.2 §17.6.
@@ -743,6 +918,26 @@ pub enum Property {
     BorderSpacing(Len, Len),
     /// `table-layout`
     TableLayout(TableLayout),
+    /// `flex-direction`
+    FlexDirection(FlexDirection),
+    /// `flex-wrap`
+    FlexWrap(FlexWrap),
+    /// `flex-grow`, a non-negative `<number>`.
+    FlexGrow(f64),
+    /// `flex-shrink`, a non-negative `<number>`.
+    FlexShrink(f64),
+    /// `flex-basis`, before `em` is resolved.
+    FlexBasis(SpecifiedSize),
+    /// `justify-content`
+    JustifyContent(JustifyContent),
+    /// `align-items`
+    AlignItems(AlignItems),
+    /// `align-self`
+    AlignSelf(AlignSelf),
+    /// `align-content`
+    AlignContent(AlignContent),
+    /// `order`, `css-flexbox-1` §5.4, a signed `<integer>`.
+    Order(i32),
     // <<< the compile-time proof injects a variant directly above this line >>>
 }
 
@@ -819,6 +1014,16 @@ impl Property {
             Property::BorderCollapse(_) => "border-collapse",
             Property::BorderSpacing(_, _) => "border-spacing",
             Property::TableLayout(_) => "table-layout",
+            Property::FlexDirection(_) => "flex-direction",
+            Property::FlexWrap(_) => "flex-wrap",
+            Property::FlexGrow(_) => "flex-grow",
+            Property::FlexShrink(_) => "flex-shrink",
+            Property::FlexBasis(_) => "flex-basis",
+            Property::JustifyContent(_) => "justify-content",
+            Property::AlignItems(_) => "align-items",
+            Property::AlignSelf(_) => "align-self",
+            Property::AlignContent(_) => "align-content",
+            Property::Order(_) => "order",
             // <<< the compile-time proof's second arm goes here >>>
         }
     }
@@ -893,7 +1098,26 @@ impl Property {
             // §17.5.2's own table says *inherited: no*, and it is the one of
             // the three that is genuinely a property of one box: a table
             // nested in a `table-layout: fixed` table has its own algorithm.
-            | Property::TableLayout(_) => false,
+            | Property::TableLayout(_)
+            // `css-flexbox-1`'s own property tables say *inherited: no* for
+            // every one of the ten, and the reason is the same one `display`
+            // has: they describe a box's participation in **one** formatting
+            // context. An inherited `flex-grow` would make every descendant of
+            // a flexible item flexible in a context it is not in — and the
+            // descendant is not a flex item at all, so nothing would ever read
+            // it back out. `order` is the one worth naming twice: §5.4 makes it
+            // *"a value for the box's ordinal group"*, and inheriting it would
+            // reorder a paragraph's `<em>` against its siblings.
+            | Property::FlexDirection(_)
+            | Property::FlexWrap(_)
+            | Property::FlexGrow(_)
+            | Property::FlexShrink(_)
+            | Property::FlexBasis(_)
+            | Property::JustifyContent(_)
+            | Property::AlignItems(_)
+            | Property::AlignSelf(_)
+            | Property::AlignContent(_)
+            | Property::Order(_) => false,
             // <<< the compile-time proof's third arm goes here >>>
         }
     }
@@ -963,9 +1187,6 @@ pub enum Parsed {
 /// `-webkit-column-count`, `-epub-text-emphasis-style` and Antenna House's
 /// `-ah-margin-start` land — all three measured in real books.
 pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
-    "align-content",
-    "align-items",
-    "align-self",
     "animation",
     "background-attachment",
     "background-image",
@@ -997,13 +1218,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "direction",
     "empty-cells",
     "filter",
-    "flex",
-    "flex-basis",
-    "flex-direction",
-    "flex-flow",
-    "flex-grow",
-    "flex-shrink",
-    "flex-wrap",
     "font",
     "font-display",
     "font-feature-settings",
@@ -1020,7 +1234,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "grid-template-columns",
     "grid-template-rows",
     "hyphens",
-    "justify-content",
     "justify-items",
     "justify-self",
     "left",
@@ -1033,7 +1246,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "min-width",
     "mix-blend-mode",
     "opacity",
-    "order",
     "outline",
     "outline-color",
     "outline-offset",
@@ -1261,6 +1473,9 @@ fn implemented_name(name: &str) -> Option<&'static str> {
 /// `no_property_is_both_implemented_and_unsupported`, because a name in both
 /// would be reported as a gap this build does not have.
 pub const IMPLEMENTED_NAMES: &[&str] = &[
+    "align-content",
+    "align-items",
+    "align-self",
     "background",
     "background-color",
     "border",
@@ -1289,6 +1504,13 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "clear",
     "color",
     "display",
+    "flex",
+    "flex-basis",
+    "flex-direction",
+    "flex-flow",
+    "flex-grow",
+    "flex-shrink",
+    "flex-wrap",
     "float",
     "font-family",
     "font-size",
@@ -1296,6 +1518,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "font-variant",
     "font-weight",
     "height",
+    "justify-content",
     "letter-spacing",
     "line-break",
     "line-height",
@@ -1305,6 +1528,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "margin-left",
     "margin-right",
     "margin-top",
+    "order",
     "orphans",
     "overflow-wrap",
     "padding",
@@ -1361,9 +1585,131 @@ fn implemented(
                 "table-column" => Display::TableColumn,
                 "table-column-group" => Display::TableColumnGroup,
                 "table-caption" => Display::TableCaption,
+                "flex" => Display::Flex,
+                "inline-flex" => Display::InlineFlex,
                 _ => return None,
             }))
         }),
+        "flex-direction" => keyword(one, single, |word| {
+            Some(Property::FlexDirection(match word {
+                "row" => FlexDirection::Row,
+                "row-reverse" => FlexDirection::RowReverse,
+                "column" => FlexDirection::Column,
+                "column-reverse" => FlexDirection::ColumnReverse,
+                _ => return None,
+            }))
+        }),
+        "flex-wrap" => keyword(one, single, |word| {
+            Some(Property::FlexWrap(match word {
+                "nowrap" => FlexWrap::NoWrap,
+                "wrap" => FlexWrap::Wrap,
+                "wrap-reverse" => FlexWrap::WrapReverse,
+                _ => return None,
+            }))
+        }),
+        // `<'flex-direction'> || <'flex-wrap'>`, §5.3 — either, both, in either
+        // order. **Both longhands are always emitted**, at their initial values
+        // where the author wrote only one: §5.3's own note is that the
+        // shorthand *"resets the omitted longhand to its initial value"*, and a
+        // build that emitted only what was written would leave an earlier
+        // `flex-wrap: wrap` standing under a later `flex-flow: column`.
+        "flex-flow" => flex_flow(significant),
+        "justify-content" => keyword(one, single, |word| {
+            Some(Property::JustifyContent(match word {
+                "flex-start" => JustifyContent::FlexStart,
+                "flex-end" => JustifyContent::FlexEnd,
+                "center" => JustifyContent::Center,
+                "space-between" => JustifyContent::SpaceBetween,
+                "space-around" => JustifyContent::SpaceAround,
+                "space-evenly" => JustifyContent::SpaceEvenly,
+                _ => return None,
+            }))
+        }),
+        "align-items" => keyword(one, single, |word| {
+            Some(Property::AlignItems(match word {
+                "flex-start" => AlignItems::FlexStart,
+                "flex-end" => AlignItems::FlexEnd,
+                "center" => AlignItems::Center,
+                "baseline" => AlignItems::Baseline,
+                "stretch" => AlignItems::Stretch,
+                _ => return None,
+            }))
+        }),
+        "align-self" => keyword(one, single, |word| {
+            Some(Property::AlignSelf(match word {
+                "auto" => AlignSelf::Auto,
+                "flex-start" => AlignSelf::FlexStart,
+                "flex-end" => AlignSelf::FlexEnd,
+                "center" => AlignSelf::Center,
+                "baseline" => AlignSelf::Baseline,
+                "stretch" => AlignSelf::Stretch,
+                _ => return None,
+            }))
+        }),
+        "align-content" => keyword(one, single, |word| {
+            Some(Property::AlignContent(match word {
+                "flex-start" => AlignContent::FlexStart,
+                "flex-end" => AlignContent::FlexEnd,
+                "center" => AlignContent::Center,
+                "space-between" => AlignContent::SpaceBetween,
+                "space-around" => AlignContent::SpaceAround,
+                "stretch" => AlignContent::Stretch,
+                _ => return None,
+            }))
+        }),
+        "flex-grow" => flex_factor(one, single, Property::FlexGrow),
+        "flex-shrink" => flex_factor(one, single, Property::FlexShrink),
+        // §7.2.3's grammar is `content | <'width'>`, and `content` — size to the
+        // item's own content — is a value this build does not have. It is
+        // `BadValue` by name rather than mapped onto `auto`, which is device 2,
+        // and that is why this is written out rather than going through
+        // `length_property`: that helper reports an unknown keyword as
+        // `Malformed`, which would put a real CSS value in the author's column
+        // instead of in this build's.
+        "flex-basis" => match (single, one) {
+            (true, Some(ComponentValue::Token(Token::Ident(word)))) => {
+                if word.eq_ignore_ascii_case("auto") {
+                    Implemented::Known(vec![Property::FlexBasis(SpecifiedSize::Auto)])
+                } else {
+                    Implemented::BadValue
+                }
+            }
+            (true, Some(value)) => match length_outcome(value) {
+                LenOutcome::Ok(len) => {
+                    Implemented::Known(vec![Property::FlexBasis(SpecifiedSize::Length(len))])
+                }
+                LenOutcome::Unsupported => Implemented::BadValue,
+                LenOutcome::Invalid => Implemented::Malformed,
+            },
+            _ => Implemented::Malformed,
+        },
+        // §7.2's shorthand, and **the one place in this file where an omitted
+        // component does not take the longhand's initial value.** §7.2 gives
+        // the shorthand its own defaults: a bare `<number>` means `1 1 0%`,
+        // where `flex-basis`'s initial value is `auto`. `flex: 1` and
+        // `flex-grow: 1` are therefore different declarations, and the
+        // difference is the whole of what a one-line `flex: 1` column does.
+        "flex" => flex_shorthand(significant),
+        // §5.4's `<integer>`, and it is **signed**: a negative `order` puts an
+        // item before one that wrote none, which is what a book's "put the
+        // figure first" rule is. `integer` above refuses zero and negatives,
+        // because `orphans` and `widows` are line counts; this is not.
+        "order" => match (single, one) {
+            (
+                true,
+                Some(ComponentValue::Token(Token::Number {
+                    value,
+                    integer: true,
+                })),
+            ) => {
+                if *value < f64::from(i32::MIN) || *value > f64::from(i32::MAX) {
+                    Implemented::Malformed
+                } else {
+                    Implemented::Known(vec![Property::Order(*value as i32)])
+                }
+            }
+            _ => Implemented::Malformed,
+        },
         "border-collapse" => keyword(one, single, |word| {
             Some(Property::BorderCollapse(match word {
                 "separate" => BorderCollapse::Separate,
@@ -1750,6 +2096,167 @@ fn keyword(
         Some(_) if single => Implemented::BadValue,
         _ => Implemented::Malformed,
     }
+}
+
+/// One non-negative `<number>` for `flex-grow` or `flex-shrink`,
+/// `css-flexbox-1` §7.1.
+///
+/// A **negative** factor is `Malformed` and not `BadValue`: §7.1's grammar is
+/// `<number [0,∞]>`, so `flex-grow: -1` is not a value this build has declined
+/// to implement — it is not a value of the property at all, and reporting it as
+/// this build's gap would put a number in the census that belongs to the book.
+fn flex_factor(
+    value: Option<&ComponentValue>,
+    single: bool,
+    build: impl Fn(f64) -> Property,
+) -> Implemented {
+    match value {
+        Some(ComponentValue::Token(Token::Number { value, .. })) if single => {
+            if *value < 0.0 || !value.is_finite() {
+                Implemented::Malformed
+            } else {
+                Implemented::Known(vec![build(*value)])
+            }
+        }
+        _ => Implemented::Malformed,
+    }
+}
+
+/// `flex-flow`, `css-flexbox-1` §5.3: `<'flex-direction'> || <'flex-wrap'>`.
+fn flex_flow(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() || significant.len() > 2 {
+        return Implemented::Malformed;
+    }
+    let mut direction = None;
+    let mut wrap = None;
+    for value in significant {
+        let ComponentValue::Token(Token::Ident(word)) = value else {
+            return Implemented::Malformed;
+        };
+        let word = word.to_ascii_lowercase();
+        let as_direction = match word.as_str() {
+            "row" => Some(FlexDirection::Row),
+            "row-reverse" => Some(FlexDirection::RowReverse),
+            "column" => Some(FlexDirection::Column),
+            "column-reverse" => Some(FlexDirection::ColumnReverse),
+            _ => None,
+        };
+        let as_wrap = match word.as_str() {
+            "nowrap" => Some(FlexWrap::NoWrap),
+            "wrap" => Some(FlexWrap::Wrap),
+            "wrap-reverse" => Some(FlexWrap::WrapReverse),
+            _ => None,
+        };
+        match (as_direction, as_wrap) {
+            (Some(value), _) if direction.is_none() => direction = Some(value),
+            (_, Some(value)) if wrap.is_none() => wrap = Some(value),
+            // A keyword of the right shape given twice, or one neither
+            // longhand takes. `flex-flow: row row` is the author's mistake;
+            // `flex-flow: inline` is a value this build does not have.
+            (None, None) => return Implemented::BadValue,
+            _ => return Implemented::Malformed,
+        }
+    }
+    Implemented::Known(vec![
+        Property::FlexDirection(direction.unwrap_or(FlexDirection::Row)),
+        Property::FlexWrap(wrap.unwrap_or(FlexWrap::NoWrap)),
+    ])
+}
+
+/// `flex`, `css-flexbox-1` §7.2: `none | [ <'flex-grow'> <'flex-shrink'>? ||
+/// <'flex-basis'> ]`.
+///
+/// The `||` is honoured rather than approximated by a left-to-right read: the
+/// grammar genuinely permits `flex: 30px 1`, and a build that required the
+/// numbers first would report a real declaration as malformed.
+///
+/// **The omitted `flex-basis` is `0%` and not `auto`.** §7.2: *"when omitted
+/// from the `flex` shorthand, its specified value is `0%`"*, and this is the
+/// one difference that decides what `flex: 1` does — with `auto` the item is
+/// sized to its content and then grown, with `0%` the whole line is shared out
+/// in proportion to the factors. Every three-column layout on the web depends
+/// on the second.
+fn flex_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() || significant.len() > 3 {
+        return Implemented::Malformed;
+    }
+    if significant.len() == 1 {
+        if let ComponentValue::Token(Token::Ident(word)) = significant[0] {
+            if word.eq_ignore_ascii_case("none") {
+                return Implemented::Known(vec![
+                    Property::FlexGrow(0.0),
+                    Property::FlexShrink(0.0),
+                    Property::FlexBasis(SpecifiedSize::Auto),
+                ]);
+            }
+        }
+    }
+    let mut numbers: Vec<f64> = Vec::new();
+    let mut basis: Option<SpecifiedSize> = None;
+    let mut unsupported = false;
+    for value in significant {
+        match value {
+            ComponentValue::Token(Token::Number { value, .. }) if *value != 0.0 => {
+                if numbers.len() == 2 || !value.is_finite() || *value < 0.0 {
+                    return Implemented::Malformed;
+                }
+                numbers.push(*value);
+            }
+            ComponentValue::Token(Token::Ident(word)) => {
+                if basis.is_some() {
+                    return Implemented::Malformed;
+                }
+                if word.eq_ignore_ascii_case("auto") {
+                    basis = Some(SpecifiedSize::Auto);
+                } else if word.eq_ignore_ascii_case("content") {
+                    // §7.2.3's other keyword, which this build does not size to.
+                    unsupported = true;
+                    basis = Some(SpecifiedSize::Auto);
+                } else {
+                    return Implemented::BadValue;
+                }
+            }
+            // A bare `0` is both a `<number>` and a `<length>`, and §7.2's
+            // grammar reads it as whichever slot is still open: `flex: 0 0 0`
+            // is grow, shrink and basis. Numbers first, because two of the
+            // three slots are numbers.
+            other => {
+                let zero = matches!(
+                    other,
+                    ComponentValue::Token(Token::Number { value, .. }) if *value == 0.0
+                );
+                if zero && numbers.len() < 2 && basis.is_none() {
+                    numbers.push(0.0);
+                    continue;
+                }
+                if basis.is_some() {
+                    return Implemented::Malformed;
+                }
+                match length_outcome(other) {
+                    LenOutcome::Ok(len) => basis = Some(SpecifiedSize::Length(len)),
+                    LenOutcome::Unsupported => {
+                        unsupported = true;
+                        basis = Some(SpecifiedSize::Auto);
+                    }
+                    LenOutcome::Invalid => return Implemented::Malformed,
+                }
+            }
+        }
+    }
+    if unsupported {
+        return Implemented::BadValue;
+    }
+    if numbers.is_empty() && basis.is_none() {
+        return Implemented::Malformed;
+    }
+    let grow = numbers.first().copied().unwrap_or(1.0);
+    let shrink = numbers.get(1).copied().unwrap_or(1.0);
+    let basis = basis.unwrap_or(SpecifiedSize::Length(Len::Percent(0.0)));
+    Implemented::Known(vec![
+        Property::FlexGrow(grow),
+        Property::FlexShrink(shrink),
+        Property::FlexBasis(basis),
+    ])
 }
 
 /// One non-negative `<integer>` for an integer-valued property.

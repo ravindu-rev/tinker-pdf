@@ -5,8 +5,9 @@ use super::sheet;
 use crate::media::{MediaContext, MediaType};
 use crate::parser::{parse, Declared};
 use crate::property::{
-    BorderStyle, Color, Declaration, Display, Float, Len, LengthPercentage, MarginValue, Property,
-    Side, SpecifiedMargin, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
+    AlignContent, AlignItems, AlignSelf, BorderStyle, Color, Declaration, Display, FlexDirection,
+    FlexWrap, Float, JustifyContent, Len, LengthPercentage, MarginValue, Property, Side, Size,
+    SpecifiedMargin, SpecifiedSize, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
 };
 use crate::{Budget, ImportResolver, Limits, NoImports, Warning};
 
@@ -458,7 +459,12 @@ fn the_border_shorthand_resets_what_it_does_not_name() {
 fn a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour() {
     for (source, property, value) in [
         ("p { float: inline-start }", "float", "inline-start"),
-        ("p { display: flex }", "display", "flex"),
+        // `flex` stood here until milestone 12 implemented it. `grid` is the
+        // successor and it is the same kind of value: a real `display` keyword,
+        // one whose nearest implemented neighbour is now `flex` rather than
+        // `block`, and one that would lay a two-dimensional layout out in one
+        // dimension and look right on every grid with one row in it.
+        ("p { display: grid }", "display", "grid"),
         // `table-cell` stood here until milestone 11 implemented it.
         // `inline-table` is the successor and it is the same kind of value: a
         // real CSS 2.2 §17.2 keyword, one this build's `Display` deliberately
@@ -767,5 +773,291 @@ fn a_percentage_margin_survives_computation() {
     assert_eq!(
         styles[0].margin.left,
         MarginValue::Length(LengthPercentage::Percent(10.0))
+    );
+}
+
+// ---- `css-flexbox-1`, milestone 12 -----------------------------------------
+
+/// Each of the ten flexbox properties parses to its own longhand, and a value
+/// outside each one's set is `Unsupported` **by name** rather than mapped onto
+/// its nearest neighbour.
+#[test]
+fn every_flexbox_longhand_reads_its_own_values() {
+    assert_eq!(
+        known("p { display: flex }"),
+        vec![Property::Display(Display::Flex)]
+    );
+    assert_eq!(
+        known("p { display: inline-flex }"),
+        vec![Property::Display(Display::InlineFlex)]
+    );
+    assert_eq!(
+        known("p { flex-direction: column-reverse }"),
+        vec![Property::FlexDirection(FlexDirection::ColumnReverse)]
+    );
+    assert_eq!(
+        known("p { flex-wrap: wrap-reverse }"),
+        vec![Property::FlexWrap(FlexWrap::WrapReverse)]
+    );
+    assert_eq!(
+        known("p { justify-content: space-evenly }"),
+        vec![Property::JustifyContent(JustifyContent::SpaceEvenly)]
+    );
+    assert_eq!(
+        known("p { align-items: baseline }"),
+        vec![Property::AlignItems(AlignItems::Baseline)]
+    );
+    assert_eq!(
+        known("p { align-self: auto }"),
+        vec![Property::AlignSelf(AlignSelf::Auto)]
+    );
+    assert_eq!(
+        known("p { align-content: space-between }"),
+        vec![Property::AlignContent(AlignContent::SpaceBetween)]
+    );
+    assert_eq!(known("p { flex-grow: 2 }"), vec![Property::FlexGrow(2.0)]);
+    assert_eq!(
+        known("p { flex-shrink: 0 }"),
+        vec![Property::FlexShrink(0.0)]
+    );
+    assert_eq!(
+        known("p { flex-basis: 30% }"),
+        vec![Property::FlexBasis(SpecifiedSize::Length(Len::Percent(
+            30.0
+        )))]
+    );
+    assert_eq!(known("p { order: -1 }"), vec![Property::Order(-1)]);
+
+    // And the values outside each set, by name.
+    for (source, property, value) in [
+        (
+            "p { flex-direction: inline-axis }",
+            "flex-direction",
+            "inline-axis",
+        ),
+        ("p { justify-content: start }", "justify-content", "start"),
+        ("p { align-items: start }", "align-items", "start"),
+        ("p { flex-basis: content }", "flex-basis", "content"),
+    ] {
+        assert_eq!(
+            declarations(source)[0].declaration,
+            Declaration::Unsupported {
+                property,
+                value: value.to_string()
+            },
+            "{source}"
+        );
+    }
+}
+
+/// `order` is a **signed** integer, which the `<integer>` reader used by
+/// `orphans` and `widows` refuses.
+///
+/// A build that reused that reader parses `order: 2` and discards `order: -1`
+/// and `order: 0` — and `order: -1` is exactly what a book writes to put a
+/// figure first.
+#[test]
+fn order_takes_the_negative_integers_the_other_integer_reader_refuses() {
+    assert_eq!(known("p { order: 0 }"), vec![Property::Order(0)]);
+    assert_eq!(known("p { order: -3 }"), vec![Property::Order(-3)]);
+    assert_eq!(sheet("p { order: 1.5 }").report.discarded_declarations, 1);
+    assert_eq!(sheet("p { orphans: -1 }").report.discarded_declarations, 1);
+}
+
+/// A negative flex factor is the **author's** mistake and not this build's gap,
+/// so it is discarded rather than counted in the census.
+#[test]
+fn a_negative_flex_factor_is_malformed_and_not_a_gap() {
+    assert_eq!(
+        sheet("p { flex-grow: -1 }").report.discarded_declarations,
+        1
+    );
+    assert_eq!(
+        sheet("p { flex-shrink: -2 }").report.discarded_declarations,
+        1
+    );
+    assert_eq!(
+        sheet("p { flex-basis: -5px }")
+            .report
+            .discarded_declarations,
+        0
+    );
+}
+
+/// **The `flex` shorthand's omitted `flex-basis` is `0%` and not `auto`**,
+/// which is §7.2's own sentence and the one difference that decides what
+/// `flex: 1` does.
+///
+/// With `auto` an item is sized to its content and then grown; with `0%` the
+/// whole line is shared out in proportion to the factors. Every three-column
+/// layout on the web depends on the second, and a build that expanded the
+/// shorthand to its longhands' initial values gets the first.
+#[test]
+fn the_flex_shorthands_omitted_basis_is_zero_and_not_auto() {
+    assert_eq!(
+        known("p { flex: 1 }"),
+        vec![
+            Property::FlexGrow(1.0),
+            Property::FlexShrink(1.0),
+            Property::FlexBasis(SpecifiedSize::Length(Len::Percent(0.0))),
+        ]
+    );
+    // And the longhand on its own leaves `flex-basis` alone entirely, which is
+    // what makes the two different declarations.
+    assert_eq!(known("p { flex-grow: 1 }"), vec![Property::FlexGrow(1.0)]);
+}
+
+/// §7.2's whole grammar: `none`, one number, two numbers, a basis, and the
+/// `||` that lets the basis come first.
+#[test]
+fn the_flex_shorthand_reads_every_form_its_grammar_has() {
+    assert_eq!(
+        known("p { flex: none }"),
+        vec![
+            Property::FlexGrow(0.0),
+            Property::FlexShrink(0.0),
+            Property::FlexBasis(SpecifiedSize::Auto),
+        ]
+    );
+    assert_eq!(
+        known("p { flex: auto }"),
+        vec![
+            Property::FlexGrow(1.0),
+            Property::FlexShrink(1.0),
+            Property::FlexBasis(SpecifiedSize::Auto),
+        ]
+    );
+    assert_eq!(
+        known("p { flex: 2 3 }"),
+        vec![
+            Property::FlexGrow(2.0),
+            Property::FlexShrink(3.0),
+            Property::FlexBasis(SpecifiedSize::Length(Len::Percent(0.0))),
+        ]
+    );
+    assert_eq!(
+        known("p { flex: 1 30px }"),
+        vec![
+            Property::FlexGrow(1.0),
+            Property::FlexShrink(1.0),
+            Property::FlexBasis(SpecifiedSize::Length(Len::Px(30.0))),
+        ]
+    );
+    assert_eq!(
+        known("p { flex: 2 0 40px }"),
+        vec![
+            Property::FlexGrow(2.0),
+            Property::FlexShrink(0.0),
+            Property::FlexBasis(SpecifiedSize::Length(Len::Px(40.0))),
+        ]
+    );
+    // The `||` in `[ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]` means
+    // the basis may be written first, and a build that read the components
+    // left to right reports a real declaration as malformed.
+    assert_eq!(
+        known("p { flex: 30px 1 }"),
+        vec![
+            Property::FlexGrow(1.0),
+            Property::FlexShrink(1.0),
+            Property::FlexBasis(SpecifiedSize::Length(Len::Px(30.0))),
+        ]
+    );
+}
+
+/// `flex-flow` resets **both** longhands, not only the one that was written.
+///
+/// §5.3's own note. Without it an earlier `flex-wrap: wrap` stands under a
+/// later `flex-flow: column`, which is a container that wraps when its author
+/// stopped asking for it.
+#[test]
+fn flex_flow_resets_the_longhand_that_was_left_out() {
+    assert_eq!(
+        known("p { flex-flow: column }"),
+        vec![
+            Property::FlexDirection(FlexDirection::Column),
+            Property::FlexWrap(FlexWrap::NoWrap),
+        ]
+    );
+    assert_eq!(
+        known("p { flex-flow: wrap }"),
+        vec![
+            Property::FlexDirection(FlexDirection::Row),
+            Property::FlexWrap(FlexWrap::Wrap),
+        ]
+    );
+    assert_eq!(
+        known("p { flex-flow: wrap-reverse row-reverse }"),
+        vec![
+            Property::FlexDirection(FlexDirection::RowReverse),
+            Property::FlexWrap(FlexWrap::WrapReverse),
+        ]
+    );
+}
+
+/// None of the ten inherits, and `order` is the one worth asserting twice: an
+/// inherited `order` would reorder a paragraph's `<em>` against its siblings.
+#[test]
+fn no_flexbox_property_inherits() {
+    let tree = super::tree(&[("div", None), ("p", Some(0))]);
+    let styles = super::cascade::styles(
+        "div { display: flex; flex-direction: column; flex-wrap: wrap; order: 3; \
+         flex-grow: 4; flex-shrink: 0; flex-basis: 20px; justify-content: center; \
+         align-items: center; align-self: flex-end; align-content: center }",
+        &tree,
+    );
+    assert_eq!(styles[0].flex_direction, FlexDirection::Column);
+    assert_eq!(styles[0].order, 3);
+    let child = &styles[1];
+    assert_eq!(child.flex_direction, FlexDirection::Row);
+    assert_eq!(child.flex_wrap, FlexWrap::NoWrap);
+    assert_eq!(child.order, 0);
+    assert_eq!(child.flex_grow, 0.0);
+    assert_eq!(child.flex_shrink, 1.0);
+    assert_eq!(child.justify_content, JustifyContent::FlexStart);
+    assert_eq!(child.align_items, AlignItems::Stretch);
+    assert_eq!(child.align_self, AlignSelf::Auto);
+    assert_eq!(child.align_content, AlignContent::Stretch);
+    assert_eq!(child.display, Display::Inline);
+}
+
+/// `flex-basis` computes to a **size**, and `auto` computes to `auto`.
+///
+/// The injection matrix asked for this: nothing asserted the computed value at
+/// all, so a build that computed `auto` to zero — which is what the `flex`
+/// shorthand's *omitted* basis is, one function away — passed everything. The
+/// two are different declarations and this is where the difference is stored.
+#[test]
+fn flex_basis_computes_to_a_size_and_auto_stays_auto() {
+    let tree = super::tree(&[("p", None)]);
+    assert_eq!(
+        super::cascade::styles("p { flex-basis: auto }", &tree)[0].flex_basis,
+        Size::Auto
+    );
+    assert_eq!(
+        super::cascade::styles("p { flex-basis: 30px }", &tree)[0].flex_basis,
+        Size::Length(LengthPercentage::Px(30.0))
+    );
+    assert_eq!(
+        super::cascade::styles("p { flex-basis: 25% }", &tree)[0].flex_basis,
+        Size::Length(LengthPercentage::Percent(25.0)),
+        "a percentage stays one: what it is a percentage of is the layout's"
+    );
+    // And an `em` is resolved against this element's own font size, which is
+    // what makes `flex-basis` a `<'width'>` rather than a bare number.
+    assert_eq!(
+        super::cascade::styles("p { font-size: 20px; flex-basis: 2em }", &tree)[0].flex_basis,
+        Size::Length(LengthPercentage::Px(40.0))
+    );
+    // §7.2.3: a negative basis is invalid, and the used value is clamped where
+    // `padding` is clamped -- at the computed value rather than at the parser.
+    assert_eq!(
+        super::cascade::styles("p { flex-basis: -5px }", &tree)[0].flex_basis,
+        Size::Length(LengthPercentage::Px(0.0))
+    );
+    // The default, which is what an item with no declaration on it is sized
+    // from.
+    assert_eq!(
+        super::cascade::styles("p { color: red }", &tree)[0].flex_basis,
+        Size::Auto
     );
 }

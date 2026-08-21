@@ -115,7 +115,7 @@ use crate::cbz::{
     MAX_SYNTHESISED_PDF, PAGE_OVERHEAD, PLACEHOLDER_GREY,
 };
 use ocf::resolve_reference;
-use package::{FallbackDefect, Package};
+use package::{FallbackDefect, Package, RenditionLayout};
 use paint::{draw_page, page_target, run_rect, BookMetrics, Fonts, Frame};
 use typeface::{FaceDefect, FaceSet};
 
@@ -593,6 +593,23 @@ fn read(
 
 /// One spine item, read as far as it went.
 struct Chapter {
+    /// The page box this chapter's own pages are, in points, and the margin
+    /// inside it.
+    ///
+    /// **Per chapter and not per book**, which is milestone 12's whole
+    /// structural change. A reflowable chapter takes the caller's box and the
+    /// reading system's margin; a pre-paginated one takes its own §8.2.2.6
+    /// viewport with **no** margin, because EPUB RS 3.3 §8.1.2 makes the
+    /// viewport the initial containing block and a margin inside it would be a
+    /// page the author did not design.
+    frame: Frame,
+    /// Whether EPUB 3.3 §8.2 makes this itemref pre-paginated.
+    ///
+    /// It is a field rather than a question asked of the package at each
+    /// reader, because the answer is §8.2.2's **resolution** of two
+    /// declarations — the book's and the itemref's — and a second caller
+    /// resolving it again is a second chance to resolve it differently.
+    fixed: bool,
     /// The container path the content document was read from, or the `idref`
     /// or `href` that named nothing.
     name: String,
@@ -615,6 +632,16 @@ impl Chapter {
     /// **A placeholder still contributes one**, which is the rule milestone 4
     /// established and this milestone does not get to relax: dropping a spine
     /// item does not renumber a page, it removes a chapter.
+    /// **EPUB RS 3.3 §8.1's spine rule is enforced in exactly one place and
+    /// this is not it.** A pre-paginated content document is *"exactly one page
+    /// per spine itemref"*, and the first draft said so twice: once here, as an
+    /// early `return 1`, and once at the layout, which truncates a fixed
+    /// chapter's pages to the first. The injection matrix deleted this half and
+    /// nothing failed -- because the truncation had already made the vector one
+    /// page long, and a chapter that laid out to nothing takes the `max(1)`
+    /// below. A rule enforced twice hides the reachable half, so the sentence
+    /// lives where the pages are decided and this function answers only what it
+    /// is holding.
     fn page_count(&self) -> usize {
         self.pages.len().max(1)
     }
@@ -733,10 +760,12 @@ pub fn synthesise(
         warnings.push(ArchiveWarning::UnimplementedFeature { property, items });
     }
 
-    let frame = Frame {
+    let reflowable_frame = Frame {
         page: layout.page,
         margin: PAGE_MARGIN,
     };
+    let frame = reflowable_frame;
+    let book_layout = package.rendition_layout();
     let (content_width, content_height) = frame.content_px();
     let media = MediaContext::screen(content_width, content_height);
     let options = LayoutOptions::new(content_width, content_height);
@@ -749,6 +778,9 @@ pub fn synthesise(
         limits,
         css_limits: &limits.css,
         media: &media,
+        // Overwritten per spine item below: a pre-paginated document is
+        // cascaded against its own viewport.
+        pre_paginated: false,
         initial: &initial,
     };
 
@@ -759,6 +791,7 @@ pub fn synthesise(
     let mut declared: Vec<FontFace> = Vec::new();
     for itemref in package.spine() {
         let (name, path, mut defect) = plan_page(book, package, &itemref.idref);
+        let fixed = itemref.layout(book_layout) == RenditionLayout::PrePaginated;
         let mut reading = None;
         if defect.is_none() {
             let source = path.clone().unwrap_or_default();
@@ -772,6 +805,10 @@ pub fn synthesise(
                 // and reporting it as the second would be a lie about the book.
                 None => defect = Some(SpineDefect::ResourceMissing),
                 Some(bytes) => {
+                    let context = read::Context {
+                        pre_paginated: fixed,
+                        ..context
+                    };
                     match read::read_document(book, &source, &bytes, &context, &mut css_budget) {
                         Err(_) => defect = Some(SpineDefect::NotStyled),
                         Ok(document) => {
@@ -809,7 +846,30 @@ pub fn synthesise(
                 }
             }
         }
+        // §8.2.2.6's viewport decides a fixed-layout chapter's page box, and a
+        // pre-paginated item that states none is named rather than silently
+        // laid into the caller's.
+        let mut frame = reflowable_frame;
+        if fixed {
+            match reading.as_ref().and_then(|read| read.viewport) {
+                Some(view) => {
+                    frame = Frame {
+                        page: (view.width * read::PX_TO_PT, view.height * read::PX_TO_PT),
+                        margin: 0.0,
+                    };
+                }
+                None => {
+                    if defect.is_none() {
+                        warnings.push(ArchiveWarning::FixedLayoutWithoutViewport {
+                            item: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
         chapters.push(Chapter {
+            frame,
+            fixed,
             name,
             path,
             defect,
@@ -845,23 +905,52 @@ pub fn synthesise(
 
     // ---- pass 3: lay every chapter out -------------------------------------
     let metrics = BookMetrics::with(&faces);
+    let mut clipped: Vec<(String, usize)> = Vec::new();
     for chapter in &mut chapters {
         let Some(reading) = &chapter.reading else {
             continue;
         };
+        // The box a chapter is laid into is its **own**, which for a
+        // reflowable one is the caller's and for a pre-paginated one is its
+        // §8.2.2.6 viewport.
+        let (chapter_width, chapter_height) = chapter.frame.content_px();
+        let chapter_options = LayoutOptions::new(chapter_width, chapter_height);
+        let chapter_options = if chapter.fixed {
+            chapter_options
+        } else {
+            options
+        };
         match layout_with(
             &reading.tree,
             &metrics,
-            &options,
+            &chapter_options,
             &limits.layout,
             &mut layout_budget,
         ) {
             Err(_) => chapter.defect = Some(SpineDefect::NotFragmented),
-            Ok(laid) => {
-                for (warning, count) in laid.warnings {
+            Ok(mut laid) => {
+                for (warning, count) in laid.warnings.drain(..) {
                     match layout_warnings.iter_mut().find(|(w, _)| *w == warning) {
                         Some(slot) => slot.1 += count,
                         None => layout_warnings.push((warning, count)),
+                    }
+                }
+                if chapter.fixed && laid.pages.len() > 1 {
+                    // EPUB RS 3.3 §8.1.2: the viewport is the initial
+                    // containing block and what falls outside it is clipped.
+                    // Everything that would have been a second page is outside
+                    // it, so it is dropped here -- and counted, because those
+                    // characters are gone from `Page::text()` as well as from
+                    // the picture.
+                    let lost: usize = laid.pages[1..]
+                        .iter()
+                        .flat_map(|page| page.runs.iter())
+                        .filter(|run| !run.generated)
+                        .map(|run| run.text.chars().count())
+                        .sum();
+                    laid.pages.truncate(1);
+                    if lost > 0 {
+                        clipped.push((chapter.name.clone(), lost));
                     }
                 }
                 chapter.pages = laid.pages;
@@ -898,6 +987,12 @@ pub fn synthesise(
             count: *count,
         });
     }
+    for (item, characters) in &clipped {
+        warnings.push(ArchiveWarning::FixedLayoutContentClipped {
+            item: item.clone(),
+            characters: *characters,
+        });
+    }
     if fonts.unrepresented() > 0 {
         warnings.push(ArchiveWarning::UnrepresentedCharacters {
             characters: fonts.unrepresented(),
@@ -923,7 +1018,7 @@ pub fn synthesise(
     }
     fonts.register(&mut builder);
 
-    let links = cross_references(&chapters, &frame, limits, total_pages);
+    let links = cross_references(&chapters, limits, total_pages);
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
     for chapter in &chapters {
@@ -943,7 +1038,8 @@ pub fn synthesise(
         // content is an SVG, which four of the six committed books have — still
         // gets its page, for the same reason a placeholder does.
         if chapter.pages.is_empty() {
-            builder.add_page(width, height, |_| {});
+            let (page_width, page_height) = chapter.frame.page;
+            builder.add_page(page_width, page_height, |_| {});
             pages.push(PageOrigin {
                 name: chapter.name.clone(),
                 defect: None,
@@ -953,8 +1049,22 @@ pub fn synthesise(
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
             let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
-            builder.add_page(width, height, |page| {
-                draw_page(page, laid, &frame, &fonts);
+            let chapter_frame = chapter.frame;
+            let (page_width, page_height) = chapter_frame.page;
+            let clip = chapter.fixed;
+            builder.add_page(page_width, page_height, |page| {
+                // EPUB RS 3.3 §8.1.2's initial containing block, as a clip
+                // path. Pagination has already dropped whatever fell below it;
+                // this is what stops a box that is **wider** than the viewport
+                // from being drawn beside the page it belongs to, which
+                // pagination cannot see.
+                if clip {
+                    page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
+                }
+                draw_page(page, laid, &chapter_frame, &fonts);
+                if clip {
+                    page.raw(b"Q");
+                }
                 for (rect, target) in on_page {
                     page.link(rect.0, rect.1, rect.2, rect.3, target);
                 }
@@ -1072,12 +1182,7 @@ type PageLinks = Vec<((f64, f64, f64, f64), Target)>;
 ///
 /// Indexed by page, so the writer can hand one page its own annotations
 /// without searching the whole book for them.
-fn cross_references(
-    chapters: &[Chapter],
-    frame: &Frame,
-    limits: &Limits,
-    total_pages: usize,
-) -> Vec<PageLinks> {
+fn cross_references(chapters: &[Chapter], limits: &Limits, total_pages: usize) -> Vec<PageLinks> {
     let mut out: Vec<PageLinks> = vec![Vec::new(); total_pages];
     for chapter in chapters {
         let Some(reading) = &chapter.reading else {
@@ -1109,7 +1214,7 @@ fn cross_references(
                         continue;
                     }
                     if let Some(slot) = out.get_mut(at) {
-                        slot.push((run_rect(run, frame), target.clone()));
+                        slot.push((run_rect(run, &chapter.frame), target.clone()));
                     }
                 }
             }

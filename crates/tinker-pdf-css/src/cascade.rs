@@ -180,6 +180,28 @@ pub struct ComputedStyle {
     pub border_spacing: BorderSpacing,
     /// `table-layout`
     pub table_layout: TableLayout,
+    /// `flex-direction`, `css-flexbox-1` §5.1.
+    pub flex_direction: FlexDirection,
+    /// `flex-wrap`, §5.2.
+    pub flex_wrap: FlexWrap,
+    /// `flex-grow`, §7.1.
+    pub flex_grow: f64,
+    /// `flex-shrink`, §7.1.
+    pub flex_shrink: f64,
+    /// `flex-basis`, §7.2.3, as a computed size.
+    pub flex_basis: Size,
+    /// `justify-content`, §8.2.
+    pub justify_content: JustifyContent,
+    /// `align-items`, §8.3.
+    pub align_items: AlignItems,
+    /// `align-self`, §8.3, **unresolved**: `auto` is still `auto` here,
+    /// because resolving it needs the parent's `align-items` and this struct
+    /// does not know its parent.
+    pub align_self: AlignSelf,
+    /// `align-content`, §8.4.
+    pub align_content: AlignContent,
+    /// `order`, §5.4.
+    pub order: i32,
     // <<< the layout proof injects a field directly above this line >>>
 }
 
@@ -233,6 +255,20 @@ impl ComputedStyle {
             border_collapse: BorderCollapse::Separate,
             border_spacing: BorderSpacing::ZERO,
             table_layout: TableLayout::Auto,
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::NoWrap,
+            // §7.1's own initial values, and the pair is what makes the
+            // default behaviour "do not grow, do shrink": an item with no
+            // `flex` declaration on it keeps its content size when there is
+            // room and gives some back when there is not.
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: Size::Auto,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
+            align_self: AlignSelf::Auto,
+            align_content: AlignContent::Stretch,
+            order: 0,
             // <<< the layout proof's initial value goes here >>>
         }
     }
@@ -399,6 +435,33 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
             };
         }
         Property::TableLayout(value) => style.table_layout = *value,
+        Property::FlexDirection(value) => style.flex_direction = *value,
+        Property::FlexWrap(value) => style.flex_wrap = *value,
+        // The parser already refuses a negative factor as malformed, so this
+        // clamp is unreachable from CSS and is here for the reason
+        // `border-spacing`'s is: a computed style is not the place to discover
+        // that a grammar changed.
+        Property::FlexGrow(value) => style.flex_grow = value.max(0.0),
+        Property::FlexShrink(value) => style.flex_shrink = value.max(0.0),
+        // §7.2.3: *"a negative value is invalid"*, and a percentage stays a
+        // percentage — it is resolved against the containing block's **main
+        // size**, which the cascade does not know and layout does.
+        Property::FlexBasis(value) => {
+            style.flex_basis = match value {
+                SpecifiedSize::Auto => Size::Auto,
+                SpecifiedSize::Length(len) => match len.compute(font_size, root_font_size) {
+                    LengthPercentage::Px(px) => Size::Length(LengthPercentage::Px(px.max(0.0))),
+                    LengthPercentage::Percent(percent) => {
+                        Size::Length(LengthPercentage::Percent(percent.max(0.0)))
+                    }
+                },
+            }
+        }
+        Property::JustifyContent(value) => style.justify_content = *value,
+        Property::AlignItems(value) => style.align_items = *value,
+        Property::AlignSelf(value) => style.align_self = *value,
+        Property::AlignContent(value) => style.align_content = *value,
+        Property::Order(value) => style.order = *value,
         // <<< the compile-time proof's fourth arm goes here >>>
     }
 }

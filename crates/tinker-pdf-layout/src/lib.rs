@@ -11,7 +11,7 @@
 //! element tree lives in the facade, and measurement arrives through
 //! [`metrics::Metrics`], five methods wide.
 //!
-//! # The six things worth knowing before reading further
+//! # The seven things worth knowing before reading further
 //!
 //! **Margin collapsing has three cases and they are not one rule.** Adjacent
 //! siblings is the one everybody implements. Parent-and-first-child and a box
@@ -51,6 +51,17 @@
 //! constraint binds, which is why the two intermediates are asserted as well as
 //! the answer. §17.6.2.1's conflict resolution is an *ordered* set of five
 //! rules, not a preference.
+//!
+//! **A flex container's free space is distributed twice, by two different
+//! rules, and the second distribution is a loop.** `css-flexbox-1` §9.7 grows
+//! in proportion to `flex-grow` and shrinks in proportion to `flex-shrink`
+//! **times the flex base size**, which is the whole reason the two are separate
+//! properties and not a sign; and it freezes the items that violated a minimum
+//! and *redistributes* rather than clamping once. Each of §9's steps that has
+//! an answer of its own is a function in [`flex`] with a fixture that fails
+//! when that function alone is wrong. `order` moves the boxes and not the
+//! words, so the items are laid out in document order and positioned in
+//! order-modified order — [`TextRun::order`]'s third customer.
 //!
 //! **A computed property with no consumer here does not compile.**
 //! [`style::consume`] destructures `ComputedStyle` with no `..`, which is gap
@@ -96,6 +107,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod flex;
 pub mod floats;
 pub mod flow;
 pub mod fragment;
@@ -691,6 +703,30 @@ pub enum Warning {
     /// clamped to it. CSS 2.2 §17.5: *"the cell is clamped so that it does not
     /// extend beyond the last row"*.
     RowspanPastTheRowGroup,
+    /// `display: inline-flex`, laid out as a **block-level** flex container.
+    ///
+    /// `css-flexbox-1` §3 makes it inline-level, and this build has no
+    /// inline-level box that is not text. The two available answers are to set
+    /// it as inline text, which throws the flex layout away entirely, or to lay
+    /// it out as a block-level flex container, which gets the box's *outside*
+    /// wrong and everything inside it right. It takes the second.
+    ///
+    /// **Distinct from [`Warning::InlineBlockAsInline`], which took the other
+    /// answer**, and the two disagree for a reason rather than by accident: an
+    /// `inline-block` holding a sentence set as inline text is very nearly
+    /// right, and a flex container set as inline text is a column of words with
+    /// no layout in it at all.
+    InlineFlexAsBlock,
+    /// A flex line taller than a whole page, drawn past the page bottom.
+    ///
+    /// **The same staged half as [`Warning::TableRowTallerThanPage`] and for
+    /// the same reason.** `css-flexbox-1` §11 fragments a flex container
+    /// between its lines in a row container and inside a line in a column one;
+    /// a line taller than the page has no break position inside it here, and
+    /// this build draws it anyway rather than dropping it. A `column` container
+    /// is one line whatever its length, so this is the warning a long
+    /// `flex-direction: column` raises.
+    FlexLineTallerThanPage,
     /// `display: table-column` or `table-column-group` carrying a `width`,
     /// which this build reads, beside anything else on it, which it does not:
     /// a column box's background and borders are §17.5.1's two rendering
@@ -723,6 +759,12 @@ impl fmt::Display for Warning {
             }
             Warning::ColumnBoxNotPainted => {
                 f.write_str("a table column box's background and borders are not painted")
+            }
+            Warning::InlineFlexAsBlock => {
+                f.write_str("display: inline-flex is laid out as a block-level flex container")
+            }
+            Warning::FlexLineTallerThanPage => {
+                f.write_str("a flex line is taller than a page and overflows it")
             }
         }
     }

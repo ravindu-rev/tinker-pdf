@@ -166,6 +166,21 @@ pub enum MarkupDefect {
     Empty,
 }
 
+/// EPUB 3.3 §8.2.2.6's viewport dimensions, in CSS pixels.
+///
+/// **This is where a fixed-layout content document's page size comes from**,
+/// and it is in the *content document* rather than in the package: §8.2.2.6
+/// makes the `<meta name="viewport">` element the one place a pre-paginated
+/// XHTML document states how big it is, so two spine items of one book may be
+/// two different sizes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    /// The `width` of the initial containing block, in CSS pixels.
+    pub width: f64,
+    /// The `height`.
+    pub height: f64,
+}
+
 /// A content document as an element tree.
 #[derive(Clone, Debug, Default)]
 pub struct Dom {
@@ -206,6 +221,49 @@ impl Dom {
         self.nodes
             .iter()
             .position(|node| node.id.as_deref() == Some(id))
+    }
+
+    /// §8.2.2.6's viewport dimensions, or `None`.
+    ///
+    /// `None` covers three different documents and the caller cannot act on
+    /// the difference, so they are one answer: no `<meta name="viewport">` at
+    /// all, one whose `content` names neither dimension, and one that says
+    /// `width=device-width` — which is valid HTML and is **not** valid here,
+    /// because §8.2.2.6's grammar is two numbers and a reading system with no
+    /// device cannot resolve the keyword into one.
+    ///
+    /// The first `<meta name="viewport">` in document order wins, which is what
+    /// a browser does with two of them.
+    #[must_use]
+    pub fn viewport(&self) -> Option<Viewport> {
+        let meta = self.nodes.iter().find(|node| {
+            node.is_html()
+                && node.name == "meta"
+                && node
+                    .attr("name")
+                    .is_some_and(|name| name.eq_ignore_ascii_case("viewport"))
+        })?;
+        let content = meta.attr("content")?;
+        let mut width = None;
+        let mut height = None;
+        for pair in content.split(',') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let value: f64 = value.trim().parse().ok()?;
+            if !value.is_finite() || value <= 0.0 {
+                return None;
+            }
+            match key.trim().to_ascii_lowercase().as_str() {
+                "width" => width = Some(value),
+                "height" => height = Some(value),
+                _ => {}
+            }
+        }
+        Some(Viewport {
+            width: width?,
+            height: height?,
+        })
     }
 
     /// The `<body>`, or the document element when there is none.

@@ -685,6 +685,37 @@ pub enum ArchiveWarning {
         /// How many rules met this.
         rules: usize,
     },
+    /// A spine item is EPUB 3.3 §8.2's `pre-paginated` and states no
+    /// §8.2.2.6 viewport, so its page is the caller's box (gap 31, milestone
+    /// 12).
+    ///
+    /// **The spine rule still holds** — the item is one page, which is EPUB RS
+    /// 3.3 §8.1's *"exactly one page per spine itemref"* — and what is missing
+    /// is the *size* of that page. A fixed-layout document laid into a page it
+    /// was not designed for is a picture of the right content at the wrong
+    /// scale, which looks like a rendering bug rather than like a book with no
+    /// viewport in it.
+    FixedLayoutWithoutViewport {
+        /// The container path of the content document.
+        item: String,
+    },
+    /// A pre-paginated content document's content did not fit its initial
+    /// containing block and was **clipped** (gap 31, milestone 12).
+    ///
+    /// EPUB RS 3.3 §8.1.2 makes the viewport the initial containing block and
+    /// clips what falls outside it, and §8.1 forbids the second page a
+    /// reflowable document would get. So the characters are gone from the page
+    /// *and* from `Page::text()`, which is exactly the shape
+    /// [`ArchiveWarning::UnrepresentedCharacters`] has and the reason this is
+    /// counted in characters rather than reported as a flag: text conservation
+    /// is an equality, and a book that lost text without saying so would be a
+    /// build whose own harness had to catch it.
+    FixedLayoutContentClipped {
+        /// The container path of the content document.
+        item: String,
+        /// How many characters did not fit.
+        characters: usize,
+    },
     /// The book has a table of contents and this build could not write it as
     /// an outline (gap 31, milestone 8).
     ///

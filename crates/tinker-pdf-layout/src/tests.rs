@@ -11,11 +11,13 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, BoxSizing, Clear, Color, Display, Float, LengthPercentage, LineHeight,
-    ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size,
-    TextAlign, Visibility, WhiteSpace,
+    AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, Display,
+    FlexDirection, FlexWrap, Float, JustifyContent, LengthPercentage, LineHeight, ListStyleType,
+    MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TextAlign,
+    Visibility, WhiteSpace,
 };
 
+use crate::flex;
 use crate::flow::marker_text;
 use crate::metrics::FixedPitch;
 use crate::table;
@@ -3334,4 +3336,1068 @@ fn a_row_group_paints_under_its_cells() {
     assert_eq!(boxes.len(), 2);
     assert_eq!(boxes[0].background.r, 1, "the group is not painted first");
     assert_eq!(boxes[1].background.r, 2);
+}
+
+// ---- `css-flexbox-1`, milestone 12 -----------------------------------------
+
+/// A flex container at a stated direction and wrap, with everything else at its
+/// initial value.
+fn flex_container(direction: FlexDirection, wrap: FlexWrap) -> ComputedStyle {
+    let mut style = base();
+    style.display = Display::Flex;
+    style.flex_direction = direction;
+    style.flex_wrap = wrap;
+    style
+}
+
+/// One flex item at a stated `flex` shorthand, holding one word.
+fn flex_item(body: &str, grow: f64, shrink: f64, basis: Size) -> BoxNode {
+    let mut style = block();
+    style.flex_grow = grow;
+    style.flex_shrink = shrink;
+    style.flex_basis = basis;
+    BoxNode::element(style, vec![text(body)])
+}
+
+fn basis(value: f64) -> Size {
+    Size::Length(LengthPercentage::Px(value))
+}
+
+/// The left edge of every run on a page, which is where a row container put its
+/// items.
+fn lefts(laid: &Layout) -> Vec<f64> {
+    xs(laid, 0)
+}
+
+/// `display: flex` lays its children out **beside** one another, which is the
+/// difference between a flex container and every other block container in this
+/// crate.
+#[test]
+fn a_flex_container_puts_its_items_on_one_line() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    let y = baselines(&laid, 0);
+    assert_eq!(x.len(), 2, "{x:?}");
+    assert!(x[1] > x[0], "the second item is beside the first: {x:?}");
+    assert!(close(y[0], y[1]), "and on the same line: {y:?}");
+    assert_eq!(laid.text(), "aabb");
+}
+
+/// `display: inline-flex` is the same layout inside and a **warning** about the
+/// outside, `css-flexbox-1` §3.
+///
+/// Two assertions and not one: the layout is a flex layout, *and* the fact that
+/// this build makes the box block-level is said out loud. A build that laid it
+/// out as a flex container and said nothing would be a silent partial
+/// implementation of the kind this whole plan exists to prevent.
+#[test]
+fn inline_flex_lays_out_as_flex_and_says_it_is_block_level() {
+    let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+    style.display = Display::InlineFlex;
+    let tree = BoxNode::element(
+        style,
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    assert!(x[1] > x[0], "it is still a flex layout: {x:?}");
+    assert_eq!(laid.warnings, vec![(Warning::InlineFlexAsBlock, 1)]);
+}
+
+/// `flex-direction: column` stacks the items and `row` sets them side by side,
+/// and the same fixture says which is which.
+#[test]
+fn flex_direction_decides_which_axis_is_the_main_one() {
+    let items = || {
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ]
+    };
+    let across = run(
+        &BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            items(),
+        ),
+        200.0,
+        400.0,
+    );
+    let down = run(
+        &BoxNode::element(
+            flex_container(FlexDirection::Column, FlexWrap::NoWrap),
+            items(),
+        ),
+        200.0,
+        400.0,
+    );
+    let (ax, ay) = (lefts(&across), baselines(&across, 0));
+    let (dx, dy) = (lefts(&down), baselines(&down, 0));
+    assert!(ax[1] > ax[0] && close(ay[0], ay[1]), "row: {ax:?} {ay:?}");
+    assert!(
+        close(dx[0], dx[1]) && dy[1] > dy[0],
+        "column: {dx:?} {dy:?}"
+    );
+}
+
+/// `row-reverse` is not `row` read backwards by the caller: main-start is the
+/// **right** edge, so the first item in the document is the rightmost one.
+#[test]
+fn row_reverse_puts_the_first_item_last() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::RowReverse, FlexWrap::NoWrap),
+        vec![
+            flex_item("aa", 0.0, 1.0, basis(50.0)),
+            flex_item("bb", 0.0, 1.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    assert!(x[0] > x[1], "the first item is on the right: {x:?}");
+    assert!(close(x[0], 150.0) && close(x[1], 100.0), "{x:?}");
+    // And the text still reads in document order, which is §5.1's own limit:
+    // the boxes move and the words do not.
+    assert_eq!(laid.text(), "aabb");
+}
+
+/// `flex-wrap: nowrap` overflows and `wrap` starts a second line, over the same
+/// three items that do not fit.
+#[test]
+fn flex_wrap_is_the_difference_between_overflowing_and_a_second_line() {
+    let items = || {
+        vec![
+            flex_item("a", 0.0, 0.0, basis(80.0)),
+            flex_item("b", 0.0, 0.0, basis(80.0)),
+            flex_item("c", 0.0, 0.0, basis(80.0)),
+        ]
+    };
+    let one = run(
+        &BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            items(),
+        ),
+        200.0,
+        400.0,
+    );
+    let two = run(
+        &BoxNode::element(flex_container(FlexDirection::Row, FlexWrap::Wrap), items()),
+        200.0,
+        400.0,
+    );
+    let (ox, oy) = (lefts(&one), baselines(&one, 0));
+    let (wx, wy) = (lefts(&two), baselines(&two, 0));
+    assert!(
+        close(oy[0], oy[1]) && close(oy[1], oy[2]) && close(ox[2], 160.0),
+        "nowrap keeps one line and overflows: {ox:?} {oy:?}"
+    );
+    assert!(
+        close(wy[0], wy[1]) && wy[2] > wy[1] && close(wx[2], 0.0),
+        "wrap starts a second line: {wx:?} {wy:?}"
+    );
+}
+
+/// `wrap-reverse` stacks the lines the other way, which is a different fact
+/// from wrapping at all.
+#[test]
+fn wrap_reverse_stacks_the_lines_upwards() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::WrapReverse),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(120.0)),
+            flex_item("b", 0.0, 0.0, basis(120.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let y = baselines(&laid, 0);
+    assert!(y[0] > y[1], "the first line is below the second: {y:?}");
+    assert_eq!(laid.text(), "ab");
+}
+
+/// `flex-grow` shares the free space out in proportion to the factor.
+#[test]
+fn flex_grow_shares_the_free_space_in_proportion() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            flex_item("a", 1.0, 1.0, basis(0.0)),
+            flex_item("b", 3.0, 1.0, basis(0.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    // 200 in the ratio 1:3 is 50 and 150, so the second item starts at 50.
+    assert!(close(x[0], 0.0) && close(x[1], 50.0), "{x:?}");
+}
+
+/// `flex-shrink` takes the overflow back in proportion to the factor **times
+/// the base size**, which is not the same as in proportion to the factor.
+///
+/// The two answers differ here on purpose: one item of 300 and one of 100 in a
+/// container of 200 overflow by 200. Scaled by the base size the shares are
+/// 3:1, so the wide one loses 150 and the narrow one 50 — 150 and 50. In
+/// proportion to the raw factor they would lose 100 each, which is 200 and 0
+/// and puts the narrow item at zero width.
+#[test]
+fn flex_shrink_is_scaled_by_the_base_size() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            flex_item("a", 0.0, 1.0, basis(300.0)),
+            flex_item("b", 0.0, 1.0, basis(100.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    assert!(close(x[1], 150.0), "the second item starts at 150: {x:?}");
+}
+
+/// `flex-basis` is read **before** `width`, which is the whole point of the
+/// property.
+#[test]
+fn flex_basis_beats_the_width_property() {
+    let mut with_width = block();
+    with_width.width = Size::Length(LengthPercentage::Px(150.0));
+    with_width.flex_basis = basis(50.0);
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            BoxNode::element(with_width, vec![text("a")]),
+            flex_item("b", 0.0, 0.0, basis(20.0)),
+        ],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    let x = lefts(&laid);
+    assert!(
+        close(x[1], 50.0),
+        "the first item is 50 wide and not 150: {x:?}"
+    );
+}
+
+/// `justify-content` moves the items along the **main** axis, which a column of
+/// y-offsets cannot see.
+#[test]
+fn justify_content_puts_the_line_where_it_says() {
+    let at = |kind| {
+        let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+        style.justify_content = kind;
+        let laid = run(
+            &BoxNode::element(
+                style,
+                vec![
+                    flex_item("a", 0.0, 0.0, basis(50.0)),
+                    flex_item("b", 0.0, 0.0, basis(50.0)),
+                ],
+            ),
+            200.0,
+            400.0,
+        );
+        lefts(&laid)
+    };
+    let start = at(JustifyContent::FlexStart);
+    assert!(close(start[0], 0.0) && close(start[1], 50.0), "{start:?}");
+    let end = at(JustifyContent::FlexEnd);
+    assert!(close(end[0], 100.0) && close(end[1], 150.0), "{end:?}");
+    let centre = at(JustifyContent::Center);
+    assert!(
+        close(centre[0], 50.0) && close(centre[1], 100.0),
+        "{centre:?}"
+    );
+    let between = at(JustifyContent::SpaceBetween);
+    assert!(
+        close(between[0], 0.0) && close(between[1], 150.0),
+        "{between:?}"
+    );
+    let around = at(JustifyContent::SpaceAround);
+    assert!(
+        close(around[0], 25.0) && close(around[1], 125.0),
+        "{around:?}"
+    );
+    let evenly = at(JustifyContent::SpaceEvenly);
+    assert!(
+        close(evenly[0], 100.0 / 3.0) && close(evenly[1], 200.0 / 3.0 + 50.0),
+        "{evenly:?}"
+    );
+}
+
+/// `align-items` moves every item along the **cross** axis, and `stretch` moves
+/// none of them because it resizes them instead.
+#[test]
+fn align_items_puts_a_short_item_where_it_says() {
+    let at = |kind| {
+        let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+        style.align_items = kind;
+        let mut tall = block();
+        tall.height = Size::Length(LengthPercentage::Px(60.0));
+        let laid = run(
+            &BoxNode::element(
+                style,
+                vec![
+                    BoxNode::element(tall, vec![text("a")]),
+                    flex_item("b", 0.0, 0.0, basis(50.0)),
+                ],
+            ),
+            200.0,
+            400.0,
+        );
+        baselines(&laid, 0)
+    };
+    let start = at(AlignItems::FlexStart);
+    assert!(close(start[0], start[1]), "both at the top: {start:?}");
+    let end = at(AlignItems::FlexEnd);
+    assert!(end[1] > end[0], "the short one at the bottom: {end:?}");
+    let centre = at(AlignItems::Center);
+    let (top, bottom) = (at(AlignItems::FlexStart), at(AlignItems::FlexEnd));
+    assert!(
+        centre[1] > top[1] && centre[1] < bottom[1],
+        "and between the two: {centre:?}"
+    );
+}
+
+/// `align-self` is one item's answer and overrides the container's, which is a
+/// different fact from `align-items` working at all.
+#[test]
+fn align_self_overrides_the_containers_align_items() {
+    let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+    style.align_items = AlignItems::FlexStart;
+    let mut tall = block();
+    tall.height = Size::Length(LengthPercentage::Px(60.0));
+    let mut moved = block();
+    moved.flex_basis = basis(50.0);
+    moved.align_self = AlignSelf::FlexEnd;
+    let tree = BoxNode::element(
+        style,
+        vec![
+            BoxNode::element(tall, vec![text("a")]),
+            BoxNode::element(moved, vec![text("b")]),
+            flex_item("c", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let y = baselines(&laid, 0);
+    assert!(
+        y[1] > y[0] && close(y[2], y[0]),
+        "only the item that asked for it moved: {y:?}"
+    );
+}
+
+/// `align-content` moves the **lines** and has no effect on a single-line
+/// container, which is §8.4's own first sentence.
+#[test]
+fn align_content_moves_the_lines_and_only_when_there_are_two() {
+    let at = |kind, wrap| {
+        let mut style = flex_container(FlexDirection::Row, wrap);
+        style.align_content = kind;
+        style.height = Size::Length(LengthPercentage::Px(200.0));
+        let laid = run(
+            &BoxNode::element(
+                style,
+                vec![
+                    flex_item("a", 0.0, 0.0, basis(120.0)),
+                    flex_item("b", 0.0, 0.0, basis(120.0)),
+                ],
+            ),
+            200.0,
+            400.0,
+        );
+        baselines(&laid, 0)
+    };
+    let start = at(AlignContent::FlexStart, FlexWrap::Wrap);
+    let end = at(AlignContent::FlexEnd, FlexWrap::Wrap);
+    assert!(
+        end[0] > start[0],
+        "two lines move to the bottom: {start:?} {end:?}"
+    );
+    // And the same declaration over one line moves nothing at all.
+    let one_start = at(AlignContent::FlexStart, FlexWrap::NoWrap);
+    let one_end = at(AlignContent::FlexEnd, FlexWrap::NoWrap);
+    assert_eq!(
+        one_start, one_end,
+        "align-content has no effect on a single-line container"
+    );
+}
+
+/// `order` moves the boxes and does **not** move the words, which is §5.4's own
+/// note and the reason text conservation survives it.
+#[test]
+fn order_moves_the_boxes_and_not_the_reading_order() {
+    let mut second = block();
+    second.flex_basis = basis(50.0);
+    second.order = -1;
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            flex_item("aa", 0.0, 0.0, basis(50.0)),
+            BoxNode::element(second, vec![text("bb")]),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let runs = &laid.pages[0].runs;
+    let placed: Vec<(f64, &str)> = runs.iter().map(|r| (r.x, r.text.as_str())).collect();
+    assert!(
+        placed.iter().find(|(_, t)| *t == "bb").expect("bb").0 < 1e-9,
+        "the ordered item is first on the line: {placed:?}"
+    );
+    assert_eq!(
+        laid.text(),
+        "aabb",
+        "and the words still read in document order"
+    );
+}
+
+/// §9.7's loop, rather than one division: an item that cannot shrink past its
+/// content gives the space back and the **other** item absorbs it.
+#[test]
+fn the_flexible_length_resolution_redistributes_after_a_minimum_bites() {
+    let items = [
+        flex::Item {
+            grow: 0.0,
+            shrink: 1.0,
+            base: 100.0,
+            hypothetical: 100.0,
+            min: 90.0,
+            extra: 0.0,
+        },
+        flex::Item {
+            grow: 0.0,
+            shrink: 1.0,
+            base: 100.0,
+            hypothetical: 100.0,
+            min: 0.0,
+            extra: 0.0,
+        },
+    ];
+    let used = flex::resolve(&items, 100.0);
+    // One pass would give 50 and 50, then clamp the first to 90 and stop --
+    // 140 in a container of 100. The loop freezes the first at 90 and gives the
+    // rest of the deficit to the second.
+    assert!(close(used[0], 90.0) && close(used[1], 10.0), "{used:?}");
+}
+
+/// §9.7 step 4b's `< 1` clause: flex factors summing to less than one
+/// distribute only that fraction of the free space.
+#[test]
+fn flex_factors_below_one_leave_the_rest_of_the_space_empty() {
+    let items = [flex::Item {
+        grow: 0.5,
+        shrink: 1.0,
+        base: 0.0,
+        hypothetical: 0.0,
+        min: 0.0,
+        extra: 0.0,
+    }];
+    let used = flex::resolve(&items, 200.0);
+    assert!(
+        close(used[0], 100.0),
+        "half the room and not all of it: {used:?}"
+    );
+}
+
+/// §9.3's own clause: a line takes at least one item however wide it is.
+#[test]
+fn a_flex_line_always_takes_one_item() {
+    let items = [
+        flex::Item {
+            grow: 0.0,
+            shrink: 0.0,
+            base: 500.0,
+            hypothetical: 500.0,
+            min: 0.0,
+            extra: 0.0,
+        },
+        flex::Item {
+            grow: 0.0,
+            shrink: 0.0,
+            base: 500.0,
+            hypothetical: 500.0,
+            min: 0.0,
+            extra: 0.0,
+        },
+    ];
+    assert_eq!(
+        flex::lines(&items, 100.0, FlexWrap::Wrap),
+        vec![(0, 1), (1, 2)]
+    );
+    assert_eq!(
+        flex::lines(&items, 100.0, FlexWrap::NoWrap),
+        vec![(0, 2)],
+        "and `nowrap` is one line whatever it costs"
+    );
+}
+
+/// §5.4's stability: two items in the same ordinal group keep document order.
+#[test]
+fn the_order_sort_is_stable() {
+    assert_eq!(flex::ordered(&[2, 1, 2, 1]), vec![1, 3, 0, 2]);
+}
+
+/// A flex item's text is conserved through wrapping, ordering and alignment,
+/// which is the invariant a box-moving milestone is most likely to break.
+#[test]
+fn a_flex_container_conserves_its_text() {
+    let mut style = flex_container(FlexDirection::RowReverse, FlexWrap::Wrap);
+    style.justify_content = JustifyContent::SpaceBetween;
+    style.align_items = AlignItems::Center;
+    let mut ordered = block();
+    ordered.order = -2;
+    ordered.flex_basis = basis(90.0);
+    let tree = BoxNode::element(
+        style,
+        vec![
+            flex_item("one", 0.0, 0.0, basis(90.0)),
+            BoxNode::element(ordered, vec![text("two")]),
+            flex_item("three", 0.0, 0.0, basis(90.0)),
+            flex_item("four", 0.0, 0.0, basis(90.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    // Each item is its own block, so the words meet with nothing between them:
+    // what is asserted is that every character survived reversing the
+    // direction, wrapping the line, reordering one item and centring them all.
+    assert_eq!(laid.text(), "onetwothreefour");
+}
+
+/// A flex container taller than a page is drawn where it is and **says so**,
+/// which is the same staged half a table row has.
+#[test]
+fn a_flex_line_taller_than_a_page_is_named() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Column, FlexWrap::NoWrap),
+        vec![
+            para("a"),
+            para("b"),
+            para("c"),
+            para("d"),
+            para("e"),
+            para("f"),
+        ],
+    );
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(
+        laid.warnings
+            .contains(&(Warning::FlexLineTallerThanPage, 1)),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "abcdef");
+}
+
+/// A row container of several lines **can** be broken between two of them,
+/// which is the other half of the sentence above.
+#[test]
+fn a_row_container_breaks_between_its_lines() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::Wrap),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(120.0)),
+            flex_item("b", 0.0, 0.0, basis(120.0)),
+            flex_item("c", 0.0, 0.0, basis(120.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 26.0);
+    assert!(laid.pages.len() > 1, "one page holds every line");
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::FlexLineTallerThanPage),
+        "a line that fits is not a line that overflows: {:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "abc");
+}
+
+/// §4: a run of child text becomes an anonymous flex item, and a run that is
+/// all white space does not.
+#[test]
+fn a_run_of_child_text_is_an_anonymous_flex_item() {
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![text("aa"), flex_item("bb", 0.0, 0.0, basis(50.0))],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    assert_eq!(x.len(), 2, "the bare text got a box of its own: {x:?}");
+    assert!(x[1] > x[0], "{x:?}");
+    assert_eq!(laid.text(), "aabb");
+
+    // And the white space every producer writes between two elements does not
+    // become a third item.
+    let spaced = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            flex_item("aa", 0.0, 0.0, basis(50.0)),
+            text("\n  "),
+            flex_item("bb", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&spaced, 200.0, 400.0);
+    assert_eq!(lefts(&laid).len(), 2, "the white space is not an item");
+}
+
+/// §3: `float` does not apply to a flex item, and the failure it prevents is a
+/// figure taken out of the line and put against the container's edge.
+#[test]
+fn a_float_declaration_on_a_flex_item_does_nothing() {
+    let mut floated = block();
+    floated.float = Float::Right;
+    floated.flex_basis = basis(50.0);
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(50.0)),
+            BoxNode::element(floated, vec![text("b")]),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    assert!(
+        close(x[1], 50.0),
+        "the item is where §9 put it and not where §9.5 would: {x:?}"
+    );
+}
+
+/// §9.4 step 11: `stretch` makes an item as tall as its line, which is a size
+/// and not a position — so it is the item's painted box that says so.
+#[test]
+fn stretch_makes_an_item_as_tall_as_its_line() {
+    let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+    style.align_items = AlignItems::Stretch;
+    let mut tall = block();
+    tall.height = Size::Length(LengthPercentage::Px(60.0));
+    let mut short = block();
+    short.flex_basis = basis(50.0);
+    short.background_color = Color {
+        r: 9,
+        g: 9,
+        b: 9,
+        a: 255,
+    };
+    let tree = BoxNode::element(
+        style,
+        vec![
+            BoxNode::element(tall, vec![text("a")]),
+            BoxNode::element(short, vec![text("b")]),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let painted = laid.pages[0]
+        .boxes
+        .iter()
+        .find(|b| b.background.r == 9)
+        .expect("the short item is painted");
+    assert!(
+        close(painted.height, 60.0),
+        "the short item's box is the line's height: {painted:?}"
+    );
+}
+
+// ---- what the injection matrix asked for -----------------------------------
+
+/// `css-align-3` §9.3's **fallback alignment**: with negative free space,
+/// `space-between` behaves as `flex-start` and the other two as `center`.
+///
+/// The matrix asked for this. Every `justify-content` fixture above has room to
+/// spare, and a build with no fallback pulls an overflowing line apart
+/// *backwards* — `free / (count - 1)` is negative, so the second item is drawn
+/// to the **left** of the first and the line reads in reverse.
+#[test]
+fn an_overflowing_line_falls_back_to_a_different_alignment() {
+    let at = |kind| {
+        let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+        style.justify_content = kind;
+        let laid = run(
+            &BoxNode::element(
+                style,
+                vec![
+                    flex_item("a", 0.0, 0.0, basis(150.0)),
+                    flex_item("b", 0.0, 0.0, basis(150.0)),
+                ],
+            ),
+            200.0,
+            400.0,
+        );
+        lefts(&laid)
+    };
+    let between = at(JustifyContent::SpaceBetween);
+    assert!(
+        close(between[0], 0.0) && close(between[1], 150.0),
+        "space-between falls back to flex-start: {between:?}"
+    );
+    let around = at(JustifyContent::SpaceAround);
+    assert!(
+        close(around[0], -50.0) && close(around[1], 100.0),
+        "and space-around to center, which overflows both ends equally: \
+         {around:?}"
+    );
+    let evenly = at(JustifyContent::SpaceEvenly);
+    assert_eq!(around, evenly, "space-evenly falls back the same way");
+}
+
+/// `css-flexbox-1` §8.3's `baseline`: the items' **first baselines** are
+/// aligned, which is not the same as their tops and not the same as their
+/// centres.
+///
+/// The matrix asked for this too. Two items whose first lines sit at different
+/// heights inside their own boxes — one has a padding above its text — are
+/// aligned so that the two lines share a baseline, which moves the item with
+/// *less* padding down.
+#[test]
+fn align_items_baseline_lines_the_text_up() {
+    let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+    style.align_items = AlignItems::Baseline;
+    let mut padded = block();
+    padded.flex_basis = basis(60.0);
+    padded.padding = Sides::all(LengthPercentage::Px(0.0));
+    padded.padding.top = LengthPercentage::Px(20.0);
+    let tree = BoxNode::element(
+        style,
+        vec![
+            BoxNode::element(padded, vec![text("a")]),
+            flex_item("b", 0.0, 0.0, basis(60.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let y = baselines(&laid, 0);
+    assert!(
+        close(y[0], y[1]),
+        "the two first baselines are the same line: {y:?}"
+    );
+    // **And where** the shared line is, which the assertion above cannot see:
+    // the line's baseline is the **largest** of the items' own, so it is the
+    // padded item's 29 and not the unpadded item's 9. The injection matrix
+    // found this -- a build that took the smallest, or zero, aligns the two
+    // items with each other perfectly and draws them both above the line box.
+    assert!(
+        close(y[0], 29.0),
+        "the line's baseline is the deepest item's: {y:?}"
+    );
+    // And the control: the same document aligned to the top puts them 20 apart,
+    // which is what says the assertion above is about §8.3 and not about two
+    // boxes that happened to agree.
+    let mut top = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+    top.align_items = AlignItems::FlexStart;
+    let mut padded = block();
+    padded.flex_basis = basis(60.0);
+    padded.padding = Sides::all(LengthPercentage::Px(0.0));
+    padded.padding.top = LengthPercentage::Px(20.0);
+    let laid = run(
+        &BoxNode::element(
+            top,
+            vec![
+                BoxNode::element(padded, vec![text("a")]),
+                flex_item("b", 0.0, 0.0, basis(60.0)),
+            ],
+        ),
+        200.0,
+        400.0,
+    );
+    let y = baselines(&laid, 0);
+    assert!(close(y[0] - y[1], 20.0), "{y:?}");
+}
+
+/// §8.4's initial value is `stretch` and it makes the **lines** taller, which
+/// then moves every item inside them.
+///
+/// The matrix asked for this. Every `align-content` fixture above states a
+/// value other than the initial one, so a build that mapped `stretch` onto
+/// `flex-start` — which moves no line at all — passed every one of them.
+#[test]
+fn align_content_stretch_makes_the_lines_taller() {
+    let container = |kind| {
+        let mut style = flex_container(FlexDirection::Row, FlexWrap::Wrap);
+        style.align_content = kind;
+        style.align_items = AlignItems::FlexEnd;
+        style.height = Size::Length(LengthPercentage::Px(200.0));
+        let laid = run(
+            &BoxNode::element(
+                style,
+                vec![
+                    flex_item("a", 0.0, 0.0, basis(120.0)),
+                    flex_item("b", 0.0, 0.0, basis(120.0)),
+                ],
+            ),
+            200.0,
+            400.0,
+        );
+        baselines(&laid, 0)
+    };
+    // Two lines of one item each, in a container of 200. Stretched, each line
+    // is 100 tall and the items sit at their bottoms; unstretched, each line is
+    // its item's height and both are at the top of the container.
+    let stretched = container(AlignContent::Stretch);
+    let packed = container(AlignContent::FlexStart);
+    assert!(
+        stretched[0] > packed[0] && stretched[1] > packed[1],
+        "stretching the lines moved both items down: {stretched:?} against \
+         {packed:?}"
+    );
+    assert!(
+        stretched[1] - stretched[0] > packed[1] - packed[0],
+        "and moved them apart: {stretched:?}"
+    );
+}
+
+/// `box-sizing: border-box` measures `flex-basis` from the **border box**, and
+/// every size in §9 is a content one.
+///
+/// The matrix asked for this. A build that skipped the conversion makes a
+/// `flex-basis: 100px` item with 10 points of padding either side 120 wide
+/// instead of 100, which is a row that overflows by the padding of every item
+/// in it.
+#[test]
+fn box_sizing_border_box_shrinks_a_flex_basis_by_its_padding() {
+    let at = |sizing| {
+        let mut item = block();
+        item.flex_basis = basis(100.0);
+        item.flex_grow = 0.0;
+        item.flex_shrink = 0.0;
+        item.box_sizing = sizing;
+        item.padding = Sides::all(LengthPercentage::Px(10.0));
+        let laid = run(
+            &BoxNode::element(
+                flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+                vec![
+                    BoxNode::element(item, vec![text("a")]),
+                    flex_item("b", 0.0, 0.0, basis(50.0)),
+                ],
+            ),
+            300.0,
+            400.0,
+        );
+        lefts(&laid)
+    };
+    let content = at(BoxSizing::ContentBox);
+    assert!(
+        close(content[1], 120.0),
+        "a content-box basis of 100 with 10 of padding is 120 wide: {content:?}"
+    );
+    let border = at(BoxSizing::BorderBox);
+    assert!(
+        close(border[1], 100.0),
+        "and a border-box one is 100: {border:?}"
+    );
+}
+
+/// §4.5: the automatic minimum main size is *"further clamped by"* the item's
+/// own stated size.
+///
+/// The matrix asked for this. Without the clamp a `width: 40px` item holding
+/// one unbreakable eighty-point word cannot be made narrower than the word, so
+/// the row overflows — and the author's declaration says it should not.
+#[test]
+fn the_automatic_minimum_is_clamped_by_a_stated_size() {
+    let item = |width: Option<f64>| {
+        let mut style = block();
+        style.flex_shrink = 1.0;
+        style.flex_grow = 0.0;
+        if let Some(width) = width {
+            style.width = Size::Length(LengthPercentage::Px(width));
+        }
+        BoxNode::element(style, vec![text("wwwwwwww")])
+    };
+    let laid = run(
+        &BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            vec![item(Some(40.0)), flex_item("b", 0.0, 0.0, basis(100.0))],
+        ),
+        100.0,
+        400.0,
+    );
+    let x = lefts(&laid);
+    assert!(
+        x[1] <= 40.0 + 1e-9,
+        "the stated width is the floor and the eighty-point word is not: {x:?}"
+    );
+    // The control: the same item with no stated width cannot go below its own
+    // longest word, which is what says the assertion above is about the clamp.
+    let laid = run(
+        &BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            vec![item(None), flex_item("b", 0.0, 0.0, basis(100.0))],
+        ),
+        100.0,
+        400.0,
+    );
+    let x = lefts(&laid);
+    assert!(close(x[1], 80.0), "{x:?}");
+}
+
+/// §9.2 step 4: the hypothetical main size is the base size **clamped by the
+/// used minimum**, and §9.3 collects the lines from those sizes.
+///
+/// The matrix asked for this. A build that used the raw base size puts two
+/// `flex-basis: 0` items on one line however long their words are, and then
+/// discovers at §9.7 that neither can be made that narrow — a line that
+/// overflows where the specification wraps.
+#[test]
+fn the_hypothetical_size_decides_where_a_line_wraps() {
+    let item = |body: &str| {
+        let mut style = block();
+        style.flex_basis = basis(0.0);
+        style.flex_grow = 0.0;
+        style.flex_shrink = 0.0;
+        BoxNode::element(style, vec![text(body)])
+    };
+    let laid = run(
+        &BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::Wrap),
+            vec![item("wwwwwwwwww"), item("wwwwwwwwww")],
+        ),
+        150.0,
+        400.0,
+    );
+    let y = baselines(&laid, 0);
+    assert!(
+        y[1] > y[0],
+        "two hundred-point words do not share a hundred-and-fifty-point line: \
+         {y:?}"
+    );
+}
+
+/// §4's white-space exception, asserted where it is **observable**.
+///
+/// The matrix asked for this: counting the runs cannot see the difference,
+/// because an anonymous item holding one newline collapses to no text and
+/// therefore to no run. `space-around` can: it divides the free space by the
+/// number of items, so a phantom third item moves the two real ones.
+#[test]
+fn a_whitespace_run_is_not_an_item_and_the_spacing_says_so() {
+    let container = |children| {
+        let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+        style.justify_content = JustifyContent::SpaceAround;
+        let laid = run(&BoxNode::element(style, children), 200.0, 400.0);
+        lefts(&laid)
+    };
+    let spaced = container(vec![
+        flex_item("a", 0.0, 0.0, basis(50.0)),
+        text("\n  "),
+        flex_item("b", 0.0, 0.0, basis(50.0)),
+    ]);
+    // Two items in 200 with 100 to spare: a quarter share at each end and a
+    // half share between, so 25 and 125. A third, empty, item would make the
+    // shares thirds and put them at 16.67 and 133.33.
+    assert!(
+        close(spaced[0], 25.0) && close(spaced[1], 125.0),
+        "{spaced:?}"
+    );
+    let bare = container(vec![
+        flex_item("a", 0.0, 0.0, basis(50.0)),
+        flex_item("b", 0.0, 0.0, basis(50.0)),
+    ]);
+    assert_eq!(spaced, bare, "the white space changed nothing at all");
+}
+
+/// §4's blockification, at the one arm of it this build can observe: an
+/// `inline-flex` **item** is a flex container whose outside §4 has already made
+/// block-level, so it does not raise the warning about being laid out as one.
+///
+/// The matrix asked for this. The `inline` and `inline-block` arms are
+/// unobservable here and are recorded as such where they are written: this
+/// build's [`crate::flow`] reads `display` to ask four questions and an inline
+/// item answers all four the way a block one does.
+#[test]
+fn an_inline_flex_item_is_blockified_and_does_not_warn() {
+    let mut inner = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+    inner.display = Display::InlineFlex;
+    inner.flex_basis = basis(100.0);
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![
+            BoxNode::element(inner, vec![flex_item("a", 0.0, 0.0, basis(40.0))]),
+            flex_item("b", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert!(
+        laid.warnings.is_empty(),
+        "an inline-flex item is already block-level: {:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "ab");
+}
+
+/// §9.7 step 2's freeze is **not** an optimisation, and step 4b's
+/// factors-below-one clause is what makes the difference visible.
+///
+/// The injection matrix asked for this twice. Deleting step 2's freeze leaves
+/// the answers unchanged in every ordinary arrangement, because step 4's loop
+/// clamps by the same minimum and reaches the same fixed point — so the first
+/// pass of the matrix reported both halves as survivors and the argument for
+/// calling them equivalent mutants was already written down. It is wrong.
+/// `initial_free` is computed **once**, in step 3, out of the frozen/unfrozen
+/// split as it stood, and step 4b multiplies *that* number by the flex factors
+/// when they sum to less than one. An item frozen in step 2 contributes its
+/// hypothetical size to it and an unfrozen one contributes its base size, and
+/// those differ exactly when a minimum bit.
+#[test]
+fn step_two_freezes_before_step_three_measures_the_free_space() {
+    // Growing. A `flex: 0 0 0` item whose content is fifty wide: its base size
+    // is zero, its automatic minimum is fifty, and step 2 freezes it at fifty
+    // because its factor is zero. The half-factor item beside it then grows by
+    // half of what is left of the *hundred and fifty*, not by half of the two
+    // hundred an unfrozen first item would have left.
+    let grown = flex::resolve(
+        &[
+            flex::Item {
+                grow: 0.0,
+                shrink: 0.0,
+                base: 0.0,
+                hypothetical: 50.0,
+                min: 50.0,
+                extra: 0.0,
+            },
+            flex::Item {
+                grow: 0.5,
+                shrink: 1.0,
+                base: 0.0,
+                hypothetical: 0.0,
+                min: 0.0,
+                extra: 0.0,
+            },
+        ],
+        200.0,
+    );
+    assert!(
+        close(grown[0], 50.0) && close(grown[1], 75.0),
+        "half of a hundred and fifty, not half of two hundred: {grown:?}"
+    );
+
+    // Shrinking, and the other half of step 2: an item whose base size is
+    // already **below** its minimum is on the wrong side of its hypothetical
+    // size and takes no part in the sums.
+    let shrunk = flex::resolve(
+        &[
+            flex::Item {
+                grow: 0.0,
+                shrink: 0.25,
+                base: 50.0,
+                hypothetical: 90.0,
+                min: 90.0,
+                extra: 0.0,
+            },
+            flex::Item {
+                grow: 0.0,
+                shrink: 0.25,
+                base: 100.0,
+                hypothetical: 100.0,
+                min: 0.0,
+                extra: 0.0,
+            },
+        ],
+        100.0,
+    );
+    assert!(
+        close(shrunk[0], 90.0) && close(shrunk[1], 77.5),
+        "a quarter of the ninety-point deficit, not of the fifty-point one: \
+         {shrunk:?}"
+    );
 }
