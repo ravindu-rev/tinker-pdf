@@ -11,7 +11,7 @@
 //! element tree lives in the facade, and measurement arrives through
 //! [`metrics::Metrics`], five methods wide.
 //!
-//! # The five things worth knowing before reading further
+//! # The six things worth knowing before reading further
 //!
 //! **Margin collapsing has three cases and they are not one rule.** Adjacent
 //! siblings is the one everybody implements. Parent-and-first-child and a box
@@ -31,6 +31,15 @@
 //! is *preferred*.** CSS 2.2 §13.3.3's rules A to D say where one may happen at
 //! all, and a fragmenter that implements only the second question breaks inside
 //! things it must not. See [`fragment`].
+//!
+//! **A float is not in the column, and reading order stops being emission
+//! order the moment one exists.** CSS 2.2 §9.5.1 is nine constraints on where a
+//! float goes and they are a set: an implementation that satisfies eight lays
+//! most pages out correctly and fails only where the ninth binds. Each is its
+//! own step in [`floats`] with its own fixture. And because a float is laid out
+//! where it is written and drawn where it was placed — which can be a page
+//! later — every [`TextRun`] carries the position in **document order** that
+//! text conservation is an ordering of. See [`floats`] and [`TextRun::order`].
 //!
 //! **A computed property with no consumer here does not compile.**
 //! [`style::consume`] destructures `ComputedStyle` with no `..`, which is gap
@@ -74,6 +83,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod floats;
 pub mod flow;
 pub mod fragment;
 pub mod limits;
@@ -90,7 +100,7 @@ use std::fmt;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, Clear, Color, Float, FontFamily, FontStyle, FontVariant, Sides, TextDecoration,
+    BorderStyle, Color, FontFamily, FontStyle, FontVariant, Sides, TextDecoration,
 };
 
 /// One node of the tree layout is given.
@@ -301,6 +311,23 @@ pub struct TextRun {
     ///
     /// `None` for a run this crate generated, which a list marker is.
     pub anchor: Option<u32>,
+    /// Where this run's characters are in **document order**, counting from
+    /// one.
+    ///
+    /// It exists because milestone 10 made reading order stop being emission
+    /// order. A float is laid out where it is written and drawn where it was
+    /// placed, and those are different places: its text can be set at the top
+    /// of a page whose in-flow text was written before it, and a float broken
+    /// over a page boundary finishes after text that follows it in the book.
+    /// Neither loses a character, and both would fail an *ordered* comparison
+    /// against the source — which is exactly what text conservation is.
+    ///
+    /// [`Page::runs`] is sorted by it, so a page reads correctly by itself,
+    /// and [`Layout::text`] sorts by it across the whole book, so the book
+    /// does. A caller that wants the order the ink goes down in has the vector
+    /// it is holding; a caller that wants the order the words were written in
+    /// has this.
+    pub order: usize,
 }
 
 /// A whole book, paginated.
@@ -320,15 +347,26 @@ impl Layout {
     /// The other half of text conservation. It is a method here rather than a
     /// helper in a test file so that the fuzz target and the crate's tests
     /// compare the same thing.
+    ///
+    /// **In document order**, which is [`TextRun::order`]'s and not the pages'.
+    /// A float whose box was broken over a page boundary finishes on the page
+    /// after the text that follows it in the book, and a comparison against the
+    /// source is an ordered one: without the sort, a book that lost nothing at
+    /// all would report a divergence at every figure. The sort is stable, so
+    /// for a book with no floats in it — where the two orders are the same
+    /// order — it changes nothing.
     #[must_use]
     pub fn text(&self) -> String {
+        let mut runs: Vec<&TextRun> = self
+            .pages
+            .iter()
+            .flat_map(|page| page.runs.iter())
+            .filter(|run| !run.generated)
+            .collect();
+        runs.sort_by_key(|run| run.order);
         let mut out = String::new();
-        for page in &self.pages {
-            for run in &page.runs {
-                if !run.generated {
-                    out.push_str(&run.text);
-                }
-            }
+        for run in runs {
+            out.push_str(&run.text);
         }
         out
     }
@@ -344,6 +382,8 @@ pub struct Limits {
     /// Break opportunities across the book. See
     /// [`limits::MAX_LINE_BREAK_WORK`].
     pub max_break_work: usize,
+    /// Float examinations across the book. See [`limits::MAX_LAYOUT_WORK`].
+    pub max_layout_work: usize,
     /// Pages. See [`limits::MAX_LAYOUT_PAGES`].
     pub max_pages: usize,
 }
@@ -354,6 +394,7 @@ impl Limits {
         max_depth: limits::MAX_BOX_DEPTH,
         max_boxes: limits::MAX_BOX_TREE_NODES,
         max_break_work: limits::MAX_LINE_BREAK_WORK,
+        max_layout_work: limits::MAX_LAYOUT_WORK,
         max_pages: limits::MAX_LAYOUT_PAGES,
     };
 }
@@ -364,7 +405,7 @@ impl Default for Limits {
     }
 }
 
-/// The two totals, spent across a whole book and never refunded.
+/// The three totals, spent across a whole book and never refunded.
 ///
 /// One object rather than three counters, for `tinker_pdf_css::Budget`'s
 /// reason: a caller that lays out forty spine items makes **one** of these, so
@@ -374,6 +415,7 @@ pub struct Budget {
     limits: Limits,
     boxes: usize,
     breaks: usize,
+    layout: usize,
 }
 
 impl Budget {
@@ -384,6 +426,7 @@ impl Budget {
             limits: *limits,
             boxes: 0,
             breaks: 0,
+            layout: 0,
         }
     }
 
@@ -413,10 +456,35 @@ impl Budget {
         Ok(())
     }
 
+    /// Charges float examinations, CSS 2.2 §9.5.
+    ///
+    /// **Before the loop, not inside it.** A scan of the placed floats costs
+    /// one unit per float and the count is known before it starts, so a book
+    /// past the cap is refused rather than swept — `tinker-pdf-zip`'s posture,
+    /// and [`limits::MAX_LINE_BREAK_WORK`]'s.
+    ///
+    /// # Errors
+    /// [`Refusal::TooMuchLayoutWork`] past the cap.
+    pub fn spend_layout(&mut self, count: usize) -> Result<(), Refusal> {
+        self.layout = self.layout.saturating_add(count);
+        if self.layout > self.limits.max_layout_work {
+            return Err(Refusal::TooMuchLayoutWork {
+                examinations: self.layout,
+            });
+        }
+        Ok(())
+    }
+
     /// Boxes generated so far.
     #[must_use]
     pub fn boxes(&self) -> usize {
         self.boxes
+    }
+
+    /// Float examinations so far.
+    #[must_use]
+    pub fn layout(&self) -> usize {
+        self.layout
     }
 
     /// Break opportunities evaluated so far.
@@ -450,6 +518,12 @@ pub enum Refusal {
         /// How many opportunities had been evaluated.
         evaluations: usize,
     },
+    /// The book's float-placement total is spent. Milestone 10's cap, and the
+    /// one milestone 7 argued would arrive with the multi-pass layout.
+    TooMuchLayoutWork {
+        /// How many floats had been examined.
+        examinations: usize,
+    },
     /// The flow fragments into more pages than [`limits::MAX_LAYOUT_PAGES`].
     TooManyPages {
         /// How many it would have been.
@@ -479,6 +553,12 @@ impl fmt::Display for Refusal {
                     "{evaluations} break evaluations is past the book's total"
                 )
             }
+            Refusal::TooMuchLayoutWork { examinations } => {
+                write!(
+                    f,
+                    "{examinations} float examinations is past the book's total"
+                )
+            }
             Refusal::TooManyPages { pages } => write!(f, "{pages} pages is past the cap"),
             Refusal::PageTooSmall { width, height } => {
                 write!(f, "a page of {width} by {height} has no room for a line")
@@ -493,17 +573,28 @@ impl std::error::Error for Refusal {}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Warning {
-    /// `float`, at a value that is not `none`. Milestone 10.
+    /// A float whose box did not fit the page it began on and was broken
+    /// across the boundary. Milestone 10.
     ///
-    /// The box is laid out **in flow**, which is not what the author asked
-    /// for; saying so is the difference between a known gap and a page that
-    /// looks like the book.
-    FloatInFlow(Float),
-    /// `clear`, at a value that is not `none`, with no floats to clear.
-    ClearIgnored(Clear),
-    /// `display: inline-block`, laid out as a block-level box. Milestone 10's
-    /// neighbourhood; see the crate's `Still owed`.
-    InlineBlockAsBlock,
+    /// `css-break-3` would **push** a float that would fit whole on the next
+    /// page rather than break it, and this build breaks it: pushing changes
+    /// which lines are shortened beside it, so it is a second layout of the
+    /// content and not a second position for the box. Nothing is lost either
+    /// way — the whole float is set, on two pages instead of one — and saying
+    /// so is the difference between a known gap and a figure that quietly
+    /// straddles a page.
+    FloatBrokenAcrossPages,
+    /// `display: inline-block`, laid out as ordinary inline text: its `width`,
+    /// its `height` and its vertical margins do not apply to it.
+    ///
+    /// **It used to say the opposite, and it used to be unreachable.** The
+    /// variant was `InlineBlockAsBlock` and it was raised where a block-level
+    /// box is built — which an `inline-block` never reaches, because
+    /// `Consumed::is_block_level` sends it down the inline path. Milestone 10
+    /// found it by needing a warning it could count, and the two halves of the
+    /// fix are one change: it is raised where inline content is gathered, and
+    /// it now names what is actually done. See the crate's `Still owed`.
+    InlineBlockAsInline,
     /// An inline box with a block-level child, laid out as a block container.
     /// CSS 2.2 §9.2.1.1 splits the inline instead.
     BlockInInline,
@@ -523,12 +614,11 @@ pub enum Warning {
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Warning::FloatInFlow(value) => {
-                write!(f, "float: {value:?} is laid out in flow")
+            Warning::FloatBrokenAcrossPages => {
+                f.write_str("a float did not fit its page and was broken across the boundary")
             }
-            Warning::ClearIgnored(value) => write!(f, "clear: {value:?} has nothing to clear"),
-            Warning::InlineBlockAsBlock => {
-                f.write_str("display: inline-block is laid out as a block")
+            Warning::InlineBlockAsInline => {
+                f.write_str("display: inline-block is laid out as inline text")
             }
             Warning::BlockInInline => {
                 f.write_str("an inline box holds a block, and is laid out as one")

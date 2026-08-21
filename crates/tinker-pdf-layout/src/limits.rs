@@ -23,9 +23,10 @@
 //! bounds nothing. They live in [`crate::Budget`], which is one object
 //! threaded through every spine item rather than a convention.
 //!
-//! A **third** work cap is in gap 31's own bounds table and is not here.
-//! `MAX_LAYOUT_WORK`'s absence is argued in full below, where it would
-//! otherwise be declared.
+//! [`MAX_LAYOUT_WORK`] is the **third**, and it arrived at milestone 10 exactly
+//! where milestone 7 said it would: *"the bound arrives with the multi-pass
+//! layout or not at all"*. Floats are that layout. It is spent across a whole
+//! book for the same reason as the other two.
 //!
 //! [`MAX_BOX_DEPTH`] is per-item and bounds a recursion rather than a total.
 //! [`MAX_LAYOUT_PAGES`] is per-book and bounds an output.
@@ -168,6 +169,40 @@ pub const MAX_LINE_BREAK_WORK: usize = 4_000_000;
 /// of anything to do with the spine.
 pub const MAX_LAYOUT_PAGES: usize = 65_536;
 
+/// Float examinations across a whole book.
+///
+/// | | Examinations |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 4 000 001 (the book built *past* this cap; the largest real book here spends under a thousand) |
+/// | A 400-page novel | ~24 000 (one figure per spine item, 12 000 line boxes, each asking the figures beside it for its measure) |
+/// | A 400-page novel with a figure on every fourth page | ~240 000 |
+/// | A 200-page comic | 0 |
+/// | A 200-page fixed document | 0 |
+/// | **This cap** | **4 000 000** |
+///
+/// **This is the cap milestone 7 argued out of existence, arriving where that
+/// argument said it would.** Its words were: *"in a build with no float
+/// re-flow, no two-pass table layout and no shrink-to-fit, every unit of layout
+/// work is one box or one line box"*, and it ended *"the bound arrives with the
+/// multi-pass layout or not at all"*. Milestone 10 is floats, and floats are
+/// the multi-pass layout: CSS 2.2 §9.5.1 places a float against **every float
+/// already placed**, and §9.5's line boxes ask all of them for their measure.
+///
+/// The quadratic behind it is `5adf502`'s finding — *depth is not work once the
+/// recursion branches* — in its loop-shaped form. [`MAX_BOX_TREE_NODES`] lets a
+/// book float 262 144 boxes; placing the last of them examines the other
+/// 262 143, and the total is 6.9e10 examinations with every other cap
+/// satisfied. Neither of the two work caps bounds it: boxes bound how many
+/// floats there are and characters bound how many lines, and the work here is
+/// the **product**.
+///
+/// A unit is one float examined for one question — is it beside this height, is
+/// its inner edge in the way, is its bottom the next one down. It is charged
+/// where the loop is entered rather than inside it, so the cost of a scan is
+/// known before the scan happens and a book past the cap is refused rather than
+/// swept.
+pub const MAX_LAYOUT_WORK: usize = 4_000_000;
+
 /// The relations, in a `const` block so a build that broke one **does not
 /// compile**.
 ///
@@ -180,6 +215,11 @@ const _: () = {
         MAX_BOX_DEPTH < MAX_BOX_TREE_NODES,
         "a tree of depth MAX_BOX_DEPTH has at least that many boxes in it, so a depth cap at \
          or above the box cap could never fire"
+    );
+    assert!(
+        MAX_LAYOUT_WORK < MAX_BOX_TREE_NODES * MAX_BOX_TREE_NODES,
+        "placing the last of MAX_BOX_TREE_NODES floats examines the others, so a float-work \
+         cap at or above the square of the box cap could never fire"
     );
     assert!(
         MAX_LAYOUT_PAGES < MAX_LINE_BREAK_WORK,

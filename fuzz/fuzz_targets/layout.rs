@@ -296,6 +296,15 @@ fuzz_target!(|data: &[u8]| {
         2 => 256,
         _ => 65_536,
     };
+    // Milestone 10's third work total. The small values are the interesting
+    // ones: a book of floats past this refuses, and the assertion that matters
+    // is that it refuses **by name** rather than by running for ever.
+    let max_layout_work = match (knobs >> 8) & 3 {
+        0 => 0,
+        1 => 64,
+        2 => 4_096,
+        _ => 4_000_000,
+    };
     let (width, height) = match (knobs >> 6) & 3 {
         // A page one point wide is where `overflow-wrap`, the last-resort
         // character break and the "nothing fits" warning all live.
@@ -308,6 +317,7 @@ fuzz_target!(|data: &[u8]| {
         max_depth,
         max_boxes,
         max_break_work,
+        max_layout_work,
         max_pages,
     };
 
@@ -325,6 +335,10 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         budget.breaks() <= limits.max_break_work,
         "the break total was exceeded rather than refused"
+    );
+    assert!(
+        budget.layout() <= limits.max_layout_work,
+        "the float total was exceeded rather than refused"
     );
     assert!(
         laid.pages.len() <= limits.max_pages,

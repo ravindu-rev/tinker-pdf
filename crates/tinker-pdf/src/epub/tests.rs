@@ -1596,6 +1596,7 @@ fn an_unencodable_character_gets_one_stable_code() {
         word_spacing: 0.0,
         generated: false,
         anchor: None,
+        order: 1,
     };
 
     let faces = super::typeface::FaceSet::new();
@@ -1708,6 +1709,7 @@ fn characters_past_the_overflow_font_are_counted() {
         word_spacing: 0.0,
         generated: false,
         anchor: None,
+        order: 1,
     });
     assert_eq!(fonts.unrepresented(), 300 - OVERFLOW_CODES);
 }

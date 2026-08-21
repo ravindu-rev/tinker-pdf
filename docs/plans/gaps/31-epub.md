@@ -4278,3 +4278,291 @@ forty-five matched exactly once on the first verification pass.
   `vertical-align` unhonoured, dashed and dotted borders drawn solid,
   `light-dark()` taking a colour with it, `pandoc-plates.epub`'s `<img>`
   undrawn, and `mutool` never run over an EPUB.
+
+## Progress — 21 August 2026, milestone 10
+
+**Nine constraints, nine fixtures, and each one fails on its own.** Floats and
+`clear` are laid out rather than named: CSS 2.2 §9.5.1's nine placement rules,
+§9.5.2's clearance, §9.5's line boxes shortened beside a float and shifted below
+one, §10.3.5's shrink-to-fit, and the fragmentation interaction the row calls
+*"the one that loses text"*. **2 653 tests, 7 ignored**, up from 2 626 at
+milestone 9.
+
+The two warnings this crate has carried since milestone 7 — `FloatInFlow` and
+`ClearIgnored` — are **gone**, which is the only honest way for a warning of
+that kind to end. One replaces them and it names a smaller gap:
+`FloatBrokenAcrossPages`.
+
+### What the design got wrong, and how it found out
+
+**1. Rules 4, 5 and 6 cannot be told apart by any fixture with only positive
+margins in it.** They are three ceilings on one number — a float's outer top may
+not be above *its containing block's top*, above *any earlier box's top*, or
+above *any earlier line box's top* — and in an ordinary document the float's
+static position is already below all three, so a build with all three deleted
+lays every book out identically. Worse, the obvious way to make one of them bind
+makes the other two bind at the same value: a float pushed up by a negative
+margin inside its containing block is pushed up past a box whose own top *is*
+that containing block's top.
+
+The three fixtures are built out of negative margins for that reason, and each
+puts its own ceiling strictly below the other two:
+
+- rule 4's containing block has a 50-point padding and its first paragraph a
+  negative *top* margin, so the earlier box's top is 10 and the earlier line's
+  is 10 and only the containing block's 50 can be what stopped the float;
+- rule 5's earlier box is an empty spacer with a top margin, so its border-box
+  top is 42 while every line box in the document is at 0;
+- rule 6's earlier box has a *padding* rather than a margin, so its border-box
+  top is 0 and its line box is at 40.
+
+The injection matrix confirms the separation: deleting any one of the three
+fails that one's fixture and no other float fixture at all.
+
+**2. The linear column cannot hold a float.** `fragment` cuts pages by walking
+one vector of items whose `y` never goes backwards; a float is placed *above*
+the line boxes that flow around it, at a position the column has already passed.
+So a float is a `FloatRecord` — its own items, its own block records, in the same
+coordinates — and pagination draws whatever of each record falls inside the
+page's window.
+
+**3. Reading order stops being emission order the moment a float exists**, and
+text conservation is an *ordered* comparison. A float written in the middle of a
+paragraph is laid out before the words that follow it and drawn beside them; a
+float broken over a page boundary finishes on the page **after** text that
+precedes it in the book. Neither loses a character and both fail an ordered
+comparison, so every `TextRun` carries an `order` — its position in document
+order — a page's runs are sorted by it, and `Layout::text` sorts by it across the
+whole book. For a book with no floats the two orders are the same order and the
+stable sort changes nothing.
+
+**4. A float can outlive the column it was written in, and pagination stopped
+where the column did.** A figure at the foot of the last page of a chapter
+extends past the last line of it; the old loop ran while there were items left
+in the column, so the rest of the float was never drawn. It is the defect this
+plan uses to introduce text conservation — *"a float that pushed content off the
+page bottom and lost it"* — and it is now a second loop with a fixture and an
+injection of its own.
+
+**5. `Warning::InlineBlockAsBlock` could not fire, and had not since milestone
+7.** Deleting the two float warnings left the two tests that *count* warnings
+without a subject, and the obvious replacement did not work: an `inline-block`
+is not block-level, so it never reaches the block builder where that warning was
+raised. It is now raised where inline content is gathered, which is where an
+`inline-block` actually arrives, and renamed `InlineBlockAsInline` because that
+is what this build does with one.
+
+**6. The browser oracle's comparisons shared one scratch file.** `cargo test`
+runs the tests in a file in parallel and both wrote their page to
+`continuous.html`, so the float comparison's first run measured the corpus
+chapter the other test had just written. What caught it is milestone 8's own
+decision — *the block sequence is asserted exactly, with no tolerance* — which
+said the browser's blocks were about ZIP containers and this engine's were about
+figures. A y-offset tolerance would have failed with a number and told nobody
+why.
+
+### The bound milestone 7 said would arrive here
+
+`limits.rs` and `bounds_ledger.rs` both carried milestone 7's argument for
+`MAX_LAYOUT_WORK`'s absence, and both ended it with the same sentence: **the
+bound arrives with the multi-pass layout or not at all, which is milestones 10
+and 11.** Floats are that layout, and the quadratic is not hypothetical:
+§9.5.1 places each float against **every float already placed**, §9.5's line
+boxes ask all of them for their measure, and §9.5.2 asks them again for every
+cleared block. `MAX_BOX_TREE_NODES` is 262 144, so a book may float that many
+boxes and the last of them is examined against the other 262 143 — **6.9e10
+examinations with every other cap satisfied**. It is the first row in the ledger
+whose ceiling is the *square* of another row.
+
+The cap is **4 000 000** float examinations, spent across a whole book. A
+400-page novel with a figure per spine item spends about 24 000 of it and one
+with a figure every fourth page about 240 000; the ledger row carries both
+numbers. It is charged in **three** places, because it is three scans, and it
+has **three** firing fixtures for the reason this run keeps finding: a rule
+enforced in three places has three reachable halves, and the injection matrix
+below has a line for each.
+
+### The browser agreement, as a number
+
+| | Deviation, as a fraction of the browser's column |
+| --- | --- |
+| **This build against Chrome 151, float-heavy document** | **0.0154** |
+| of which: the browser reports a line box's top and this engine a baseline, at the 32-pixel `<h1>` the offsets are measured from | 0.0150 |
+| of which: everything else, over sixteen blocks and six figures | 0.0004 |
+| The cap | 0.05 |
+| **The injected defect: the same document with `float: none` on this engine's side** | **0.2396** |
+
+The second row is the finding. The per-block deltas printed by
+`TINKER_BROWSER_TABLE=1` are 0.0150, 0.0151, 0.0152 … all the way down — **a
+constant established at the first block and never added to**. Every float in
+that document is on the same line of the same paragraph as Chrome's, to within
+half a pixel.
+
+**Two variables are held fixed and both are stated on both sides.** Milestone 8
+fixed the face; this fixes what `line-height: normal` means. This build resolves
+it as 1.2 and Chrome resolves it from Courier New's own metrics, which is 1.133:
+six per cent of every line in the document, accumulating down the column, and
+nothing whatever to do with where a float went. Measured without that rule the
+two columns disagree by 0.0449, and the whole systematic part of it is that
+ratio. It is a rule in the fixture's own stylesheet, which reaches the browser
+and the cascade by the same path.
+
+### The injection matrix
+
+**Fifty-six injections of forty-eight distinct defects**, in two passes: forty
+against the placement, the clearance, the line boxes, the fragmentation and the
+document order, and eight more against the work cap after it was declared. Nine
+of the first forty survived, and **every one of the nine was a real gap in the
+fixtures rather than an equivalent mutant** — the whole section was built out of
+left floats, so the right-hand half of rules 2, 3 and 7 was untested; clearance
+had a float for a predecessor in every fixture, so the half of it that stops
+margins collapsing was untested; and two of them were wrong for reasons worth
+their own paragraphs below. One defect was caught by the browser oracle and by
+nothing else, which is this run's named failure mode and is closed by a unit
+fixture in the same row.
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | **Rule 1** — a left float clamped to the page rather than to its containing block | `rule_1_a_float_does_not_leave_its_containing_block` |
+| 2 | **Rule 1** — a right float's own edge measured from the wrong side | `rule_1_a_float_does_not_leave_its_containing_block`, `rule_3_a_float_does_not_cross_an_earlier_float_on_the_other_side` |
+| 3 | **Rule 2** — an earlier float on the same side ignored | `rule_2_a_float_does_not_overlap_an_earlier_float_on_its_own_side`, `rule_7_two_floats_that_do_not_fit_side_by_side_stack` |
+| 4 | The same, on the right | **survived** — closed by `rule_2_a_float_does_not_overlap_an_earlier_float_on_its_own_side` |
+| 5 | **Rule 3** — an earlier float on the other side ignored | `rule_3_a_float_does_not_cross_an_earlier_float_on_the_other_side` |
+| 6 | The same, on the right | **survived** — closed by `rule_3_a_float_does_not_cross_an_earlier_float_on_the_other_side` |
+| 7 | **Rule 4** — the containing block's top is not a ceiling | `rule_4_a_float_does_not_rise_above_its_containing_block` |
+| 8 | **Rule 5** — an earlier box's top is not a ceiling | `rule_5_a_float_does_not_rise_above_an_earlier_box`, `rule_8_a_float_is_placed_as_high_as_it_fits` |
+| 9 | **Rule 6** — an earlier line box's top is not a ceiling | `rule_6_a_float_does_not_rise_above_an_earlier_line_box` |
+| 10 | **Rule 7** — two stacked floats may leave the containing block | `rule_7_two_floats_that_do_not_fit_side_by_side_stack`, `rule_8_a_float_is_placed_as_high_as_it_fits` |
+| 11 | The same, on the right | **survived** — closed by `rule_7_two_floats_that_do_not_fit_side_by_side_stack` |
+| 12 | Its condition dropped: every float clamped whether stacked or not | **survived** — closed by `rule_7_two_floats_that_do_not_fit_side_by_side_stack` |
+| 13 | **Rule 8** — the candidates tried lowest last rather than first | `rule_1_a_float_does_not_leave_its_containing_block`, `rule_2_a_float_does_not_overlap_an_earlier_float_on_its_own_side` |
+| 14 | **Rule 8** — only the ceiling is ever tried | `rule_3_a_float_does_not_cross_an_earlier_float_on_the_other_side`, `rule_7_two_floats_that_do_not_fit_side_by_side_stack` |
+| 15 | **Rule 9** — the two ends of the range swapped | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so`, `a_float_inside_a_paragraph_keeps_the_paragraph_whole` |
+| 16 | A float above the range still counted as beside it | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so`, `a_float_taller_than_its_containing_block_goes_on_shortening_lines` |
+| 17 | The inner edge of a float taken from its outer side | `a_float_inside_a_paragraph_keeps_the_paragraph_whole`, `a_float_taller_than_its_containing_block_goes_on_shortening_lines` |
+| 18 | The rule 5 ceiling recorded from nothing: no box ever contributes | `rule_5_a_float_does_not_rise_above_an_earlier_box` |
+| 19 | The rule 6 ceiling recorded from nothing: no line ever contributes | `rule_6_a_float_does_not_rise_above_an_earlier_line_box` |
+| 20 | A float's static position taken before the margins standing at it | `rule_5_a_float_does_not_rise_above_an_earlier_box`, `rule_6_a_float_does_not_rise_above_an_earlier_line_box` |
+| 21 | A float placed but not moved to where it was placed | `rule_1_a_float_does_not_leave_its_containing_block`, `rule_2_a_float_does_not_overlap_an_earlier_float_on_its_own_side` |
+| 22 | Clearance added to the box's own margin rather than measured with it | `clearance_is_what_is_still_needed_and_not_the_floats_bottom` |
+| 23 | Clearance computed and not applied | `clearance_moves_a_box_below_the_floats_it_names` |
+| 24 | Every clear value clears both sides | `clearance_moves_a_box_below_the_floats_it_names` |
+| 25 | Clearance no longer stops the margins collapsing through it | **survived** — closed by `clearance_does_not_let_the_margins_it_sits_between_collapse` |
+| 26 | A line box not shortened by a left float | `a_float_inside_a_paragraph_keeps_the_paragraph_whole`, `a_float_taller_than_its_containing_block_goes_on_shortening_lines` |
+| 27 | A line box not shortened by a right float | **only the browser oracle** — closed by `a_line_box_is_shortened_beside_a_float_and_restored_below_it` |
+| 28 | A line with no room beside a float is set there anyway | `a_line_with_no_room_beside_a_float_goes_under_it` |
+| 29 | A line pushed past every float rather than under the next one | **survived** — closed by `a_line_with_no_room_beside_a_float_goes_under_it` |
+| 30 | A word too long for the measure sends its line under the floats | `a_line_with_no_room_beside_a_float_goes_under_it` |
+| 31 | An auto-width float given the whole containing block | `a_float_with_no_width_is_shrunk_to_fit` |
+| 32 | Shrink-to-fit without its preferred-width clamp | `a_float_with_no_width_is_shrunk_to_fit` |
+| 33 | A float that does not fit its page drawn off the bottom of it | **survived** — closed by `a_float_that_would_fall_off_the_page_bottom_is_pushed_whole` |
+| 34 | A float never broken, so what did not fit is drawn off the page | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so`, `a_float_outliving_the_column_still_gets_a_page` |
+| 35 | A float broken and not said to be | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so` |
+| 36 | A float continuing on a page it is drawn above the top of | **survived** — closed by `a_float_continuing_onto_a_page_starts_at_the_top_of_it` |
+| 37 | The column stops where the text does, and the float below it is lost | `a_float_outliving_the_column_still_gets_a_page` |
+| 38 | Reading order is emission order again | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so`, `a_float_outliving_the_column_still_gets_a_page` |
+| 39 | A page's runs left in the order the boxes were made | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so`, `a_float_inside_a_paragraph_keeps_the_paragraph_whole` |
+| 40 | Every run stamped with the same document position | `a_float_broken_across_a_page_keeps_all_of_itself_and_says_so`, `a_float_inside_a_paragraph_keeps_the_paragraph_whole` |
+
+| # | Defect against `MAX_LAYOUT_WORK` | Caught by |
+| --- | --- | --- |
+| 1 | The placement scan is not charged | `a_book_past_the_float_work_total_is_refused_by_name`, `a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name` |
+| 2 | The candidate scan is not charged | `a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name` |
+| 3 | A line box's search for a band is not charged | `a_book_past_the_float_work_total_through_its_line_boxes_is_refused_by_name` |
+| 4 | A line box's own band is not charged | **survived** — and the scan it charged for is gone: it recomputed, at the same height and over the same list, the band the loop above it had already found |
+| 5 | A clearance scan is not charged | `a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name` |
+| 6 | A float's own clearance scan is not charged | **survived** — recorded below |
+| 7 | The float total is counted and never accumulated | `a_book_past_the_float_work_total_is_refused_by_name`, `a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name` |
+| 8 | The float total is spent without being refused | `a_book_past_the_float_work_total_is_refused_by_name`, `a_book_past_the_float_work_total_through_its_clearances_is_refused_by_name` |
+
+#### The two survivors that were findings rather than fixtures
+
+**`a float that does not fit its page drawn off the bottom of it` survived
+because the fixture named for the push was going through the break path.** The
+test asked whether the float's *first item* fits the remaining space, and a
+float's first item is a zero-height top margin: it always fits, the push never
+ran, and what actually happened was that the margin was drawn on one page and
+everything else on the next — same runs, same positions, one extra warning that
+nothing asserted the absence of. It is this plan's own *"a fixture giving the
+right answer for the wrong reason"*, and the fix is that the **margin box**
+decides: a figure that would fit on a page of its own is pushed whole, one that
+would not is broken wherever it starts. The fixture now asserts the warning is
+**absent**, which is the only thing that separates the two behaviours.
+
+**`rule 7's condition dropped` survived because the answer it changes is the
+fallback nobody reaches.** Clamping every float to its containing block's far
+edge, rather than only one that has another float beside it, rejects a
+too-wide float at every candidate height — and the correct code also puts a lone
+too-wide float exactly where the fallback does. The two agree in every
+arrangement the section had. They part when the *correct* answer is not the
+fallback: a lone float wider than its containing block with an earlier float on
+the **other** side, which rule 3 sends below it and the broken build puts back
+at the top, straight through it. That is now the third half of rule 7's fixture.
+
+#### The one that is recorded rather than closed
+
+`a float's own clearance scan is not charged` survives, and it is bounded rather
+than untested. A float with `clear` is scanned once against the placed floats
+before it is placed — and then **placed**, which charges the same list at least
+three times over in the same call. Deleting the clearance charge under-counts a
+float's cost by at most a quarter and cannot change what the cap is for: the
+work is still `O(floats²)`, still charged, and still refused at the same order
+of magnitude. A firing fixture for it would have to hold the placement charge
+constant while varying only the clearance one, which is a fixture about
+arithmetic rather than about a book. The block-level clearance scan — the one
+that is *not* accompanied by a placement — is charged, has its own firing
+fixture, and its deletion is caught.
+
+#### The harness
+
+`inject_m10.py` in the scratchpad is `inject_m9.py` with a second stage, and its
+docstring names all three of the harness bugs this run has found so the next
+milestone inherits the finding rather than the bug: milestone 3's `shutil.copy2`
+preserving an mtime, milestone 4's unrevertable empty-string replacement, and
+milestone 8's restore stamping the original mtime and leaving a defective
+dependency rlib linked. The second stage is new and it earns its place: the
+layout crate's own tests run in a second, so only a defect that survives them
+costs three minutes of the whole workspace — and a defect that reaches the second
+stage is **reported as such**, which is how row 27 was found to be caught by the
+browser and by nothing else. Every anchor was read out of the file it names
+before it was written, and all fifty-six matched exactly once on the first
+verification pass.
+
+
+### Still owed, and what was narrowed
+
+- **A float met inside a paragraph is placed at the top of that paragraph, not
+  on the line it was written on.** The paragraph is *not* split — the words
+  either side of the float are one inline formatting context and set as one
+  line, which is what §9.5 asks for and the shape a real book uses — but
+  §9.5.1's rule 6 wants the float's outer top no higher than the line box it sat
+  on, and the line boxes do not exist when the float is met. A drop cap or a
+  lead figure at the start of a paragraph is exactly right; one written halfway
+  down a long paragraph floats up to the top of it.
+- **`css-break-3` would push a float that has already begun**, and this build
+  breaks it. A float that has *not* begun **is** pushed whole to the next page,
+  which is the common case and costs nothing; once part of it is drawn, pushing
+  the rest would mean re-laying-out the lines that were shortened beside it,
+  which is a second layout of the content rather than a second position for the
+  box. Nothing is lost either way and `FloatBrokenAcrossPages` names it.
+- **Shrink-to-fit measures text and not boxes.** A block inside an auto-width
+  float with a stated `width` does not widen the float, because counting block
+  records would make the preferred width of every float the width of the trial
+  measure — the shrink-to-fit bug that produces a page-wide float holding one
+  word.
+- **An auto-width float is laid out three times**: once at a measure nothing
+  reaches, once at a measure nothing fits, once for real. Every pass is charged
+  to the same budget as everything else, and a float with a stated `width` pays
+  for none of them.
+- **`overflow` does not establish a block formatting context**, because
+  `overflow` is not a property this build has. The pre-`flow-root` clearfix — a
+  float and a following `overflow: hidden` block — is laid out as if the
+  property were absent.
+- **A line box's band is probed at the container's own `line-height`**, not at
+  the line's finished height, which is not known until it is filled and cannot
+  be filled until its width is known. The case it gets wrong is one oversized
+  inline on a line beside a float.
+- Milestone 9's list is otherwise unchanged: the fetched corpus is unset on this
+  machine, WOFF is refused, `local()` is unavailable, `unicode-range` is unread,
+  tables are set as inline text, `vertical-align` is unhonoured, and `mutool`
+  has never been run over an EPUB.

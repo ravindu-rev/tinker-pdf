@@ -42,7 +42,7 @@
 //! first is blank. With it, the break happens and [`Warning::BreakForcedPastTheRules`]
 //! says where the rules had to be given up.
 
-use crate::flow::{Flow, ItemKind};
+use crate::flow::{BlockRecord, Flow, Item, ItemKind};
 use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, Warning};
 
 /// Slack for a comparison against a page height, in points.
@@ -76,11 +76,22 @@ enum Tier {
     WithoutAc,
 }
 
+/// How much of one float has been drawn.
+#[derive(Clone, Copy, Debug, Default)]
+struct FloatCursor {
+    /// One past the last of its items already on a page.
+    next: usize,
+    /// Whether any of it has been drawn at all. A float that begins below this
+    /// page is not started; one that began above it and is still going is.
+    started: bool,
+}
+
 /// Cuts a flow into pages.
 pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result<Layout, Refusal> {
     let mut warnings = flow.warnings.clone();
     let mut pages: Vec<Page> = Vec::new();
-    if flow.items.is_empty() {
+    let mut floats: Vec<FloatCursor> = vec![FloatCursor::default(); flow.floats.len()];
+    if flow.items.is_empty() && flow.floats.is_empty() {
         // A book with nothing in it is one empty page rather than none: a
         // caller that got zero pages would have to invent one, and inventing
         // one is where a page of the wrong size comes from.
@@ -89,8 +100,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
     }
 
     let mut cursor = 0usize;
+    let mut after = 0.0;
     while cursor < flow.items.len() {
         let top = flow.items[cursor].y;
+        after = top + options.height;
         let limit = top + options.height;
         let mut forced_at = None;
         let mut overflow_at = None;
@@ -121,7 +134,17 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             (None, Some(at)) => choose(&flow, cursor, at, &mut warnings),
         };
 
-        pages.push(page(&flow, cursor, cut.end, top));
+        let mut built = page(&flow, cursor, cut.end, top);
+        beside(
+            &flow,
+            &mut floats,
+            &mut built,
+            top,
+            options.height,
+            &mut warnings,
+        );
+        order(&mut built);
+        pages.push(built);
         if pages.len() > limits.max_pages {
             return Err(Refusal::TooManyPages { pages: pages.len() });
         }
@@ -132,7 +155,108 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
         cursor = cut.next;
     }
 
+    // **A float can outlive the column it was written in**, and this is the
+    // loop that stops that from losing it. Floats are taken out of flow, so a
+    // figure at the foot of the last page of a chapter can extend past the last
+    // line of it; the column has run out and the float has not. Without this,
+    // the pages stop where the text does and the rest of the float is simply
+    // never drawn — which is text conservation's own example of the defect it
+    // exists for, and it renders beautifully.
+    let mut top = after;
+    while floats
+        .iter()
+        .zip(&flow.floats)
+        .any(|(cursor, float)| cursor.next < float.items.len())
+    {
+        let mut built = Page::default();
+        beside(
+            &flow,
+            &mut floats,
+            &mut built,
+            top,
+            options.height,
+            &mut warnings,
+        );
+        order(&mut built);
+        pages.push(built);
+        if pages.len() > limits.max_pages {
+            return Err(Refusal::TooManyPages { pages: pages.len() });
+        }
+        top += options.height;
+    }
+
     Ok(Layout { pages, warnings })
+}
+
+/// Sorts a page's runs into document order.
+///
+/// **Stable**, and that is load-bearing twice: a list marker shares its line's
+/// first stamp and has to stay in front of it, and two runs of one line share
+/// nothing but their order in the line.
+fn order(page: &mut Page) {
+    page.runs.sort_by_key(|run| run.order);
+}
+
+/// Draws whatever of each float belongs on this page.
+///
+/// A float is placed in the column's coordinates and drawn in the page's, and
+/// the two agree exactly until a float does not fit the page it started on.
+/// Then it is **broken**: what fits is drawn here and the rest starts at the
+/// top of the next page. `css-break-3` would push the whole box instead, which
+/// is a different layout of the text beside it and not a different position for
+/// the box — see [`Warning::FloatBrokenAcrossPages`].
+fn beside(
+    flow: &Flow,
+    cursors: &mut [FloatCursor],
+    out: &mut Page,
+    top: f64,
+    height: f64,
+    warnings: &mut Vec<(Warning, usize)>,
+) {
+    for (float, cursor) in flow.floats.iter().zip(cursors.iter_mut()) {
+        if cursor.next >= float.items.len() {
+            continue;
+        }
+        let start = cursor.next;
+        if !cursor.started {
+            if float.items[start].y >= top + height - EPSILON {
+                // It begins on a page that has not been reached yet.
+                continue;
+            }
+            // **A float that has not begun is pushed rather than broken**, and
+            // that is `css-break-3`'s rule rather than a convenience: a figure
+            // that would fit on a page of its own belongs whole on the next
+            // one. It costs nothing here because nothing of it has been drawn
+            // yet — which is exactly why the same cannot be done once it has,
+            // and why a float taller than a whole page is broken wherever it
+            // starts rather than pushed for ever.
+            //
+            // **The margin box decides, not the first item.** Asking whether
+            // the first item fits is asking about a zero-height margin, which
+            // always fits: the push never ran, the break path did its work
+            // instead, and the fixture named for the push passed. The
+            // injection campaign is what said so — see the plan's milestone 10
+            // note.
+            let fits = float.bottom <= top + height + EPSILON;
+            if !fits && float.bottom - float.top <= height + EPSILON {
+                continue;
+            }
+            cursor.started = true;
+        }
+        // A float continuing onto this page starts at the top of it, and
+        // everything after it keeps the spacing the column gave it.
+        let shift = -(float.items[start].y - top).min(0.0);
+        let offset = shift - top;
+        while cursor.next < float.items.len() {
+            let item = &float.items[cursor.next];
+            if item.y + offset + item.height > height + EPSILON && cursor.next > start {
+                warn(warnings, Warning::FloatBrokenAcrossPages);
+                break;
+            }
+            cursor.next += 1;
+        }
+        emit(&float.items, &float.blocks, start, cursor.next, offset, out);
+    }
 }
 
 /// The best permitted cut at or before `overflow`, relaxing §13.3.3's rules in
@@ -211,9 +335,26 @@ fn permitted(flow: &Flow, index: usize, tier: Tier) -> Option<Cut> {
 /// Builds one page out of a half-open range of flow items.
 fn page(flow: &Flow, start: usize, end: usize, top: f64) -> Page {
     let mut out = Page::default();
+    emit(&flow.items, &flow.blocks, start, end, -top, &mut out);
+    out
+}
+
+/// Draws a half-open range of one flow's items at a stated offset.
+///
+/// One function for the column and for every float, because they are the same
+/// thing at different origins — and because a second copy of it is where a
+/// float's backgrounds would quietly stop being clipped to the page.
+fn emit(
+    items: &[Item],
+    blocks: &[BlockRecord],
+    start: usize,
+    end: usize,
+    offset: f64,
+    out: &mut Page,
+) {
     // Decorations first and in tree order, so an ancestor's background is
     // under its descendants'.
-    for block in &flow.blocks {
+    for block in blocks {
         if !block.painted {
             continue;
         }
@@ -225,11 +366,11 @@ fn page(flow: &Flow, start: usize, end: usize, top: f64) -> Page {
         if from >= to {
             continue;
         }
-        let box_top = flow.items[from].y;
-        let box_bottom = flow.items[to - 1].y + flow.items[to - 1].height;
+        let box_top = items[from].y;
+        let box_bottom = items[to - 1].y + items[to - 1].height;
         out.boxes.push(BoxFragment {
             x: block.x,
-            y: box_top - top,
+            y: box_top + offset,
             width: block.width,
             height: (box_bottom - box_top).max(0.0),
             background: block.background,
@@ -238,9 +379,9 @@ fn page(flow: &Flow, start: usize, end: usize, top: f64) -> Page {
             border_color: block.border_color,
         });
     }
-    for item in &flow.items[start..end] {
+    for item in &items[start..end] {
         if let ItemKind::Line(line) = &item.kind {
-            let baseline = item.y - top + line.baseline;
+            let baseline = item.y + offset + line.baseline;
             for run in &line.runs {
                 let mut run = run.clone();
                 run.y = baseline;
@@ -248,7 +389,6 @@ fn page(flow: &Flow, start: usize, end: usize, top: f64) -> Page {
             }
         }
     }
-    out
 }
 
 fn warn(warnings: &mut Vec<(Warning, usize)>, warning: Warning) {

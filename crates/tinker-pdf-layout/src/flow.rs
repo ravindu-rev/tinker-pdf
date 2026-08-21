@@ -36,6 +36,23 @@
 //! there. Writing them as three special cases is how an implementation ends up
 //! with two of them.
 //!
+//! # A float is laid out here and placed somewhere else
+//!
+//! A floated box is taken out of the flow: it does not advance the cursor, its
+//! content is laid out in a formatting context of its own at `x = 0`, and the
+//! whole of it is then moved to wherever [`crate::floats`] says §9.5.1 puts it.
+//! Three things follow, and each is a thing this module does that it would not
+//! otherwise do:
+//!
+//! - the float's items are **not** in [`Flow::items`], because the page cutter
+//!   walks that vector expecting a `y` that never goes backwards and a float's
+//!   is above the lines that flow around it;
+//! - a line box's measure is asked of the floats before it is filled, and a
+//!   line with no room beside them is shifted below them — §9.5's second
+//!   sentence, and the one an implementation leaves out;
+//! - every run carries a document-order stamp, because the order the boxes were
+//!   made in stopped being the order the words were written in.
+//!
 //! # The collapsed value is not a maximum
 //!
 //! §8.3.1: *"the maximum of the positive adjoining margins, plus the minimum of
@@ -50,11 +67,29 @@ use tinker_pdf_css::property::{
     OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TextAlign,
 };
 
+use crate::floats::{Ceilings, FloatContext, Placed};
 use crate::metrics::Metrics;
 use crate::style::{consume, Consumed};
 use crate::text::{self, Collapser};
 use crate::uax14;
 use crate::{BoxNode, Budget, Content, Limits, Options, Refusal, TextRun, Warning};
+
+/// Slack for the comparisons a float's geometry needs, in points.
+///
+/// [`crate::fragment`]'s figure and [`crate::floats`]'s, for the same reason:
+/// a word that fits the measure to within a thousandth of a point fits, and
+/// the alternative is a rounding error sending a line under a figure it was
+/// beside.
+const EPSILON: f64 = 1e-6;
+
+/// The measure a max-content trial is run at, in points.
+///
+/// Wide enough that no line in a book reaches it — a hundred thousand points is
+/// thirty-five feet of Courier — and small enough that the arithmetic stays
+/// exact in an `f64`, which `f64::MAX` would not: a width of `f64::MAX` less a
+/// margin is still `f64::MAX`, and every shrink-to-fit answer would be
+/// infinite.
+const MAX_MEASURE: f64 = 100_000.0;
 
 /// One block box's decorations and where they sit.
 #[derive(Clone, Debug)]
@@ -137,11 +172,34 @@ pub(crate) struct Item {
     pub kind: ItemKind,
 }
 
+/// One float, laid out in its own formatting context and placed.
+///
+/// Its items are **not** in [`Flow::items`], and that is the whole reason this
+/// type exists: [`crate::fragment`] cuts pages by walking a single column whose
+/// `y` never goes backwards, and a float's content sits beside that column
+/// rather than in it. Keeping the two apart is what lets a float be placed
+/// above the line boxes that flow around it without the page cutter ever seeing
+/// a `y` it cannot order.
+#[derive(Clone, Debug)]
+pub(crate) struct FloatRecord {
+    /// The float's own flow, in the same coordinates as [`Flow::items`].
+    pub items: Vec<Item>,
+    /// Its own block records, indexing [`FloatRecord::items`].
+    pub blocks: Vec<BlockRecord>,
+    /// Margin-box top, which is where the float's first page is decided.
+    pub top: f64,
+    /// Margin-box bottom.
+    pub bottom: f64,
+}
+
 /// A whole book as one continuous column, before it is cut into pages.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Flow {
     pub items: Vec<Item>,
     pub blocks: Vec<BlockRecord>,
+    /// The floats, in the order they were met — which is document order, and
+    /// therefore the order their text has to be read back in.
+    pub floats: Vec<FloatRecord>,
     pub warnings: Vec<(Warning, usize)>,
 }
 
@@ -225,6 +283,41 @@ struct Builder<'a, M: Metrics> {
     /// Of those, the ones with `page-break-inside: avoid`, which is rule B's
     /// candidate set at the moment a margin is contributed.
     open_avoid: Vec<usize>,
+    /// The floats of the formatting context being built, CSS 2.2 §9.5.
+    floats: FloatContext,
+    /// §9.5.1's rule 5: the lowest border-box top any earlier box has had.
+    ceiling_box: f64,
+    /// Rule 6: the lowest top any earlier line box has had. Two fields rather
+    /// than one running maximum, because they are two rules with two fixtures.
+    ceiling_line: f64,
+    /// Rule 4: the content top of the block container being filled.
+    content_top: f64,
+    /// Document order, stamped on every run as it is made.
+    ///
+    /// **Reading order stops being emission order the moment a float exists.**
+    /// A float's content is laid out when the float is met and drawn where the
+    /// float was placed, which can be a page later than the text that follows
+    /// it in the source; without a stamp, the only order available to a reader
+    /// of the output is the order the boxes happened to be produced in, and
+    /// text conservation — an *ordered* comparison — would fail on a book that
+    /// lost nothing at all.
+    sequence: usize,
+}
+
+/// What laying a subtree out in its own formatting context came to.
+///
+/// A struct rather than the four-tuple it was, because a float's own flow, its
+/// own decorations, the floats **inside** it and its height are four different
+/// things and a caller that took the third for the second would compile.
+struct Sublayout {
+    /// The subtree's own flow, at `x = 0` and `y = 0`.
+    items: Vec<Item>,
+    /// Its own block records, indexing those items.
+    blocks: Vec<BlockRecord>,
+    /// Any floats it placed in its own formatting context.
+    floats: Vec<FloatRecord>,
+    /// How tall the whole of it came to, margins included.
+    height: f64,
 }
 
 /// One run of text in an inline formatting context, after phase I.
@@ -233,6 +326,8 @@ struct Piece {
     style: Consumed,
     /// The [`BoxNode::anchor`] of the node this piece's text came from.
     anchor: Option<u32>,
+    /// Its position in document order. See [`Builder::sequence`].
+    order: usize,
 }
 
 /// Lays a tree out into one continuous column.
@@ -253,6 +348,15 @@ pub(crate) fn build<M: Metrics>(
         pending: Pending::default(),
         open: Vec::new(),
         open_avoid: Vec::new(),
+        floats: FloatContext::default(),
+        // Nothing is earlier than the first box, and a ceiling of zero would
+        // be a claim about the top of the page rather than the absence of one:
+        // a book whose first block has a negative top margin starts above the
+        // page and a float in it belongs there too.
+        ceiling_box: f64::NEG_INFINITY,
+        ceiling_line: f64::NEG_INFINITY,
+        content_top: 0.0,
+        sequence: 0,
     };
     builder.block(root, options.width, 0.0, 0, false, 0)?;
     // The last pending margin is committed so the flow's height includes it,
@@ -360,15 +464,6 @@ impl<M: Metrics> Builder<'_, M> {
             return Ok(());
         }
         self.budget.spend_box()?;
-        if style.float != Float::None {
-            self.warn(Warning::FloatInFlow(style.float));
-        }
-        if style.clear != Clear::None {
-            self.warn(Warning::ClearIgnored(style.clear));
-        }
-        if style.display == Display::InlineBlock {
-            self.warn(Warning::InlineBlockAsBlock);
-        }
         let avoid = avoid || style.page_break_inside == PageBreakInside::Avoid;
 
         let margin_top = style.margin_px(Side::Top, containing);
@@ -441,6 +536,12 @@ impl<M: Metrics> Builder<'_, M> {
         let block = self.flow.blocks.len();
         self.flow.blocks.push(record);
 
+        // §9.5.2's clearance, which goes **between** the margins already
+        // adjoining here and this box's own top margin — so it is introduced
+        // before the top margin joins them, and introducing it is what stops
+        // the two from collapsing through each other.
+        self.clear(&style, margin_top)?;
+
         // The top margin joins whatever is adjoining, and the box's
         // `page-break-before` joins the break position that margin is. The
         // avoid set is taken **before** this box is opened, because an element
@@ -448,6 +549,11 @@ impl<M: Metrics> Builder<'_, M> {
         self.pending.breaks.push(style.page_break_before);
         self.pending.meet(&self.open_avoid.clone());
         self.pending.add(margin_top);
+        // §9.5.1's rule 5 counts this box from here on. The border-box top is
+        // where the margins standing at this position have taken it, which is
+        // not `self.y` — they have not been committed yet and will not be
+        // until something that is not a margin arrives.
+        self.ceiling_box = self.ceiling_box.max(self.y + self.pending.value());
 
         self.open.push(block);
         if style.page_break_inside == PageBreakInside::Avoid {
@@ -464,7 +570,13 @@ impl<M: Metrics> Builder<'_, M> {
 
         let content_x = left + border.left + padding.left;
         let before = self.y;
+        // Rule 4's containing block for any float among the children. It is
+        // `before` plus the margins standing here rather than `before` itself,
+        // for the reason above: an uncommitted margin has not moved `self.y`
+        // yet and it will.
+        let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
         self.children(node, &style, content_x, content_width, depth, avoid, block)?;
+        self.content_top = outer_top;
         let content_height = self.y - before;
 
         // A specified height is honoured by padding the flow out to it; a
@@ -532,6 +644,7 @@ impl<M: Metrics> Builder<'_, M> {
                     text,
                     style: style.clone(),
                     anchor: node.anchor,
+                    order: self.order(),
                 });
                 self.lines(&pieces, style, block, content_x, content_width)
             }
@@ -543,7 +656,14 @@ impl<M: Metrics> Builder<'_, M> {
                     let mut pieces = Vec::new();
                     let mut collapser = Collapser::new();
                     for child in children {
-                        self.gather(child, &mut pieces, &mut collapser, depth + 1)?;
+                        self.gather(
+                            child,
+                            &mut pieces,
+                            &mut collapser,
+                            depth + 1,
+                            content_x,
+                            content_width,
+                        )?;
                     }
                     return self.lines(&pieces, style, block, content_x, content_width);
                 }
@@ -559,6 +679,29 @@ impl<M: Metrics> Builder<'_, M> {
                 let mut ordinal = 0usize;
                 for (child, child_style) in children.iter().zip(&styles) {
                     if child_style.is_none() {
+                        continue;
+                    }
+                    if child_style.float != Float::None {
+                        // The inline content standing before a float is set
+                        // first, and that is not §9.2.1.1's doing — a float is
+                        // not block-level and does not on its own make an
+                        // anonymous box. It is document order's: the float's
+                        // text is stamped where it is laid out, and laying it
+                        // out before the words that precede it in the source
+                        // would put those words after it in every reading of
+                        // the output.
+                        if !run.is_empty() {
+                            self.anonymous(&run, style, block, content_x, content_width, depth)?;
+                            run.clear();
+                        }
+                        self.float_box(
+                            child,
+                            child_style,
+                            content_width,
+                            content_x,
+                            depth + 1,
+                            avoid,
+                        )?;
                         continue;
                     }
                     if child_style.is_block_level() {
@@ -598,19 +741,29 @@ impl<M: Metrics> Builder<'_, M> {
         let mut pieces = Vec::new();
         let mut collapser = Collapser::new();
         for child in run {
-            self.gather(child, &mut pieces, &mut collapser, depth + 1)?;
+            self.gather(
+                child,
+                &mut pieces,
+                &mut collapser,
+                depth + 1,
+                content_x,
+                content_width,
+            )?;
         }
         self.lines(&pieces, style, block, content_x, content_width)
     }
 
     /// Collects one inline-level subtree's text, phase I applied **across**
     /// the whole context.
+    #[allow(clippy::too_many_arguments)]
     fn gather(
         &mut self,
         node: &BoxNode,
         out: &mut Vec<Piece>,
         collapser: &mut Collapser,
         depth: usize,
+        content_x: f64,
+        content_width: f64,
     ) -> Result<(), Refusal> {
         if depth > self.limits.max_depth {
             return Err(Refusal::TooDeep { depth });
@@ -619,7 +772,24 @@ impl<M: Metrics> Builder<'_, M> {
         if style.is_none() {
             return Ok(());
         }
+        // §9.7: a float is block-level whatever `display` said, so a floated
+        // element inside a paragraph is taken out here rather than made into a
+        // piece — and the paragraph is **not** split around it, which is the
+        // difference between this path and the block one. What it costs is
+        // that the float's static position is the top of the inline formatting
+        // context rather than the line it was written on: the lines do not
+        // exist yet when this runs. See the crate's `Still owed`.
+        if style.float != Float::None {
+            return self.float_box(node, &style, content_width, content_x, depth, false);
+        }
         self.budget.spend_box()?;
+        if style.display == Display::InlineBlock {
+            // Here rather than beside the block builder, which is where it was
+            // until milestone 10 and where it could not fire: an
+            // `inline-block` is not block-level, so it arrives in an inline
+            // formatting context and is set as text.
+            self.warn(Warning::InlineBlockAsInline);
+        }
         match &node.content {
             Content::Text(source) => {
                 let text = collapser.push(source, style.white_space);
@@ -628,19 +798,296 @@ impl<M: Metrics> Builder<'_, M> {
                         text,
                         style,
                         anchor: node.anchor,
+                        order: self.order(),
                     });
                 }
             }
             Content::Children(children) => {
                 for child in children {
-                    if consume(&child.style).is_block_level() {
+                    let child_style = consume(&child.style);
+                    // A float is not the §9.2.1.1 case: it is taken out of the
+                    // inline flow rather than splitting the inline box that
+                    // holds it, so warning about it would name the wrong rule.
+                    if child_style.float == Float::None && child_style.is_block_level() {
                         self.warn(Warning::BlockInInline);
                     }
-                    self.gather(child, out, collapser, depth + 1)?;
+                    self.gather(child, out, collapser, depth + 1, content_x, content_width)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// The next document-order stamp. See [`Builder::sequence`].
+    fn order(&mut self) -> usize {
+        self.sequence += 1;
+        self.sequence
+    }
+
+    /// Where content would start if it arrived now: `self.y` plus whatever
+    /// margins are standing at this position and have not been committed.
+    fn cursor(&self) -> f64 {
+        self.y + self.pending.value()
+    }
+
+    /// Whether the innermost open box has already begun, which decides whether
+    /// an item emitted here is inside its border box.
+    fn inside_open(&self) -> bool {
+        self.open
+            .last()
+            .is_some_and(|block| self.flow.blocks[*block].first.is_some())
+    }
+
+    /// CSS 2.2 §9.5.2: clearance, introduced above a box's own top margin.
+    ///
+    /// **Clearance is not a margin and not a border.** It is a third thing,
+    /// and §8.3.1 gives it the property that makes it worth being a third
+    /// thing: a box with clearance does not collapse its top margin with the
+    /// margins above it, so the cleared box moves down and stays down. Adding
+    /// the distance to the margin instead would let the next box's margin
+    /// collapse it away again.
+    fn clear(&mut self, style: &Consumed, margin_top: f64) -> Result<(), Refusal> {
+        if style.clear == Clear::None {
+            return Ok(());
+        }
+        self.budget.spend_layout(self.floats.len())?;
+        let Some(bottom) = self.floats.clearance_bottom(style.clear) else {
+            // Nothing on those sides is floated, so there is nothing to clear
+            // and nothing to say: `clear` on a book's every `<hr>` is not a
+            // fidelity gap and a warning about it would drown the ones that
+            // are.
+            return Ok(());
+        };
+        let clearance = bottom - (self.cursor() + margin_top);
+        if clearance <= 0.0 {
+            return Ok(());
+        }
+        let inside = self.inside_open();
+        self.commit_margin();
+        self.emit(clearance, ItemKind::Edge, inside);
+        Ok(())
+    }
+
+    /// One floated box: §9.5.1's placement, and its content in a formatting
+    /// context of its own.
+    ///
+    /// The float's own flow is built first and placed second, because §9.5.1's
+    /// rules 2, 3 and 7 all need the height of the box being placed and a
+    /// float's height is whatever its content came to.
+    fn float_box(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        containing: f64,
+        cb_left: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        let outer_width = self.float_width(node, style, containing, depth, avoid)?;
+        let Sublayout {
+            mut items,
+            mut blocks,
+            floats: mut nested,
+            height,
+        } = self.sublayout(node, outer_width, depth, avoid)?;
+
+        // A float with `clear` clears before it is placed: §9.5.2's *"the top
+        // margin edge is moved below"* is about the box, and a float is a box.
+        let mut hint = self.cursor();
+        if style.clear != Clear::None {
+            self.budget.spend_layout(self.floats.len())?;
+            if let Some(bottom) = self.floats.clearance_bottom(style.clear) {
+                hint = hint.max(bottom);
+            }
+        }
+        let ceilings = Ceilings {
+            containing_top: self.content_top,
+            earlier_box_top: self.ceiling_box,
+            earlier_line_top: self.ceiling_line,
+        };
+        let (left, top) = self.floats.place(
+            style.float,
+            outer_width,
+            height,
+            hint,
+            &ceilings,
+            cb_left,
+            cb_left + containing,
+            self.budget,
+        )?;
+
+        translate(&mut items, &mut blocks, left, top);
+        for record in &mut nested {
+            translate(&mut record.items, &mut record.blocks, left, top);
+            record.top += top;
+            record.bottom += top;
+        }
+        self.floats.push(Placed {
+            side: style.float,
+            left,
+            right: left + outer_width,
+            top,
+            bottom: top + height,
+        });
+        // Rule 5 counts a float among the boxes an element earlier in the
+        // document generated, and rule 6 does not count it among the line
+        // boxes: a float holds line boxes but is not on one.
+        self.ceiling_box = self.ceiling_box.max(top);
+        self.flow.floats.push(FloatRecord {
+            items,
+            blocks,
+            top,
+            bottom: top + height,
+        });
+        self.flow.floats.append(&mut nested);
+        Ok(())
+    }
+
+    /// §10.3.5: a float's used width, shrink-to-fit where `width` is `auto`.
+    ///
+    /// *"min(max(preferred minimum width, available width), preferred width)"*,
+    /// and the two preferred widths are measured by laying the float's content
+    /// out twice — once at a measure nothing can reach, which puts every
+    /// paragraph on one line, and once at a measure nothing fits in, which puts
+    /// every unbreakable word on one. Measuring them from the same line breaker
+    /// that will set the float is what stops the shrink-to-fit width and the
+    /// actual set text disagreeing about where a word ends.
+    ///
+    /// It costs two extra layouts of the float's subtree, charged to the same
+    /// budget as everything else. A float with a stated `width` pays neither.
+    fn float_width(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        containing: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<f64, Refusal> {
+        let margins =
+            style.margin_px(Side::Left, containing) + style.margin_px(Side::Right, containing);
+        let extra = style.padding_px(Side::Left, containing)
+            + style.padding_px(Side::Right, containing)
+            + style.border_width.left
+            + style.border_width.right;
+        if let Size::Length(length) = style.width {
+            let specified = match length {
+                LengthPercentage::Px(px) => px,
+                LengthPercentage::Percent(percent) => containing * percent / 100.0,
+            };
+            let content = match style.box_sizing {
+                tinker_pdf_css::property::BoxSizing::ContentBox => specified,
+                tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
+            }
+            .max(0.0);
+            return Ok(content + extra + margins);
+        }
+        // A trial measures how far right its text reached, which counts the
+        // insets on the **left** of it and none of the ones on the right.
+        let right = style.padding_px(Side::Right, containing)
+            + style.border_width.right
+            + style.margin_px(Side::Right, containing);
+        let preferred = self.measure_content(node, MAX_MEASURE, depth, avoid)? + right;
+        let minimum = self.measure_content(node, 0.0, depth, avoid)? + right;
+        Ok(containing.max(minimum).min(preferred).max(minimum))
+    }
+
+    /// The outer width one trial layout came to: the rightmost edge any text
+    /// in it reached.
+    ///
+    /// Text and not boxes. A block inside the float with an `auto` width fills
+    /// whatever measure the trial was run at, so counting block records would
+    /// make the preferred width of every float the width of the trial — which
+    /// is the shrink-to-fit bug that produces a page-wide float holding one
+    /// word. What it costs is a float whose only wide thing is a block with a
+    /// stated `width`; see the crate's `Still owed`.
+    fn measure_content(
+        &mut self,
+        node: &BoxNode,
+        measure: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<f64, Refusal> {
+        // A trial's warnings are not the book's. Setting a paragraph at a
+        // measure of zero reports a line that overflowed on every word, and
+        // reporting that to the caller would be reporting an answer this
+        // function threw away.
+        let warnings = std::mem::take(&mut self.warnings);
+        let trial = self.sublayout(node, measure, depth, avoid);
+        self.warnings = warnings;
+        let trial = trial?;
+        let (items, floats) = (trial.items, trial.floats);
+        let mut width = 0.0f64;
+        let mut extents = |items: &[Item]| {
+            for item in items {
+                if let ItemKind::Line(line) = &item.kind {
+                    for run in &line.runs {
+                        width = width.max(run.x + run.width);
+                    }
+                }
+            }
+        };
+        extents(&items);
+        for float in &floats {
+            extents(&float.items);
+        }
+        Ok(width)
+    }
+
+    /// Lays a subtree out in a formatting context of its own, at `x = 0`.
+    ///
+    /// Everything positional is swapped out and put back: the items, the block
+    /// records, the cursor, the adjoining margins, the open boxes and — the one
+    /// that would be a silent fault rather than a crash — **the float context**,
+    /// because a float establishes a new block formatting context and floats
+    /// outside it do not reach inside it.
+    fn sublayout(
+        &mut self,
+        node: &BoxNode,
+        measure: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<Sublayout, Refusal> {
+        let items = std::mem::take(&mut self.flow.items);
+        let blocks = std::mem::take(&mut self.flow.blocks);
+        let floats = std::mem::take(&mut self.flow.floats);
+        let context = std::mem::take(&mut self.floats);
+        let y = std::mem::replace(&mut self.y, 0.0);
+        let pending = std::mem::take(&mut self.pending);
+        let open = std::mem::take(&mut self.open);
+        let open_avoid = std::mem::take(&mut self.open_avoid);
+        let ceiling_box = std::mem::replace(&mut self.ceiling_box, f64::NEG_INFINITY);
+        let ceiling_line = std::mem::replace(&mut self.ceiling_line, f64::NEG_INFINITY);
+        let content_top = std::mem::replace(&mut self.content_top, 0.0);
+
+        let result = self.block(node, measure, 0.0, depth, avoid, 0);
+        if result.is_ok() {
+            // The same reason `build` does it: without this the float's bottom
+            // margin is not part of its height, and a float whose height is
+            // short by a margin lets the line beside it start too high.
+            self.commit_margin();
+        }
+
+        let inner = std::mem::replace(&mut self.flow.items, items);
+        let inner_blocks = std::mem::replace(&mut self.flow.blocks, blocks);
+        let inner_floats = std::mem::replace(&mut self.flow.floats, floats);
+        let height = std::mem::replace(&mut self.y, y);
+        self.floats = context;
+        self.pending = pending;
+        self.open = open;
+        self.open_avoid = open_avoid;
+        self.ceiling_box = ceiling_box;
+        self.ceiling_line = ceiling_line;
+        self.content_top = content_top;
+        result?;
+        Ok(Sublayout {
+            items: inner,
+            blocks: inner_blocks,
+            floats: inner_floats,
+            height,
+        })
     }
 
     /// A `list-item`'s marker, on the first line of its own box.
@@ -656,6 +1103,11 @@ impl<M: Metrics> Builder<'_, M> {
         let width = self.metrics.measure(&text, &font);
         for index in first..self.flow.blocks[block].last {
             if let ItemKind::Line(line) = &mut self.flow.items[index].kind {
+                // The marker reads before the first word of its own item, and
+                // the stamp says so: sorting a page's runs into document order
+                // is a **stable** sort, so a marker sharing the first run's
+                // number stays in front of it.
+                let order = line.runs.first().map_or(0, |run| run.order);
                 line.runs.insert(
                     0,
                     TextRun {
@@ -678,6 +1130,7 @@ impl<M: Metrics> Builder<'_, M> {
                         word_spacing: 0.0,
                         generated: true,
                         anchor: None,
+                        order,
                     },
                 );
                 return;
@@ -725,7 +1178,6 @@ impl<M: Metrics> Builder<'_, M> {
         let mut cursor = 0usize;
         let first_item = self.flow.items.len();
         while start < content.len() {
-            let available = (content_width - if first_line { indent } else { 0.0 }).max(0.0);
             // `cursor` is where the previous line stopped looking, and it is
             // not an optimisation. Restarting the scan at zero for every line
             // makes filling a paragraph `O(lines x opportunities)`, which for a
@@ -735,6 +1187,22 @@ impl<M: Metrics> Builder<'_, M> {
             while cursor < opportunities.len() && opportunities[cursor].at <= start {
                 cursor += 1;
             }
+            let indent_here = if first_line { indent } else { 0.0 };
+            // §9.5's other half: the measure is what the floats beside this
+            // line have left of it, and where nothing is left the line goes
+            // under them. Both are decided **before** the line is filled,
+            // because the width is what decides where it breaks.
+            let (line_x, available) = self.beside(
+                container,
+                content_x,
+                content_width,
+                indent_here,
+                &content,
+                &spans,
+                pieces,
+                &opportunities[cursor..],
+                start,
+            )?;
             let (end, hard) = self.fit(
                 &content,
                 &spans,
@@ -753,17 +1221,8 @@ impl<M: Metrics> Builder<'_, M> {
             let justify =
                 container.text_align == TextAlign::Justify && !hard && end < content.len();
             self.line(
-                &content,
-                &spans,
-                pieces,
-                container,
-                block,
-                content_x + if first_line { indent } else { 0.0 },
-                (content_width - if first_line { indent } else { 0.0 }).max(0.0),
-                trim_start,
-                trim_end,
-                justify,
-                lines_here,
+                &content, &spans, pieces, container, block, line_x, available, trim_start,
+                trim_end, justify, lines_here,
             );
             lines_here += 1;
             first_line = false;
@@ -779,6 +1238,83 @@ impl<M: Metrics> Builder<'_, M> {
             }
         }
         Ok(())
+    }
+
+    /// Where the next line box starts and how wide it is, given the floats.
+    ///
+    /// CSS 2.2 §9.5: *"line boxes are shortened to make room for the float"* —
+    /// and §9.5's other sentence, the one an implementation leaves out:
+    /// *"if a shortened line box is too small to contain any content, then it
+    /// is shifted downward until either it fits or there are no more floats
+    /// present."* A build with only the first sentence sets one word per line
+    /// down the side of a wide figure and never recovers.
+    ///
+    /// **The height it asks the band about is the strut's**, not the line's.
+    /// The line's own height is not known until it has been filled and it
+    /// cannot be filled until its width is known, so something has to be
+    /// assumed; the container's own `line-height` is the assumption every
+    /// line in a book of uniform text meets exactly, and the case it gets
+    /// wrong — one oversized inline in the last line beside a float — is worth
+    /// less than the circularity it avoids.
+    #[allow(clippy::too_many_arguments)]
+    fn beside(
+        &mut self,
+        container: &Consumed,
+        content_x: f64,
+        content_width: f64,
+        indent: f64,
+        content: &str,
+        spans: &[(usize, usize, usize)],
+        pieces: &[Piece],
+        opportunities: &[uax14::Opportunity],
+        start: usize,
+    ) -> Result<(f64, f64), Refusal> {
+        let full = (content_width - indent).max(0.0);
+        if self.floats.is_empty() {
+            return Ok((content_x + indent, full));
+        }
+        let left = content_x;
+        let right = content_x + content_width;
+        let height = container.line_height.max(0.0);
+        let top = self.cursor();
+        // What has to fit for the line to be worth setting here: the first
+        // unbreakable run of it. A word longer than the whole measure would
+        // never fit anywhere, so it is not a reason to go looking below a
+        // float — that line overflows wherever it is put.
+        let first = opportunities.first().map_or(content.len(), |o| o.at);
+        let word = self.measure(content, spans, pieces, start, first)
+            - self.trailing(content, spans, pieces, start, first);
+        let mut chosen = top;
+        let (band_left, band_right) = loop {
+            // Two scans for the band and one for the step below it, each over
+            // every float in this context.
+            //
+            // **One charge and one band.** This loop used to leave its band
+            // behind and a second call recomputed it afterwards, at the same
+            // height, over the same list, for the same answer — and the charge
+            // for that second scan was one no book could ever reach, because
+            // this one fires first. The injection campaign is what said so.
+            self.budget.spend_layout(3 * self.floats.len())?;
+            let band = self.floats.band(chosen, chosen + height, left, right);
+            if word > full + EPSILON || band.1 - band.0 - indent >= word - EPSILON {
+                break band;
+            }
+            match self.floats.next_bottom(chosen) {
+                Some(next) => chosen = next,
+                None => break band,
+            }
+        };
+        if chosen > top {
+            // The line goes below the float, and the space it left is part of
+            // this block: a background painted behind a paragraph is painted
+            // behind the gap beside the figure too.
+            self.commit_margin();
+            self.emit(chosen - top, ItemKind::Edge, true);
+        }
+        Ok((
+            band_left + indent,
+            (band_right - band_left - indent).max(0.0),
+        ))
     }
 
     /// Where the next line ends: the last break opportunity that fits, or the
@@ -1014,6 +1550,7 @@ impl<M: Metrics> Builder<'_, M> {
                 word_spacing: style.word_spacing,
                 generated: false,
                 anchor: pieces[*index].anchor,
+                order: pieces[*index].order,
             });
             width += advance;
         }
@@ -1068,7 +1605,29 @@ impl<M: Metrics> Builder<'_, M> {
         // with a child's when there is text between them.
         self.commit_margin();
         let _ = block;
+        // §9.5.1's rule 6, and the only place it is recorded: a float may not
+        // rise above a line box that already holds earlier content.
+        self.ceiling_line = self.ceiling_line.max(self.y);
         self.emit(height, ItemKind::Line(Box::new(line)), true);
+    }
+}
+
+/// Moves a finished sub-flow to where its float was placed.
+///
+/// A run's `y` is not touched because a run has not got one yet: it is written
+/// at pagination out of its line box's position, so moving the item moves the
+/// text with it.
+fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
+    for item in items {
+        item.y += dy;
+        if let ItemKind::Line(line) = &mut item.kind {
+            for run in &mut line.runs {
+                run.x += dx;
+            }
+        }
+    }
+    for block in blocks {
+        block.x += dx;
     }
 }
 

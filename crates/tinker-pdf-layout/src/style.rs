@@ -23,12 +23,16 @@
 //!
 //! # Naming a field is not the same as honouring it
 //!
-//! Three fields are named here and deliberately not implemented — `float`,
-//! `clear` and the shape of `font-variant` — and each **warns by name** rather
-//! than being quietly discarded or, worse, mapped onto its nearest implemented
-//! neighbour. Laying a `float: left` out as an ordinary block is gap 07's
-//! solid-black gradient in a stylesheet: the page is plausible, the paragraph
-//! is in the wrong place, and nothing anywhere says so. Milestone 10 is floats.
+//! `float` and `clear` were named here and not implemented until milestone 10,
+//! and each **warned by name** rather than being quietly discarded or, worse,
+//! mapped onto its nearest implemented neighbour. Laying a `float: left` out as
+//! an ordinary block is gap 07's solid-black gradient in a stylesheet: the page
+//! is plausible, the paragraph is in the wrong place, and nothing anywhere says
+//! so. Both are now read by [`crate::floats`] and the two warnings are gone,
+//! which is the only honest way for a warning of that kind to end.
+//!
+//! `font-variant` is still carried rather than honoured: it reaches the painter
+//! as a value and no synthesis of small capitals happens anywhere.
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
@@ -113,10 +117,9 @@ pub struct Consumed {
     pub overflow_wrap: OverflowWrap,
     /// `line-break` and `word-break` together, §5.1 and §5.2.
     pub tailoring: Tailoring,
-    /// `float`, which this build does not implement — the value is here so the
-    /// warning can name it.
+    /// `float`, CSS 2.2 §9.5.1. Read by [`crate::floats`].
     pub float: Float,
-    /// `clear`, likewise.
+    /// `clear`, §9.5.2.
     pub clear: Clear,
 }
 

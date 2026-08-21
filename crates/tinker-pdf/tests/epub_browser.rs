@@ -389,8 +389,15 @@ fn run(browser: &Path, arguments: &[String]) -> (bool, String) {
 }
 
 /// Lays a document out in the browser and reads the measurement back.
-fn browser_blocks(browser: &Path, html: &str, width: f64) -> Vec<Block> {
-    let path = scratch().join("continuous.html");
+///
+/// `slot` names the file the page is written to, and it is a parameter rather
+/// than a constant because it has to be: `cargo test` runs the tests in this
+/// file **in parallel**, and two comparisons sharing one path is one of them
+/// measuring the other one's document. That is not a hypothetical — the float
+/// comparison below read the corpus chapter on its first run, and the block
+/// sequence assertion is what said so.
+fn browser_blocks(browser: &Path, slot: &str, html: &str, width: f64) -> Vec<Block> {
+    let path = scratch().join(slot);
     std::fs::write(&path, html).expect("the oracle page");
     let url = format!("file:///{}", path.display().to_string().replace('\\', "/"));
     let (ok, dom) = run(
@@ -561,6 +568,7 @@ fn the_browser_and_this_engine_lay_the_same_column_out_the_same_way() {
 
     let theirs = browser_blocks(
         &browser,
+        "continuous.html",
         &oracle_page(&document, &author, Some(width_px)),
         width_px,
     );
@@ -685,6 +693,7 @@ fn the_continuous_comparison_notices_a_dropped_margin() {
 
     let theirs = browser_blocks(
         &browser,
+        "dropped-margin.html",
         &oracle_page(&document, &author, Some(width_px)),
         width_px,
     );
@@ -885,4 +894,214 @@ fn the_browser_and_this_engine_fragment_the_same_document_into_the_same_pages() 
             joined_theirs.matches(phrase).count()
         );
     }
+}
+
+// ---- the float comparison (milestone 10) ---------------------------------------
+
+/// How far the two columns of the float document may disagree.
+///
+/// **Itemised, like [`MAX_COLUMN_DEVIATION`], and against the same kind of
+/// control.** The measured disagreement is **0.0154 of the column**, and it is
+/// one thing rather than a budget:
+///
+/// | | Of the column |
+/// | --- | --- |
+/// | The constant [`MAX_COLUMN_DEVIATION`] names — the browser reports a **line box's top** and this engine a **baseline** — here at the 32-pixel `<h1>` the offsets are measured from, so 13.4 pixels of an 867-pixel column | 0.0150 |
+/// | Everything else, over sixteen blocks and six figures | 0.0004 |
+///
+/// The second row is the one worth reading. Once the face and the line height
+/// are the same on both sides, **every float in this document is where Chrome
+/// put it to within half a pixel** — the deltas printed by
+/// `TINKER_BROWSER_TABLE=1` are 0.0150, 0.0151, 0.0152 … all the way down, a
+/// constant carried from the first block and never added to.
+///
+/// The cap is 0.05, three times the measurement, and the **injected defect
+/// measures 0.2396** — fifteen times the honest disagreement and five times the
+/// cap. That ratio is what makes this an oracle rather than a threshold: see
+/// [`the_float_comparison_notices_a_float_that_was_not_floated`].
+const MAX_FLOAT_DEVIATION: f64 = 0.05;
+
+/// The float-heavy content document, written for this comparison.
+///
+/// **Every float has a stated `width`.** Shrink-to-fit is implemented and has
+/// its own fixture one crate down, but a browser's preferred-width calculation
+/// and this build's differ by a fraction of a character at every figure, and a
+/// comparison that folded that into its tolerance would be measuring its own
+/// font metrics rather than its float placement. What is compared here is
+/// *placement*: the same figure of the same size, on the same side, in the same
+/// column of text.
+///
+/// It holds the arrangements §9.5.1's rules distinguish: a left float with text
+/// beside it, a right one, two narrow enough to sit side by side, two that are
+/// not, and a `clear` after them all.
+const FLOAT_DOCUMENT: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Figures</title></head><body>\n",
+    "<h1>The figures and the text around them</h1>\n",
+    "<p>The first paragraph is set at the full measure and has no figure beside it at all, ",
+    "which is what makes the second one worth measuring against it.</p>\n",
+    "<div class=\"fl\">Figure one, on the left, with a caption long enough to take several ",
+    "lines of its own.</div>\n",
+    "<p>This paragraph runs down the right of the first figure and its lines are shortened ",
+    "for as long as the figure lasts, and then they are not, which is the whole of the ",
+    "interaction between a float and a line box.</p>\n",
+    "<p>A second paragraph, which begins beside the figure if the first one did not finish ",
+    "it and at the full measure otherwise.</p>\n",
+    "<div class=\"fr\">Figure two, on the right, with a caption of its own.</div>\n",
+    "<p>The text beside a right float is shortened from the other side, and a build that ",
+    "shortened it from the left would put every line of this paragraph in the wrong place ",
+    "while keeping every line count right.</p>\n",
+    "<div class=\"fl narrow\">Three</div>\n",
+    "<div class=\"fl narrow\">Four</div>\n",
+    "<p>Figures three and four are narrow enough to sit side by side, and this paragraph ",
+    "goes beside both of them.</p>\n",
+    "<div class=\"fl wide\">Figure five is wide.</div>\n",
+    "<div class=\"fl wide\">Figure six is wide too, and cannot sit beside five.</div>\n",
+    "<p>Five and six cannot share a line, so six is under five and this paragraph is beside ",
+    "whichever of them it reaches.</p>\n",
+    "<p class=\"cl\">This paragraph clears both sides and starts below every figure above ",
+    "it, whatever the paragraphs before it did.</p>\n",
+    "<h2>After the clearance</h2>\n",
+    "<p>A closing paragraph at the full measure, which is where the two columns have to ",
+    "agree again if they agreed anywhere.</p>\n",
+    "</body></html>\n"
+);
+
+/// The float document's own stylesheet, given to both sides unchanged.
+///
+/// **`line-height` is stated, and that is the second variable held fixed.**
+/// [`SAME_FACE`] holds the font; this holds what `line-height: normal` means.
+/// This build resolves it as 1.2 — the figure every specification example uses
+/// — and a browser resolves it from the face's own metrics, which for Courier
+/// New is 1.133. The difference is six per cent of *every* line in the
+/// document, it accumulates down the column, and it is nothing whatever to do
+/// with where a float went: measured without this rule the two columns
+/// disagreed by 0.0449, of which the whole systematic part is that ratio.
+/// Stating it leaves the comparison about §9.5.1, which is what it is for.
+///
+/// It is a rule **on both sides**, like the face — the same declaration reaches
+/// the browser through [`oracle_page`] and this engine through the cascade —
+/// and [`the_float_comparison_notices_a_float_that_was_not_floated`] is what
+/// says the result can still fail.
+const FLOAT_STYLESHEET: &str = concat!(
+    "* { line-height: 1.2; }\n",
+    ".fl { float: left; width: 180px; margin: 0 16px 8px 0; }\n",
+    ".fr { float: right; width: 180px; margin: 0 0 8px 16px; }\n",
+    ".narrow { width: 90px; }\n",
+    ".wide { width: 260px; }\n",
+    ".cl { clear: both; }\n",
+    "p { margin: 8px 0; }\n"
+);
+
+/// **The float-heavy column, block by block, against the browser's.**
+///
+/// The same two assertions as the continuous comparison — the block sequence
+/// exactly, then the offsets to within a stated fraction — over a document
+/// whose every block is placed by §9.5.1 rather than by §9.4.1.
+#[test]
+fn the_browser_and_this_engine_place_the_same_floats_in_the_same_column() {
+    let browser = oracle!("the float-heavy y-offset comparison");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "floats.html",
+        &oracle_page(FLOAT_DOCUMENT, FLOAT_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let ours = engine_blocks(FLOAT_DOCUMENT, FLOAT_STYLESHEET, width_px);
+
+    assert!(
+        ours.len() >= 12,
+        "the fixture produced {} block boxes",
+        ours.len()
+    );
+    let theirs_text: Vec<(&str, &str)> = theirs
+        .iter()
+        .map(|block| (block.tag.as_str(), block.text.as_str()))
+        .collect();
+    let ours_text: Vec<(&str, &str)> = ours
+        .iter()
+        .map(|block| (block.tag.as_str(), block.text.as_str()))
+        .collect();
+    assert_eq!(
+        theirs_text, ours_text,
+        "the browser and this engine disagree about which blocks exist"
+    );
+
+    let worst = deviation(&theirs, &ours, true);
+    println!("  worst float deviation {worst:.4} of the column");
+    assert!(
+        worst <= MAX_FLOAT_DEVIATION,
+        "the two float columns differ by {worst:.4}, which is past {MAX_FLOAT_DEVIATION}"
+    );
+}
+
+/// And the float comparison **can** fail: the same document with the floats
+/// taken out of this engine's side.
+///
+/// `float: none` is not an arbitrary defect. It is what this build did until
+/// milestone 10 — every figure in the flow, every paragraph pushed down past
+/// it — and it is the exact failure the milestone exists to end. The number it
+/// produces is what the tolerance above is judged against.
+#[test]
+fn the_float_comparison_notices_a_float_that_was_not_floated() {
+    let browser = oracle!("the float control");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "float-control.html",
+        &oracle_page(FLOAT_DOCUMENT, FLOAT_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let injected = format!("{FLOAT_STYLESHEET}\n.fl, .fr {{ float: none; }}\n");
+    let ours = engine_blocks(FLOAT_DOCUMENT, &injected, width_px);
+
+    let worst = deviation(&theirs, &ours, false);
+    println!("  worst deviation with the floats unfloated: {worst:.4}");
+    assert!(
+        worst > MAX_FLOAT_DEVIATION,
+        "taking the floats out moved the column by only {worst:.4}, \
+         so the comparison would not have noticed"
+    );
+}
+
+/// The worst disagreement between two columns, as a fraction of the browser's.
+///
+/// The same measure the continuous comparison makes, written once so that a
+/// test and its control cannot drift apart: a control computed by a second copy
+/// of this arithmetic could pass while the test it certifies measured something
+/// else.
+fn deviation(theirs: &[Block], ours: &[Block], table: bool) -> f64 {
+    let span = (theirs.last().map_or(1.0, |block| block.top)
+        - theirs.first().map_or(0.0, |block| block.top))
+    .max(1.0);
+    let offsets = |blocks: &[Block]| -> Vec<f64> {
+        let first = blocks.first().map_or(0.0, |block| block.top);
+        blocks
+            .iter()
+            .map(|block| (block.top - first) / span)
+            .collect()
+    };
+    let theirs_at = offsets(theirs);
+    let ours_at = offsets(ours);
+    let mut worst = 0.0f64;
+    for (at, (a, b)) in theirs_at.iter().zip(&ours_at).enumerate() {
+        let gap = (a - b).abs();
+        if gap > worst {
+            worst = gap;
+        }
+        if table && std::env::var_os("TINKER_BROWSER_TABLE").is_some() {
+            println!(
+                "    {at:3} {:8} browser {:9.2} ours {:9.2} delta {:+.4}  {}",
+                ours[at].tag,
+                theirs[at].top,
+                ours[at].top,
+                a - b,
+                &ours[at].text[..ours[at].text.len().min(40)]
+            );
+        }
+    }
+    worst
 }

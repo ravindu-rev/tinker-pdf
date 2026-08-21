@@ -22,18 +22,27 @@
 //! for `MAX_DOM_NODES`'s reason one milestone earlier: a cap belongs where the
 //! thing it bounds is decided, and pages are decided by `layout::fragment`.
 //!
-//! **`MAX_LAYOUT_WORK` is in gap 31's bounds table and is not in this one**,
-//! and the argument is milestone 7's rather than an omission. In a build with
-//! no float re-flow, no two-pass table layout and no shrink-to-fit, every unit
-//! of layout work is one box or one line box; boxes are bounded by
+//! **`MAX_LAYOUT_WORK` is in gap 31's bounds table and was not in this one
+//! until milestone 10.** Milestone 7's argument for its absence was: in a build
+//! with no float re-flow, no two-pass table layout and no shrink-to-fit, every
+//! unit of layout work is one box or one line box; boxes are bounded by
 //! `MAX_BOX_TREE_NODES` and line boxes by `MAX_LINE_BREAK_WORK`, because a line
 //! box needs a character and every character is charged before the breaker is
 //! entered. A cap there would sit above what its own inputs can ask for — gap
 //! 18a milestone 8's failure — or below the box cap, where it would be the box
 //! cap wearing another name. It was written, its firing test was attempted, and
-//! it could not be made to fire without lowering itself. **The bound arrives
-//! with the multi-pass layout or not at all**, which is milestones 10 and 11,
-//! and it is the same sentence `MAX_XPS_VISUAL_DEPTH`'s absence carries below.
+//! it could not be made to fire without lowering itself. The argument ended:
+//! **the bound arrives with the multi-pass layout or not at all**, which is
+//! milestones 10 and 11.
+//!
+//! *Amended, 21 August 2026, gap 31 milestone 10.* **It arrived, and the
+//! sentence above is why the row can be checked rather than argued.** Floats
+//! are the multi-pass layout: §9.5.1 places each float against every float
+//! already placed and §9.5's line boxes ask all of them for their measure, so
+//! the work is the **product** of the two caps that were said to bound it —
+//! 262 144 floats examined 262 144 times is 6.9e10 with every other cap
+//! satisfied. It is the first row in this table whose ceiling is the *square*
+//! of another row, and it fires on 2 000 floats in one chapter.
 //!
 //! Earning that absence cost three fixes rather than none, and they are the
 //! interesting half: *depth is not work once the recursion branches* has a
@@ -949,6 +958,27 @@ fn ledger() -> Vec<Bound> {
             ),
         },
         Bound {
+            name: "MAX_LAYOUT_WORK",
+            cap: layout_limits::MAX_LAYOUT_WORK as u128,
+            published: "4 000 000",
+            fixtures: layout_limits::MAX_LAYOUT_WORK as u128,
+            comic: 0,
+            document: 0,
+            // The **square** of the box cap, which is what makes this row
+            // exist: a book may float every box it is allowed, and placing the
+            // last of them examines all the others. Neither work cap below
+            // bounds a product of itself.
+            reachable: layout_limits::MAX_BOX_TREE_NODES as u128
+                * layout_limits::MAX_BOX_TREE_NODES as u128,
+            reachable_because:
+                "every one of MAX_BOX_TREE_NODES floats examined against all the others",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: (
+                "a_book_past_the_float_work_total_is_refused_by_name",
+                LAYOUT_TESTS,
+            ),
+        },
+        Bound {
             name: "MAX_LAYOUT_PAGES",
             cap: layout_limits::MAX_LAYOUT_PAGES as u128,
             published: "65 536",
@@ -973,8 +1003,9 @@ fn ledger() -> Vec<Bound> {
 /// the plan's "per-item caps sit beside them" were built as named constants.
 /// Gap 30's milestone 2 adds four, its milestone 3 adds two and its milestone
 /// 6 adds three; gap 31's milestone 3 adds one, its milestone 4 adds three, its
-/// milestone 6 adds eight and its milestone 7 adds four. All thirty-three are
-/// here, and a bound added without a row fails this.
+/// milestone 6 adds eight, its milestone 7 adds four and its milestone 10 adds
+/// the one milestone 7 argued would arrive with the multi-pass layout. All
+/// thirty-four are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -1013,6 +1044,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_BOX_DEPTH",
             "MAX_BOX_TREE_NODES",
             "MAX_LINE_BREAK_WORK",
+            "MAX_LAYOUT_WORK",
             "MAX_LAYOUT_PAGES",
         ],
         "a bound was added or renamed without a row in this sweep"
@@ -1119,7 +1151,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 33, "the ledger is thirty-three rows");
+    assert_eq!(measured, 34, "the ledger is thirty-four rows");
 }
 
 /// Each constant's ledger publishes its value in prose, and prose does not
