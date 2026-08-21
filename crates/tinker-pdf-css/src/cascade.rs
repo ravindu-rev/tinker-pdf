@@ -174,6 +174,12 @@ pub struct ComputedStyle {
     pub line_break: LineBreakStrictness,
     /// `word-break`
     pub word_break: WordBreak,
+    /// `border-collapse`
+    pub border_collapse: BorderCollapse,
+    /// `border-spacing`, resolved to two lengths in CSS pixels.
+    pub border_spacing: BorderSpacing,
+    /// `table-layout`
+    pub table_layout: TableLayout,
     // <<< the layout proof injects a field directly above this line >>>
 }
 
@@ -224,6 +230,9 @@ impl ComputedStyle {
             overflow_wrap: OverflowWrap::Normal,
             line_break: LineBreakStrictness::Auto,
             word_break: WordBreak::Normal,
+            border_collapse: BorderCollapse::Separate,
+            border_spacing: BorderSpacing::ZERO,
+            table_layout: TableLayout::Auto,
             // <<< the layout proof's initial value goes here >>>
         }
     }
@@ -256,6 +265,8 @@ impl ComputedStyle {
         style.overflow_wrap = parent.overflow_wrap;
         style.line_break = parent.line_break;
         style.word_break = parent.word_break;
+        style.border_collapse = parent.border_collapse;
+        style.border_spacing = parent.border_spacing;
         style
     }
 }
@@ -375,7 +386,33 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::OverflowWrap(value) => style.overflow_wrap = *value,
         Property::LineBreak(value) => style.line_break = *value,
         Property::WordBreak(value) => style.word_break = *value,
+        Property::BorderCollapse(value) => style.border_collapse = *value,
+        // A negative `border-spacing` is not a length CSS 2.2 §17.6.1 permits
+        // -- its grammar is `<length> <length>?` with a *"Value: non-negative"*
+        // note -- and clamping here rather than at the parser is the same
+        // choice `padding` already makes two properties up: the parser reports
+        // what the author wrote and the computed value is the used one.
+        Property::BorderSpacing(horizontal, vertical) => {
+            style.border_spacing = BorderSpacing {
+                horizontal: px(*horizontal, font_size, root_font_size).max(0.0),
+                vertical: px(*vertical, font_size, root_font_size).max(0.0),
+            };
+        }
+        Property::TableLayout(value) => style.table_layout = *value,
         // <<< the compile-time proof's fourth arm goes here >>>
+    }
+}
+
+/// A specified length to pixels, with no percentage to worry about.
+///
+/// `border-spacing` is the only property here whose grammar has no percentage
+/// in it at all, so the `Len::Percent` arm is unreachable from the parser and
+/// resolves to zero rather than panicking: a computed style is not the place to
+/// discover that a grammar changed.
+fn px(len: Len, font_size: f64, root_font_size: f64) -> f64 {
+    match len.compute(font_size, root_font_size) {
+        LengthPercentage::Px(value) => value,
+        LengthPercentage::Percent(_) => 0.0,
     }
 }
 

@@ -59,15 +59,27 @@ center {
   text-align: center;
 }
 
-/* ---- §15.3.8: the table box tree this build does not have ---------------
+/* ---- §15.3.8: the table box tree ---------------------------------------
  *
- * Every declaration below is `Unsupported` and every one of them is charged to
- * the census, per element, on purpose. Milestone 11 is tables; until it lands
- * a `<table>` is set as inline text, which conserves every character and puts
- * none of them in a cell -- and the census is where a caller finds that out.
- * Naming `display: table` and having it refused is a different fact from not
- * naming it, which is the whole of decision 5 read at the UA sheet. */
-table { display: table; }
+ * Milestone 11. Every one of these was `Unsupported` and charged to the census
+ * per element until it landed; a `<table>` was set as inline text, which
+ * conserved every character and put none of them in a cell. The nine values
+ * arrived together because §17.2.1's generation is stated over the whole set:
+ * a build with `table-cell` and no `table-row` cannot perform it.
+ *
+ * `colgroup` and `col` are here although nothing paints a column box: their
+ * `width` is one of §17.5.2.1's three sources, and a build that did not give
+ * them a display would not see them at all. What is not painted is warned
+ * about by name -- `Warning::ColumnBoxNotPainted`.
+ *
+ * `border-spacing: 2px` is HTML's own default and it is not decoration -- it is
+ * the gap between the cells of every unstyled table in every book, and a sheet
+ * that left it out draws a table whose cells touch. */
+table {
+  display: table;
+  border-collapse: separate;
+  border-spacing: 2px;
+}
 caption { display: table-caption; }
 colgroup { display: table-column-group; }
 col { display: table-column; }
@@ -75,9 +87,15 @@ thead { display: table-header-group; }
 tbody { display: table-row-group; }
 tfoot { display: table-footer-group; }
 tr { display: table-row; }
-td, th { display: table-cell; }
 
-th {
+/* §15.3.8's own `padding: 1px`, which is what stops a bordered cell's text
+ * from sitting on its border. */
+td, th {
+  display: table-cell;
+  padding: 1px;
+}
+
+th, caption {
   text-align: center;
 }
 

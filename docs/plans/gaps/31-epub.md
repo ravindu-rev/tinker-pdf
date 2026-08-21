@@ -1454,7 +1454,7 @@ one per milestone, each independently green under the full gate.
 | 8 | **The first book that reads** | XHTML through `tinker-pdf-xml`'s new mode into an element tree; **a committed UA stylesheet**, parsed by milestone 6's parser and cascaded like an author's, with a test that removing it produces an undifferentiated book — so its absence is visible rather than merely worse; the cascade over the tree, layout, fragmentation and synthesis into a `CosDocument`; **every book in the committed corpus opens, paginates and passes text conservation**, with the conservation figure recorded per book; `Page::text()` returns the words in reading order; cross-references between spine items reach the page as milestone 5's link annotations, and the navigation document as the outline; qpdf clean; **the browser oracle stands up here** — ruling 9 amended in writing with its argument, the continuous `y`-offset comparison built with a UA sheet injected on both sides, the paginated `--print-to-pdf` comparison beside it, and the job red when the browser is missing — **amended, 21 August 2026, milestone 8, in two places and both measured rather than assumed.** (a) The paginated comparison is made at **the browser's own default page box** and not at 432 × 648: Chromium honours an `@page { size: … }` for the output page and lays the document out at its own box anyway, then scales — asked for 432 × 648 it wrote a 432 × 648 page whose body text is set at 8.69 points rather than 12, which is 576/792, this page's height over US Letter's. A page count compared across that scale is a comparison of two different documents, so the comparison moves to the box the browser is not scaling and asserts the text size to keep that honest. (b) **A face is held fixed on both sides** as well as a UA sheet, because two faces disagree by about a line per paragraph and a line is worth about as much as a margin: with each side using its own, the tolerance needed (0.033) was larger than the injected dropped-margin defect it exists for (0.033), which is this plan's own *"thresholded into meaninglessness"*. With `Courier New` declared on both, the honest disagreement is 0.036 and the same defect measures 0.105; the census printed per book, which is the number this milestone is actually judged on | L |
 | 9 | **Fonts** | `@font-face` (`css-fonts-4` §4.1) and the `src` descriptor (§4.3) with `format()` and the fallback list; the font matching algorithm (§5) including **per-character fallback** (§2.1, §5.3), with a fixture whose one run needs three faces and becomes three PDF text objects; **SHA-1 in `tinker-pdf-crypto`**, pinned against published vectors, with a second implementation written a different way asserted to agree over every length up to two blocks — gap 29's CRC-32 discipline, because a hash written wrong is self-consistently wrong; **both de-obfuscations, asserted on the de-obfuscated bytes and not on a page that drew** — IDPF's SHA-1 key over 1 040 bytes and Adobe's 16-byte UUID key over 1 024, each from a fixture built for it, with the whitespace-stripping of §4.4.3 proved by an identifier that has some; WOFF and WOFF2 refused **by name**; a character no available face covers producing a named warning rather than a blank; `FontProvider`'s per-family fallback question answered — the trait extended, or the reason it is not recorded; the generic families' standard-14 metrics asserted to make pagination independent of whether a provider is attached | M |
 | 10 | **Floats and `clear`** | CSS 2.2 §9.5.1's **nine numbered constraints, each with its own fixture**, because they are a set and an implementation that satisfies eight produces a page that looks right on the ninth's absence; §9.5.2's `clear` and clearance; float interaction with line boxes — a line box shortened beside a float and restored below it; a float taller than its containing block; two floats that do not fit side by side; **a float that would fall off the page bottom**, which is the fragmentation interaction and the one that loses text; text conservation asserted across every float fixture, since a lost float is a lost paragraph; the browser comparison run over a float-heavy content document and its `y`-offset agreement recorded as a number | M |
-| 11 | **Tables** | CSS 2.2 §17.2's model and **§17.2.1's anonymous table objects**, which is the fixup a real book needs because HTML tables in the wild omit `<tbody>`; §17.5.2.1's fixed layout and §17.5.2.2's automatic layout, the latter asserted to be the two-pass algorithm the spec describes rather than a one-pass approximation; §17.6.1's separated model and §17.6.2's collapsing model with §17.6.2.1's conflict resolution; `colspan` and `rowspan`; a nested table, since it multiplies the layout work cap; **table fragmentation across a page boundary** — or, if it is staged, the row amended in place with its argument, in the shape gap 30's milestone 8 amended its own | L |
+| 11 | **Tables** | CSS 2.2 §17.2's model and **§17.2.1's anonymous table objects**, which is the fixup a real book needs because HTML tables in the wild omit `<tbody>`; §17.5.2.1's fixed layout and §17.5.2.2's automatic layout, the latter asserted to be the two-pass algorithm the spec describes rather than a one-pass approximation; §17.6.1's separated model and §17.6.2's collapsing model with §17.6.2.1's conflict resolution; `colspan` and `rowspan`; a nested table, since it multiplies the layout work cap; **table fragmentation across a page boundary** — or, if it is staged, the row amended in place with its argument, in the shape gap 30's milestone 8 amended its own. **Amended, 21 August 2026, milestone 11, twice.** *(1)* Fragmentation across a page boundary is **built between the rows and staged inside one**: a table breaks at any of its row bands and a band is the maximal run of rows a `rowspan` joins, which is where §13.3.3 puts a break position and is what every table in a real book needs. A band taller than a whole page has no break position inside it, is drawn where it is, and says `TableRowTallerThanPage`; slicing every cell of a band at one height and continuing them on the next page is `css-break-3`'s and is not here. *(2)* **The fixup a real book needs is not the missing `<tbody>`** — not for this corpus. Pandoc and calibre both write `<thead>` and `<tbody>` in full; what they write that needs §17.2.1 is *indentation*, so the step that fires on every table in the committed corpus is rule 3 and the row group fires on none of them. The bare-`<tr>` table is hand-written and legacy HTML's shape, is implemented, and has its own fixtures | L |
 | 12 | **Flexbox, and fixed-layout renditions** | `css-flexbox-1`: `display: flex` and `inline-flex`, `flex-direction`, `flex-wrap`, the `flex` shorthand and its three components, `justify-content`, `align-items`, `align-self`, `align-content` and `order`, each with a fixture; the flex layout algorithm's line-breaking and free-space distribution asserted against the browser oracle rather than against arithmetic done twice; **fixed-layout renditions** (§8.2) — `rendition:layout: pre-paginated`, which EPUB RS 3.3 §8.1 makes *"exactly one page per spine itemref"*, §8.2.2.6's content-document dimensions from the viewport meta, and the initial containing block of RS §8.1.2 with content outside it clipped; a fixed-layout book from milestone 1's corpus if one can be obtained, and **recorded as owed rather than quietly dropped** if not — gap 30's own shortfall, named so it is not repeated by accident | M |
 | 13 | **Bounds, determinism, ledgers, campaign** | Every constant joins `bounds_ledger.rs`'s **existing** table and passes all five checks, with three recorded numbers each; **the book yardstick added as the third, and every one of the seventeen existing rows given a figure for it** — no row opts out, because gap 30's milestone 9 had to fix exactly that; the three `const`-block relations, so a bad one **does not compile**, including the product relation for `MAX_SELECTOR_MATCHES`; the **fifteenth** determinism fingerprint — gap 30's XPS is the fourteenth — whose fixture is a real producer's book from milestone 1, plus a byte hash of the synthesised document beside it in the pair gap 29 established, reproduced on `wasm32-wasip1` with none of the other fourteen moving; **a fingerprint at a second page box**, which is this format's own determinism question and no earlier one had it: the same bytes at 432 × 648 and at 600 × 800 must each be stable and must differ; `cargo fuzz run css` and `cargo fuzz run layout` each surviving a session with no crash, no OOM and no timeout; peak memory recorded for the largest book in both corpora; the ledger sweep below | M |
 
@@ -4566,3 +4566,304 @@ verification pass.
   machine, WOFF is refused, `local()` is unavailable, `unicode-range` is unread,
   tables are set as inline text, `vertical-align` is unhonoured, and `mutool`
   has never been run over an EPUB.
+
+
+## Progress — 21 August 2026, milestone 11
+
+**Nine generation steps, two width algorithms, two border models, and a
+comparison against Chrome that agrees to 0.0005 of the column.** CSS 2.2 §17 is
+laid out rather than named: §17.2.1's anonymous table objects, §17.5's grid with
+`colspan` and `rowspan`, §17.5.2.1's fixed algorithm and §17.5.2.2's *two-pass*
+automatic one, §17.6.1's separated model and §17.6.2's collapsing model with
+§17.6.2.1's five ordered rules, a nested table, and fragmentation between the
+rows. **2 722 tests, 7 ignored**, up from 2 653 at milestone 10.
+
+Fourteen `display` values where there were five, three properties where there
+were none — `border-collapse`, `border-spacing`, `table-layout` — and the
+`display` row of the committed corpus's unsupported census is **empty**, which
+is the first time this plan has emptied one.
+
+### What the design got wrong, and how it found out
+
+**1. The row's own sentence about `<tbody>` is false for this corpus, and the
+fixture that was written to assert it failed.** The plan says the fixup a real
+book needs is the missing row group, *"because HTML tables in the wild omit
+`<tbody>`"*. Hand-written and legacy HTML does; **pandoc and calibre do not**.
+Both write `<thead>` and `<tbody>` in full, and the first corpus fixture — which
+asserted `!document.contains("<tbody")` — failed on its first run. What every
+one of them *does* write is indentation between the tags, so the step that fires
+on every table in the committed corpus is §17.2.1's **rule 3**, white space
+between two proper table children, and without it every real table gets an empty
+anonymous cell between every pair of real ones. The fixture now asserts the
+measurement in the direction it came out, the row is amended in place, and the
+bare-`<tr>` table keeps its own fixtures because it is still the markup a
+hand-written book uses.
+
+**2. §17.5.2.1's own first sentence is the one an implementation skips.** *"A
+value of `auto` means use the automatic table layout algorithm"* — so
+`table-layout: fixed` with no stated `width` is **not** the fixed algorithm. A
+build that read only the property name divides the containing block evenly among
+the columns and draws a table that looks entirely reasonable. It has its own
+fixture and its own injected defect.
+
+**3. The obvious fixture for "the fixed algorithm reads only the first row"
+cannot fail.** Stating a width on the *same* column in both rows makes the two
+builds agree by accident: the first row is walked first either way and
+§17.5.2.1's *"a column already given a width keeps it"* discards the second
+row's. The injection matrix found it — the defect survived — and the fixture now
+states a width on a column the first row left `auto`, which is the only
+arrangement in which the two answers differ.
+
+**4. §17.6.2.1's rule 1 was zeroing the width in two places, and only one half
+was reachable.** `resolve` returned a `hidden` winner with `width: 0.0` *and*
+`Edge::used_width` returned zero for `hidden`. A defect deleting the second
+survived every test in the suite because nothing could reach it — this plan's
+own *"a rule enforced twice hides the reachable half"*. `resolve` now returns the
+winner as it was declared and §8.5.3 is applied in one place, which is the one
+that answers *what is drawn* rather than *what won*. The comment that claimed a
+build comparing used widths would lose rule 3 to a solid border was wrong for the
+same reason — rules 1 and 2 dispose of `hidden` and `none` before rule 3 ever
+compares a width — and it is corrected in place rather than deleted.
+
+**5. `border-collapse` and `border-spacing` inherit, and in a document made of
+`<table>` elements that is unobservable.** Both are *inherited: yes*, both are
+read off the **table** box, and the user-agent sheet declares both on every
+`<table>` — HTML's own `border-spacing: 2px` — so a table nested in a table has
+a declaration of its own and a declared value beats an inherited one. Every
+browser behaves the same way. The first fixture written for it therefore failed;
+what has no user-agent rule is a `display: table` that is not a `<table>`, which
+is what a stylesheet writes on a `<div>`, and that box inherits. Two fixtures,
+one per property, and the two defects are two rows of the matrix rather than one.
+
+**6. A row is the wrong unit of fragmentation and a *band* is the right one.**
+A page may break between two rows and may not break across a cell that spans
+them, so the item the fragmenter sees is the maximal run of grid rows a `rowspan`
+joins. With no `rowspan` in the table every band is one row, which is where a
+book's table breaks; with one, the rows it spans move whole.
+
+**7. A page count cannot see whether a table broke *legally*.** With the spacing
+between two bands emitted as an edge rather than a margin there is no break
+position at all — and §13.3.3's escape then drops rules A to D and cuts anyway,
+producing **the same page count** and one warning. The defect survived until the
+fixture asserted `BreakForcedPastTheRules` is *absent*, which is milestone 10's
+finding arriving in a second place.
+
+**8. Reading order stops being emission order in two more ways.** Milestone 10
+found the first: a float is laid out where it is written and drawn where it is
+placed. A table adds `<tfoot>`, which HTML 4.01 required to be written *before*
+the bodies and which §17.2 renders *after* them; and a row's cells, which sit
+beside one another rather than under. Both are survivable for one reason —
+`TextRun::order` — and the design that follows from it is that **the cells are
+laid out in document order and the rows are emitted in visual order**, which are
+two different loops over the same table. Two injected defects, one per loop.
+
+**9. The layout total is three quantities and not one.** `colspan` × `rowspan`
+per cell is what a hostile file inflates; grid rows × grid columns is what a
+table of two thousand rows whose first one spans two thousand columns inflates
+without inflating the first; and §17.5.2.2's distribution over every spanning
+cell's span is a third again. Each has a firing fixture that the other two
+charges do not fire, and **a nested table multiplies every one of them**: an
+outer cell is laid out three times — twice to measure and once to set — so the
+same inner table is under the total alone and past it nested. That pair is
+`a_nested_table_multiplies_the_work_total` and it is the clearest statement of
+what `MAX_LAYOUT_WORK` is for that this workspace has.
+
+### The two-pass algorithm, asserted as an algorithm
+
+§17.5.2.2 computes a minimum and a maximum content width per column **first**,
+and distributes the table's width over them **second**. A one-pass
+approximation — a share of the available width in proportion to each column's
+content — is an ordinary thing to write and agrees with this everywhere except
+where a column's minimum is greater than its proportional share.
+
+So the fixture is one where they differ, and it asserts three things rather than
+one: the first pass's own output, the second pass's answer, and the one-pass
+answer computed in the test file so the difference is a number rather than a
+claim.
+
+| | Column A (nine short words) | Column B (one fifty-point word) |
+| --- | --- | --- |
+| Pass 1, minimum | 10 | 50 |
+| Pass 1, maximum | 170 | 50 |
+| **Pass 2, at a table width of 110** | **60** | **50** |
+| A one-pass share of 110 in proportion to the maximum | 85 | **25 — below its own minimum** |
+
+`table::constraints` and `table::distribute` are two functions with the pass-1
+result as a value between them, which is what makes the intermediate assertable
+at all; `the_two_pass_widths_are_the_widths_the_cells_get` then asserts the same
+numbers on a laid-out page.
+
+### The browser comparison, over a table-heavy document
+
+| | Worst deviation, as a fraction of the browser's column |
+| --- | --- |
+| **The table-heavy comparison** | **0.0005** |
+| The injected defect — `td, th { display: block }` | 0.1245 |
+| One line of this column, for scale | 0.016 |
+| The cap | 0.02 |
+
+Thirty-two blocks over a document holding a `<caption>`, a `<thead>`, a
+`<tbody>`, a table with no `<tbody>` at all, a `colspan`, a `rowspan`, a
+`<tfoot>` written before the body it is drawn under, a collapsing-border table
+beside a separated one, and a nested table. The **block sequence agrees
+exactly**, which is the sharper half: it is an ordered list, both sides walk the
+document, and the `<tfoot>` is reported before its `<tbody>` on both — so the
+*offsets* are what say it was drawn under it.
+
+Two variables are held fixed beyond milestone 8's face and milestone 10's
+`line-height`, and both are named rather than tolerated. **`vertical-align`**:
+HTML's own user-agent sheet puts `middle` on a table and `inherit` on a cell, so
+every browser centres a short cell in a tall row, and this build has no §17.5.4
+at all. Measured without stating it, the fixture disagreed by **0.1070** —
+*larger than the injected defect the oracle exists to catch*, which is precisely
+the *"oracle whose noise floor is its own defect"* the risk table warns about.
+And **the heading size**: the two sides report a line box's top and a baseline
+respectively, `deviation` cancels the constant by subtracting the first block,
+and that works only while every block shares one — an `h1` at `2em` does not, and
+is worth 0.0104 on its own.
+
+The **corpus** comparison is unchanged at **0.0360**, at the same block, and the
+0.019 its itemisation attributed to the table is still there. What moved is the
+reason — the interval holding the table is now 35 pt *shorter* on this engine's
+side rather than being a paragraph of inline text — and it is deliberately not
+claimed to be localised: what is left there is a variable the table fixture holds
+and the corpus one does not.
+
+### The injection matrix
+
+**Fifty-two injected, fifty-two caught, none survived** — after a first pass of
+fifty-one in which six survived and every one of the six was a real gap closed.
+The five distinct causes are §1 (a fixture asserting the wrong direction), §3 (a
+fixture that could not fail), §4 (a rule enforced twice), §5 (a property nothing
+observed) and §7 (a page count that cannot see a rule), and one more: the
+`colspan="2 "` fixture, which `str::parse` on a trimmed string reads perfectly
+well, so the leading-digits rule it was written for was never exercised. It is
+`"2x"` now.
+
+| # | Defect | Caught by |
+| --- | --- | --- |
+| 1 | 17.2.1 (1): a column's children generate boxes | `a_columns_children_generate_no_boxes` |
+| 2 | 17.2.1 (2): every child of a column group is a column | `a_column_groups_non_column_child_generates_no_box` |
+| 3 | 17.2.1 (3): white space between two rows is a row | `whitespace_between_two_rows_is_not_a_row_of_its_own` |
+| 4 | 17.2.1 (3): the 'if any' clause needs a neighbour on both sides | `whitespace_between_two_rows_is_not_a_row_of_its_own` |
+| 5 | 17.2.1 (4): white space ends a misparented run | `whitespace_between_two_misparented_cells_does_not_end_the_run` |
+| 6 | 17.2.1 (5): a table's stray child generates no row | `a_stray_cell_outside_a_table_gets_an_anonymous_table`, `a_tables_stray_child_gets_an_anonymous_row` |
+| 7 | 17.2.1 (6): a row group's stray child generates no row | `a_row_groups_stray_child_gets_an_anonymous_row` |
+| 8 | 17.2.1 (7): a row's stray child generates no cell | `a_rows_stray_child_gets_an_anonymous_cell` |
+| 9 | 17.2: each bare row gets a row group of its own | `a_rowspan_keeps_its_rows_on_one_page`, `a_rowspan_pushes_the_next_rows_cells_right`, `a_table_of_bare_rows_gets_the_row_group_the_book_left_out` |
+| 10 | 17.2.1 (9): a misparented internal box gets no anonymous table | `a_stray_cell_outside_a_table_gets_an_anonymous_table`, `whitespace_between_two_misparented_cells_does_not_end_the_run` |
+| 11 | 17.5: colspan is ignored | `a_colspan_takes_the_slots_it_says`, `a_hostile_colspan_is_refused_by_the_work_total`, `a_nested_table_multiplies_the_work_total` |
+| 12 | 17.5: rowspan is ignored | `a_rowspan_keeps_its_rows_on_one_page`, `a_rowspan_pushes_the_next_rows_cells_right`, `a_rowspan_of_zero_reaches_the_end_of_its_row_group` |
+| 13 | 17.5: rowspan=0 is clamped to one instead of the group | `a_rowspan_of_zero_reaches_the_end_of_its_row_group` |
+| 14 | 17.5: a rowspan past its group is not clamped to it | `a_rowspan_past_its_row_group_is_clamped_and_says_so` |
+| 15 | 17.5: a cell is placed without skipping occupied slots | `a_rowspan_of_zero_reaches_the_end_of_its_row_group`, `a_rowspan_pushes_the_next_rows_cells_right` |
+| 16 | 17.5.2.2: one pass, in proportion to the maximum | `table_layout_fixed_with_an_auto_width_uses_the_automatic_algorithm`, `the_automatic_algorithm_is_two_pass_and_a_one_pass_answer_differs`, `the_two_pass_widths_are_the_widths_the_cells_get` |
+| 17 | 17.5.2.2: a spanning cell is applied in the first pass | `a_spanning_cell_raises_its_columns_after_the_single_ones` |
+| 18 | 17.5.2.2: an auto-width table fills its containing block | `an_auto_width_table_takes_its_maximum_and_not_the_measure`, `border_collapse_ignores_border_spacing`, `border_spacing_is_two_directions` |
+| 19 | 17.5.2.2: a table wider than its maximum does not share the surplus | `a_colspan_takes_the_slots_it_says` |
+| 20 | 17.5.2.2: the minimum trial is run at the maximum measure | `a_cells_background_fills_its_whole_row`, `a_row_taller_than_a_page_is_drawn_and_says_so`, `table_layout_fixed_with_an_auto_width_uses_the_automatic_algorithm` |
+| 21 | 17.5.2.1: fixed is used even when the width is auto | `table_layout_fixed_with_an_auto_width_uses_the_automatic_algorithm` |
+| 22 | 17.5.2.1: every row's widths are read, not only the first | `the_fixed_algorithm_reads_the_first_row_and_ignores_the_rest` |
+| 23 | 17.5.2.1: a first-row cell's width beats its column's | `a_columns_width_beats_the_first_rows_cell` |
+| 24 | 17.6.1: the spacing is between the cells and not at the edges | `border_spacing_is_between_the_cells_and_at_the_edges` |
+| 25 | 17.6.1: one spacing number serves both directions | `border_spacing_is_two_directions` |
+| 26 | 17.6.2: border-spacing is honoured under collapse | `border_collapse_ignores_border_spacing` |
+| 27 | 17.6.2: a collapsed border is drawn whole by both cells | `a_collapsed_border_is_shared_between_the_cells_beside_it`, `two_adjacent_borders_collapse_into_one` |
+| 28 | 17.6.2.1 rule 1: hidden does not beat a wider border | `a_hidden_border_beats_a_wider_one`, `a_hidden_border_leaves_no_ink_where_it_won` |
+| 29 | 17.6.2.1 rule 1: the winner keeps hidden's stated width | `a_hidden_border_beats_a_wider_one`, `a_hidden_border_leaves_no_ink_where_it_won` |
+| 30 | 17.6.2.1 rule 2: none is compared on its width | `a_none_border_loses_to_a_narrower_one` |
+| 31 | 17.6.2.1 rule 3: the narrower border wins | `the_wider_border_wins` |
+| 32 | 17.6.2.1 rule 4: double does not outrank solid | `at_equal_widths_the_style_order_decides` |
+| 33 | 17.6.2.1 rule 5: the table beats the cell | `at_equal_widths_and_styles_the_box_decides` |
+| 34 | 17: a rowspan does not join its rows into one band | `a_rowspan_keeps_its_rows_on_one_page` |
+| 35 | 13.3.3: the spacing between two bands is not a break position | `a_table_breaks_between_its_rows` |
+| 36 | 17: a band taller than a page says nothing | `a_row_taller_than_a_page_is_drawn_and_says_so` |
+| 37 | 17.5.3: a cell's box is its content's height, not its row's | `a_cells_background_fills_its_whole_row` |
+| 38 | 17.5.3: a spanning cell's height is applied with the single ones | `the_browser_and_this_engine_lay_the_same_tables_out_the_same_way` |
+| 39 | 17.2: the row groups are rendered in document order | `a_footer_group_written_first_is_read_first_and_drawn_last` |
+| 40 | 17.2: the cells are laid out in visual order, so the stamps are too | `a_footer_group_written_first_is_read_first_and_drawn_last` |
+| 41 | MAX_LAYOUT_WORK: the grid placement is charged one unit a cell | `the_width_distribution_is_charged_as_well_as_the_grid` |
+| 42 | MAX_LAYOUT_WORK: the grid itself is not charged | `a_grid_of_many_rows_and_many_columns_is_refused_by_the_work_total`, `the_width_distribution_is_charged_as_well_as_the_grid` |
+| 43 | MAX_LAYOUT_WORK: the width distribution is not charged | `the_width_distribution_is_charged_as_well_as_the_grid` |
+| 44 | 17.5: colspan and rowspan never leave the markup | `the_browser_and_this_engine_lay_the_same_tables_out_the_same_way`, `a_colspan_with_trailing_rubbish_is_its_leading_digits`, `a_rowspan_of_zero_reaches_the_end_of_its_row_group` |
+| 45 | HTML: an attribute is parsed with str::parse rather than by its digits | `a_colspan_with_trailing_rubbish_is_its_leading_digits` |
+| 46 | HTML: rowspan=0 is clamped away at the door | `a_rowspan_of_zero_reaches_the_end_of_its_row_group` |
+| 47 | 15.3.8: the user-agent sheet's border-spacing is gone | `the_user_agent_sheet_carries_htmls_own_border_spacing` |
+| 48 | 15.3.8: the user-agent sheet's cell padding is gone | `the_user_agent_sheet_carries_htmls_own_cell_padding` |
+| 49 | 15.3.8: a <td> is a block rather than a cell | `the_table_comparison_notices_a_cell_that_was_not_a_cell`, `the_browser_and_this_engine_lay_the_same_column_out_the_same_way`, `the_browser_and_this_engine_fragment_the_same_document_into_the_same_pages` |
+| 50 | 17.6: border-collapse does not inherit | `a_table_that_is_not_a_table_element_inherits_its_border_collapse` |
+| 51 | 17.6.1: border-spacing does not inherit | `a_table_that_is_not_a_table_element_inherits_its_border_spacing` |
+| 52 | 17.6.1: border-spacing takes one length and copies it | `border_spacing_takes_one_length_or_two_and_they_are_two_directions` |
+
+#### The harness
+
+`inject_m11.py` and `defects_m11.py` in the scratchpad are milestone 10's, and
+the docstring now names a **fourth** harness bug for the next milestone to
+inherit: `pathlib.Path.write_text` on Windows translates `\n` to `\r\n`, so
+every file a milestone edits with a patch script is CRLF in the working copy —
+invisible in `git diff`, because `.gitattributes` says `eol=lf`, and fatal to the
+harness, because `verify_all` reads with universal newlines and `apply` reads
+bytes. The two disagreed, `verify_all` reported *"all 51 anchors match exactly
+once"*, and the run died on the first defect. Normalising the working copy to LF
+before a campaign is the fix; the note is in the docstring beside milestone 3's
+`shutil.copy2`, milestone 4's unrevertable empty-string replacement and
+milestone 8's mtime-restoring restore.
+
+Every anchor was read out of the file it names **after `cargo fmt`** and all
+fifty-two matched exactly once.
+
+### Still owed, and what was narrowed
+
+- **A band taller than a page is drawn past the page bottom rather than
+  sliced.** This is the staged half of table fragmentation and the row is
+  amended in place with the argument. Breaking *between* bands is built and is
+  what a real book's table needs; slicing one — every cell cut at the same height
+  and continued on the next page — is `css-break-3`'s. `TableRowTallerThanPage`
+  names it, and nothing is lost either way.
+- **`<thead>` is not repeated on each page of a table that spans several.**
+  §17.5.1 says a header and footer group *"may be repeated on each page"*; this
+  build draws each exactly once.
+- **`vertical-align` is not implemented, and on a table it is §17.5.4.** Every
+  cell is set from its own content top. It is the **largest single gap the
+  committed corpus measures** — thirty-four elements — it is the compile-time
+  proof's injected property now that `border-collapse` is implemented, and it is
+  worth 0.1070 of the browser comparison's column when it is not held fixed.
+- **`caption-side` is `Unsupported` by name**, so every caption is set above its
+  table and one asked for at the bottom is a reported gap rather than a caption
+  in the wrong place. `empty-cells` is unsupported for the same reason.
+- **CAPMIN is zero.** §17.5.2.2's caption minimum cannot widen a table here,
+  because captions are laid out at the *containing block's* width before the
+  table's own is known — which is also what keeps a caption's reading-order
+  stamps ahead of the cells'. HTML requires `<caption>` to be a table's first
+  element child, so document order and this order agree for every conforming
+  book.
+- **A column box's background and borders are not painted.** §17.5.1's six
+  rendering layers are not implemented; a `<col>`'s `width` is read, which is
+  §17.5.2.1's second source, and `ColumnBoxNotPainted` names the rest.
+- **`display: inline-table` is `BadValue` by name.** It is an inline-level table
+  and this build has no inline-level box that is not text; mapping it onto
+  `table` would put a table on a line of its own and look entirely reasonable.
+- **A spanning cell's excess width is shared in proportion to the columns'
+  maxima**, which CSS 2.2 does not specify — it says only *"should be
+  increased"* — and is what every browser does. The note is in `constraints`
+  because a reader is entitled to know which sentence is the specification's.
+- **A collapsed border at the table's outer edge is drawn whole *inside* the
+  table box** rather than centred on the grid line, which would put half of it
+  outside. The ink is the same width and the table is half a border narrower
+  than a browser's.
+- **§17.2.1's rules 1 and 2 destroy text, and they are unreachable from valid
+  markup.** A `table-column`'s children generate no boxes at all, so a `<col>`
+  holding a word loses it — and text conservation would report it as missing.
+  It cannot arise from a real book: HTML makes `<col>` a void element and lets
+  `<colgroup>` hold nothing but `<col>`, so both rules are reachable only from a
+  caller-built box tree. Named here rather than left for a fuzz corpus to find.
+- **The layout fuzz target does not generate tables.** Its structured generator
+  picks from four `display` values and none of them is one of the nine, so the
+  whole of §17 is unfuzzed. Adding them needs the target's `expected()` to model
+  the two rules above — the one legitimate way §17 loses text — which is
+  milestone 13's, where the fuzz work is.
+- Milestone 10's list is otherwise unchanged: the fetched corpus is unset on this
+  machine, WOFF is refused, `local()` is unavailable, `unicode-range` is unread,
+  a float met inside a paragraph floats to the top of it, `overflow` establishes
+  no formatting context, and `mutool` has never been run over an EPUB.
+

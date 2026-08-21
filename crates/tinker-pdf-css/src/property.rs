@@ -221,11 +221,27 @@ impl<T: Copy> Sides<T> {
     }
 }
 
-/// `display`, at the five values this build lays out.
+/// `display`, at the fourteen values this build lays out.
 ///
-/// `flex`, `grid`, `table` and the rest are `Unsupported` **by name and by
-/// value**, which is the whole of device 2: mapping `display: flex` onto
-/// `block` produces a page that looks entirely reasonable and is wrong.
+/// `flex`, `grid` and the rest are `Unsupported` **by name and by value**,
+/// which is the whole of device 2: mapping `display: flex` onto `block`
+/// produces a page that looks entirely reasonable and is wrong.
+///
+/// # The nine table values arrived together, and they had to
+///
+/// CSS 2.2 §17.2's box tree is not nine independent values: §17.2.1 *generates*
+/// the missing ones, and a build that had `table-cell` and not `table-row`
+/// could not perform the generation at all. Adding them one at a time would
+/// mean a build in which a `<td>` is a cell of nothing.
+///
+/// `inline-table` is **not** here and its absence is the same decision read the
+/// other way. It is an inline-level table, which is a table box in an inline
+/// formatting context, and this build has no inline-level box that is not text;
+/// mapping it onto [`Display::Table`] would put a table on a line of its own
+/// and the page would look entirely reasonable. So it is a value of an
+/// implemented property that this build does not take, which
+/// [`Implemented::BadValue`] reports by name — the same answer `float:
+/// inline-start` gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Display {
     /// `inline`
@@ -238,6 +254,99 @@ pub enum Display {
     ListItem,
     /// `none`
     None,
+    /// `table`, CSS 2.2 §17.2.
+    Table,
+    /// `table-row-group`
+    TableRowGroup,
+    /// `table-header-group`
+    TableHeaderGroup,
+    /// `table-footer-group`
+    TableFooterGroup,
+    /// `table-row`
+    TableRow,
+    /// `table-cell`
+    TableCell,
+    /// `table-column`
+    TableColumn,
+    /// `table-column-group`
+    TableColumnGroup,
+    /// `table-caption`
+    TableCaption,
+}
+
+impl Display {
+    /// Whether this is one of §17.2's internal table values — everything a
+    /// table box may contain, and nothing that may stand on its own.
+    ///
+    /// §17.2.1's generation rules are stated over exactly this set, which is
+    /// why it is a predicate here rather than a `matches!` at each of its four
+    /// callers.
+    #[must_use]
+    pub fn is_internal_table(self) -> bool {
+        matches!(
+            self,
+            Display::TableRowGroup
+                | Display::TableHeaderGroup
+                | Display::TableFooterGroup
+                | Display::TableRow
+                | Display::TableCell
+                | Display::TableColumn
+                | Display::TableColumnGroup
+                | Display::TableCaption
+        )
+    }
+
+    /// Whether this is one of the three row-group values, which §17.2 treats
+    /// alike everywhere but ordering.
+    #[must_use]
+    pub fn is_row_group(self) -> bool {
+        matches!(
+            self,
+            Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+        )
+    }
+}
+
+/// `border-collapse`, CSS 2.2 §17.6.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BorderCollapse {
+    /// `separate`, §17.6.1. The initial value.
+    Separate,
+    /// `collapse`, §17.6.2.
+    Collapse,
+}
+
+/// `table-layout`, CSS 2.2 §17.5.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableLayout {
+    /// `auto`, §17.5.2.2. The initial value.
+    Auto,
+    /// `fixed`, §17.5.2.1.
+    Fixed,
+}
+
+/// `border-spacing`, CSS 2.2 §17.6.1, computed to two lengths in CSS pixels.
+///
+/// Two numbers rather than one because the property takes `<length>
+/// <length>?`, and the horizontal one spaces columns while the vertical one
+/// spaces rows: a build that kept one would put the same gap in both
+/// directions, which is right for every fixture written with one value and
+/// wrong for every book that writes two.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorderSpacing {
+    /// Between columns, and between the table's left and right border and the
+    /// cells beside them.
+    pub horizontal: f64,
+    /// Between rows, and at the top and bottom.
+    pub vertical: f64,
+}
+
+impl BorderSpacing {
+    /// `0 0`, which is the initial value.
+    pub const ZERO: Self = Self {
+        horizontal: 0.0,
+        vertical: 0.0,
+    };
 }
 
 /// `float`. `inline-start` and `inline-end` are **not** `left` and `right`:
@@ -628,6 +737,12 @@ pub enum Property {
     LineBreak(LineBreakStrictness),
     /// `word-break`
     WordBreak(WordBreak),
+    /// `border-collapse`
+    BorderCollapse(BorderCollapse),
+    /// `border-spacing`, horizontal then vertical, before `em` is resolved.
+    BorderSpacing(Len, Len),
+    /// `table-layout`
+    TableLayout(TableLayout),
     // <<< the compile-time proof injects a variant directly above this line >>>
 }
 
@@ -701,6 +816,9 @@ impl Property {
             Property::OverflowWrap(_) => "overflow-wrap",
             Property::LineBreak(_) => "line-break",
             Property::WordBreak(_) => "word-break",
+            Property::BorderCollapse(_) => "border-collapse",
+            Property::BorderSpacing(_, _) => "border-spacing",
+            Property::TableLayout(_) => "table-layout",
             // <<< the compile-time proof's second arm goes here >>>
         }
     }
@@ -730,7 +848,17 @@ impl Property {
             | Property::Widows(_)
             | Property::OverflowWrap(_)
             | Property::LineBreak(_)
-            | Property::WordBreak(_) => true,
+            | Property::WordBreak(_)
+            // CSS 2.2 §17.6 and §17.6.1 both say *inherited: yes*, and the
+            // reason is the box tree §17.2.1 builds rather than a convention:
+            // the two properties are declared on the **table** and are read by
+            // every cell in it, and an anonymous table box generated by the
+            // fixup has no declaration of its own to read. A build that did not
+            // inherit them would give an author-written `table { border-collapse:
+            // collapse }` to the table and separate borders to every cell under
+            // it, which draws a plausible table with two border models in it.
+            | Property::BorderCollapse(_)
+            | Property::BorderSpacing(_, _) => true,
             Property::TextDecoration(_)
             | Property::Display(_)
             | Property::Float(_)
@@ -761,7 +889,11 @@ impl Property {
             // failure. `page-break-before` and `page-break-after` are already
             // not inherited two lines above, so this is also the answer that
             // keeps the family consistent.
-            | Property::PageBreakInside(_) => false,
+            | Property::PageBreakInside(_)
+            // §17.5.2's own table says *inherited: no*, and it is the one of
+            // the three that is genuinely a property of one box: a table
+            // nested in a `table-layout: fixed` table has its own algorithm.
+            | Property::TableLayout(_) => false,
             // <<< the compile-time proof's third arm goes here >>>
         }
     }
@@ -840,10 +972,8 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "background-position",
     "background-repeat",
     "background-size",
-    "border-collapse",
     "border-image",
     "border-radius",
-    "border-spacing",
     "bottom",
     "box-shadow",
     "break-after",
@@ -921,7 +1051,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "speak",
     "src",
     "tab-size",
-    "table-layout",
     "text-emphasis",
     "text-emphasis-style",
     "text-overflow",
@@ -1139,6 +1268,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-bottom-color",
     "border-bottom-style",
     "border-bottom-width",
+    "border-collapse",
     "border-color",
     "border-left",
     "border-left-color",
@@ -1148,6 +1278,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-right-color",
     "border-right-style",
     "border-right-width",
+    "border-spacing",
     "border-style",
     "border-top",
     "border-top-color",
@@ -1184,6 +1315,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "page-break-after",
     "page-break-before",
     "page-break-inside",
+    "table-layout",
     "text-align",
     "text-decoration",
     "text-indent",
@@ -1220,9 +1352,54 @@ fn implemented(
                 "inline-block" => Display::InlineBlock,
                 "list-item" => Display::ListItem,
                 "none" => Display::None,
+                "table" => Display::Table,
+                "table-row-group" => Display::TableRowGroup,
+                "table-header-group" => Display::TableHeaderGroup,
+                "table-footer-group" => Display::TableFooterGroup,
+                "table-row" => Display::TableRow,
+                "table-cell" => Display::TableCell,
+                "table-column" => Display::TableColumn,
+                "table-column-group" => Display::TableColumnGroup,
+                "table-caption" => Display::TableCaption,
                 _ => return None,
             }))
         }),
+        "border-collapse" => keyword(one, single, |word| {
+            Some(Property::BorderCollapse(match word {
+                "separate" => BorderCollapse::Separate,
+                "collapse" => BorderCollapse::Collapse,
+                _ => return None,
+            }))
+        }),
+        "table-layout" => keyword(one, single, |word| {
+            Some(Property::TableLayout(match word {
+                "auto" => TableLayout::Auto,
+                "fixed" => TableLayout::Fixed,
+                _ => return None,
+            }))
+        }),
+        // `<length> <length>?`, and **not** `<length-percentage>`: CSS 2.2
+        // §17.6.1's grammar has no percentage in it, and a percentage of a
+        // table whose width depends on its own spacing is circular. A
+        // percentage here is therefore the author's mistake rather than this
+        // build's gap, which is `Malformed` and not `BadValue`.
+        "border-spacing" => match significant.len() {
+            1 | 2 => {
+                let mut lengths = Vec::with_capacity(2);
+                for value in significant {
+                    match length_outcome(value) {
+                        LenOutcome::Ok(Len::Percent(_)) => return Some(Implemented::Malformed),
+                        LenOutcome::Ok(len) => lengths.push(len),
+                        LenOutcome::Unsupported => return Some(Implemented::BadValue),
+                        LenOutcome::Invalid => return Some(Implemented::Malformed),
+                    }
+                }
+                let horizontal = lengths[0];
+                let vertical = *lengths.get(1).unwrap_or(&horizontal);
+                Implemented::Known(vec![Property::BorderSpacing(horizontal, vertical)])
+            }
+            _ => Implemented::Malformed,
+        },
         "float" => keyword(one, single, |word| {
             Some(Property::Float(match word {
                 "none" => Float::None,

@@ -62,14 +62,17 @@
 
 use std::collections::HashMap;
 
+use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, Clear, Color, Display, Float, LengthPercentage, ListStyleType, MarginValue,
-    OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TextAlign,
+    BorderCollapse, BorderStyle, BoxSizing, Clear, Color, Display, Float, LengthPercentage,
+    ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size,
+    TableLayout, TextAlign,
 };
 
 use crate::floats::{Ceilings, FloatContext, Placed};
 use crate::metrics::Metrics;
 use crate::style::{consume, Consumed};
+use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
 use crate::{BoxNode, Budget, Content, Limits, Options, Refusal, TextRun, Warning};
@@ -150,6 +153,27 @@ pub(crate) struct LineBox {
     pub avoid_inside: bool,
 }
 
+/// One band of table rows that cannot be separated, CSS 2.2 §17.
+///
+/// **A band and not a row**, and the difference is `rowspan`. A page may break
+/// between two rows and may not break across a cell that spans them, so the
+/// unit the fragmenter sees is the maximal run of grid rows joined by a
+/// spanning cell. A table with no `rowspan` in it has one band per row, which
+/// is where a real book's table breaks.
+///
+/// Its items are in **band-local** coordinates and are not in [`Flow::items`],
+/// for [`FloatRecord`]'s reason one milestone earlier: the page cutter walks a
+/// single column whose `y` never goes backwards, and the cells of a row sit
+/// beside each other rather than under each other. Keeping them here is what
+/// lets a two-column row be one item.
+#[derive(Clone, Debug)]
+pub(crate) struct RowBand {
+    /// The cells' items, at the band's own origin.
+    pub items: Vec<Item>,
+    /// The row and cell decorations, indexing [`RowBand::items`].
+    pub blocks: Vec<BlockRecord>,
+}
+
 /// What a flow item is.
 #[derive(Clone, Debug)]
 pub(crate) enum ItemKind {
@@ -159,6 +183,10 @@ pub(crate) enum ItemKind {
     Edge,
     /// A line box. Breaking before one is §13.3.3's case (2).
     Line(Box<LineBox>),
+    /// One band of table rows, whole. §13.3.3 gives no break position inside
+    /// one, which is why it is one item and not its cells' items spliced into
+    /// the column.
+    Rows(Box<RowBand>),
 }
 
 /// One piece of the continuous column.
@@ -292,6 +320,22 @@ struct Builder<'a, M: Metrics> {
     ceiling_line: f64,
     /// Rule 4: the content top of the block container being filled.
     content_top: f64,
+    /// What the table driver has decided about the very next box
+    /// [`Builder::block`] lays out, CSS 2.2 §17.5.3 and §17.6.2.
+    ///
+    /// A cell's used width is its **column's**, whatever the cell's own
+    /// `width` says — that is what a column is — and under a collapsing border
+    /// model its used borders are the resolved ones, which are not on any
+    /// element at all. Neither can be expressed as a computed style, so neither
+    /// can arrive through [`consume`].
+    ///
+    /// It is `take`n rather than read, so it applies to **exactly one box**. A
+    /// copy would reach the cell's children, and a cell holding a nested table
+    /// would give that table the outer cell's column width and the outer cell's
+    /// collapsed borders — a table inside a table that is silently the wrong
+    /// size, which is this plan's own definition of the failure worth
+    /// preventing.
+    cell: Option<CellPass>,
     /// Document order, stamped on every run as it is made.
     ///
     /// **Reading order stops being emission order the moment a float exists.**
@@ -318,6 +362,51 @@ struct Sublayout {
     floats: Vec<FloatRecord>,
     /// How tall the whole of it came to, margins included.
     height: f64,
+}
+
+/// What the table driver imposes on one cell box. See [`Builder::cell`].
+#[derive(Clone, Debug)]
+struct CellPass {
+    /// The border-box width the cell must take.
+    ///
+    /// `None` means *ignore the cell's own `width` and take the measure* —
+    /// which is what §17.5.2.2's first pass needs, because a cell with `width:
+    /// 4em` has a maximum content width decided by its text and not by its
+    /// declaration. A build that measured the first pass with the declaration
+    /// in place would find every such cell's maximum equal to its minimum and
+    /// its column would never grow.
+    width: Option<f64>,
+    /// The collapsed borders, §17.6.2, already halved. `None` in the separated
+    /// model, where a cell's own borders are its own.
+    borders: Option<Collapsed>,
+}
+
+/// One box's four resolved borders, §17.6.2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Collapsed {
+    width: Sides<f64>,
+    style: Sides<BorderStyle>,
+    color: Sides<Color>,
+}
+
+impl CellPass {
+    /// Applies the decision to a consumed style, CSS 2.2 §17.5.3: a cell's
+    /// margins do not apply, and its width is its column's.
+    fn apply(&self, style: &mut Consumed) {
+        style.margin = Sides::all(MarginValue::Length(LengthPercentage::ZERO));
+        match self.width {
+            Some(width) => {
+                style.width = Size::Length(LengthPercentage::Px(width));
+                style.box_sizing = BoxSizing::BorderBox;
+            }
+            None => style.width = Size::Auto,
+        }
+        if let Some(borders) = self.borders {
+            style.border_width = borders.width;
+            style.border_style = borders.style;
+            style.border_color = borders.color;
+        }
+    }
 }
 
 /// One run of text in an inline formatting context, after phase I.
@@ -356,6 +445,7 @@ pub(crate) fn build<M: Metrics>(
         ceiling_box: f64::NEG_INFINITY,
         ceiling_line: f64::NEG_INFINITY,
         content_top: 0.0,
+        cell: None,
         sequence: 0,
     };
     builder.block(root, options.width, 0.0, 0, false, 0)?;
@@ -459,10 +549,16 @@ impl<M: Metrics> Builder<'_, M> {
         if depth > self.limits.max_depth {
             return Err(Refusal::TooDeep { depth });
         }
-        let style = consume(&node.style);
+        let mut style = consume(&node.style);
         if style.is_none() {
             return Ok(());
         }
+        // Exactly one box, and the one the table driver just decided about.
+        // See [`Builder::cell`].
+        if let Some(pass) = self.cell.take() {
+            pass.apply(&mut style);
+        }
+        let style = style;
         self.budget.spend_box()?;
         let avoid = avoid || style.page_break_inside == PageBreakInside::Avoid;
 
@@ -575,7 +671,16 @@ impl<M: Metrics> Builder<'_, M> {
         // for the reason above: an uncommitted margin has not moved `self.y`
         // yet and it will.
         let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
-        self.children(node, &style, content_x, content_width, depth, avoid, block)?;
+        if style.is_table() {
+            // CSS 2.2 §17. Everything above this line -- the margins, the
+            // border, the padding, `width`, `box-sizing`, the page-break
+            // properties -- is the ordinary block box a table also is, and
+            // reusing it is what stops a table from being a second, quietly
+            // different, box model.
+            self.table(node, &style, content_x, content_width, depth, avoid, block)?;
+        } else {
+            self.children(node, &style, content_x, content_width, depth, avoid, block)?;
+        }
         self.content_top = outer_top;
         let content_height = self.y - before;
 
@@ -677,8 +782,32 @@ impl<M: Metrics> Builder<'_, M> {
                 // item: `ordinal` used to scan the whole child list for each
                 // list item, which is `O(children^2)` for one long list.
                 let mut ordinal = 0usize;
-                for (child, child_style) in children.iter().zip(&styles) {
+                // §17.2.1 rule 9's run, once it has been wrapped.
+                let mut wrapped_until = 0usize;
+                for (index, (child, child_style)) in children.iter().zip(&styles).enumerate() {
+                    if index < wrapped_until {
+                        continue;
+                    }
                     if child_style.is_none() {
+                        continue;
+                    }
+                    if child_style.is_internal_table() {
+                        // §17.2.1 rule 9, **the ninth generation step**: an
+                        // internal table box whose parent is not a table is
+                        // wrapped, with its consecutive internal siblings, in
+                        // an anonymous table. Without it a stray `<tr>` is
+                        // neither block-level nor inline-level and generates
+                        // nothing at all -- which loses a row of a book rather
+                        // than misplacing it.
+                        if !run.is_empty() {
+                            self.anonymous(&run, style, block, content_x, content_width, depth)?;
+                            run.clear();
+                        }
+                        let end = table::misparented_run(children, index);
+                        self.budget.spend_box()?;
+                        let wrapper = anonymous_table(&node.style, &children[index..end]);
+                        self.block(&wrapper, content_width, content_x, depth + 1, avoid, 0)?;
+                        wrapped_until = end;
                         continue;
                     }
                     if child_style.float != Float::None {
@@ -1020,15 +1149,23 @@ impl<M: Metrics> Builder<'_, M> {
         let trial = trial?;
         let (items, floats) = (trial.items, trial.floats);
         let mut width = 0.0f64;
-        let mut extents = |items: &[Item]| {
+        // A band's text is inside it, so a trial that did not look would
+        // measure a cell holding a nested table as empty and give its column no
+        // width at all.
+        fn extend(items: &[Item], width: &mut f64) {
             for item in items {
-                if let ItemKind::Line(line) = &item.kind {
-                    for run in &line.runs {
-                        width = width.max(run.x + run.width);
+                match &item.kind {
+                    ItemKind::Line(line) => {
+                        for run in &line.runs {
+                            *width = width.max(run.x + run.width);
+                        }
                     }
+                    ItemKind::Rows(band) => extend(&band.items, width),
+                    ItemKind::Margin(_) | ItemKind::Edge => {}
                 }
             }
-        };
+        }
+        let mut extents = |items: &[Item]| extend(items, &mut width);
         extents(&items);
         for float in &floats {
             extents(&float.items);
@@ -1088,6 +1225,516 @@ impl<M: Metrics> Builder<'_, M> {
             floats: inner_floats,
             height,
         })
+    }
+
+    /// A `display: table` box's content, CSS 2.2 §17.
+    ///
+    /// The order below is the specification's and every step of it is
+    /// separable:
+    ///
+    /// 1. §17.2.1 generates the boxes the document left out — [`table::generate`];
+    /// 2. §17.4's captions are laid out above the table;
+    /// 3. §17.5 places every cell in the grid, `colspan` and `rowspan` included;
+    /// 4. §17.6.2 resolves the collapsing borders, which must happen **before**
+    ///    any measuring because a collapsed border changes how much room a cell
+    ///    has for its text;
+    /// 5. §17.5.2.2's **first pass** measures a minimum and a maximum content
+    ///    width per cell, or §17.5.2.1 skips it because a fixed layout does not
+    ///    depend on the contents;
+    /// 6. §17.5.2.2's **second pass** distributes the table's width over the
+    ///    columns;
+    /// 7. every cell is laid out at its column's width, **in document order**,
+    ///    so the reading-order stamps ascend with the source;
+    /// 8. the rows are emitted in **visual order** — header, bodies, footer —
+    ///    which is not document order once a book writes `<tfoot>` first.
+    ///
+    /// Steps 7 and 8 being different orders is milestone 10's finding in two
+    /// dimensions, and [`crate::TextRun::order`] is what makes it survivable.
+    #[allow(clippy::too_many_arguments)]
+    fn table(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        content_x: f64,
+        content_width: f64,
+        depth: usize,
+        avoid: bool,
+        block: usize,
+    ) -> Result<(), Refusal> {
+        let tree = table::generate(node);
+        for step in table::Step::ALL {
+            for _ in 0..tree.generated.count(step) {
+                self.budget.spend_box()?;
+            }
+        }
+        // §17.4. HTML requires `<caption>` to be a table's first element child,
+        // so for every conforming book this order is also document order --
+        // which is what keeps the stamps ascending. `caption-side` is
+        // `Unsupported` by name, so a caption asked for at the bottom is a
+        // reported gap rather than a caption drawn in the wrong place.
+        for caption in &tree.captions {
+            self.block(caption, content_width, content_x, depth + 1, avoid, 0)?;
+        }
+        // **The first of the three places the layout total is charged.** A
+        // `colspan` is a number in the file and the slots it occupies are the
+        // work, so the charge is made before the slots are marked rather than
+        // as they are marked -- `MAX_LINE_BREAK_WORK`'s posture, and the reason
+        // a `colspan="4000000000"` costs a refusal and not a gigabyte.
+        let grid = {
+            let budget = &mut *self.budget;
+            Grid::place(&tree, |slots| budget.spend_layout(slots))?
+        };
+        if grid.clamped > 0 {
+            self.warn(Warning::RowspanPastTheRowGroup);
+        }
+        if grid.columns == 0 || grid.slots.is_empty() {
+            return Ok(());
+        }
+        // **The second.** The grid is rows by columns and neither factor bounds
+        // the other: five cells of `colspan="1000"` are five boxes and five
+        // thousand slots.
+        self.budget
+            .spend_layout(grid.rows.saturating_mul(grid.columns))?;
+        let rows_of = tree.visual_rows();
+        let mut occupancy = vec![vec![None; grid.columns]; grid.rows];
+        for (at, slot) in grid.slots.iter().enumerate() {
+            for row in occupancy.iter_mut().skip(slot.top).take(slot.rows) {
+                for column in row.iter_mut().skip(slot.left).take(slot.columns) {
+                    *column = Some(at);
+                }
+            }
+        }
+
+        // The column boxes: §17.5.2's widths, and §17.5.1's two rendering
+        // layers this build does not paint.
+        let mut declared: Vec<Option<f64>> = vec![None; grid.columns];
+        let collapsing = style.border_collapse == BorderCollapse::Collapse;
+        for (at, width) in declared.iter_mut().enumerate() {
+            let Some(column) = tree.columns.get(at) else {
+                break;
+            };
+            let Some(described) = column.node.or(column.group) else {
+                continue;
+            };
+            let consumed = consume(&described.style);
+            let bordered = !collapsing
+                && (consumed.border_width.top > 0.0
+                    || consumed.border_width.right > 0.0
+                    || consumed.border_width.bottom > 0.0
+                    || consumed.border_width.left > 0.0);
+            if consumed.background_color.a != 0 || bordered {
+                self.warn(Warning::ColumnBoxNotPainted);
+            }
+            if let Size::Length(length) = consumed.width {
+                *width = Some(resolve_length(length, content_width).max(0.0));
+            }
+        }
+
+        // §17.6.2, before anything is measured.
+        let borders: Vec<Option<Collapsed>> = if collapsing {
+            collapsed_borders(node, &tree, &grid, &occupancy, &rows_of)
+                .into_iter()
+                .map(Some)
+                .collect()
+        } else {
+            vec![None; grid.slots.len()]
+        };
+
+        // Document order over the slots, which is *not* the order they were
+        // placed in: `Grid::place` walks the row groups in visual order.
+        let mut document: Vec<usize> = (0..grid.slots.len()).collect();
+        document.sort_by_key(|at| {
+            let slot = &grid.slots[*at];
+            (slot.group, slot.row, slot.cell)
+        });
+
+        let hspacing = style.border_spacing.horizontal;
+        let vspacing = style.border_spacing.vertical;
+        let spacing_total = hspacing * (grid.columns as f64 + 1.0);
+        let available = (content_width - spacing_total).max(0.0);
+        // §17.5.2.1's own first sentence: *"a value of `auto` means use the
+        // automatic table layout algorithm"*. A build that ran the fixed
+        // algorithm whenever `table-layout: fixed` was declared divides the
+        // containing block evenly among the columns and draws a table nobody
+        // asked for.
+        let fixed_layout =
+            style.table_layout == TableLayout::Fixed && !matches!(style.width, Size::Auto);
+
+        let mut specified: Vec<Option<f64>> = vec![None; grid.slots.len()];
+        let mut cells: Vec<CellWidths> = Vec::with_capacity(grid.slots.len());
+        for &at in &document {
+            let slot = grid.slots[at];
+            let cell = &tree.groups[slot.group].rows[slot.row].cells[slot.cell];
+            let inner = cell.content.node();
+            let consumed = consume(&inner.style);
+            specified[at] = match consumed.width {
+                Size::Auto => None,
+                Size::Length(length) => Some(resolve_length(length, content_width).max(0.0)),
+            };
+            let (min, max) = if fixed_layout {
+                (0.0, 0.0)
+            } else {
+                // §17.5.2.2's **first pass**. The two trials are the same two
+                // `float_width` runs for shrink-to-fit and for the same reason:
+                // measuring from the breaker that will set the text is what
+                // stops the width and the set text disagreeing about where a
+                // word ends.
+                let inset = borders[at].map_or(consumed.border_width, |c| c.width);
+                let right = consumed.padding_px(Side::Right, content_width) + inset.right;
+                let left = consumed.padding_px(Side::Left, content_width) + inset.left;
+                self.cell = Some(CellPass {
+                    width: None,
+                    borders: borders[at],
+                });
+                let max = self.measure_content(inner, MAX_MEASURE, depth + 1, avoid)? + right;
+                self.cell = Some(CellPass {
+                    width: None,
+                    borders: borders[at],
+                });
+                let min = self.measure_content(inner, 0.0, depth + 1, avoid)? + right;
+                let empty = left + right;
+                (min.max(empty), max.max(min).max(empty))
+            };
+            cells.push(CellWidths {
+                left: slot.left,
+                columns: slot.columns,
+                min,
+                max,
+                specified: specified[at],
+            });
+        }
+
+        // **The third.** §17.5.2.2 spreads every spanning cell over every
+        // column it touches, which is the product a nested table multiplies:
+        // the inner table's whole distribution runs once inside each of the
+        // outer cell's three layouts.
+        let mut spread = grid.columns;
+        for slot in &grid.slots {
+            spread = spread.saturating_add(slot.columns);
+        }
+        self.budget.spend_layout(spread)?;
+
+        let columns: Vec<f64> = if fixed_layout {
+            let first: Vec<CellWidths> = grid
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.top == 0)
+                .map(|(at, slot)| CellWidths {
+                    left: slot.left,
+                    columns: slot.columns,
+                    min: 0.0,
+                    max: 0.0,
+                    specified: specified[at],
+                })
+                .collect();
+            table::fixed(grid.columns, &declared, &first, available)
+        } else {
+            let constraints = table::constraints(grid.columns, &cells, &declared);
+            // §17.5.2.2's second pass. CAPMIN is zero here because the captions
+            // were laid out at the *containing block's* width a few lines up
+            // and cannot therefore make the table wider; see the crate's `Still
+            // owed`.
+            let used = match style.width {
+                Size::Auto => table::automatic_width(&constraints, available, 0.0),
+                Size::Length(_) => available,
+            };
+            table::distribute(&constraints, used)
+        };
+
+        let table_width = columns.iter().sum::<f64>() + spacing_total;
+        // The record was made at the containing block's width, because `block`
+        // cannot know a table's used width until §17.5.2 has run over its
+        // contents. This is the one place a block record is corrected after the
+        // fact, and the alternative -- a table box painted the full width of
+        // the page with its cells in the left half of it -- is a background
+        // that is visibly wrong and a border that is silently in the wrong
+        // place.
+        self.flow.blocks[block].width -= content_width - table_width;
+        if table_width > content_width + EPSILON {
+            self.warn(Warning::ContentOverflowedPage);
+        }
+
+        let mut lefts = Vec::with_capacity(grid.columns);
+        let mut x = content_x + hspacing;
+        for width in &columns {
+            lefts.push(x);
+            x += width + hspacing;
+        }
+        let span_width = |slot: &Slot| -> f64 {
+            columns[slot.left..slot.left + slot.columns]
+                .iter()
+                .sum::<f64>()
+                + (slot.columns.saturating_sub(1)) as f64 * hspacing
+        };
+
+        // Step 7: every cell, at its column's width, in document order.
+        let mut laid: Vec<Option<Sublayout>> = (0..grid.slots.len()).map(|_| None).collect();
+        for &at in &document {
+            let slot = grid.slots[at];
+            let cell = &tree.groups[slot.group].rows[slot.row].cells[slot.cell];
+            let width = span_width(&slot);
+            self.cell = Some(CellPass {
+                width: Some(width),
+                borders: borders[at],
+            });
+            laid[at] = Some(self.sublayout(cell.content.node(), width, depth + 1, avoid)?);
+        }
+
+        // §17.5.3's row heights: the rows a cell does not span first, then the
+        // ones it does. The order is the same as the width algorithm's and for
+        // the same reason -- a spanning cell met first would put its whole
+        // height into its top row.
+        let mut heights = vec![0.0f64; grid.rows];
+        for (grid_row, (group, row)) in rows_of.iter().enumerate() {
+            if let Some(row_node) = tree.groups[*group].rows[*row].node {
+                if let Size::Length(length) = consume(&row_node.style).height {
+                    heights[grid_row] = resolve_length(length, content_width).max(0.0);
+                }
+            }
+        }
+        for (at, slot) in grid.slots.iter().enumerate() {
+            if slot.rows == 1 {
+                let height = laid[at].as_ref().map_or(0.0, |sub| sub.height);
+                heights[slot.top] = heights[slot.top].max(height);
+            }
+        }
+        for (at, slot) in grid.slots.iter().enumerate() {
+            if slot.rows <= 1 {
+                continue;
+            }
+            let have: f64 = heights[slot.top..slot.top + slot.rows].iter().sum::<f64>()
+                + (slot.rows - 1) as f64 * vspacing;
+            let want = laid[at].as_ref().map_or(0.0, |sub| sub.height);
+            if want > have {
+                let extra = (want - have) / slot.rows as f64;
+                for height in &mut heights[slot.top..slot.top + slot.rows] {
+                    *height += extra;
+                }
+            }
+        }
+        let mut tops = Vec::with_capacity(grid.rows + 1);
+        let mut y = 0.0;
+        for height in &heights {
+            tops.push(y);
+            y += height + vspacing;
+        }
+        tops.push(y);
+
+        // **A band, not a row.** A page may break between two rows and may not
+        // break across a cell that spans them, so the unit the fragmenter sees
+        // is the maximal run of rows a `rowspan` joins. With no `rowspan` in
+        // the table every band is one row, which is where a book's table
+        // breaks.
+        let mut joined = vec![false; grid.rows];
+        for slot in &grid.slots {
+            for row in joined
+                .iter_mut()
+                .take(slot.top + slot.rows)
+                .skip(slot.top + 1)
+            {
+                *row = true;
+            }
+        }
+        let mut bands: Vec<(usize, usize)> = Vec::new();
+        let mut start = 0usize;
+        for (row, joined) in joined.iter().enumerate().skip(1) {
+            if !joined {
+                bands.push((start, row));
+                start = row;
+            }
+        }
+        bands.push((start, grid.rows));
+
+        // Step 8: emit, in visual order. The margins standing at this position
+        // are committed first -- CSS 2.2 §8.3.1 does not collapse a table's
+        // margins through it, and the first thing emitted here is not a margin.
+        self.commit_margin();
+        let spacing_break = MarginBreak {
+            forced: false,
+            allowed_by_a: true,
+            allowed_by_b: !avoid,
+        };
+        let mut open_group: Option<usize> = None;
+        for &(from, to) in &bands {
+            let group_index = rows_of[from].0;
+            if open_group != Some(group_index) {
+                if open_group.is_some() {
+                    self.open.pop();
+                    open_group = None;
+                }
+                if let Some(group_node) = tree.groups[group_index].node {
+                    self.budget.spend_box()?;
+                    let record = self.record(group_node, content_x, table_width);
+                    self.open.push(record);
+                    open_group = Some(group_index);
+                }
+            }
+            // §17.6.1's vertical spacing, above every band including the
+            // first. It is a `Margin` item and not an `Edge`, so it is
+            // §13.3.3's case (1) -- the break position a table between two
+            // pages needs.
+            self.emit(vspacing, ItemKind::Margin(spacing_break.clone()), true);
+            let band = self.band(
+                &tree,
+                &grid,
+                &rows_of,
+                &mut laid,
+                &heights,
+                &tops,
+                &lefts,
+                &columns,
+                from,
+                to,
+                content_x,
+                table_width,
+                hspacing,
+                vspacing,
+            )?;
+            let height: f64 = heights[from..to].iter().sum::<f64>()
+                + (to - from).saturating_sub(1) as f64 * vspacing;
+            self.emit(height, ItemKind::Rows(Box::new(band)), true);
+        }
+        if open_group.is_some() {
+            self.open.pop();
+        }
+        // And below the last one, which is what makes the table's own content
+        // height include §17.6.1's last spacing.
+        self.emit(vspacing, ItemKind::Margin(spacing_break), true);
+        Ok(())
+    }
+
+    /// One band of rows, as one flow item's worth of content.
+    #[allow(clippy::too_many_arguments)]
+    fn band(
+        &mut self,
+        tree: &TableBox<'_>,
+        grid: &Grid,
+        rows_of: &[(usize, usize)],
+        laid: &mut [Option<Sublayout>],
+        heights: &[f64],
+        tops: &[f64],
+        lefts: &[f64],
+        columns: &[f64],
+        from: usize,
+        to: usize,
+        content_x: f64,
+        table_width: f64,
+        hspacing: f64,
+        vspacing: f64,
+    ) -> Result<RowBand, Refusal> {
+        let mut items: Vec<Item> = Vec::new();
+        let mut blocks: Vec<BlockRecord> = Vec::new();
+        let band_top = tops[from];
+
+        // The row boxes first, so a cell's background covers a row's rather
+        // than the other way round -- CSS 2.2 §17.5.1's layer order, and the
+        // reason these records come before the cells' in this vector.
+        for grid_row in from..to {
+            let (group, row) = rows_of[grid_row];
+            let Some(row_node) = tree.groups[group].rows[row].node else {
+                continue;
+            };
+            self.budget.spend_box()?;
+            let mut record = decorate(
+                row_node,
+                content_x + hspacing,
+                (table_width - 2.0 * hspacing).max(0.0),
+            );
+            if !record.painted {
+                continue;
+            }
+            // A spacer with the row's exact geometry, so the record's fragment
+            // is the row's border box and not the extent of whatever text
+            // happened to be in it. A row holding one short cell and one tall
+            // one would otherwise be painted the height of the tall one in one
+            // build and the short one in another, and both look like a row.
+            let spacer = items.len();
+            items.push(Item {
+                y: tops[grid_row] - band_top,
+                height: heights[grid_row],
+                kind: ItemKind::Edge,
+            });
+            record.first = Some(spacer);
+            record.last = spacer + 1;
+            blocks.push(record);
+        }
+
+        for grid_row in from..to {
+            for (at, slot) in grid.slots.iter().enumerate() {
+                if slot.top != grid_row {
+                    continue;
+                }
+                let Some(sub) = laid[at].take() else {
+                    continue;
+                };
+                let cell_x = lefts[slot.left];
+                let cell_top = tops[slot.top] - band_top;
+                let cell_width = columns[slot.left..slot.left + slot.columns]
+                    .iter()
+                    .sum::<f64>()
+                    + slot.columns.saturating_sub(1) as f64 * hspacing;
+                let cell_height = heights[slot.top..slot.top + slot.rows].iter().sum::<f64>()
+                    + slot.rows.saturating_sub(1) as f64 * vspacing;
+                let Sublayout {
+                    items: mut inner,
+                    blocks: mut records,
+                    floats,
+                    height: _,
+                } = sub;
+                translate(&mut inner, &mut records, cell_x, cell_top);
+                // §17.5.3: a cell's box is its row's height, whatever its
+                // content came to. The spacer is what says so; without it a
+                // one-line cell in a five-line row is painted one line tall,
+                // which is a table with ragged backgrounds.
+                let spacer = items.len();
+                items.push(Item {
+                    y: cell_top,
+                    height: cell_height,
+                    kind: ItemKind::Edge,
+                });
+                let base = items.len();
+                for (index, mut record) in records.into_iter().enumerate() {
+                    if index == 0 {
+                        record.x = cell_x;
+                        record.width = cell_width;
+                        record.first = Some(spacer);
+                        record.last = spacer + 1;
+                    } else if let Some(first) = record.first {
+                        record.first = Some(first + base);
+                        record.last += base;
+                    }
+                    blocks.push(record);
+                }
+                items.append(&mut inner);
+                // A float inside a cell stays inside the band: its own
+                // formatting context is the cell's, so it cannot reach past the
+                // row it is in and there is nothing for the page cutter to
+                // carry forward.
+                for mut float in floats {
+                    translate(&mut float.items, &mut float.blocks, cell_x, cell_top);
+                    let float_base = items.len();
+                    for mut record in float.blocks {
+                        if let Some(first) = record.first {
+                            record.first = Some(first + float_base);
+                            record.last += float_base;
+                        }
+                        blocks.push(record);
+                    }
+                    items.extend(float.items);
+                }
+            }
+        }
+        Ok(RowBand { items, blocks })
+    }
+
+    /// A block record for a box this module lays out itself — a row or a row
+    /// group, neither of which goes through [`Builder::block`].
+    fn record(&mut self, node: &BoxNode, x: f64, width: f64) -> usize {
+        let record = decorate(node, x, width);
+        let index = self.flow.blocks.len();
+        self.flow.blocks.push(record);
+        index
     }
 
     /// A `list-item`'s marker, on the first line of its own box.
@@ -1612,6 +2259,286 @@ impl<M: Metrics> Builder<'_, M> {
     }
 }
 
+/// A length or a percentage against a containing width.
+fn resolve_length(length: LengthPercentage, containing: f64) -> f64 {
+    match length {
+        LengthPercentage::Px(px) => px,
+        LengthPercentage::Percent(percent) => containing * percent / 100.0,
+    }
+}
+
+/// One box's decorations, as a record with no items in it yet.
+fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
+    let style = consume(&node.style);
+    let painted = style.background_color.a != 0
+        || style.border_width.top > 0.0
+        || style.border_width.right > 0.0
+        || style.border_width.bottom > 0.0
+        || style.border_width.left > 0.0;
+    BlockRecord {
+        x,
+        width,
+        first: None,
+        last: 0,
+        background: style.background_color,
+        border_width: style.border_width,
+        border_style: style.border_style,
+        border_color: style.border_color,
+        painted: painted && style.visible,
+    }
+}
+
+/// One box's **specified** border on one side, for §17.6.2.1.
+///
+/// Specified and not used, which is [`Edge::width`]'s whole note: §8.5.3 makes
+/// a `hidden` border's used width zero, and §17.6.2.1's first rule is that a
+/// `hidden` border beats every other. A build that collapsed used widths would
+/// find `hidden` at zero, lose on width, and draw the border the author hid.
+fn specified_edge(node: &BoxNode, side: Side, origin: Origin) -> Edge {
+    Edge {
+        style: node.style.border_style.get(side),
+        width: node.style.border_width.get(side).max(0.0),
+        color: node.style.border_color.get(side),
+        origin,
+    }
+}
+
+/// The collapsed border of every cell, CSS 2.2 §17.6.2.
+///
+/// Each of the four sides of each cell is a grid line, and every box that
+/// touches that line brings a border to it: the two cells on either side, their
+/// rows, their row groups, the columns, the column groups and the table.
+/// [`table::collapse`] then applies §17.6.2.1's five rules to the set.
+///
+/// **Half the resolved width at an inner line and the whole of it at an outer
+/// one.** §17.6.2 centres a collapsed border on the grid line, which would put
+/// half the table's outermost border outside the table box; this build keeps
+/// that half inside. The ink is the same width either way and the table is half
+/// a border narrower than a browser's, which is the divergence and is named in
+/// the crate's `Still owed`.
+fn collapsed_borders(
+    table: &BoxNode,
+    tree: &TableBox<'_>,
+    grid: &Grid,
+    occupancy: &[Vec<Option<usize>>],
+    rows_of: &[(usize, usize)],
+) -> Vec<Collapsed> {
+    let row_node = |grid_row: usize| -> Option<&BoxNode> {
+        rows_of
+            .get(grid_row)
+            .and_then(|(group, row)| tree.groups[*group].rows[*row].node)
+    };
+    let group_node = |grid_row: usize| -> Option<&BoxNode> {
+        rows_of
+            .get(grid_row)
+            .and_then(|(group, _)| tree.groups[*group].node)
+    };
+    let group_of = |grid_row: usize| rows_of.get(grid_row).map(|(group, _)| *group);
+    let column_nodes = |column: usize| -> (Option<&BoxNode>, Option<&BoxNode>) {
+        match tree.columns.get(column) {
+            Some(box_) => (box_.node, box_.group),
+            None => (None, None),
+        }
+    };
+    let mut out = Vec::with_capacity(grid.slots.len());
+    for slot in &grid.slots {
+        let mut edges: [Vec<Edge>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let cell = |at: usize| -> &BoxNode {
+            let slot = &grid.slots[at];
+            tree.groups[slot.group].rows[slot.row].cells[slot.cell]
+                .content
+                .node()
+        };
+        let me = tree.groups[slot.group].rows[slot.row].cells[slot.cell]
+            .content
+            .node();
+        let last_row = slot.top + slot.rows;
+        let last_column = slot.left + slot.columns;
+
+        // Top.
+        edges[0].push(specified_edge(me, Side::Top, Origin::Cell));
+        if let Some(node) = row_node(slot.top) {
+            edges[0].push(specified_edge(node, Side::Top, Origin::Row));
+        }
+        if slot.top == 0 {
+            edges[0].push(specified_edge(table, Side::Top, Origin::Table));
+            for column in slot.left..last_column {
+                let (col, group) = column_nodes(column);
+                if let Some(node) = col {
+                    edges[0].push(specified_edge(node, Side::Top, Origin::Column));
+                }
+                if let Some(node) = group {
+                    edges[0].push(specified_edge(node, Side::Top, Origin::ColumnGroup));
+                }
+            }
+        } else {
+            for above in occupancy[slot.top - 1]
+                .iter()
+                .take(last_column)
+                .skip(slot.left)
+                .flatten()
+            {
+                edges[0].push(specified_edge(cell(*above), Side::Bottom, Origin::Cell));
+            }
+            if let Some(node) = row_node(slot.top - 1) {
+                edges[0].push(specified_edge(node, Side::Bottom, Origin::Row));
+            }
+        }
+        if group_of(slot.top) != slot.top.checked_sub(1).and_then(group_of) {
+            if let Some(node) = group_node(slot.top) {
+                edges[0].push(specified_edge(node, Side::Top, Origin::RowGroup));
+            }
+            if let Some(node) = slot.top.checked_sub(1).and_then(group_node) {
+                edges[0].push(specified_edge(node, Side::Bottom, Origin::RowGroup));
+            }
+        }
+
+        // Bottom.
+        edges[2].push(specified_edge(me, Side::Bottom, Origin::Cell));
+        if let Some(node) = row_node(last_row - 1) {
+            edges[2].push(specified_edge(node, Side::Bottom, Origin::Row));
+        }
+        if last_row >= grid.rows {
+            edges[2].push(specified_edge(table, Side::Bottom, Origin::Table));
+            for column in slot.left..last_column {
+                let (col, group) = column_nodes(column);
+                if let Some(node) = col {
+                    edges[2].push(specified_edge(node, Side::Bottom, Origin::Column));
+                }
+                if let Some(node) = group {
+                    edges[2].push(specified_edge(node, Side::Bottom, Origin::ColumnGroup));
+                }
+            }
+        } else {
+            for below in occupancy[last_row]
+                .iter()
+                .take(last_column)
+                .skip(slot.left)
+                .flatten()
+            {
+                edges[2].push(specified_edge(cell(*below), Side::Top, Origin::Cell));
+            }
+            if let Some(node) = row_node(last_row) {
+                edges[2].push(specified_edge(node, Side::Top, Origin::Row));
+            }
+        }
+        if group_of(last_row.saturating_sub(1)) != group_of(last_row) {
+            if let Some(node) = group_node(last_row - 1) {
+                edges[2].push(specified_edge(node, Side::Bottom, Origin::RowGroup));
+            }
+            if let Some(node) = group_node(last_row) {
+                edges[2].push(specified_edge(node, Side::Top, Origin::RowGroup));
+            }
+        }
+
+        // Left.
+        edges[3].push(specified_edge(me, Side::Left, Origin::Cell));
+        let (col, colgroup) = column_nodes(slot.left);
+        if let Some(node) = col {
+            edges[3].push(specified_edge(node, Side::Left, Origin::Column));
+        }
+        if let Some(node) = colgroup {
+            edges[3].push(specified_edge(node, Side::Left, Origin::ColumnGroup));
+        }
+        if slot.left == 0 {
+            edges[3].push(specified_edge(table, Side::Left, Origin::Table));
+            for row in slot.top..last_row {
+                if let Some(node) = row_node(row) {
+                    edges[3].push(specified_edge(node, Side::Left, Origin::Row));
+                }
+                if let Some(node) = group_node(row) {
+                    edges[3].push(specified_edge(node, Side::Left, Origin::RowGroup));
+                }
+            }
+        } else {
+            for row in occupancy.iter().take(last_row).skip(slot.top) {
+                if let Some(left) = row[slot.left - 1] {
+                    edges[3].push(specified_edge(cell(left), Side::Right, Origin::Cell));
+                }
+            }
+            let (col, colgroup) = column_nodes(slot.left - 1);
+            if let Some(node) = col {
+                edges[3].push(specified_edge(node, Side::Right, Origin::Column));
+            }
+            if let Some(node) = colgroup {
+                edges[3].push(specified_edge(node, Side::Right, Origin::ColumnGroup));
+            }
+        }
+
+        // Right.
+        edges[1].push(specified_edge(me, Side::Right, Origin::Cell));
+        let (col, colgroup) = column_nodes(last_column - 1);
+        if let Some(node) = col {
+            edges[1].push(specified_edge(node, Side::Right, Origin::Column));
+        }
+        if let Some(node) = colgroup {
+            edges[1].push(specified_edge(node, Side::Right, Origin::ColumnGroup));
+        }
+        if last_column >= grid.columns {
+            edges[1].push(specified_edge(table, Side::Right, Origin::Table));
+            for row in slot.top..last_row {
+                if let Some(node) = row_node(row) {
+                    edges[1].push(specified_edge(node, Side::Right, Origin::Row));
+                }
+                if let Some(node) = group_node(row) {
+                    edges[1].push(specified_edge(node, Side::Right, Origin::RowGroup));
+                }
+            }
+        } else {
+            for row in occupancy.iter().take(last_row).skip(slot.top) {
+                if let Some(right) = row[last_column] {
+                    edges[1].push(specified_edge(cell(right), Side::Left, Origin::Cell));
+                }
+            }
+            let (col, colgroup) = column_nodes(last_column);
+            if let Some(node) = col {
+                edges[1].push(specified_edge(node, Side::Left, Origin::Column));
+            }
+            if let Some(node) = colgroup {
+                edges[1].push(specified_edge(node, Side::Left, Origin::ColumnGroup));
+            }
+        }
+
+        let outer = [
+            slot.top == 0,
+            last_column >= grid.columns,
+            last_row >= grid.rows,
+            slot.left == 0,
+        ];
+        let mut width = Sides::all(0.0);
+        let mut style = Sides::all(BorderStyle::None);
+        let mut color = Sides::all(Color::BLACK);
+        for (index, side) in [Side::Top, Side::Right, Side::Bottom, Side::Left]
+            .into_iter()
+            .enumerate()
+        {
+            let won = table::collapse(&edges[index]);
+            let used = won.used_width();
+            width.set(side, if outer[index] { used } else { used / 2.0 });
+            style.set(side, won.style);
+            color.set(side, won.color);
+        }
+        out.push(Collapsed {
+            width,
+            style,
+            color,
+        });
+    }
+    out
+}
+
+/// §17.2.1 rule 9's anonymous table, around a run of misparented boxes.
+fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
+    let mut style = ComputedStyle::inherit_from(parent);
+    style.display = Display::Table;
+    BoxNode {
+        style,
+        content: Content::Children(run.to_vec()),
+        anchor: None,
+        span: crate::CellSpan::ONE,
+    }
+}
+
 /// Moves a finished sub-flow to where its float was placed.
 ///
 /// A run's `y` is not touched because a run has not got one yet: it is written
@@ -1620,10 +2547,17 @@ impl<M: Metrics> Builder<'_, M> {
 fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
     for item in items {
         item.y += dy;
-        if let ItemKind::Line(line) = &mut item.kind {
-            for run in &mut line.runs {
-                run.x += dx;
+        match &mut item.kind {
+            ItemKind::Line(line) => {
+                for run in &mut line.runs {
+                    run.x += dx;
+                }
             }
+            // A band's items are already relative to the band, so only the
+            // horizontal half of the move reaches inside it. A build that
+            // passed `dy` down as well would move a table inside a float twice.
+            ItemKind::Rows(band) => translate(&mut band.items, &mut band.blocks, dx, 0.0),
+            ItemKind::Margin(_) | ItemKind::Edge => {}
         }
     }
     for block in blocks {

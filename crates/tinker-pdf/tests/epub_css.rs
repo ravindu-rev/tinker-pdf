@@ -221,14 +221,17 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // decision 5's second device doing exactly its job on real input.
             "background-color",
             "border-bottom",
-            "border-collapse",
-            "border-spacing",
             "border-top",
             "color",
             "color-scheme",
-            // Also a value gap, from both producers: pandoc writes
-            // `display: flex` and calibre writes six `display: table*` values.
-            "display",
+            // **`display` used to be here and milestone 11 removed it**, and
+            // the way it left is the census earning its keep. Its whole count
+            // over this corpus was calibre's six `display: table*` values, all
+            // of which are now read; the `display: flex` this list's old
+            // comment blamed on pandoc is inside a `/* … */` in pandoc's own
+            // stylesheet and never reached the parser at all. A census that
+            // counted names rather than asserting the set would have gone from
+            // fourteen to thirteen and nobody would have known which one went.
             "hyphens",
             "list-style",
             "max-width",
@@ -244,6 +247,13 @@ fn the_unsupported_census_over_the_committed_corpus() {
             "vertical-align",
         ]
     );
+
+    // `border-collapse` and `border-spacing` left the same way and at the same
+    // milestone. Neither is written by either producer here — they were in
+    // `UNSUPPORTED_PROPERTIES` and had a count of zero — so their departure
+    // changes this list and not this corpus's numbers; the user-agent sheet is
+    // where they are now written and `epub_tables.rs` is where that is
+    // asserted.
 
     // And the other half of decision 5's split. **Nothing at all**, and that is
     // the interesting answer rather than a boring one: milestone 1's census

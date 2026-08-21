@@ -63,16 +63,22 @@ const VARIANT_ANCHOR: &str =
 /// this is the third time in this gap that a test written a milestone early has
 /// had to be resolved by the milestone it was written for.
 ///
-/// `border-collapse` is the successor and it is chosen the same way: CSS 2.2
-/// §17.6, in `UNSUPPORTED_PROPERTIES` today, present in both producers' books,
-/// and genuinely not implemented because the table model that would consume it
-/// is milestone 11's. When that milestone lands this constant moves again, and
-/// the reason it can be moved without weakening anything is that the *shape* of
-/// the proof is in the harness rather than in the name.
-const VARIANT: &str = "    BorderCollapse(bool),";
-const APPLY_ARM: &str = "        Property::BorderCollapse(_) => {}";
-const NAME_ARM: &str = "            Property::BorderCollapse(_) => \"border-collapse\",";
-const INHERITED_ARM: &str = "            Property::BorderCollapse(_) => true,";
+/// `border-collapse` was the successor and milestone 11 implemented it, on
+/// exactly the schedule the paragraph above predicted — *"when that milestone
+/// lands this constant moves again"*. It has now moved twice, which is the
+/// second piece of evidence that the choice is the right kind: a name that
+/// never had to move would be a name nobody was ever going to implement.
+///
+/// `vertical-align` is the successor and it is chosen the same way: CSS 2.2
+/// §10.8 and §17.5.4, in `UNSUPPORTED_PROPERTIES` today, and **the largest
+/// single gap the committed corpus measures** at thirty-four elements — larger
+/// now than `display`'s was before milestone 11 emptied it. It is genuinely not
+/// implemented: nothing here aligns a cell's content within its row, and every
+/// cell in this build is set from its top.
+const VARIANT: &str = "    VerticalAlign(bool),";
+const APPLY_ARM: &str = "        Property::VerticalAlign(_) => {}";
+const NAME_ARM: &str = "            Property::VerticalAlign(_) => \"vertical-align\",";
+const INHERITED_ARM: &str = "            Property::VerticalAlign(_) => true,";
 
 struct Source {
     lib: String,
@@ -232,7 +238,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
         "the build failed for some other reason than a non-exhaustive match:\n{stderr}"
     );
     assert!(
-        stderr.contains("BorderCollapse"),
+        stderr.contains("VerticalAlign"),
         "the error does not name the variant that was added:\n{stderr}"
     );
 }

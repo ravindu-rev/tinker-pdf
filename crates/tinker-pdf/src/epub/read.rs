@@ -40,10 +40,11 @@ use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, StyleTree};
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
+use tinker_pdf_css::property::Display;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
 };
-use tinker_pdf_layout::{BoxNode, Content};
+use tinker_pdf_layout::{BoxNode, CellSpan, Content};
 
 use super::ocf::{resolve_reference, Ocf};
 use super::xhtml::{Child, Dom, Node};
@@ -460,5 +461,62 @@ fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
         style,
         content: Content::Children(children),
         anchor: Some(anchor),
+        span: cell_span(
+            node,
+            &styles.styles.get(at).map_or(Display::Inline, |s| s.display),
+        ),
+    }
+}
+
+/// HTML's `colspan`, `rowspan` and `span`, CSS 2.2 §17.5.
+///
+/// **This is the one thing a table needs that no stylesheet can say.** There is
+/// no CSS property behind any of the three, so the cascade cannot carry them
+/// and `tinker_pdf_layout::style::consume`'s compile-time device — which is
+/// about computed styles — has nothing to say about them. They arrive on
+/// [`BoxNode::span`] instead, from here, which is the file that already knows
+/// what an XHTML attribute is.
+///
+/// The clamps are HTML's own and each is a different number for a different
+/// reason. `colspan` is 1 to 1 000 and a `colspan="0"` is *one* column, because
+/// HTML 4's *"spans every column"* reading was dropped. `rowspan` is 0 to
+/// 65 534 and **zero survives**: it is HTML's *"to the end of the row group"*,
+/// which is the only one of the three where zero is a value rather than a
+/// mistake, and clamping it here would turn a real book's `rowspan="0"` into a
+/// one-row cell with the rest of the column shifted up.
+fn cell_span(node: &Node, display: &Display) -> CellSpan {
+    match display {
+        Display::TableCell => CellSpan {
+            columns: attribute_count(node.attr("colspan"), 1, 1_000, 1),
+            rows: attribute_count(node.attr("rowspan"), 0, 65_534, 1),
+        },
+        // `<col span>` and `<colgroup span>`, which say how many columns the
+        // box describes rather than how many a cell occupies.
+        Display::TableColumn | Display::TableColumnGroup => CellSpan {
+            columns: attribute_count(node.attr("span"), 1, 1_000, 1),
+            rows: 1,
+        },
+        _ => CellSpan::ONE,
+    }
+}
+
+/// HTML's *"rules for parsing non-negative integers"*, clamped.
+///
+/// A value with trailing rubbish — `"3 "`, `"2x"` — is HTML's leading-digits
+/// rule and yields the digits; a value with no leading digit at all is the
+/// default. A build that used `str::parse` alone would give `colspan="2 "` one
+/// column, which is a table with a hole in it.
+fn attribute_count(value: Option<&str>, low: u32, high: u32, default: u32) -> u32 {
+    let Some(raw) = value else {
+        return default;
+    };
+    let digits: String = raw
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    match digits.parse::<u32>() {
+        Ok(count) => count.clamp(low, high),
+        Err(_) => default,
     }
 }

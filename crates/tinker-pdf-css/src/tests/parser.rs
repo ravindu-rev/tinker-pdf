@@ -26,6 +26,35 @@ fn known(source: &str) -> Vec<Property> {
         .collect()
 }
 
+/// CSS 2.2 §17.6.1's `border-spacing` is `<length> <length>?`, and **the two
+/// lengths are two directions**.
+///
+/// One value copies to both and two do not. A build that kept the first number
+/// twice is right about every stylesheet written with one value — which is
+/// almost all of them — and puts the wrong gap between the rows of every table
+/// whose author wrote two. The injection matrix found that nothing here
+/// asserted it: every layout fixture set the computed value directly and never
+/// went through this grammar.
+///
+/// A percentage is **`Malformed` and not `Unsupported`**, because §17.6.1's
+/// grammar has no percentage in it at all: it is the author's mistake rather
+/// than this build's gap, which is the same distinction `orphans: 2.5` is on
+/// the other side of.
+#[test]
+fn border_spacing_takes_one_length_or_two_and_they_are_two_directions() {
+    assert_eq!(
+        known("table { border-spacing: 4px }"),
+        vec![Property::BorderSpacing(Len::Px(4.0), Len::Px(4.0))]
+    );
+    assert_eq!(
+        known("table { border-spacing: 2px 8px }"),
+        vec![Property::BorderSpacing(Len::Px(2.0), Len::Px(8.0))]
+    );
+    // Three is not a form the grammar has.
+    assert!(known("table { border-spacing: 1px 2px 3px }").is_empty());
+    assert!(known("table { border-spacing: 10% }").is_empty());
+}
+
 /// §5.4.4: a malformed declaration is discarded to the next semicolon, the
 /// ones either side of it survive, and the discard is **counted**.
 ///
@@ -430,7 +459,12 @@ fn a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour() {
     for (source, property, value) in [
         ("p { float: inline-start }", "float", "inline-start"),
         ("p { display: flex }", "display", "flex"),
-        ("p { display: table-cell }", "display", "table-cell"),
+        // `table-cell` stood here until milestone 11 implemented it.
+        // `inline-table` is the successor and it is the same kind of value: a
+        // real CSS 2.2 §17.2 keyword, one this build's `Display` deliberately
+        // does not have, and one whose nearest implemented neighbour --
+        // `table` -- would put a table on a line of its own and look right.
+        ("p { display: inline-table }", "display", "inline-table"),
         (
             "p { text-align: match-parent }",
             "text-align",

@@ -99,6 +99,17 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
         return Ok(Layout { pages, warnings });
     }
 
+    // **A band taller than a page has no break position inside it**, so it is
+    // drawn where it is and the fact is said out loud. Slicing a band -- every
+    // cell cut at the same height and continued on the next page -- is
+    // `css-break-3`'s and is the staged half of milestone 11; see
+    // [`Warning::TableRowTallerThanPage`] and gap 31's row, amended in place.
+    for item in &flow.items {
+        if matches!(item.kind, ItemKind::Rows(_)) && item.height > options.height + EPSILON {
+            warn(&mut warnings, Warning::TableRowTallerThanPage);
+        }
+    }
+
     let mut cursor = 0usize;
     let mut after = 0.0;
     while cursor < flow.items.len() {
@@ -324,8 +335,13 @@ fn permitted(flow: &Flow, index: usize, tier: Tier) -> Option<Cut> {
         // §13.3.3 gives no break position between a block container's content
         // edge and its child content — that is `css-break-3`'s addition and
         // not CSS 2.2's — so a border or a padding is not a break position
-        // until every rule has been dropped.
-        ItemKind::Edge => (tier == Tier::WithoutAc).then_some(Cut {
+        // until every rule has been dropped. A band of table rows is the same
+        // answer for a different reason: **a break inside it would cut a cell
+        // in half across a `rowspan`**, and §13.3.3 gives no position there
+        // either. A table breaks between its bands, which are the `Margin`
+        // items §17.6.1's vertical spacing emits, and a band that is the whole
+        // page's worth is drawn where it is.
+        ItemKind::Edge | ItemKind::Rows(_) => (tier == Tier::WithoutAc).then_some(Cut {
             end: index,
             next: index,
         }),
@@ -380,13 +396,28 @@ fn emit(
         });
     }
     for item in &items[start..end] {
-        if let ItemKind::Line(line) = &item.kind {
-            let baseline = item.y + offset + line.baseline;
-            for run in &line.runs {
-                let mut run = run.clone();
-                run.y = baseline;
-                out.runs.push(run);
+        match &item.kind {
+            ItemKind::Line(line) => {
+                let baseline = item.y + offset + line.baseline;
+                for run in &line.runs {
+                    let mut run = run.clone();
+                    run.y = baseline;
+                    out.runs.push(run);
+                }
             }
+            // A band is a flow of its own at the band's origin, which is the
+            // same shape a float is and is drawn by the same function. One
+            // function and not two, so a nested table's backgrounds cannot
+            // quietly stop being drawn.
+            ItemKind::Rows(band) => emit(
+                &band.items,
+                &band.blocks,
+                0,
+                band.items.len(),
+                item.y + offset,
+                out,
+            ),
+            ItemKind::Margin(_) | ItemKind::Edge => {}
         }
     }
 }

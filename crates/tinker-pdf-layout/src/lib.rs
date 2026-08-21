@@ -41,6 +41,17 @@
 //! later — every [`TextRun`] carries the position in **document order** that
 //! text conservation is an ordering of. See [`floats`] and [`TextRun::order`].
 //!
+//! **A table's box tree is mostly not in the document.** CSS 2.2 §17.2.1
+//! generates the boxes a real book leaves out — and a real book leaves out
+//! `<tbody>` every time. Each of [`table`]'s nine generation steps is
+//! separately omittable and each has a fixture that fails when that step alone
+//! is deleted. §17.5.2.2's automatic width algorithm is **two passes** —
+//! minimum and maximum content widths first, distribution second — and a
+//! one-pass approximation gives a plausible table that differs only where the
+//! constraint binds, which is why the two intermediates are asserted as well as
+//! the answer. §17.6.2.1's conflict resolution is an *ordered* set of five
+//! rules, not a preference.
+//!
 //! **A computed property with no consumer here does not compile.**
 //! [`style::consume`] destructures `ComputedStyle` with no `..`, which is gap
 //! 31's decision 5 carried one milestone further than the crate that invented
@@ -54,7 +65,7 @@
 //! use tinker_pdf_css::cascade::ComputedStyle;
 //! use tinker_pdf_css::property::Display;
 //! use tinker_pdf_layout::metrics::FixedPitch;
-//! use tinker_pdf_layout::{layout, BoxNode, Content, Limits, Options};
+//! use tinker_pdf_layout::{layout, BoxNode, CellSpan, Content, Limits, Options};
 //!
 //! let mut style = ComputedStyle::initial();
 //! style.display = Display::Block;
@@ -67,8 +78,10 @@
 //!         style: text,
 //!         content: Content::Text("the sea, the sea".into()),
 //!         anchor: None,
+//!         span: CellSpan::ONE,
 //!     }]),
 //!     anchor: None,
+//!     span: CellSpan::ONE,
 //! };
 //! let laid = layout(
 //!     &tree,
@@ -89,6 +102,7 @@ pub mod fragment;
 pub mod limits;
 pub mod metrics;
 pub mod style;
+pub mod table;
 pub mod text;
 pub mod uax14;
 pub mod unicode;
@@ -132,6 +146,49 @@ pub struct BoxNode {
     /// one — a `u32` rather than a type, so nothing here can acquire an
     /// opinion about what a tag means.
     pub anchor: Option<u32>,
+    /// How many grid slots this node takes when it is a table cell, CSS 2.2
+    /// §17.5.
+    ///
+    /// **It is not a style and it could not have been.** `colspan` and
+    /// `rowspan` are HTML attributes with no CSS property behind them: there is
+    /// nothing in any stylesheet that sets them, so the cascade cannot carry
+    /// them and [`style::consume`]'s compile-time device — which is about
+    /// *computed styles* — has nothing to say about them. A caller that knows
+    /// what a `<td colspan>` is puts the number here; a caller that does not
+    /// leaves [`CellSpan::ONE`] and gets a grid.
+    ///
+    /// Ignored on every node that is not a `display: table-cell`, which is what
+    /// HTML says of the attributes themselves.
+    pub span: CellSpan,
+}
+
+/// How many grid slots a table cell takes, CSS 2.2 §17.5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellSpan {
+    /// `colspan`. Zero is not a span and is read as one, which is what HTML
+    /// says of `colspan="0"`.
+    pub columns: u32,
+    /// `rowspan`. **Zero means *to the end of this row group***, which is
+    /// HTML's own reading of `rowspan="0"` and the one case where zero is a
+    /// value rather than a mistake — so it survives here rather than being
+    /// clamped at the door, where the row group it refers to is not known yet.
+    pub rows: u32,
+}
+
+impl CellSpan {
+    /// One slot, which is every cell that does not say otherwise.
+    pub const ONE: Self = Self {
+        columns: 1,
+        rows: 1,
+    };
+}
+
+impl Default for CellSpan {
+    /// [`CellSpan::ONE`], and **not** `columns: 0, rows: 0`. A `#[derive]`
+    /// would have given the second, which is a cell that occupies nothing.
+    fn default() -> Self {
+        Self::ONE
+    }
 }
 
 /// What a node holds.
@@ -155,6 +212,7 @@ impl BoxNode {
             style,
             content: Content::Text(text.into()),
             anchor: None,
+            span: CellSpan::ONE,
         }
     }
 
@@ -165,6 +223,7 @@ impl BoxNode {
             style,
             content: Content::Children(children),
             anchor: None,
+            span: CellSpan::ONE,
         }
     }
 
@@ -172,6 +231,13 @@ impl BoxNode {
     #[must_use]
     pub fn with_anchor(mut self, anchor: u32) -> Self {
         self.anchor = Some(anchor);
+        self
+    }
+
+    /// The same node, spanning slots. See [`BoxNode::span`].
+    #[must_use]
+    pub fn with_span(mut self, columns: u32, rows: u32) -> Self {
+        self.span = CellSpan { columns, rows };
         self
     }
 
@@ -609,6 +675,27 @@ pub enum Warning {
     BreakForcedPastTheRules,
     /// Content that did not fit the width and was drawn outside the page box.
     ContentOverflowedPage,
+    /// A table row taller than a whole page, drawn past the page bottom.
+    /// Milestone 11.
+    ///
+    /// **This is the staged half of table fragmentation and it is named rather
+    /// than silent.** A table breaks *between* its rows, which is where CSS
+    /// 2.2 §13.3.3 puts a break position and is what a real book's table needs;
+    /// a row taller than the page has no such position inside it and this build
+    /// draws it anyway rather than dropping it. Slicing a row's cells at a line
+    /// boundary — every cell cut at the same height, each continuing on the
+    /// next page — is `css-break-3`'s and is not here. See the crate's `Still
+    /// owed` and gap 31's milestone 11 row, amended in place.
+    TableRowTallerThanPage,
+    /// A table cell whose `rowspan` reaches past the last row of its row group,
+    /// clamped to it. CSS 2.2 §17.5: *"the cell is clamped so that it does not
+    /// extend beyond the last row"*.
+    RowspanPastTheRowGroup,
+    /// `display: table-column` or `table-column-group` carrying a `width`,
+    /// which this build reads, beside anything else on it, which it does not:
+    /// a column box's background and borders are §17.5.1's two rendering
+    /// layers and neither is painted here.
+    ColumnBoxNotPainted,
 }
 
 impl fmt::Display for Warning {
@@ -628,6 +715,15 @@ impl fmt::Display for Warning {
                 f.write_str("a page break was taken where CSS 2.2 13.3.3 permits none")
             }
             Warning::ContentOverflowedPage => f.write_str("content is wider than the page box"),
+            Warning::TableRowTallerThanPage => {
+                f.write_str("a table row is taller than a page and overflows it")
+            }
+            Warning::RowspanPastTheRowGroup => {
+                f.write_str("a rowspan reaches past its row group and was clamped")
+            }
+            Warning::ColumnBoxNotPainted => {
+                f.write_str("a table column box's background and borders are not painted")
+            }
         }
     }
 }

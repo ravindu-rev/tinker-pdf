@@ -18,6 +18,7 @@ use tinker_pdf_css::property::{
 
 use crate::flow::marker_text;
 use crate::metrics::FixedPitch;
+use crate::table;
 use crate::{
     layout, layout_with, BoxNode, Budget, Content, Layout, Limits, Options, Refusal, Warning,
 };
@@ -2038,4 +2039,1299 @@ fn each_edge_is_its_own() {
     );
     let _ = Side::Right;
     assert!(matches!(Content::Text(String::new()), Content::Text(_)));
+}
+
+// ---- CSS 2.2 §17, tables ----------------------------------------------------
+//
+// Milestone 11. Every number below is arithmetic a reader can check at the
+// file's own metrics: a character is as wide as the font is tall, so "abc" at
+// ten points is thirty points of max-content and, being one word, thirty of
+// min-content too.
+
+fn styled(display: Display) -> ComputedStyle {
+    let mut style = base();
+    style.display = display;
+    style
+}
+
+fn table_of(children: Vec<BoxNode>) -> BoxNode {
+    BoxNode::element(styled(Display::Table), children)
+}
+
+fn row_of(cells: Vec<BoxNode>) -> BoxNode {
+    BoxNode::element(styled(Display::TableRow), cells)
+}
+
+fn cell_of(body: &str) -> BoxNode {
+    BoxNode::element(styled(Display::TableCell), vec![text(body)])
+}
+
+fn group_of(display: Display, rows: Vec<BoxNode>) -> BoxNode {
+    BoxNode::element(styled(display), rows)
+}
+
+/// A whitespace-only anonymous inline box, which is what a producer's newline
+/// between two tags becomes.
+fn gap() -> BoxNode {
+    text("\n  ")
+}
+
+/// The `x` of every text run on a page, in the order the runs read.
+fn xs(laid: &Layout, page: usize) -> Vec<f64> {
+    laid.pages[page].runs.iter().map(|run| run.x).collect()
+}
+
+fn close(left: f64, right: f64) -> bool {
+    (left - right).abs() < 1e-9
+}
+
+// ---- §17.2.1, the anonymous table objects ----------------------------------
+
+/// Step 1: a `table-column` box's children generate nothing.
+///
+/// Two consequences and both are asserted: the step is counted, **and** the
+/// text inside the `<col>` does not reach the page. A test for the counter
+/// alone would pass on a build that counted it and set the text anyway.
+#[test]
+fn a_columns_children_generate_no_boxes() {
+    let column = BoxNode::element(styled(Display::TableColumn), vec![text("lost")]);
+    let tree = table_of(vec![column, row_of(vec![cell_of("kept")])]);
+    let generated = table::generate(&tree).generated;
+    assert_eq!(generated.count(table::Step::DropColumnChildren), 1);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.text(), "kept");
+}
+
+/// Step 2: a `table-column-group`'s child that is not a `table-column`
+/// generates nothing.
+///
+/// **Not step 1 under another name.** Step 1 is about a column's children and
+/// this is about a column group's non-column children, and the fixture keeps
+/// them apart by having no `table-column` in it at all — so a build with only
+/// step 1 sets the `<div>`'s text.
+#[test]
+fn a_column_groups_non_column_child_generates_no_box() {
+    let group = BoxNode::element(
+        styled(Display::TableColumnGroup),
+        vec![BoxNode::element(block(), vec![text("lost")])],
+    );
+    let tree = table_of(vec![group, row_of(vec![cell_of("kept")])]);
+    let built = table::generate(&tree);
+    assert_eq!(
+        built
+            .generated
+            .count(table::Step::DropNonColumnFromColumnGroup),
+        1
+    );
+    assert_eq!(built.generated.count(table::Step::DropColumnChildren), 0);
+    // The second consequence, and the one a counter alone would miss: the
+    // `<div>` did not become a **column**. A build that took every child of a
+    // column group for a column would give the table a column described by a
+    // box that is not one, and §17.5.2.1 would read its `width`.
+    assert_eq!(
+        built.columns.len(),
+        1,
+        "the stray child became a column: {:?}",
+        built.columns.len()
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.text(), "kept");
+}
+
+/// Step 3: the newline a producer writes between `</tr>` and `<tr>` is not a
+/// cell.
+///
+/// The second consequence is the one that matters: without this step the table
+/// has an extra anonymous row in it, so the fixture asserts the **number of
+/// rows** as well as the counter.
+#[test]
+fn whitespace_between_two_rows_is_not_a_row_of_its_own() {
+    let tree = table_of(vec![
+        gap(),
+        row_of(vec![cell_of("a")]),
+        gap(),
+        row_of(vec![cell_of("b")]),
+        gap(),
+    ]);
+    let tree_box = table::generate(&tree);
+    assert_eq!(
+        tree_box
+            .generated
+            .count(table::Step::DropWhitespaceInContainer),
+        3
+    );
+    assert_eq!(tree_box.generated.count(table::Step::RowForTableChild), 0);
+    assert_eq!(tree_box.visual_rows().len(), 2);
+    // **And the *"if any"* half of rule 3**, which is a separate clause and a
+    // separate defect: a whitespace-only child with no sibling on either side
+    // is removed too. A build that required a neighbour on both sides gives a
+    // table of nothing but indentation one empty row, which is a table with a
+    // blank line in it.
+    let only = table_of(vec![gap()]);
+    assert!(table::generate(&only).visual_rows().is_empty());
+}
+
+/// Step 4: white space between two internal table siblings, in a parent that
+/// is not a table at all.
+///
+/// Step 3's parent is a tabular container and this one's is the `<div>` step 9
+/// is about, which is why they are two rules. A build with only step 3 ends the
+/// misparented run at the newline and wraps the two cells in **two** anonymous
+/// tables, side by side, which looks like a table.
+#[test]
+fn whitespace_between_two_misparented_cells_does_not_end_the_run() {
+    let children = vec![cell_of("a"), gap(), cell_of("b")];
+    assert!(table::is_whitespace_between_table_boxes(&children, 1));
+    assert_eq!(table::misparented_run(&children, 0), 3);
+    // And it is genuinely about white space: a paragraph there ends the run.
+    let broken = vec![cell_of("a"), para("x"), cell_of("b")];
+    assert!(!table::is_whitespace_between_table_boxes(&broken, 1));
+    assert_eq!(table::misparented_run(&broken, 0), 1);
+}
+
+/// Step 5: a table's child that is not a proper table child is wrapped in an
+/// anonymous row holding an anonymous cell.
+#[test]
+fn a_tables_stray_child_gets_an_anonymous_row() {
+    let tree = table_of(vec![para("stray"), row_of(vec![cell_of("real")])]);
+    let generated = table::generate(&tree).generated;
+    assert_eq!(generated.count(table::Step::RowForTableChild), 1);
+    assert_eq!(generated.count(table::Step::CellForRowChild), 1);
+    let laid = run(&tree, 200.0, 400.0);
+    // Two rows, one under the other, and the stray text is not lost.
+    assert_eq!(laid.text(), "strayreal");
+    // A line box is twelve points and its baseline is one of leading plus
+    // eight of ascent.
+    assert_eq!(baselines(&laid, 0), vec![9.0, 21.0]);
+}
+
+/// Step 6: a row group's child that is not a row is wrapped in an anonymous
+/// row.
+///
+/// **Not step 5.** The parent here is a `<tbody>`, and the fixture has a real
+/// row group in it so a build with only step 5 leaves the paragraph unwrapped
+/// and loses it.
+#[test]
+fn a_row_groups_stray_child_gets_an_anonymous_row() {
+    let group = group_of(
+        Display::TableRowGroup,
+        vec![para("stray"), row_of(vec![cell_of("real")])],
+    );
+    let tree = table_of(vec![group]);
+    let generated = table::generate(&tree).generated;
+    assert_eq!(generated.count(table::Step::RowForRowGroupChild), 1);
+    assert_eq!(generated.count(table::Step::RowForTableChild), 0);
+    assert_eq!(run(&tree, 200.0, 400.0).text(), "strayreal");
+}
+
+/// Step 7: a row's child that is not a cell is wrapped in an anonymous cell.
+///
+/// A `<div>` between two `<td>`s is what a producer writes, and without this
+/// step it generates no box at all — a lost paragraph, which is the failure
+/// text conservation exists to name.
+#[test]
+fn a_rows_stray_child_gets_an_anonymous_cell() {
+    let row = row_of(vec![cell_of("a"), para("stray"), cell_of("b")]);
+    let tree = table_of(vec![row]);
+    let generated = table::generate(&tree).generated;
+    assert_eq!(generated.count(table::Step::CellForRowChild), 1);
+    let laid = run(&tree, 300.0, 400.0);
+    assert_eq!(laid.text(), "astrayb");
+    // Three cells side by side, which is what says the stray became a *cell*
+    // and not a row.
+    assert_eq!(baselines(&laid, 0), vec![9.0, 9.0, 9.0]);
+}
+
+/// Step 8: **the `<tbody>` a real book leaves out.**
+///
+/// XHTML has no tree-construction stage, so a `<table>` of bare `<tr>`s arrives
+/// with no row group at all. Consecutive bare rows share **one** anonymous
+/// group rather than getting one each, which is the half of this step a build
+/// gets wrong without noticing: one group per row lays the table out
+/// identically and every `<tfoot>` after it is then in the wrong place.
+#[test]
+fn a_table_of_bare_rows_gets_the_row_group_the_book_left_out() {
+    let tree = table_of(vec![
+        row_of(vec![cell_of("a")]),
+        row_of(vec![cell_of("b")]),
+        row_of(vec![cell_of("c")]),
+    ]);
+    let generated = table::generate(&tree);
+    assert_eq!(generated.generated.count(table::Step::GroupForBareRows), 1);
+    assert_eq!(generated.groups.len(), 1);
+    assert_eq!(generated.groups[0].rows.len(), 3);
+    assert!(generated.groups[0].node.is_none());
+}
+
+/// Step 9: an internal table box whose parent is not a table.
+///
+/// It is [`table::misparented_run`] rather than one of [`table::generate`]'s
+/// steps because its input is a block container's child list, and a counter for
+/// it inside `Generated` could never be bumped. Both consequences are asserted:
+/// the run is found, and the two cells end up **side by side**, which only
+/// happens if an anonymous table was generated around them.
+#[test]
+fn a_stray_cell_outside_a_table_gets_an_anonymous_table() {
+    let tree = BoxNode::element(block(), vec![cell_of("a"), cell_of("b"), para("after")]);
+    let children = match &tree.content {
+        Content::Children(children) => children,
+        Content::Text(_) => unreachable!(),
+    };
+    assert_eq!(table::misparented_run(children, 0), 2);
+    let laid = run(&tree, 300.0, 400.0);
+    assert_eq!(laid.text(), "abafter");
+    let baselines = baselines(&laid, 0);
+    assert_eq!(
+        baselines[0], baselines[1],
+        "the two stray cells are on one row, so an anonymous table wrapped them"
+    );
+    assert!(
+        baselines[2] > baselines[1],
+        "and the paragraph after them is not in it"
+    );
+}
+
+/// The eight steps [`table::generate`] performs are the eight [`table::Step`]
+/// names, and a ninth added without a place in the order fails here.
+#[test]
+fn the_generation_steps_are_a_sequence() {
+    assert_eq!(table::Step::ALL.len(), 8);
+    let mut sorted = table::Step::ALL.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted.as_slice(),
+        table::Step::ALL.as_slice(),
+        "the array is not in the order the variants declare"
+    );
+    let tree = table_of(vec![row_of(vec![cell_of("a")])]);
+    assert_eq!(
+        table::generate(&tree).generated.fired(),
+        vec![table::Step::GroupForBareRows],
+        "an ordinary table of bare rows needs exactly one step"
+    );
+}
+
+// ---- §17.5, the grid, colspan and rowspan ----------------------------------
+
+/// `colspan` takes the slots it says, and the cells after it start past them.
+#[test]
+fn a_colspan_takes_the_slots_it_says() {
+    // A stated width, because an `auto` table shrinks to its content
+    // (§17.5.2.2) and five one-character cells would make every column ten
+    // points wide — a fixture whose numbers are about the text rather than
+    // about the grid.
+    let mut style = styled(Display::Table);
+    style.width = Size::Length(LengthPercentage::Px(300.0));
+    let tree = BoxNode::element(
+        style,
+        vec![
+            row_of(vec![cell_of("a").with_span(2, 1), cell_of("b")]),
+            row_of(vec![cell_of("c"), cell_of("d"), cell_of("e")]),
+        ],
+    );
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 5);
+    // Three equal columns of a hundred points: the spanning cell is at zero and
+    // the one after it is at two hundred.
+    assert!(close(x[0], 0.0) && close(x[1], 200.0), "{x:?}");
+    assert!(
+        close(x[2], 0.0) && close(x[3], 100.0) && close(x[4], 200.0),
+        "{x:?}"
+    );
+}
+
+/// `rowspan` occupies the slot below, so the next row's first cell starts one
+/// column to the right.
+#[test]
+fn a_rowspan_pushes_the_next_rows_cells_right() {
+    let tree = table_of(vec![
+        row_of(vec![cell_of("a").with_span(1, 2), cell_of("b")]),
+        row_of(vec![cell_of("c")]),
+    ]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(close(x[0], 0.0) && x[1] > x[0], "{x:?}");
+    assert!(
+        close(x[2], x[1]),
+        "the second row's only cell is under `b` and not under `a`: {x:?}"
+    );
+}
+
+/// `rowspan="0"` is HTML's *"to the end of this row group"*, which is the one
+/// place zero is a value and not a mistake.
+#[test]
+fn a_rowspan_of_zero_reaches_the_end_of_its_row_group() {
+    let tree = table_of(vec![group_of(
+        Display::TableRowGroup,
+        vec![
+            row_of(vec![cell_of("a").with_span(1, 0), cell_of("b")]),
+            row_of(vec![cell_of("c")]),
+            row_of(vec![cell_of("d")]),
+        ],
+    )]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[2], x[1]) && close(x[3], x[1]) && x[1] > x[0],
+        "both later rows are beside the spanning cell: {x:?}"
+    );
+    assert!(
+        laid.warnings.is_empty(),
+        "a span to the end of the group is not a clamp: {:?}",
+        laid.warnings
+    );
+}
+
+/// A `rowspan` past the last row of its row group is clamped **to the group**
+/// and says so — CSS 2.2 §17.5's own rule, and not "to the table".
+#[test]
+fn a_rowspan_past_its_row_group_is_clamped_and_says_so() {
+    let tree = table_of(vec![
+        group_of(
+            Display::TableRowGroup,
+            vec![row_of(vec![cell_of("a").with_span(1, 4), cell_of("b")])],
+        ),
+        group_of(Display::TableRowGroup, vec![row_of(vec![cell_of("c")])]),
+    ]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(warning, _)| *warning == Warning::RowspanPastTheRowGroup),
+        "{:?}",
+        laid.warnings
+    );
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[2], x[0]),
+        "the second group's row starts at the left edge, so the span stopped at \
+         its own group: {x:?}"
+    );
+}
+
+// ---- §17.5.2.2, the automatic algorithm, which is two passes ---------------
+
+/// **The whole of this milestone's width claim, and it is about the algorithm
+/// rather than about a table that came out looking plausible.**
+///
+/// §17.5.2.2 computes a minimum and a maximum content width per column
+/// *first*, and distributes the table's width over them *second*. A one-pass
+/// approximation that gives each column a share of the available width in
+/// proportion to its content is a perfectly ordinary thing to write, and it
+/// agrees with this everywhere except where a column's minimum is greater than
+/// its proportional share.
+///
+/// So the fixture is one where they differ: column B is one unbreakable word of
+/// fifty points and column A is nine short ones. The one-pass answer gives B
+/// twenty-five points — **below its own minimum**, which is a table whose text
+/// overflows its cell — and the two-pass answer gives it fifty.
+#[test]
+fn the_automatic_algorithm_is_two_pass_and_a_one_pass_answer_differs() {
+    let cells = [
+        table::CellWidths {
+            left: 0,
+            columns: 1,
+            min: 10.0,
+            max: 170.0,
+            specified: None,
+        },
+        table::CellWidths {
+            left: 1,
+            columns: 1,
+            min: 50.0,
+            max: 50.0,
+            specified: None,
+        },
+    ];
+    // The first pass, asserted on its own. It is a value and not an
+    // intermediate a debugger could see, which is what makes this an assertion.
+    let constraints = table::constraints(2, &cells, &[None, None]);
+    assert_eq!(constraints.min, vec![10.0, 50.0]);
+    assert_eq!(constraints.max, vec![170.0, 50.0]);
+    assert_eq!(constraints.total_min(), 60.0);
+    assert_eq!(constraints.total_max(), 220.0);
+
+    // The second pass.
+    let widths = table::distribute(&constraints, 110.0);
+    assert_eq!(widths, vec![60.0, 50.0]);
+
+    // And the one-pass answer, computed here so the difference is a number in
+    // this file rather than a claim in a comment.
+    let one_pass: Vec<f64> = cells
+        .iter()
+        .map(|cell| 110.0 * cell.max / constraints.total_max())
+        .collect();
+    assert_eq!(one_pass, vec![85.0, 25.0]);
+    assert!(
+        one_pass[1] < constraints.min[1],
+        "the fixture does not distinguish the two algorithms"
+    );
+    assert_ne!(widths, one_pass);
+}
+
+/// And the same table, laid out, so the algorithm reaches the page.
+#[test]
+fn the_two_pass_widths_are_the_widths_the_cells_get() {
+    let mut painted = styled(Display::TableCell);
+    painted.background_color = Color {
+        r: 1,
+        g: 2,
+        b: 3,
+        a: 255,
+    };
+    let wide = BoxNode::element(painted.clone(), vec![text("a a a a a a a a a")]);
+    let narrow = BoxNode::element(painted, vec![text("bbbbb")]);
+    let tree = table_of(vec![row_of(vec![wide, narrow])]);
+    let laid = run(&tree, 110.0, 400.0);
+    let boxes = &laid.pages[0].boxes;
+    assert_eq!(boxes.len(), 2);
+    assert!(close(boxes[0].width, 60.0), "{:?}", boxes[0]);
+    assert!(close(boxes[1].width, 50.0), "{:?}", boxes[1]);
+    assert!(close(boxes[1].x, 60.0), "{:?}", boxes[1]);
+}
+
+/// §17.5.2.2 applies a spanning cell **after** every single-column one, and
+/// the order is the algorithm rather than a convenience.
+///
+/// A spanning cell met first pushes its whole minimum into the columns it
+/// touches, and the single-column cells that follow cannot take it back — so
+/// the table is wider than it needs to be, which looks like a table.
+#[test]
+fn a_spanning_cell_raises_its_columns_after_the_single_ones() {
+    let cells = [
+        table::CellWidths {
+            left: 0,
+            columns: 2,
+            min: 100.0,
+            max: 100.0,
+            specified: None,
+        },
+        table::CellWidths {
+            left: 0,
+            columns: 1,
+            min: 80.0,
+            max: 80.0,
+            specified: None,
+        },
+        table::CellWidths {
+            left: 1,
+            columns: 1,
+            min: 10.0,
+            max: 10.0,
+            specified: None,
+        },
+    ];
+    let constraints = table::constraints(2, &cells, &[None, None]);
+    // The single-column cells already sum to ninety, so the spanning cell needs
+    // ten more and not a hundred.
+    assert_eq!(constraints.total_min(), 100.0);
+    assert!(
+        constraints.min[0] > 80.0 && constraints.min[1] > 10.0,
+        "the deficit went to both columns: {constraints:?}"
+    );
+}
+
+/// §17.5.2.2's `auto` width: a table narrower than its containing block takes
+/// its own maximum and does not fill the page.
+#[test]
+fn an_auto_width_table_takes_its_maximum_and_not_the_measure() {
+    let constraints = table::Constraints {
+        min: vec![10.0, 10.0],
+        max: vec![40.0, 40.0],
+    };
+    assert_eq!(table::automatic_width(&constraints, 400.0, 0.0), 80.0);
+    // And one wider than the measure takes the measure, down to its minimum.
+    assert_eq!(table::automatic_width(&constraints, 50.0, 0.0), 50.0);
+    let wide = table::Constraints {
+        min: vec![100.0, 100.0],
+        max: vec![400.0, 400.0],
+    };
+    assert_eq!(
+        table::automatic_width(&wide, 50.0, 0.0),
+        200.0,
+        "a table cannot be narrower than the sum of its minimums"
+    );
+}
+
+// ---- §17.5.2.1, the fixed algorithm ----------------------------------------
+
+/// §17.5.2.1's own first sentence: **`width: auto` means use the automatic
+/// algorithm**, whatever `table-layout` says.
+///
+/// The two answers differ here by construction: the fixed algorithm would
+/// divide two hundred points into two columns of a hundred, and the automatic
+/// one gives the wide column its content and the narrow one its own.
+#[test]
+fn table_layout_fixed_with_an_auto_width_uses_the_automatic_algorithm() {
+    let mut style = styled(Display::Table);
+    style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+    let tree = BoxNode::element(
+        style,
+        vec![row_of(vec![cell_of("a a a a a a a a a"), cell_of("bbbbb")])],
+    );
+    let laid = run(&tree, 110.0, 400.0);
+    let x = xs(&laid, 0);
+    // The wide cell wraps into several lines and the narrow one is the last
+    // run, at the second column's left edge: sixty under the automatic
+    // algorithm and fifty-five under the fixed one's even division.
+    assert!(
+        close(*x.last().expect("a run"), 60.0),
+        "an auto-width table took the fixed algorithm's even columns: {x:?}"
+    );
+}
+
+/// And with a stated width it is the fixed algorithm, which reads the **first
+/// row** and nothing else.
+///
+/// **The obvious fixture cannot fail**, and the injection matrix is what said
+/// so. Putting a stated width on the *same* column in both rows makes the two
+/// builds agree by accident: the first row is walked first either way, and
+/// §17.5.2.1's *"a column already given a width keeps it"* then discards the
+/// second row's. So the second row states a width on a column the first row
+/// left `auto`, which is the only arrangement in which the two answers differ —
+/// first row only gives the auto column all 160 points that are left, and
+/// every row gives it 150 and shares the surplus.
+#[test]
+fn the_fixed_algorithm_reads_the_first_row_and_ignores_the_rest() {
+    let mut style = styled(Display::Table);
+    style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+    style.width = Size::Length(LengthPercentage::Px(200.0));
+    let mut first = styled(Display::TableCell);
+    first.width = Size::Length(LengthPercentage::Px(40.0));
+    let mut second = styled(Display::TableCell);
+    second.width = Size::Length(LengthPercentage::Px(150.0));
+    let tree = BoxNode::element(
+        style,
+        vec![
+            row_of(vec![BoxNode::element(first, vec![text("a")]), cell_of("b")]),
+            row_of(vec![
+                cell_of("c"),
+                BoxNode::element(second, vec![text("d")]),
+            ]),
+        ],
+    );
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[1], 40.0),
+        "the first row's forty-point cell set the first column: {x:?}"
+    );
+    assert!(
+        close(x[2], 0.0) && close(x[3], 40.0),
+        "the second row's hundred-and-fifty-point cell changed nothing: {x:?}"
+    );
+}
+
+/// A `<col>`'s width beats a first-row cell's, which is the order §17.5.2.1
+/// states its three sources in.
+#[test]
+fn a_columns_width_beats_the_first_rows_cell() {
+    let declared = [Some(30.0), None];
+    let first = [table::CellWidths {
+        left: 0,
+        columns: 1,
+        min: 0.0,
+        max: 0.0,
+        specified: Some(90.0),
+    }];
+    assert_eq!(table::fixed(2, &declared, &first, 100.0), vec![30.0, 70.0]);
+    // And with no column box the cell decides, which is what says the
+    // assertion above is about the order and not about the number.
+    assert_eq!(
+        table::fixed(2, &[None, None], &first, 100.0),
+        vec![90.0, 10.0]
+    );
+}
+
+// ---- §17.6.1, the separated border model -----------------------------------
+
+/// `border-spacing` goes between every pair of cells **and** at the four
+/// edges, which is the half a build leaves out.
+#[test]
+fn border_spacing_is_between_the_cells_and_at_the_edges() {
+    let mut style = styled(Display::Table);
+    style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+    style.width = Size::Length(LengthPercentage::Px(200.0));
+    style.border_spacing = tinker_pdf_css::property::BorderSpacing {
+        horizontal: 6.0,
+        vertical: 0.0,
+    };
+    let tree = BoxNode::element(style, vec![row_of(vec![cell_of("a"), cell_of("b")])]);
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    // 200 less three gaps of six is 182, so each column is 91.
+    assert!(close(x[0], 6.0), "the left edge has a gap too: {x:?}");
+    assert!(close(x[1], 103.0), "{x:?}");
+}
+
+/// It takes **two** lengths and they are two directions.
+///
+/// A build that kept one number is right about every fixture written with one
+/// value and wrong about every book that writes two.
+#[test]
+fn border_spacing_is_two_directions() {
+    let mut style = styled(Display::Table);
+    style.border_spacing = tinker_pdf_css::property::BorderSpacing {
+        horizontal: 0.0,
+        vertical: 20.0,
+    };
+    let tree = BoxNode::element(
+        style,
+        vec![
+            row_of(vec![cell_of("a"), cell_of("b")]),
+            row_of(vec![cell_of("c"), cell_of("d")]),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(
+        xs(&laid, 0)[1],
+        10.0,
+        "the horizontal spacing is zero, so the second column starts where the \
+         first one's ten points of text end"
+    );
+    let baselines = baselines(&laid, 0);
+    // 20 of spacing, 1 of leading, 8 of ascent; then 12 of line, 20 of
+    // spacing, 9.
+    assert_eq!(baselines, vec![29.0, 29.0, 61.0, 61.0]);
+}
+
+// ---- §17.6.2.1, the five ordered rules -------------------------------------
+
+fn edge(style: BorderStyle, width: f64, origin: table::Origin) -> table::Edge {
+    table::Edge {
+        style,
+        width,
+        color: Color::BLACK,
+        origin,
+    }
+}
+
+/// Rule 1: `hidden` beats everything, **including a wider border**.
+///
+/// It is the only rule that can make a border disappear, and it has to be first
+/// for exactly that reason: reached after rule 3 the wide solid border has
+/// already won and the author's `border-style: hidden` draws a line.
+#[test]
+fn a_hidden_border_beats_a_wider_one() {
+    let won = table::resolve(
+        edge(BorderStyle::Hidden, 1.0, table::Origin::Row),
+        edge(BorderStyle::Solid, 8.0, table::Origin::Cell),
+    );
+    assert_eq!(won.style, BorderStyle::Hidden);
+    assert_eq!(won.used_width(), 0.0);
+    // Both ways round, because the two arguments are not symmetric anywhere
+    // else in this function.
+    let other = table::resolve(
+        edge(BorderStyle::Solid, 8.0, table::Origin::Cell),
+        edge(BorderStyle::Hidden, 1.0, table::Origin::Row),
+    );
+    assert_eq!(other.style, BorderStyle::Hidden);
+}
+
+/// Rule 2: `none` has the lowest priority, **including against a narrower
+/// border**.
+///
+/// Written as its own arm and not left to rule 3, because a `border-style: none`
+/// with a stated `border-width` is a real declaration and would win on width.
+#[test]
+fn a_none_border_loses_to_a_narrower_one() {
+    let won = table::resolve(
+        edge(BorderStyle::None, 8.0, table::Origin::Cell),
+        edge(BorderStyle::Solid, 1.0, table::Origin::Table),
+    );
+    assert_eq!(won.style, BorderStyle::Solid);
+    assert_eq!(won.width, 1.0);
+    assert_eq!(
+        table::resolve(
+            edge(BorderStyle::None, 8.0, table::Origin::Cell),
+            edge(BorderStyle::None, 1.0, table::Origin::Table),
+        )
+        .used_width(),
+        0.0
+    );
+}
+
+/// Rule 3: at different widths the wider wins, whatever the style order and
+/// whatever the box says.
+#[test]
+fn the_wider_border_wins() {
+    let won = table::resolve(
+        // A `double`, which outranks `solid` at rule 4, and on a cell, which
+        // outranks a table at rule 5 — so only rule 3 can decide this.
+        edge(BorderStyle::Double, 1.0, table::Origin::Cell),
+        edge(BorderStyle::Solid, 4.0, table::Origin::Table),
+    );
+    assert_eq!(won.style, BorderStyle::Solid);
+    assert_eq!(won.width, 4.0);
+}
+
+/// Rule 4: at equal widths the style order decides, and it is the
+/// specification's order rather than alphabetical or declaration order.
+#[test]
+fn at_equal_widths_the_style_order_decides() {
+    // `double` over `solid`, and the `solid` is on the cell so rule 5 would
+    // decide the other way.
+    let won = table::resolve(
+        edge(BorderStyle::Double, 2.0, table::Origin::Table),
+        edge(BorderStyle::Solid, 2.0, table::Origin::Cell),
+    );
+    assert_eq!(won.style, BorderStyle::Double);
+    // And the whole of the order this build's `BorderStyle` can express.
+    for (better, worse) in [
+        (BorderStyle::Double, BorderStyle::Solid),
+        (BorderStyle::Solid, BorderStyle::Dashed),
+        (BorderStyle::Dashed, BorderStyle::Dotted),
+    ] {
+        assert_eq!(
+            table::resolve(
+                edge(worse, 2.0, table::Origin::Cell),
+                edge(better, 2.0, table::Origin::Table),
+            )
+            .style,
+            better,
+            "{better:?} does not beat {worse:?}"
+        );
+    }
+}
+
+/// Rule 5: at equal widths and equal styles the box decides, cell first and
+/// table last.
+#[test]
+fn at_equal_widths_and_styles_the_box_decides() {
+    let order = [
+        table::Origin::Table,
+        table::Origin::ColumnGroup,
+        table::Origin::Column,
+        table::Origin::RowGroup,
+        table::Origin::Row,
+        table::Origin::Cell,
+    ];
+    for window in order.windows(2) {
+        let (worse, better) = (window[0], window[1]);
+        let won = table::resolve(
+            edge(BorderStyle::Solid, 2.0, worse),
+            edge(BorderStyle::Solid, 2.0, better),
+        );
+        assert_eq!(won.origin, better, "{better:?} does not beat {worse:?}");
+        let other = table::resolve(
+            edge(BorderStyle::Solid, 2.0, better),
+            edge(BorderStyle::Solid, 2.0, worse),
+        );
+        assert_eq!(other.origin, better, "and not in the other order either");
+    }
+}
+
+/// The collapsing model ignores `border-spacing`, §17.6.2's own first
+/// sentence.
+///
+/// It is zeroed at [`crate::style::consume`] rather than at each reader, so a
+/// build cannot forget it in one of the four places it is read.
+#[test]
+fn border_collapse_ignores_border_spacing() {
+    let mut style = styled(Display::Table);
+    style.border_collapse = tinker_pdf_css::property::BorderCollapse::Collapse;
+    style.border_spacing = tinker_pdf_css::property::BorderSpacing {
+        horizontal: 30.0,
+        vertical: 30.0,
+    };
+    let tree = BoxNode::element(style, vec![row_of(vec![cell_of("a"), cell_of("b")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    // With the thirty points honoured the first cell would start at thirty and
+    // the second at seventy.
+    assert!(close(x[0], 0.0) && close(x[1], 10.0), "{x:?}");
+}
+
+/// A collapsed border is half a width on each side of an **inner** grid line
+/// and the whole of it at an outer one.
+#[test]
+fn a_collapsed_border_is_shared_between_the_cells_beside_it() {
+    let mut table_style = styled(Display::Table);
+    table_style.border_collapse = tinker_pdf_css::property::BorderCollapse::Collapse;
+    table_style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+    table_style.width = Size::Length(LengthPercentage::Px(200.0));
+    let mut cell = styled(Display::TableCell);
+    cell.border_style = Sides::all(BorderStyle::Solid);
+    cell.border_width = Sides::all(4.0);
+    let tree = BoxNode::element(
+        table_style,
+        vec![row_of(vec![
+            BoxNode::element(cell.clone(), vec![text("a")]),
+            BoxNode::element(cell, vec![text("b")]),
+        ])],
+    );
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[0], 4.0),
+        "the table's outer edge keeps the whole width: {x:?}"
+    );
+    assert!(close(x[1], 102.0), "and the shared edge is halved: {x:?}");
+}
+
+/// A `hidden` border removes the line it collapsed with, on the page and not
+/// only in [`table::resolve`].
+///
+/// §17.6.2.1's rule 1 is the only rule that can make a border *disappear*, and
+/// [`table::Edge::used_width`] is the second half of it: a build that resolved
+/// the conflict correctly and then drew the winner's stated width would draw
+/// the border the author hid. Two halves, two places, and this is the fixture
+/// for the second.
+#[test]
+fn a_hidden_border_leaves_no_ink_where_it_won() {
+    let mut table_style = styled(Display::Table);
+    table_style.border_collapse = tinker_pdf_css::property::BorderCollapse::Collapse;
+    table_style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+    table_style.width = Size::Length(LengthPercentage::Px(200.0));
+    let mut left = styled(Display::TableCell);
+    left.border_style = Sides::all(BorderStyle::Solid);
+    left.border_width = Sides::all(8.0);
+    let mut right = styled(Display::TableCell);
+    right.border_style = Sides::all(BorderStyle::Hidden);
+    right.border_width = Sides::all(4.0);
+    let tree = BoxNode::element(
+        table_style,
+        vec![row_of(vec![
+            BoxNode::element(left, vec![text("a")]),
+            BoxNode::element(right, vec![text("b")]),
+        ])],
+    );
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[1], 100.0),
+        "the hidden border was drawn at the shared edge: {x:?}"
+    );
+    assert!(
+        close(x[0], 8.0),
+        "and the solid border on the table's own edge still is: {x:?}"
+    );
+}
+
+/// The whole of §17.6.2's point: two adjacent one-point borders are **one**
+/// line and not two.
+#[test]
+fn two_adjacent_borders_collapse_into_one() {
+    let mut cell = styled(Display::TableCell);
+    cell.border_style = Sides::all(BorderStyle::Solid);
+    cell.border_width = Sides::all(2.0);
+    let build = |collapse: bool| {
+        let mut style = styled(Display::Table);
+        style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+        style.width = Size::Length(LengthPercentage::Px(200.0));
+        if collapse {
+            style.border_collapse = tinker_pdf_css::property::BorderCollapse::Collapse;
+        }
+        let tree = BoxNode::element(
+            style,
+            vec![row_of(vec![
+                BoxNode::element(cell.clone(), vec![text("a")]),
+                BoxNode::element(cell.clone(), vec![text("b")]),
+            ])],
+        );
+        xs(&run(&tree, 300.0, 400.0), 0)
+    };
+    let separated = build(false);
+    let collapsed = build(true);
+    assert!(close(separated[1], 102.0), "{separated:?}");
+    assert!(close(collapsed[1], 101.0), "{collapsed:?}");
+}
+
+// ---- fragmentation ---------------------------------------------------------
+
+/// **A table breaks between its rows**, which is where §13.3.3 puts a break
+/// position and is what a real book's table needs.
+#[test]
+fn a_table_breaks_between_its_rows() {
+    let rows: Vec<BoxNode> = (0..10).map(|_| row_of(vec![cell_of("x")])).collect();
+    let tree = table_of(rows);
+    // Twelve points a row, so a page of fifty holds four.
+    let laid = run(&tree, 200.0, 50.0);
+    assert!(laid.pages.len() > 1, "the table did not break at all");
+    // **And it breaks where §13.3.3 permits one**, which is the half a page
+    // count cannot see: with no break position between the bands the
+    // fragmenter drops rules A to D and cuts anyway, producing the same page
+    // count and one warning. Asserting the warning is *absent* is the only
+    // thing that separates the two builds — milestone 10's finding, in a
+    // second place.
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(warning, _)| *warning == Warning::BreakForcedPastTheRules),
+        "the table broke where no rule permits it: {:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "x".repeat(10));
+    assert_eq!(
+        laid.pages.iter().map(|page| page.runs.len()).sum::<usize>(),
+        10,
+        "a row was drawn twice or not at all"
+    );
+}
+
+/// And it does **not** break across a `rowspan`, because there is no break
+/// position inside a cell that spans two rows.
+#[test]
+fn a_rowspan_keeps_its_rows_on_one_page() {
+    let tree = table_of(vec![
+        row_of(vec![cell_of("a")]),
+        row_of(vec![cell_of("b").with_span(1, 2), cell_of("c")]),
+        row_of(vec![cell_of("d")]),
+        row_of(vec![cell_of("e")]),
+    ]);
+    // Three rows fit a page of thirty-six points; the band of two must move
+    // whole to the next page rather than being cut in half.
+    let laid = run(&tree, 200.0, 30.0);
+    let pages: Vec<String> = (0..laid.pages.len())
+        .map(|at| page_text(&laid, at))
+        .collect();
+    assert!(
+        pages
+            .iter()
+            .any(|page| page.contains('b') && page.contains('d')),
+        "the spanning cell and the row it spans are not on one page: {pages:?}"
+    );
+    assert_eq!(laid.text(), "abcde");
+}
+
+/// A band taller than a page is drawn where it is and **says so**, which is
+/// the staged half of table fragmentation named rather than left silent.
+#[test]
+fn a_row_taller_than_a_page_is_drawn_and_says_so() {
+    let tall = cell_of("a b c d e f g h i j k l m n o p q r s t u v w x y z");
+    let tree = table_of(vec![row_of(vec![tall])]);
+    let laid = run(&tree, 40.0, 30.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(warning, _)| *warning == Warning::TableRowTallerThanPage),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(
+        conservable(&laid.text()),
+        conservable("a b c d e f g h i j k l m n o p q r s t u v w x y z"),
+        "and nothing was lost by overflowing"
+    );
+}
+
+// ---- nesting, and the work cap it multiplies -------------------------------
+
+/// A table inside a cell is laid out inside it.
+#[test]
+fn a_nested_table_is_laid_out_inside_its_cell() {
+    let inner = table_of(vec![row_of(vec![cell_of("i"), cell_of("j")])]);
+    let outer = table_of(vec![row_of(vec![
+        BoxNode::element(styled(Display::TableCell), vec![inner]),
+        cell_of("k"),
+    ])]);
+    let laid = run(&outer, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(laid.text(), "ijk");
+    assert!(
+        x[0] < x[1] && x[1] < x[2],
+        "the inner table's two cells are inside the outer one's first: {x:?}"
+    );
+    assert!(x[1] < 100.0, "the nested table overflowed its cell: {x:?}");
+}
+
+/// **A hostile `colspan` is refused by the layout total**, which is the first
+/// of the three places tables charge it.
+///
+/// A `colspan` is a number in the file and the slots it claims are the work, so
+/// five boxes can ask for five million slots — a quantity neither the box cap
+/// nor the line-break cap can see, because it is neither a box nor a
+/// character.
+#[test]
+fn a_hostile_colspan_is_refused_by_the_work_total() {
+    let rows: Vec<BoxNode> = (0..5)
+        .map(|_| row_of(vec![cell_of("x").with_span(1_000_000, 1)]))
+        .collect();
+    let refusal = layout(
+        &table_of(rows),
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect_err("a table past the layout total");
+    assert!(
+        matches!(refusal, Refusal::TooMuchLayoutWork { .. }),
+        "{refusal:?}"
+    );
+}
+
+/// **The second of the three places**, and it has its own fixture because a
+/// total charged in three places has three reachable halves.
+///
+/// The grid is rows by columns and neither factor bounds the other. Two
+/// thousand rows whose first one holds a cell spanning two thousand columns is
+/// four thousand slots to *place* — a long way under the total — and four
+/// million to *hold*. Delete the grid charge and this book lays out; delete the
+/// placement charge and it still refuses.
+#[test]
+fn a_grid_of_many_rows_and_many_columns_is_refused_by_the_work_total() {
+    let mut rows = vec![row_of(vec![cell_of("x").with_span(2_000, 1)])];
+    rows.extend((0..1_999).map(|_| row_of(vec![cell_of("y")])));
+    let refusal = layout(
+        &table_of(rows),
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect_err("a grid past the layout total");
+    assert!(
+        matches!(refusal, Refusal::TooMuchLayoutWork { .. }),
+        "{refusal:?}"
+    );
+}
+
+/// **And the third**: §17.5.2.2 spreads every spanning cell over every column
+/// it touches, and that is a third quantity again.
+///
+/// One row of 1 200 000 columns is 1 200 000 slots to place and 1 200 000 to
+/// hold — 2 400 000 together, under the total — and 2 400 000 more to
+/// distribute. It refuses only with all three charged, which is what makes this
+/// the fixture for the third rather than a second copy of the first.
+#[test]
+fn the_width_distribution_is_charged_as_well_as_the_grid() {
+    let refusal = layout(
+        &table_of(vec![row_of(vec![cell_of("x").with_span(1_200_000, 1)])]),
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect_err("a distribution past the layout total");
+    assert!(
+        matches!(refusal, Refusal::TooMuchLayoutWork { .. }),
+        "{refusal:?}"
+    );
+}
+
+/// **And a nested table multiplies it**, which is why gap 31's bounds table
+/// named a nested table beside the two-pass algorithm in the same sentence.
+///
+/// The two fixtures hold the *same* inner table and differ only in whether it
+/// is inside a cell. Alone it is under the total; wrapped, the outer table
+/// lays its cell out three times — twice to measure it and once to set it —
+/// and the same work is charged three times over.
+#[test]
+fn a_nested_table_multiplies_the_work_total() {
+    let inner = |span: u32| {
+        table_of(vec![row_of(vec![
+            cell_of("x").with_span(span, 1),
+            cell_of("y"),
+        ])])
+    };
+    let span = 900_000;
+    let alone = layout(
+        &inner(span),
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    );
+    assert!(
+        alone.is_ok(),
+        "the inner table alone is already past the total, so the pair proves \
+         nothing: {alone:?}"
+    );
+    let nested = table_of(vec![row_of(vec![BoxNode::element(
+        styled(Display::TableCell),
+        vec![inner(span)],
+    )])]);
+    let refusal = layout(
+        &nested,
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect_err("the same table, nested, is past it");
+    assert!(
+        matches!(refusal, Refusal::TooMuchLayoutWork { .. }),
+        "{refusal:?}"
+    );
+}
+
+// ---- conservation and reading order ----------------------------------------
+
+/// **Every character of a table survives it**, which is a lost cell's only
+/// witness: a table with one column missing renders beautifully.
+#[test]
+fn every_character_of_a_table_survives_it() {
+    let source = table_of(vec![
+        BoxNode::element(styled(Display::TableCaption), vec![text("caption")]),
+        group_of(
+            Display::TableHeaderGroup,
+            vec![row_of(vec![cell_of("h1"), cell_of("h2")])],
+        ),
+        gap(),
+        group_of(
+            Display::TableRowGroup,
+            vec![
+                row_of(vec![cell_of("a1"), cell_of("a2")]),
+                row_of(vec![
+                    cell_of("b1").with_span(2, 1),
+                    BoxNode::element(styled(Display::TableCell), vec![para("nested")]),
+                ]),
+            ],
+        ),
+    ]);
+    let laid = run(&source, 200.0, 400.0);
+    assert_eq!(
+        conservable(&laid.text()),
+        conservable(&source.source_text()),
+        "a cell was lost or repeated"
+    );
+}
+
+/// **A `<tfoot>` written first is read first and drawn last**, which is
+/// milestone 10's finding in two dimensions.
+///
+/// HTML 4.01 required `<tfoot>` before `<tbody>` and real books therefore
+/// contain it. §17.2 renders it below, and a build whose reading order is its
+/// emission order reports the footer's text in the middle of the table — which
+/// fails an *ordered* text conservation on a book that lost nothing at all.
+#[test]
+fn a_footer_group_written_first_is_read_first_and_drawn_last() {
+    let source = table_of(vec![
+        group_of(
+            Display::TableFooterGroup,
+            vec![row_of(vec![cell_of("foot")])],
+        ),
+        group_of(Display::TableRowGroup, vec![row_of(vec![cell_of("body")])]),
+    ]);
+    let laid = run(&source, 200.0, 400.0);
+    // Read in document order: the footer first.
+    assert_eq!(laid.text(), "footbody");
+    assert_eq!(
+        conservable(&laid.text()),
+        conservable(&source.source_text())
+    );
+    // Drawn in visual order: the footer last. The page's own vector is the ink
+    // order and is sorted by the stamp, so the *baselines* are what says which
+    // was drawn where.
+    let runs = &laid.pages[0].runs;
+    let foot = runs
+        .iter()
+        .find(|run| run.text == "foot")
+        .expect("the foot");
+    let body = runs
+        .iter()
+        .find(|run| run.text == "body")
+        .expect("the body");
+    assert!(
+        foot.y > body.y,
+        "the footer group was drawn above the body: {} vs {}",
+        foot.y,
+        body.y
+    );
+}
+
+/// And it survives a page boundary, which is where a fragmenter loses a row.
+#[test]
+fn a_tables_text_is_conserved_across_a_page_boundary() {
+    let rows: Vec<BoxNode> = (0..20)
+        .map(|at| row_of(vec![cell_of(&format!("r{at}")), cell_of("z")]))
+        .collect();
+    let source = table_of(rows);
+    let laid = run(&source, 200.0, 40.0);
+    assert!(laid.pages.len() > 4, "{} pages", laid.pages.len());
+    assert_eq!(
+        conservable(&laid.text()),
+        conservable(&source.source_text())
+    );
+}
+
+// ---- §17.4 and §17.5.3, the rest of the model ------------------------------
+
+/// §17.4: a caption is set above its table.
+#[test]
+fn a_caption_is_set_above_its_table() {
+    let tree = table_of(vec![
+        BoxNode::element(styled(Display::TableCaption), vec![text("cap")]),
+        row_of(vec![cell_of("a")]),
+    ]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.text(), "capa");
+    let baselines = baselines(&laid, 0);
+    assert!(baselines[0] < baselines[1], "{baselines:?}");
+}
+
+/// §17.5.3: a cell's box is its row's height, whatever its own content came
+/// to.
+///
+/// A one-line cell beside a five-line one is painted five lines tall, and a
+/// build without the rule draws a table with ragged backgrounds.
+#[test]
+fn a_cells_background_fills_its_whole_row() {
+    let mut painted = styled(Display::TableCell);
+    painted.background_color = Color {
+        r: 9,
+        g: 9,
+        b: 9,
+        a: 255,
+    };
+    let tree = table_of(vec![row_of(vec![
+        BoxNode::element(painted.clone(), vec![text("one")]),
+        BoxNode::element(painted, vec![text("a a a a a a a a a a")]),
+    ])]);
+    let laid = run(&tree, 100.0, 400.0);
+    let boxes = &laid.pages[0].boxes;
+    assert_eq!(boxes.len(), 2);
+    assert!(
+        close(boxes[0].height, boxes[1].height),
+        "the short cell is {} tall and the tall one {}",
+        boxes[0].height,
+        boxes[1].height
+    );
+    assert!(boxes[0].height > 12.0, "the row is more than one line tall");
+}
+
+/// An empty cell still takes its column, so the cells after it are where the
+/// grid says.
+#[test]
+fn an_empty_cell_still_takes_its_column() {
+    let empty = BoxNode::element(styled(Display::TableCell), Vec::new());
+    // A fixed layout, because that is the algorithm that gives an empty column
+    // a width at all: §17.5.2.2 would give it its content's, which is nothing.
+    let mut style = styled(Display::Table);
+    style.table_layout = tinker_pdf_css::property::TableLayout::Fixed;
+    style.width = Size::Length(LengthPercentage::Px(300.0));
+    let tree = BoxNode::element(style, vec![row_of(vec![cell_of("a"), empty, cell_of("c")])]);
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 2);
+    assert!(
+        close(x[1], 200.0),
+        "the third cell is in the third column: {x:?}"
+    );
+}
+
+/// A row group's background is painted under its rows' and its cells'.
+#[test]
+fn a_row_group_paints_under_its_cells() {
+    let mut group = styled(Display::TableRowGroup);
+    group.background_color = Color {
+        r: 1,
+        g: 1,
+        b: 1,
+        a: 255,
+    };
+    let mut cell = styled(Display::TableCell);
+    cell.background_color = Color {
+        r: 2,
+        g: 2,
+        b: 2,
+        a: 255,
+    };
+    let tree = table_of(vec![BoxNode::element(
+        group,
+        vec![row_of(vec![BoxNode::element(cell, vec![text("a")])])],
+    )]);
+    let laid = run(&tree, 200.0, 400.0);
+    let boxes = &laid.pages[0].boxes;
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(boxes[0].background.r, 1, "the group is not painted first");
+    assert_eq!(boxes[1].background.r, 2);
 }

@@ -36,9 +36,10 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, BoxSizing, Clear, Color, Display, Float, FontFamily, FontStyle, FontVariant,
-    LengthPercentage, LineHeight, ListStyleType, MarginValue, OverflowWrap, PageBreak,
-    PageBreakInside, Sides, Size, Spacing, TextAlign, TextDecoration, Visibility, WhiteSpace,
+    BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, Display, Float,
+    FontFamily, FontStyle, FontVariant, LengthPercentage, LineHeight, ListStyleType, MarginValue,
+    OverflowWrap, PageBreak, PageBreakInside, Sides, Size, Spacing, TableLayout, TextAlign,
+    TextDecoration, Visibility, WhiteSpace,
 };
 
 use crate::metrics::FontRequest;
@@ -121,6 +122,19 @@ pub struct Consumed {
     pub float: Float,
     /// `clear`, §9.5.2.
     pub clear: Clear,
+    /// `border-collapse`, CSS 2.2 §17.6. Read by [`crate::table`].
+    pub border_collapse: BorderCollapse,
+    /// `border-spacing`, §17.6.1, **already zeroed under `collapse`**.
+    ///
+    /// §17.6.2's first sentence is *"in this model ... the `border-spacing`
+    /// property is ignored"*, and doing it here rather than at each of the four
+    /// readers is `border-width`'s precedent eight fields up: the used value is
+    /// resolved once, at the one door, so no reader can forget. A build that
+    /// left it to the readers spaces a collapsed table exactly like a separated
+    /// one everywhere it forgot, which is a table that looks fine.
+    pub border_spacing: BorderSpacing,
+    /// `table-layout`, §17.5.2.
+    pub table_layout: TableLayout,
 }
 
 /// Reads a computed style, exhaustively.
@@ -166,6 +180,9 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         overflow_wrap,
         line_break,
         word_break,
+        border_collapse,
+        border_spacing,
+        table_layout,
         // <<< the layout proof's binding goes here >>>
     } = style;
 
@@ -243,6 +260,12 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         },
         float: *float,
         clear: *clear,
+        border_collapse: *border_collapse,
+        border_spacing: match border_collapse {
+            BorderCollapse::Separate => *border_spacing,
+            BorderCollapse::Collapse => BorderSpacing::ZERO,
+        },
+        table_layout: *table_layout,
     }
 }
 
@@ -259,9 +282,33 @@ impl Consumed {
     }
 
     /// Whether this element generates a block-level box.
+    ///
+    /// A `display: table` is block-level (CSS 2.2 §9.2.1) and an *internal*
+    /// table box is **not**: it is neither block-level nor inline-level, it may
+    /// only appear inside a table, and it is [`crate::table`]'s to place. The
+    /// two halves are separate predicates for that reason — a build that folded
+    /// the internal values in here would put a stray `<td>` on a line of its
+    /// own as a block, which is a page that looks entirely reasonable.
     #[must_use]
     pub fn is_block_level(&self) -> bool {
-        matches!(self.display, Display::Block | Display::ListItem)
+        matches!(
+            self.display,
+            Display::Block | Display::ListItem | Display::Table
+        )
+    }
+
+    /// Whether this element generates a table box, CSS 2.2 §17.2.
+    #[must_use]
+    pub fn is_table(&self) -> bool {
+        self.display == Display::Table
+    }
+
+    /// Whether this element generates one of §17.2's internal table boxes —
+    /// the ones that may only appear inside a table, and that §17.2.1's rule 9
+    /// wraps in an anonymous one when they do not.
+    #[must_use]
+    pub fn is_internal_table(&self) -> bool {
+        self.display.is_internal_table()
     }
 
     /// Whether this element generates no box at all.

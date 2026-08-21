@@ -122,7 +122,7 @@ const SKIPPED: &str = "browser-oracle: SKIPPED";
 /// | | Of the column |
 /// | --- | --- |
 /// | A constant 13 pt: the browser reports a **line box's top** and this engine a **baseline**, and the two differ by the half-leading of whichever font size the first block is set at | 0.007 |
-/// | One `<table>`, which this build does not lay out as a table — milestone 11 — and whose cells it therefore sets as one inline run | 0.019 |
+/// | One `<table>`. **Milestone 11 lays it out as a table and this number did not move**: 0.0360 before and 0.0360 after, at the same block, with the same 0.019 across the interval that holds it. What moved is the reason — this engine's table is now 35 pt *shorter* than the browser's rather than being a paragraph of inline text — and it is deliberately **not** claimed to be localised. [`the_browser_and_this_engine_lay_the_same_tables_out_the_same_way`] agrees to 0.0005 over sixteen cells with a `colspan`, a `rowspan`, a bare-`<tr>` table and a nested one, so what is left here is a variable that fixture holds fixed and this one does not: `vertical-align`, which HTML's own user-agent sheet puts on every cell, or the `<code>` at `font-size: 85%` inside this table's third row | 0.019 |
 /// | One paragraph that broke a line differently, which is `<code>`'s `font-size: 85%` inside it against a face this build has one size of | 0.010 |
 ///
 /// The cap is 0.05, which is that measurement with room for one more line, and
@@ -1063,6 +1063,230 @@ fn the_float_comparison_notices_a_float_that_was_not_floated() {
     assert!(
         worst > MAX_FLOAT_DEVIATION,
         "taking the floats out moved the column by only {worst:.4}, \
+         so the comparison would not have noticed"
+    );
+}
+
+/// How far the table-heavy column may disagree with the browser's.
+///
+/// **The measured disagreement is 0.0005 of the column**, which is the closest
+/// agreement any of the three comparisons in this file reaches and is what
+/// happens when the variables neither build shares are stated rather than
+/// tolerated: the face, `line-height`, `vertical-align` and the heading size
+/// are all held, and what is left is §17.5.2's column widths, §17.5's row
+/// heights, §17.2.1's generated boxes and §17.2's rendering order.
+///
+/// The cap is 0.02, and it is not three times the measurement — it is **one
+/// line of this column**, which is 19.2 px of 1 199 and therefore 0.016. A
+/// comparison whose cap were tighter than a line would fail the first time a
+/// browser wrapped one cell one word differently, and one whose cap were looser
+/// would admit a whole row. The **injected defect measures 0.1245** — six times
+/// the cap and two hundred and forty-nine times the measurement. See
+/// [`the_table_comparison_notices_a_cell_that_was_not_a_cell`].
+const MAX_TABLE_DEVIATION: f64 = 0.02;
+
+/// The table-heavy content document, written for this comparison.
+///
+/// **Every cell holds a `<p>`**, and that is not decoration. Both sides of this
+/// oracle report `display: block` and `display: list-item` boxes and nothing
+/// else — a `table-cell` is neither — so a document whose cells held bare text
+/// would be compared on the blocks *around* the table and would agree with a
+/// build that had no table model at all. The paragraph inside each cell is what
+/// puts the cell's own content into the comparison: its `top` is where the
+/// table put the cell, so a column of the wrong width, a row of the wrong
+/// height, a `colspan` in the wrong place and a missing row group each move it.
+///
+/// It holds what §17 distinguishes: a `<caption>`, a `<thead>` and a `<tbody>`,
+/// **a second table with no `<tbody>` at all** — which is what every table in
+/// the committed corpus looks like and is §17.2.1's whole reason for existing —
+/// a `colspan`, a `rowspan`, a `<tfoot>` written before the body it is drawn
+/// under, a collapsing-border table beside a separated one, and a nested table
+/// inside a cell.
+const TABLE_DOCUMENT: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Tables</title></head><body>\n",
+    "<h1>The tables and the text around them</h1>\n",
+    "<p>The first paragraph is set at the full measure and has no table beside it, ",
+    "which is what makes the ones after it worth measuring against it.</p>\n",
+    "<table class=\"fixed\">\n",
+    "<caption><p>A caption, which §17.4 sets above the table it belongs to.</p></caption>\n",
+    "<thead><tr><th><p>Heading one</p></th><th><p>Heading two</p></th>",
+    "<th><p>Heading three</p></th></tr></thead>\n",
+    "<tbody>\n",
+    "<tr><td><p>A cell whose text is long enough to take more than one line at this ",
+    "column width, which is what makes the row height depend on the column width.</p></td>",
+    "<td><p>Short</p></td><td><p>Also short</p></td></tr>\n",
+    "<tr><td colspan=\"2\"><p>A cell spanning two columns, which is wider than either of ",
+    "them and therefore wraps at a different place.</p></td><td><p>Third</p></td></tr>\n",
+    "<tr><td rowspan=\"2\"><p>A cell spanning two rows, so the row below it starts one ",
+    "column to the right.</p></td><td><p>Second column</p></td><td><p>Third column</p></td></tr>\n",
+    "<tr><td><p>Under the second</p></td><td><p>Under the third</p></td></tr>\n",
+    "</tbody>\n",
+    "</table>\n",
+    "<p>A paragraph between the two tables, at the full measure again.</p>\n",
+    "<table class=\"bare\">\n",
+    "<tr><td><p>This table has no tbody in it at all, which is what every table in the ",
+    "committed corpus looks like.</p></td><td><p>Second</p></td></tr>\n",
+    "<tr><td><p>A second bare row</p></td><td><p>And its neighbour</p></td></tr>\n",
+    "</table>\n",
+    "<p>A paragraph before the collapsing table.</p>\n",
+    "<table class=\"collapse\">\n",
+    "<tfoot><tr><td><p>A footer written before the body</p></td><td><p>and drawn under it",
+    "</p></td></tr></tfoot>\n",
+    "<tbody><tr><td><p>The body of the collapsing table</p></td><td><p>with a second cell",
+    "</p></td></tr></tbody>\n",
+    "</table>\n",
+    "<p>A paragraph before the nested table.</p>\n",
+    "<table class=\"bare\">\n",
+    "<tr><td><table class=\"bare inner\"><tr><td><p>Inner one</p></td><td><p>Inner two</p>",
+    "</td></tr></table></td><td><p>Beside the nested table</p></td></tr>\n",
+    "</table>\n",
+    "<h2>After the tables</h2>\n",
+    "<p>A closing paragraph at the full measure, which is where the two columns have to ",
+    "agree again if they agreed anywhere.</p>\n",
+    "</body></html>\n"
+);
+
+/// The table document's own stylesheet, given to both sides unchanged.
+///
+/// **`line-height` is stated for the float comparison's reason** — this build
+/// resolves `normal` as 1.2 and a browser resolves it from Courier New's own
+/// metrics as 1.133, which is six per cent of every line in the document and
+/// nothing to do with §17.
+///
+/// Everything a browser's own user-agent sheet says about a table is restated
+/// here at a specificity that wins, because this comparison is about §17.5.2
+/// and §17.6 rather than about whose default `border-spacing` is which:
+/// `table-layout`, `width`, `border-collapse`, `border-spacing` and the cell
+/// padding are all stated, and the paragraphs inside the cells have their
+/// margins taken off so that a cell's height is its text's.
+const TABLE_STYLESHEET: &str = concat!(
+    "* { line-height: 1.2; }\n",
+    // **The third variable held fixed, and it is `vertical-align`.** HTML's own
+    // user-agent sheet puts `vertical-align: middle` on a table and `inherit`
+    // on a cell, so every browser centres a short cell in a tall row. This
+    // build has no §17.5.4 at all -- `vertical-align` is `Unsupported` by name
+    // and is the largest single gap the committed corpus measures, at
+    // thirty-four elements -- so every cell here is set from its top. Stating
+    // `top` on both sides leaves the comparison about §17.5.2's column widths
+    // and §17.6's borders, which is what it is for. Without it this fixture
+    // measures a gap that is already counted, and measures it at 0.1070 --
+    // larger than the injected defect the oracle exists to catch, which is the
+    // definition of an oracle whose noise floor is its own defect.
+    "td, th { vertical-align: top; }\n",
+    // And the fourth: the two sides report different things about a block's
+    // first line -- the browser a line box's top and this engine a baseline --
+    // and the difference is a constant per font size. `deviation` cancels the
+    // constant by subtracting the first block, which works only while every
+    // block shares one. A heading at 2em does not, and it is worth 0.0104 of
+    // this column on its own.
+    "h1, h2 { font-size: 1em; margin: 8px 0; }\n",
+    "table { border-collapse: separate; border-spacing: 4px; margin: 8px 0; }\n",
+    "td, th { padding: 2px; }\n",
+    "td p, th p, caption p { margin: 0; }\n",
+    "th { font-weight: normal; text-align: left; }\n",
+    "p { margin: 8px 0; }\n",
+    ".fixed { table-layout: fixed; width: 380px; }\n",
+    ".bare { table-layout: fixed; width: 380px; }\n",
+    ".inner { width: 180px; }\n",
+    ".collapse { border-collapse: collapse; table-layout: fixed; width: 380px; }\n",
+    ".collapse td { border: 1px solid #888888; }\n"
+);
+
+/// **The table-heavy column, block by block, against the browser's.**
+///
+/// The same two assertions as the continuous and float comparisons — the block
+/// sequence exactly, then the offsets to within a stated fraction — over a
+/// document whose every block below the first is placed by §17 rather than by
+/// §9.4.1.
+///
+/// The sequence assertion is the sharper half here and it is worth saying why:
+/// it is an *ordered* list, and §17.2's rendering order is not document order.
+/// Both sides walk the document, so the `<tfoot>` written before its `<tbody>`
+/// is reported before it on both — and the *offsets* are then what say it was
+/// drawn under it. A build that emitted the footer where it was written would
+/// pass the sequence and fail the offsets, which is exactly the split the two
+/// assertions exist for.
+#[test]
+fn the_browser_and_this_engine_lay_the_same_tables_out_the_same_way() {
+    let browser = oracle!("the table-heavy y-offset comparison");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "tables.html",
+        &oracle_page(TABLE_DOCUMENT, TABLE_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let ours = engine_blocks(TABLE_DOCUMENT, TABLE_STYLESHEET, width_px);
+
+    assert!(
+        ours.len() >= 25,
+        "the fixture produced {} block boxes, which is not a table-heavy \
+         document",
+        ours.len()
+    );
+    let theirs_text: Vec<(&str, &str)> = theirs
+        .iter()
+        .map(|block| (block.tag.as_str(), block.text.as_str()))
+        .collect();
+    let ours_text: Vec<(&str, &str)> = ours
+        .iter()
+        .map(|block| (block.tag.as_str(), block.text.as_str()))
+        .collect();
+    if theirs_text != ours_text {
+        let at = theirs_text
+            .iter()
+            .zip(&ours_text)
+            .position(|(a, b)| a != b)
+            .unwrap_or(theirs_text.len().min(ours_text.len()));
+        panic!(
+            "the browser and this engine disagree about which blocks exist, \
+             first at {at} of {}/{}:\n  browser: {:?}\n  ours:    {:?}",
+            theirs_text.len(),
+            ours_text.len(),
+            theirs_text.get(at),
+            ours_text.get(at)
+        );
+    }
+
+    let worst = deviation(&theirs, &ours, true);
+    println!("  worst table deviation {worst:.4} of the column");
+    assert!(
+        worst <= MAX_TABLE_DEVIATION,
+        "the two table columns differ by {worst:.4}, which is past \
+         {MAX_TABLE_DEVIATION}"
+    );
+}
+
+/// And the table comparison **can** fail: the same document with the cells laid
+/// out as blocks.
+///
+/// `display: block` on the cells is not an arbitrary defect. It is one of the
+/// two things this build could have done before milestone 11 — the other being
+/// to set them as inline text, which is what it actually did — and it is the
+/// failure that produces a page holding every word in the right order, one
+/// cell under another, with nothing anywhere saying a table was meant. The
+/// number it produces is what the tolerance above is judged against.
+#[test]
+fn the_table_comparison_notices_a_cell_that_was_not_a_cell() {
+    let browser = oracle!("the table control");
+    let width_px = (DEFAULT_PAGE.0 - PAGE_MARGIN * 2.0) / PX_TO_PT;
+
+    let theirs = browser_blocks(
+        &browser,
+        "table-control.html",
+        &oracle_page(TABLE_DOCUMENT, TABLE_STYLESHEET, Some(width_px)),
+        width_px,
+    );
+    let injected = format!("{TABLE_STYLESHEET}\ntd, th {{ display: block; }}\n");
+    let ours = engine_blocks(TABLE_DOCUMENT, &injected, width_px);
+
+    let worst = deviation(&theirs, &ours, false);
+    println!("  worst deviation with the cells unceiled: {worst:.4}");
+    assert!(
+        worst > MAX_TABLE_DEVIATION,
+        "laying the cells out as blocks moved the column by only {worst:.4}, \
          so the comparison would not have noticed"
     );
 }

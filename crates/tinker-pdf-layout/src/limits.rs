@@ -25,8 +25,10 @@
 //!
 //! [`MAX_LAYOUT_WORK`] is the **third**, and it arrived at milestone 10 exactly
 //! where milestone 7 said it would: *"the bound arrives with the multi-pass
-//! layout or not at all"*. Floats are that layout. It is spent across a whole
-//! book for the same reason as the other two.
+//! layout or not at all"*. Floats are that layout, and milestone 11's tables
+//! are the other half of the same sentence: §17.5.2.2 is two passes, a cell is
+//! laid out three times, and a nested table multiplies all of it. It is spent
+//! across a whole book for the same reason as the other two.
 //!
 //! [`MAX_BOX_DEPTH`] is per-item and bounds a recursion rather than a total.
 //! [`MAX_LAYOUT_PAGES`] is per-book and bounds an output.
@@ -169,13 +171,14 @@ pub const MAX_LINE_BREAK_WORK: usize = 4_000_000;
 /// of anything to do with the spine.
 pub const MAX_LAYOUT_PAGES: usize = 65_536;
 
-/// Float examinations across a whole book.
+/// Float examinations and table slots across a whole book.
 ///
 /// | | Examinations |
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 4 000 001 (the book built *past* this cap; the largest real book here spends under a thousand) |
 /// | A 400-page novel | ~24 000 (one figure per spine item, 12 000 line boxes, each asking the figures beside it for its measure) |
 /// | A 400-page novel with a figure on every fourth page | ~240 000 |
+/// | A 400-page novel with a twenty-row table in every tenth chapter | ~1 000 (four tables, sixty slots, three columns and three widths each) |
 /// | A 200-page comic | 0 |
 /// | A 200-page fixed document | 0 |
 /// | **This cap** | **4 000 000** |
@@ -201,6 +204,28 @@ pub const MAX_LAYOUT_PAGES: usize = 65_536;
 /// where the loop is entered rather than inside it, so the cost of a scan is
 /// known before the scan happens and a book past the cap is refused rather than
 /// swept.
+///
+/// # Milestone 11 added the other half of the sentence, and it is table slots
+///
+/// The row that predicted this cap named *two* multipliers: *"automatic table
+/// layout is two passes (§17.5.2.2), float placement re-flows a line,
+/// shrink-to-fit measures twice, and **a nested table multiplies all three**"*.
+/// Tables charge it in three places, and the three are three different
+/// quantities rather than one quantity counted thrice — which is what a firing
+/// fixture for each of them says:
+///
+/// | Charged | The quantity | Why the other two do not bound it |
+/// | --- | --- | --- |
+/// | [`crate::table::Grid::place`] | slots occupied, `colspan` × `rowspan` per cell | Five boxes can claim five million slots: a `colspan` is a number in the file and neither the box cap nor the break cap can see it |
+/// | The occupancy map | grid rows × grid columns | Two thousand rows whose first one spans two thousand columns is four thousand slots to *place* and four million to *hold* |
+/// | §17.5.2.2's distribution | columns + every spanning cell's span | One row of 1 200 000 columns is under the total on the first two and past it with the third |
+///
+/// **And a nested table multiplies every one of them.** An outer cell is laid
+/// out three times — twice to measure its two content widths and once to set it
+/// — so a table inside a cell pays its whole bill three times over, and the
+/// same table alone is under the total while nested it is not. That pair of
+/// fixtures is `a_nested_table_multiplies_the_work_total`, and it is the
+/// clearest statement of what this constant is for that this crate has.
 pub const MAX_LAYOUT_WORK: usize = 4_000_000;
 
 /// The relations, in a `const` block so a build that broke one **does not
