@@ -304,12 +304,44 @@ floor, and the two whose floors are weaker than the rest — `jpx`, because
 both of its failure modes paint, and `cbz`, because ruling 2's placeholder is
 ink on every pixel — say so where they are declared.
 
+### Amended, 22 August 2026: fifteen, and a question this plan did not have
+
+The count above was fourteen when it was written. Gap 31's milestone 13 added
+the fifteenth — `epub`, a real producer's book — and with it something no
+earlier fingerprint could ask.
+
+**Every fingerprint before it hashed a document whose page count was a property
+of the file.** A reflowable book's is not: `OpenOptions` states a page box and
+the pagination follows it, which gap 31's milestone 4 recorded as the reason
+`Document::open_with` exists at all. So determinism for this format is two
+claims rather than one — *stable at a given box*, and *different at a different
+box* — and `a_book_is_stable_at_each_page_box_and_the_two_boxes_differ` holds
+both. A build that ignored the caller's box entirely would satisfy "stable"
+twice over, which is the shape this repository has spent a run learning to
+distrust.
+
+That test also found the half of it that is easy to miss: a build ignoring the
+caller's *width* still produces two different documents, because the height
+still differs. Two independent consequences, and the injection matrix reported
+it as surviving until both were asserted.
+
+All fifteen reproduce on `wasm32-wasip1` under wasmtime, and on
+`x86_64-unknown-linux-gnu` under WSL2, against native Windows.
+
 ### What this plan still leaves open
 
-- **macOS.** Claimed, from `ci.yml`. One observed CI run settles it.
+- **macOS.** Claimed, from `ci.yml`, and the claim is now checkable in one
+  respect: the `test` matrix names `macos-14` and runs `cargo test --workspace`,
+  which is what carries `tests/determinism.rs`. So the job is configured to
+  prove ruling 4 there; what is missing is a run somebody watched. **This
+  machine cannot supply one** — there is no Apple hardware here, and a Darwin
+  target cannot be cross-*run*, only cross-compiled.
 - **A CI run of `wasm-determinism`.** The job is written, guarded against
-  passing without executing, and has been run by hand; nobody has watched it
-  run *there*. Same act as the above.
+  passing without executing, and has been run by hand on this machine; nobody
+  has watched it run *there*. The same act settles both.
 
-Three of four measured on one machine, and the fourth is a push away. That is
-a materially different sentence from the one this section replaces.
+**Three of ruling 4's four targets are measured; the fourth is configured and
+unobserved.** That is the whole of the difference, and it is a difference no
+amount of work on this machine can close — which is why it is written here as a
+standing item rather than as a milestone somebody could mistake for undone
+work.
