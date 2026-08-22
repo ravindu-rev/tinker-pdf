@@ -153,7 +153,7 @@ ty =  (w1 − TJadj/1000)·Tfs + Tc + Tw?            (vertical; no Th)
 inside a multi-byte code of a composite font. This is the classic CID bug and gets a
 dedicated fixture.
 
-*Amended August 2026, gap [05](gaps/05-vertical-metrics.md).* Two things this section left
+*Amended August 2026, gap 05.* Two things this section left
 implicit, both of which were therefore built wrong. The **position vector** `v` that
 [05-fonts](05-fonts.md) stores alongside `w1` is applied here and nowhere else: a vertical
 glyph is drawn at the current point displaced by *minus* `v`, in glyph space, so the

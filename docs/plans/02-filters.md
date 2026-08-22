@@ -62,10 +62,10 @@ Wave 2 (L):
 
 - **JPXDecode (7.4.9) — *no longer* a non-goal, since August 2026,** and
   unlike JBIG2 the gate did **not** open on a corpus number: gap 23 measured
-  JPX at 0.4 % of 4 525 files and [gaps/18](gaps/18-jpx-decision.md)'s own
+  JPX at 0.4 % of 4 525 files and gaps/18's own
   amendment reads that number and argues for the 150-line header probe. The
   owner chose the decoder anyway, and
-  [gaps/18a](gaps/18a-jpx-decoder.md) records at its top that this was a
+  gaps/18a records at its top that this was a
   choice and not a finding. What this crate decodes is T.800 Annex I's JP2
   boxes and a bare J2K codestream, Annex A's marker segments with COC and QCC
   overriding per component, Annex B's tier-2 — tag trees, packet headers,
@@ -77,7 +77,7 @@ Wave 2 (L):
   replicated to the reference grid, `pclr` palettes through `cmap`, and `cdef`
   naming an opacity channel. ISO 32000-1 8.9.5.4 is `tinker-pdf`'s half of the
   boundary and lives there.
-  What it refuses is [gap 18a](gaps/18a-jpx-decoder.md)'s enumerated list, and
+  What it refuses is gap 18a's enumerated list, and
   **every entry of it is reachable and named** — RGN, POC, PPM, PPT, CRG,
   five of Table A.19's six code-block styles, any Part 2 marker, tile-parts
   out of order, a `colr` this build cannot map, precision above 16 bits,
@@ -93,7 +93,7 @@ Wave 2 (L):
 - **JBIG2Decode (7.4.7) — *half* a non-goal, since August 2026.** The gate
   opened: gap 23 ran the corpora and JBIG2 came back at 2.3 % of 4 525 files,
   the highest of the three capabilities ruling 3 defers, and
-  [gaps/17](gaps/17-jbig2-generic-region.md) built the generic-region lineage
+  gaps/17 built the generic-region lineage
   against it. What this crate now decodes is the MQ arithmetic coder (T.88
   Annex E, in its own module for gap 18's sake), clause 7's segment headers,
   Annex D.3's embedded organisation with `/JBIG2Globals`, generic regions on
@@ -110,7 +110,7 @@ Wave 2 (L):
   different from the two entries above it: **no PDF stream is ever a PNG
   file**, so PNG is not in `Filter`, has no `/Decode` name, and cannot be
   reached from a content stream at all. It is a **container** decoder, built
-  for [gaps/29](gaps/29-cbz.md) because a CBZ is a ZIP of JPEG and PNG pages,
+  for gaps/29 because a CBZ is a ZIP of JPEG and PNG pages,
   and it lives in this crate rather than beside the archive reader because
   everything it needs is already here — `inflate.rs` for the zlib-wrapped
   IDAT (10.3), `predictors.rs` for the row filters, and `crc32.rs` for the
@@ -299,7 +299,7 @@ no predictor at all, hardcoded `/EarlyChange`, and refused DCT and CCITT. The
 mapping is therefore no longer private to the COS crate:
 `CosDocument::filter_chain(dict, sink)` exposes it, so Table 10's defaults exist
 in one place and both paths reach the same `apply_chain`. Gap
-[08](gaps/08-inline-image-filters.md) has the measurements. The rule the
+08 has the measurements. The rule the
 episode leaves behind is that a *second* mapping is the failure mode to watch
 for here, not a wrong one: the specs above are testable, and two callers
 agreeing to differ are not.

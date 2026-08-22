@@ -341,7 +341,7 @@ existing assertions.
 Recorded here rather than in a gap document because PRE-E in
 [the execution order](gaps/00-execution-order.md) has none: it is a
 prerequisite found by a cross-plan review, and it exists so that
-[27](gaps/27-form-calculations-decision.md) option A has something to build
+27 option A has something to build
 on.
 
 ### Where the code actually lives
@@ -461,7 +461,7 @@ interpreter's failure path is the common one, not the rare one.
 **"Calculation — the open item, stated plainly" is no longer open.** That
 section says the owner decides when this phase starts and that the decision is
 recorded as an ADR either way. The ADR is
-[gap 27](gaps/27-form-calculations-decision.md); the decision is **option A**,
+gap 27; the decision is **option A**,
 a hand-rolled ECMAScript subset, taken *against* that document's own
 recommendation of option B and for a reason recorded there — the transactional
 primitive its deciding argument demands now exists, so the argument no longer

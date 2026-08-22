@@ -19,7 +19,7 @@ this document is where they become mechanisms.
   outlines are quadratic and up-conversion adds float work and error for
   nothing.
 
-  *Amended, August 2026 (gap [13](gaps/13-quadratic-path-verb.md)).* The verb
+  *Amended, August 2026 (gap 13).* The verb
   set now matches: `Verb::QuadTo` exists, `Path::quad_to` builds one, the
   flattener has a quadratic arm and `show_glyph` emits quadratics rather than
   raising them. The cubic verb is spelled `CurveTo` rather than `CubicTo`, and
@@ -67,7 +67,7 @@ this document is where they become mechanisms.
   "if that proves to band, a vertex-interpolated triangle primitive is added
   *here* but scheduled *there*. Named as a seam, not silently assumed away."
 
-  *Amended, August 2026 (gap [10](gaps/10-mesh-shadings.md)).* **The seam was
+  *Amended, August 2026 (gap 10).* **The seam was
   taken.** `mesh.rs` is that primitive, and the reason is worse than banding: a
   mesh decomposed into separately filled triangles anti-aliases every *shared*
   edge against the backdrop, so two neighbours contribute about half coverage
@@ -94,7 +94,7 @@ this document is where they become mechanisms.
   post-parity work in 08. Criterion benches exist from milestone 1 so the
   cost of this stance is measured, not guessed.
 
-  *Amended, August 2026 (gap [14](gaps/14-bounded-painting.md)).* There are no
+  *Amended, August 2026 (gap 14).* There are no
   criterion benches, in this crate or any other, and there never were — so
   nothing measured the cost of anything, which is how three independent
   O(canvas) layers survived to be found by reading. Gap 14's numbers were taken
@@ -163,7 +163,7 @@ pub enum Paint { Solid([u8; 4]) } // premultiplied RGBA; Gray targets take the R
 set; it is `Send` but not shared — one per worker, per the architecture's
 concurrency model ([00-architecture](00-architecture.md)).
 
-*Amended, August 2026 (gap [12](gaps/12-image-sampling.md)).* There is no
+*Amended, August 2026 (gap 12).* There is no
 `Rasterizer` type, no `Surface` and no `ClipStack`. The crate's entry points
 are free functions — `fill`, `stroke` and now `image::draw_image` — over a
 `Canvas` (which owns its pixels rather than borrowing them) with an optional
@@ -188,7 +188,7 @@ recursive subdivision with a device-space tolerance of 0.25 px (criterion:
 maximum control-point deviation from the chord), depth-capped so a
 pathological curve cannot recurse unboundedly.
 
-*Amended, August 2026 (gap [13](gaps/13-quadratic-path-verb.md)).* Flattening
+*Amended, August 2026 (gap 13).* Flattening
 is adaptive but it is not recursive. Both subdividers take a fixed step count
 from the control polygon's length — `ceil(sqrt(polygon / tolerance) * 1.5)`,
 clamped to 512 — and sample the curve at evenly spaced parameters. The
@@ -217,7 +217,7 @@ summation an optimizer might be tempted to reorder. This is the same family
 of rasterizer MuPDF and FreeType use, which keeps our output in the visual
 neighborhood Tinker's users already accept.
 
-*Amended, August 2026 (gap [14](gaps/14-bounded-painting.md)).* The crate has
+*Amended, August 2026 (gap 14).* The crate has
 never had a cell accumulator. `fill` samples each pixel row at **sixteen
 sub-scanlines**, sorts the crossings on each, and adds each span's exact
 overlap with each pixel column into a per-row `u16` accumulator in 1/256
@@ -348,7 +348,7 @@ DDA — the inner loop is integer like every other inner loop here. Pyramid
 levels are returned to the caller for caching; 08 owns image caching policy,
 this crate stays stateless between calls.
 
-*Amended, August 2026 (gap [12](gaps/12-image-sampling.md)).* All four rows are
+*Amended, August 2026 (gap 12).* All four rows are
 built, and three details of this section are not what shipped.
 
 `ImageSource` is **straight** alpha, not premultiplied on ingest. `canvas.rs`

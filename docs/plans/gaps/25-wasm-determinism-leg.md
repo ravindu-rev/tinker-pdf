@@ -73,9 +73,9 @@ it looks like.
 | 1 | The job runs | A CI run shows it executing rather than skipping | S |
 | 2 | It agrees with the native matrix | All four fingerprints identical across four targets. If not, the divergence is found and fixed — not baselined | S |
 | 3 | STATUS updated | The row moves out of "Not built" once it has actually run | S |
-| 4 | Fixture growth as pixel paths land | Each of [09](09-tiling-patterns.md), [10](10-mesh-shadings.md), [11](11-transparency-groups.md), [12](12-image-sampling.md) adds a fixture | S |
+| 4 | Fixture growth as pixel paths land | Each of 09, 10, 11, 12 adds a fixture | S |
 
-*Amended, August 2026, by [07](07-stroked-patterns.md).* A fifth fixture,
+*Amended, August 2026, by 07.* A fifth fixture,
 `pattern`, landed ahead of the four plans named in milestone 4 and is not owed
 by any of them. It covers `fill_with_pattern`, which had no fingerprint at
 all — the `shading` fixture goes through `sh`, a different loop with a
@@ -100,9 +100,9 @@ CI has and this environment does not.
 ## As built
 
 *August 2026.* Milestones 1 to 3 are done. **Milestone 4 is not**, and it is
-not this plan's to do: it belongs to [09](09-tiling-patterns.md),
-[10](10-mesh-shadings.md), [11](11-transparency-groups.md) and
-[12](12-image-sampling.md), each of which adds its own fixture as it lands.
+not this plan's to do: it belongs to 09,
+10, 11 and
+12, each of which adds its own fixture as it lands.
 
 *Amended, 19 August 2026.* **Milestone 4 is now done** — all four of those
 plans landed their fixtures, and the section below closes it. The section
@@ -277,17 +277,17 @@ jobs.
 
 ### Milestone 4, closed
 
-Milestone 4 asked each of [09](09-tiling-patterns.md),
-[10](10-mesh-shadings.md), [11](11-transparency-groups.md) and
-[12](12-image-sampling.md) to add a fixture as it landed. All four did, and the
+Milestone 4 asked each of 09,
+10, 11 and
+12 to add a fixture as it landed. All four did, and the
 `As built` above was written before the last of them:
 
 | Owed by | Fixture | What had no fingerprint before it |
 | --- | --- | --- |
-| [09](09-tiling-patterns.md) | `tiling` | a rasterised cell, a lattice, `PaintType 2`. Gap 07's `pattern` is a `PatternType 2` shading evaluated per pixel and reaches none of it |
-| [10](10-mesh-shadings.md) | `mesh` | the only fixture whose hash depends on a *count* chosen from a device-space measure, so a subdivision step landing one different on another target shows here and nowhere else |
-| [11](11-transparency-groups.md) | `transparency` | a `/Group` or an ExtGState `/SMask` — none of the seven before it would have moved if clause 11 had never been written |
-| [12](12-image-sampling.md) | `image` | an image. Every fingerprint report made while image sampling was being rewritten was true and meant nothing |
+| 09 | `tiling` | a rasterised cell, a lattice, `PaintType 2`. Gap 07's `pattern` is a `PatternType 2` shading evaluated per pixel and reaches none of it |
+| 10 | `mesh` | the only fixture whose hash depends on a *count* chosen from a device-space measure, so a subdivision step landing one different on another target shows here and nowhere else |
+| 11 | `transparency` | a `/Group` or an ExtGState `/SMask` — none of the seven before it would have moved if clause 11 had never been written |
+| 12 | `image` | an image. Every fingerprint report made while image sampling was being rewritten was true and meant nothing |
 
 Six more arrived from plans milestone 4 does not name — gap 06's `optional`,
 gap 07's `pattern`, gap 17's `jbig2`, gap 18a's `jpx`, gap 29's `cbz` and gap

@@ -32,7 +32,7 @@ equivalent, ever. Dev tooling exemptions (`cargo-fuzz`, `criterion`, `proptest`)
   arrays and UTF-16BE surrogate pairs.
 - CMap inheritance (9.7.5.3): `usecmap` in the body and `/UseCMap` in the stream dictionary,
   merged so the child overrides the parent where they overlap. *Added August 2026, gap
-  [04](gaps/04-usecmap-and-codespaces.md).* Which side of ruling 8 this falls on is the same
+  04.* Which side of ruling 8 this falls on is the same
   answer `/CIDToGIDMap` got: the chain is walked in `tinker-pdf-font`, because it is CMap
   syntax, and the parent is *fetched* by `tinker-pdf-cos`, because a parent may be a document
   stream and a leaf crate has no address for one. The seam is a resolver closure, the shape
@@ -66,7 +66,7 @@ equivalent, ever. Dev tooling exemptions (`cargo-fuzz`, `criterion`, `proptest`)
   /CIDToGIDMap name or stream. *Amended August 2026:* the first belongs to the leaf crate and
   the second does not. `/CIDToGIDMap` is an entry in a PDF font dictionary, so by the Design
   section's own rule — and by ruling 8 — it is read by the binder and the leaf crate is handed
-  the glyph index that falls out. See [gap 02](gaps/02-cid-to-gid.md).
+  the glyph index that falls out. See gap 02.
 - Glyph → path → raster through [07-raster](07-rasterizer.md), with a per-(face, glyph, size)
   raster cache; hints parsed for stem darkening only — no hinting engine.
 - Base-14 substitute faces (Liberation), the Symbol/ZapfDingbats gap, and `trait FontProvider`
@@ -184,7 +184,7 @@ as sorted, non-overlapping ranges with binary search, /DW as the default; /W2//D
 shape for vertical. Exit tolerance is 0.1 pt against the oracle at rendered size — tight
 enough to catch nominalWidthX/defaultWidthX confusion, which is the classic CFF width bug.
 
-*Amended August 2026, gap [05](gaps/05-vertical-metrics.md).* The range structure is not
+*Amended August 2026, gap 05.* The range structure is not
 what was built. `/W` is expanded at read time into a `HashMap` keyed by CID, and `/W2`
 follows it rather than introducing a second shape — one lookup discipline for both, so the
 horizontal and vertical metrics of a CID cannot be found by two different searches that
@@ -220,7 +220,7 @@ of text files is not in it. Feature gates: `cmap-predefined` (default on; Identi
 always compiled in regardless) and `bundled-fonts` (default on; wasm hosts that supply a
 `FontProvider` can drop both).
 
-**Measured, August 2026 (gap [03](gaps/03-predefined-cmaps.md) M4).** The estimate was "~10 MB
+**Measured, August 2026 (gap 03 M4).** The estimate was "~10 MB
 of source text, expected to compile+deflate to low single-digit MB". The whole registry — 202
 CMaps, every collection including the deprecated Adobe-Japan2 — is **7.5 MB of source**
 compiling to **1.19 MB** of delta-encoded, deflated tables. The wasm figures are the

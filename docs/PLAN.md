@@ -22,7 +22,7 @@ Locked decisions this plan builds on, not up for relitigation here:
   as they arise; full 2.0 conformance is explicitly not a v1 goal.
 - **Formats: PDF, and then CBZ, XPS and EPUB** (*decided 16 August 2026*).
   This engine was "a PDF engine and always will be" until the owner answered
-  [gaps/28](plans/gaps/28-tinker-integration-decisions.md)'s first decision
+  gaps/28's first decision
   with a fourth option that document did not offer: build the three formats
   MuPDF also opened, natively, rather than drop them, convert them out of
   process or keep MuPDF for them. It is what removes the last AGPL code from

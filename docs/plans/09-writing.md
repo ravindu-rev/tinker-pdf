@@ -356,7 +356,7 @@ with a warning.
 
 *Amended, August 2026 (gap 20).* Milestone 5's oracle criterion is met on
 fixtures rather than on a corpus, which is the only part still owed: there is
-no corpus here until [gap 23](gaps/23-corpus-runner.md). `qpdf --check` and
+no corpus here until gap 23. `qpdf --check` and
 `qpdf --show-linearization` are clean and warning-free on one-page, two-page,
 six-page and shared-resource fixtures, encrypted and not, in a CI job that
 fails rather than passes when qpdf is absent. "Padded hint gap" and

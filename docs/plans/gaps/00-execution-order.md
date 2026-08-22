@@ -75,7 +75,7 @@ green tick and no rendering.
 ### PRE-C — the fuzz toolchain, moved to the front
 
 **Status: done** — `04fb5ae` through `17be6b7`. This is gap
-[24](24-fuzz-execution.md) M1–M4, hoisted; M5 stays at its numbered position.
+24 M1–M4, hoisted; M5 stays at its numbered position.
 
 Three separate plans carry a `cargo fuzz run` exit criterion — gap 03 M6
 (`cmap`), gap 16 M5 (`ccitt`), gap 17 M7 (`jbig2`) — and all three sat *ahead*
@@ -89,7 +89,7 @@ all three. It also found two live defects before any gap work began; see
 ### PRE-D — the JPX option-A plan does not exist
 
 **Status: not started.** Runs immediately before gap
-[18](18-jpx-decision.md).
+18.
 
 Gap 18 is a decision document offering two options, and its milestone table is
 explicitly option B's: *"Only for option B, since A needs its own plan written
@@ -113,7 +113,7 @@ line brief whose milestones describe different work.
 ### PRE-E — `DocumentEditor` has no transaction primitive
 
 **Status: not started.** Runs immediately before gap
-[27](27-form-calculations-decision.md).
+27.
 
 Gap 27 option A requires that a calculation either applies wholly or not at
 all. The forms API cannot express that. `DocumentEditor::set_field_value`
@@ -205,7 +205,7 @@ this. WSL2/Ubuntu-24.04 with nightly and `cargo-fuzz 0.13.2` is the local route
 and it works.
 
 **One ZIP signature covers five formats, so gap 29's sniff mis-opens gap 30's
-input.** *Added while planning [30](30-xps.md), August 2026.* `Document::open`
+input.** *Added while planning 30, August 2026.* `Document::open`
 sniffs `PK\x03\x04` at offset zero and hands the bytes to `cbz::synthesise`,
 which is correct for a comic archive and wrong for every other ZIP-shaped
 document format. Measured on a real one-page XPS written by Windows' own XPS
@@ -234,7 +234,7 @@ which is this programme's recurring failure and the reason the ordering is
 written down rather than left to whoever picks the plan up.
 
 **The same ZIP signature still mis-opens gap 31's input, and gap 30 did not fix
-it.** *Added while planning [31](31-epub.md), August 2026.* Gap 30 closed the
+it.** *Added while planning 31, August 2026.* Gap 30 closed the
 XPS half and named EPUB in the same sentence; nobody went back for it. Measured
 on six Project Gutenberg books before a line of gap 31's code: Frankenstein —
 thirty-one XHTML content documents and three stylesheets — **opens**, reports
@@ -280,42 +280,42 @@ Prerequisites are marked. Sizes are from [README.md](README.md).
 
 | # | Item | Why here | State |
 | --- | --- | --- | --- |
-| 1 | [21](21-metadata-absent-vs-empty.md) metadata absent vs empty (S) | Smallest real defect; warm-up | **done** `243d755` |
+| 1 | 21 metadata absent vs empty (S) | Smallest real defect; warm-up | **done** `243d755` |
 | 2 | **PRE-A** determinism fixture | Blocks all glyph and pixel work | **done** `9ba9237` |
-| 3 | **PRE-C** = [24](24-fuzz-execution.md) M1–M4 | Three later plans' exit criteria need it | **done** `04fb5ae`..`17be6b7` |
+| 3 | **PRE-C** = 24 M1–M4 | Three later plans' exit criteria need it | **done** `04fb5ae`..`17be6b7` |
 | 4 | **PRE-B** = [25](25-wasm-determinism-leg.md) M1–M3 | Build sequence ranks it before all pixel work | **done** `f864b8b`, `1714abf` |
-| 5 | [22](22-pdf-version-and-trapped.md) version and `/Trapped` (S) | Same file as 21, still cold | **done** `12959a6` |
-| 6 | [01](01-cff-glyph-selection.md) CFF glyph selection (L) | Unblocks 02; the deepest font defect | **done** `81a9da7`..`51f36d3` |
-| 7 | [02](02-cid-to-gid.md) CID to GID (M) | Needs 01's `gid_for_cid` | **done** `93a01db`, `125f5e0` |
-| 8 | [04](04-usecmap-and-codespaces.md) usecmap (S) | Parser-level; parents become real at 9 | in progress |
-| 9 | [03](03-predefined-cmaps.md) predefined CMaps (L) | Makes 04's parents real; needs the `cmap` fuzz target from PRE-C | |
-| 10 | [05](05-vertical-metrics.md) vertical metrics (M) | Completes the font lane | |
-| 11 | [07](07-stroked-patterns.md) stroked patterns (S) | **All four milestones**, per the finding above | |
-| 12 | [06](06-optional-content.md) optional content (M) | Silent wrong output, no dependencies | |
-| 13 | [13](13-quadratic-path-verb.md) quadratic verb (S) | Rasteriser lane opens; smallest first | |
-| 14 | [14](14-bounded-painting.md) bounded painting (M) | Fingerprints must **not** move | |
-| 15 | [12](12-image-sampling.md) image sampling (M) | + a determinism fixture (25 M4) | |
-| 16 | [15](15-cancellation.md) cancellation (S) | Closes the rasteriser lane | |
-| 17 | [16](16-ccitt-completion.md) CCITT (M) | Decoder flip and rewire in one commit; must expose a row-level T.6 seam for 17 | |
-| 18 | [08](08-inline-image-filters.md) inline image filters (S) | **After 16**, per the finding above | |
-| 19 | [11](11-transparency-groups.md) transparency groups (L) | Hard constraint: 11 before 09 | |
-| 20 | [09](09-tiling-patterns.md) tiling patterns (M) | + 07's tiling half + the stroke-path anchoring test | |
-| 21 | [19](19-encrypt-and-linearize.md) encrypt and linearize (M) | Writing lane | |
-| 22 | [20](20-linearization-validation.md) linearization validation (S) | Needs qpdf, installed | |
-| 23 | [23](23-corpus-runner.md) corpus runner (M) | Hard constraint: 23 before 10 and 17. Needs a `--fonts` flag | |
-| 24 | [10](10-mesh-shadings.md) mesh shadings (M) | Scheduled by corpus evidence | |
-| 25 | [17](17-jbig2-generic-region.md) JBIG2 (L) | Scheduled by corpus evidence. MQ coder in its own module from commit one | |
+| 5 | 22 version and `/Trapped` (S) | Same file as 21, still cold | **done** `12959a6` |
+| 6 | 01 CFF glyph selection (L) | Unblocks 02; the deepest font defect | **done** `81a9da7`..`51f36d3` |
+| 7 | 02 CID to GID (M) | Needs 01's `gid_for_cid` | **done** `93a01db`, `125f5e0` |
+| 8 | 04 usecmap (S) | Parser-level; parents become real at 9 | in progress |
+| 9 | 03 predefined CMaps (L) | Makes 04's parents real; needs the `cmap` fuzz target from PRE-C | |
+| 10 | 05 vertical metrics (M) | Completes the font lane | |
+| 11 | 07 stroked patterns (S) | **All four milestones**, per the finding above | |
+| 12 | 06 optional content (M) | Silent wrong output, no dependencies | |
+| 13 | 13 quadratic verb (S) | Rasteriser lane opens; smallest first | |
+| 14 | 14 bounded painting (M) | Fingerprints must **not** move | |
+| 15 | 12 image sampling (M) | + a determinism fixture (25 M4) | |
+| 16 | 15 cancellation (S) | Closes the rasteriser lane | |
+| 17 | 16 CCITT (M) | Decoder flip and rewire in one commit; must expose a row-level T.6 seam for 17 | |
+| 18 | 08 inline image filters (S) | **After 16**, per the finding above | |
+| 19 | 11 transparency groups (L) | Hard constraint: 11 before 09 | |
+| 20 | 09 tiling patterns (M) | + 07's tiling half + the stroke-path anchoring test | |
+| 21 | 19 encrypt and linearize (M) | Writing lane | |
+| 22 | 20 linearization validation (S) | Needs qpdf, installed | |
+| 23 | 23 corpus runner (M) | Hard constraint: 23 before 10 and 17. Needs a `--fonts` flag | |
+| 24 | 10 mesh shadings (M) | Scheduled by corpus evidence | |
+| 25 | 17 JBIG2 (L) | Scheduled by corpus evidence. MQ coder in its own module from commit one | |
 | 26 | **PRE-D** JPX option-A plan | 18 has no milestones for the chosen option | |
-| 27 | [18](18-jpx-decision.md) JPX decoder, option A (XL) | | |
-| 28 | [24](24-fuzz-execution.md) M5 first real campaign | Parsers have finished changing by here | |
+| 27 | 18 JPX decoder, option A (XL) | | |
+| 28 | 24 M5 first real campaign | Parsers have finished changing by here | |
 | 29 | [25](25-wasm-determinism-leg.md) M4 fixture growth | Owed by 09, 10, 11, 12 | |
-| 30 | [26](26-binding-packaging.md) binding packaging (M) | Dry run only; the matrix legs are CI-only | |
+| 30 | 26 binding packaging (M) | Dry run only; the matrix legs are CI-only | |
 | 31 | **PRE-E** `DocumentEditor` transactions | 27 option A cannot be built without it | |
-| 32 | [27](27-form-calculations-decision.md) form calculations, option A | Two commits: option B's reader, then the interpreter | |
-| 33 | [28](28-tinker-integration-decisions.md) Tinker integration | M4 is code in a different repository | **done** |
-| 34 | [29](29-cbz.md) CBZ (S) | The first of the three container plans gap 28's decision spawned. Nothing blocks it; it builds `tinker-pdf-zip`, which 30 needs | **done** `5f46fe3`..`b764917` |
-| 35 | [30](30-xps.md) XPS (L) | The second. Needs 29 for `tinker-pdf-zip`, `ImageData::Compressed` and `bounds_ledger.rs`, and needs 09, 10 and 11 because its milestone 5 writes patterns, shadings and groups and the only check on what it writes is that this engine already reads them. **Its own milestone 1 is a corpus of real documents, before any reader** — gap 29 closed owing exactly that, and the ordering is how this one does not | **done** `83d49f3`..`1574767` |
-| 36 | [31](31-epub.md) EPUB (XL+) — **DONE**, 22 August 2026 | The third and last. Needs 29 and 30 for everything both built, and **changes** one of them: `tinker-pdf-xml` grows a doctype mode in this plan's milestone 2, because XHTML in the wild carries doctypes and the crate refuses them. The owner chose the **full reflowable engine** on 19 August 2026 over fixed-layout-only and a bounded subset. Its milestone 3 is the only one of thirteen that improves matters alone, for gap 30 milestone 3's reason; its milestone 5 is the writer's missing half again — link annotations and an outline — and lands before its consumers | |
+| 32 | 27 form calculations, option A | Two commits: option B's reader, then the interpreter | |
+| 33 | 28 Tinker integration | M4 is code in a different repository | **done** |
+| 34 | 29 CBZ (S) | The first of the three container plans gap 28's decision spawned. Nothing blocks it; it builds `tinker-pdf-zip`, which 30 needs | **done** `5f46fe3`..`b764917` |
+| 35 | 30 XPS (L) | The second. Needs 29 for `tinker-pdf-zip`, `ImageData::Compressed` and `bounds_ledger.rs`, and needs 09, 10 and 11 because its milestone 5 writes patterns, shadings and groups and the only check on what it writes is that this engine already reads them. **Its own milestone 1 is a corpus of real documents, before any reader** — gap 29 closed owing exactly that, and the ordering is how this one does not | **done** `83d49f3`..`1574767` |
+| 36 | 31 EPUB (XL+) — **DONE**, 22 August 2026 | The third and last. Needs 29 and 30 for everything both built, and **changes** one of them: `tinker-pdf-xml` grows a doctype mode in this plan's milestone 2, because XHTML in the wild carries doctypes and the crate refuses them. The owner chose the **full reflowable engine** on 19 August 2026 over fixed-layout-only and a bounded subset. Its milestone 3 is the only one of thirteen that improves matters alone, for gap 30 milestone 3's reason; its milestone 5 is the writer's missing half again — link annotations and an outline — and lands before its consumers | |
 
 The three container plans sit after 33 because gap 28 is the decision that
 spawned them, and they are numbered here rather than left out of the ledger

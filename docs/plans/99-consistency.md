@@ -77,7 +77,7 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    *Amended, August 2026.* This named five, and had named five since it was
    written. `tinker-pdf-math` arrived with ruling 4's amendment above and this
    ruling did not move; `tinker-pdf-zip` arrived with
-   [gap 29](gaps/29-cbz.md), which found the first drift while sweeping for
+   gap 29, which found the first drift while sweeping for
    the second. The rule is unchanged and its scope is wider than the list
    suggested — which is the failure mode of a rule that enumerates rather than
    defines, so: a leaf is any crate that takes bytes and plain parameters and
@@ -88,7 +88,7 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    `zip` for raw DEFLATE and CRC-32 — and a leaf-to-leaf edge does not weaken
    this ruling, which is about public APIs rather than about edges.
 
-   *Amended again, 19 August 2026, [gap 30](gaps/30-xps.md) milestone 9.*
+   *Amended again, 19 August 2026, gap 30 milestone 9.*
    **Eight**, and this is the first update the amendment above predicted: it
    said the scope is wider than the list, and `tinker-pdf-xml` is a crate the
    list did not name and the definition always covered. It takes bytes of
@@ -102,7 +102,7 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    `META-INF/container.xml` rather than OPC: the leaf is the reusable part
    precisely because it is a leaf.
 
-   *Amended a third time, 22 August 2026, [gap 31](gaps/31-epub.md) milestone
+   *Amended a third time, 22 August 2026, gap 31 milestone
    13.* **Ten**, and one word of the amendment above is corrected in the same
    edit. It said gap 31 *"reuses this crate"*, and the truth is **reuses, after
    changing**: `tinker-pdf-xml` as gap 30 froze it refuses every Project
@@ -128,7 +128,7 @@ the answer gets a numbered ruling here instead of living in one phase's head.
    comparison references, never committed or redistributed.
 
    **Amended, 21 August 2026, gap 31 milestone 8: a headless browser is a
-   fifth, and only for CSS.** [31](gaps/31-epub.md)'s oracle section works out
+   fifth, and only for CSS.** 31's oracle section works out
    why the four are not enough for a reflowable format, and the argument is
    worth keeping rather than the conclusion alone.
 

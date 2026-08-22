@@ -275,7 +275,7 @@ its own, so that nobody reads the question without the reply.
 
 **1. EPUB, XPS and CBZ — built natively, inside tinker-pdf.**
 *Answered 16 August 2026.* `Doc::Other` exists only because MuPDF was
-multi-format. [gaps/28](gaps/28-tinker-integration-decisions.md) costed three
+multi-format. gaps/28 costed three
 options — drop them, keep MuPDF for those three formats alone, or convert out
 of process — and recommended dropping them. The answer is a fourth option that
 document does not contain: the three formats become capabilities of this
@@ -302,7 +302,7 @@ The capability matrix (`caps_get`) stays the mechanism either way: until a
 format's plan lands, its absence is reported rather than discovered.
 
 **2. Forms JavaScript — a hand-rolled ECMAScript subset, and it is built.**
-*Answered by [gaps/27](gaps/27-form-calculations-decision.md), closed
+*Answered by gaps/27, closed
 `07dd4b0`..`7c7b52d`.* The option taken is **A**, against that document's own
 recommendation of B, and the reason is that A's precondition had been built in
 the meantime: option B's deciding argument is that a half-implementation is
@@ -343,7 +343,7 @@ licence: it clears when MuPDF leaves, whatever Tinker chooses for itself.
 | 15.4 | App smoke + release | Tauri app opens, scrolls, searches, renders fixtures and real documents; `tinker-cli info/render/text` parity; a release ships from the simplified pipeline. Includes the source-archive fix the deletion checklist's re-verification found | S |
 
 Faces are **15.1a rather than 15.0** for a reason worth stating, because
-[gaps/28](gaps/28-tinker-integration-decisions.md) puts them before any golden
+gaps/28 puts them before any golden
 comparison and "before" reads as "first". There is no `Document::with_fonts`
 to call until 15.1 has put a `Document` in Tinker, so the work cannot precede
 the swap; what it must precede is 15.2, and that is where the gate belongs. It
@@ -367,7 +367,7 @@ wrong only about its readiness.
 **The precondition is not met and cannot yet be measured.** Checkpoint B wants
 corpus render parity ratcheted at 95% or better. No corpus has ever been run —
 eight real files have been through `tpdf`, total. See
-[gaps/23](gaps/23-corpus-runner.md). Integration cannot start against evidence
+gaps/23. Integration cannot start against evidence
 that does not exist, and the number is one corpus run away rather than far.
 
 **Tinker must supply a `FontProvider` or every non-embedding document renders
@@ -376,7 +376,7 @@ design, so it has no OS dependencies and builds identically on wasm. That
 makes the host responsible, and Tinker is the host. This is a render-parity
 blocker on the widest class of real files, it appears in no phase plan, and it
 must land *before* any golden comparison or every comparison measures the
-absence of text. See [gaps/28](gaps/28-tinker-integration-decisions.md).
+absence of text. See gaps/28.
 
 **The deletion checklist is unverified against Tinker's current tree.** Its
 paths were checked at planning time, which was the scaffolding commit. The
@@ -401,7 +401,7 @@ than in gap 28, because a gap document is the record of what was believed at
 planning time and this plan is the record of what is true.
 
 **The corpus has run, and it settles less of Checkpoint B than it looks.**
-[gaps/23](gaps/23-corpus-runner.md): 4 525 files from pdf.js, veraPDF, qpdf's
+gaps/23: 4 525 files from pdf.js, veraPDF, qpdf's
 qtest and the PDF Association, one child process each, 20 s timeout, 72 dpi —
 **4 484 rendered every page, 40 failed, 1 timed out, and not one crashed.**
 
