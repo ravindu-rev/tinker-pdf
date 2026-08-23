@@ -16,45 +16,49 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 911 tests proving the
+These come before any new feature. The suite is 2 924 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **First-party verification.** Ruling 13 retires the subprocess oracles,
-  and between that decision and the last replacement this suite is losing
-  evidence it has not yet regained — `epub_browser.rs` and the epubcheck
-  verdicts each remain the only outside read of something.
-  Evidence: the four properties [verification.md](verification.md) names as
-  not coming back. The order is fixed — nothing is deleted before the check
-  replacing it exists and has been injection-counted, and the steps keep the
-  numbers the allowance rows in `xtask/src/main.rs` cite:
-  5. EPUB reftest pairs and analytic layout, then `epub_browser.rs`, the
-     browser job, and the epubcheck step. (M)
+- **First-party verification.** Ruling 13 retires the subprocess oracles.
+  **No test and no CI job invokes one any more**; what is left of this item is
+  the two tiers of first-party evidence the last oracle's departure was
+  supposed to buy, and until they exist the suite is thinner than the count
+  suggests. Evidence: the four properties
+  [verification.md](verification.md) names as not coming back. The order is
+  fixed — nothing is deleted before the check replacing it exists and has been
+  injection-counted, and the steps keep the numbers the allowance rows in
+  `xtask/src/main.rs` cite:
   6. Analytic raster fixtures: pages whose correct raster is computable in
      closed form by an independent in-test function. (M)
   7. Metamorphic probes over the real corpus — rotation, cropping and
      resolution coherence — with their own ratchet rows. (M)
   8. `tools/oracle-diff` deleted; the suite recounted. (S)
 
-  Steps 1 to 4 are done: `cargo xtask oracles` holds the boundary with a
+  Steps 1 to 5 are done: `cargo xtask oracles` holds the boundary with a
   build failure, the honesty pass corrected two claims about checks that were
   never wired, the strict validator retired the four qpdf tests and their
-  job, and `xps_conservation.rs` retired `xps_mutool.rs` and its job. The
-  validator found three defects in this engine's own output on the way — a
-  missing trailer `/ID`, a stale `/Prev` carried into a rewrite, and a
-  cross-reference table with no free head — and its structural tier now runs
-  over a rewrite of every corpus file with its own ratchet row.
+  job, `xps_conservation.rs` retired `xps_mutool.rs` and its job, and
+  `epub_analytic.rs` and `epub_reftest.rs` retired `epub_browser.rs`, the
+  browser job and the epubcheck step. The validator found three defects in
+  this engine's own output on the way — a missing trailer `/ID`, a stale
+  `/Prev` carried into a rewrite, and a cross-reference table with no free
+  head — and its structural tier now runs over a rewrite of every corpus file
+  with its own ratchet row.
 
-  Step 4 found one too, and it is the kind an injection matrix exists to
-  find rather than a defect in shipped output: composing the painter's open
-  scopes outermost-first was caught by **nothing at all** — 0 of 892 — because
-  every `RenderTransform` in all eight committed packages is a translation and
-  two translations commute. Two nested canvases that do not commute close it.
-  What left with the oracle is stated in [verification.md](verification.md)
-  and is not narrowed by what replaced it.
+  Steps 4 and 5 each found a hole nothing in the suite could see, which is
+  what an injection matrix is for. Composing the painter's open scopes
+  outermost-first was caught by **nothing at all** — 0 of 892 — because every
+  `RenderTransform` in all eight committed XPS packages is a translation and
+  two translations commute; two nested canvases that do not commute close it.
+  And of step 5's six injections, **two were caught by the new suites alone**
+  out of 2 935 tests, the browser oracle included: `text-indent` ignored, and
+  CSS 2.2 §13.3.2's `orphans` and `widows` ignored. What left with each oracle
+  is stated in [verification.md](verification.md) and is not narrowed by what
+  replaced it.
 
   Exit: no test or CI job spawns a program the workspace did not build,
   `cargo xtask oracles` is green in `cargo xtask check`, and every row of

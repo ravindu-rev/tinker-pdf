@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 911 passed, 0 failed, 8 ignored** across 120 suites on
+is **2 924 passed, 0 failed, 8 ignored** across 121 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -127,19 +127,20 @@ real producers emitted, published normative data (Adobe's CMap resources,
 the Unicode character database), and the committed output of a tool that was
 run once, which is a dated measurement rather than a check.
 
-**This is a migration, and this section says where it stands rather than
-implying it is finished.** Ruling 9's subprocess oracles are being replaced
-one at a time, and the order is fixed: no oracle test or CI job is deleted
-before the first-party check that replaces it exists and has been
-injection-counted. Until then the old job still runs, and this table is what
-is true today. The [roadmap](ROADMAP.md) carries the milestones.
+**The migration's deletions are finished and the table below is the record of
+them.** No test and no CI job in this repository invokes an outside program to
+adjudicate a document any more. The order was fixed throughout: no oracle test
+or job was deleted before the first-party check replacing it existed and had
+been injection-counted. What that cost is the third column of the last two rows
+and the four properties named further down — the [roadmap](ROADMAP.md) carries
+the two tiers of evidence still owed.
 
 | Was proving | Oracle | Replaced by | State |
 | --- | --- | --- | --- |
 | Written output is a well-formed PDF to a reader nobody here wrote | `qpdf --check`, `--show-linearization` (`qpdf_oracle.rs`, plus CBZ/XPS/EPUB variants) | The strict validator (below), plus `validated_output.rs` and the three container files reading every value back out of the dictionaries | **done** |
 | A second program's reading of an XPS package matches ours | `xps_mutool.rs` | `xps_conservation.rs`: a census of the markup by an independent in-test walk, against a census of the document synthesised from it | **done** |
-| CSS layout against the reference implementation of CSS | `epub_browser.rs` | Reftest pairs and analytic layout over fixed metrics | still running |
-| Whose fault an engine-versus-book EPUB disagreement is | epubcheck 5.3.0 (`tests/epub/EPUBCHECK.tsv`) | Nothing. The verdicts stand as a dated record, never re-run | still running |
+| CSS layout against the reference implementation of CSS | `epub_browser.rs` | `epub_analytic.rs`, whose every expected number is computed in the test, and `epub_reftest.rs`, which lays out pairs the specification says are one document | **done** |
+| Whose fault an engine-versus-book EPUB disagreement is | epubcheck 5.3.0 (`tests/epub/EPUBCHECK.tsv`) | Nothing. The verdicts stand as a dated record, never re-run | **done** |
 | JPEG 2000 decode against a decoder sharing no code | *(none — see below)* | Committed reference decodes, already offline | **done** |
 
 ### The strict validator
@@ -210,6 +211,52 @@ other seven injections were already caught by between 3 and 29 assertions each,
 so what conservation adds is breadth over the real packages and that one hole —
 not sole custody of seven defect classes.
 
+### EPUB analytic layout, and reftest pairs
+
+`epub_browser.rs` printed a document in a headless Chromium and compared the
+column, the pagination, the floats, the tables and the flex containers against
+this engine's. It was ruling 9's fifth oracle and the one added *because a
+previous oracle was not good enough*: an engine whose EPUB layout is itself a
+partial CSS implementation is not a reference, and a browser is. Ruling 13
+retires it, and the two files that replace it are honest about being two
+different kinds of evidence.
+
+**`epub_analytic.rs` computes the answer.** `BookMetrics::STANDARD` measures
+with the standard 14, and Courier's advance is exactly 600/1000 of the em for
+every character — a number in the specification's own Appendix D rather than
+one this repository chose. So a document set in `monospace` has a line breaker
+with a closed form, and every expected value in the file is arithmetic the test
+does: `floor(measure / 0.6 × size)` characters to a line, baselines
+`line-height` apart, adjoining margins collapsed to the larger, padding and
+border adding on the content edge, `text-indent` on the first line and no
+other, a float shortening the lines beside it and none below, and CSS 2.2
+§13.3.2's `orphans` and `widows` deciding where a column breaks.
+
+**`epub_reftest.rs` needs no answer at all.** It lays out pairs of documents the
+specification says are one document — a `margin` shorthand against its four
+longhands, `1.5em` against `24px`, `50%` against `120px`, `<b>` against a bold
+`<span>`, an implied `<tbody>` against an explicit one, two collapsed margins
+against the single larger one — and requires that this engine agree. Nobody has
+to know where the boxes go. Every pair carries a **mismatch reference**: the
+same side with one declaration changed, which must *fail*, because a pair that
+cannot disagree proves nothing and two empty documents agree perfectly.
+
+Six injections were counted before the browser was deleted, over the whole
+2 935-test workspace with the oracle still in it. Four were caught by between 2
+and 10 assertions each. **Two were caught by the new suites alone**: dropping
+`text-indent`, and ignoring `orphans` and `widows` — both invisible to the
+browser oracle, which compares a continuous column and a five-page print at one
+page box. What the new suites do not have is the browser's own claim, and it is
+the largest single thing this migration cost: an independent implementation of
+CSS said where the boxes went, and now nothing does.
+
+The epubcheck row is not a replacement either. `tests/epub/EPUBCHECK.tsv` holds
+what epubcheck 5.3.0 said about the six committed books when it was run, and it
+is now a dated measurement: nothing re-runs it, and when this engine and a book
+disagree there is no longer an arbiter to say whose fault it is. What the record
+still does is hold the corpus to having a verdict per book and to the set of
+books the tool was unhappy with, so a book added without one is a visible gap.
+
 The JPEG 2000 row is not a replacement so much as a correction.
 `jpx_reference.rs` never invoked anything: it compares against `.opj.pgm`
 files committed once, with the commands, the tool version and the date in
@@ -240,13 +287,16 @@ unfetched corpus or a skipped test exits 0 and reads exactly like a pass, so
 every job that depends on something being present prints a `RAN` / `SKIPPED`
 line and greps its own log. This was established by measurement — removing
 qpdf from `PATH` and watching `cargo test` report `2 passed` — and it
-outlives the oracles it was built for. The qpdf job it was written for is
+outlives the oracles it was built for — which is the point of restating it
+here now that the last of them is gone. The qpdf job it was written for is
 gone; the same grep now proves the *strict pass* ran, because a child that
 skipped it would leave every file "not eligible", which reads as a run that
 measured nothing rather than as a regression. `corpus.yml` and the
-fetched-EPUB job still need it, and `cargo xtask oracles` keeps the boundary
-itself from eroding by holding a build failure over any test that spawns a
-program the workspace did not build.
+fetched-EPUB job still need it, for the reason that job has always had: the
+books it reads cannot be committed, so they can fail to arrive as well as fail
+to read, and both look like a green tick. `cargo xtask oracles` keeps the
+boundary itself from eroding by holding a build failure over any test that
+spawns a program the workspace did not build.
 
 ## Bounds are measured against real inputs
 

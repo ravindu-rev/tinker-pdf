@@ -597,13 +597,19 @@ fn the_plates_are_written_in_reverse_of_the_order_the_book_names_them() {
     );
 }
 
-// ---- epubcheck --------------------------------------------------------------
-
-/// Printed once per test that actually invoked epubcheck. CI greps for it.
-const EPUBCHECK_RAN: &str = "epubcheck-oracle: RAN";
-
-/// Printed once per test that could not. CI greps for it too, and fails.
-const EPUBCHECK_SKIPPED: &str = "epubcheck-oracle: SKIPPED";
+// ---- the epubcheck record ---------------------------------------------------
+//
+// **A dated measurement, not a check** (ruling 13, roadmap step 5). epubcheck
+// 5.3.0 was run once over the committed corpus, on 2026-08-23, and what it said
+// is `EPUBCHECK.tsv`. Nothing re-runs it: ruling 13 does not let a program
+// outside this repository adjudicate a document, and the roadmap records that
+// what leaves with it does not come back — when this engine and a book disagree
+// there is no longer an arbiter to say whose fault it is.
+//
+// The record still earns its place, and the test below is why: it holds the
+// corpus to having a verdict for every book and to the *set* of books the tool
+// was unhappy with. A book added without one is a gap in the record, and a
+// corpus quietly reshuffled is a different corpus.
 
 /// One row of `EPUBCHECK.tsv`.
 #[derive(Debug, PartialEq, Eq)]
@@ -686,99 +692,6 @@ fn every_book_has_a_recorded_epubcheck_verdict() {
         ["calibre-book-cover.epub"],
         "the set of books epubcheck is unhappy with changed"
     );
-}
-
-/// Re-runs epubcheck and checks the recorded verdicts still hold.
-///
-/// Ruling 9's posture: epubcheck is a subprocess, never a dependency, nothing
-/// is vendored, and its output is a transient comparison reference. What it
-/// gives is exactly one thing and it is worth having — **when this engine and a
-/// book disagree, epubcheck says whose fault it is.**
-///
-/// Set `TINKER_EPUBCHECK` to `epubcheck.jar` or to an `epubcheck` executable;
-/// `TINKER_JAVA` names the JVM when `java` is not on `PATH`.
-#[test]
-fn the_recorded_epubcheck_verdicts_still_hold() {
-    let Some(command) = epubcheck() else {
-        println!("{EPUBCHECK_SKIPPED} -- TINKER_EPUBCHECK is unset or does not run");
-        return;
-    };
-    println!("{EPUBCHECK_RAN} over {} committed books", BOOKS.len());
-    let recorded = recorded_verdicts();
-    for entry in BOOKS {
-        let path = corpus_dir().join(entry.file);
-        let mut run = std::process::Command::new(&command[0]);
-        run.args(&command[1..]).arg(&path);
-        let output = run
-            .output()
-            .unwrap_or_else(|e| panic!("epubcheck did not run over {}: {e}", entry.file));
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        let fresh = parse_epubcheck(&text);
-        assert_eq!(
-            fresh, recorded[entry.file],
-            "{}: epubcheck now says something else",
-            entry.file
-        );
-    }
-}
-
-/// How to invoke epubcheck, or `None`.
-///
-/// A version query rather than a `which`: a jar that will not start is not an
-/// oracle, and this is the one call whose failure means *skip* rather than
-/// *fail*.
-fn epubcheck() -> Option<Vec<String>> {
-    let named = std::env::var("TINKER_EPUBCHECK").ok()?;
-    let command = if named.ends_with(".jar") {
-        let java = std::env::var("TINKER_JAVA").unwrap_or_else(|_| "java".to_owned());
-        vec![java, "-jar".to_owned(), named]
-    } else {
-        vec![named]
-    };
-    let ok = std::process::Command::new(&command[0])
-        .args(&command[1..])
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    ok.then_some(command)
-}
-
-/// Counts `SEVERITY(CODE)` occurrences in epubcheck's own output.
-///
-/// The text form rather than `--json`, because parsing JSON here would mean
-/// either a dependency this repository does not take or a parser nobody asked
-/// for. The severities are the five epubcheck prints, and `USAGE` is counted
-/// under its own name rather than folded into the informational bucket.
-fn parse_epubcheck(text: &str) -> Verdict {
-    let mut verdict = Verdict {
-        fatal: 0,
-        error: 0,
-        warning: 0,
-        usage: 0,
-        messages: Vec::new(),
-    };
-    for line in text.lines() {
-        for (severity, count) in [
-            ("FATAL", &mut verdict.fatal),
-            ("ERROR", &mut verdict.error),
-            ("WARNING", &mut verdict.warning),
-            ("USAGE", &mut verdict.usage),
-        ] {
-            let prefix = format!("{severity}(");
-            if let Some(rest) = line.strip_prefix(&prefix) {
-                if let Some(end) = rest.find(')') {
-                    *count += 1;
-                    verdict
-                        .messages
-                        .push(format!("{severity}:{}", &rest[..end]));
-                }
-            }
-        }
-    }
-    verdict.messages.sort();
-    verdict.messages.dedup();
-    verdict
 }
 
 // ---- the doctype census -----------------------------------------------------

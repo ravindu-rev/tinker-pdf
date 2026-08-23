@@ -864,11 +864,7 @@ fn a_page_states_its_own_size_and_not_a_letter_one() {
 #[test]
 fn a_png_and_a_jpeg_each_state_their_own_pixels() {
     for (name, bytes, wanted) in [
-        (
-            "Resources/p.png",
-            rgb_png(7, 5, &[255; 7 * 5 * 3]),
-            (7, 5),
-        ),
+        ("Resources/p.png", rgb_png(7, 5, &[255; 7 * 5 * 3]), (7, 5)),
         ("Resources/p.jpg", grey_jpeg(24, 16), (24, 16)),
     ] {
         let source = format!("/{name}");

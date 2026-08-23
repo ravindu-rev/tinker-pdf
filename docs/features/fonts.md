@@ -184,7 +184,7 @@ let doc = Document::open(bytes)?
   targets, asserting a least-ink floor so a face that stops drawing cannot
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
-- The whole workspace stands at 2 911 passed / 0 failed / 8 ignored
+- The whole workspace stands at 2 924 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026), and the corpus run — 4 525 files, 4 484
   rendered every page, 0 crashes — exercises real embedded fonts of every
   kind here. See [verification](../verification.md).

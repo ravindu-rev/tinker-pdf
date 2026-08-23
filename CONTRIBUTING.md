@@ -145,16 +145,16 @@ its file is listed in `SPAWNERS` with the reason it may — and a row there
 whose file has stopped spawning fails too, so an allowance cannot outlive
 the thing it allowed.
 
-Two rows are still `DEBT`: the browser and epubcheck oracles of retired
-ruling 9 have not been replaced yet, and each row names the roadmap step that
-removes it. The four qpdf rows are gone — the strict validator replaced them —
-and so is the mutool row, replaced by `xps_conservation.rs`. Every allowance
-left in the same commit as the test it allowed. Until the rest go those tests still run, and they still must not
-skip silently — a skip exits 0 and reads exactly like a pass, so each CI job
-greps its own output for a `RAN` banner and fails on `SKIPPED`. That `RAN` /
-`SKIPPED` discipline outlives the oracles: it binds every check that depends
-on something being present, the fetched corpora and the corpus run's own
-strict pass included.
+**No row is a test oracle any more.** The four qpdf rows left with the strict
+validator, the mutool row with `xps_conservation.rs`, and the browser and
+epubcheck rows with `epub_analytic.rs` and `epub_reftest.rs` — every allowance
+in the same commit as the test it allowed. One `DEBT` row is left and it is a
+tool nothing calls: `tools/oracle-diff`, deleted at the roadmap's step 8.
+
+The `RAN` / `SKIPPED` discipline outlives the oracles it was written for. A
+skip exits 0 and reads exactly like a pass, so every job that depends on
+something being present greps its own output for a banner and fails without
+one — the fetched corpora and the corpus run's own strict pass included.
 
 ## Commits and licensing
 

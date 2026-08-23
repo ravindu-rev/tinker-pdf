@@ -546,19 +546,6 @@ fn check_libm() -> Result<(), Vec<String>> {
 /// standing for a year after the debt is paid.
 const SPAWNERS: &[(&str, &str)] = &[
     (
-        "crates/tinker-pdf/tests/epub_browser.rs",
-        "DEBT (step 5): a headless browser lays out the committed books. \
-         Retired ruling 9's own reasoning is that a browser is the reference \
-         implementation of CSS, so this is the costliest row to lose. Leaves \
-         with the reftest pairs",
-    ),
-    (
-        "crates/tinker-pdf/tests/epub.rs",
-        "DEBT (step 5): epubcheck says whose fault an engine-versus-book \
-         disagreement is. Leaves when EPUBCHECK.tsv freezes into a dated \
-         record with no arbiter behind it",
-    ),
-    (
         "tools/oracle-diff/src/main.rs",
         "DEBT (step 8): retired ruling 9's external-renderer harness. Wired \
          into no test and no CI job; the whole tool is deleted",
