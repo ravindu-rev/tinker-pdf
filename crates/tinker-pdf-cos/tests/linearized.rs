@@ -822,7 +822,7 @@ fn the_fixture_streams_encrypt_to_genuinely_different_lengths() {
 
     let mut streams = 0usize;
     let mut total_growth = 0u64;
-    for num in 1..=doc.max_object_number() {
+    for (num, _) in doc.xref().iter() {
         let r = ObjRef::new(num, 0);
         let Ok(object) = doc.get(r) else { continue };
         let Object::Stream(stream) = object.as_ref() else {

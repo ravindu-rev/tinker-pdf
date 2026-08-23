@@ -565,10 +565,13 @@ fn object_lines(cos: &CosDocument) -> Vec<String> {
 
     let highest = cos.max_object_number();
     lines.push(format!("  objects (highest number {highest})"));
-    for number in 1..=highest {
-        let Some(entry) = cos.xref().get(number) else {
+    // Over the entries the table has, not over the range it spans. A file
+    // numbering one object `i32::MAX` — and the corpus has one — otherwise
+    // costs two thousand million lookups to list four objects.
+    for (number, entry) in cos.xref().iter() {
+        if number == 0 {
             continue;
-        };
+        }
         let (kind, generation) = match entry {
             XrefEntry::Free { gen, .. } => ("free".to_string(), gen),
             XrefEntry::Offset { offset, gen } => (format!("at {offset}"), gen),
@@ -972,7 +975,12 @@ fn metamorphic(doc: &Document, options: &Options, spent: std::time::Duration) {
     // timeout was the symptom.
     match cleanly_read(doc) {
         None => {
+            // A phase line before each: both rewrite and reopen the document,
+            // which is several seconds of silence on a large file — and is
+            // where a rewrite that does not terminate stops.
+            println!("phase meta-rotate");
             rotation(doc, &base, &render).print("rotate");
+            println!("phase meta-crop");
             cropping(doc, &page, &base, &render).print("crop");
         }
         Some(why) => {
@@ -981,6 +989,7 @@ fn metamorphic(doc: &Document, options: &Options, spent: std::time::Duration) {
         }
     }
     // `dpi` rewrites nothing, so it is asked of every document that rendered.
+    println!("phase meta-dpi");
     resolution(&page, &base, &render).print("dpi");
 }
 
@@ -1207,6 +1216,14 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     println!("probe {PROBE_VERSION}");
     println!("file {path}");
 
+    // `phase` lines are the corpus runner's progress signal, and the reason
+    // they work needs no protocol: Rust's stdout is a `LineWriter`, so each
+    // one reaches the capture file when it is printed. A child killed at the
+    // timeout having printed nothing for half of it was not making progress,
+    // and the runner reports that as `stalled` rather than as a slow file.
+    // `parse_record` ignores keys it does not know, so these cost an older
+    // runner nothing.
+    println!("phase open");
     let doc = match open(path, options.password.as_deref(), fonts) {
         Ok(doc) => doc,
         Err(message) => {
@@ -1247,11 +1264,17 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         annotations: options.annotations,
         ..RenderOptions::at_dpi(options.dpi)
     };
+    println!("phase render");
     let mut rendered = 0u32;
     for index in options.pages(&doc) {
         let Some(page) = doc.page(index) else {
             continue;
         };
+        // Before the page rather than after it, so the line names the page
+        // being worked on when a kill arrives rather than the last one that
+        // finished. The runner never reads the number, only the fact that the
+        // capture file grew; the number is for whoever reads the report.
+        println!("page {}/{pages}", index + 1);
         let bitmap = page.render(&render);
         // Ruling 2's definition, and the one the ratchet counts: a bitmap
         // came back. A page rendered with a JBIG2 placeholder on it rendered.
@@ -1264,6 +1287,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     }
     println!("rendered {rendered}");
 
+    println!("phase strict");
     strict(&doc);
     metamorphic(&doc, options, started.elapsed());
 
@@ -1405,11 +1429,14 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
 /// exactly the features that are hardest to reach.
 fn capabilities(cos: &CosDocument) -> BTreeSet<&'static str> {
     let mut found = BTreeSet::new();
-    for number in 1..=cos.max_object_number() {
-        let generation = match cos.xref().get(number) {
-            Some(XrefEntry::Offset { gen, .. }) => gen,
-            Some(XrefEntry::InStream { .. }) => 0,
-            Some(XrefEntry::Free { .. }) | None => continue,
+    // The same, and this one was measured: `probe` over
+    // `pdfjs/test/pdfs/bug1980958.pdf` took 61 seconds, all of it here, for a
+    // 219-byte file that opens and renders in a twentieth of a second.
+    for (number, entry) in cos.xref().iter() {
+        let generation = match entry {
+            XrefEntry::Offset { gen, .. } => gen,
+            XrefEntry::InStream { .. } => 0,
+            XrefEntry::Free { .. } => continue,
         };
         let Ok(object) = cos.get(ObjRef::new(number, generation)) else {
             continue;
@@ -1623,8 +1650,8 @@ mod tests {
         let cos = doc.cos();
         let lines = object_lines(cos).join("\n");
 
-        for number in 1..=cos.max_object_number() {
-            if cos.xref().get(number).is_some() {
+        for (number, _) in cos.xref().iter() {
+            if number > 0 {
                 assert!(
                     lines.contains(&format!("    {number:>6} ")),
                     "object {number} is in the table and must be listed: {lines}"

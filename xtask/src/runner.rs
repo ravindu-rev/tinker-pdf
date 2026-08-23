@@ -10,7 +10,30 @@
 //!
 //! So: a process per file, killed after a timeout, and **both** states are
 //! results rather than absences. A file that aborts is `Crashed`; a file that
-//! hangs is `TimedOut`; the report carries them and the run continues.
+//! runs out of time is `TimedOut` or `Stalled`; the report carries them and
+//! the run continues.
+//!
+//! ## How a hang is told from a slow file
+//!
+//! By whether the child was still saying anything. Rust's stdout is a
+//! `LineWriter`, so every line the child prints reaches the capture file when
+//! it is printed rather than when the process ends — which means the capture
+//! file's *length* is a progress signal available to the runner for free,
+//! without a pipe, a second thread or a protocol.
+//!
+//! A child killed at the timeout having written something recently was making
+//! progress and is `TimedOut`: a slow file. One that had written nothing for
+//! half its budget is `Stalled`, and that is the state a non-terminating loop
+//! produces. The distinction is not free of judgement and the limit is worth
+//! stating plainly: a single unit of work longer than the stall window — one
+//! enormous page — is silent for the same reason a hang is, and reads as
+//! `Stalled`. What the runner can say honestly is "made no observable progress
+//! for half its budget", and `at` names the phase it was in when it stopped.
+//!
+//! This was written because a real one got through. `pdfjs/test/pdfs/
+//! bug1980958.pdf` is 219 bytes and rendered in under two seconds, and a
+//! rewrite of it did not terminate; the corpus run recorded a timeout, which
+//! is what it records for a 900-page scan, and nobody looked.
 //!
 //! ## How a crash is told from a failure
 //!
@@ -19,7 +42,7 @@
 //!
 //! - record ends in `done` — the child finished, and the record says what it
 //!   found, including that a file would not open;
-//! - no `done`, and we killed it — `TimedOut`;
+//! - no `done`, and we killed it — `TimedOut` or `Stalled`;
 //! - no `done`, and it exited on its own — `Crashed`, whatever the status.
 //!
 //! An exit code alone cannot do this. A panic that unwinds to a `main`
@@ -62,8 +85,15 @@ pub enum Outcome {
     Failed(String),
     /// The child died without finishing its record.
     Crashed(String),
-    /// The child was still running when the timeout expired, and was killed.
-    TimedOut,
+    /// The child was still running when the timeout expired, and was killed
+    /// while it was still writing. A slow file.
+    ///
+    /// `at` is the last phase the child announced, or an empty string from a
+    /// child too old to announce one.
+    TimedOut { at: String },
+    /// The child was killed at the timeout having written nothing for half of
+    /// it. A hang, or one unit of work longer than that window.
+    Stalled { at: String },
 }
 
 impl Outcome {
@@ -73,7 +103,8 @@ impl Outcome {
             Outcome::Passed => "passed",
             Outcome::Failed(_) => "failed",
             Outcome::Crashed(_) => "crashed",
-            Outcome::TimedOut => "timed_out",
+            Outcome::TimedOut { .. } => "timed_out",
+            Outcome::Stalled { .. } => "stalled",
         }
     }
 }
@@ -268,7 +299,21 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         }
     };
 
+    // How long the child may write nothing before the runner stops calling it
+    // slow and starts calling it stalled. Half the budget: a proportion rather
+    // than a constant, because it has to mean the same thing at `--timeout 5`
+    // and `--timeout 60`, and because a floor large enough to be safe at one
+    // end is larger than the whole budget at the other. `--timeout 0` is
+    // refused on the command line, so this is never zero.
+    let stall_window = timeout / 2;
+
     let mut killed = false;
+    let mut said = 0u64;
+    let mut last_spoke = started;
+    // The capture file's length is checked on its own clock rather than every
+    // poll: four thousand children polled every two milliseconds would be a
+    // great many `stat` calls to answer a question that changes slowly.
+    let mut next_look = started;
     loop {
         match process.try_wait() {
             Ok(Some(_)) => break,
@@ -281,6 +326,15 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
                 break;
             }
         }
+        let now = Instant::now();
+        if now >= next_look {
+            next_look = now + Duration::from_millis(100);
+            let written = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+            if written != said {
+                said = written;
+                last_spoke = now;
+            }
+        }
         if started.elapsed() >= timeout {
             let _ = process.kill();
             let _ = process.wait();
@@ -291,6 +345,7 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         // long enough that four thousand of them do not spin a core.
         std::thread::sleep(Duration::from_millis(2));
     }
+    let silent_for = last_spoke.elapsed();
 
     let millis = started.elapsed().as_millis() as u64;
     let stdout = read_and_remove(&out_path);
@@ -314,7 +369,12 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
     // already decided not to wait for it and counting it as a pass would make
     // the timeout depend on scheduling luck.
     if killed {
-        result.outcome = Outcome::TimedOut;
+        let at = last_phase(&stdout);
+        result.outcome = if silent_for >= stall_window {
+            Outcome::Stalled { at }
+        } else {
+            Outcome::TimedOut { at }
+        };
     }
     result
 }
@@ -328,6 +388,25 @@ fn read_and_remove(path: &Path) -> String {
     }
     let _ = std::fs::remove_file(path);
     text
+}
+
+/// The last phase the child announced, or an empty string.
+///
+/// `phase` is an ordinary record key, so a child that does not write one is
+/// not an error — it is a child that cannot say where it stopped, and the
+/// stalled/slow verdict does not depend on it. The `page k/n` lines a render
+/// writes count too, because "stopped at page 340 of 900" is the most useful
+/// answer this can give.
+pub fn last_phase(text: &str) -> String {
+    text.lines()
+        .rev()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("phase ")
+                .or_else(|| line.strip_prefix("page ").map(|_| line))
+                .map(|rest| rest.trim().chars().take(60).collect::<String>())
+        })
+        .unwrap_or_default()
 }
 
 fn last_meaningful_line(text: &str) -> Option<String> {

@@ -16,23 +16,13 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 939 tests proving the
+These come before any new feature. The suite is 2 943 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **A rewrite that does not come back.** `pdfjs/test/pdfs/bug1980958.pdf` is
-  219 bytes, opens through the rescan ladder with a synthesised root, and
-  renders its 10 × 10 page in under two seconds — and `editor().save()` over
-  it had not returned after three minutes. Found by step 7's rotation
-  relation, which is why that relation is asked only of files this engine read
-  cleanly. Nothing in the suite covers it: the corpus runner's timeout reads a
-  hang as a slow file, and ruling 1's fuzzers prove no crash rather than
-  progress. Evidence: one corpus file, reproducible in a second.
-  Exit: the rewrite terminates, with a test over a rescued document that
-  asserts it; and the corpus runner tells a hang from a slow file. (S)
 - **The macOS and wasm determinism legs, observed.** Three of ruling 4's
   four targets are measured on one machine
   ([features/determinism.md](features/determinism.md)); macOS is claimed

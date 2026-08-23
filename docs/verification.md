@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 939 passed, 0 failed, 8 ignored** across 122 suites on
+is **2 943 passed, 0 failed, 8 ignored** across 122 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -70,7 +70,18 @@ timeout):
 
 **Not one crash.** Ruling 1 held against thousands of files nobody here
 authored, which is worth more than the fuzzers, because these are documents
-real producers emitted rather than mutations. The second axis — 1 045 files
+real producers emitted rather than mutations. A crash is one of four states the
+runner can report, and the fourth is newer than the rest: a child killed at the
+timeout is **stalled** if it had written nothing for half its budget and merely
+**timed out** if it was still naming pages. Rust's stdout is line-buffered, so
+the capture file's length is a progress signal the runner gets without a pipe
+or a protocol, and the report names the phase the child stopped in. The
+distinction was added because a real defect used the old one to hide: a 219-byte
+file that rendered in under two seconds did not finish a rewrite in three
+minutes, and "timed out" is also what a 900-page scan says. The limit of the
+signal is worth stating — one unit of work longer than the stall window is
+silent for the same reason a hang is, so what the runner claims honestly is
+*made no observable progress for half its budget*. The second axis — 1 045 files
 (23 %) rendering *with something reported* — is measured without font
 faces: this build bundles none, so the number is dominated by documents
 that draw no text without a provider, `ratchet.json` says so in its own

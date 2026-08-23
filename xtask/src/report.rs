@@ -252,6 +252,18 @@ impl Run {
                         {
                             fields.push(("reason", Json::string(reason)));
                         }
+                        // Where a killed child had got to. Written for both
+                        // states rather than only for the stalled one: "timed
+                        // out at page 340 of 900" and "stalled at strict" are
+                        // the two sentences that save whoever reads this from
+                        // reproducing the run before they can start on it.
+                        if let crate::runner::Outcome::TimedOut { at }
+                        | crate::runner::Outcome::Stalled { at } = &file.outcome
+                        {
+                            if !at.is_empty() {
+                                fields.push(("at", Json::string(at)));
+                            }
+                        }
                         if !file.capabilities.is_empty() {
                             fields.push((
                                 "capabilities",
@@ -423,7 +435,7 @@ impl Run {
             let outcomes = corpus.outcomes();
             lines.push(format!(
                 "{:<14} {:>6} files  {:>6} passed  {:>6} degraded  \
-                 (failed {}, crashed {}, timed out {})",
+                 (failed {}, crashed {}, timed out {}, stalled {})",
                 corpus.name,
                 corpus.total(),
                 corpus.passed(),
@@ -431,6 +443,11 @@ impl Run {
                 outcomes.get("failed").copied().unwrap_or(0),
                 outcomes.get("crashed").copied().unwrap_or(0),
                 outcomes.get("timed_out").copied().unwrap_or(0),
+                // Its own column, not folded into the one before it. A stalled
+                // file is a defect in this engine and a timed-out one is a
+                // large document; a single number for both is what let a
+                // non-terminating rewrite sit in the corpus unnoticed.
+                outcomes.get("stalled").copied().unwrap_or(0),
             ));
         }
         lines.push(format!(
@@ -559,7 +576,14 @@ mod tests {
                     ),
                     file("c.pdf", Outcome::Failed("no".into()), &[], &["jpx"]),
                     file("d.pdf", Outcome::Crashed("boom".into()), &[], &[]),
-                    file("e.pdf", Outcome::TimedOut, &[], &[]),
+                    file(
+                        "e.pdf",
+                        Outcome::TimedOut {
+                            at: "page 3/900".into(),
+                        },
+                        &[],
+                        &[],
+                    ),
                 ],
             }],
             limits: Vec::new(),
