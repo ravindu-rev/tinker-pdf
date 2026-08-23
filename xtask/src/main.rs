@@ -37,6 +37,9 @@ release options:
   cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
                                  bindings/dotnet/runtimes/<rid>/native/
 
+  cargo xtask synth-face [--out PATH]    write the synthetic face `--fonts
+                                 synthetic` measures with, so it can be looked at
+
   cargo xtask corpus-fetch [--record] [--force] [--corpus NAME]
                                          fetch and verify the pinned corpora
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
@@ -47,12 +50,18 @@ corpus-run options:
   --timeout N     seconds per file before the child is killed (default 20)
   --dpi D         render resolution (default 72)
   --fonts PATH    a face, or directory of faces, for documents embedding none
+  --fonts synthetic
+                  the face this repository writes for itself, so the second
+                  bar needs no licence, no fetch and no runner image. The
+                  keyword wins over a directory of that name
   --jobs N        files at once (default: the core count)
   --sample N      at most N files per corpus, recorded as a limit
   --child PATH    the program to spawn (default: tpdf beside this binary)
   --report PATH   write the full per-file report here
-  --check         compare against corpus/ratchet.json; fail on a regression
-  --record        rewrite corpus/ratchet.json from this run
+  --check         compare against the bar for this --fonts setting; fail on a
+                  regression. corpus/ratchet.json without faces,
+                  corpus/ratchet-fonts.json with them — never each other
+  --record        rewrite that bar from this run
   --strict        with --check, a rise in the degradation rate also fails
 
   cargo xtask help
@@ -103,6 +112,7 @@ fn main() -> ExitCode {
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
+        "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -113,6 +123,37 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `cargo xtask synth-face` — write the face the second corpus bar uses.
+///
+/// Exists so the face is a file somebody can open rather than an argument
+/// nobody can inspect. `corpus-run --fonts synthetic` writes the same bytes to
+/// the same place and does not need this to have been run.
+fn synth_face(args: &[String]) -> Result<(), String> {
+    let root = repo_root();
+    let mut path = xtask::face::default_path(&root);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--out" => {
+                index += 1;
+                path = std::path::PathBuf::from(
+                    args.get(index).ok_or("`--out` needs a path")?.clone(),
+                );
+            }
+            other => return Err(format!("unknown option `{other}`")),
+        }
+        index += 1;
+    }
+    xtask::face::write(&path)?;
+    println!(
+        "synth-face: wrote {} ({} bytes, {})",
+        path.display(),
+        xtask::face::bytes().len(),
+        xtask::face::SYNTHETIC
+    );
+    Ok(())
 }
 
 /// A task whose failure is one message rather than a list of problems.

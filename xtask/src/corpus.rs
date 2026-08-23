@@ -42,8 +42,57 @@ pub fn licences(root: &Path, args: &[String]) -> Result<(), String> {
     ))
 }
 
-/// Where `ratchet.json` lives, relative to the repository root.
+/// Where the no-faces bar lives, relative to the repository root.
 pub const RATCHET_PATH: &str = "corpus/ratchet.json";
+
+/// Where the with-faces bar lives.
+///
+/// A second file rather than a second section of the first, and the reason is
+/// the one [`crate::ratchet`]'s module note gives: the two are different
+/// measurements and mixing them makes the ratchet meaningless. Two files means
+/// a run cannot even *read* the wrong bar, and the comparator's existing
+/// refusal — a bar recorded under one `--fonts` setting will not compare
+/// against a run under another — becomes the second lock rather than the only
+/// one.
+pub const RATCHET_FONTS_PATH: &str = "corpus/ratchet-fonts.json";
+
+/// The `--fonts` value that means "the face this repository writes for
+/// itself".
+///
+/// A keyword rather than a path. A directory of this name would be shadowed,
+/// which is stated in `--help`; the alternative is a second flag that can
+/// disagree with the first, and a run measured against a face nobody can
+/// identify afterwards is not a measurement.
+pub const SYNTHETIC_FONTS: &str = "synthetic";
+
+/// Which bar a run compares against, from what it was measured with.
+#[must_use]
+pub fn ratchet_path(fonts: &str) -> &'static str {
+    if fonts == "none" {
+        RATCHET_PATH
+    } else {
+        RATCHET_FONTS_PATH
+    }
+}
+
+/// What a run was measured with, and where the child should look for it.
+///
+/// Returns the name the report records and the path the child is given.
+fn resolve_fonts(root: &Path, args: &RunArgs) -> Result<(String, Option<String>), String> {
+    match args.fonts.as_deref() {
+        None => Ok(("none".to_string(), None)),
+        Some(SYNTHETIC_FONTS) => {
+            let path = crate::face::default_path(root);
+            crate::face::write(&path)?;
+            eprintln!("corpus-run: wrote the synthetic face to {}", path.display());
+            Ok((
+                crate::face::SYNTHETIC.to_string(),
+                Some(path.display().to_string()),
+            ))
+        }
+        Some(path) => Ok((path.to_string(), Some(path.to_string()))),
+    }
+}
 
 /// Everything `corpus-run`'s command line can say.
 #[derive(Clone, Debug)]
@@ -170,7 +219,8 @@ impl RunArgs {
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let args = RunArgs::parse(args)?;
     let corpora = lock::read(root)?;
-    let child = resolve_child(&args)?;
+    let (fonts, fonts_path) = resolve_fonts(root, &args)?;
+    let child = resolve_child(&args, fonts_path.as_deref())?;
 
     let mut limits: Vec<String> = Vec::new();
     if let Some(sample) = args.sample {
@@ -243,7 +293,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         settings: Settings {
             timeout_seconds: args.timeout.as_secs(),
             dpi: args.dpi,
-            fonts: args.fonts.clone().unwrap_or_else(|| "none".to_string()),
+            fonts,
         },
     };
 
@@ -262,7 +312,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         println!("\nwrote {}", path.display());
     }
 
-    let ratchet_path = root.join(RATCHET_PATH);
+    let bar_path = ratchet_path(&run.settings.fonts);
+    let ratchet_path = root.join(bar_path);
     if args.record {
         let note = ratchet_note(&run);
         std::fs::write(&ratchet_path, run.to_ratchet_json(&note).to_pretty())
@@ -284,7 +335,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if args.check {
         let text = std::fs::read_to_string(&ratchet_path)
             .map_err(|e| format!("{}: {e}", ratchet_path.display()))?;
-        let bar = ratchet::parse(&text).map_err(|e| format!("{RATCHET_PATH}: {e}"))?;
+        let bar = ratchet::parse(&text).map_err(|e| format!("{bar_path}: {e}"))?;
         let comparison = ratchet::compare(&bar, &run, args.strict);
 
         for note in &comparison.notes {
@@ -304,9 +355,15 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             return Err(format!("the corpus ratchet did not hold:{message}"));
         }
         if !comparison.improvements.is_empty() {
+            // With the flags that produced it: two bars now exist, and a
+            // hint that re-records the wrong one is worse than none.
+            let again = match args.fonts.as_deref() {
+                None => String::new(),
+                Some(fonts) => format!(" --fonts {fonts}"),
+            };
             println!(
                 "\nthe bar held, and moved. To take the new numbers:\n  \
-                 cargo run -p xtask -- corpus-run --record"
+                 cargo run -p xtask -- corpus-run --record{again}"
             );
         }
     }
@@ -319,7 +376,17 @@ fn ratchet_note(run: &Run) -> String {
         "WITHOUT font faces: this engine bundles none, so `degraded` here is \
          dominated by documents that embed no font and therefore draw no text. \
          It is a fact about this build's font policy as much as about the \
-         engine. Re-measure with --fonts to see the other number."
+         engine. Re-measure with --fonts synthetic to see the other number."
+    } else if run.settings.fonts == crate::face::SYNTHETIC {
+        "WITH the face this repository writes for itself \
+         (`cargo xtask synth-face`): every glyph from 32 up is the same \
+         filled box, so it answers `was a face available` and nothing \
+         else. The difference between this bar and the no-faces one is \
+         how much of the degradation was the absence of a face rather \
+         than a defect in the engine; neither figure says the text was \
+         set correctly. The face is versioned in this setting, so \
+         changing it invalidates the bar rather than silently moving \
+         it. Not comparable with a no-faces figure either."
     } else {
         "WITH font faces supplied, so `degraded` excludes the missing-face \
          term. It is not comparable with a no-faces figure and the comparator \
@@ -435,7 +502,7 @@ pub fn pdfs_under(dir: &Path) -> Vec<PathBuf> {
 /// same profile and the same revision as the runner. A `tpdf` found on `PATH`
 /// could be anything, and a corpus measured against last month's build that
 /// happened to be installed is worse than no measurement.
-fn resolve_child(args: &RunArgs) -> Result<Child, String> {
+fn resolve_child(args: &RunArgs, fonts: Option<&str>) -> Result<Child, String> {
     if let Some(path) = &args.child {
         if !path.exists() {
             return Err(format!("--child {}: no such program", path.display()));
@@ -466,9 +533,9 @@ fn resolve_child(args: &RunArgs) -> Result<Child, String> {
         "--dpi".to_string(),
         args.dpi.to_string(),
     ];
-    if let Some(fonts) = &args.fonts {
+    if let Some(fonts) = fonts {
         child_args.push("--fonts".to_string());
-        child_args.push(fonts.clone());
+        child_args.push(fonts.to_string());
     }
     Ok(Child {
         program: sibling,

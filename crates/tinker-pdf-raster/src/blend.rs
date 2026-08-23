@@ -98,10 +98,13 @@ impl BlendMode {
             BlendMode::ColorBurn => {
                 if cb >= 255 {
                     255
-                } else if cs == 0 {
-                    0
                 } else {
-                    255 - ((255 - cb) * 255 / cs).min(255)
+                    // 11.3.5: 1 - min(1, (1 - cb) / cs). A source of zero
+                    // makes that quotient infinite, so the min is 1 and the
+                    // result is 0 — the formula's own limit rather than a
+                    // special case, which is why it is spelled as the
+                    // division having no answer rather than as a branch.
+                    255 - ((255 - cb) * 255).checked_div(cs).unwrap_or(255).min(255)
                 }
             }
             BlendMode::HardLight => {

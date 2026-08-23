@@ -133,8 +133,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
+      # `--target` named explicitly. The cargo-fuzz that
+      # `taiki-e/install-action` puts on the runner is a musl build, and
+      # cargo-fuzz takes its own build triple as the default target — so
+      # it asked for `x86_64-unknown-linux-musl`, which links libc
+      # statically, which the address sanitizer refuses. Naming the target
+      # makes the job independent of how the tool it uses was compiled.
       - name: Build every target once
-        run: cargo fuzz build
+        run: cargo fuzz build --target x86_64-unknown-linux-gnu
         # `-D warnings` from a nightly compiler would fail this on a lint
         # that has nothing to do with the code under test.
         env:
@@ -145,7 +151,8 @@ jobs:
           failed=()
           for target in $(cargo fuzz list); do
             echo "::group::$target"
-            if ! cargo fuzz run "$target" "fuzz/corpus/$target" -- \
+            if ! cargo fuzz run --target x86_64-unknown-linux-gnu \
+                 "$target" "fuzz/corpus/$target" -- \
                  -max_total_time=20 -timeout=20; then
               failed+=("$target")
             fi

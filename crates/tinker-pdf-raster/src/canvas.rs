@@ -760,11 +760,17 @@ fn blend(
         *slot = if backdrop_alpha == 255 {
             // The fast path, and the old arithmetic exactly.
             (mul255(*mixed, alpha) + mul255(cb, inverse)).min(255) as u8
-        } else if union_out == 0 {
-            0
         } else {
             let weighted = mul255(*mixed, alpha) + mul255(mul255(cb, backdrop_alpha), inverse);
-            ((weighted * 255 + union_out / 2) / union_out).min(255) as u8
+            // A union alpha of zero means nothing is painted at this pixel at
+            // all, so there is nothing to renormalise against and the result
+            // is zero. Said as the division having no answer rather than as a
+            // branch above, which keeps the rounding term beside the quotient
+            // it rounds.
+            (weighted * 255 + union_out / 2)
+                .checked_div(union_out)
+                .unwrap_or(0)
+                .min(255) as u8
         };
     }
 

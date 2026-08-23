@@ -88,7 +88,10 @@ jobs:
 
       - name: Fuzz ${{ matrix.target }}
         run: |
-          cargo fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+          # See the note in ci.yml's `fuzz-seeds`: the installed
+          # cargo-fuzz defaults to a musl target the sanitizer refuses.
+          cargo fuzz run --target x86_64-unknown-linux-gnu \
+            ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
             -max_total_time=${{ github.event.inputs.seconds || 600 }} \
             -timeout=25 \
             -print_final_stats=1
@@ -118,7 +121,9 @@ jobs:
       # anyone running it locally to run it on a copy.
       - name: Minimise and attach the corpus
         if: success()
-        run: cargo fuzz cmin ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
+        run: |
+          cargo fuzz cmin --target x86_64-unknown-linux-gnu \
+            ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
       - name: Attach the minimised corpus
         if: success()
         uses: actions/upload-artifact@v4
