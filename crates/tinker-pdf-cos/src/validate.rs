@@ -38,6 +38,8 @@
 //! writer agrees with itself. `docs/verification.md` states that in its own
 //! voice; it is the property that left with the oracles.
 
+mod hints;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::doc::{CosDocument, LadderLevel};
@@ -345,6 +347,25 @@ pub enum DefectKind {
     /// 12.5.6.5: a link annotation names neither `/Dest` nor `/A`.
     LinkWithoutTarget,
 
+    // ---- linearization (Annex F) ------------------------------------------
+    /// F.2.2: a parameter dictionary that is not what it declares — `/L`
+    /// against the file's own length, `/N` against the pages, `/O` against the
+    /// first page's object, `/T` against the main table's first entry.
+    LinearizedParameterWrong {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// F.3/F.4: the primary hint stream cannot be read at all — no stream at
+    /// `/H`, no `/S`, or a table that runs out mid-field.
+    HintStreamUnreadable,
+    /// F.3/F.4: a hint table states a number the file's own object extents
+    /// contradict. This is the one the writer got wrong in five separate ways
+    /// while every test passed, because nothing had ever read it back.
+    HintValueWrong {
+        /// What the number describes.
+        entry: &'static str,
+    },
+
     // ---- stream extents and filters (7.3.8, 7.4) --------------------------
     /// 7.3.8.2: `/Length` is absent, or indirect and unresolvable.
     StreamLengthUnresolved,
@@ -412,7 +433,10 @@ impl DefectKind {
             | DefectKind::ObjStmOffsetOutOfRange { .. }
             | DefectKind::StreamLengthUnresolved
             | DefectKind::StreamLengthNotExact { .. }
-            | DefectKind::StreamDoesNotDecode => Tier::Structure,
+            | DefectKind::StreamDoesNotDecode
+            | DefectKind::LinearizedParameterWrong { .. }
+            | DefectKind::HintStreamUnreadable
+            | DefectKind::HintValueWrong { .. } => Tier::Structure,
 
             // What the document says rather than how the file is laid out. A
             // rewrite inherits every one of these from its source, which is
@@ -488,6 +512,9 @@ impl DefectKind {
             DefectKind::StreamLengthUnresolved => "stream-length-unresolved",
             DefectKind::StreamLengthNotExact { .. } => "stream-length-not-exact",
             DefectKind::StreamDoesNotDecode => "stream-does-not-decode",
+            DefectKind::LinearizedParameterWrong { .. } => "linearized-parameter-wrong",
+            DefectKind::HintStreamUnreadable => "hint-stream-unreadable",
+            DefectKind::HintValueWrong { .. } => "hint-value-wrong",
             DefectKind::PageNodeUntyped => "page-node-untyped",
             DefectKind::PageParentWrong { .. } => "page-parent-wrong",
             DefectKind::PageCountWrong { .. } => "page-count-wrong",
@@ -628,6 +655,18 @@ impl core::fmt::Display for DefectKind {
                 None => write!(f, "/Length {declared} and no endstream at all (7.3.8.1)"),
             },
             DefectKind::StreamDoesNotDecode => f.write_str("the filter chain refused it (7.4)"),
+            DefectKind::LinearizedParameterWrong { entry } => {
+                write!(f, "the linearization dictionary's {entry} (F.2.2)")
+            }
+            DefectKind::HintStreamUnreadable => {
+                f.write_str("the primary hint stream cannot be read (F.3)")
+            }
+            DefectKind::HintValueWrong { entry } => {
+                write!(
+                    f,
+                    "the hint tables' {entry} is not what the file holds (F.3)"
+                )
+            }
             DefectKind::PageNodeUntyped => {
                 f.write_str("a node in the page tree is neither /Page nor /Pages (7.7.3.2)")
             }
@@ -733,6 +772,7 @@ pub fn validate(doc: &CosDocument) -> Vec<Defect> {
         out: Vec::new(),
         seen_repairs: BTreeSet::new(),
         visited: BTreeSet::new(),
+        pages: Vec::new(),
     };
     let before = doc.warnings().len();
     v.ladder();
@@ -741,6 +781,7 @@ pub fn validate(doc: &CosDocument) -> Vec<Defect> {
     v.trailer(&sections);
     v.entries(&sections);
     v.semantics();
+    v.linearization(&sections);
     v.repairs_raised_while_reading(before);
     v.out
 }
@@ -756,6 +797,9 @@ enum RawEntry {
 /// One cross-reference section, read from the bytes rather than from the
 /// document's merged view of them.
 struct Section {
+    /// Where its `xref` keyword or its stream object begins. Annex F's `/T`
+    /// names a byte inside the main one, so the offset has to survive the read.
+    at: u64,
     entries: Vec<(u32, RawEntry)>,
     trailer: Dict,
 }
@@ -819,6 +863,9 @@ struct Validator<'a> {
     /// Resources already checked. One font shared by a thousand pages is one
     /// font, and a pattern whose own resources name it back is a loop.
     visited: BTreeSet<ObjRef>,
+    /// The page objects, in page order, as this module's own walk found them.
+    /// Annex F's tables are stated per page, so they need the same order.
+    pages: Vec<ObjRef>,
 }
 
 impl Validator<'_> {
@@ -1065,6 +1112,7 @@ impl Validator<'_> {
     /// A classic table (7.5.4), entry by twenty-byte entry.
     fn classic_at(&mut self, at: usize) -> Option<Section> {
         let mut cursor = skip_space(self.buf, at + 4);
+        let _ = at;
         let mut entries = Vec::new();
 
         loop {
@@ -1082,12 +1130,17 @@ impl Validator<'_> {
                 );
                 self.repairs(None, sink);
                 let trailer = parsed.object.as_dict().cloned().unwrap_or_default();
-                return Some(Section { entries, trailer });
+                return Some(Section {
+                    at: at as u64,
+                    entries,
+                    trailer,
+                });
             }
 
             let Some((first, used)) = ascii_int(self.buf, cursor) else {
                 self.report(None, Some(cursor as u64), DefectKind::TableTrailerMissing);
                 return Some(Section {
+                    at: at as u64,
                     entries,
                     trailer: Dict::new(),
                 });
@@ -1096,6 +1149,7 @@ impl Validator<'_> {
             let Some((count, used)) = ascii_int(self.buf, spaced) else {
                 self.report(None, Some(cursor as u64), DefectKind::SubsectionMalformed);
                 return Some(Section {
+                    at: at as u64,
                     entries,
                     trailer: Dict::new(),
                 });
@@ -1106,6 +1160,7 @@ impl Validator<'_> {
                 let Some(row) = self.buf.get(cursor..cursor.saturating_add(20)) else {
                     self.report(None, Some(cursor as u64), DefectKind::EntryNotTwentyBytes);
                     return Some(Section {
+                        at: at as u64,
                         entries,
                         trailer: Dict::new(),
                     });
@@ -1156,6 +1211,7 @@ impl Validator<'_> {
                 DefectKind::XrefStreamWidthsBad,
             );
             return Some(Section {
+                at: offset,
                 entries: Vec::new(),
                 trailer: dict,
             });
@@ -1168,6 +1224,7 @@ impl Validator<'_> {
                 DefectKind::StreamDoesNotDecode,
             );
             return Some(Section {
+                at: offset,
                 entries: Vec::new(),
                 trailer: dict,
             });
@@ -1260,6 +1317,7 @@ impl Validator<'_> {
         }
 
         Some(Section {
+            at: offset,
             entries,
             trailer: dict,
         })
@@ -1857,6 +1915,7 @@ impl Validator<'_> {
             if !inherited.media_box {
                 self.report(Some(node), None, DefectKind::MediaBoxAbsent);
             }
+            self.pages.push(node);
             self.annotations(names, node, &dict);
             if let Some(resources) = inherited.resources {
                 self.resources(names, Some(node), &resources, 0);
@@ -2767,6 +2826,441 @@ impl Validator<'_> {
             self.report(at, None, kind("/BBox"));
         }
     }
+}
+
+impl Validator<'_> {
+    /// Annex F: what a linearized file promises, against what it holds.
+    ///
+    /// Every expectation here is recomputed from the *file* — the object
+    /// extents recovered from the cross-reference sections, the page order
+    /// this module's own walk found — and never from the writer's plan. The
+    /// two routes meet at the same numbers or the file is wrong. That is the
+    /// whole design: the writer's own round-trip reader already agrees with
+    /// the writer, which is the agreement that proves nothing.
+    fn linearization(&mut self, sections: &[Section]) {
+        // F.2.2: the parameter dictionary is the first object in the file, and
+        // a file whose first object is anything else is simply not linearized.
+        let Some(first) = self.first_object() else {
+            return;
+        };
+        let linearized = self.doc.intern(b"Linearized");
+        let Some(dict) = first.1.as_dict().filter(|d| d.contains_key(linearized)) else {
+            return;
+        };
+        let dict = dict.clone();
+
+        let parameter = |key: &[u8]| -> Option<u64> {
+            let name = self.doc.intern(key);
+            nonnegative(dict.get_int(name))
+        };
+
+        // F.2.2 item 2: the length of the whole file.
+        if parameter(b"L") != Some(self.buf.len() as u64) {
+            self.report(
+                Some(first.0),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/L" },
+            );
+        }
+
+        // Item 4: how many pages, which this module counted itself.
+        let page_count = self.pages.len();
+        if parameter(b"N") != Some(page_count as u64) {
+            self.report(
+                Some(first.0),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/N" },
+            );
+        }
+
+        // Item 3: the first page's own page object.
+        let first_page = self.pages.first().copied();
+        if parameter(b"O") != first_page.map(|page| u64::from(page.num)) {
+            self.report(
+                Some(first.0),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/O" },
+            );
+        }
+
+        // Item 6: the offset of the first entry of the main cross-reference
+        // section — the *second* section in the chain, since the front one is
+        // what `startxref` names.
+        if let Some(main) = sections.get(1) {
+            let wanted = first_entry_of(self.buf, main.at);
+            if parameter(b"T") != Some(wanted) {
+                self.report(
+                    Some(first.0),
+                    None,
+                    DefectKind::LinearizedParameterWrong { entry: "/T" },
+                );
+            }
+        }
+
+        let extents = self.extents(sections);
+
+        // Item 5: the end of the first page's section. Recomputed as the
+        // furthest byte any object of page one reaches, which is a weaker
+        // statement than the writer's own arithmetic and an independent one.
+        let run = self.page_run(0).unwrap_or_default();
+        let reaches = run
+            .iter()
+            .filter_map(|num| extents.get(num))
+            .map(|(at, len)| at + len)
+            .max();
+        match (parameter(b"E"), reaches) {
+            (Some(declared), Some(reaches)) if declared >= reaches => {}
+            (_, None) => {}
+            _ => self.report(
+                Some(first.0),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/E" },
+            ),
+        }
+
+        // Item 7: where the primary hint stream is, and how long.
+        let hint = dict
+            .get_array(self.doc.intern(b"H"))
+            .map(<[Object]>::to_vec)
+            .unwrap_or_default();
+        let hint_offset = hint
+            .first()
+            .and_then(Object::as_int)
+            .and_then(|v| u64::try_from(v).ok());
+        let hint_length = hint
+            .get(1)
+            .and_then(Object::as_int)
+            .and_then(|v| u64::try_from(v).ok());
+        let (Some(hint_offset), Some(hint_length)) = (hint_offset, hint_length) else {
+            self.report(
+                Some(first.0),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/H" },
+            );
+            return;
+        };
+        let Some((stream_num, stream)) = self.object_at(hint_offset) else {
+            self.report(
+                Some(first.0),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/H" },
+            );
+            return;
+        };
+        if extents.get(&stream_num.num).map(|(_, len)| *len) != Some(hint_length) {
+            self.report(
+                Some(stream_num),
+                None,
+                DefectKind::LinearizedParameterWrong { entry: "/H" },
+            );
+        }
+
+        self.hint_tables(stream_num, &stream, page_count, &extents, hint_length);
+    }
+
+    /// The two tables inside the primary hint stream, against the file.
+    fn hint_tables(
+        &mut self,
+        stream_num: ObjRef,
+        stream: &Object,
+        page_count: usize,
+        extents: &BTreeMap<u32, (u64, u64)>,
+        hint_length: u64,
+    ) {
+        let shared_at = stream
+            .as_dict()
+            .and_then(|d| d.get_int(self.doc.intern(b"S")))
+            .and_then(|v| usize::try_from(v).ok());
+        let data = self.doc.stream_decoded(stream_num).ok();
+        let (Some(shared_at), Some(data)) = (shared_at, data) else {
+            self.report(Some(stream_num), None, DefectKind::HintStreamUnreadable);
+            return;
+        };
+        let Some(tables) = hints::decode(&data, shared_at, page_count) else {
+            self.report(Some(stream_num), None, DefectKind::HintStreamUnreadable);
+            return;
+        };
+
+        // Table F.3 item 2: a byte offset, and the one field that held an
+        // object *number* until an outside reader said otherwise. The two are
+        // not confusable in either direction — the first page's object number
+        // is a small integer and its object sits hundreds of bytes in.
+        // F.4: an offset inside a hint table is measured **as though the
+        // primary hint stream were not in the file**, because the tables are
+        // built before their own length is known. Everything after the stream
+        // is therefore short by exactly that length, and a reader that forgets
+        // to add it back lands inside the stream it just read.
+        let first_page = self.pages.first().copied();
+        let declared_offset = first_page
+            .and_then(|page| extents.get(&page.num))
+            .map(|(at, _)| *at);
+        if declared_offset != Some(u64::from(tables.first_page_offset) + hint_length) {
+            self.report(
+                Some(stream_num),
+                None,
+                DefectKind::HintValueWrong {
+                    entry: "first page offset",
+                },
+            );
+        }
+
+        for index in 0..page_count {
+            let Some(page) = tables.pages.get(index) else {
+                break;
+            };
+            // Table F.4 item 1: a page is a run of consecutive object numbers
+            // from its page object, so its count is the gap to the next page's
+            // number. The *last* page has no next page to measure against, so
+            // its run is the one the table declares — and then every number in
+            // it has to be an object the file really carries, which is the
+            // half a declared count cannot fake.
+            let run = match self.page_run(index) {
+                Some(run) => {
+                    if u64::from(page.objects) != run.len() as u64 {
+                        self.report(
+                            Some(stream_num),
+                            None,
+                            DefectKind::HintValueWrong {
+                                entry: "page object count",
+                            },
+                        );
+                    }
+                    run
+                }
+                None => {
+                    let start = self.pages.get(index).map_or(0, |page| page.num);
+                    if page.objects == 0 {
+                        self.report(
+                            Some(stream_num),
+                            None,
+                            DefectKind::HintValueWrong {
+                                entry: "last page's object count",
+                            },
+                        );
+                    }
+                    (start..start.saturating_add(page.objects)).collect()
+                }
+            };
+            for num in &run {
+                if !extents.contains_key(num) {
+                    self.report(
+                        Some(stream_num),
+                        None,
+                        DefectKind::HintValueWrong {
+                            entry: "page's own objects, which no table carries",
+                        },
+                    );
+                }
+            }
+
+            // Item 2: and its length is the bytes those objects occupy.
+            let measured: u64 = run
+                .iter()
+                .filter_map(|num| extents.get(num))
+                .map(|(_, len)| *len)
+                .sum();
+            if u64::from(page.length) != measured {
+                self.report(
+                    Some(stream_num),
+                    None,
+                    DefectKind::HintValueWrong {
+                        entry: "page length",
+                    },
+                );
+            }
+
+            // Items 3 and 4: every identifier names an entry that exists, and
+            // never one of the page's own objects.
+            for id in &page.shared {
+                if *id as usize >= tables.shared_lengths.len() {
+                    self.report(
+                        Some(stream_num),
+                        None,
+                        DefectKind::HintValueWrong {
+                            entry: "shared identifier",
+                        },
+                    );
+                }
+            }
+            if index == 0 && !page.shared.is_empty() {
+                // F.4.2: page one's own objects *are* the first shared
+                // entries, so it names none of them.
+                self.report(
+                    Some(stream_num),
+                    None,
+                    DefectKind::HintValueWrong {
+                        entry: "first page's shared references",
+                    },
+                );
+            }
+        }
+
+        // Table F.5 item 3: part 6's objects are the first shared entries.
+        if u64::from(tables.shared_first_page) != self.page_run(0).map_or(0, |run| run.len() as u64)
+        {
+            self.report(
+                Some(stream_num),
+                None,
+                DefectKind::HintValueWrong {
+                    entry: "first page's shared entry count",
+                },
+            );
+        }
+
+        // Items 1 and 2: part 8's first object, and where it is.
+        if tables.shared_lengths.len() > tables.shared_first_page as usize {
+            let at = extents.get(&tables.first_shared_object).map(|(at, _)| *at);
+            if at != Some(u64::from(tables.first_shared_offset) + hint_length) {
+                self.report(
+                    Some(stream_num),
+                    None,
+                    DefectKind::HintValueWrong {
+                        entry: "first shared object offset",
+                    },
+                );
+            }
+        } else if tables.first_shared_object != 0 || tables.first_shared_offset != 0 {
+            self.report(
+                Some(stream_num),
+                None,
+                DefectKind::HintValueWrong {
+                    entry: "part 8, which is not there",
+                },
+            );
+        }
+
+        // Table F.6 item 1: each entry's group length is the span of the
+        // object it describes.
+        for (index, length) in tables.shared_lengths.iter().enumerate() {
+            let number = self.shared_entry_object(&tables, index);
+            let Some(number) = number else {
+                continue;
+            };
+            if extents.get(&number).map(|(_, len)| *len) != Some(u64::from(*length)) {
+                self.report(
+                    Some(stream_num),
+                    None,
+                    DefectKind::HintValueWrong {
+                        entry: "shared group length",
+                    },
+                );
+            }
+        }
+    }
+
+    /// Which object a shared-table entry describes (F.4.2).
+    ///
+    /// The first `shared_first_page` entries are part 6's objects, numbered
+    /// consecutively from the first page's; the rest are part 8's, from
+    /// `first_shared_object`.
+    fn shared_entry_object(&self, tables: &hints::Hints, index: usize) -> Option<u32> {
+        let first_page = self.pages.first()?.num;
+        let boundary = tables.shared_first_page as usize;
+        let index = u32::try_from(index).ok()?;
+        if (index as usize) < boundary {
+            first_page.checked_add(index)
+        } else {
+            tables
+                .first_shared_object
+                .checked_add(index - boundary as u32)
+        }
+    }
+
+    /// The consecutive run of object numbers page `index` owns (F.3.8).
+    fn page_run(&self, index: usize) -> Option<Vec<u32>> {
+        let page = self.pages.get(index)?;
+        match self.pages.get(index + 1) {
+            Some(next) if next.num > page.num => Some((page.num..next.num).collect()),
+            // The last page owns everything from its page object to whatever
+            // the layout put next, which the page order alone cannot say.
+            _ => None,
+        }
+    }
+
+    /// Where every object begins and how many bytes it occupies.
+    ///
+    /// An object's span is the gap to whatever the file holds next — the next
+    /// object, or the cross-reference section that follows it. Objects are
+    /// written back to back, so this is the same number a writer computes and
+    /// arrived at from the other side.
+    fn extents(&self, sections: &[Section]) -> BTreeMap<u32, (u64, u64)> {
+        let mut offsets: BTreeMap<u32, u64> = BTreeMap::new();
+        for section in sections {
+            for (num, entry) in &section.entries {
+                if let RawEntry::Offset { offset, .. } = entry {
+                    offsets.entry(*num).or_insert(*offset);
+                }
+            }
+        }
+
+        let mut boundaries: Vec<u64> = offsets.values().copied().collect();
+        boundaries.extend(sections.iter().map(|section| section.at));
+        boundaries.sort_unstable();
+
+        offsets
+            .iter()
+            .map(|(num, at)| {
+                let next = boundaries
+                    .iter()
+                    .copied()
+                    .find(|other| *other > *at)
+                    .unwrap_or(self.buf.len() as u64);
+                (*num, (*at, next.saturating_sub(*at)))
+            })
+            .collect()
+    }
+
+    /// The first indirect object in the file, by position rather than by
+    /// number (F.2.2 asks for the first one *written*).
+    fn first_object(&self) -> Option<(ObjRef, Object)> {
+        let mut at = 0usize;
+        while at < self.buf.len() {
+            if let Some(reference) = header_at(self.buf, at as u64) {
+                let mut sink = WarningSink::new();
+                let parsed =
+                    parse_indirect_at(self.buf, at as u64, self.doc.names_table(), &mut sink)?;
+                return Some((reference, parsed.object));
+            }
+            at += 1;
+            // The parameter dictionary is at the top of the file or nowhere:
+            // F.2.1 puts it before everything else, so a scan that has walked
+            // past the header and a comment line has already failed.
+            if at > 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The object whose header begins exactly at `offset`.
+    fn object_at(&self, offset: u64) -> Option<(ObjRef, Object)> {
+        let reference = header_at(self.buf, offset)?;
+        let mut sink = WarningSink::new();
+        let parsed = parse_indirect_at(self.buf, offset, self.doc.names_table(), &mut sink)?;
+        Some((reference, parsed.object))
+    }
+}
+
+/// Where a classic table's first entry sits: past `xref` and past the
+/// subsection header line (7.5.4). Annex F's `/T` names that byte.
+fn first_entry_of(buf: &[u8], section: u64) -> u64 {
+    let Ok(at) = usize::try_from(section) else {
+        return section;
+    };
+    if !buf.get(at..).is_some_and(|r| r.starts_with(b"xref")) {
+        // A cross-reference stream has no entry line to point at, so `/T`
+        // names the section itself.
+        return section;
+    }
+    let mut cursor = skip_space(buf, at + 4);
+    // Past `first count` and its end-of-line.
+    if let Some((_, used)) = ascii_int(buf, cursor) {
+        cursor = skip_space(buf, cursor + used);
+        if let Some((_, used)) = ascii_int(buf, cursor) {
+            cursor = skip_eol(buf, cursor + used);
+        }
+    }
+    cursor as u64
 }
 
 /// The `N G obj` header beginning **exactly** at `offset` (7.5.4).

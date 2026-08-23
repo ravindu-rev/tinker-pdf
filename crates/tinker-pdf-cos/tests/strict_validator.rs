@@ -1179,3 +1179,205 @@ fn a_resource_name_that_resolves_to_nothing_is_refused() {
     let zero = format!("{:0width$}", 0, width = digits.len());
     refused(patch_at(&bytes, at, zero.as_bytes()), "resource-unresolved");
 }
+
+// ---- Annex F, whose tables nothing had ever read ----------------------------
+
+/// The six-page linearized layout.
+fn linearized() -> Vec<u8> {
+    saved(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..WriteOptions::default()
+    })
+}
+
+/// A document with a real part 8: page one uses one font, the rest use another
+/// it never touches, so that font is shared between pages two onward and
+/// belongs nowhere else (F.3.8).
+fn shared_resource() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Helvetica");
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "page 0");
+    });
+    builder.add_base_font(b"F1", b"Courier");
+    for index in 1..6 {
+        builder.add_page(200.0, 100.0, |page| {
+            page.text(b"F1", 12.0, 10.0, 50.0, &format!("page {index}"));
+        });
+    }
+    let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+    DocumentEditor::new(doc).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..WriteOptions::default()
+    })
+}
+
+/// Rewrites one of the parameter dictionary's fixed-width integers.
+///
+/// F.2.1 writes every one of them to the same width so the dictionary's own
+/// length is known before the layout is: an injection can therefore change a
+/// value without moving a byte, which is exactly what these rules need.
+fn parameter(bytes: &[u8], key: &[u8], value: u64) -> Vec<u8> {
+    let at = find(bytes, key).expect("the parameter dictionary") + key.len();
+    let width = digits_at(bytes, at).len();
+    assert!(width > 0, "the value is written as digits");
+    patch_at(bytes, at, format!("{value:0width$}").as_bytes())
+}
+
+/// Where the primary hint stream's data begins.
+fn hint_data(bytes: &[u8]) -> usize {
+    let object = find(bytes, b"2 0 obj").expect("the hint stream is object two");
+    object + find(&bytes[object..], b"stream\n").expect("its data") + 7
+}
+
+/// Rewrites one thirty-two bit field of a hint table.
+fn hint_field(bytes: &[u8], at: usize, value: u32) -> Vec<u8> {
+    patch_at(bytes, hint_data(bytes) + at, &value.to_be_bytes())
+}
+
+#[test]
+fn both_linearized_layouts_validate_clean() {
+    clean(linearized());
+    clean(shared_resource());
+}
+
+#[test]
+fn a_declared_file_length_that_is_not_the_files_is_refused() {
+    refused(
+        parameter(&linearized(), b"/L ", 99),
+        "linearized-parameter-wrong",
+    );
+}
+
+#[test]
+fn a_first_page_object_that_is_not_the_first_pages_is_refused() {
+    refused(
+        parameter(&linearized(), b"/O ", 9),
+        "linearized-parameter-wrong",
+    );
+}
+
+#[test]
+fn a_page_count_the_tree_does_not_agree_with_is_refused() {
+    refused(
+        parameter(&linearized(), b"/N ", 5),
+        "linearized-parameter-wrong",
+    );
+}
+
+/// F.2.2 item 6: `/T` names the first *entry* of the main table, not the
+/// `xref` keyword above it — a distinction worth a rule, because a reader
+/// seeking there lands one line early and reads the subsection header as an
+/// entry.
+#[test]
+fn a_main_table_offset_that_names_the_wrong_byte_is_refused() {
+    refused(
+        parameter(&linearized(), b"/T ", 7),
+        "linearized-parameter-wrong",
+    );
+}
+
+/// F.2.2 item 5: `/E` is the end of the first page's section, so a value
+/// before the first page's own objects end is one that cuts them off.
+#[test]
+fn a_first_page_end_before_the_first_page_is_refused() {
+    refused(
+        parameter(&linearized(), b"/E ", 1),
+        "linearized-parameter-wrong",
+    );
+}
+
+#[test]
+fn a_hint_stream_that_is_not_where_h_says_is_refused() {
+    refused(
+        parameter(&linearized(), b"/H [ ", 9),
+        "linearized-parameter-wrong",
+    );
+}
+
+/// Table F.3 item 2 held an object *number* until an outside reader said
+/// otherwise, and nothing in this repository could tell: the number and the
+/// offset are both small integers in a small file.
+#[test]
+fn a_first_page_offset_that_is_not_the_first_pages_is_refused() {
+    let bytes = linearized();
+    refused(hint_field(&bytes, 4, 12), "hint-value-wrong");
+}
+
+/// Table F.3 item 1: every page's object count is stated as a delta from this,
+/// so moving it moves all of them at once.
+#[test]
+fn page_object_counts_that_are_not_the_runs_are_refused() {
+    let bytes = linearized();
+    refused(hint_field(&bytes, 0, 7), "hint-value-wrong");
+}
+
+/// Item 4, the least page length, for the same reason.
+#[test]
+fn page_lengths_that_are_not_the_bytes_are_refused() {
+    let bytes = linearized();
+    refused(hint_field(&bytes, 10, 4096), "hint-value-wrong");
+}
+
+/// Table F.6 item 1: a shared entry's group length is the span of the object
+/// it describes.
+#[test]
+fn a_shared_group_length_that_is_not_the_objects_is_refused() {
+    let bytes = shared_resource();
+    let shared_at = {
+        let at = find(&bytes, b"/S ").expect("the hint stream states where") + 3;
+        digits_at(&bytes, at)
+            .iter()
+            .fold(0usize, |acc, b| acc * 10 + usize::from(b - b'0'))
+    };
+    // Table F.5 item 6: the least group length, which every entry is a delta
+    // from. Four thirty-two bit items, then a sixteen bit one, so it begins at
+    // byte eighteen of the table -- and patching byte twenty instead lands
+    // half in it and half in the width that follows, which decodes as a
+    // hundred-bit field and fails the whole read rather than one rule.
+    refused(hint_field(&bytes, shared_at + 18, 4096), "hint-value-wrong");
+}
+
+/// F.4.2: part 8's first object and its offset are both zero when there is no
+/// part 8, and a file that claims one has a shared table nobody can walk.
+#[test]
+fn a_part_eight_that_is_not_there_is_refused() {
+    let bytes = linearized();
+    let shared_at = {
+        let at = find(&bytes, b"/S ").expect("the hint stream states where") + 3;
+        digits_at(&bytes, at)
+            .iter()
+            .fold(0usize, |acc, b| acc * 10 + usize::from(b - b'0'))
+    };
+    refused(hint_field(&bytes, shared_at, 6), "hint-value-wrong");
+}
+
+/// The shared table is addressed by the stream's own `/S`, so a reader that
+/// trusted its own arithmetic instead would never notice the two disagreeing.
+#[test]
+fn a_hint_stream_that_cannot_be_walked_is_refused() {
+    let bytes = linearized();
+    let at = find(&bytes, b"/S ").expect("the hint stream states where") + 3;
+    let width = digits_at(&bytes, at).len();
+    let past = format!("{:0width$}", 999, width = width);
+    refused(
+        patch_at(&bytes, at, past.as_bytes()),
+        "hint-stream-unreadable",
+    );
+}
+
+/// And an ordinary file is held to none of it, which is what says these rules
+/// are about linearization rather than about every file that happens to pass.
+#[test]
+fn an_ordinary_layout_is_not_held_to_annex_f() {
+    let bytes = rewritten();
+    assert!(
+        find(&bytes, b"/Linearized").is_none(),
+        "the ordinary layout claims nothing"
+    );
+    clean(bytes);
+}
