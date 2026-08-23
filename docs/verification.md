@@ -88,6 +88,21 @@ that draw no text without a provider, `ratchet.json` says so in its own
 note, and `corpus-run` refuses to compare a `--fonts` run against a bar
 recorded without them.
 
+The fourth axis is the metamorphic one, and its denominator is worth being
+honest about. A relation is not asked of a file that has already spent much of
+the runner's budget opening and rendering, because the relations cost roughly
+that again twice over and a timeout would move the *pass* rate — a different
+measurement that was here first. That gate is a **clock**, and a clock deciding
+a ratcheted number means a file near the line can be asked on one run and
+declined on the next: one run recorded `dpi` at 572 of 579 and the next at 572
+of 580. Nothing deterministic replaces it — `qpdf/numeric-and-string-2.pdf` is
+16 KB with 22 objects and takes 4.9 seconds, while files a hundred times its
+size take a tenth of that — so the line is **sited** instead: every corpus file
+between one and six seconds was timed, and 3 100 ms is the middle of the widest
+gap in that distribution, 2 885 ms below and 3 385 ms above. The per-file
+report carries each document's `cost` — bytes, objects and first-page pixels —
+which is the measurement that settled it.
+
 The third axis is ruling 13's, and it is about the **writer** rather than the
 reader: every file this engine read cleanly is rewritten in memory and the
 rewrite is handed to the strict validator. Only its structural tier counts —

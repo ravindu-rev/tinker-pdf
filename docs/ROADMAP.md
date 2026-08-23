@@ -23,6 +23,19 @@ rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
+- **Images are sampled differently at different resolutions.** The `dpi`
+  relation — render at twice the scale, box-filter down, require agreement —
+  fails on nine qpdf files and every one of them carries an image. The two
+  PCLM files disagree on **23.4 %** of their pixels (107 592 of 459 869); the
+  inline-image files on 4.4–5.4 %; the budget is 2 %. No text-only or
+  vector-only file in 4 525 fails it. A wrong colour or a wrong shape commutes
+  with the scale and leaves the relation green, so what this names is a *grid*
+  mistake: an image's device rectangle, or its sampling of source pixels, is a
+  function of the render scale when it must not be. Two of the nine were found
+  only when the metamorphic budget was resited and they became eligible.
+  Evidence: 9 of 582 files compared, August 2026, named per file in
+  `corpus/report.json`. Exit: qpdf's `dpi` row holds on every image-carrying
+  file, and a fixture pins one PCLM strip at two scales. (M)
 - **The macOS and wasm determinism legs, observed.** Three of ruling 4's
   four targets are measured on one machine
   ([features/determinism.md](features/determinism.md)); macOS is claimed

@@ -280,7 +280,35 @@ impl Run {
                                 ),
                             ));
                         }
+                        if file.cost != crate::runner::Cost::default() {
+                            fields.push((
+                                "cost",
+                                Json::object([
+                                    ("bytes", Json::count(file.cost.bytes)),
+                                    ("objects", Json::count(file.cost.objects)),
+                                    ("pixels", Json::count(file.cost.pixels)),
+                                ]),
+                            ));
+                        }
                         fields.push(("strict", strict_json(&file.strict)));
+                        // The fourth axis, per file. Without it the ratchet
+                        // can say `dpi held on 572 of 580, worse than the
+                        // recorded 572 of 579` and nothing in the run says
+                        // *which* file — which makes the number a verdict
+                        // rather than a lead, and `corpus.yml` keeps this
+                        // report precisely so a moved bar can be followed up.
+                        if !file.metamorphic.is_empty() {
+                            fields.push((
+                                "metamorphic",
+                                Json::object(file.metamorphic.iter().map(|(name, verdict)| {
+                                    let mut row = vec![("verdict", Json::string(verdict.label()))];
+                                    if !verdict.detail().is_empty() {
+                                        row.push(("detail", Json::string(verdict.detail())));
+                                    }
+                                    (name.clone(), Json::object(row))
+                                })),
+                            ));
+                        }
                         Json::object(fields)
                     })
                     .collect();
@@ -542,6 +570,7 @@ mod tests {
         FileResult {
             path: path.to_string(),
             outcome,
+            cost: crate::runner::Cost::default(),
             pages: 1,
             rendered: 1,
             warnings: warnings

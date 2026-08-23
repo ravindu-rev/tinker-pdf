@@ -134,6 +134,23 @@ pub struct FileResult {
     /// What the metamorphic relations said about the first page, by name
     /// (roadmap step 7): `rotate`, `crop`, `dpi`.
     pub metamorphic: BTreeMap<String, MetaVerdict>,
+    /// What this document costs to work on, as properties of the document.
+    ///
+    /// Reported so that the gate deciding which files the relations are asked
+    /// of can be a function of the corpus rather than of the machine. Zero
+    /// from a child that did not say.
+    pub cost: Cost,
+}
+
+/// A document's size, in the three dimensions that bound work on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cost {
+    /// The file's length.
+    pub bytes: u64,
+    /// How many object numbers the cross-reference table has entries for.
+    pub objects: u64,
+    /// Device pixels in the first page at the run's resolution.
+    pub pixels: u64,
 }
 
 /// One metamorphic relation's verdict on one file.
@@ -240,6 +257,7 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         // same as a relation that held: an empty map counts as neither
         // compared nor held.
         metamorphic: BTreeMap::new(),
+        cost: Cost::default(),
     };
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
@@ -454,6 +472,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut semantics = 0u64;
     let mut defects: BTreeMap<String, usize> = BTreeMap::new();
     let mut metamorphic: BTreeMap<String, MetaVerdict> = BTreeMap::new();
+    let mut cost = Cost::default();
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -479,6 +498,18 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                     } else {
                         reason.trim().to_string()
                     });
+                }
+            }
+            "cost" => {
+                let mut rest = rest.split_whitespace();
+                while let (Some(field), Some(value)) = (rest.next(), rest.next()) {
+                    let value = value.parse().unwrap_or(0);
+                    match field {
+                        "bytes" => cost.bytes = value,
+                        "objects" => cost.objects = value,
+                        "pixels" => cost.pixels = value,
+                        _ => {}
+                    }
                 }
             }
             "cap" => {
@@ -576,6 +607,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         millis,
         strict,
         metamorphic,
+        cost,
     })
 }
 

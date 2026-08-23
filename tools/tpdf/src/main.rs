@@ -861,12 +861,31 @@ const ROTATE_BUDGET: f64 = 0.01;
 
 /// How long a file may already have taken before its relations are skipped.
 ///
-/// Two seconds of the corpus runner's twenty. The relations cost roughly what
-/// opening and rendering the first page cost, twice over, so a file that is
-/// already a tenth of the way through the budget is one where asking them
-/// risks the timeout — and a timeout would move the *pass* rate, which is a
-/// measurement this one must not disturb.
-const META_BUDGET_MS: u64 = 2_000;
+/// The relations cost roughly what opening and rendering the first page cost,
+/// twice over, so a file already well into the corpus runner's twenty-second
+/// budget is one where asking them risks the timeout — and a timeout would
+/// move the *pass* rate, which is a measurement this one must not disturb.
+///
+/// **This is a clock, and a clock decides a number the ratchet compares.**
+/// That is worth saying plainly rather than burying: `compared` is the
+/// denominator of the metamorphic rate, so a file sitting near this line can
+/// be asked on one run and declined on the next, and the bar moves by one file
+/// for no reason anybody changed. It happened: a run recorded `dpi` at 572 of
+/// 579 and the next said 572 of 580.
+///
+/// Nothing deterministic replaces it. The `cost` line beside this reports the
+/// three properties of a document that ought to bound the work — bytes,
+/// objects and first-page pixels — and measured against the corpus they do
+/// not: `qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and takes 4.9
+/// seconds, while files a hundred times its size take a tenth of that.
+///
+/// So the line is **sited** rather than chosen: 3 100 ms is the middle of the
+/// widest gap in the measured distribution. Every corpus file between one and
+/// six seconds was timed (4 525 files, 72 dpi, August 2026); the slowest
+/// admitted is 2 885 ms and the fastest declined is 3 385 ms, so the nearest
+/// file either side is 7 % away rather than the 3 % that two seconds gave.
+/// Moving this number re-records the bar, which is a commit somebody reviews.
+const META_BUDGET_MS: u64 = 3_100;
 
 /// A share of a page's pixels, for a relation's report.
 #[allow(
@@ -1286,6 +1305,24 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         }
     }
     println!("rendered {rendered}");
+
+    // What this document costs to work on, as properties of the document.
+    // Read by nothing yet; measured so the metamorphic gate can stop being a
+    // clock. See `META_BUDGET_MS`.
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let objects = doc.cos().xref().len();
+    let pixels = doc.page(0).map_or(0u64, |page| {
+        let (x0, y0, x1, y1) = page.crop_box();
+        let scale = f64::from(options.dpi as f32) / 72.0;
+        let w = ((x1 - x0) * scale).abs().ceil().max(0.0);
+        let h = ((y1 - y0) * scale).abs().ceil().max(0.0);
+        if w.is_finite() && h.is_finite() {
+            (w as u64) * (h as u64)
+        } else {
+            0
+        }
+    });
+    println!("cost bytes {bytes} objects {objects} pixels {pixels}");
 
     println!("phase strict");
     strict(&doc);

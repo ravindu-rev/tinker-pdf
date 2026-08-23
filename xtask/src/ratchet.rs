@@ -446,6 +446,7 @@ mod tests {
             out.push(FileResult {
                 path: format!("{index}.pdf"),
                 outcome,
+                cost: crate::runner::Cost::default(),
                 pages: 1,
                 rendered: 1,
                 warnings,
