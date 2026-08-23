@@ -1343,10 +1343,11 @@ mod tests {
     // computed, so a field at the wrong width, an item in the wrong order or a
     // delta against the wrong base fails here without an external tool.
     //
-    // Its limit is worth stating, because it is the reason the qpdf oracle in
-    // `tests/qpdf_oracle.rs` is not optional: a reader that misunderstands the
+    // Its limit is worth stating, because it is the reason the strict
+    // validator's own decoder is not optional: a reader that misunderstands the
     // format in the same way the writer does agrees with it perfectly. This
-    // half catches arithmetic; that half catches meaning.
+    // half catches arithmetic against `Plan`'s numbers; the validator's half
+    // catches those numbers against the file's own object extents.
 
     /// Unpacks fields of arbitrary bit width, most significant bit first —
     /// [`BitWriter`] backwards.

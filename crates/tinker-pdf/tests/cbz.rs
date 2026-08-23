@@ -401,7 +401,7 @@ fn only_a_synthesised_document_reports_an_archive() {
 }
 
 /// The synthesised document survives a rewrite through the ordinary writer,
-/// which is what the qpdf oracle in `cbz_qpdf.rs` is pointed at.
+/// which is what `cbz_validated.rs` is pointed at.
 #[test]
 fn a_synthesised_document_saves_and_reopens() {
     let archive = zip(

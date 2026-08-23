@@ -61,7 +61,7 @@ jobs:
 
           # A corpus job whose corpora are missing exits 0 having measured
           # nothing, which reads exactly like a clean run. The same hazard the
-          # wasm-determinism and qpdf-linearization jobs were fixed for: check
+          # wasm-determinism and the retired qpdf job were fixed for: check
           # the bad outcome first and by name, so the log says why.
           if grep -q 'INCOMPLETE' corpus-run.log; then
             echo "::error::the corpus run did not describe the whole corpus," \

@@ -9,7 +9,7 @@
 # ## The hazard this file is written against
 #
 # `cargo test` with a filter matching nothing prints `0 passed` and exits 0.
-# The `wasm-determinism` and `qpdf-linearization` jobs in ci.yml are both
+# The `wasm-determinism` job in ci.yml, and the oracle jobs beside it, are all
 # written to *prove they ran* for that reason. A release job is the same hazard
 # with worse consequences: a job that builds nothing, uploads nothing and
 # reports success is indistinguishable from one that worked, and the thing it

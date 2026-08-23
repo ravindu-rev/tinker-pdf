@@ -8,7 +8,7 @@
 //! ruling 9 permits exactly that, because an oracle is invoked and never
 //! linked.
 //!
-//! `tests/xps_qpdf.rs` is the other half of this gap's oracle story and it
+//! `tests/xps_validated.rs` reads the document this engine synthesised and it
 //! answers a different question. qpdf reads the **PDF this engine wrote** and
 //! says whether it is a well-formed PDF; it has never seen an XPS and cannot
 //! say whether the document means what the package meant. mutool reads
@@ -61,7 +61,7 @@ const SKIPPED: &str = "mutool-oracle: SKIPPED";
 
 /// Where mutool is, or `None`.
 ///
-/// A version query rather than a `which`, for `xps_qpdf.rs`'s reason: an
+/// A version query rather than a `which`, for the retired qpdf oracle's reason: an
 /// executable that cannot run is not an oracle, and this is the one call whose
 /// failure means *skip* rather than *fail*. `mutool -v` writes its banner to
 /// stderr and exits 0.

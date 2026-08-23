@@ -16,7 +16,7 @@
 //! # Why the allow, and why the path attribute
 //!
 //! Six test binaries include this module — `xps_opc.rs`, `xps_spine.rs`,
-//! `xps_markup.rs`, `xps_glyphs.rs`, `xps_qpdf.rs` and gap 31's `epub_ocf.rs`
+//! `xps_markup.rs`, `xps_glyphs.rs`, `xps_validated.rs` and gap 31's `epub_ocf.rs`
 //! — and each compiles its own copy and uses a different subset. The ZIP writer
 //! comes from `cbz_support` by path rather than by a second `mod` declaration
 //! in each binary, so an XPS test never has to know that the archive builder it

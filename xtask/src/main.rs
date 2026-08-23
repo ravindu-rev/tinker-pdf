@@ -529,12 +529,13 @@ fn check_libm() -> Result<(), Vec<String>> {
 ///   bytes this repository then verifies against its own SHA-256; `cargo`
 ///   builds and publishes; the child the corpus runner spawns is a workspace
 ///   binary built from the same revision.
-/// - **A debt, with a milestone against it.** The four qpdf tests, the XPS
-///   render comparison, the browser and epubcheck. Each is an oracle of
-///   retired ruling 9, still running because ruling 13's order is fixed:
-///   nothing is deleted before the first-party check replacing it exists and
-///   has been injection-counted. Each row names the step of the roadmap's
-///   first-party-verification item that removes it.
+/// - **A debt, with a milestone against it.** The XPS render comparison, the
+///   browser and epubcheck. Each is an oracle of retired ruling 9, still
+///   running because ruling 13's order is fixed: nothing is deleted before the
+///   first-party check replacing it exists and has been injection-counted.
+///   Each row names the step of the roadmap's first-party-verification item
+///   that removes it. The four qpdf tests left in step 3, with the strict
+///   validator, and their rows left with them.
 ///
 /// The check runs both ways. A file that spawns something and is not here is
 /// a build failure — that is the boundary. And a row here whose file no
@@ -542,27 +543,6 @@ fn check_libm() -> Result<(), Vec<String>> {
 /// allowance leave in the same commit as the thing it allowed, instead of
 /// standing for a year after the debt is paid.
 const SPAWNERS: &[(&str, &str)] = &[
-    (
-        "crates/tinker-pdf-cos/tests/qpdf_oracle.rs",
-        "DEBT (step 3): retired ruling 9's qpdf oracle over linearized and \
-         encrypted output. Leaves with the strict validator, once the ten-fault \
-         injection matrix recorded in this file is caught 10/10 in-tree",
-    ),
-    (
-        "crates/tinker-pdf/tests/cbz_qpdf.rs",
-        "DEBT (step 3): qpdf reads the document synthesised from a comic \
-         archive. Leaves with the strict validator",
-    ),
-    (
-        "crates/tinker-pdf/tests/xps_qpdf.rs",
-        "DEBT (step 3): qpdf reads the document synthesised from a fixed \
-         document. Leaves with the strict validator",
-    ),
-    (
-        "crates/tinker-pdf/tests/epub_qpdf.rs",
-        "DEBT (step 3): qpdf reads the document synthesised from a book. \
-         Leaves with the strict validator",
-    ),
     (
         "crates/tinker-pdf/tests/xps_mutool.rs",
         "DEBT (step 4): a second reader's rendering of an XPS package, which \

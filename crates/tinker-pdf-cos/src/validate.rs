@@ -3095,9 +3095,14 @@ impl Validator<'_> {
             }
         }
 
-        // Table F.5 item 3: part 6's objects are the first shared entries.
-        if u64::from(tables.shared_first_page) != self.page_run(0).map_or(0, |run| run.len() as u64)
-        {
+        // Table F.5 item 3: part 6's objects are the first shared entries, so
+        // this is page one's own object count — which the page table states
+        // and the loop above has already held to the file's numbering wherever
+        // there is a second page to measure against. Comparing it against the
+        // run directly would fail every one-page document, where there is no
+        // next page and the run is the table's own claim.
+        let first_page_objects = tables.pages.first().map_or(0, |page| page.objects);
+        if tables.shared_first_page != first_page_objects {
             self.report(
                 Some(stream_num),
                 None,
