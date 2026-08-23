@@ -253,3 +253,62 @@ fn the_trailer_size_counts_the_encryption_dictionary() {
         "/Size {size} must exceed the /Encrypt object number {number}"
     );
 }
+
+/// **No object number is written twice.**
+///
+/// 7.3.10 makes an object number the identity of an object, so a file with two
+/// `N 0 obj` headers for one `N` has no defined meaning: which one a reader
+/// gets depends on which cross-reference entry survived, and the two here were
+/// the `/Encrypt` dictionary and the cross-reference stream itself. Both were
+/// numbered `max + 2` on an encrypted rewrite that packed objects.
+///
+/// Nothing caught it because neither object is ever reached *by number* — a
+/// reader finds the stream through `startxref` and `/Encrypt` through the
+/// trailer — so every existing assertion about this file passed. It surfaced
+/// when the cross-reference stream stopped being written densely and the two
+/// rows had to share one slot in a map.
+#[test]
+fn no_object_number_is_written_twice() {
+    let editor = DocumentEditor::new(source());
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: true,
+        compress: true,
+        encryption: Some(Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: entropy(),
+        }),
+        ..WriteOptions::default()
+    });
+
+    // Header scan rather than a parse: the point is what is *in the file*, and
+    // asking this repository's reader would ask the half that already agrees.
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut seen: Vec<u32> = Vec::new();
+    for (index, _) in text.match_indices(" 0 obj") {
+        let before = &text[..index];
+        let digits: String = before
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_digit)
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if let Ok(number) = digits.parse::<u32>() {
+            seen.push(number);
+        }
+    }
+    assert!(seen.len() > 2, "a rewrite writes objects: {seen:?}");
+
+    let mut sorted = seen.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        seen.len(),
+        "an object number is written twice: {seen:?}"
+    );
+}

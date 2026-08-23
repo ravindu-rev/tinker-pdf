@@ -1557,8 +1557,30 @@ impl DocumentEditor {
                 let encrypt_num = self.doc.trailer().get_ref(encrypt).map(|r| r.num);
 
                 // A rewrite must carry everything, not only the changes.
+                //
+                // Over the object numbers the document **has**, not over the
+                // range its numbering allows. This walked `1..=max_object_
+                // number()`, which is the same thing for almost every file and
+                // two thousand million lookups for
+                // `pdfjs/test/pdfs/bug1980958.pdf` — 219 bytes, four objects,
+                // the last of them numbered `i32::MAX`. A save over it had not
+                // returned after three minutes. The reader was hardened
+                // against exactly this shape years ago (`limits::MAX_XREF_
+                // SLOTS`, dense below the cap and a map above it); the editor
+                // never was, and nothing noticed because the corpus runner
+                // reads a hang as a slow file.
+                //
+                // `XrefTable::iter` yields ascending object numbers across
+                // both halves of that table, so the objects are visited in the
+                // same order as before and the bytes a rewrite produces are
+                // unchanged for every file whose numbering is dense.
                 let mut all = ObjectSet::new();
-                for num in 1..=self.doc.max_object_number() {
+                for (num, _) in self.doc.xref().iter() {
+                    if num == 0 {
+                        // Object zero is the head of the free list, never a
+                        // real object; the old range started at one.
+                        continue;
+                    }
                     let r = ObjRef::new(num, 0);
                     if self.deleted.contains(&num) {
                         continue;
@@ -1766,6 +1788,85 @@ mod tests {
             ..WriteOptions::default()
         });
         CosDocument::open(bytes).expect("the saved document opens")
+    }
+
+    /// The shape of `pdfjs/test/pdfs/bug1980958.pdf`, transcribed.
+    ///
+    /// 219 bytes, four objects, and the last of them numbered `2147483647` —
+    /// `i32::MAX`, which is legal: 7.3.10 puts no ceiling on an object number
+    /// beyond the ten-digit field of a cross-reference entry. There is no
+    /// `startxref` and no `trailer`, so the file opens through the rescan
+    /// ladder with a synthesised root, and it renders its 10 x 10 page in
+    /// under two seconds.
+    ///
+    /// The bytes are hand-written here rather than read from the corpus,
+    /// because the corpus is fetched and this test has to run without it.
+    fn numbered_to_the_ceiling() -> Arc<CosDocument> {
+        let text = concat!(
+            "%PDF-1.7\n",
+            "1 0 obj <</Type /Catalog /Pages 2 0 R>>\nendobj\n",
+            "2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n",
+            "3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 10 10]>>\nendobj\n",
+            "\n2147483647 0 obj <</Root 1 0 R>>\nendobj\n",
+        );
+        let doc = CosDocument::open(text.as_bytes().to_vec()).expect("it opens");
+        assert_eq!(doc.max_object_number(), 2_147_483_647, "the premise");
+        Arc::new(doc)
+    }
+
+    /// **A rewrite costs what the document holds, not what its numbering
+    /// allows.**
+    ///
+    /// This document holds four objects. Walking `1..=max_object_number()` to
+    /// find them is two thousand million lookups, which is not a hang in the
+    /// sense of a loop that never ends — it is a loop over the numbers the
+    /// file *could* have used instead of the four it did. The corpus runner
+    /// reads the difference as a slow file and the fuzzers prove no crash
+    /// rather than progress, so nothing in the suite covered it until this.
+    ///
+    /// Asserted on the *size of the output* rather than on a clock. A dense
+    /// implementation cannot produce a small file: it would have to write
+    /// two thousand million cross-reference entries before it could write the
+    /// trailer. So this measures work done, and stays true on a fast machine
+    /// and a slow one — the discipline `bounds_ledger.rs` states by banning
+    /// `Instant::now` from itself.
+    #[test]
+    fn a_rewrite_carries_the_objects_the_document_has() {
+        let editor = DocumentEditor::new(numbered_to_the_ceiling());
+        let bytes = editor.save(&WriteOptions::default());
+        assert!(
+            bytes.len() < 2048,
+            "a four-object rewrite is {} bytes",
+            bytes.len()
+        );
+
+        let saved = CosDocument::open(bytes).expect("the rewrite reopens");
+        assert_eq!(pages::count(&saved), 1, "and it is still the same page");
+    }
+
+    /// The same, on the path that writes a cross-reference **stream**.
+    ///
+    /// A separate test because `WriteOptions::default()` has `object_streams`
+    /// off, so the classic table is what the test above exercises — and the
+    /// classic table has been written in subsections, and therefore sparse,
+    /// since it was written. The stream form was the dense one, and 7.5.8.2's
+    /// `/Index` is the same subsection device under another name.
+    #[test]
+    fn a_packed_rewrite_carries_the_objects_the_document_has() {
+        let editor = DocumentEditor::new(numbered_to_the_ceiling());
+        let bytes = editor.save(&WriteOptions {
+            object_streams: true,
+            compress: true,
+            ..WriteOptions::default()
+        });
+        assert!(
+            bytes.len() < 2048,
+            "a four-object rewrite is {} bytes",
+            bytes.len()
+        );
+
+        let saved = CosDocument::open(bytes).expect("the rewrite reopens");
+        assert_eq!(pages::count(&saved), 1, "and it is still the same page");
     }
 
     #[test]

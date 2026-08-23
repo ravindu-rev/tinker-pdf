@@ -60,6 +60,18 @@ object-stream container is compressed whenever compression is on at all;
 a cross-reference stream never is, because a reader finds it by offset
 before it knows anything about filters.
 
+**Cost is the object count, never the object numbering.** Both tables are
+written in subsections — the classic one by its `first count` runs (7.5.4),
+the stream by `/Index` (7.5.8.2 Table 17) — so a file holding four objects
+writes four entries whatever it numbered them. That is not a size
+optimisation. `pdfjs/test/pdfs/bug1980958.pdf` is 219 bytes, holds four
+objects and numbers the last of them `2147483647`; a rewrite that walked
+the range rather than the objects made two thousand million lookups and had
+not returned after three minutes. The rewrite path enumerates the
+cross-reference table's own entries for the same reason, and the reader has
+been hardened against this shape since it was written
+(`limits::MAX_XREF_SLOTS`).
+
 **Encrypt-on-save.** `WriteOptions::encryption` encrypts a rewrite at R6
 (AES-256): every string and every stream (7.6.2), each under an
 initialisation vector derived from the file key and object number so

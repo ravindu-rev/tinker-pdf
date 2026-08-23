@@ -910,6 +910,20 @@ fn packable(object: &Object) -> bool {
     !matches!(object, Object::Stream(_))
 }
 
+/// One row of a cross-reference stream, before it is packed into `/W` fields.
+///
+/// Named rather than written as a tuple because the three forms are 7.5.8.2's
+/// three types and the middle field means something different in each: a byte
+/// offset in type 1 and a container's object number in type 2.
+enum Row {
+    /// Type 0: free. Object zero always is; nothing else here ever is.
+    Free,
+    /// Type 1: at this byte offset in the file.
+    AtOffset(u64),
+    /// Type 2: the k-th object of the container.
+    InStream(usize),
+}
+
 /// Writes a cross-reference stream (7.5.8).
 ///
 /// Needed rather than preferred once objects live in containers: a classic
@@ -925,46 +939,84 @@ fn write_xref_stream(
     objects: &ObjectSet,
     names: &NameTable,
 ) {
-    let stream_number = container.saturating_add(1);
     // Every object that has an offset, not just the container. `/Encrypt` is
     // numbered above it, and sizing from the container alone left that object
     // with no entry at all: the file reopened as unencrypted with zero pages
     // while its content was genuinely ciphertext, which is unrecoverable.
-    let highest = offsets
+    let highest_written = offsets
         .iter()
         .map(|(num, _)| *num)
         .max()
-        .unwrap_or(stream_number)
-        .max(stream_number);
-    let size = highest.saturating_add(1);
+        .unwrap_or(container)
+        .max(container);
+    // The stream is an object as well, and it takes the next number after
+    // everything already written — not `container + 1`, which is the number
+    // `/Encrypt` takes on an encrypted rewrite. Those two collided, so such a
+    // file carried **two objects numbered the same**, and the reason nothing
+    // noticed is that neither of them is found by number: a reader reaches the
+    // stream through `startxref` and `/Encrypt` through the trailer. The dense
+    // table hid it further, by resolving the collision in favour of whichever
+    // branch it tested first.
+    let stream_number = highest_written.saturating_add(1);
+    let size = stream_number.saturating_add(1);
+
+    // One row per object that exists, in a map, and then `/Index` subsections
+    // over the runs — the same device `write_classic_xref` has always used,
+    // spelled the way 7.5.8.2 Table 17 spells it.
+    //
+    // This used to write `0..size` densely and look up each number by scanning
+    // `offsets` and `packed`. Two defects in one loop. The scans made it
+    // quadratic in the object count, which is invisible until a file is large.
+    // The density made it unbounded in the highest object *number*, which is a
+    // different thing entirely: `pdfjs/test/pdfs/bug1980958.pdf` holds four
+    // objects and numbers the last of them `i32::MAX`, so the loop ran two
+    // thousand million times and `Vec::with_capacity(size * 8)` asked for
+    // seventeen gigabytes to hold the result.
+    //
+    // A reader that ignores `/Index` reads the default `[0 Size]` and gets the
+    // wrong rows, so this is not a free choice — but `/Index` is not optional
+    // to support either, and this engine's own reader has honoured it since
+    // the cross-reference stream reader was written.
+    let mut rows: BTreeMap<u32, Row> = BTreeMap::new();
+    // Object zero heads the free list, and 7.5.8.2 keeps that requirement from
+    // the classic table.
+    rows.insert(0, Row::Free);
+    for (num, offset) in offsets {
+        rows.insert(*num, Row::AtOffset(*offset));
+    }
+    for (index, num) in packed.iter().enumerate() {
+        // A packed object is only in a container if it has no offset of its
+        // own; an object written twice would be a defect upstream of here, and
+        // the offset is the entry a reader can act on.
+        rows.entry(*num).or_insert(Row::InStream(index));
+    }
+    rows.insert(stream_number, Row::AtOffset(out.len() as u64));
 
     // Three bytes of offset covers 16 MB; four covers 4 GB, which is past
     // what any single PDF should be.
-    let mut data = Vec::with_capacity((size as usize) * 8);
-    for num in 0..size {
-        if num == 0 {
-            // Object zero heads the free list.
-            data.push(0);
-            data.extend_from_slice(&[0, 0, 0, 0]);
-            data.extend_from_slice(&[255, 255]);
-            continue;
+    let mut data = Vec::with_capacity(rows.len() * 8);
+    let mut index_pairs: Vec<(u32, u32)> = Vec::new();
+    for (num, row) in &rows {
+        match index_pairs.last_mut() {
+            Some((first, count)) if *first + *count == *num => *count += 1,
+            _ => index_pairs.push((*num, 1)),
         }
-        if let Some((_, offset)) = offsets.iter().find(|(n, _)| *n == num) {
-            data.push(1);
-            data.extend_from_slice(&(*offset as u32).to_be_bytes());
-            data.extend_from_slice(&0u16.to_be_bytes());
-        } else if let Some(index) = packed.iter().position(|n| *n == num) {
-            data.push(2);
-            data.extend_from_slice(&container.to_be_bytes());
-            data.extend_from_slice(&(index as u16).to_be_bytes());
-        } else if num == stream_number {
-            data.push(1);
-            data.extend_from_slice(&(out.len() as u32).to_be_bytes());
-            data.extend_from_slice(&0u16.to_be_bytes());
-        } else {
-            data.push(0);
-            data.extend_from_slice(&[0, 0, 0, 0]);
-            data.extend_from_slice(&[255, 255]);
+        match row {
+            Row::Free => {
+                data.push(0);
+                data.extend_from_slice(&[0, 0, 0, 0]);
+                data.extend_from_slice(&[255, 255]);
+            }
+            Row::AtOffset(offset) => {
+                data.push(1);
+                data.extend_from_slice(&(*offset as u32).to_be_bytes());
+                data.extend_from_slice(&0u16.to_be_bytes());
+            }
+            Row::InStream(index) => {
+                data.push(2);
+                data.extend_from_slice(&container.to_be_bytes());
+                data.extend_from_slice(&(*index as u16).to_be_bytes());
+            }
         }
     }
 
@@ -993,6 +1045,24 @@ fn write_xref_stream(
     dict.insert(
         Name::W,
         Object::Array(vec![Object::Int(1), Object::Int(4), Object::Int(2)]),
+    );
+    // 7.5.8.2 Table 17: which object numbers the rows above describe. Its
+    // default is `[0 Size]`, which is what this stream used to be — and what
+    // made its cost a function of the highest object number rather than of the
+    // object count.
+    dict.insert(
+        Name::INDEX,
+        Object::Array(
+            index_pairs
+                .iter()
+                .flat_map(|(first, count)| {
+                    [
+                        Object::Int(i64::from(*first)),
+                        Object::Int(i64::from(*count)),
+                    ]
+                })
+                .collect(),
+        ),
     );
     // A stale /Prev would point at a revision this file does not contain.
     let dict = crate::edit::without(&dict, Name::PREV);
