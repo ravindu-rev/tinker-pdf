@@ -145,11 +145,11 @@ its file is listed in `SPAWNERS` with the reason it may — and a row there
 whose file has stopped spawning fails too, so an allowance cannot outlive
 the thing it allowed.
 
-Three rows are still `DEBT`: the mutool, browser and epubcheck oracles of
-retired ruling 9 have not been replaced yet, and each row names the roadmap
-step that removes it. The four qpdf rows are gone — the strict validator
-replaced them, and the allowances left in the same commit as the tests they
-allowed. Until the rest go those tests still run, and they still must not
+Two rows are still `DEBT`: the browser and epubcheck oracles of retired
+ruling 9 have not been replaced yet, and each row names the roadmap step that
+removes it. The four qpdf rows are gone — the strict validator replaced them —
+and so is the mutool row, replaced by `xps_conservation.rs`. Every allowance
+left in the same commit as the test it allowed. Until the rest go those tests still run, and they still must not
 skip silently — a skip exits 0 and reads exactly like a pass, so each CI job
 greps its own output for a `RAN` banner and fails on `SKIPPED`. That `RAN` /
 `SKIPPED` discipline outlives the oracles: it binds every check that depends

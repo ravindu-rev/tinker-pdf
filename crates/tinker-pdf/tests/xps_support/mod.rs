@@ -36,6 +36,16 @@
 #[path = "../cbz_support/mod.rs"]
 mod archive_writer;
 
+/// The raw-dictionary readers, by path for `archive_writer`'s reason: ruling
+/// 13's conservation harness reads a synthesised document the way
+/// `xps_validated.rs` does — out of the dictionaries, never through the typed
+/// readers — and an XPS test should not have to know which file that module was
+/// first written for.
+#[path = "../validated_support/mod.rs"]
+pub mod validated;
+
+pub mod conservation;
+
 pub use archive_writer::{distinct_pixels, grey_jpeg, rgb_png, zip, Damage, ZipFile};
 
 use tinker_pdf::cbz;

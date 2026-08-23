@@ -534,8 +534,10 @@ fn check_libm() -> Result<(), Vec<String>> {
 ///   running because ruling 13's order is fixed: nothing is deleted before the
 ///   first-party check replacing it exists and has been injection-counted.
 ///   Each row names the step of the roadmap's first-party-verification item
-///   that removes it. The four qpdf tests left in step 3, with the strict
-///   validator, and their rows left with them.
+///   that removes it. The four qpdf tests left in step 3 with the strict
+///   validator, and `xps_mutool.rs` left in step 4 with the conservation
+///   suite — every one of their rows leaving in the same commit as the test it
+///   allowed, which is the half of this check that catches a stale allowance.
 ///
 /// The check runs both ways. A file that spawns something and is not here is
 /// a build failure — that is the boundary. And a row here whose file no
@@ -543,13 +545,6 @@ fn check_libm() -> Result<(), Vec<String>> {
 /// allowance leave in the same commit as the thing it allowed, instead of
 /// standing for a year after the debt is paid.
 const SPAWNERS: &[(&str, &str)] = &[
-    (
-        "crates/tinker-pdf/tests/xps_mutool.rs",
-        "DEBT (step 4): a second reader's rendering of an XPS package, which \
-         is the only check here that catches a mistake this engine makes \
-         consistently in both directions. Leaves with the conservation suite, \
-         and what it proved does not come back",
-    ),
     (
         "crates/tinker-pdf/tests/epub_browser.rs",
         "DEBT (step 5): a headless browser lays out the committed books. \

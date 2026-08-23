@@ -163,5 +163,5 @@ a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
 `handler.rs` so seeds and carve order cannot drift, including the one
 pre-R6 seed that genuinely authenticates. All of it rides in the
-workspace suite: 2 883 passed, 0 failed, 8 ignored (Windows x86_64,
+workspace suite: 2 911 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).

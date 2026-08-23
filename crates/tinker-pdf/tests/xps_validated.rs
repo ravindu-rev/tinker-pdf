@@ -17,12 +17,14 @@
 //! a missing `/Extend` — so a round trip through this repository's own reader
 //! would agree with itself about a form that carried none of them.
 
-mod validated_support;
 mod xps_support;
 
 use tinker_pdf::{cbz, xps};
 use tinker_pdf::{CosDocument, Defect, Document, WriteMode, WriteOptions};
-use validated_support::{category, flat, has, name, numbers, pages, resource, value};
+// Through `xps_support` rather than by its own `mod`, because the conservation
+// harness beside it reads a document the same way and a file loaded as two
+// modules in one binary is two copies of the same helpers.
+use xps_support::validated::{category, flat, has, name, numbers, pages, resource, value};
 use xps_support::{archive, document, fixed_page, fixed_page_with, one_page_package, with};
 
 fn corpus(name: &str) -> Vec<u8> {

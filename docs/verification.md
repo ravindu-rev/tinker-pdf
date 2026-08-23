@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 883 passed, 0 failed, 8 ignored** across 120 suites on
+is **2 911 passed, 0 failed, 8 ignored** across 120 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -137,7 +137,7 @@ is true today. The [roadmap](ROADMAP.md) carries the milestones.
 | Was proving | Oracle | Replaced by | State |
 | --- | --- | --- | --- |
 | Written output is a well-formed PDF to a reader nobody here wrote | `qpdf --check`, `--show-linearization` (`qpdf_oracle.rs`, plus CBZ/XPS/EPUB variants) | The strict validator (below), plus `validated_output.rs` and the three container files reading every value back out of the dictionaries | **done** |
-| A second program's reading of an XPS package matches ours | `xps_mutool.rs` | Conservation assertions derived from the markup by an independent in-test walk | still running |
+| A second program's reading of an XPS package matches ours | `xps_mutool.rs` | `xps_conservation.rs`: a census of the markup by an independent in-test walk, against a census of the document synthesised from it | **done** |
 | CSS layout against the reference implementation of CSS | `epub_browser.rs` | Reftest pairs and analytic layout over fixed metrics | still running |
 | Whose fault an engine-versus-book EPUB disagreement is | epubcheck 5.3.0 (`tests/epub/EPUBCHECK.tsv`) | Nothing. The verdicts stand as a dated record, never re-run | still running |
 | JPEG 2000 decode against a decoder sharing no code | *(none — see below)* | Committed reference decodes, already offline | **done** |
@@ -173,6 +173,42 @@ Eighty injections hold the rules to the discipline this repository uses
 everywhere else: each defect is put back into a document this engine wrote,
 the rule that catches it is named, and the undamaged twin is asserted clean in
 the same file. `tpdf check --strict` exits by the verdict.
+
+### XPS conservation
+
+`xps_conservation.rs` asks one question of every committed package: **does the
+synthesised document carry what the markup states, in order, at the place
+ECMA-388 18.1 puts it?** Both sides state the same census — page sizes, painted
+elements with their colours, gradient geometry and stops, image pixel counts and
+rectangles, tiling copies, glyph runs with their origins, sizes, text and the
+advances `Indices` overrides — and the comparator reports a typed divergence for
+each thing that differs. All eight packages conserve every fact, and the counts
+are recorded in `tests/xps/CONSERVATION.tsv`, which a change that moves them has
+to re-measure.
+
+What makes it worth anything is the same thing the strict validator's value
+rests on: **what the markup side is not allowed to use.** It reaches for
+`tinker-pdf-zip` to get bytes out of the package and nothing above that — not
+the XML parser the reader parses with, not the PNG and JPEG decoders that give a
+picture its pixel count, not `geometry`'s reader of 11.2.3's abbreviated
+grammar, and not 18.1's scale and flip, which are written out from the clause so
+that a defect in the reader's arithmetic cannot cancel against a harness sharing
+it. A harness that asked the reader what the reader decided would have checked
+nothing.
+
+Eight injections were counted before the oracle was deleted, and one of them is
+the reason to run an injection matrix rather than reason about one. Composing
+the painter's open scopes outermost-first — gap 30 milestone 8's own defect, the
+one that put a picture four thousand points down the page — was caught by
+**nothing at all**: 0 of 892. Every `RenderTransform` in all eight committed
+packages is a translation, and two translations compose to the same matrix
+either way round; and since the outermost open scope is the page, whose
+transform is the identity, one canvas cannot part the two orders either. The
+fixture that closes it is two nested canvases that do not commute with an image
+brush beneath them, and it is the only assertion in the suite that fires. The
+other seven injections were already caught by between 3 and 29 assertions each,
+so what conservation adds is breadth over the real packages and that one hole —
+not sole custody of seven defect classes.
 
 The JPEG 2000 row is not a replacement so much as a correction.
 `jpx_reference.rs` never invoked anything: it compares against `.opj.pgm`

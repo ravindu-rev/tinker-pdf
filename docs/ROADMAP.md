@@ -16,7 +16,7 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 883 tests proving the
+These come before any new feature. The suite is 2 911 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
@@ -25,14 +25,12 @@ thousands of documents nobody here authored.
 
 - **First-party verification.** Ruling 13 retires the subprocess oracles,
   and between that decision and the last replacement this suite is losing
-  evidence it has not yet regained — `xps_mutool.rs`, `epub_browser.rs` and
-  the epubcheck verdicts each remain the only outside read of something.
+  evidence it has not yet regained — `epub_browser.rs` and the epubcheck
+  verdicts each remain the only outside read of something.
   Evidence: the four properties [verification.md](verification.md) names as
   not coming back. The order is fixed — nothing is deleted before the check
   replacing it exists and has been injection-counted, and the steps keep the
   numbers the allowance rows in `xtask/src/main.rs` cite:
-  4. XPS conservation from an independent markup walk, then `xps_mutool.rs`
-     and its job. (M)
   5. EPUB reftest pairs and analytic layout, then `epub_browser.rs`, the
      browser job, and the epubcheck step. (M)
   6. Analytic raster fixtures: pages whose correct raster is computable in
@@ -41,13 +39,22 @@ thousands of documents nobody here authored.
      resolution coherence — with their own ratchet rows. (M)
   8. `tools/oracle-diff` deleted; the suite recounted. (S)
 
-  Steps 1 to 3 are done: `cargo xtask oracles` holds the boundary with a
+  Steps 1 to 4 are done: `cargo xtask oracles` holds the boundary with a
   build failure, the honesty pass corrected two claims about checks that were
-  never wired, and the strict validator retired the four qpdf tests and their
-  job. It found three defects in this engine's own output on the way —
-  a missing trailer `/ID`, a stale `/Prev` carried into a rewrite, and a
+  never wired, the strict validator retired the four qpdf tests and their
+  job, and `xps_conservation.rs` retired `xps_mutool.rs` and its job. The
+  validator found three defects in this engine's own output on the way — a
+  missing trailer `/ID`, a stale `/Prev` carried into a rewrite, and a
   cross-reference table with no free head — and its structural tier now runs
   over a rewrite of every corpus file with its own ratchet row.
+
+  Step 4 found one too, and it is the kind an injection matrix exists to
+  find rather than a defect in shipped output: composing the painter's open
+  scopes outermost-first was caught by **nothing at all** — 0 of 892 — because
+  every `RenderTransform` in all eight committed packages is a translation and
+  two translations commute. Two nested canvases that do not commute close it.
+  What left with the oracle is stated in [verification.md](verification.md)
+  and is not narrowed by what replaced it.
 
   Exit: no test or CI job spawns a program the workspace did not build,
   `cargo xtask oracles` is green in `cargo xtask check`, and every row of
