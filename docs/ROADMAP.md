@@ -16,7 +16,7 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 790 tests proving the
+These come before any new feature. The suite is 2 883 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
@@ -25,20 +25,12 @@ thousands of documents nobody here authored.
 
 - **First-party verification.** Ruling 13 retires the subprocess oracles,
   and between that decision and the last replacement this suite is losing
-  evidence it has not yet regained — `qpdf_oracle.rs`, `xps_mutool.rs`,
-  `epub_browser.rs` and the epubcheck verdicts each remain the only outside
-  read of something. Evidence: the four properties
-  [verification.md](verification.md) names as not coming back, and the
-  nine-of-ten injection matrix whose tenth fault only qpdf ever caught. The
-  order is fixed — nothing is deleted before the check replacing it exists
-  and has been injection-counted:
-  1. `cargo xtask oracles`: the boundary itself, held by a build failure
-     rather than by habit. (S)
-  2. The honesty pass: a `jpx-oracle` CI job that greps a marker no code
-     emits, and two claims about checks that were never wired. (S)
-  3. A strict validator — own output re-opened with the leniency ladder
-     off, plus the structures the tolerant reader never consults — then the
-     four qpdf tests and their job. (M)
+  evidence it has not yet regained — `xps_mutool.rs`, `epub_browser.rs` and
+  the epubcheck verdicts each remain the only outside read of something.
+  Evidence: the four properties [verification.md](verification.md) names as
+  not coming back. The order is fixed — nothing is deleted before the check
+  replacing it exists and has been injection-counted, and the steps keep the
+  numbers the allowance rows in `xtask/src/main.rs` cite:
   4. XPS conservation from an independent markup walk, then `xps_mutool.rs`
      and its job. (M)
   5. EPUB reftest pairs and analytic layout, then `epub_browser.rs`, the
@@ -48,6 +40,14 @@ thousands of documents nobody here authored.
   7. Metamorphic probes over the real corpus — rotation, cropping and
      resolution coherence — with their own ratchet rows. (M)
   8. `tools/oracle-diff` deleted; the suite recounted. (S)
+
+  Steps 1 to 3 are done: `cargo xtask oracles` holds the boundary with a
+  build failure, the honesty pass corrected two claims about checks that were
+  never wired, and the strict validator retired the four qpdf tests and their
+  job. It found three defects in this engine's own output on the way —
+  a missing trailer `/ID`, a stale `/Prev` carried into a rewrite, and a
+  cross-reference table with no free head — and its structural tier now runs
+  over a rewrite of every corpus file with its own ratchet row.
 
   Exit: no test or CI job spawns a program the workspace did not build,
   `cargo xtask oracles` is green in `cargo xtask check`, and every row of
@@ -59,14 +59,6 @@ thousands of documents nobody here authored.
   from CI configuration and no run has been watched. Exit: one commit with
   the `macos-14` leg and the `wasm-determinism` job green together,
   observed. (S)
-- **`/ID` on encrypted writes.** 7.5.5 Table 15 requires a trailer `/ID`
-  whenever `/Encrypt` is present; no file this engine encrypts carries one.
-  An outside reader found it, and its complaint is currently allowed through
-  *by name*, which costs an assertion. Needs a decision on deriving the ID
-  (the 48 caller-supplied entropy bytes are fully consumed today). Exit: the
-  strict validator refuses a trailer carrying `/Encrypt` and no `/ID`, that
-  rule is injection-counted, and the by-name allowance is gone with the
-  oracle that needed it. (S)
 - **A `--fonts` corpus bar.** The corpus's 24 % rendered-with-warnings rate
   is dominated by the no-bundled-faces policy, so it measures the policy as
   much as the engine. Record a bar with a font provider supplied, and

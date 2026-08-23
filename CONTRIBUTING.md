@@ -145,15 +145,16 @@ its file is listed in `SPAWNERS` with the reason it may — and a row there
 whose file has stopped spawning fails too, so an allowance cannot outlive
 the thing it allowed.
 
-Several rows are still `DEBT`: the qpdf, mutool, browser and epubcheck
-oracles of retired ruling 9 have not been replaced yet, and each row names
-the roadmap step that removes it. Until then those tests still run, and they
-still must not skip silently — a skip exits 0 and reads exactly like a pass,
-so the CI job greps its own output for `qpdf-oracle: RAN` and fails on
-`qpdf-oracle: SKIPPED`. Set `TINKER_QPDF` to an absolute path if your install
-is somewhere `PATH` does not reach; quote it if the path has spaces. That
-`RAN` / `SKIPPED` discipline outlives the oracles: it binds every check that
-depends on something being present, the fetched corpora included.
+Three rows are still `DEBT`: the mutool, browser and epubcheck oracles of
+retired ruling 9 have not been replaced yet, and each row names the roadmap
+step that removes it. The four qpdf rows are gone — the strict validator
+replaced them, and the allowances left in the same commit as the tests they
+allowed. Until the rest go those tests still run, and they still must not
+skip silently — a skip exits 0 and reads exactly like a pass, so each CI job
+greps its own output for a `RAN` banner and fails on `SKIPPED`. That `RAN` /
+`SKIPPED` discipline outlives the oracles: it binds every check that depends
+on something being present, the fetched corpora and the corpus run's own
+strict pass included.
 
 ## Commits and licensing
 

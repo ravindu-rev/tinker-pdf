@@ -133,6 +133,7 @@ because glyph coverage needs both the content tokenizer and font metrics
   terminates, scaled and rotated runs, and the needle-bytes-absent assertion
   over every decompressed stream.
 - Every edited document is written through the [writer](writing.md), whose
-  output is checked by qpdf in CI (`qpdf_oracle.rs`); the `render_page` and
+  output is held to the strict validator (`strict_validator.rs`); the
+  `render_page` and
   `cos_document` fuzz targets cover the reader side of what the editor
   produces.

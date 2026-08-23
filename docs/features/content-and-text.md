@@ -160,5 +160,5 @@ sweeps the same shapes on stable. `tools/oracle-diff` can run an external
 text extractor for comparison, but it is wired into no test and no CI job,
 and ruling 13 retires it. Across the corpus, 4 484 of
 4 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 2 790 passed / 0 failed / 8 ignored (Windows x86_64,
+--workspace` stands at 2 883 passed / 0 failed / 8 ignored (Windows x86_64,
 as of August 2026).

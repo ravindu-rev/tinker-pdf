@@ -124,7 +124,6 @@ Some(Encryption { .. })` or `linearize: true` on a `Rewrite`
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| `/ID` on encrypted saves | qpdf's `invalid /ID in trailer dictionary`, allowed through the oracle *by name* in `qpdf_oracle.rs` so nothing else hides behind it | 7.5.5 Table 15 requires `/ID` beside `/Encrypt`; all 48 entropy bytes are consumed and no derivation is decided | [ROADMAP](../ROADMAP.md) Tier 1 |
 | Encrypting an incremental update | no typed variant: the incremental writer takes no cipher, so the combination cannot be requested | an update inherits the base file's encryption, which needs the original file key plumbed through | [ROADMAP](../ROADMAP.md) Tier 2 |
 | Linearizing an incremental update | none — `linearize` is quietly dropped, documented on the field | an update appends to whatever layout the original had; claiming `/Linearized` over it would be a lie a reader believes | 7.5.6, Annex F |
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
@@ -144,17 +143,23 @@ and object-stream round-trips through the engine's own reader.
 
 `crates/tinker-pdf-cos/tests/linearized.rs` checks byte offsets against the
 bytes — a file can open perfectly with page one scattered through the
-middle, which a round-trip cannot see. `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`
-then asks somebody else: `qpdf --check` and `qpdf --show-linearization`
-run as subprocesses over one-, two- and six-page fixtures plus
-a shared-resource fixture with a real part 8, encrypted and not, with
-every hint-table value recomputed from the raw bytes; the writer's whole
-object surface — graphics states, groups, gradients, patterns, a composite
-font, links and outlines — is read back through `--show-object` and
-`--json`, in plain, rewritten, linearized and compressed-object-stream
-form. The `qpdf-linearization` CI job (`.github/workflows/ci.yml`)
-installs qpdf, greps its own log for the `RAN` banner and goes **red when
-qpdf is missing** — a skip may not impersonate a pass.
+middle, which a round-trip cannot see.
+`crates/tinker-pdf-cos/tests/strict_validator.rs` then reads the file again
+with the leniency ladder **off**: eighty injections over the frame, the
+cross-reference sections as the bytes spell them, the trailer's Table 15
+entries, stream extents against `endstream`, and Annex F's hint tables
+decoded by a reader that shares nothing with the writer and is held to the
+file's own object extents. `tests/validated_output.rs` reads the writer's
+whole object surface back out of the dictionaries — graphics states, groups,
+gradients, patterns, a composite font down to its `/W` and `/ToUnicode`,
+links and outlines with their counts and back-links — because every one of
+those entries is one the *typed* readers supply a default for.
+
+What that costs is stated where it is spent: this is this project's own
+parser reading this project's own writer, so the one thing it cannot
+establish is that anybody else accepts these files. The qpdf oracle that
+used to make that claim is gone under ruling 13
+([verification](../verification.md)).
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the
@@ -162,11 +167,16 @@ forms suites save through both modes. The three document byte-hashes in
 `crates/tinker-pdf/tests/determinism.rs` pin writer byte-determinism —
 object numbering, dictionary order and stream framing frozen as bytes
 (ruling 4, [determinism](determinism.md)). All of it rides in the
-workspace suite: 2 790 passed, 0 failed, 8 ignored (Windows x86_64,
-August 2026) — [verification](../verification.md). What is *not* yet
-verified is scale: the linearization check runs on fixtures, never over the
-corpus. And under ruling 13 the arbiter itself changes: the strict validator
-that replaces qpdf reads what qpdf read *and* the structures the tolerant
-reader never consults — but it is this project's own reader, so the one
-thing it cannot establish is that anybody else accepts these files
-([ROADMAP](../ROADMAP.md) Tier 1, [verification](../verification.md)).
+workspace suite: SUITE_COUNT passed, 0 failed, 8 ignored (Windows x86_64,
+August 2026) — [verification](../verification.md).
+
+**And it runs at scale.** Every corpus file this engine reads cleanly is
+rewritten in memory and the rewrite is validated, which is 4 225
+documents nobody here authored: all 4 225 of those rewrites carry no
+structural defect at all, and `corpus/ratchet.json` holds the rate. That pass
+is what found the three defects this writer had and no other check could see,
+because this engine's own reader repairs all three in silence: no trailer
+`/ID` on any path, a `/Prev` inherited from a source that no longer exists, a
+cross-reference table with no free head whenever the lowest object number was
+two or more, and a linearization parameter dictionary carried into a rewrite
+that is not linearized.

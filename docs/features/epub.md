@@ -158,9 +158,12 @@ set ([ROADMAP.md](../ROADMAP.md) Tier 4).
   table); the CSS crate's tokenizer, selector and cascade suites.
 - `epub_browser.rs`: a headless Chromium lays out the same books and the
   `y` offsets and text partition are compared — never pixels; red if the
-  browser is missing. `epub_qpdf.rs`: every synthesised book passes
-  `qpdf --check`. **Both leave under ruling 13**, and the browser is the one
-  that costs the most: retired ruling 9's own reasoning is that a browser is
+  browser is missing. `epub_validated.rs`: every synthesised book is held to
+  the strict validator, its pages are read at the box the caller stated, its
+  content streams are decoded operator by operator so a placeholder page and
+  a page that reads are told apart, and its three embedded faces keep their
+  own `/W` advances. That one replaced the qpdf oracle; the browser has yet
+  to be replaced, and it is the one that costs the most: retired ruling 9's own reasoning is that a browser is
   the reference implementation of CSS, so what replaces it — reftest pairs
   and analytic layout — has both sides written by the same people who wrote
   the engine. After that milestone, **this engine's CSS is verified against

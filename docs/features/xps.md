@@ -130,12 +130,17 @@ the format, and the doc says so ([ROADMAP.md](../ROADMAP.md) Tier 4).
   orders differ), `xps_opc.rs`, `xps_markup.rs`, `xps_glyphs.rs`
   (de-obfuscation asserted byte-for-byte), `xps_images.rs`,
   `xps_memory.rs` (synthesis cost measured), `xml_real_packages.rs`.
-- `xps_qpdf.rs`: every synthesised PDF passes `qpdf --check`;
-  `xps_mutool.rs`: rendered output compared against an external reader, in a
-  job that goes red if it is missing. **Both leave under ruling 13.** What
-  they prove — that two independent programs read one package and agree — is
-  the thing conservation assertions cannot reproduce, so after that milestone
-  a consistent misreading of ECMA-388 survives ([ROADMAP](../ROADMAP.md)).
+- `xps_validated.rs`: every synthesised PDF is held to the strict validator,
+  in every write mode, and its gradients, transparency groups, boxes and
+  composite fonts are read back out of the dictionaries — the entries this
+  engine's own typed readers supply a default for. It replaces the qpdf oracle
+  ruling 13 retired; what left with it is that a reader nobody here wrote
+  accepts the file. `xps_mutool.rs`: rendered output compared against an
+  external reader, in a job that goes red if it is missing. **It leaves under
+  ruling 13 too**, and it is the costlier of the two: what it proves — that
+  two independent programs read one package and agree — is the thing
+  conservation assertions cannot reproduce, so after that milestone a
+  consistent misreading of ECMA-388 survives ([ROADMAP](../ROADMAP.md)).
 - The `xps` determinism fingerprint and the fixed-document byte-hash
   ([determinism](determinism.md)) — the first fixture whose input this
   repository did not author.

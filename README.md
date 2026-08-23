@@ -32,8 +32,10 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 
 ## Measured, not claimed
 
-As of August 2026: **2 790 tests** (0 failed) across 119 suites; corpus of
-**4 525** documents with **4 484 rendering every page and zero crashes**;
+As of August 2026: **2 883 tests** (0 failed) across 120 suites; corpus of
+**4 525** documents with **4 484 rendering every page and zero crashes**, and
+**4 225 of 4 225** rewrites of them validating against ISO 32000 read
+strictly;
 all 202 Adobe CMaps compiled in; UAX #14 line breaking at
 **19 338 / 19 338** of Unicode's own conformance table.
 
