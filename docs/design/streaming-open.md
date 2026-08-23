@@ -8,8 +8,11 @@ file (ISO 32000-1 Annex F) not one read touches the tail. The
 [roadmap](../ROADMAP.md) names this gap and its unusual advantage: the
 reader's spec-complete counterpart is already in-tree, because the writer
 produces Annex F output whose hint tables are read back bit-for-bit by this
-repository's own tests and arbitrated by `qpdf --show-linearization`
-(`crates/tinker-pdf-cos/tests/qpdf_oracle.rs`, ruling 9). What is missing is
+repository's own tests. The reader is also what closes an old gap in that
+claim: hint tables were once bit-packed structures this repository wrote and
+nothing here read, wrong in five ways with every test green — a production
+reader over *linearized files this project did not write* is the first
+in-tree check that could have caught it. What is missing is
 a source abstraction, an open path that discovers structure incrementally,
 and honesty — typed, per [rulings](../rulings.md) 2 and 10 — about the
 operations that still need every byte.
@@ -177,20 +180,21 @@ against `SliceSource`.
 |---|---|---|---|
 | 1 | `ByteSource`, `SliceSource`, `CountingSource`, `ShreddedSource`; `Backing` behind `CosDocument` | Full workspace suite green with `SliceSource`; `determinism.rs` fingerprints byte-identical over `ShreddedSource`; no public-signature change flagged by `tinker_parity.rs` | M |
 | 2 | Incremental tail-first discovery (generic path) | New `streaming_open.rs` test: a multi-megabyte committed fixture opens and reads one mid-file object with `CountingSource` total under a committed byte budget (ratchet-style number, `--check`ed like `corpus/ratchet.json`) | M |
-| 3 | `linearize::hints` promoted from `linearize.rs` tests to production | Existing round-trip tests re-pointed at the production module; `qpdf_oracle.rs` gains a case parsing qpdf-written hint tables with the `SKIPPED`-is-red guard | S |
-| 4 | Linearized fast path + `Document::open_streaming` + page-one render | Test renders page one of (a) a writer-linearized fixture and (b) a qpdf-linearized file, asserting via `CountingSource` that **zero read ranges intersect the tail** past `/E` and total bytes stay under budget; `/L` mismatch provably falls back to the generic path | L |
+| 3 | `linearize::hints` promoted from `linearize.rs` tests to production | Existing round-trip tests re-pointed at the production module; the reader parses the hint tables of every already-linearized file in the fetched qpdf corpus — files this project did not write — and the count parsed is asserted so a shrinking set cannot read as a passing one | S |
+| 4 | Linearized fast path + `Document::open_streaming` + page-one render | Test renders page one of (a) a writer-linearized fixture and (b) a linearized file from the fetched qpdf corpus, asserting via `CountingSource` that **zero read ranges intersect the tail** past `/E` and total bytes stay under budget; `/L` mismatch provably falls back to the generic path | L |
 | 5 | Honest degradation + wasm host loop | Damaged fixture on a streamed source reaches `LadderLevel::Rescan` with `WholeFileFetched` warned; `hostile_input.rs` sweep runs over `ShreddedSource` with zero panics; `bindings/js` demo feeds ranges and draws page one, checked in the existing wasm CI job shape | M |
 
 ## Dependencies
 
-- The Annex F writer and its oracles — `linearize.rs`,
-  `tests/linearized.rs`, `tests/qpdf_oracle.rs` — all landed; milestone 3
-  is a move, not an implementation.
+- The Annex F writer and its tests — `linearize.rs`,
+  `tests/linearized.rs` — all landed; milestone 3 is a move, not an
+  implementation.
 - The determinism suite and its fingerprints
   ([verification.md](../verification.md)) as the arrival-independence bar.
 - The qpdf corpus (637 files, fetched via `xtask corpus-fetch`) as the
-  external source of linearized files for milestone 4.
-- No new crates, no new subprocess oracles beyond qpdf already in use.
+  source of linearized files this project did not write — inputs, which
+  ruling 13 keeps — for milestones 3 and 4.
+- No new crates and no external programs (ruling 13).
 
 ## Risks
 

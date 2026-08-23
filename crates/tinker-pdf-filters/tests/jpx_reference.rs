@@ -1,4 +1,19 @@
-//! Gates 1 and 3: this decoder against OpenJPEG's, reversible and lossy.
+//! Gates 1 and 3: this decoder against committed reference decodes.
+//!
+//! # This file was called an oracle, and it is not one
+//!
+//! *Renamed August 2026, under ruling 13.* Nothing here invokes anything.
+//! Every byte it compares against is committed: the codestreams under
+//! `tests/jpx/`, and the `.opj.pgm` / `.opj.ppm` images beside them. They
+//! were produced once, on a named day, by the commands recorded below, and
+//! they are read from disk like any other fixture.
+//!
+//! The old name said otherwise, `docs/verification.md` repeated it, and a CI
+//! job grepped this file's output for a `jpx-oracle: RAN` banner that no line
+//! of it has ever printed — so that job could not pass, and the claim it was
+//! guarding was not the claim this file makes. All three are corrected here.
+//! What this file actually is: **a dated measurement**, which ruling 13
+//! admits as an input and never as a check that re-runs.
 //!
 //! This is the strongest check the JPEG 2000 decoder has, and until milestone
 //! 4 it could not be run at all: tier-1 emits coefficients, and until the
@@ -12,25 +27,34 @@
 //! level shift. Only the 9/7's fixed-point arithmetic is outside it, and that
 //! is milestone 5 with gates of its own.
 //!
-//! It matters more than an ordinary oracle check because **T.800 publishes no
-//! datastream annex** — there is no equivalent of T.88's Annex H.1, which is
-//! the artefact gap 17 leaned on for JBIG2. This comparison carries that
-//! weight instead.
+//! It carries more weight than an ordinary fixture because **T.800 publishes
+//! no datastream annex** — there is no equivalent of T.88's Annex H.1, which
+//! is the artefact gap 17 leaned on for JBIG2. These committed decodes carry
+//! that weight instead, and being a measurement rather than a check is the
+//! cost: they say what one decoder produced once, on these codestreams, and
+//! they cannot grow to cover a partition nobody has yet encoded. Ruling 13
+//! makes that a permanent property of this file, so new coverage means
+//! hand-authored codestreams transcribed from T.800 — the discipline JBIG2
+//! took from Annex H — rather than asking an encoder for one.
 //!
 //! # The fixtures
 //!
 //! Made from *our own* images with `opj_compress -r 1` (lossless, so the
 //! reversible 5/3), at one, two and three decomposition levels, and committed
-//! under ruling 9 — the oracle is invoked, never vendored, and ISO's own
-//! conformance codestreams are not redistributable in any case. The shapes
+//! with their provenance — a tool's output on our input is ours to commit,
+//! and ISO's own conformance codestreams are not redistributable in any case.
+//! Nothing of that tool is vendored, linked or invoked by this suite. The
+//! shapes
 //! are deliberate: an even grid, an odd one (17 by 13, so every subband has a
 //! partial code-block), a one-pixel checkerboard, and two single-row/column
 //! images where the 1D lifting degenerates.
 //!
 //! The 9/7 fixtures are `-i<levels>` for a rate-1 irreversible stream and
 //! `-q20` for one truncated to a twentieth of its size, and each comes with
-//! the oracle's own decode of it as `.opj.pgm` — the reference image, since a
-//! lossy stream has no source image to compare against. Regenerate with:
+//! a committed decode of it as `.opj.pgm` — the reference image, since a
+//! lossy stream has no source image to compare against at all. These were
+//! generated once with OpenJPEG 2.5.0 in August 2026; regenerating them is a
+//! deliberate, dated act, not something a test does:
 //!
 //! ```text
 //! opj_compress -i tests/jpx/r1.pgm -o tests/jpx/r1-2.jp2   -r 1  -n 2
@@ -52,8 +76,8 @@
 //! **RCT** streams and `c*-i2.jp2` are **ICT** ones.
 //!
 //! `s1` to `s3` carry subsampled components, made with `-s`. Their reference
-//! images come from `opj_decompress -upsample`, which is the flag that makes
-//! the oracle put a subsampled component back on the reference grid — and it
+//! images come from `opj_decompress -upsample`, which is the flag that puts
+//! a subsampled component back on the reference grid — and it
 //! does it by **replication**, which is why this build does too. Without the
 //! flag `opj_decompress` writes the component grid instead and there is
 //! nothing to compare against.
@@ -347,7 +371,7 @@ fn a_reversible_rgb_decode_is_byte_identical_to_openjpeg() {
 ///
 /// This is the whole justification for replicating rather than filtering, and
 /// it is worth being exact about why the two differ. Plan 02
-/// chose a triangle filter for JPEG's chroma because *its* oracle,
+/// chose a triangle filter for JPEG's chroma because *its* reference,
 /// libjpeg-turbo, interpolates. OpenJPEG does not: it takes the sample at
 /// `floor(X / XRsiz)` and repeats it. Byte-identity is only reachable against
 /// the decoder one is actually compared with, so the two plans disagree on
@@ -384,7 +408,7 @@ fn a_subsampled_component_is_replicated_like_openjpeg() {
             0,
             "{name}: {differing} of {} samples differ from `opj_decompress \
              -upsample` (worst {worst}). A worst of one or two at block edges \
-             means this build interpolated where the oracle replicated",
+             means this build interpolated where the reference replicated",
             want.len()
         );
         compared += 1;

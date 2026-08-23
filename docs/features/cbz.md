@@ -153,9 +153,12 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   page-overhead charge against documents of 1 to 200 pages. Pictures are
   asserted against literal expected pixels, not only against another render.
 - `crates/tinker-pdf/tests/cbz_qpdf.rs` — the synthesised document is saved
-  and checked by qpdf as a subprocess (ruling 9, [rulings](../rulings.md)),
-  so "the CBZ produced a valid document" is a third party's claim; the tests
-  print `RAN`/`SKIPPED` and CI greps for the first and fails on the second.
+  and checked by qpdf as a subprocess, so "the CBZ produced a valid document"
+  is a third party's claim; the tests print `RAN`/`SKIPPED` and CI greps for
+  the first and fails on the second. **This check is on its way out**: ruling
+  9 is retired and ruling 13 replaces it with a first-party strict validator,
+  after which nobody outside this repository reads the file at all
+  ([ROADMAP](../ROADMAP.md)).
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 17 unit tests over
   ordering and classification.
@@ -171,5 +174,5 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take.
   Two of the 24 targets.
-- The whole workspace: `cargo test --workspace` is 2 787 passed, 0 failed,
+- The whole workspace: `cargo test --workspace` is 2 790 passed, 0 failed,
   8 ignored (Windows x86_64, as of August 2026).

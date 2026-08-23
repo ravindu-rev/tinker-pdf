@@ -146,7 +146,7 @@ and object-stream round-trips through the engine's own reader.
 bytes — a file can open perfectly with page one scattered through the
 middle, which a round-trip cannot see. `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`
 then asks somebody else: `qpdf --check` and `qpdf --show-linearization`
-run as subprocesses (ruling 9) over one-, two- and six-page fixtures plus
+run as subprocesses over one-, two- and six-page fixtures plus
 a shared-resource fixture with a real part 8, encrypted and not, with
 every hint-table value recomputed from the raw bytes; the writer's whole
 object surface — graphics states, groups, gradients, patterns, a composite
@@ -162,7 +162,11 @@ forms suites save through both modes. The three document byte-hashes in
 `crates/tinker-pdf/tests/determinism.rs` pin writer byte-determinism —
 object numbering, dictionary order and stream framing frozen as bytes
 (ruling 4, [determinism](determinism.md)). All of it rides in the
-workspace suite: 2 787 passed, 0 failed, 8 ignored (Windows x86_64,
+workspace suite: 2 790 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md). What is *not* yet
-verified is scale: the linearization oracle runs on fixtures, and the
-corpus-wide oracle job is owed ([ROADMAP](../ROADMAP.md) Tier 1).
+verified is scale: the linearization check runs on fixtures, never over the
+corpus. And under ruling 13 the arbiter itself changes: the strict validator
+that replaces qpdf reads what qpdf read *and* the structures the tolerant
+reader never consults — but it is this project's own reader, so the one
+thing it cannot establish is that anybody else accepts these files
+([ROADMAP](../ROADMAP.md) Tier 1, [verification](../verification.md)).

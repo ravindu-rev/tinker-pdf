@@ -136,15 +136,21 @@ and `BidiCharacterTest.txt` — run the way `LineBreakTest.txt`'s 19 338
 cases already are in `tests/uax14_conformance.rs`. A version-skew test
 compares the two crates' vendored file headers.
 
-**Conformance bar.** Three oracle-style sources, in the pattern
-[verification.md](../verification.md) already runs: the **aots** corpus
-(adobe-type-tools' annotated OpenType spec tests — tiny fonts with
-expected glyph sequences per GSUB/GPOS lookup type) and Unicode's
-**text-rendering-tests** corpus (real fonts with expected glyph names and
-positions per script) are committed as fixtures with their licenses
-recorded in `THIRDPARTY.md`; and `hb-shape` is invoked as a subprocess
-oracle under ruling 9 — never linked, output never committed — with the
-`oracle: RAN` / `SKIPPED`-is-red guard every oracle carries.
+**Conformance bar.** Two published sources, both *data* and therefore
+admissible under ruling 13: the **aots** corpus (adobe-type-tools' annotated
+OpenType spec tests — tiny fonts with expected glyph sequences per GSUB/GPOS
+lookup type) and Unicode's **text-rendering-tests** corpus (real fonts with
+expected glyph names and positions per script), committed as fixtures with
+their licences recorded in `THIRDPARTY.md`. Both carry their expected output
+inside the fixture, which is what makes them gates rather than comparisons.
+
+**What no shaping engine here adjudicates.** Ruling 13 rules out running
+another shaper and diffing. Those two corpora between them cover a large
+part of Latin, Arabic and the Indic lookups, and nothing covers the rest:
+for a script with no conformance fixture, this design can show that shaping
+ran and that it is deterministic, not that it is right. That remainder is
+named per script in [features/fonts.md](../features/fonts.md) as the
+capability lands, rather than implied by a percentage.
 
 ## Milestones
 
@@ -153,11 +159,11 @@ oracle under ruling 9 — never linked, output never committed — with the
 | 1 | `tinker-pdf-shape` crate: `GDEF`/`GSUB`/`GPOS` parsing, coverage/classdef, extension and chaining-context lookups | aots fixture suite green per lookup type in `tests/aots.rs`; `fuzz_shape` (arbitrary face bytes + text) in the nightly fuzz job with zero crashes; `#![deny(clippy::float_arithmetic)]` compiles | L |
 | 2 | Default shaper: `cmap` via `tinker_pdf_font::Sfnt`, `ccmp`/`liga`, GPOS `kern`/`mark`/`mkmk`, cluster mapping | text-rendering-tests CMAP/GSUB/GPOS sections pass as committed fixtures; shaping fingerprints committed and reproduced by the determinism CI legs ([features/determinism.md](../features/determinism.md)) on all four targets | M |
 | 3 | UAX #9: level resolution, bracket pairs, per-line `reorder`, mirroring | `BidiTest.txt` and `BidiCharacterTest.txt` conformance tests green through the same entry point consumers call, in the `uax14_conformance.rs` pattern | M |
-| 4 | Arabic-script shaper: joining forms, `rlig`, cursive attachment | text-rendering-tests Arabic sections pass; `hb-shape` subprocess diff over a committed word list runs in CI with `RAN`/`SKIPPED` guard and an agreement percentage that ratchets | L |
-| 5 | USE shaper for Indic and Southeast Asian scripts | text-rendering-tests USE sections pass; `hb-shape` diff percentage committed per script and refused regression, in the corpus-ratchet pattern | XL |
-| 6 | Layout consumer: `Shaper` trait, itemize→shape→break→reorder wiring, `BookMetrics` implements it | An Arabic EPUB fixture paginates with joined forms and RTL line order, pinned by a render fingerprint; `tests/epub_browser.rs` text-partition comparison runs on it (ruling 9's browser oracle); the one-path-owns-a-run rule asserted by test | L |
-| 7 | Creation consumer: shaped runs through `DocumentBuilder::glyph_run` | Round-trip test: Arabic string built into a PDF, text extraction returns the original string; the `qpdf-oracle: RAN` guard green on the output, in the `epub_qpdf.rs` pattern; render fingerprint committed | M |
-| 8 | Forms consumer: `fill.rs` `text_appearance` shapes non-Latin values | Fill an Arabic value into a text field: appearance renders joined (fingerprint), `/V` round-trips through extraction, qpdf clean; `fill.rs`'s `escape` no longer writes `?` for characters above the single-byte range, and [features/forms.md](../features/forms.md) records the change | M |
+| 4 | Arabic-script shaper: joining forms, `rlig`, cursive attachment | Every text-rendering-tests Arabic section passes, with the count of sections asserted so a shrinking suite cannot read as a passing one; injected wrong joining-class and wrong-anchor defects each caught by a counted assertion | L |
+| 5 | USE shaper for Indic and Southeast Asian scripts | Every text-rendering-tests USE section passes, counted; scripts with no fixture are listed by name in the feature doc as shaped-but-unverified rather than counted as done | XL |
+| 6 | Layout consumer: `Shaper` trait, itemize→shape→break→reorder wiring, `BookMetrics` implements it | An Arabic EPUB fixture paginates with joined forms and RTL line order, pinned by a render fingerprint; the reftest pairs of [render-verification](render-verification.md)'s EPUB tier gain an RTL pair; the one-path-owns-a-run rule asserted by test | L |
+| 7 | Creation consumer: shaped runs through `DocumentBuilder::glyph_run` | Round-trip test: Arabic string built into a PDF, text extraction returns the original string; the strict structural validator clean on the output; render fingerprint committed | M |
+| 8 | Forms consumer: `fill.rs` `text_appearance` shapes non-Latin values | Fill an Arabic value into a text field: appearance renders joined (fingerprint), `/V` round-trips through extraction, the strict validator clean; `fill.rs`'s `escape` no longer writes `?` for characters above the single-byte range, and [features/forms.md](../features/forms.md) records the change | M |
 
 ## Dependencies
 
@@ -169,8 +175,10 @@ oracle under ruling 9 — never linked, output never committed — with the
 - The determinism fingerprint suite and CI legs
   ([features/determinism.md](../features/determinism.md)) — milestone 2
   extends them, the macOS/wasm legs must be observed first (Tier 1).
-- The oracle harness discipline of [verification.md](../verification.md)
-  (ruling 9) for `hb-shape` and the browser oracle.
+- The conformance-fixture discipline of
+  [verification.md](../verification.md): a fixture carries its own expected
+  output, and a suite whose case count can shrink silently is not a suite —
+  so the counts are asserted.
 - EPUB `@font-face` currently refuses WOFF/WOFF2 by name
   ([features/epub.md](../features/epub.md)); real Arabic EPUBs often ship
   WOFF, so milestone 6's fixture uses a raw sfnt face until that Tier 4
@@ -180,8 +188,8 @@ oracle under ruling 9 — never linked, output never committed — with the
 
 | Risk | Mitigation |
 |---|---|
-| Indic/USE correctness is effectively unbounded — the reason this is the roadmap's largest single item | USE's data-driven cluster model rather than per-script shapers; conformance files and aots gate correctness, the `hb-shape` ratchet only *measures* the remainder; scripts scheduled by corpus evidence under ruling 3, not completeness |
-| The `hb-shape` oracle disagreeing is not always a bug (ruling 9's own CSS lesson) | Gates are the Unicode and aots conformance fixtures; the subprocess diff is a ratcheted agreement percentage for triage, never a hard pass/fail on USE scripts |
+| Indic/USE correctness is effectively unbounded — the reason this is the roadmap's largest single item | USE's data-driven cluster model rather than per-script shapers; the Unicode and aots conformance files gate what they cover; scripts scheduled by corpus evidence under ruling 3, not completeness |
+| **Ruling 13 leaves scripts without a conformance fixture unadjudicated.** Shaping can be deterministic, plausible and wrong, and nothing fires | Those scripts are listed by name in the feature doc as shaped-but-unverified; the number that matters is how many sections pass, asserted with its count, not a percentage against another engine. Not closed |
 | Two measurement paths disagree — the exact failure `metrics.rs` warns about, now with three paths (`Metrics`, `Shaper`, the renderer) | One path owns a run, asserted by test (milestone 6); creation writes the shaper's own advances through `glyph_run`, so what was measured is what is drawn |
 | Re-shaping at unsafe line breaks goes quadratic or breaks Arabic joining across lines | `safe_to_break` flags per glyph; re-shape only the boundary runs; a pinned test breaks inside a joined word under `word-break: break-all` and asserts forms and cost |
 | Float creep silently breaks the cross-target contract | Integer font units end to end; `clippy::float_arithmetic` denied in the crate; fingerprints on all four targets from milestone 2, divergence is build-stopping |

@@ -11,8 +11,17 @@
 //! code-length encoder, a package-merge, and a second set of edge cases; the
 //! ratio that matters is "much smaller than nothing", and fixed codes reach it.
 //!
-//! Correctness is what is not modest. Every output is checked against this
-//! crate's own inflate by proptest, and against zlib in CI (ruling 9).
+//! Correctness is what is not modest: every output is checked against this
+//! crate's own inflate by proptest, over generated inputs rather than chosen
+//! ones.
+//!
+//! It once said "and against zlib in CI (ruling 9)" as well. No such check
+//! ever existed in any workflow — corrected August 2026 with the ruling-13
+//! sweep, and worth recording rather than quietly deleting, because a claim
+//! about a check that does not run is the failure mode that sweep exists to
+//! find. Under ruling 13 no such check may be added: the round trip against
+//! our own inflate is what there is, and what it cannot catch is a bug the
+//! encoder and the decoder share.
 
 /// How far back a match may reach (RFC 1951 §3.2.5).
 const WINDOW: usize = 32_768;

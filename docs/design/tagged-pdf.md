@@ -128,8 +128,8 @@ the element (ruling 10), with the `/K` walk winning.
 ### Measurement is the corpus harness, extended
 
 `tpdf probe` (`tools/tpdf/src/main.rs`) is the child `cargo xtask
-corpus-run` spawns per file (the probe is the harness's own child; oracles
-stay subprocesses per ruling 9). It grows lines the runner already knows how to count:
+corpus-run` spawns per file. It grows lines the runner already knows how to
+count:
 `struct elements N`, `struct mcids N`, `struct orphans N`, plus `warn`
 kinds for truncation and parent-tree disagreement. `corpus/ratchet.json`
 gains the aggregated bars, so a regression in how many elements the
@@ -138,9 +138,10 @@ render does today. The veraPDF corpus encodes pass/fail per file in its
 paths; the PDF/UA milestone diffs those annotations against this design's
 checks — tagged (`/MarkInfo /Marked true`), structure tree present, MCIDs
 resolvable, `/Alt` present on `Figure` — **scoped to those clauses only**,
-with every disagreement enumerated in `corpus/report.json`. Running the
-veraPDF CLI itself as a subprocess oracle stays available under ruling 9 if
-the annotations prove too coarse; nothing links it.
+with every disagreement enumerated in `corpus/report.json`. Ruling 13
+leaves no fallback if those annotations prove too coarse: they are the only
+outside statement about these files this design may use, so a clause they do
+not cover is measured by this engine alone and the feature doc says which.
 
 ### Writer groundwork
 
@@ -162,7 +163,7 @@ semantics stay with [../features/content-and-text.md](../features/content-and-te
 | 3 | `TextChar` MCID + `Page::structured_text()` reading order, `/Alt`, `/ActualText`, `/E`, orphan count | A fixture whose content-stream order differs from structure order extracts in structure order; `/ActualText` replaces enclosed chars; `Figure` alt text surfaces; `plain_text()` output byte-identical to before on the whole fingerprint suite | M |
 | 4 | Corpus graduation: `tpdf probe` structure lines, ratchet bars over the veraPDF corpus | `cargo xtask corpus-run --check` compares `struct elements` / `mcids` / `orphans` bars; `corpus/ratchet.json` committed with non-zero element counts for `verapdf`; a seeded regression (element cap set to 0) fails the check | S |
 | 5 | PDF/UA measurement against corpus annotations, scoped to implemented clauses | An xtask report line states agreement per clause; every disagreement is a named file in `corpus/report.json`; CI job green with the agreement bars recorded in the ratchet | M |
-| 6 | `/StructParents` + `/ParentTree` emission on `DocumentBuilder` | A builder-produced two-paragraph document round-trips through `Document::structure()` with both MCIDs matched and zero orphans; `qpdf --check` reports the file clean as a subprocess oracle | S |
+| 6 | `/StructParents` + `/ParentTree` emission on `DocumentBuilder` | A builder-produced two-paragraph document round-trips through `Document::structure()` with both MCIDs matched and zero orphans; the strict structural validator reports the file clean | S |
 
 ## Dependencies
 
@@ -174,7 +175,7 @@ semantics stay with [../features/content-and-text.md](../features/content-and-te
 - Corpus harness — `xtask/src/corpus.rs`, `ratchet.rs`, `tools/tpdf`
   probe records; the fetched veraPDF corpus pinned in `corpus/corpora.lock`.
 - Milestone 6 — `DocumentBuilder` and the write path in `tinker-pdf-cos`;
-  `qpdf` as a subprocess oracle (ruling 9).
+  the strict structural validator beside it (ruling 13).
 
 ## Risks
 

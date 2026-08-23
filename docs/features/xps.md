@@ -131,8 +131,11 @@ the format, and the doc says so ([ROADMAP.md](../ROADMAP.md) Tier 4).
   (de-obfuscation asserted byte-for-byte), `xps_images.rs`,
   `xps_memory.rs` (synthesis cost measured), `xml_real_packages.rs`.
 - `xps_qpdf.rs`: every synthesised PDF passes `qpdf --check`;
-  `xps_mutool.rs`: rendered output compared against the mutool oracle
-  (ruling 9), in a job that goes red if the oracle is missing.
+  `xps_mutool.rs`: rendered output compared against an external reader, in a
+  job that goes red if it is missing. **Both leave under ruling 13.** What
+  they prove — that two independent programs read one package and agree — is
+  the thing conservation assertions cannot reproduce, so after that milestone
+  a consistent misreading of ECMA-388 survives ([ROADMAP](../ROADMAP.md)).
 - The `xps` determinism fingerprint and the fixed-document byte-hash
   ([determinism](determinism.md)) — the first fixture whose input this
   repository did not author.

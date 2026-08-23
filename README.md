@@ -32,12 +32,16 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 
 ## Measured, not claimed
 
-As of August 2026: **2 787 tests** (0 failed) across 119 suites; corpus of
+As of August 2026: **2 790 tests** (0 failed) across 119 suites; corpus of
 **4 525** documents with **4 484 rendering every page and zero crashes**;
 all 202 Adobe CMaps compiled in; UAX #14 line breaking at
-**19 338 / 19 338** of Unicode's own conformance table; linearized output
-validated by `qpdf --check` in CI, in a job that goes red if qpdf is
-missing.
+**19 338 / 19 338** of Unicode's own conformance table.
+
+Under ruling 13 this engine's verification, like its implementation, is its
+own: nothing outside this repository renders, parses, validates or measures a
+document as evidence. That is a decision with a price, and
+[docs/verification.md](docs/verification.md) names the four properties it
+costs rather than absorbing them.
 
 ## Quick tour
 

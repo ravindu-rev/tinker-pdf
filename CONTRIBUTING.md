@@ -109,8 +109,8 @@ now, and reviews enforce all four.
 ## Working an item
 
 Roadmap items carry **exit criteria** that are deliberately concrete — a
-test that runs, a corpus number, an oracle line — and a design doc when the
-item is large. Build to the exit criteria and treat a design doc's milestone
+test that runs, a corpus number, a counted injection — and a design doc when
+the item is large. Build to the exit criteria and treat a design doc's milestone
 table as the commit boundary set.
 
 Warnings are data, not log lines: every leniency the engine performs emits a
@@ -134,19 +134,26 @@ Fixtures in `testdata/` were generated with mutool (see
 [`testdata/README.md`](testdata/README.md)); do not modify them — committed
 goldens and parity tests assume their exact bytes.
 
-External corpora are fetched, never committed, and oracles (mutool, pdftoppm,
-pdfium_test, qpdf, a headless Chromium) are CI subprocesses, never
-dependencies. The reasoning is recorded once in
-[docs/verification.md](docs/verification.md).
+External corpora are fetched, never committed. They are *inputs* — documents
+real producers emitted — and ruling 13 keeps them for exactly that reason.
 
-Oracle jobs must not skip silently: `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`
-puts `qpdf --check` and `qpdf --show-linearization` over the linearized
-writer's output, and without qpdf on `PATH` those tests **skip** — a skip
-exits 0 and reads exactly like a pass — so the CI job greps its own output
-for `qpdf-oracle: RAN` and fails if it finds `qpdf-oracle: SKIPPED` instead.
-Set `TINKER_QPDF` to an absolute path if your install is somewhere `PATH`
-does not reach; quote it if the path has spaces. Every oracle since follows
-the same pattern (ruling 9).
+**No new test may spawn a program.** Ruling 13: nothing outside this
+repository renders, parses, validates or measures a document as evidence.
+`cargo xtask oracles` holds that boundary with a build failure, and it is
+part of `cargo xtask check`, so a `Command::new` in a test fails CI unless
+its file is listed in `SPAWNERS` with the reason it may — and a row there
+whose file has stopped spawning fails too, so an allowance cannot outlive
+the thing it allowed.
+
+Several rows are still `DEBT`: the qpdf, mutool, browser and epubcheck
+oracles of retired ruling 9 have not been replaced yet, and each row names
+the roadmap step that removes it. Until then those tests still run, and they
+still must not skip silently — a skip exits 0 and reads exactly like a pass,
+so the CI job greps its own output for `qpdf-oracle: RAN` and fails on
+`qpdf-oracle: SKIPPED`. Set `TINKER_QPDF` to an absolute path if your install
+is somewhere `PATH` does not reach; quote it if the path has spaces. That
+`RAN` / `SKIPPED` discipline outlives the oracles: it binds every check that
+depends on something being present, the fetched corpora included.
 
 ## Commits and licensing
 

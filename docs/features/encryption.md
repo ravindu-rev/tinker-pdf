@@ -149,7 +149,9 @@ the trip, identical plaintexts encrypting differently, and encryption
 composed with object streams. `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`
 holds the encrypted linearized output against `qpdf --check` and a
 `--decrypt`ed copy against qpdf's clean-summary line, qpdf invoked as a
-subprocess and never linked (ruling 9, [rulings](../rulings.md)).
+subprocess and never linked. Ruling 9 is retired: this check is replaced by
+a first-party strict validator, and the `/ID` row above closes with it
+([ROADMAP](../ROADMAP.md)).
 
 Two of the 24 fuzz targets are this feature's: `crypt` drives
 authentication with input-chosen field widths and both decrypt paths over
@@ -157,5 +159,5 @@ a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
 `handler.rs` so seeds and carve order cannot drift, including the one
 pre-R6 seed that genuinely authenticates. All of it rides in the
-workspace suite: 2 787 passed, 0 failed, 8 ignored (Windows x86_64,
+workspace suite: 2 790 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).

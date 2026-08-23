@@ -16,10 +16,12 @@ xtask — repository chores
 usage:
   cargo xtask dag       check the crate dependency graph against the declared one
   cargo xtask libm      check that no pixel path calls the platform's libm
+  cargo xtask oracles   check that every program this repository spawns is
+                        written down with a reason (ruling 13)
   cargo xtask vendor    check vendored data against THIRDPARTY.md and deny.toml
   cargo xtask versions  check every manifest against the workspace version, and
                         `publish = false` where publishing would be wrong
-  cargo xtask check     all four of the above
+  cargo xtask check     all five of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -64,15 +66,18 @@ fn main() -> ExitCode {
     match task.as_str() {
         "dag" => report("dag", check_dag()),
         "libm" => report("libm", check_libm()),
+        "oracles" => report("oracles", check_oracles()),
         "vendor" => report("vendor", check_vendor()),
         "versions" => report("versions", version::check(&repo_root())),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
+            let oracles = check_oracles();
             let vendor = check_vendor();
             let versions = version::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
+            problems.extend(oracles.err().unwrap_or_default());
             problems.extend(vendor.err().unwrap_or_default());
             problems.extend(versions.err().unwrap_or_default());
             report(
@@ -508,6 +513,210 @@ fn check_libm() -> Result<(), Vec<String>> {
     }
 }
 
+/// Every file permitted to spawn a program, and the reason it may.
+///
+/// Ruling 13: nothing outside this repository renders, parses, validates or
+/// measures a document as evidence. A third-party program may host this code,
+/// execute it, fetch bytes for it or generate inputs for it — it may never be
+/// the thing that says whether the output is right.
+///
+/// **The reason is a field, not a comment, and no row opts out.** That is the
+/// `bounds_ledger.rs` discipline, for the same reason: a row that opts out of
+/// saying why is a row nobody re-reads. Rows below fall into two classes, and
+/// the difference is the whole point of this check:
+///
+/// - **Permanent.** The program supplies or hosts. `curl` and `tar` move
+///   bytes this repository then verifies against its own SHA-256; `cargo`
+///   builds and publishes; the child the corpus runner spawns is a workspace
+///   binary built from the same revision.
+/// - **A debt, with a milestone against it.** The four qpdf tests, the XPS
+///   render comparison, the browser and epubcheck. Each is an oracle of
+///   retired ruling 9, still running because ruling 13's order is fixed:
+///   nothing is deleted before the first-party check replacing it exists and
+///   has been injection-counted. Each row names the step of the roadmap's
+///   first-party-verification item that removes it.
+///
+/// The check runs both ways. A file that spawns something and is not here is
+/// a build failure — that is the boundary. And a row here whose file no
+/// longer spawns anything is *also* a failure, because that is what makes an
+/// allowance leave in the same commit as the thing it allowed, instead of
+/// standing for a year after the debt is paid.
+const SPAWNERS: &[(&str, &str)] = &[
+    (
+        "crates/tinker-pdf-cos/tests/qpdf_oracle.rs",
+        "DEBT (step 3): retired ruling 9's qpdf oracle over linearized and \
+         encrypted output. Leaves with the strict validator, once the ten-fault \
+         injection matrix recorded in this file is caught 10/10 in-tree",
+    ),
+    (
+        "crates/tinker-pdf/tests/cbz_qpdf.rs",
+        "DEBT (step 3): qpdf reads the document synthesised from a comic \
+         archive. Leaves with the strict validator",
+    ),
+    (
+        "crates/tinker-pdf/tests/xps_qpdf.rs",
+        "DEBT (step 3): qpdf reads the document synthesised from a fixed \
+         document. Leaves with the strict validator",
+    ),
+    (
+        "crates/tinker-pdf/tests/epub_qpdf.rs",
+        "DEBT (step 3): qpdf reads the document synthesised from a book. \
+         Leaves with the strict validator",
+    ),
+    (
+        "crates/tinker-pdf/tests/xps_mutool.rs",
+        "DEBT (step 4): a second reader's rendering of an XPS package, which \
+         is the only check here that catches a mistake this engine makes \
+         consistently in both directions. Leaves with the conservation suite, \
+         and what it proved does not come back",
+    ),
+    (
+        "crates/tinker-pdf/tests/epub_browser.rs",
+        "DEBT (step 5): a headless browser lays out the committed books. \
+         Retired ruling 9's own reasoning is that a browser is the reference \
+         implementation of CSS, so this is the costliest row to lose. Leaves \
+         with the reftest pairs",
+    ),
+    (
+        "crates/tinker-pdf/tests/epub.rs",
+        "DEBT (step 5): epubcheck says whose fault an engine-versus-book \
+         disagreement is. Leaves when EPUBCHECK.tsv freezes into a dated \
+         record with no arbiter behind it",
+    ),
+    (
+        "tools/oracle-diff/src/main.rs",
+        "DEBT (step 8): retired ruling 9's external-renderer harness. Wired \
+         into no test and no CI job; the whole tool is deleted",
+    ),
+    (
+        "crates/tinker-pdf-css/tests/unimplemented_property_does_not_build.rs",
+        "PERMANENT: spawns `rustc` on a snippet that must fail to compile. It \
+         adjudicates nothing about a document — it asks this repository's own \
+         compiler whether this repository's own type refuses a state",
+    ),
+    (
+        "crates/tinker-pdf-layout/tests/uncascaded_field_does_not_build.rs",
+        "PERMANENT: the same compile-refusal proof for a layout field",
+    ),
+    (
+        "xtask/src/fetch.rs",
+        "PERMANENT: `curl` and `tar` fetch and unpack the pinned corpora. \
+         Supplying, not adjudicating — and nothing fetched is trusted: the \
+         archive is verified against this project's own SHA-256 before it is \
+         unpacked",
+    ),
+    (
+        "xtask/src/release.rs",
+        "PERMANENT: `cargo`, and the packaging tools, to build and publish. \
+         Build machinery, which reads no document",
+    ),
+    (
+        "xtask/src/runner.rs",
+        "PERMANENT: spawns the corpus child, which is `tpdf` built from this \
+         revision into the same directory as the runner. A workspace binary, \
+         resolved as a sibling rather than from PATH for exactly that reason",
+    ),
+];
+
+/// Ruling 13's boundary, held by a build failure rather than by habit.
+///
+/// The rule this enforces is not "do not call `Command::new`". It is that
+/// every place this repository starts a program is written down with a reason,
+/// in one list, so that adding an outside adjudicator is a diff somebody
+/// reviews instead of a line nobody notices. The oracles it is retiring
+/// arrived one plausible commit at a time.
+///
+/// Deliberately a text scan rather than anything cleverer: an `#[ignore]`d
+/// test, a `cfg`-ed module and a helper behind three layers of indirection all
+/// spawn just as effectively as a plain call, and a check that only sees what
+/// compiles on this target is a check with holes on the others.
+///
+/// **What it does not see, said here rather than discovered later:** Rust is
+/// the only language it reads. `bindings/js/demo/verify.mjs` drives a headless
+/// browser through Playwright and this check cannot see it — legitimately, as
+/// it happens, because that browser *hosts* the wasm demo and reports whether
+/// ink landed, which is executing rather than adjudicating. But the reason it
+/// passes is a reading of what it does, not a thing this check established,
+/// and the same would be true of a `.mjs` that did adjudicate. A gate that
+/// covers one language and is described as covering the boundary is the kind
+/// of claim ruling 13's own sweep was written to find.
+fn check_oracles() -> Result<(), Vec<String>> {
+    let root = repo_root();
+    let mut problems = Vec::new();
+
+    let mut files = Vec::new();
+    for tree in ["crates", "tools", "xtask", "fuzz/fuzz_targets", "bindings"] {
+        collect_rust_files(&root.join(tree), &mut files);
+    }
+    files.sort();
+
+    // Spelled in two pieces so that this function does not match itself. The
+    // alternative is to add this file to the allowance list, which would be a
+    // lie about what it does — and a scanner that reports its own needle is
+    // one nobody trusts the second time.
+    let needle = concat!("Command", "::new");
+
+    let mut spawns = Vec::new();
+    for file in &files {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            // Never a silent skip. A file this cannot read is a file this
+            // cannot vouch for, and vouching is the entire job.
+            problems.push(format!(
+                "{}: could not be read, so it cannot be checked",
+                shown(&root, file)
+            ));
+            continue;
+        };
+        // Comments are stripped so that a doc comment *about* spawning — the
+        // one this very function has — does not register as spawning.
+        if !text
+            .lines()
+            .filter_map(|line| line.split("//").next())
+            .any(|code| code.contains(needle))
+        {
+            continue;
+        }
+        spawns.push(shown(&root, file));
+    }
+
+    let allowed: BTreeMap<&str, &str> = SPAWNERS.iter().copied().collect();
+    for file in &spawns {
+        if !allowed.contains_key(file.as_str()) {
+            problems.push(format!(
+                "{file}: spawns a program, and ruling 13 says nothing outside \
+                 this repository may adjudicate. If it supplies or hosts \
+                 rather than adjudicates, add it to `SPAWNERS` in \
+                 xtask/src/main.rs with the reason it may",
+            ));
+        }
+    }
+    for (file, _) in SPAWNERS {
+        if !spawns.iter().any(|found| found == file) {
+            problems.push(format!(
+                "{file}: is allowed to spawn a program and no longer spawns \
+                 one. Remove the row — an allowance that outlives its need is \
+                 how the next one gets in",
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        problems.sort();
+        Err(problems)
+    }
+}
+
+/// A path as this repository names it: relative to the root, forward slashes,
+/// so a problem reads the same on Windows as in CI.
+fn shown(root: &Path, file: &Path) -> String {
+    file.strip_prefix(root)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Vendored data, checked against the two files that are supposed to describe
 /// it.
 ///
@@ -779,6 +988,53 @@ mod tests {
     use super::*;
 
     /// The check runs against this repository, which is the point of it.
+    ///
+    /// Both directions at once: a file that spawns something and is not on
+    /// the list fails here, and so does a row on the list whose file has
+    /// stopped spawning. The second half is what makes an allowance leave in
+    /// the same commit as the oracle it allowed.
+    #[test]
+    fn this_repository_writes_down_every_program_it_spawns() {
+        if let Err(problems) = check_oracles() {
+            panic!(
+                "ruling 13's boundary has moved:
+{problems:#?}"
+            );
+        }
+    }
+
+    /// Every row says why, and says which kind of why.
+    ///
+    /// The `bounds_ledger.rs` doctrine: a row that opts out of a check is a
+    /// row that is not checked. `PERMANENT` means the program supplies or
+    /// hosts and stays; `DEBT` means it adjudicates, is on its way out, and
+    /// names the roadmap step that removes it. A row that is neither has not
+    /// been thought about.
+    #[test]
+    fn every_spawner_says_why_and_says_which_kind() {
+        for (file, reason) in SPAWNERS {
+            assert!(
+                reason.starts_with("PERMANENT: ") || reason.starts_with("DEBT ("),
+                "{file}: a reason must begin `PERMANENT: ` or `DEBT (step N): `,                  so that a debt cannot be filed as a fact of life: {reason}"
+            );
+            assert!(
+                reason.len() > 40,
+                "{file}: `{reason}` does not say enough to be re-read in a year"
+            );
+        }
+    }
+
+    /// A file named twice would let one row be deleted and the allowance
+    /// survive, which is precisely the failure the second direction of the
+    /// check exists to prevent.
+    #[test]
+    fn no_spawner_is_listed_twice() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (file, _) in SPAWNERS {
+            assert!(seen.insert(*file), "{file} appears twice in SPAWNERS");
+        }
+    }
+
     #[test]
     fn this_repository_obeys_its_own_graph() {
         if let Err(problems) = check_dag() {

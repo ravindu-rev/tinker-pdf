@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 787 passed, 0 failed, 8 ignored** across 119 suites on
+is **2 790 passed, 0 failed, 8 ignored** across 119 suites on
 `x86_64-pc-windows-msvc`; the same suite is 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` (the difference is Windows-only and
 tool-gated suites).
@@ -80,39 +80,71 @@ recorded floor in the same PR. The floor and the budgets live in-repo,
 diffable, so lowering one is a reviewed decision rather than a drift.
 
 **The honest limit of the corpus run**: it measures whether a bitmap came
-back, not whether it is the right bitmap. Nothing has yet compared a page
-this engine drew against a page an independent renderer drew — that is
-`oracle-diff`'s question, the tool exists, and wiring it to the corpus is
-the [roadmap](ROADMAP.md)'s first item, ahead of any new feature.
+back, not whether it is the right bitmap. Nothing here compares a page this
+engine drew against a page anything else drew, and under ruling 13 nothing
+ever will. [design/render-verification.md](design/render-verification.md)
+says what stands in its place and, precisely, what that cannot reach.
 
-## Oracles are subprocesses, never dependencies
+## Verification is first-party
 
-Ruling 9. mutool, pdftoppm, pdfium_test and qpdf are invoked as external
-CLIs; a headless Chromium is a fifth oracle, for CSS only, because a
-browser is the reference implementation of CSS. Nothing links them, nothing
-vendors them, their outputs are transient comparison references — never
-committed, never redistributed, never shipped.
+Ruling 13. Nothing outside this repository renders, parses, validates or
+measures a document as evidence. A third-party program may host this code,
+execute it, fetch bytes for it or generate inputs for it; it may never be
+the thing that says whether the output is right. Third-party **bytes** stay
+admissible with provenance recorded — the four fetched corpora, fixtures
+real producers emitted, published normative data (Adobe's CMap resources,
+the Unicode character database), and the committed output of a tool that was
+run once, which is a dated measurement rather than a check.
 
-**A skipped oracle is red, not green.** A missing oracle binary exits 0 and
-reads exactly like a pass, so every oracle job prints an `oracle: RAN` /
-`SKIPPED` line that CI greps, and goes red on `SKIPPED`. This was
-established by measurement — removing qpdf from `PATH` and watching
-`cargo test` report `2 passed` — and it is the rule for every oracle since.
+**This is a migration, and this section says where it stands rather than
+implying it is finished.** Ruling 9's subprocess oracles are being replaced
+one at a time, and the order is fixed: no oracle test or CI job is deleted
+before the first-party check that replaces it exists and has been
+injection-counted. Until then the old job still runs, and this table is what
+is true today. The [roadmap](ROADMAP.md) carries the milestones.
 
-Standing oracle checks, all in CI:
+| Was proving | Oracle | Replaced by | State |
+| --- | --- | --- | --- |
+| Written output is a well-formed PDF to a reader nobody here wrote | `qpdf --check`, `--show-linearization` (`tinker-pdf-cos/tests/qpdf_oracle.rs`, plus CBZ/XPS/EPUB variants) | A strict validator: own output re-opened with the leniency ladder **off**, plus the structures the tolerant reader never consults | still running |
+| A second program's reading of an XPS package matches ours | `xps_mutool.rs` | Conservation assertions derived from the markup by an independent in-test walk | still running |
+| CSS layout against the reference implementation of CSS | `epub_browser.rs` | Reftest pairs and analytic layout over fixed metrics | still running |
+| Whose fault an engine-versus-book EPUB disagreement is | epubcheck 5.3.0 (`tests/epub/EPUBCHECK.tsv`) | Nothing. The verdicts stand as a dated record, never re-run | still running |
+| JPEG 2000 decode against a decoder sharing no code | *(none — see below)* | Committed reference decodes, already offline | **done** |
 
-- **qpdf** validates written output: `qpdf --check` and
-  `--show-linearization` over linearized fixtures, encrypted and not
-  (`crates/tinker-pdf-cos/tests/qpdf_oracle.rs`, plus CBZ/XPS/EPUB
-  variants). Injection puts the offline round-trip reader beside it at
-  nine of ten faults caught; the tenth is why the oracle is not optional.
-- **mutool** renders the committed XPS packages for comparison
-  (`crates/tinker-pdf/tests/xps_mutool.rs`).
-- **Chromium** lays out the committed EPUB books; compared on `y` offsets
-  and text partition, never pixels
-  (`crates/tinker-pdf/tests/epub_browser.rs`).
-- **opj_decompress** decodes the JPEG 2000 corpus for comparison
-  (`crates/tinker-pdf-filters/tests/jpx_oracle.rs`).
+The JPEG 2000 row is not a replacement so much as a correction.
+`jpx_reference.rs` never invoked anything: it compares against `.opj.pgm`
+files committed once, with the commands, the tool version and the date in
+its header. It was described here and in its own name as an oracle, and it
+was not one.
+
+**What does not come back.** Four properties leave this suite with the
+oracles, and no first-party mechanism returns them:
+
+1. A reader nobody here wrote accepts a PDF this engine wrote.
+2. An independent program's reading of an XPS package matches this engine's.
+3. This engine's CSS layout matches the reference implementation of CSS —
+   both sides of a reftest share every misreading its author has.
+4. When this engine and a book disagree, there is an arbiter.
+
+The risk under all four is one risk: reader, writer, validator, fixtures and
+reviewer share one author's reading of the specification, everything agrees,
+and everything is wrong — deterministically, on every target, forever. That
+is the risk the oracles existed for. It is not closed, and nothing below
+closes it. What narrows it is the part of the suite that answers to
+something other than this engine's own opinion: fixtures whose correct
+output is computable in closed form, bitstreams transcribed from the
+standards' own annexes, published conformance data, and thousands of
+documents nobody here authored.
+
+**A check that can be absent is red, not green.** A missing binary, an
+unfetched corpus or a skipped test exits 0 and reads exactly like a pass, so
+every job that depends on something being present prints a `RAN` / `SKIPPED`
+line and greps its own log. This was established by measurement — removing
+qpdf from `PATH` and watching `cargo test` report `2 passed` — and it
+outlives the oracles it was built for: `corpus.yml` and the fetched-EPUB job
+still need it, and `cargo xtask oracles` keeps the boundary itself from
+eroding by holding a build failure over any test that spawns a program the
+workspace did not build.
 
 ## Bounds are measured against real inputs
 
@@ -139,16 +171,17 @@ gap is manageable and a false claim is not — nobody goes looking.
 - **`pdfcmp`** (`tools/pdfcmp`): the canonical perceptual comparator. Gates
   on the fraction of pixels where any channel moves more than a threshold —
   a glyph moving one pixel barely moves a mean, so the metric is changed
-  pixels, not mean difference. Failure output is side-by-side plus a
-  per-pixel heat map, because a number that fails without a picture wastes
-  a human's morning.
-- **`oracle-diff`** (`tools/oracle-diff`): drives `render`, `text` and
-  `which` against the external oracles as subprocesses. Every oracle is
-  optional at invocation and a missing one is reported by name.
+  pixels, not mean difference. `--diff` writes a per-pixel heat map beside
+  the verdict, because a number that fails without a picture wastes a
+  human's morning.
+- **`oracle-diff`** (`tools/oracle-diff`): the external-renderer harness of
+  retired ruling 9. Wired into no test and no CI job, and deleted when the
+  last oracle it could drive is gone ([roadmap](ROADMAP.md)).
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
-  (transcendental ban on pixel paths), `vendor` (data-file provenance
-  gate), `versions`, `check`, `corpus-fetch` / `corpus-run` /
-  `corpus-licences`, `release`, `nuget-stage`.
+  (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
+  no test may spawn a program the workspace did not build), `vendor`
+  (data-file provenance gate), `versions`, `check`, `corpus-fetch` /
+  `corpus-run` / `corpus-licences`, `release`, `nuget-stage`.
 
 ## What is deliberately outside the suite
 

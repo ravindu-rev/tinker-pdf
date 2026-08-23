@@ -44,7 +44,7 @@ tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-cont
 tinker-pdf-xml ───────────────────────────────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-css ─────→ tinker-pdf-layout ──────────────────────────────────────────────→ tinker-pdf
 
-tools: pdfcmp (no engine deps) · oracle-diff (subprocess oracles) · tpdf (depends on facade)
+tools: pdfcmp (no engine deps) · oracle-diff (retired, ruling 13) · tpdf (depends on facade)
 ```
 
 **Ten leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
@@ -101,10 +101,11 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
 Tools: `tpdf` (debug CLI over the facade), `pdfcmp` (perceptual
-comparator), `oracle-diff` (external-renderer harness) — all described in
+comparator), `oracle-diff` (the external-renderer harness of retired ruling
+9, wired into nothing and scheduled for deletion) — all described in
 [verification.md](verification.md). `xtask` holds the workspace police
-(`dag`, `libm`, `vendor`, `versions`, `check`) and the release, corpus and
-packaging machinery.
+(`dag`, `libm`, `oracles`, `vendor`, `versions`, `check`) and the release,
+corpus and packaging machinery.
 
 ## Error model
 

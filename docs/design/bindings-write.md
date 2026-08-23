@@ -160,10 +160,10 @@ byte-hashes already in `crates/tinker-pdf/tests/determinism.rs` (the
 `*_is_the_same_bytes_on_every_target` trio); each smoke test grows a
 write leg printing `WROTE sha256=<hex>`, and a `cargo xtask bindings-parity`
 leg compares the four lines against the committed hash and exits nonzero on
-any mismatch or any missing line. The saved bytes are additionally opened by
-`qpdf --check` as an optional subprocess oracle through the `tools/oracle-diff`
-harness discipline (ruling 9: optional at invocation, missing reported by
-name, `SKIPPED`-is-red in CI).
+any mismatch or any missing line. The saved bytes are additionally re-opened
+through this engine's strict structural validator, which is what keeps four
+byte-identical outputs from being identically wrong — under ruling 13 that
+check is first-party, so it cannot be absent and cannot be skipped.
 
 **Packaging.** No new artifacts: the wheel, npm tarball and NuGet package
 already staged by gap 26 carry the new symbols. `cargo xtask release` (dry run
@@ -180,7 +180,7 @@ smoke gates now include the write legs, so a package that ships a read-only
 | 3 | C ABI builder surface: `TpdfBuilder`, `TpdfPageBuilder`, push/finish over `Option<T>` boxing | FFI build-a-document byte-equal to facade-direct in `cargo test -p tinker-pdf-ffi`; double-finish and push-after-finish return `SpentHandle` with a naming error message; the new `#[repr(C)]` types and `extern "C"` signatures added to [bindings.md](../features/bindings.md)'s contract listing and the .NET P/Invoke transcription, reviewed and committed | M |
 | 4 | Python and JS wrappers: `PyEditor`/`PyBuilder`, `PdfEditor`/`PdfBuilder`, transaction sugar over the two primitives | `bindings/python/tests` and `bindings/js/tests` run both scripts and print `WROTE sha256=<hex>`; a raising body inside the Python context manager and a throwing JS callback each leave the editor restored, asserted by re-saving and hashing | M |
 | 5 | .NET wrapper: five new `SafeHandle`s, `Editor`/`Builder` classes, status-to-`PdfException` mapping | `bindings/dotnet/tests/Smoke` prints `DOTNET-SMOKE: WROTE sha256=<hex>`; disposing the document before the editor still saves correctly; a finalizer-only teardown (no explicit `Dispose`) leaks nothing under the smoke's existing run | M |
-| 6 | Parity + oracle + CI: committed write hashes in `determinism.rs`, `cargo xtask bindings-parity`, `qpdf --check` leg, release smoke gates extended | `cargo xtask bindings-parity` exits nonzero on any hash mismatch or absent `WROTE` line; `qpdf --check` runs as a subprocess with missing-oracle-is-`SKIPPED`-is-red; `release.yml`'s smoke jobs run the write legs on every platform they already cover | M |
+| 6 | Parity + validation + CI: committed write hashes in `determinism.rs`, `cargo xtask bindings-parity`, strict-validator leg, release smoke gates extended | `cargo xtask bindings-parity` exits nonzero on any hash mismatch or absent `WROTE` line; every saved artefact passes the strict structural validator; `release.yml`'s smoke jobs run the write legs on every platform they already cover | M |
 
 ## Dependencies
 
@@ -191,8 +191,8 @@ smoke gates now include the write legs, so a package that ships a read-only
 - The determinism suite (`crates/tinker-pdf/tests/determinism.rs`,
   [verification.md](../verification.md)) for the committed write hashes;
   [features/determinism.md](../features/determinism.md) documents the claim.
-- `qpdf` present on CI for the oracle leg, under `tools/oracle-diff`'s
-  optional-but-`SKIPPED`-is-red discipline.
+- The strict structural validator ([verification.md](../verification.md))
+  for the validation leg.
 - [docs/features/bindings.md](../features/bindings.md) (referenced by
   `tinker-pdf-ffi/src/lib.rs` today) grows alongside; roadmap placement in
   [ROADMAP.md](../ROADMAP.md).
@@ -204,7 +204,7 @@ smoke gates now include the write legs, so a package that ships a read-only
 | Consuming Rust APIs (`finish`, `push_page`) become FFI double-frees | Handles box `Option<T>`; consuming calls `take()`, spent handles refuse with `SpentHandle`, free stays symmetric and null-tolerant — asserted in milestone 2/3 tests |
 | Checkpoint pair reintroduces the silent-misuse `transaction()` was designed against | No open state exists by construction: checkpoints are values, restore is idempotent, drop is inert; the three managed wrappers ship the closure sugar so callers rarely touch the pair raw |
 | `TpdfStatus` growth breaks the frozen C ABI | Append-only discriminants, existing 0–7 frozen; a `tinker-pdf-ffi` test asserts the numeric values of all pre-existing variants |
-| Byte-identical parity is brittle against legitimate writer changes | Hashes live in one place (`determinism.rs`) and the four surfaces are compared to *it*, so a writer change is one recorded update, not four flaky suites; the qpdf oracle keeps "identical" from meaning "identically wrong" |
+| Byte-identical parity is brittle against legitimate writer changes | Hashes live in one place (`determinism.rs`) and the four surfaces are compared to *it*, so a writer change is one recorded update, not four flaky suites; the strict validator is what keeps "identical" from meaning "identically wrong" |
 | Encrypted output non-reproducible across surfaces | Entropy is caller-supplied by design; parity passes fixed bytes, and no binding is permitted a randomness default (ruling 11) |
 | Skipped widgets flattened into success or failure across FFI | `TpdfFillReport` carries each `SkippedWidget` with its widget `ObjRef` and `WidgetDefect` (ruling 10); smoke tests assert the report crosses non-empty on the `/Rect`-less widget `testdata/form-fields.pdf` carries for exactly this |
 | wasm memory growth invalidates borrowed views mid-edit | Write APIs return copies (`TpdfBuffer` on the C ABI, owned `Vec<u8>`/`bytes` in wasm and Python); the only aliasing view remains the read side's `viewUnsafeUntilNextAllocation`, whose detachment `node_smoke.mjs` already demonstrates |

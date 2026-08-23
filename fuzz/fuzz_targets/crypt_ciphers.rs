@@ -18,9 +18,10 @@
 //! ## What is asserted beyond "it did not panic"
 //!
 //! Every one of these is a **round trip or a cross-check between two entry
-//! points over one algorithm**, because a cipher has no other oracle: a second
-//! implementation to compare against is exactly what ruling 9 keeps out of
-//! this repository, and the published vectors are already unit tests. What a
+//! points over one algorithm**, because a cipher has nothing else to be held
+//! against here: a second implementation to compare with is exactly what
+//! ruling 13 keeps out of this repository, and the published vectors are
+//! already unit tests. What a
 //! vector cannot do is cover the lengths, and length handling is where the
 //! bugs are.
 //!

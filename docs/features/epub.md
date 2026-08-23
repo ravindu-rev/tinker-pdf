@@ -142,7 +142,9 @@ set ([ROADMAP.md](../ROADMAP.md) Tier 4).
 - **Six committed books from two real producers** (pandoc 3.10.2, calibre
   9.13.0) over text authored here, in `crates/tinker-pdf/tests/epub/`,
   with epubcheck 5.3.0 verdicts recorded so that when engine and book
-  disagree, epubcheck says whose fault it is. **Twenty more are fetched**,
+  disagree, epubcheck says whose fault it is — a claim ruling 13 ends: the
+  verdicts become a dated record, never re-run, and after that there is no
+  arbiter. **Twenty more are fetched**,
   never committed (Project Gutenberg's trademark licence and `epub3-samples`'
   CC-BY-SA are both barred by this repository's own no-copyleft gate), and
   `epub_fetched.rs` prints `epub-corpus: RAN` / `SKIPPED` so the CI job goes
@@ -155,9 +157,15 @@ set ([ROADMAP.md](../ROADMAP.md) Tier 4).
   floats and tables step by step, UAX #14 conformance over the full pair
   table); the CSS crate's tokenizer, selector and cascade suites.
 - `epub_browser.rs`: a headless Chromium lays out the same books and the
-  `y` offsets and text partition are compared — never pixels (ruling 9,
-  and the reasoning is in [rulings.md](../rulings.md)); red if the browser
-  is missing. `epub_qpdf.rs`: every synthesised book passes `qpdf --check`.
+  `y` offsets and text partition are compared — never pixels; red if the
+  browser is missing. `epub_qpdf.rs`: every synthesised book passes
+  `qpdf --check`. **Both leave under ruling 13**, and the browser is the one
+  that costs the most: retired ruling 9's own reasoning is that a browser is
+  the reference implementation of CSS, so what replaces it — reftest pairs
+  and analytic layout — has both sides written by the same people who wrote
+  the engine. After that milestone, **this engine's CSS is verified against
+  its own reading of the specifications and nothing else**
+  ([ROADMAP](../ROADMAP.md), [verification](../verification.md)).
 - The `epub` determinism fingerprint asserts stability at two page boxes
   *and* that the two differ; the synthesised book's bytes are hashed too
   ([determinism](determinism.md)).

@@ -132,28 +132,39 @@ record of where to patch. A CMS larger than the gap is a typed refusal, not a tr
 Output stays deterministic given the signer's bytes: same inputs, same file, byte-identical
 (the determinism contract, ruling 4, extended to written bytes as plan 09 already treats it).
 
-**Verification.** Per ruling 9, oracles are subprocesses. The signing oracle plan 09 already
-names — pyHanko's CLI validating our signed output — becomes a CI job; `openssl cms -verify`
-cross-checks CMS handling at the protocol layer, and `qpdf --check` stays green on signed
-incremental saves via the existing `qpdf_oracle.rs` harness. Every job prints
-`sig-oracle: RAN` / `SKIPPED` and CI greps for `RAN`, because a skipped oracle reads exactly
-like a pass ([verification](../verification.md)). Read-side ground truth is a committed
-corpus of signed fixtures — valid, tampered-after-signing, expired-chain, each with an
-expected-verdict sidecar asserted in `cargo test`. Fuzzers: raw DER into `tinker-pdf-pki`,
-and whole signed PDFs into the verdict path.
+**Verification, and the one place ruling 13 costs the most.** The primitives are gated by
+published test vectors, which is data and the strongest evidence available: NIST CAVP RSA and
+ECDSA verify vectors, RFC 8017's worked example, RFC 5652 fixture DER. Read-side ground truth
+is a committed corpus of signed fixtures — valid, tampered-after-signing, expired-chain —
+each with an expected-verdict sidecar asserted in `cargo test`. Fuzzers: raw DER into
+`tinker-pdf-pki`, and whole signed PDFs into the verdict path. Written signatures are checked
+by the strict structural validator, and every signing test asserts the
+`starts_with(original)` prefix invariant and independently re-digests the returned
+`/ByteRange` spans.
+
+**What none of that establishes:** that anyone else accepts the signature. Under ruling 13 no
+CI job may ask a validator, so:
+
+> A signature everything in-tree accepts may still be rejected by real validators.
+
+Interop is therefore a *dated, recorded, one-time measurement* performed outside CI and
+written into this document when the capability lands — the same class of evidence as the
+committed JPEG 2000 reference decodes: a measurement, not a check. It does not run again, it
+does not gate a merge, and it goes stale. Nothing here hides that, because a signing feature
+whose interop claim is unverified and unstated is worse than one that says so.
 
 ## Milestones
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
 |---|-------------|-------------------------------------|-----------------|
 | 1 | Signature inventory: `/ByteRange`/`/Contents` parsing, range digesting, coverage classification | `Document::signatures()` lists every signature in the fixture corpus with correct coverage; a flipped byte inside a covered range flips the digest verdict in a unit test; fuzzer on the parse path runs crash-free in CI | M |
-| 2 | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the same subject/issuer/validity/SPKI values `openssl x509 -text` shows (subprocess diff, `sig-oracle: RAN` line); dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
+| 2 | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the subject/issuer/validity/SPKI values committed in its sidecar, transcribed once from the certificate's own DER and reviewed; RFC 5280's own example certificates parse; dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
 | 3 | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
 | 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
 | 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
 | 6 | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
 | 7 | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
-| 8 | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; pyHanko CLI validates the output (`sig-oracle: RAN` grepped in CI); oversized CMS → typed refusal test | L |
+| 8 | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |
 | 9 | Facade + FFI projection, warnings, docs | Verdict types exposed 1:1 through `tinker-pdf-ffi` (ruling 11) with parity tests; typed warnings carry object provenance (ruling 10) pinned by fixture; [features/forms.md](../features/forms.md) gains a signature-fields section; roadmap row closed against [ROADMAP.md](../ROADMAP.md) | M |
 
 ## Dependencies
@@ -162,24 +173,25 @@ and whole signed PDFs into the verdict path.
   (`tinker-pdf-cos/src/write.rs`, `edit.rs`); `Revision.byte_range` from open
   (`xref.rs`, [opening](../features/opening.md)); `FieldKind::Signature` and field
   classification (`form.rs`); SHA-2 digests and the published-vector convention
-  (`tinker-pdf-crypto`); the `qpdf_oracle.rs` harness and oracle `RAN`/`SKIPPED`
-  convention ([verification](../verification.md)); rulings 1, 2, 8, 9, 10, 11
+  (`tinker-pdf-crypto`); the strict structural validator
+  ([verification](../verification.md)); rulings 1, 2, 8, 10, 11, 13
   ([rulings](../rulings.md)).
 - **New:** `tinker-pdf-pki` leaf crate (milestones 2–3) before verdict assembly (6);
   crypto verify math (4–5) before 6; milestone 1 is independent and can land first;
   the write side (8) depends only on 1 and the existing incremental writer, so it can
   proceed in parallel with 4–7.
-- **External, CI-only:** pyHanko CLI and the `openssl` CLI as subprocess oracles
-  (ruling 9); signed-fixture corpus committed to the test tree.
+- **Published data, not programs (ruling 13):** NIST CAVP verify vectors, RFC 8017 and
+  RFC 5652 examples, RFC 5280 sample certificates; signed-fixture corpus committed to the
+  test tree with expected-verdict sidecars.
 
 ## Risks
 
 | Risk | Mitigation |
 |------|------------|
-| Hand-rolled RSA/ECDSA verify accepts a forgery (padding laxity, missing range checks) | Verify-only scope; CAVP negative vectors and forged-padding cases as merge gates, mirroring the crate's FIPS 197/RFC 6229 precedent; full-encoding comparison for EMSA-PKCS1-v1_5; `openssl cms -verify` subprocess cross-check on every corpus file |
+| Hand-rolled RSA/ECDSA verify accepts a forgery (padding laxity, missing range checks) | Verify-only scope; CAVP negative vectors and forged-padding cases as merge gates, mirroring the crate's FIPS 197/RFC 6229 precedent; full-encoding comparison for EMSA-PKCS1-v1_5 rather than a prefix match. The negative vectors carry this alone under ruling 13, which is why every published invalid case is a gate rather than a sample |
 | ASN.1 parser panics or overreads on malformed DER (largest new untrusted surface) | Own leaf crate with dedicated fuzz target from milestone 2's first commit; depth caps and definite-length-only parsing; ruling 1 makes a fuzz crash a release blocker |
 | A verdict rendered as a single "valid" boolean misleads hosts into overtrusting | The API has no boolean: coverage, digest, chain, and MDP are separate typed fields, and the docs state the engine proves integrity, not identity — anchors are the host's assertion |
 | Byte-range trickery: ranges that skip more than the `/Contents` gap make a "valid" signature over chosen bytes | Coverage classification is computed from the ranges, never trusted from them; anything but exact-gap bracketing to EOF or a clean revision boundary is `Suspicious` with a typed reason, fixture-pinned |
-| MDP misclassification calls a benign form fill a disallowed change (or the reverse) | Classification reuses the tested `form.rs` field machinery rather than re-deriving object roles; fixtures for each `/P` level in both directions; disagreement with pyHanko's MDP verdict on the corpus is investigated, not overridden |
-| Signing seam drifts from the prefix invariant and silently invalidates what it signs | `starts_with(original)` asserted in every signing test without exception (already the incremental writer's rule); the `/ByteRange` digest re-computed independently in tests before the oracle ever runs |
-| Oracle rot: pyHanko/openssl missing on a runner turns the signing gate green by absence | `sig-oracle: RAN`/`SKIPPED` printed and grepped, the same rule every existing oracle follows ([verification](../verification.md)) |
+| MDP misclassification calls a benign form fill a disallowed change (or the reverse) | Classification reuses the tested `form.rs` field machinery rather than re-deriving object roles; fixtures for each `/P` level in both directions, each fixture's expected verdict written from the clause rather than from a run |
+| Signing seam drifts from the prefix invariant and silently invalidates what it signs | `starts_with(original)` asserted in every signing test without exception (already the incremental writer's rule); the `/ByteRange` digest re-computed independently in tests |
+| **Nobody outside this repository ever validates a signature it produced** (ruling 13), so this engine can sign confidently and wrongly | The primitives are pinned by published vectors, which is the part most likely to be subtly wrong. Assembly and placement are not adjudicated by anyone; interop is a dated one-time measurement recorded in this document, and the sentence about real validators stands in the feature doc as a permanent limit. **Not closed** |

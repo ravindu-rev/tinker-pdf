@@ -5,9 +5,9 @@ if not, which clause did it break?" with typed findings a test can assert on,
 the 2 907-file veraPDF corpus — today purely a never-crash bar
 ([verification.md](../verification.md)) — graduates to a conformance bar whose
 agreement rate is ratcheted like every other corpus number, and
-`DocumentBuilder` gains an archival profile that either produces a file
-veraPDF-the-tool accepts or refuses at build time with an error naming the
-clause it could not satisfy. The [roadmap](../ROADMAP.md) Tier 3 item this
+`DocumentBuilder` gains an archival profile that either produces a file this
+engine's own validator accepts with zero findings, or refuses at build time
+with an error naming the clause it could not satisfy. The [roadmap](../ROADMAP.md) Tier 3 item this
 implements says exactly that: the corpus "graduates to a conformance bar."
 
 ## Scope
@@ -22,9 +22,10 @@ implements says exactly that: the corpus "graduates to a conformance bar."
 - **Flavour detection**: reading the claimed `pdfaid:part` /
   `pdfaid:conformance` from the XMP packet (ISO 32000-1 14.3.2), so a caller can ask
   "validate against what this file claims" or name a flavour explicitly.
-- **The oracle**: veraPDF-the-tool as a subprocess under ruling 9, comparing
-  verdicts over its own corpus, whose expected verdict is annotated in each
-  file's name (clause, test number, `pass`/`fail`).
+- **The bar**: the veraPDF *corpus*, whose expected verdict is annotated in
+  each file's name (clause, test number, `pass`/`fail`). The annotations are
+  published data and admissible under ruling 13; the tool that produced them
+  is not invoked.
 - **A writer profile**: on `DocumentBuilder` and `WriteOptions`
   (`crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf-cos/src/write.rs`):
   `/OutputIntents` with an embedded ICC destination profile (ISO 32000-1
@@ -122,19 +123,26 @@ nothing, never panics, and the existing hostile-input sweep
 (`crates/tinker-pdf/tests/hostile_input.rs`) grows a validator call so
 mutated fixtures exercise the rules on every commit.
 
-**The two-sided oracle.** The veraPDF corpus is unusual: it is *atomic*
-(one clause per file) and *annotated* (expected verdict in the filename).
-That gives a first bar with no subprocess at all — run the validator over
-the corpus, compare verdict to annotation, record the agreement rate as a
-new per-corpus row in `corpus/ratchet.json`, which `cargo xtask corpus-run`
-already refuses to regress. The second bar is veraPDF-the-tool itself,
-invoked as a subprocess per ruling 9, never linked, its output transient.
-It follows the `qpdf_oracle.rs` pattern exactly, including the lesson
-verification.md records: the job prints `verapdf-oracle: RAN` / `SKIPPED`
-and CI greps it, because a skipped oracle exits 0 and reads like a pass.
-Disagreements are diffed clause by clause; each is either our bug (fix), a
-known staged rule (named in the module), or veraPDF's bug (recorded with
-the file and clause, the way oracle allowances are recorded today).
+**The bar is the corpus's own annotations.** The veraPDF corpus is
+unusual, and this whole design leans on why: it is *atomic* (one clause per
+file) and *annotated* (the expected verdict is in the filename). Those
+annotations are a published statement about what each file is, made by the
+people who wrote the conformance suite — data, not a program — so ruling 13
+admits them. Run the validator over the corpus, compare verdict to
+annotation, record the agreement rate as a new per-corpus row in
+`corpus/ratchet.json`, which `cargo xtask corpus-run` already refuses to
+regress.
+
+Each disagreement is classified and recorded rather than averaged away:
+our bug (fix), a known staged rule (named in the module), or an annotation
+this project reads differently (recorded with the file, the clause, and the
+reading — the shape the bounds ledger uses for a justification field).
+
+**What is lost, and it is real.** A second validator's verdict on a file
+*this engine wrote* has no substitute here. The annotations cover the
+corpus's files, not ours, so the writer profile is checked by the same rule
+table that would accept its mistakes. Milestone 6 narrows that by building
+fixtures deliberately at the edge of each clause; it does not close it.
 
 **The writer profile.** `DocumentBuilder` gains a conformance mode set at
 construction; `WriteOptions` gains the matching field for rewrites of
@@ -164,9 +172,11 @@ existing documents. Under a profile:
   refused-at-the-door style — nothing is discovered by the validator that
   the builder allowed.
 
-The loop closes end to end: files the profile writes are validated by our
-own validator, by veraPDF as subprocess, and by `qpdf --check` alongside
-the existing writer oracle.
+The loop closes end to end within this repository: files the profile writes
+are validated by our own validator and by the strict structural validator
+([render-verification](render-verification.md)'s sibling for the writer).
+Under ruling 13 there is no outside verdict on them, which is the limit
+named above.
 
 ## Milestones
 
@@ -175,9 +185,9 @@ the existing writer oracle.
 | 1 | Validator core: flavour types, `ConformanceFinding`, rule table, XMP flavour detection, `Document::validate_pdfa`, `tpdf check --pdfa` | Unit fixtures per rule shape pass; hostile-input sweep calls the validator with zero panics; `tpdf check --pdfa` exits by verdict | M |
 | 2 | Syntax-only rule group (part 1 clauses first — largest count, least machinery), then parts 2–4 syntax deltas | Validator verdict vs filename annotation over the veraPDF corpus's file-structure clauses recorded as a ratchet row in `corpus/ratchet.json`; `corpus-run` refuses regression | L |
 | 3 | XMP rule group: packet well-formedness, `pdfaid` agreement, `/Info` consistency | Metadata-clause corpus files agree with annotations at the recorded rate; a wrong-flavour fixture yields exactly the metadata finding, asserted by kind | M |
-| 4 | veraPDF subprocess oracle in CI | CI job prints `verapdf-oracle: RAN` and goes red on `SKIPPED`; clause-level disagreement list committed; every disagreement classified (our bug / staged rule / recorded oracle allowance) | M |
+| 4 | Disagreement ledger against the corpus annotations | Clause-level disagreement list committed, every row carrying a mandatory reason string; each classified (our bug / staged rule / a reading recorded with its clause); a row without a reason fails the test that reads the ledger | M |
 | 5 | Font and colour rule groups (colour rules needing profile internals staged behind [design/icc.md](icc.md)) | Font- and colour-clause corpus agreement rates recorded and ratcheted; staged colour rules are named refusals asserted by a test, not silent passes | L |
-| 6 | Writer profile on `DocumentBuilder` + `WriteOptions`, output intent, XMP generation, typed refusals | Built fixtures pass milestone 1–5's validator with zero findings; veraPDF subprocess accepts them; `qpdf --check` clean; one refusal test per forbidden feature; a PDF/A fixture joins the determinism byte-hashes | L |
+| 6 | Writer profile on `DocumentBuilder` + `WriteOptions`, output intent, XMP generation, typed refusals | Built fixtures pass milestone 1–5's validator with zero findings and the strict structural validator clean; each fixture is built deliberately at the edge of its clause and its near-miss twin is asserted to fail; one refusal test per forbidden feature; a PDF/A fixture joins the determinism byte-hashes | L |
 
 ## Dependencies
 
@@ -194,18 +204,16 @@ the existing writer oracle.
 - **Corpus machinery** — `corpus/corpora.lock` pins the veraPDF corpus;
   `xtask` `corpus-run`/`ratchet.rs` provide the ratchet the agreement rate
   rides on. Exists.
-- **veraPDF CLI in CI** — a Java tool; the CI image must carry it, pinned
-  by version, under ruling 9's subprocess-only terms.
 - **[features/writing.md](../features/writing.md)** — the writer whose
-  options and builder this extends; the qpdf oracle beside it.
+  options and builder this extends, and the strict structural validator
+  beside it.
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
 | ISO 19005 has hundreds of sub-clauses; "validates PDF/A" overclaims what any first delivery checks | Coverage is a measured number, not a word: the ratchet row records agreement per clause group, staged rules are named refusals with tests, and docs state the rate rather than the ambition (the injection discipline in [verification.md](../verification.md)) |
-| veraPDF-the-tool disagrees with its own corpus annotations in places, so the two bars conflict | Annotation agreement and tool agreement are separate measurements with separate records; a conflict is classified and recorded per file, never averaged away |
+| **Nothing outside this repository ever validates a file this engine wrote** (ruling 13), so the writer is checked by the rule table that would also accept its mistakes | Every built fixture has a near-miss twin that must fail, so the rule is shown to discriminate rather than merely to pass; the limit is named in this doc and in [verification.md](../verification.md). Not closed |
 | XMP is a graph serialisation; a pull parser yields tokens, not the graph (the `xmp_metadata` amendment's own warning) | Parse only the property shapes 19005 checks, in the facade, behind fixtures taken from real producers' packets; a packet the subset cannot read is a finding ("metadata not checkable"), not a pass |
-| Java-based oracle bloats or flakes CI | Subset the oracle run (atomic corpus files are small), pin the veraPDF version in the workflow, and keep the annotation-based bar as the every-commit check with the subprocess bar scheduled |
 | No shippable ICC profile licence for the writer's default output intent | The THIRDPARTY.md vendor gate decides before the API does: if no profile clears `cargo xtask vendor`, the profile parameter is mandatory and documented, matching the no-bundled-faces precedent |
 | Writer profile refusals drift from validator rules, so the builder emits what the validator rejects | One rule table serves both: builder refusals cite the same `Clause` values, and a round-trip test validates every built fixture with the full validator in the same suite |

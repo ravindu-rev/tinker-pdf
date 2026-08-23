@@ -1,4 +1,4 @@
-//! PngSuite as an external arbiter for the PNG decoder (gap 29 M3, ruling 9).
+//! PngSuite as an external arbiter for the PNG decoder (gap 29 M3).
 //!
 //! PngSuite is Willem van Schaik's test set, and it is **the only PNG material
 //! in reach that this repository did not write**. Everything in
@@ -8,7 +8,12 @@
 //! JPEG 2000 plane count that was correct only for the code-blocks its own
 //! in-tree encoder happened to emit.
 //!
-//! # Ruling 9: invoked, never vendored
+//! # Fetched, never committed (ruling 13's input carve-out)
+//!
+//! PngSuite is a set of *files*, not a program: it says what a decoder should
+//! produce by being deliberately broken in fourteen documented ways and
+//! deliberately correct in the rest. Ruling 13 removes programs from the
+//! verification surface and keeps inputs, and this is squarely an input.
 //!
 //! Nothing from PngSuite is committed. Fetch it and point `TINKER_PNGSUITE` at
 //! the extracted directory:

@@ -15,7 +15,7 @@
 //!
 //! - **The inverse RCT is exact integer arithmetic**, so it does not need a
 //!   gate of its own: it extends gate 1. A losslessly coded RGB stream comes
-//!   back byte-identical to `opj_decompress` in `tests/jpx_oracle.rs`, and no
+//!   back byte-identical to the committed decodes in `tests/jpx_reference.rs`, and no
 //!   decoder with the two chrominance terms transposed can pass that.
 //! - **The inverse ICT is the 9/7's partner and a float transform in the
 //!   standard**, so it gets the 9/7's gate 2: the same ladder walked in `f64`

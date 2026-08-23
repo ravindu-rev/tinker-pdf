@@ -4,9 +4,9 @@
 //!
 //! CONTRIBUTING rule 1: no third-party crates. An HTTPS client and a gzip/tar
 //! reader are each a large dependency tree, and the project already has a
-//! precedent for the alternative — ruling 9 invokes qpdf and mutool as
-//! subprocesses rather than linking them, on the grounds that an external
-//! arbiter should stay external. `curl` and `tar` ship with every platform
+//! precedent for the alternative — a program that only moves bytes is
+//! invoked rather than linked, which ruling 13 permits explicitly: fetching
+//! is supplying, not adjudicating. `curl` and `tar` ship with every platform
 //! this repository builds on, Windows 10 and the GitHub runners included, and
 //! neither is trusted with anything: what comes back is verified here, against
 //! a digest computed by this project's own SHA-256, before it is unpacked.

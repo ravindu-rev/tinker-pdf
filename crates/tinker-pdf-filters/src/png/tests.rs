@@ -15,8 +15,8 @@
 //!    were then decoded by Pillow, an entirely separate PNG implementation,
 //!    which agreed they are the sixty-four values 0..63 in row-major order.
 //!    Nothing in this tree touched them before they were committed.
-//! 3. **PngSuite** runs against the same decoder in `tests/png_suite.rs`, under
-//!    ruling 9: fetched, never committed.
+//! 3. **PngSuite** runs against the same decoder in `tests/png_suite.rs`:
+//!    fetched, never committed — an input, which ruling 13 keeps.
 //!
 //! The builder below uses `deflate::zlib_compress` for the *transport* only. It
 //! is not under test here — `inflate.rs` and `deflate.rs` have their own — and
@@ -1459,8 +1459,9 @@ fn a_repeated_header_or_palette_is_dropped() {
 /// the two must agree.
 ///
 /// The generating script is recorded in gap 29's milestone 3 note rather than
-/// committed, for the reason ruling 9 gives about oracles: what is worth
-/// keeping is the artefact it produced and the record of where it came from.
+/// committed, for the reason ruling 13 gives about a tool that ran once: what
+/// is worth keeping is the artefact it produced and the record of where it
+/// came from.
 #[rustfmt::skip]
 const PLAIN_8X8: [u8; 102] = [
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,

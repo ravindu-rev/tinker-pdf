@@ -32,7 +32,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | --- | --- |
 | [features/determinism.md](features/determinism.md) | bit-identical output across targets; the fingerprint suite |
 | [rulings.md](rulings.md) | the numbered engineering rulings — these override everything |
-| [verification.md](verification.md) | fuzzing, corpora, oracles, ratchets, injection — the doctrine |
+| [verification.md](verification.md) | fuzzing, corpora, ratchets, injection, and what first-party verification cannot prove — the doctrine |
 
 ## Project
 

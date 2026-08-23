@@ -11,8 +11,9 @@ third-party colour engine — and transparency-group colour spaces honoured
 in compositing (ISO 32000-1 11.4.7, 11.6.6), including the page-level
 `/Group` that `Page::render` does not read today. The
 [roadmap](../ROADMAP.md) names both gaps and points them here; the exit it
-records is that corpus pages with `ICCBased` spaces move under the parity
-budget of [render-parity](render-parity.md).
+records is that ICC profiles drive conversion and that known-answer tables
+computed from the specification's own equations hold
+([render-verification](render-verification.md)).
 
 ## Scope
 
@@ -37,8 +38,9 @@ budget of [render-parity](render-parity.md).
 - **Typed refusals under rulings 2 and 10**: a profile the parser declines
   falls back to today's `Approximated` with a warning naming the object
   and the reason, never a hard failure.
-- Fixtures, fingerprints, a fuzz target, and a subprocess oracle for all of
-  the above ([verification.md](../verification.md)).
+- Fixtures, fingerprints, a fuzz target and specification-derived
+  known-answer tables for all of the above
+  ([verification.md](../verification.md), ruling 13).
 
 ## Non-goals
 
@@ -168,21 +170,28 @@ and maximum CLUT grid volume, measured against real embedded profiles.
   the parser, per the standing rule in
   [verification.md](../verification.md), seeded with the profiles the
   fixtures embed.
-- **Oracle, the `opj_decompress` pattern:** Little CMS's `transicc` (with
-  Argyll's `xicclu` as the named alternate) is a CLI that applies a
-  profile to component values on stdin — invoked as a subprocess in a new
-  `crates/tinker-pdf-color/tests/icc_oracle.rs`, never linked (ruling 9).
-  For each fixture profile and a grid of inputs, our transform must agree
-  within a per-channel budget of 2/255 — budgeted, not bit-exact, because
-  CMMs legitimately interpolate differently. The test prints
-  `icc-oracle: RAN <version>` / `SKIPPED` and CI greps it red on
-  `SKIPPED`, exactly as `qpdf-oracle:` does (ruling 9).
+- **Known-answer tables, not a second CMM.** Ruling 13 forbids asking
+  another colour engine what a transform should produce, so the answers
+  come from the specification instead. For a matrix/TRC profile every step
+  is published arithmetic — the parametric curve types of ICC.1 6.2, the
+  s15.16 matrix, the chromatic adaptation of Annex E — so a grid of inputs
+  has expected outputs computable by hand and committed as a table, in
+  `crates/tinker-pdf-color/tests/icc_known_answers.rs`. Each table records
+  the clause its numbers come from. This is *stronger* than a budgeted
+  agreement with another CMM, which is why the milestone that used to buy
+  agreement now buys exactness.
+
+  **What it does not reach:** LUT profiles (`mft1`, `mft2`, `mAB `,
+  `mBA `). Their CLUT interpolation is where two CMMs legitimately differ,
+  and it is exactly the part no published table settles. Hand-computed
+  lookups pin the interpolation this engine chose; nothing says that choice
+  matches what a profile's author expected. That is a named limit of this
+  design, recorded in [verification.md](../verification.md)'s terms.
 - **Corpus evidence:** the `tpdf probe` capability scan
   (`scan_capabilities` in tools/tpdf/src/main.rs) grows an `iccbased` tag beside `jbig2` and
   `jpx`, so `corpus/report.json` measures how many real files carry
   profiles, and *which kinds* — the ruling-3 evidence that schedules the
-  LUT milestone, and the selector that puts these files into the
-  [render-parity](render-parity.md) manifest.
+  LUT milestone.
 - **Fingerprints:** the stage-1 pairs plus new ICCBased fixtures are
   committed fingerprints in `determinism.rs`, holding ruling 4's
   bit-identical contract across targets once profiles drive conversion.
@@ -197,8 +206,8 @@ and maximum CLUT grid volume, measured against real embedded profiles.
 | 4 | `Transform` for matrix/TRC profiles: compiled tables, s15.16 matrix, integer eval | `cargo xtask libm` passes with the new code in place; round-trip tests (sRGB profile → PCS → sRGB identity within 1/255); fixed known-answer tests for a committed test profile | M |
 | 5 | LUT profiles: `mft1`, `mft2`, `mAB `, `mBA `, integer CLUT interpolation | Known-answer tests against hand-computed CLUT lookups; fuzz corpus extended with LUT profiles, still clean | L |
 | 6 | `ColorSpace::Icc` wired: `ICCBased` arm, fallback warning, `iccbased` probe tag, rendering intents | New ICCBased fingerprints committed; a refused profile produces the ruling-10 warning in `Bitmap.warnings` (asserted); `corpus/report.json` shows the `iccbased` count after a nightly run | M |
-| 7 | `icc-oracle` subprocess test | CI log contains `icc-oracle: RAN`; removing `transicc` from `PATH` in a scratch run goes red on the `SKIPPED` grep; grid agreement within 2/255 per channel on every fixture profile | S |
-| 8 | Parity movement | The render-parity manifest includes the `iccbased`-tagged corpus files and [render-parity](render-parity.md)'s `parity-run --check` holds them under budget; the ratchet update recording the improvement lands in the same PR | S |
+| 7 | Known-answer tables for matrix/TRC profiles | Every row's expected value is hand-computed from a named ICC.1 clause and carries that citation; the tables hold bit-exactly, not within a budget; injecting a wrong matrix coefficient or a wrong curve exponent is caught by a counted assertion | S |
+| 8 | Corpus movement | `corpus/report.json` shows the `iccbased` count; the metamorphic rows of [render-verification](render-verification.md) still hold over the files carrying profiles, so the new conversion path did not break resolution or rotation coherence | S |
 
 ## Dependencies
 
@@ -210,10 +219,8 @@ and maximum CLUT grid volume, measured against real embedded profiles.
   budgets in `crates/tinker-pdf-render/src/lib.rs` (reused, not forked).
 - The fingerprint suite (`crates/tinker-pdf/tests/determinism.rs`) and the
   bounds ledger (`crates/tinker-pdf/tests/bounds_ledger.rs`).
-- [render-parity](render-parity.md)'s manifest and ratchet — milestone 8
-  only; nothing earlier waits on it.
-- One pinned oracle package (`transicc` or `xicclu`) installed in CI, as
-  `opj_decompress` already is.
+- [render-verification](render-verification.md)'s metamorphic rows —
+  milestone 8 only; nothing earlier waits on it.
 
 ## Risks
 
@@ -224,5 +231,5 @@ and maximum CLUT grid volume, measured against real embedded profiles.
 | CMYK group buffers (5 bytes/pixel) inflate memory on group-heavy pages | Buffers are already bounded to the group's device-space extent and `MAX_GROUP_BUFFERS` caps the count; the existing decline-and-warn path (`GroupBudgetSpent`) absorbs the excess |
 | Non-separable blends in CMYK groups are an approximation and a reviewer mistakes it for a bug | The conversion is a named, warned limit on the type and in this doc; the fixture for it commits the approximated fingerprint so any silent change is caught |
 | Every colour-touching fingerprint churns when the CMM lands | Expected and staged: milestone 6 re-records fingerprints in its own PR with before/after renders attached, the discipline `corpus/ratchet.json` updates already follow |
-| The oracle CMM disagrees legitimately (interpolation, intent details) and the budget flaps | Agreement is budgeted at 2/255 and the package version is pinned; a pin bump re-records in the same PR, the render-parity rule |
-| v2 versus v4 profile differences (PCS encoding, curve types) handled subtly wrongly | Known-answer tests per profile version in milestone 4/5; the oracle grid runs over both v2 and v4 fixture profiles |
+| **No second CMM adjudicates this, under ruling 13.** A misreading of ICC.1 that survives one review converts every profiled page wrongly, and every check here agrees with it | Matrix/TRC transforms are pinned bit-exactly against tables hand-computed from named clauses, which is arithmetic rather than opinion. LUT interpolation has no such anchor and the doc says so; it is the largest named limit of this design |
+| v2 versus v4 profile differences (PCS encoding, curve types) handled subtly wrongly | Known-answer tables per profile version in milestones 4, 5 and 7, each citing the clause it came from, over both v2 and v4 fixture profiles |

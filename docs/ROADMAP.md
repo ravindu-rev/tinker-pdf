@@ -14,20 +14,45 @@ L and XL items have a design doc in [design/](design/); S and M items live
 here alone. Scheduling within a tier follows corpus hit-rate evidence
 (ruling 3, [rulings.md](rulings.md)), not interest.
 
-## Tier 1 — prove correctness against the world
+## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 787 tests proving the
-engine agrees with itself; nothing yet proves it agrees with anyone else.
+These come before any new feature. The suite is 2 790 tests proving the
+engine agrees with itself, and ruling 13 says that is the only kind of proof
+this repository will have. That raises the bar on what those tests must be
+rather than lowering it: answers computable in closed form, bitstreams
+transcribed from the standards' own annexes, published conformance data, and
+thousands of documents nobody here authored.
 
-- **Render parity over the corpus.** The single biggest hole in the
-  verification surface: the corpus run measures whether a bitmap came back
-  (4 484 of 4 525 files, zero crashes), not whether it is the right bitmap.
-  `tools/oracle-diff` is written — `render`, `text` and `which` against
-  external renderers as subprocesses under ruling 9 — and is wired into no
-  CI job and no test. Exit: a CI job running oracle-diff over a corpus
-  subset, gating on `pdfcmp`'s changed-pixel budget, with a committed
-  parity percentage that ratchets and a `SKIPPED`-is-red guard. (M,
-  [design/render-parity.md](design/render-parity.md))
+- **First-party verification.** Ruling 13 retires the subprocess oracles,
+  and between that decision and the last replacement this suite is losing
+  evidence it has not yet regained — `qpdf_oracle.rs`, `xps_mutool.rs`,
+  `epub_browser.rs` and the epubcheck verdicts each remain the only outside
+  read of something. Evidence: the four properties
+  [verification.md](verification.md) names as not coming back, and the
+  nine-of-ten injection matrix whose tenth fault only qpdf ever caught. The
+  order is fixed — nothing is deleted before the check replacing it exists
+  and has been injection-counted:
+  1. `cargo xtask oracles`: the boundary itself, held by a build failure
+     rather than by habit. (S)
+  2. The honesty pass: a `jpx-oracle` CI job that greps a marker no code
+     emits, and two claims about checks that were never wired. (S)
+  3. A strict validator — own output re-opened with the leniency ladder
+     off, plus the structures the tolerant reader never consults — then the
+     four qpdf tests and their job. (M)
+  4. XPS conservation from an independent markup walk, then `xps_mutool.rs`
+     and its job. (M)
+  5. EPUB reftest pairs and analytic layout, then `epub_browser.rs`, the
+     browser job, and the epubcheck step. (M)
+  6. Analytic raster fixtures: pages whose correct raster is computable in
+     closed form by an independent in-test function. (M)
+  7. Metamorphic probes over the real corpus — rotation, cropping and
+     resolution coherence — with their own ratchet rows. (M)
+  8. `tools/oracle-diff` deleted; the suite recounted. (S)
+
+  Exit: no test or CI job spawns a program the workspace did not build,
+  `cargo xtask oracles` is green in `cargo xtask check`, and every row of
+  [verification.md](verification.md)'s migration table reads **done**. (L,
+  [design/render-verification.md](design/render-verification.md))
 - **The macOS and wasm determinism legs, observed.** Three of ruling 4's
   four targets are measured on one machine
   ([features/determinism.md](features/determinism.md)); macOS is claimed
@@ -35,12 +60,13 @@ engine agrees with itself; nothing yet proves it agrees with anyone else.
   the `macos-14` leg and the `wasm-determinism` job green together,
   observed. (S)
 - **`/ID` on encrypted writes.** 7.5.5 Table 15 requires a trailer `/ID`
-  whenever `/Encrypt` is present; no file this engine encrypts carries one,
-  and `qpdf --check` warns on every such file — the warning is currently
-  allowed through the oracle *by name*, which costs an assertion. Needs a
-  decision on deriving the ID (the 48 caller-supplied entropy bytes are
-  fully consumed today). Exit: qpdf clean on encrypted output with the
-  by-name allowance removed from `qpdf_oracle.rs`. (S)
+  whenever `/Encrypt` is present; no file this engine encrypts carries one.
+  An outside reader found it, and its complaint is currently allowed through
+  *by name*, which costs an assertion. Needs a decision on deriving the ID
+  (the 48 caller-supplied entropy bytes are fully consumed today). Exit: the
+  strict validator refuses a trailer carrying `/Encrypt` and no `/ID`, that
+  rule is injection-counted, and the by-name allowance is gone with the
+  oracle that needed it. (S)
 - **A `--fonts` corpus bar.** The corpus's 24 % rendered-with-warnings rate
   is dominated by the no-bundled-faces policy, so it measures the policy as
   much as the engine. Record a bar with a font provider supplied, and
@@ -88,17 +114,23 @@ warning contract), with corpus reachability measured.
   [design/icc.md](design/icc.md))
 - **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, five of Table A.19's
   six code-block styles, out-of-order tile-parts — every entry reachable
-  and named, measured 4 refusals of 19 corpus files. Exit: refusal rows
-  retire one by one as corpus files demand them. (M)
+  and named, measured 4 refusals of 19 corpus files. Ruling 13 costs this
+  item its cheapest source of fixtures: a codestream exercising a new
+  partition can no longer be produced by asking an encoder for one, so each
+  is hand-authored and transcribed, the discipline JBIG2 took from T.88's
+  Annex H. Exit: refusal rows retire one by one as corpus files demand
+  them. (M–L)
 - **Full ICC colour.** ICC and CIE spaces are approximated by component
   count today, stated on the type. An own CMM — profile parsing,
   transforms, rendering intents — is the capability. Exit: ICC profiles
-  drive conversion; corpus pages with `ICCBased` spaces move under the
-  parity budget. (L, [design/icc.md](design/icc.md))
+  drive conversion; known-answer tables computed from the specification's
+  own equations hold for matrix/TRC profiles. (L,
+  [design/icc.md](design/icc.md))
 - **Incremental update with encryption.** An incremental save of an
   encrypted document needs the original file key plumbed to the
   incremental writer; today the combination is refused. Exit: fill a form
-  in an encrypted file, save incrementally, qpdf decrypts it clean. (M)
+  in an encrypted file, save incrementally, and the saved file decrypts and
+  passes the strict validator. (M)
 
 ## Tier 3 — capabilities absent today
 
@@ -109,9 +141,13 @@ Ordered by leverage, not size.
   ECDSA verify — hand-rolled, verify-only, under the same rules as the
   rest of the crypto. Writing: sign on incremental update — the
   byte-identical prefix a signature needs already exists and is tested.
-  `/DocMDP` and modification detection follow. Exit: verify a corpus of
-  signed documents; produce a signature an independent validator accepts.
-  (XL, [design/signatures.md](design/signatures.md))
+  `/DocMDP` and modification detection follow. Ruling 13 costs this item
+  its continuous interop check: nothing in CI may ask another program
+  whether a signature is acceptable, so a signature everything in-tree
+  accepts may still be rejected by real validators, and the design doc says
+  so. Exit: verify a corpus of signed documents; the published CAVP and RFC
+  test vectors gate the primitives; interop is a dated, recorded, one-time
+  measurement outside CI. (XL, [design/signatures.md](design/signatures.md))
 - **Text shaping — a non-goal, overturned.** The docs long stated shaping
   as permanent non-goal, and for *rendering existing PDFs* the reasoning
   holds: the producer positioned every glyph. It fails wherever this

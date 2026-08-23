@@ -148,11 +148,16 @@ wants the reason to survive it.
   arbitrary bytes, and no decoder ever exceeds `Limits::max_output`.
 - `crates/tinker-pdf-filters/tests/containers.rs` — `inflate_raw` and CRC-32
   as their container consumers use them.
-- `crates/tinker-pdf-filters/tests/jpx_oracle.rs` — the JPX decoder against
-  OpenJPEG (ruling 9: invoked, never vendored): fixtures made with
-  `opj_compress`, lossy references decoded by `opj_decompress`, byte-identity
-  pinning container, tier-2, tier-1 context numbering, dequantisation, the
-  5/3 and the DC level shift in one comparison.
+- `crates/tinker-pdf-filters/tests/jpx_reference.rs` — the JPX decoder
+  against committed reference decodes: codestreams made with `opj_compress`
+  from this repository's own images, lossy references decoded once by
+  `opj_decompress` (OpenJPEG 2.5.0, August 2026), byte-identity pinning
+  container, tier-2, tier-1 context numbering, dequantisation, the 5/3 and
+  the DC level shift in one comparison. **It invokes nothing** — it was named
+  and described as an oracle and never was one, and the CI job that grepped
+  it for a banner it does not print could not pass. Corrected with ruling 13,
+  which keeps the committed decodes as a dated measurement and rules out ever
+  regenerating them as a check.
 - `crates/tinker-pdf-filters/tests/png_suite.rs` — the PNG decoder against
   PngSuite, 176 files as of August 2026: all fifteen legal colour-type/depth
   pairs, and fourteen broken-by-design files that must each be refused. Runs
@@ -168,6 +173,6 @@ wants the reason to survive it.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 2 787 passed / 0 failed / 8 ignored
+  workspace stands at 2 790 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md) for
   the full harness.

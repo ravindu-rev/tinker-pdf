@@ -89,37 +89,34 @@ living in one feature's head.
    ranges with no opinion about what an entry is *for*; `xml` returns markup
    events with no XPS or EPUB vocabulary in its API.
 
-9. **Oracles are subprocesses, never dependencies.** Binds
-   [verification.md](verification.md) and every feature that cites an oracle
-   diff. mutool, pdftoppm, pdfium_test and qpdf are invoked as external CLIs
-   in CI; nothing links them, and their outputs are transient comparison
+9. **Oracles are subprocesses, never dependencies.** *Retired August 2026;
+   superseded by ruling 13.* Bound [verification.md](verification.md) and
+   every feature that cited an oracle diff. mutool, pdftoppm, pdfium_test,
+   qpdf, openjpeg and a headless Chromium were invoked as external CLIs in
+   CI; nothing linked them, and their outputs were transient comparison
    references, never committed or redistributed.
 
-   **A headless browser is a fifth, and only for CSS.** The reasoning is
-   worth keeping rather than the conclusion alone. XPS markup has one right
-   answer, so agreement with the mutool oracle is evidence there, bounded by
-   the recorded risk that where the oracle is wrong about XPS both engines
-   agree and both are wrong. **CSS does not work like that.** `mutool draw`
-   lists EPUB and takes `-W`, `-H` and `-S` for its layout, but its EPUB
-   engine is itself a partial CSS implementation, so:
+   The rule was right about *how* to hold an external program at arm's
+   length. What ruling 13 overturns is that it held one at all. One part
+   outlives it and is restated there: a check that can be absent must
+   announce whether it ran, which is why the `RAN` / `SKIPPED` grep is still
+   the pattern for every job that depends on something being present.
+
+   The reasoning is kept rather than deleted, because it is the argument
+   ruling 13 has to answer, and answering it costs something real. XPS
+   markup has one right answer, so agreement with a second reader was
+   evidence there — bounded by the recorded risk that where the second
+   reader is wrong about XPS, both engines agree and both are wrong. **CSS
+   does not work like that.** An engine whose EPUB support is itself a
+   partial CSS implementation is not a reference, so:
 
    > For XPS, agreeing with the oracle was evidence. For EPUB, disagreeing
    > with it is not evidence of a bug.
 
-   A browser is the reference implementation of CSS, and comparing a CSS
-   implementation against a partial one is comparing it against nothing. So
-   `tests/epub_browser.rs` invokes Chromium — `chrome`, `msedge` or
-   `chromium`, found by path or named by `TINKER_BROWSER` — with
-   `--headless=new`, `--dump-dom` and `--print-to-pdf`. Two constraints come
-   with it:
-
-   - **It is not a pixel comparison and never becomes one.** A browser lays
-     a content document into one continuous column, so there is no page 3 to
-     compare against page 3; what is compared is `y` offsets and the
-     partition of the text across pages.
-   - **The job goes red when the browser is missing.** A skipped oracle
-     exits 0 and reads exactly like a pass. The `browser-oracle: RAN` /
-     `SKIPPED` line is printed and grepped, exactly as `qpdf-oracle:` is.
+   A browser is the reference implementation of CSS, and that is why one
+   was the fifth oracle. Under ruling 13 it is not, and the sentence above
+   becomes a limit this repository accepts and names
+   ([features/epub.md](features/epub.md)) rather than a job it runs.
 
 10. **Warnings carry provenance.** Binds all reading paths. Every leniency
     action (repaired xref, truncated stream decoded short, substituted
@@ -137,6 +134,33 @@ living in one feature's head.
     application's test files assertion-for-assertion; when those tests
     change (bug fixes only), the ports follow. Parity claims are
     `cargo test` output, not judgment.
+
+13. **Verification is first-party.** Binds
+    [verification.md](verification.md) and every feature that cited an
+    oracle. Nothing outside this repository renders, parses, validates or
+    measures a document as evidence. Ruling 9 is retired by this one.
+
+    The line is drawn between *adjudicating* and *supplying*, because "no
+    third party" read literally is unsatisfiable — the compiler, the CI
+    runner and `curl` are all third-party programs. A third-party program
+    may host this code, execute it, fetch bytes for it, or generate inputs
+    for it. It may never be the thing that says whether the output is
+    right. The reason is the same one that put every filter, cipher, font
+    parser and rasterizer in this tree: an implementation this project does
+    not own is one it cannot answer for.
+
+    Third-party **bytes** stay admissible, with provenance recorded — the
+    fetched corpora, fixtures real producers emitted, published normative
+    data (Adobe's CMap resources, the Unicode character database), and the
+    committed output of a tool that was run once, which is a dated
+    measurement rather than a check. A corpus is not an implementation; it
+    is what an implementation is for.
+
+    What this costs is written down rather than absorbed.
+    [verification.md](verification.md) names the properties that left the
+    suite with the oracles and did not come back, in its own voice. A known
+    gap is manageable; a suite that has quietly stopped proving something
+    is not.
 
 ## How to add a ruling
 

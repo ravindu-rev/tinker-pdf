@@ -14,8 +14,10 @@
 //!    and a decoder's stay in step under *any* permutation. Gap 17 transposed
 //!    two of template 0's context bits and T.88 Annex H.1 still decoded to
 //!    its published picture byte for byte.
-//! c. `openjpeg` as a subprocess oracle, under ruling 9 — invoked, never
-//!    vendored, in `tests/jpx_oracle.rs`.
+//! c. Committed reference decodes in `tests/jpx_reference.rs` — codestreams
+//!    and decoded images produced once by OpenJPEG 2.5.0 in August 2026, with
+//!    the commands recorded in that file's header. A dated measurement, which
+//!    is all ruling 13 allows and all it ever was: nothing is invoked.
 //! d. Gap 23's nineteen real files, as milestone 8's acceptance number.
 
 mod bounds;

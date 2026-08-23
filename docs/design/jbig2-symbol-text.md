@@ -121,9 +121,11 @@ existing `fuzz/fuzz_targets/jbig2.rs` needs no new knobs — its assertions
 (exact output size, exact refusal error, warning dedup, swapped globals) are
 already the right contract — but its seed corpus gains symbol/text fixtures
 written by an `#[ignore]`d test in `jbig2.rs`, the house pattern that keeps
-seeds and fixtures from drifting. Oracles stay subprocesses per ruling 9:
-`pdftoppm` renders the JBIG2 slice of the corpus for `oracle-diff` comparison,
-and the ratcheted `cargo xtask corpus-run` measures the hit-rate exit.
+seeds and fixtures from drifting. Ruling 13 rules out asking another decoder
+what a page should look like, so the anchor is the standard itself: T.88's
+Annex H.1 publishes a page bitmap for both coding variants, which is the
+artefact this whole capability is tested against, and the ratcheted
+`cargo xtask corpus-run` measures the hit-rate exit.
 Determinism: integer-only decoding, no `HashMap`, and one JBIG2-bearing render
 fingerprint joins `crates/tinker-pdf/tests/determinism.rs`. Injection: at least
 one deliberate defect per decoder (a transposed IAID context, a wrong refinement
@@ -141,7 +143,7 @@ injection at the bottom of `jbig2.rs` already does.
 | 5 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
 | 6 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
 | 7 | Bounds and fuzz hardening | `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES`, `MAX_JBIG2_TEXT_INSTANCES` rows in `bounds_ledger.rs`, each measured against a real `jbig2enc`/OCRmyPDF output and none refusing it; a recorded fuzz session over the extended seeds with zero crashes | S |
-| 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; `pdftoppm` oracle comparison over the JBIG2 corpus slice in CI; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |
+| 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; every JBIG2-bearing corpus file renders without a placeholder warning, counted; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |
 
 ## Dependencies
 
@@ -152,11 +154,10 @@ injection at the bottom of `jbig2.rs` already does.
   `Warning`/`Capability` enums in `lib.rs`.
 - `crate::T6Rows` (the T.6 decoder `decode_mmr` already reuses) for
   Huffman-variant collective bitmaps.
-- Corpus infrastructure: `cargo xtask corpus-fetch` / `corpus-run`,
-  `corpus/ratchet.json`, `tools/oracle-diff` — which already drives
-  `pdftoppm` as a subprocess oracle (ruling 9); installing poppler in a CI
-  job, the way the `jpx-oracle` job installs openjpeg, is milestone 8's
-  work, not a thing that exists today.
+- Corpus infrastructure: `cargo xtask corpus-fetch` / `corpus-run` and
+  `corpus/ratchet.json`. Ruling 13 means milestone 8 measures the hit-rate
+  and the absence of placeholder warnings rather than comparing pixels with
+  anything; T.88 Annex H.1 carries the pixel-exact weight instead.
 - `crates/tinker-pdf/tests/bounds_ledger.rs` (ledger rows) and
   `crates/tinker-pdf/tests/determinism.rs` (fingerprint).
 - `fuzz/fuzz_targets/jbig2.rs` and its committed seed corpus.
@@ -165,7 +166,7 @@ injection at the bottom of `jbig2.rs` already does.
 
 | Risk | Mitigation |
 |---|---|
-| Context-lifetime bugs (dictionary contexts shared across symbols, IAID width derived from symbol count) decode plausibly wrong pages rather than crashing | Annex H.1 pixel-exact assertions in both coding variants; `pdftoppm` oracle over the real corpus; injection tests with counted catches |
+| Context-lifetime bugs (dictionary contexts shared across symbols, IAID width derived from symbol count) decode plausibly wrong pages rather than crashing | Annex H.1 pixel-exact assertions in both coding variants — the standard's own bitmap, which under ruling 13 is the only adjudicator there is — plus injection tests with counted catches. Beyond H.1's page the corpus can say a file decoded, not that it decoded correctly, and this doc says so |
 | Symbol dictionaries invite allocation blowup: 32-bit symbol counts, per-symbol bitmaps, per-strip instance counts | Every count capped by a named budget checked before allocation (`packed_size` pattern); budgets are ledger rows measured against real OCR files so no cap refuses the thing the format is for |
 | Huffman effort wasted if the corpus is all-arithmetic — or arithmetic-first wrong if it is not | Milestone 1 census decides the order (ruling 3); H.1's Huffman page keeps the variant conformance-testable regardless |
 | Dangling references: text region whose dictionary is in a missing globals stream, or refused over budget | Region not counted; page with zero regions still refuses by name; the fuzz target already swaps globals and own streams every run |
