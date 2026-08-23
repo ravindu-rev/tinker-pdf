@@ -7,12 +7,12 @@
 //! > **For XPS, agreeing with mutool was evidence. For EPUB, disagreeing with
 //! > mutool is not evidence of a bug.**
 //!
-//! MuPDF reads EPUB and `mutool draw` takes `-W`, `-H` and `-S` for exactly
-//! this layout — but MuPDF's EPUB engine is *itself* a partial CSS
-//! implementation, so a disagreement names no culprit. A browser is the
-//! reference implementation of CSS, and comparing a CSS implementation against
-//! a partial one is comparing it against nothing. The amendment is written into
-//! `docs/plans/99-consistency.md` beside ruling 9 rather than left here.
+//! `mutool draw` reads EPUB and takes `-W`, `-H` and `-S` for exactly this
+//! layout — but the mutool oracle is *itself* a partial CSS implementation, so
+//! a disagreement names no culprit. A browser is the reference implementation
+//! of CSS, and comparing a CSS implementation against a partial one is
+//! comparing it against nothing. The amendment is written into
+//! `docs/rulings.md` beside ruling 9 rather than left here.
 //!
 //! # What this compares, and what it deliberately does not
 //!

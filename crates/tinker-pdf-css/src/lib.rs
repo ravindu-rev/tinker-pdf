@@ -1,7 +1,7 @@
 //! CSS: bytes in, a stylesheet out; an element and a selector in, a match and a
 //! specificity out; declarations and a tree in, computed styles out.
 //!
-//! Scope, design and exit criteria: `docs/plans/gaps/31-epub.md`, milestone 6.
+//! Feature documentation: `docs/features/epub.md`.
 //!
 //! **The ninth leaf**, and the fourth crate in this workspace with no internal
 //! dependency at all, beside `filters`, `crypto` and `xml`. Ruling 8's August

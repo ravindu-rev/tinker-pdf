@@ -4,7 +4,7 @@
 # filters, crypto, fonts, rasterization. No third-party crates for PDF logic or
 # primitives. Dev/build/binding tooling (proptest, criterion, PyO3, wasm-bindgen,
 # cargo-fuzz) is exempt from that rule; nothing in the exempt set ships inside
-# the engine. See docs/plans/00-architecture.md for the policy and its boundary.
+# the engine. See docs/architecture.md for the policy and its boundary.
 
 [workspace]
 resolver = "2"

@@ -1,5 +1,7 @@
 //! Transcendental functions that give the same bits on every target.
 //!
+//! Feature documentation: `docs/features/determinism.md`.
+//!
 //! Ruling 4 says rendering is deterministic: the same document at the same
 //! scale produces byte-identical output on Linux, Windows, macOS and wasm.
 //! The rasteriser's fixed-point coverage accumulation was built for that, and

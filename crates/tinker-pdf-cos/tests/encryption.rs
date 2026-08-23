@@ -1,9 +1,9 @@
 //! Decrypting real encrypted documents.
 //!
-//! Two of these assertions are the whole point of the phase: they are the
-//! MuPDF defects Tinker documented, fixed. Owner and user authentication are
-//! told apart, and a `/P` whose reserved bits are set still reports its
-//! restrictions instead of degrading to "everything is permitted".
+//! Two of these assertions are the whole point of the phase: owner and user
+//! authentication are told apart, and a `/P` whose reserved bits are set
+//! still reports its restrictions instead of degrading to "everything is
+//! permitted".
 
 use std::path::PathBuf;
 use tinker_pdf_cos::{AuthError, AuthLevel, CosDocument, Name};
@@ -29,9 +29,9 @@ fn the_user_password_authenticates_as_the_user() {
     assert_eq!(doc.auth_level(), AuthLevel::User);
 }
 
-/// The distinction MuPDF's bindings could not make: `fz_authenticate_password`
-/// returns a bitmask saying *which* password matched, and the wrapper Tinker
-/// used collapsed it to a bool.
+/// Authentication reports *which* password matched, not merely that one did:
+/// a result collapsed to a bool cannot tell owner authority from user
+/// authority.
 #[test]
 fn the_owner_password_authenticates_as_the_owner() {
     let doc = open("encrypted-aes256.pdf");
@@ -66,9 +66,10 @@ fn an_unencrypted_document_has_nothing_to_authenticate() {
     );
 }
 
-/// The second MuPDF defect: `/P`'s reserved bits are 1 by specification, so a
-/// strict bitflags parse fails on every real value and the fallback granted
-/// everything — including for this file, which forbids printing.
+/// `/P`'s reserved bits are 1 by specification, so a strict bitflags parse
+/// fails on every real value; the bits are read as the spec sets them instead
+/// of falling back to "everything is permitted" — including for this file,
+/// which forbids printing.
 #[test]
 fn permissions_survive_their_reserved_bits() {
     let doc = open("permissions-noprint.pdf");

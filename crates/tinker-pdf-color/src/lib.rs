@@ -1,5 +1,7 @@
 //! Colour spaces and the PDF function interpreter (8.6, 7.10).
 //!
+//! Feature documentation: `docs/features/rendering.md`.
+//!
 //! A leaf crate: component values in, RGB out, with no PDF types anywhere in
 //! the surface. The caller translates `/ColorSpace` dictionaries into these
 //! plain descriptions.

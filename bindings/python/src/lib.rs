@@ -5,7 +5,7 @@
 //! the GIL — safe because the engine is `Send + Sync`, and it is what makes a
 //! thread pool over pages actually parallel in Python.
 //!
-//! Scope and packaging: `docs/plans/13-bindings.md`.
+//! Scope and packaging: `docs/features/bindings.md`.
 
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;

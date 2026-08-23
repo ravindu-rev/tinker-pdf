@@ -6,7 +6,7 @@ cache keyed on that file. Nothing from any corpus enters git — size aside,
 redistribution rights are per-file murky in every real-world PDF collection,
 and a pin plus a checksum reproduces the set without this project becoming a
 distributor. The reasoning is
-[`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-corpora.md).
+[`docs/verification.md`](../docs/verification.md).
 
 ## Licences
 

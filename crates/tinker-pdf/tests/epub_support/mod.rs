@@ -167,13 +167,11 @@ pub fn is_stylesheet(name: &str) -> bool {
 
 /// Which of the shapes a document type declaration is in.
 ///
-/// The five values are the rows of the plan's own settlement table in
-/// [The doctype collision], plus the split between the two quote characters —
-/// because *"the single-quoted XHTML 1.1 form"* is named in milestone 2's exit
-/// criteria and a census that folded the quotes together could not tell
-/// milestone 2 whether it had ever been seen.
-///
-/// [The doctype collision]: ../../../../docs/plans/gaps/31-epub.md
+/// The five values are the rows of the settlement table in gap 31's "The
+/// doctype collision" section, plus the split between the two quote
+/// characters — because *"the single-quoted XHTML 1.1 form"* is named in
+/// milestone 2's exit criteria and a census that folded the quotes together
+/// could not tell milestone 2 whether it had ever been seen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Doctype {
     /// No declaration at all.

@@ -20,7 +20,7 @@
 //!   placeholder grey, because the shape and its position are known and only
 //!   the colour is not.
 //!
-//! That is [07](../../../../docs/plans/gaps/07-stroked-patterns.md)'s lesson:
+//! That is gap 07's lesson:
 //! that gap's headline defect was a gradient-stroked rule painting **solid
 //! black, silently**, and black is a plausible colour where the placeholder
 //! grey is not. Everything in this module that cannot be painted returns

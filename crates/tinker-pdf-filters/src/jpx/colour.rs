@@ -28,7 +28,7 @@
 //! - **Subsampling, by replication.** A component with `XRsiz` or `YRsiz`
 //!   above one covers the reference grid in blocks, and each block takes the
 //!   sample's value unfiltered. That is the opposite of what
-//!   `docs/plans/02-filters.md` decided for JPEG, deliberately and for the
+//!   plan 02 decided for JPEG, deliberately and for the
 //!   same underlying reason: there the oracle is libjpeg-turbo, which does
 //!   fancy upsampling, and here it is `opj_decompress -upsample`, which
 //!   replicates. Gate 1's byte-identity is only reachable if the two agree.

@@ -51,10 +51,10 @@ and it deserves an unusual amount of scrutiny, so here is the honest framing:
   Stated precisely, because the previous wording here claimed more than was
   true: the full NIST CAVP suites are **not** wired in, and there is no
   CBC-AES-256 vector even though that is the mode the fixtures use. AES-256 in
-  CBC is exercised end to end by decrypting a MuPDF-produced R6 file and by an
-  independent Python reimplementation of Algorithm 2.B in the test suite, which
-  is real evidence and is not the same thing as CAVP. Wiring the suites is
-  tracked in [plan 03](docs/plans/03-encryption.md).
+  CBC is exercised end to end by decrypting a mutool-written R6 fixture and by
+  an independent Python reimplementation of Algorithm 2.B in the test suite,
+  which is real evidence and is not the same thing as CAVP. Wiring the suites
+  is tracked in [`docs/features/encryption.md`](docs/features/encryption.md).
 - **Password comparison is constant-time.**
 
   Decrypt paths are **not** fuzzed today. A `tinker-pdf-crypto` fuzz target

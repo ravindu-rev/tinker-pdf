@@ -16,7 +16,8 @@
 //! # }
 //! ```
 //!
-//! Scope, design and exit criteria: `docs/plans/00-architecture.md`.
+//! Feature documentation: `docs/architecture.md`, and one doc per feature
+//! under `docs/features/`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

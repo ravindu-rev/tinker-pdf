@@ -1,7 +1,7 @@
 # Fuzzing
 
 Twenty-four `cargo-fuzz` targets, one per leaf format plus two whole-pipeline ones.
-Policy: [`docs/plans/14-testing-and-corpora.md`](../docs/plans/14-testing-and-corpora.md).
+Policy: [`docs/verification.md`](../docs/verification.md).
 
 | Target | What it drives |
 | --- | --- |
@@ -125,7 +125,7 @@ a *copy* unless you mean to lose them. `git status` after a run is worth a
 look before `git add`.
 
 Large third-party corpora are fetched by pinned checksum and never committed —
-see the plan for the per-corpus licence table.
+see [`corpus/README.md`](../corpus/README.md) for the per-corpus licence table.
 
 ## Crashes
 

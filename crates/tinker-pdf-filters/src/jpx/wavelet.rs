@@ -25,7 +25,7 @@
 //! differently on a 32-bit target does not shift a result slightly, it changes
 //! which quantisation bucket a coefficient falls in and therefore which
 //! integer a sample rounds to. So it runs in the fixed-point format
-//! `docs/plans/gaps/18a-jpx-decoder.md` settled **before any decoder code
+//! gap 18a settled **before any decoder code
 //! existed**, precisely so the decision would not be made implicitly by
 //! whoever wrote the wavelet: `i32` planes at Q12, `i64` constants at Q24,
 //! every product formed in `i64` at Q36 and rounded back with

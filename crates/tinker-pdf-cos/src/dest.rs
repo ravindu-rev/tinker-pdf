@@ -1,10 +1,11 @@
 //! Destinations and actions (12.3.2, 12.6).
 //!
-//! The type here is the design answer to a specific defect. MuPDF's outline
-//! writer took a `uri` field and, given `#page=2`, stored it as a *named*
-//! destination, percent-encoded to `#nameddest=%23page%3D2`, which resolves to
-//! no page when the file is read back. The three kinds are different things
-//! and this engine never conflates them, in either direction (ruling 6).
+//! The type here is the design answer to an information-loss hazard:
+//! collapsing `Explicit`, `Named` and `Uri` into one field loses what a
+//! round-trip cannot recover — a `#page=2` stored as a *named* destination,
+//! percent-encoded to `#nameddest=%23page%3D2`, resolves to no page when the
+//! file is read back. The three kinds are different things and this engine
+//! never conflates them, in either direction (ruling 6).
 
 use crate::doc::CosDocument;
 use crate::name::{Name, NameTable};

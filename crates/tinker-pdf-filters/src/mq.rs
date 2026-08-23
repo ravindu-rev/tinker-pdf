@@ -5,8 +5,7 @@
 //! per decision, and gets one bit back. Everything that makes a decision
 //! predictable lives in how the caller chooses the context, which is why the
 //! same coder serves JBIG2's generic regions (T.88 6.2) and JPEG 2000's
-//! code-block coder (T.800 Annex D), per
-//! `docs/plans/gaps/18a-jpx-decoder.md`.
+//! code-block coder (T.800 Annex D), per gap 18a.
 //!
 //! The one thing the two codecs do *not* share is where a context starts.
 //! T.88 E.3.6 starts all of them at zero; T.800 Table D.7 fixes three. See

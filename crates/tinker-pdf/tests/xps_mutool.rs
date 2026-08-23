@@ -1,13 +1,12 @@
 //! mutool reads the XPS itself, and agrees with what this engine made of it
 //! (gap 30 milestone 9, ruling 9).
 //!
-//! **The irony is the point, and gap 30's design section writes it down rather
-//! than leaving it to be noticed.** MuPDF reads XPS — `mutool draw` lists
-//! `pdf`, `xps`, `cbz` and `epub` as its input formats — and mutool is already
-//! one of ruling 9's four named oracles. So *the library gap 28's decision
-//! removes from Tinker's shipped tree is the best available oracle for the
-//! format it is being removed for*, and ruling 9 permits exactly that, because
-//! an oracle is invoked and never linked.
+//! **Gap 30's design section writes the choice down rather than leaving it to
+//! be noticed.** mutool reads XPS — `mutool draw` lists `pdf`, `xps`, `cbz`
+//! and `epub` as its input formats — and mutool is already one of ruling 9's
+//! four named oracles, so it is the best available oracle for this format, and
+//! ruling 9 permits exactly that, because an oracle is invoked and never
+//! linked.
 //!
 //! `tests/xps_qpdf.rs` is the other half of this gap's oracle story and it
 //! answers a different question. qpdf reads the **PDF this engine wrote** and
@@ -36,9 +35,9 @@
 //!
 //! # And the caveat that must be stated rather than discovered
 //!
-//! **It is the same engine Tinker is leaving.** Where MuPDF is wrong about XPS
-//! this engine will agree with it and both will be wrong. An oracle bounds the
-//! space of disagreements; it does not certify the answer.
+//! **The oracle is not the specification.** Where the oracle is wrong about
+//! XPS this engine will agree with it and both will be wrong. An oracle bounds
+//! the space of disagreements; it does not certify the answer.
 //!
 //! # Skipped, not silently passed
 //!

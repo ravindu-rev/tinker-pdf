@@ -6,9 +6,6 @@
 //! them. Over HTTP range requests that is the difference between a document
 //! that appears immediately and one that appears when the last byte lands.
 //!
-//! This is the phase's superiority item: MuPDF 1.26 removed linearized
-//! output, and Tinker's own plans had to shell out to qpdf for it.
-//!
 //! # Why this needs no patching pass
 //!
 //! Every offset in the file is known before a byte is written, because

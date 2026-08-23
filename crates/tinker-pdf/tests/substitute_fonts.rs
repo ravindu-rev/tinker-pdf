@@ -1,8 +1,9 @@
 //! A host-supplied face puts text on the page (plans 05, 15).
 //!
-//! This is the gap that stands between the engine and replacing MuPDF inside
-//! Tinker: a document that names Helvetica and embeds nothing extracts its
-//! text perfectly and draws none of it, because the engine bundles no faces.
+//! This is the gap that stands between the engine and drawing text when no
+//! fonts are embedded: a document that names Helvetica and embeds nothing
+//! extracts its text perfectly and draws none of it, because the engine
+//! bundles no faces and the host supplies them.
 //! The seam that closes it is [`tinker_pdf::FontProvider`], and this proves
 //! the whole path — provider to glyph outline to ink on the page.
 //!

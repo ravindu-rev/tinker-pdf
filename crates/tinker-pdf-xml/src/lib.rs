@@ -1,7 +1,7 @@
 //! XML 1.0 with namespaces: bytes in, events out, and no PDF vocabulary
 //! anywhere — nor any XPS vocabulary, which is the same rule read twice.
 //!
-//! Scope, design and exit criteria: `docs/plans/gaps/30-xps.md`, milestone 2.
+//! Feature documentation: `docs/features/xps.md`.
 //!
 //! The eighth leaf. It exists because three different parts of an OPC package
 //! are XML — the content-types item, every relationships part, and the fixed

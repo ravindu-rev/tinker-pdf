@@ -11,7 +11,7 @@
 //! double-writes where it overlaps, and both depend on the transform, so
 //! neither is fixable by rounding differently.
 //!
-//! The policy this file implements is `docs/plans/07-rasterizer.md`.
+//! The sampling policy is recorded in `docs/features/rasterizer.md`.
 
 use crate::blend::BlendMode;
 use crate::canvas::{Canvas, Color};

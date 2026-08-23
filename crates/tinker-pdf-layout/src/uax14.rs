@@ -322,9 +322,9 @@ fn is_letter(class: Class) -> bool {
 /// the third is not a list at all: *"breaks are allowed before Japanese small
 /// kana"* is `CJ` resolving to `ID`, which [`resolve`] already does for every
 /// value but `strict`. The fourth group — breaks before centred punctuation —
-/// is **not implemented** and is recorded in the crate's `Still owed` rather
-/// than approximated, because a list that is nearly right is what device 2 of
-/// gap 31's honesty machinery exists to prevent.
+/// is **not implemented** and is recorded in `docs/features/epub.md`'s
+/// refusal table rather than approximated, because a list that is nearly
+/// right is what device 2 of gap 31's honesty machinery exists to prevent.
 const LOOSE_BREAK_BEFORE: &[char] = &[
     // Hyphens.
     '\u{2010}', '\u{2013}', '\u{301c}', '\u{30a0}', // Iteration marks.

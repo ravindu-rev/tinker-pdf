@@ -6,7 +6,7 @@
 //! `/OCProperties` `/D` configuration says which of them a reader shows when
 //! it opens the file with no further instruction, and that is the whole of
 //! what this module answers. Toggling one afterwards is a separate feature —
-//! `docs/plans/08-rendering-device.md` defers it — and nothing here mutates.
+//! plan 08 defers it — and nothing here mutates.
 //!
 //! # Everything not understood is visible
 //!
@@ -17,7 +17,7 @@
 //! not know, an `/OCGs` naming a group the catalog never listed, a reference
 //! cycle — each one renders.
 //!
-//! Scope and exit criteria: `docs/plans/gaps/06-optional-content.md`.
+//! Feature documentation: `docs/features/rendering.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

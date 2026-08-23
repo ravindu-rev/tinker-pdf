@@ -12,7 +12,7 @@
 //! Nothing here contains logic. Every function is a projection of a facade
 //! call (ruling 11); if a binding needs behaviour, the facade grows it first.
 //!
-//! Scope, design and exit criteria: `docs/plans/13-bindings.md`.
+//! Feature documentation: `docs/features/bindings.md`.
 
 #![warn(missing_docs)]
 

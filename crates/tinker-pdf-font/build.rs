@@ -1,6 +1,6 @@
 //! Compiles Adobe's vendored CMap registry into two static tables.
 //!
-//! `docs/plans/05-fonts.md` specifies this: the predefined CMaps of 9.7.5.2
+//! `docs/features/fonts.md` records this: the predefined CMaps of 9.7.5.2
 //! are "parsed at build time from Adobe's `cmap-resources` data", as
 //! "delta-encoded ranges, deflated with our own filter code". This is that
 //! build step, and it is the first `build.rs` in the workspace.

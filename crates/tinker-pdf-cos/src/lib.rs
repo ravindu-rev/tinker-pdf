@@ -1,6 +1,7 @@
 //! PDF file syntax: lexer, object model, cross-reference tables in every flavor, object streams, the repair scanner, and the serializers.
 //!
-//! Scope, design and exit criteria: `docs/plans/01-cos-and-object-model.md`.
+//! Feature documentation: `docs/features/opening.md`,
+//! `docs/features/document-model.md` and `docs/features/writing.md`.
 //!
 //! Two layers live here. The bottom one is pure syntax — the token grammar of
 //! 7.2 and the object grammar of 7.3 — and knows nothing beyond the bytes it

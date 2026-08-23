@@ -42,7 +42,8 @@ const ZERO_WIDTH_SPACE: char = '\u{200b}';
 // Under `pre` and `pre-wrap` a tab survives phase I and is then measured as one
 // character of the element's font, which is wrong for a table set in a `<pre>`
 // and right for everything else a reflowable book does with one. Recorded in
-// the crate's `Still owed` rather than approximated by a number nobody reads.
+// `docs/features/epub.md`'s refusal table rather than approximated by a
+// number nobody reads.
 
 /// Whether a value collapses white space at all.
 #[must_use]

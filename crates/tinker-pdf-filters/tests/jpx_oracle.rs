@@ -346,7 +346,7 @@ fn a_reversible_rgb_decode_is_byte_identical_to_openjpeg() {
 /// `opj_decompress -upsample`.
 ///
 /// This is the whole justification for replicating rather than filtering, and
-/// it is worth being exact about why the two differ. `docs/plans/02-filters.md`
+/// it is worth being exact about why the two differ. Plan 02
 /// chose a triangle filter for JPEG's chroma because *its* oracle,
 /// libjpeg-turbo, interpolates. OpenJPEG does not: it takes the sample at
 /// `floor(X / XRsiz)` and repeats it. Byte-identity is only reachable against

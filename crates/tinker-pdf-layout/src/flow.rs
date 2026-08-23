@@ -1094,7 +1094,8 @@ impl<M: Metrics> Builder<'_, M> {
         // difference between this path and the block one. What it costs is
         // that the float's static position is the top of the inline formatting
         // context rather than the line it was written on: the lines do not
-        // exist yet when this runs. See the crate's `Still owed`.
+        // exist yet when this runs. See the refusal table in
+        // `docs/features/epub.md`.
         if style.float != Float::None {
             return self.float_box(node, &style, content_width, content_x, depth, false);
         }
@@ -1318,7 +1319,7 @@ impl<M: Metrics> Builder<'_, M> {
     /// make the preferred width of every float the width of the trial — which
     /// is the shrink-to-fit bug that produces a page-wide float holding one
     /// word. What it costs is a float whose only wide thing is a block with a
-    /// stated `width`; see the crate's `Still owed`.
+    /// stated `width`; see the refusal table in `docs/features/epub.md`.
     fn measure_content(
         &mut self,
         node: &BoxNode,
@@ -1622,8 +1623,8 @@ impl<M: Metrics> Builder<'_, M> {
             let constraints = table::constraints(grid.columns, &cells, &declared);
             // §17.5.2.2's second pass. CAPMIN is zero here because the captions
             // were laid out at the *containing block's* width a few lines up
-            // and cannot therefore make the table wider; see the crate's `Still
-            // owed`.
+            // and cannot therefore make the table wider; see the refusal
+            // table in `docs/features/epub.md`.
             let used = match style.width {
                 Size::Auto => table::automatic_width(&constraints, available, 0.0),
                 Size::Length(_) => available,
@@ -2997,7 +2998,7 @@ fn specified_edge(node: &BoxNode, side: Side, origin: Origin) -> Edge {
 /// half the table's outermost border outside the table box; this build keeps
 /// that half inside. The ink is the same width either way and the table is half
 /// a border narrower than a browser's, which is the divergence and is named in
-/// the crate's `Still owed`.
+/// `docs/features/epub.md`'s refusal table.
 fn collapsed_borders(
     table: &BoxNode,
     tree: &TableBox<'_>,

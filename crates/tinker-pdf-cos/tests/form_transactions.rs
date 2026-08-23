@@ -1,7 +1,7 @@
 //! Transactions over the editor, and the atomicity of one field's fill.
 //!
 //! Two defects motivate this file, and both were reproduced against the code
-//! that preceded it (PRE-E in `docs/plans/gaps/00-execution-order.md`):
+//! that preceded it (PRE-E):
 //!
 //! 1. A refused second field left the first one written. There was no
 //!    begin/commit/rollback anywhere on `DocumentEditor`, so "these values

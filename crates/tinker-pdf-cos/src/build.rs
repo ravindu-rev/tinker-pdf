@@ -3431,7 +3431,7 @@ mod tests {
             })
             .collect();
 
-        // The same shape the MuPDF-generated fixture has.
+        // The same shape the mutool-generated fixture has.
         for want in [
             (0u32, "Part One", Some(0u32)),
             (1, "Chapter 1", Some(1)),

@@ -1,8 +1,8 @@
 //! Optional content, from the catalog to the pixels (8.11).
 //!
 //! Everything here is built from bytes rather than from `testdata/`, whose
-//! four files are MuPDF's and are not to be modified — and none of which has
-//! an `/OCProperties` anyway.
+//! four files are mutool-written and are not to be modified — and none of
+//! which has an `/OCProperties` anyway.
 //!
 //! Every fixture draws something *outside* the layer it is about. "The page
 //! is white" is what a render that failed outright also produces, and a suite

@@ -8,7 +8,7 @@
 //! cross-reference streams, and strings inside object streams — the object
 //! stream was decrypted as a whole, so its contents already are.
 //!
-//! [`EncryptParams`] is the handoff to `docs/plans/03-encryption.md`: plain
+//! [`EncryptParams`] is the handoff to `docs/features/encryption.md`: plain
 //! integers, booleans and byte strings, no COS types, because
 //! `tinker-pdf-crypto` is a leaf crate.
 

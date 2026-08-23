@@ -1,6 +1,6 @@
 //! ZIP containers: bytes in, entries out, with no PDF vocabulary anywhere.
 //!
-//! Scope, design and exit criteria: `docs/plans/gaps/29-cbz.md`, milestone 2.
+//! Feature documentation: `docs/features/cbz.md`.
 //!
 //! A CBZ is a ZIP of page images and an XPS document is an OPC package, which
 //! is also a ZIP, so this is a leaf crate rather than a module in whatever

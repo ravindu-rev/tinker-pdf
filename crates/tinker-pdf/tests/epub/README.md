@@ -6,10 +6,10 @@ committed here; and twenty more that **cannot** be committed, fetched by
 which, where each came from, what it demonstrates, and what licence it is under.
 
 This milestone is scheduled **before any EPUB code exists**, and that is the
-point of it. [Gap 29](../../../../docs/plans/gaps/29-cbz.md) closed having never
+point of it. Gap 29 closed having never
 opened a `.cbz` a real archiver produced — three milestones owed it, and the
 gap's closing statement had to record it as a limitation of the whole gap.
-[Gap 30](../../../../docs/plans/gaps/30-xps.md) answered that structurally, by
+Gap 30 answered that structurally, by
 obtaining eight genuine packages in milestone 1 *before a reader existed*, and
 its Progress sections record seven things real files did that ECMA-388 did not
 predict — two of which would have produced a reader that refuses every OpenXPS
@@ -17,7 +17,7 @@ file Windows writes. This is that device a third time.
 
 ## The licence gate, which is the reason there are two corpora
 
-[Gap 31's plan](../../../../docs/plans/gaps/31-epub.md) measured this before a
+Gap 31's plan measured this before a
 line of it was written, and milestone 1 confirmed the one row it left open.
 
 | Source | Licence | Committable? |

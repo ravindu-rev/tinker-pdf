@@ -1,7 +1,7 @@
 //! Layout: a box tree and a source of metrics in, pages of positioned
 //! fragments out.
 //!
-//! Scope, design and exit criteria: `docs/plans/gaps/31-epub.md`, milestone 7.
+//! Feature documentation: `docs/features/epub.md`.
 //!
 //! **The tenth leaf.** Ruling 8's August 2026 amendment makes the test of a
 //! leaf the definition rather than the list: *a leaf is any crate that takes
@@ -671,7 +671,8 @@ pub enum Warning {
     /// `Consumed::is_block_level` sends it down the inline path. Milestone 10
     /// found it by needing a warning it could count, and the two halves of the
     /// fix are one change: it is raised where inline content is gathered, and
-    /// it now names what is actually done. See the crate's `Still owed`.
+    /// it now names what is actually done. See the refusal table in
+    /// `docs/features/epub.md`.
     InlineBlockAsInline,
     /// An inline box with a block-level child, laid out as a block container.
     /// CSS 2.2 §9.2.1.1 splits the inline instead.
@@ -696,8 +697,9 @@ pub enum Warning {
     /// a row taller than the page has no such position inside it and this build
     /// draws it anyway rather than dropping it. Slicing a row's cells at a line
     /// boundary — every cell cut at the same height, each continuing on the
-    /// next page — is `css-break-3`'s and is not here. See the crate's `Still
-    /// owed` and gap 31's milestone 11 row, amended in place.
+    /// next page — is `css-break-3`'s and is not here. See the refusal table
+    /// in `docs/features/epub.md` and gap 31's milestone 11 row, amended in
+    /// place.
     TableRowTallerThanPage,
     /// A table cell whose `rowspan` reaches past the last row of its row group,
     /// clamped to it. CSS 2.2 §17.5: *"the cell is clamped so that it does not

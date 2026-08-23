@@ -1,6 +1,7 @@
 //! JBIG2 (ITU-T T.88): the generic-region lineage.
 //!
-//! Scope and the reasoning behind it: `docs/plans/gaps/17-jbig2-generic-region.md`.
+//! Feature documentation: `docs/features/filters.md`. The reasoning behind
+//! the scope is gap 17's.
 //!
 //! JBIG2 is two largely separate codecs sharing one container. The **generic
 //! region** lineage codes a bilevel bitmap pixel by pixel, either with the MQ

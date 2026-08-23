@@ -1,9 +1,8 @@
 # Python binding
 
 PyO3 directly over the `tinker-pdf` facade — not through the C ABI, which
-would only add a second error translation. Scope and design:
-[`docs/plans/13-bindings.md`](../../docs/plans/13-bindings.md); packaging:
-[gap 26](../../docs/plans/gaps/26-binding-packaging.md).
+would only add a second error translation. Scope, design and packaging:
+[`docs/features/bindings.md`](../../docs/features/bindings.md).
 
 ```python
 import tinker_pdf
@@ -56,5 +55,5 @@ renderer does nothing at all. That is PRE-A's failure, one ecosystem out.
 
 `pip install tinker-pdf` does not work and is not meant to yet. The pipeline
 exists and has been exercised as a dry run; the facade is not frozen until
-0.1.0 ([plan 00](../../docs/plans/00-architecture.md)), and until then the
+0.1.0 ([`docs/architecture.md`](../../docs/architecture.md)), and until then the
 version number says what the API is worth depending on.

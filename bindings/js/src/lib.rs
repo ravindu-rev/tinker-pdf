@@ -10,7 +10,7 @@
 //! call gets the warning in its name and its documentation; the safe one gets
 //! the short name.
 //!
-//! Scope and packaging: `docs/plans/13-bindings.md`.
+//! Scope and packaging: `docs/features/bindings.md`.
 
 #![allow(clippy::new_without_default)]
 

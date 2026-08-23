@@ -5,12 +5,12 @@
 //! by three exhaustive `match`es in `tinker-pdf-css` so that a property parsed
 //! and never cascaded is `error[E0004]`.
 //!
-//! That guard stops one milestone short of the page. Milestone 6's own
-//! `Still owed` says so — *"nothing consumes any of this, which is milestone
-//! 7's and milestone 8's"* — and the gap it leaves is the same failure one
-//! level up: a property can be parsed, cascaded, written into `ComputedStyle`,
-//! and then read by nobody. The book still renders. It renders slightly
-//! differently, and nobody can tell by looking.
+//! That guard stops one milestone short of the page. Gap 31's milestone 6
+//! recorded the debt itself — *"nothing consumes any of this, which is
+//! milestone 7's and milestone 8's"* — and the gap it leaves is the same
+//! failure one level up: a property can be parsed, cascaded, written into
+//! `ComputedStyle`, and then read by nobody. The book still renders. It
+//! renders slightly differently, and nobody can tell by looking.
 //!
 //! `style::consume` closes it by destructuring `ComputedStyle` with **no
 //! `..`**, and this file is the proof that the destructure is load-bearing

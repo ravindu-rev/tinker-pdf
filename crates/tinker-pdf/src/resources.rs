@@ -1455,8 +1455,8 @@ impl PageResources {
 
     /// Records that a font resolved no glyph for a code it was asked for.
     ///
-    /// Step 4 of the fallback order in `docs/plans/gaps/01-cff-glyph-selection
-    /// .md`: the glyph drawn is `.notdef`, and the page says so rather than
+    /// Step 4 of the fallback order in gap 01 (CFF glyph selection): the
+    /// glyph drawn is `.notdef`, and the page says so rather than
     /// silently drawing something else. Only rendering reaches this — text
     /// extraction never asks for an outline — so the same list stays exactly
     /// what its name says for the extraction path, which turns it into

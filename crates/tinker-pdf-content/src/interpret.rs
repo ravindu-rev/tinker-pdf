@@ -883,8 +883,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     /// tokens to find the tag before the `<<` was written and then deleted:
     /// a deliberate defect injection could not make it change a single
     /// answer, because both it and this produce a visible scope for every
-    /// inline list, well formed or not. `docs/plans/gaps/06-optional-content
-    /// .md` asks for the reassembly; the plan is amended there instead.
+    /// inline list, well formed or not. Gap 06 asks for the reassembly; the
+    /// plan is amended there instead.
     fn optional_content_name(&self) -> Option<Vec<u8>> {
         let Some(Token::Name(property)) = self.stack.last() else {
             return None;

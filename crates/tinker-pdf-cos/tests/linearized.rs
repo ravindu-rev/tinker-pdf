@@ -1,8 +1,5 @@
 //! Linearized output (Annex F, phase 09).
 //!
-//! MuPDF 1.26 removed linearized writing, and Tinker's own plans had to shell
-//! out to qpdf for it. This is the superiority item.
-//!
 //! The point of a linearized file is that a reader holding only its first few
 //! kilobytes can draw page one. That is a claim about *byte offsets*, so
 //! every test here checks offsets against the bytes rather than checking that

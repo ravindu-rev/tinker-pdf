@@ -1,7 +1,7 @@
 //! JPEG 2000 (ITU-T T.800 / ISO-IEC 15444-1), the decoder.
 //!
 //! Scope, the three questions it was not allowed to start without, and the
-//! milestone order: `docs/plans/gaps/18a-jpx-decoder.md`.
+//! milestone order: gap 18a.
 //!
 //! # Why the refusals are the feature
 //!
@@ -648,7 +648,7 @@ fn normalise(value: i32, from: u8, to: u8, signed: bool) -> u32 {
 /// **Replication, not filtering**, and the reason is the oracle rather than
 /// taste: `opj_decompress -upsample` takes the sample at `floor(X / XRsiz)`
 /// unfiltered, and gate 1 asks for byte-identity against it. A triangle
-/// filter — which is what `docs/plans/02-filters.md` chose for JPEG, where
+/// filter — which is what plan 02 chose for JPEG, where
 /// the oracle is libjpeg-turbo and libjpeg-turbo interpolates — would put
 /// every edge pixel a level or two out and the gate would have to become a
 /// tolerance.

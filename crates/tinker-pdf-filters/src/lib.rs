@@ -1,6 +1,6 @@
 //! Hand-rolled PDF stream filters. Bytes in, bytes out; no PDF types.
 //!
-//! Scope, design and exit criteria: `docs/plans/02-filters.md`.
+//! Feature documentation: `docs/features/filters.md`.
 //!
 //! Wave 1 is the byte-filter set: Flate (RFC 1950/1951), LZW (7.4.4),
 //! ASCIIHex (7.4.2), ASCII85 (7.4.3), RunLength (7.4.5) and the predictors of

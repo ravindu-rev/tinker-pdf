@@ -197,9 +197,9 @@ impl Metadata {
 /// Reads `/Info`.
 ///
 /// 7.5.5 puts the information dictionary in the trailer, and that is looked at
-/// first. Some producers — MuPDF among them — write it into the catalog
-/// instead, so a document that has metadata but no trailer entry still reports
-/// it rather than appearing blank.
+/// first. Some producers write it into the catalog instead, so a document
+/// that has metadata but no trailer entry still reports it rather than
+/// appearing blank.
 #[must_use]
 pub fn metadata(doc: &CosDocument) -> Metadata {
     let from_trailer = doc
@@ -582,8 +582,8 @@ pub fn attachments(doc: &CosDocument) -> Vec<Attachment> {
 /// the document identity and rights information that `/Info` does not, and
 /// several archival profiles require them.
 ///
-/// *Amended, 19 August 2026, [gap 30](../../../docs/plans/gaps/30-xps.md)
-/// milestone 9, per CONTRIBUTING rule 4.* This used to say the parser "this
+/// *Amended, 19 August 2026, gap 30 milestone 9, per CONTRIBUTING rule 4.*
+/// This used to say the parser "this
 /// engine does not have and should not grow", and half of that is no longer
 /// true: `tinker-pdf-xml` exists, as the eighth leaf, because XPS's fixed-page
 /// markup needed one. **It is deliberately not used here, and the amendment
@@ -610,7 +610,7 @@ mod tests {
     /// A one-page document whose trailer carries `info` verbatim as `/Info`.
     ///
     /// Written out by hand so the `/Info` dictionary is exactly what the test
-    /// says it is: the fixtures in `testdata/` are MuPDF's, and no producer
+    /// says it is: the fixtures in `testdata/` are mutool-written, and no producer
     /// emits the degenerate entries this rule is about.
     fn with_info(info: &str) -> CosDocument {
         let bytes = format!(

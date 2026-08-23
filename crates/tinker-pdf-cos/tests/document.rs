@@ -1,6 +1,6 @@
 //! The canonical fixtures, opened end to end.
 //!
-//! These four files are MuPDF-written and honest, so every one of them must
+//! These four files are mutool-written and honest, so every one of them must
 //! open at [`LadderLevel::Trust`] with an empty warning list. A warning here
 //! is a regression in this crate, not damage in the file.
 

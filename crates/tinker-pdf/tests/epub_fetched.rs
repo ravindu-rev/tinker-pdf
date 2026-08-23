@@ -346,8 +346,8 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
 /// character in the wrong place is one absent from the right one. A build that
 /// dropped a gloss, or drew one twice, fails this as loudly as it would without
 /// the exception. It is pinned rather than fixed because it is a
-/// **reading-order** defect in the float path — milestone 10's — and gap 31's
-/// closing statement names it as owed.
+/// **reading-order** defect in the float path — milestone 10's — and
+/// `docs/features/epub.md`'s refusal table names it as owed.
 ///
 /// **`sample-internallinks.epub` has no glyphs.** It is Japanese, this engine
 /// bundles no faces by design, and nothing attached a [`tinker_pdf::FontProvider`]

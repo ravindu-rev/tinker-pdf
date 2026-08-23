@@ -1,6 +1,6 @@
 //! `css-flexbox-1` §9, as separable steps.
 //!
-//! Scope, design and exit criteria: `docs/plans/gaps/31-epub.md`, milestone 12.
+//! Feature documentation: `docs/features/epub.md`.
 //!
 //! # Why this is a module of functions and not one procedure
 //!

@@ -330,7 +330,7 @@ fn documents_are_usable_from_several_threads() {
 /// Vector content, because the fixtures use base-14 fonts and carry no
 /// embedded font program: there is no outline to draw for their text, and
 /// substituting one needs a bundled face that this engine does not yet ship.
-/// See `docs/STATUS.md`.
+/// See `docs/features/fonts.md`.
 #[test]
 fn a_rendered_page_actually_has_marks_on_it() {
     use tinker_pdf_cos::DocumentBuilder;

@@ -4,7 +4,7 @@
 //! COS types anywhere in its surface (ruling 8). That is what lets it be
 //! fuzzed, tested against published vectors, and read on its own.
 //!
-//! Scope, design and exit criteria: `docs/plans/03-encryption.md`.
+//! Feature documentation: `docs/features/encryption.md`.
 //!
 //! # On trusting this
 //!

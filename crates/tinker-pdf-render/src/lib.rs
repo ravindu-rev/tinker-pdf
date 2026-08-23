@@ -5,7 +5,7 @@
 //! what a page asks for; `tinker-pdf-raster` knows how to put it on pixels;
 //! neither knows about the other, and this joins them.
 //!
-//! Scope, design and exit criteria: `docs/plans/08-rendering-device.md`.
+//! Feature documentation: `docs/features/rendering.md`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

@@ -1266,8 +1266,8 @@ mod tests {
         }
     }
 
-    /// The seam [17](../../../docs/plans/gaps/17-jbig2-generic-region.md)'s
-    /// MMR path decodes through: rows one at a time, from a bit offset that
+    /// The seam gap 17's MMR path decodes through: rows one at a time, from
+    /// a bit offset that
     /// is not a byte offset, with the position readable afterwards.
     #[test]
     fn two_dimensional_rows_resume_from_a_bit_offset() {

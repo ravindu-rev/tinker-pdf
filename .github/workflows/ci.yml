@@ -1,7 +1,7 @@
 # tinker-pdf CI.
 #
 # The build matrix IS a feature: pure Rust means windows-msvc and wasm32 build
-# with nothing but rustup — the two targets MuPDF made painful for Tinker.
+# with nothing but rustup — no C toolchain and no vendored library on either.
 
 name: CI
 
@@ -267,12 +267,9 @@ jobs:
           grep -q 'qpdf-oracle: RAN' container-oracle.log
 
   mutool-xps-oracle:
-    # Ruling 9's oracle for XPS itself, and gap 30's design section writes the
-    # irony down rather than leaving it to be noticed: MuPDF reads XPS, mutool
-    # is already one of ruling 9's four named oracles, and so **the library gap
-    # 28's decision removes from Tinker's shipped tree is the best available
-    # oracle for the format it is being removed for**. Ruling 9 permits exactly
-    # that, because an oracle is invoked and never linked.
+    # Ruling 9's oracle for XPS itself: mutool reads XPS, and it is already
+    # one of ruling 9's four named oracles. Ruling 9 permits exactly that,
+    # because an oracle is invoked and never linked.
     #
     # `qpdf-linearization` above reads the PDF this engine wrote and says
     # whether it is a well-formed PDF. It has never seen an XPS. This job reads
@@ -426,13 +423,13 @@ jobs:
     # milestone 8, and the only one here that exists because a *previous*
     # oracle is not good enough.
     #
-    # `mutool-xps-oracle` above compares this engine against MuPDF and gap 30
-    # recorded the risk: where MuPDF is wrong about XPS, this engine will agree
-    # with it and both will be wrong. XPS markup has one right answer so the
-    # risk is bounded. CSS does not work like that — MuPDF's EPUB layout is
-    # itself a partial CSS implementation, so **disagreeing with mutool is not
-    # evidence of a bug** and there is no fourth-oracle answer to fall back on.
-    # A browser is the reference implementation of CSS.
+    # `mutool-xps-oracle` above compares this engine against mutool and gap 30
+    # recorded the risk: where the oracle is wrong about XPS, this engine will
+    # agree with it and both will be wrong. XPS markup has one right answer so
+    # the risk is bounded. CSS does not work like that — mutool's EPUB layout
+    # is itself a partial CSS implementation, so **disagreeing with mutool is
+    # not evidence of a bug** and there is no fourth-oracle answer to fall back
+    # on. A browser is the reference implementation of CSS.
     #
     # `ubuntu-latest` ships Chromium via `chromium-browser`, and the test looks
     # for it by path or by `TINKER_BROWSER`. It is invoked, never linked and

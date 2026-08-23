@@ -54,7 +54,7 @@ fn stream(spec: &Spec, packets: &[u8]) -> Vec<u8> {
 /// Every entry of the plan's refusal list, reached and named.
 ///
 /// The list is transcribed from
-/// `docs/plans/gaps/18a-jpx-decoder.md`'s "Where a half-implementation is
+/// gap 18a's "Where a half-implementation is
 /// worse than none" section, in its order, so that a reader can put the two
 /// side by side. An entry that stops being reachable — because the feature
 /// got built, or because a check moved — fails here rather than quietly

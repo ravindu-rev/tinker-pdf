@@ -2,9 +2,8 @@
 
 A safe C# wrapper over `tinker-pdf-ffi`'s C ABI. Handle lifetime is the whole
 job of it: every native handle lives in a `SafeHandle`, so a document or bitmap
-is released exactly once even if an exception unwinds past it. Scope and
-design: [`docs/plans/13-bindings.md`](../../docs/plans/13-bindings.md);
-packaging: [gap 26](../../docs/plans/gaps/26-binding-packaging.md).
+is released exactly once even if an exception unwinds past it. Scope, design
+and packaging: [`docs/features/bindings.md`](../../docs/features/bindings.md).
 
 ```csharp
 using var document = Document.Open(File.ReadAllBytes("file.pdf"));
@@ -70,4 +69,4 @@ embeds no font program and this engine bundles no faces.
 
 `dotnet add package TinkerPdf` does not work and is not meant to yet. The
 pipeline exists and has been exercised as a dry run; the facade is not frozen
-until 0.1.0 ([plan 00](../../docs/plans/00-architecture.md)).
+until 0.1.0 ([`docs/architecture.md`](../../docs/architecture.md)).

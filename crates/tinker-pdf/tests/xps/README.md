@@ -3,12 +3,12 @@
 Nothing in this repository wrote a byte of any package here. That is the whole
 point of the directory, and it is gap 30 milestone 1's deliverable.
 
-[Gap 29](../../../../docs/plans/gaps/29-cbz.md) closed having **never opened a
+Gap 29 closed having **never opened a
 `.cbz` produced by a real archiver**. Every fixture in it was hand-built from
 APPNOTE 6.3.10's field layouts, three milestones recorded the debt as owed, and
 the sixth had to write it into the gap's closing section as a limitation of the
 whole gap: *"The first real archive this meets may find something, and nothing
-here would have."* [Gap 30](../../../../docs/plans/gaps/30-xps.md) does not
+here would have."* Gap 30 does not
 repeat that, and the way it does not is structural — obtaining real documents is
 its **first** milestone, before the XML parser, before the package layer, before
 any reader code at all. Every later milestone's fixtures come from these files.
