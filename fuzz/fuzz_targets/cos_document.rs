@@ -21,6 +21,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = doc.warnings();
     let _ = doc.header_version();
     let _ = doc.permissions();
+    // The strict validator walks the sections itself rather than reading the
+    // merged table, so it is a second cross-reference parser over the same
+    // arbitrary bytes and needs the same guarantee.
+    let _ = tinker_pdf_cos::validate(&doc);
 
     // Bounded, because a fuzzer will happily produce a file claiming millions
     // of pages and the point is to find panics, not to time out.

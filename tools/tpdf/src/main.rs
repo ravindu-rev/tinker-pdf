@@ -28,7 +28,7 @@ usage:
   tpdf fields  <file.pdf> [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
-  tpdf check   <file.pdf>...
+  tpdf check   <file.pdf>... [--strict]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
 options:
@@ -41,10 +41,18 @@ options:
   --fonts PATH a face, or a directory of faces, for documents that embed none
   --password P the password to open an encrypted file with
   --quiet      only report failures
+  --strict     with check, also validate against ISO 32000 strictly
 
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
 corpus.
+
+`--strict` adds the validator of ruling 13: the file is read again with the
+leniency ladder off and held to the structures a tolerant read never consults
+-- the cross-reference sections as the bytes spell them, stream extents
+against `endstream`, the trailer against Table 15. Any defect exits non-zero,
+because the question `--strict` asks is not whether it opened but whether it
+is right.
 
 `probe` is the one the corpus runner spawns, one child process per file. It
 opens the file, renders every page, and writes a line-oriented record of what
@@ -114,6 +122,7 @@ struct Options {
     quiet: bool,
     raw: bool,
     stream: bool,
+    strict: bool,
 }
 
 impl Options {
@@ -130,6 +139,7 @@ impl Options {
             quiet: false,
             raw: false,
             stream: false,
+            strict: false,
         };
 
         let mut index = 0;
@@ -179,6 +189,7 @@ impl Options {
                 "--quiet" => options.quiet = true,
                 "--raw" => options.raw = true,
                 "--stream" => options.stream = true,
+                "--strict" => options.strict = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
@@ -760,6 +771,7 @@ fn check(options: &Options) -> Result<(), String> {
     let fonts = options.font_provider()?;
     let mut failed = 0usize;
     let mut warned = 0usize;
+    let mut invalid = 0usize;
 
     for path in &options.files {
         match open(path, options.password.as_deref(), fonts.as_ref()) {
@@ -769,12 +781,26 @@ fn check(options: &Options) -> Result<(), String> {
                 if !warnings.is_empty() {
                     warned += 1;
                 }
+                // Ruling 13's verdict, and the reason `--strict` exits by it:
+                // "it opened" and "it is right" are different questions, and
+                // the corpus pass answers the first one already.
+                let defects = if options.strict {
+                    doc.validate()
+                } else {
+                    Vec::new()
+                };
+                if !defects.is_empty() {
+                    invalid += 1;
+                }
                 if !options.quiet {
                     println!(
                         "ok    {path}  {pages} pages, {:?}, {} warnings",
                         doc.ladder_level(),
                         warnings.len()
                     );
+                }
+                for defect in &defects {
+                    println!("      {} {defect}", defect.kind.tier().as_str());
                 }
             }
             Err(message) => {
@@ -790,8 +816,14 @@ fn check(options: &Options) -> Result<(), String> {
         failed,
         warned
     );
+    if options.strict {
+        println!("{invalid} with defects");
+    }
     if failed > 0 {
         return Err(format!("{failed} files could not be opened"));
+    }
+    if invalid > 0 {
+        return Err(format!("{invalid} files did not validate"));
     }
     Ok(())
 }
