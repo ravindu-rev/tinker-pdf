@@ -338,7 +338,7 @@ fn ratchet_note(run: &Run) -> String {
          trailer — because a rewrite copies the page tree, the \
          annotations and the resource dictionaries from its source, and a \
          defect there belongs to the source. A file this engine could not \
-         read cleanly is not eligible and is counted as neither. Compared \
+         read cleanly is not eligible and is counted as neither. `metamorphic` is the fourth axis (roadmap step 7): relations that must hold between two renders of one file, which need no ground truth. `rotate` turns the page a quarter and requires the transposition; `crop` moves the page box and requires the sub-rectangle of the full render, exactly; `dpi` renders at twice the scale, box-filters down and requires agreement. Each records `compared` beside `held`, because a relation that declines the hard files is not a relation that held — and `rotate` and `crop` are asked only of files this engine read cleanly, since a rewrite of a repaired document compares two repairs. What none of them catches is a defect that commutes with the transformation: a colour converted wrongly is converted equally wrongly at both resolutions and both rotations, and every row stays green. Compared \
          by integer cross-multiplication, never as floats: \
          passed_now * total_before >= passed_before * total_now."
     )

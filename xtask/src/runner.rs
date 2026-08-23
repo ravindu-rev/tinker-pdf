@@ -100,6 +100,54 @@ pub struct FileResult {
     /// What the strict validator said about a **rewrite** of this file, or
     /// why the file was not eligible for one (ruling 13).
     pub strict: Strict,
+    /// What the metamorphic relations said about the first page, by name
+    /// (roadmap step 7): `rotate`, `crop`, `dpi`.
+    pub metamorphic: BTreeMap<String, MetaVerdict>,
+}
+
+/// One metamorphic relation's verdict on one file.
+///
+/// Three states and not two, for `Strict`'s reason: a relation that could not
+/// be asked — a page too large to render twice, a rewrite that would not
+/// reopen — must not be counted as one that held, or the rate flatters itself
+/// by declining the hard files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetaVerdict {
+    /// The relation held.
+    Held,
+    /// It did not, and this is what the child measured.
+    Broke(String),
+    /// It was not asked, and this is why.
+    Skipped(String),
+}
+
+impl MetaVerdict {
+    /// Whether the relation was asked at all.
+    pub fn compared(&self) -> bool {
+        !matches!(self, MetaVerdict::Skipped(_))
+    }
+
+    /// Whether it held.
+    pub fn held(&self) -> bool {
+        matches!(self, MetaVerdict::Held)
+    }
+
+    /// The word the report writes.
+    pub fn label(&self) -> &'static str {
+        match self {
+            MetaVerdict::Held => "held",
+            MetaVerdict::Broke(_) => "broke",
+            MetaVerdict::Skipped(_) => "skipped",
+        }
+    }
+
+    /// What the child said, where it said anything.
+    pub fn detail(&self) -> &str {
+        match self {
+            MetaVerdict::Held => "",
+            MetaVerdict::Broke(detail) | MetaVerdict::Skipped(detail) => detail,
+        }
+    }
 }
 
 /// The strict pass's verdict on one file.
@@ -157,6 +205,10 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         capabilities: BTreeSet::new(),
         millis,
         strict: Strict::Ineligible("the child produced no record".to_string()),
+        // A child that wrote no record asked no relation, which is not the
+        // same as a relation that held: an empty map counts as neither
+        // compared nor held.
+        metamorphic: BTreeMap::new(),
     };
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
@@ -298,7 +350,7 @@ fn hash(text: &str) -> u64 {
 
 /// The record format's version. A record announcing anything else is refused
 /// rather than half-read.
-const PROBE_VERSION: u32 = 2;
+const PROBE_VERSION: u32 = 3;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -322,6 +374,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut structure = 0u64;
     let mut semantics = 0u64;
     let mut defects: BTreeMap<String, usize> = BTreeMap::new();
+    let mut metamorphic: BTreeMap<String, MetaVerdict> = BTreeMap::new();
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -356,6 +409,25 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                 let (label, count) = rest.rsplit_once(' ').unwrap_or((rest.trim(), "1"));
                 let count: usize = count.trim().parse().unwrap_or(1);
                 *warnings.entry(label.trim().to_string()).or_default() += count;
+            }
+            "meta" => {
+                let (name, rest) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
+                let (verdict, detail) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
+                let detail = detail.trim().to_string();
+                let verdict = match verdict.trim() {
+                    "held" => MetaVerdict::Held,
+                    "broke" => MetaVerdict::Broke(detail),
+                    // An unknown word is a skip with the word in it rather than
+                    // a hold: a runner that read a verdict it did not know as
+                    // "the relation held" would count a newer child's failures
+                    // as successes.
+                    other => MetaVerdict::Skipped(if detail.is_empty() {
+                        other.to_string()
+                    } else {
+                        detail
+                    }),
+                };
+                metamorphic.insert(name.trim().to_string(), verdict);
             }
             "strict" => {
                 let (what, rest) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
@@ -424,6 +496,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         capabilities,
         millis,
         strict,
+        metamorphic,
     })
 }
 
@@ -431,7 +504,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 2\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+    const GOOD: &str = "probe 3\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
                         cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
                         strict semantics 2\nstrict kind annot-rect-unordered 2\n\
                         warn render:UnreadableFont 2\nms 40\ndone\n";
@@ -495,22 +568,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 2\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 3\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 2", "probe 7")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 3", "probe 7")).is_none());
         // And the version the strict pass replaced: a record without that
         // pass means something else by the same keys.
-        assert!(parse_record(&GOOD.replace("probe 2", "probe 1")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 2\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 3", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 3\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 2\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 3\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -523,7 +596,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 2\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 3\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -532,7 +605,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 2\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 3\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),
@@ -543,6 +616,60 @@ mod tests {
 
     /// A newer child may add keys. An older runner must go on reading the
     /// ones it knows rather than declaring every file a crash.
+    #[test]
+    fn a_metamorphic_verdict_reads_its_three_states() {
+        let text = concat!(
+            "probe 3\n",
+            "opened yes\n",
+            "pages 1\n",
+            "rendered 1\n",
+            "meta rotate held\n",
+            "meta crop broke 12 of 400 pixels of the crop are not the page under it\n",
+            "meta dpi skipped the page is too large to render twice\n",
+            "ms 1\n",
+            "done\n",
+        );
+        let result = parse_record(text).expect("a record");
+        assert_eq!(result.metamorphic["rotate"], MetaVerdict::Held);
+        assert!(result.metamorphic["rotate"].held());
+        assert!(result.metamorphic["rotate"].compared());
+
+        assert!(!result.metamorphic["crop"].held());
+        assert!(
+            result.metamorphic["crop"].compared(),
+            "a relation that broke was still asked"
+        );
+        assert!(result.metamorphic["crop"].detail().contains("400 pixels"));
+
+        assert!(
+            !result.metamorphic["dpi"].compared(),
+            "a relation that was skipped was not asked"
+        );
+        assert!(!result.metamorphic["dpi"].held());
+    }
+
+    /// A verdict this runner does not know is **not** a hold.
+    ///
+    /// The direction matters, and it is the version check's: a newer child that
+    /// grows a fourth verdict must not have it read as a success by an older
+    /// runner, because that is the reading that turns a regression into a green
+    /// tick.
+    #[test]
+    fn an_unknown_metamorphic_verdict_is_not_a_hold() {
+        let text = concat!(
+            "probe 3\n",
+            "opened yes\n",
+            "pages 1\n",
+            "rendered 1\n",
+            "meta rotate inconclusive\n",
+            "ms 1\n",
+            "done\n",
+        );
+        let result = parse_record(text).expect("a record");
+        assert!(!result.metamorphic["rotate"].held());
+        assert!(!result.metamorphic["rotate"].compared());
+    }
+
     #[test]
     fn an_unknown_key_is_ignored() {
         let text = GOOD.replace("ms 40", "colour_space_hits 12\nms 40");

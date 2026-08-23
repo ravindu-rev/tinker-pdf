@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 940 passed, 0 failed, 8 ignored** across 123 suites on
+is **2 944 passed, 0 failed, 8 ignored** across 123 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -109,6 +109,53 @@ re-recorded the file.
 The ratchet: recorded rates may not decrease; improving one updates the
 recorded floor in the same PR. The floor and the budgets live in-repo,
 diffable, so lowering one is a reviewed decision rather than a drift.
+
+### The fourth axis: relations between two renders
+
+Roadmap step 7. The corpus has no ground truth — nobody here knows what those
+4 525 pages should look like — but a *relation between two renders of one file*
+needs none, and it can be asked of every file at once. `tpdf probe` checks three
+in-process, on the first page, and `corpus/ratchet.json` records how many files
+each was asked of beside how many it held on:
+
+| Relation | Asked of | Held |
+| --- | ---: | ---: |
+| `rotate` | 4209 | 3930 |
+| `crop` | 4189 | 4140 |
+| `dpi` | 4436 | 4362 |
+
+- **`rotate`** turns the page a quarter and requires the transposition. Not
+  exact and measured rather than assumed: turning the page puts every glyph on
+  a different sampling grid, so over 119 pdf.js files it was exact on 83 and at
+  0.29 % of pixels by the ninetieth percentile. The budget is 1 %, which is far
+  above that noise and far below anything structural — a rotation applied to
+  the geometry and not to the clip moves whole regions.
+- **`crop`** moves the page box and requires the sub-rectangle of the full
+  render, **exactly**. It needs no budget because it changes no sampling grid,
+  and that is a measurement too: it was exact on all 119.
+- **`dpi`** renders at twice the scale, box-filters down and requires
+  agreement within 2 %. Over the same 119 it was exact on 118 and over 12 % on
+  one, so the line is drawn where nothing sits.
+
+Both counts are recorded and both are ratcheted, for the strict pass's reason: a
+relation that quietly stopped being asked would otherwise raise its own hold
+rate by shrinking what it is a rate of. `rotate` and `crop` are asked only of
+files this engine read cleanly, because a rewrite of a document the reader had
+to repair compares two repairs rather than two renders.
+
+**What they cannot catch, stated because it is why they are an axis and not a
+verdict:** any defect that commutes with the transformation. A colour converted
+wrongly is converted equally wrongly at both resolutions and at both rotations,
+and every row above stays green.
+
+**Building this axis found two things.** Instrumenting the probe turned three
+files that had always passed into timeouts — and `--record` wrote that
+regression in as the new bar, which is exactly what a ratchet exists to prevent;
+the relations are now bounded so the pass rate they must not disturb is
+undisturbed. And `pdfjs/test/pdfs/bug1980958.pdf`, 219 bytes and a 10 × 10 page,
+has a **rewrite that does not come back**: three minutes in, the rotation
+relation had not returned, where the same file renders in under two seconds. It
+is a roadmap item now.
 
 **The honest limit of the corpus run**: it measures whether a bitmap came
 back, not whether it is the right bitmap. Nothing here compares a page this

@@ -16,7 +16,7 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 940 tests proving the
+These come before any new feature. The suite is 2 944 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
@@ -32,22 +32,20 @@ thousands of documents nobody here authored.
   fixed — nothing is deleted before the check replacing it exists and has been
   injection-counted, and the steps keep the numbers the allowance rows in
   `xtask/src/main.rs` cite:
-  7. Metamorphic probes over the real corpus — rotation, cropping and
-     resolution coherence — with their own ratchet rows. (M)
   8. `tools/oracle-diff` deleted; the suite recounted. (S)
 
-  Steps 1 to 6 are done: `cargo xtask oracles` holds the boundary with a
-  build failure, the honesty pass corrected two claims about checks that were
-  never wired, the strict validator retired the four qpdf tests and their
-  job, `xps_conservation.rs` retired `xps_mutool.rs` and its job, and
-  `epub_analytic.rs` and `epub_reftest.rs` retired `epub_browser.rs`, the
-  browser job and the epubcheck step, and `analytic_coverage.rs` and
-  `render_analytic.rs` gave the rasterizer and the page a tier that answers to
-  arithmetic. The validator found three defects in
-  this engine's own output on the way — a missing trailer `/ID`, a stale
-  `/Prev` carried into a rewrite, and a cross-reference table with no free
-  head — and its structural tier now runs over a rewrite of every corpus file
-  with its own ratchet row.
+  Steps 1 to 7 are done. `cargo xtask oracles` holds the boundary with a build
+  failure and the honesty pass corrected two claims about checks that were
+  never wired. The strict validator retired the four qpdf tests and their job;
+  `xps_conservation.rs` retired `xps_mutool.rs` and its job; `epub_analytic.rs`
+  and `epub_reftest.rs` retired `epub_browser.rs`, the browser job and the
+  epubcheck step. `analytic_coverage.rs` and `render_analytic.rs` gave the
+  rasterizer and the page a tier that answers to arithmetic, and `tpdf probe`'s
+  three metamorphic relations gave `corpus/ratchet.json` a fourth axis over the
+  4 525 real files. The validator found three defects in this engine's own
+  output on the way — a missing trailer `/ID`, a stale `/Prev` carried into a
+  rewrite, and a cross-reference table with no free head — and its structural
+  tier now runs over a rewrite of every corpus file with its own ratchet row.
 
   Steps 4 and 5 each found a hole nothing in the suite could see, which is
   what an injection matrix is for. Composing the painter's open scopes
@@ -59,14 +57,28 @@ thousands of documents nobody here authored.
   CSS 2.2 §13.3.2's `orphans` and `widows` ignored. Step 6's matrix found the
   hole in its own first draft: two roundings the sampling grid performs were
   caught by nothing but the determinism fingerprint, which notices that a pixel
-  moved and has no opinion about whether it should have. What left with each
-  oracle is stated in [verification.md](verification.md) and is not narrowed by
-  what replaced it.
+  moved and has no opinion about whether it should have. Step 7 found two of
+  its own: instrumenting the probe turned three files that had always passed
+  into timeouts and wrote that in as the new bar, and one 219-byte file that
+  opens through the rescan ladder has a **rewrite that never returns** —
+  three minutes in, the rotation relation had not come back. What left with
+  each oracle is stated in [verification.md](verification.md) and is not
+  narrowed by what replaced it.
 
   Exit: no test or CI job spawns a program the workspace did not build,
   `cargo xtask oracles` is green in `cargo xtask check`, and every row of
   [verification.md](verification.md)'s migration table reads **done**. (L,
   [design/render-verification.md](design/render-verification.md))
+- **A rewrite that does not come back.** `pdfjs/test/pdfs/bug1980958.pdf` is
+  219 bytes, opens through the rescan ladder with a synthesised root, and
+  renders its 10 × 10 page in under two seconds — and `editor().save()` over
+  it had not returned after three minutes. Found by step 7's rotation
+  relation, which is why that relation is asked only of files this engine read
+  cleanly. Nothing in the suite covers it: the corpus runner's timeout reads a
+  hang as a slow file, and ruling 1's fuzzers prove no crash rather than
+  progress. Evidence: one corpus file, reproducible in a second.
+  Exit: the rewrite terminates, with a test over a rescued document that
+  asserts it; and the corpus runner tells a hang from a slow file. (S)
 - **The macOS and wasm determinism legs, observed.** Three of ruling 4's
   four targets are measured on one machine
   ([features/determinism.md](features/determinism.md)); macOS is claimed

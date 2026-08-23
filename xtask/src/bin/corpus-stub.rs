@@ -55,20 +55,20 @@ fn main() {
         // Dies mid-record: everything up to `rendered` and then nothing. This
         // is the one an exit code cannot catch, because the process exits 0.
         "truncate" => {
-            println!("probe 2");
+            println!("probe 3");
             println!("file {file}");
             println!("opened yes");
             println!("pages 9");
         }
         "unopenable" => {
-            println!("probe 2");
+            println!("probe 3");
             println!("file {file}");
             println!("opened no not a PDF: no indirect objects found");
             println!("ms 1");
             println!("done");
         }
         other => {
-            println!("probe 2");
+            println!("probe 3");
             println!("file {file}");
             println!("opened yes");
             println!("ladder Trust");

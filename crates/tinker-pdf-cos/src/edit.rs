@@ -451,6 +451,46 @@ impl DocumentEditor {
         true
     }
 
+    /// Sets a page's `/CropBox` (14.11.2), in the page's own user space.
+    ///
+    /// The rectangle is written as the caller gives it. It is **not** clipped
+    /// to the media box here, because 14.11.2 lets the two disagree and a
+    /// reader is the one that reconciles them — `Page::crop_box` already does,
+    /// and doing it twice would mean an editor could not write the document
+    /// its caller asked for.
+    ///
+    /// A degenerate rectangle is refused rather than written: a crop box of no
+    /// area is a page a viewer cannot show, and 7.9.5 wants two distinct
+    /// corners.
+    pub fn set_crop_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> bool {
+        if ![x0, y0, x1, y1].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let (left, right) = (x0.min(x1), x0.max(x1));
+        let (bottom, top) = (y0.min(y1), y0.max(y1));
+        if right - left <= 0.0 || top - bottom <= 0.0 {
+            return false;
+        }
+        let Some(reference) = self.page_refs().get(index as usize).copied() else {
+            return false;
+        };
+        let Some(Object::Dict(mut dict)) = self.get(reference) else {
+            return false;
+        };
+        let key = self.intern(b"CropBox");
+        dict.insert(
+            key,
+            Object::Array(vec![
+                Object::Real(left),
+                Object::Real(bottom),
+                Object::Real(right),
+                Object::Real(top),
+            ]),
+        );
+        self.put(reference, Object::Dict(dict));
+        true
+    }
+
     /// Inserts a blank page of the given size at `index`.
     ///
     /// `index` may equal the page count, which appends. A larger one is
@@ -1777,6 +1817,55 @@ mod tests {
         assert!(editor.rotate_page(0, 270));
         let saved = reopen(&editor, WriteMode::Incremental);
         assert_eq!(pages::collect(&saved)[0].rotation, 90);
+    }
+
+    /// **A crop box reaches the file as the rectangle the caller stated.**
+    ///
+    /// Read back through `pages::collect`, which clips a crop box to the media
+    /// box — so a rectangle inside the page comes back untouched and this test
+    /// says the writer put it there rather than that the reader invented it.
+    #[test]
+    fn a_crop_box_is_written_as_the_rectangle_it_was_given() {
+        let mut editor = DocumentEditor::new(document(1));
+        assert!(editor.set_crop_box(0, 10.0, 20.0, 90.0, 80.0));
+
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let crop = pages::collect(&saved)[0].crop_box;
+        assert!((crop.x0 - 10.0).abs() < 1e-9, "{crop:?}");
+        assert!((crop.y0 - 20.0).abs() < 1e-9, "{crop:?}");
+        assert!((crop.x1 - 90.0).abs() < 1e-9, "{crop:?}");
+        assert!((crop.y1 - 80.0).abs() < 1e-9, "{crop:?}");
+    }
+
+    /// **Corners in any order are the same rectangle**, and a degenerate one is
+    /// refused rather than written.
+    ///
+    /// 7.9.5 wants two distinct corners and says nothing about which is which,
+    /// so a caller passing the top-right first is not making a mistake. A
+    /// caller passing the same corner twice is: a crop box of no area is a page
+    /// no viewer can show, and writing it would put the refusal off until
+    /// somebody opened the file.
+    #[test]
+    fn a_crop_box_normalizes_its_corners_and_refuses_a_degenerate_one() {
+        let mut editor = DocumentEditor::new(document(1));
+        assert!(editor.set_crop_box(0, 90.0, 80.0, 10.0, 20.0));
+        let saved = reopen(&editor, WriteMode::Incremental);
+        let crop = pages::collect(&saved)[0].crop_box;
+        assert!(crop.x0 < crop.x1 && crop.y0 < crop.y1, "{crop:?}");
+        assert!((crop.x0 - 10.0).abs() < 1e-9, "{crop:?}");
+
+        let mut editor = DocumentEditor::new(document(1));
+        assert!(!editor.set_crop_box(0, 10.0, 20.0, 10.0, 80.0), "no width");
+        assert!(!editor.set_crop_box(0, 10.0, 20.0, 90.0, 20.0), "no height");
+        assert!(
+            !editor.set_crop_box(0, f64::NAN, 0.0, 1.0, 1.0),
+            "not a number"
+        );
+        assert!(!editor.set_crop_box(9, 0.0, 0.0, 1.0, 1.0), "no such page");
+        assert!(
+            !editor.is_dirty(),
+            "a refused crop box changes nothing at all"
+        );
     }
 
     #[test]

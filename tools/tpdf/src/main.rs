@@ -14,8 +14,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use tinker_pdf::{
-    CosDocument, Dict, Document, LadderLevel, ObjRef, Object, RenderOptions, SimpleFontProvider,
-    StreamObj, Tier, WriteMode, WriteOptions, XrefEntry,
+    Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
+    SimpleFontProvider, StreamObj, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -828,12 +828,366 @@ fn check(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+// ---- metamorphic probes (ruling 13, roadmap step 7) -----------------------
+
+/// How far a render at two resolutions may disagree, as a share of the pixels.
+///
+/// **Measured, not chosen.** Over the first 119 files of the pdf.js corpus at
+/// 72 dpi this relation was *exact* on 118 and over 12% on one. Two percent is
+/// therefore not a threshold separating a population — there is no population
+/// between zero and twelve — it is a line drawn where nothing sits, so a file
+/// that crosses it has done something other than resample an edge.
+///
+/// What the ratchet records is the count either side of the line, so moving
+/// this number is a diff somebody reviews rather than a quiet re-baselining.
+const DPI_BUDGET: f64 = 0.02;
+
+/// The same, for a quarter-turn.
+///
+/// **Rotation is not exact and measuring says why.** Turning the page puts
+/// every glyph on a different sampling grid, so the outline that covered 40% of
+/// a pixel now covers 60% of its neighbour — the picture is the same and the
+/// bytes are not. Over the same 119 files: exact on 83, under a tenth of a
+/// percent on 90 of them, and 0.29% at the ninetieth percentile, with one file
+/// at 14%.
+///
+/// One percent sits above the noise and far below anything structural: a
+/// rotation applied to the geometry and not to the clip, or to the text and not
+/// to the images, moves whole regions rather than the rims of glyphs.
+const ROTATE_BUDGET: f64 = 0.01;
+
+/// How long a file may already have taken before its relations are skipped.
+///
+/// Two seconds of the corpus runner's twenty. The relations cost roughly what
+/// opening and rendering the first page cost, twice over, so a file that is
+/// already a tenth of the way through the budget is one where asking them
+/// risks the timeout — and a timeout would move the *pass* rate, which is a
+/// measurement this one must not disturb.
+const META_BUDGET_MS: u64 = 2_000;
+
+/// A share of a page's pixels, for a relation's report.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a share of a page's pixels, reported to one figure"
+)]
+fn share(moved: u64, total: u64) -> f64 {
+    moved as f64 / total.max(1) as f64
+}
+
+/// How far one channel may move before a pixel counts as different.
+///
+/// Eight levels of 255. Resampling moves an edge pixel by a lot and a flat area
+/// by nothing, so a smaller threshold measures the anti-aliasing and a larger
+/// one measures nothing.
+const CHANNEL_TOLERANCE: i32 = 8;
+
+/// One relation's verdict, in the record's own words.
+enum Relation {
+    /// The relation held.
+    Held,
+    /// It did not, and this is what was measured.
+    Broke(String),
+    /// It could not be asked — an empty page, a page too large to render
+    /// twice, a rewrite that would not reopen.
+    Skipped(&'static str),
+}
+
+impl Relation {
+    fn print(&self, name: &str) {
+        match self {
+            Relation::Held => println!("meta {name} held"),
+            Relation::Broke(detail) => println!("meta {name} broke {}", one_line(detail)),
+            Relation::Skipped(why) => println!("meta {name} skipped {why}"),
+        }
+    }
+}
+
+/// The three relations, checked in this process.
+///
+/// **In-process on purpose**: the design says no image leaves the child, and it
+/// is not squeamishness. A relation checked by writing two bitmaps and diffing
+/// them elsewhere would need somewhere to write four thousand pairs of them,
+/// and would make the corpus run depend on a comparator outside the run.
+///
+/// Only the first page. Every relation costs at least one extra render and the
+/// rotation and crop ones cost a save and a reopen as well, so asking every
+/// page of a four-thousand-file corpus would turn a twenty-second timeout into
+/// the thing being measured.
+fn metamorphic(doc: &Document, options: &Options, spent: std::time::Duration) {
+    // **The relations may not cost the file its outcome**, and this line is
+    // there because they did. Each one re-renders the first page and two of
+    // them save and reopen the document, so on a slow file the extra work ran
+    // the corpus runner's twenty-second timeout out: the first recorded run
+    // turned three pdf.js files that had always passed into timeouts, and
+    // wrote that in as the new bar.
+    //
+    // A file that has already spent this much of its budget opening and
+    // rendering is one whose relations are *not asked*, which the record says
+    // in its own words. The alternative — a longer timeout — would change what
+    // the pass rate means, and the pass rate is a different measurement that
+    // was here first.
+    if spent > std::time::Duration::from_millis(META_BUDGET_MS) {
+        for name in ["rotate", "crop", "dpi"] {
+            Relation::Skipped("the file spent its budget opening and rendering").print(name);
+        }
+        return;
+    }
+    if doc.page_count() == 0 {
+        for name in ["rotate", "crop", "dpi"] {
+            Relation::Skipped("the document has no pages").print(name);
+        }
+        return;
+    }
+
+    let render = RenderOptions {
+        annotations: options.annotations,
+        ..RenderOptions::at_dpi(options.dpi)
+    };
+    let Some(page) = doc.page(0) else {
+        return;
+    };
+    let base = page.render(&render);
+    // A page that came back empty is a page the relations cannot speak about:
+    // every one of them holds trivially over nothing.
+    if base.width == 0 || base.height == 0 {
+        for name in ["rotate", "crop", "dpi"] {
+            Relation::Skipped("the page rendered to nothing").print(name);
+        }
+        return;
+    }
+
+    // **The two relations that rewrite are asked only of a document this
+    // engine read cleanly**, which is the strict pass's own eligibility and is
+    // borrowed rather than reinvented. The reason is the relation's, not the
+    // clock's: rotating or cropping a document means saving it and reading it
+    // back, so over a file the reader had to *repair* the comparison is
+    // between two repairs and not between two renders.
+    //
+    // It is also what stops a pathological file from eating the corpus
+    // runner's budget. `pdfjs/test/pdfs/bug1980958.pdf` is 219 bytes, opens
+    // through the rescan ladder with a synthesised root, renders its 10x10
+    // page in under two seconds — and its rewrite does not come back at all:
+    // three minutes in, `rotate` had not returned. Asking a relation of a
+    // document whose structure the reader invented was the mistake; the
+    // timeout was the symptom.
+    match cleanly_read(doc) {
+        None => {
+            rotation(doc, &base, &render).print("rotate");
+            cropping(doc, &page, &base, &render).print("crop");
+        }
+        Some(why) => {
+            Relation::Skipped(why).print("rotate");
+            Relation::Skipped(why).print("crop");
+        }
+    }
+    // `dpi` rewrites nothing, so it is asked of every document that rendered.
+    resolution(&page, &base, &render).print("dpi");
+}
+
+/// One pixel of a bitmap, as three channels.
+fn channels(bitmap: &Bitmap, x: u32, y: u32) -> (i32, i32, i32) {
+    let at = (y as usize) * bitmap.stride + (x as usize) * bitmap.components();
+    let p = bitmap.data.get(at..at + 3).unwrap_or(&[0, 0, 0]);
+    (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]))
+}
+
+fn differs(a: (i32, i32, i32), b: (i32, i32, i32)) -> bool {
+    (a.0 - b.0).abs() > CHANNEL_TOLERANCE
+        || (a.1 - b.1).abs() > CHANNEL_TOLERANCE
+        || (a.2 - b.2).abs() > CHANNEL_TOLERANCE
+}
+
+/// **A page rotated a quarter-turn is the same page transposed.**
+///
+/// `/Rotate 90` turns the page clockwise, so the pixel at `(x, y)` of the
+/// rotated render is the pixel at `(x, height - 1 - y)` of the original with
+/// its axes swapped. Nothing about the content changes, so this is an equality
+/// and not a budget — and it catches every place a rotation is applied to the
+/// geometry and not to the clip, or to the text and not to the images.
+fn rotation(doc: &Document, base: &Bitmap, render: &RenderOptions) -> Relation {
+    let mut editor = doc.editor();
+    if !editor.rotate_page(0, 90) {
+        return Relation::Skipped("the page would not rotate");
+    }
+    let Ok(turned) = Document::open(editor.save(&WriteOptions::default())) else {
+        return Relation::Skipped("the rotated document would not reopen");
+    };
+    let Some(page) = turned.page(0) else {
+        return Relation::Skipped("the rotated document lost its page");
+    };
+    let rotated = page.render(render);
+
+    if rotated.width != base.height || rotated.height != base.width {
+        return Relation::Broke(format!(
+            "{}x{} turned is {}x{} and not {}x{}",
+            base.width, base.height, rotated.width, rotated.height, base.height, base.width
+        ));
+    }
+    let mut moved = 0u64;
+    for y in 0..rotated.height {
+        for x in 0..rotated.width {
+            let source = channels(base, y, base.height - 1 - x);
+            if differs(channels(&rotated, x, y), source) {
+                moved += 1;
+            }
+        }
+    }
+    let total = u64::from(rotated.width) * u64::from(rotated.height);
+    if share(moved, total) <= ROTATE_BUDGET {
+        Relation::Held
+    } else {
+        Relation::Broke(format!(
+            "{moved} of {total} pixels ({:.1}%) are not the transposition, over a              budget of {:.1}%",
+            share(moved, total) * 100.0,
+            ROTATE_BUDGET * 100.0
+        ))
+    }
+}
+
+/// **A cropped render is the sub-rectangle of the full one** (ruling 5's tile
+/// equality, generalised from a tile to the page box).
+///
+/// The crop box is the middle half of the page, in whole pixels at the scale
+/// being rendered, so the comparison needs no resampling: every pixel of the
+/// cropped render has a pixel of the full one it must equal exactly.
+fn cropping(doc: &Document, page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
+    let (x0, y0, x1, y1) = page.crop_box();
+    let (width, height) = (x1 - x0, y1 - y0);
+    if !(width.is_finite() && height.is_finite()) || width < 4.0 || height < 4.0 {
+        return Relation::Skipped("the page is too small to crop");
+    }
+    if page.rotation() != 0 {
+        // A rotated page's crop box and its bitmap do not share an axis, and
+        // the relation would be about this test's arithmetic rather than about
+        // the engine. `rotate` already covers the turning.
+        return Relation::Skipped("the page is already rotated");
+    }
+
+    // A quarter in from each edge, snapped to whole pixels at this scale so the
+    // sub-rectangle lands on pixel boundaries.
+    let scale = render.scale;
+    let inset_x = ((width / 4.0) * scale).floor() / scale;
+    let inset_y = ((height / 4.0) * scale).floor() / scale;
+    if inset_x <= 0.0 || inset_y <= 0.0 {
+        return Relation::Skipped("the page is too small to crop");
+    }
+
+    let mut editor = doc.editor();
+    if !editor.set_crop_box(0, x0 + inset_x, y0 + inset_y, x1 - inset_x, y1 - inset_y) {
+        return Relation::Skipped("the crop box would not be set");
+    }
+    let Ok(cropped) = Document::open(editor.save(&WriteOptions::default())) else {
+        return Relation::Skipped("the cropped document would not reopen");
+    };
+    let Some(page) = cropped.page(0) else {
+        return Relation::Skipped("the cropped document lost its page");
+    };
+    let small = page.render(render);
+    if small.width == 0 || small.height == 0 {
+        return Relation::Skipped("the cropped page rendered to nothing");
+    }
+
+    // Where the cropped rectangle starts in the full render. `y` counts down a
+    // bitmap and up a page, so the top of the crop is the *far* inset.
+    let left = (inset_x * scale).round() as u32;
+    let top = (inset_y * scale).round() as u32;
+    if left + small.width > base.width || top + small.height > base.height {
+        return Relation::Broke(format!(
+            "a {}x{} crop at ({left}, {top}) does not fit a {}x{} page",
+            small.width, small.height, base.width, base.height
+        ));
+    }
+
+    let mut moved = 0u64;
+    for y in 0..small.height {
+        for x in 0..small.width {
+            if differs(channels(&small, x, y), channels(base, left + x, top + y)) {
+                moved += 1;
+            }
+        }
+    }
+    // **No budget, and that is a measurement rather than an oversight.** A crop
+    // moves the page box and nothing else, so every pixel of the cropped render
+    // has a pixel of the full one on the same sampling grid: over the first 119
+    // files of the pdf.js corpus this relation was exact on all 119. Rotation
+    // and resolution both change the grid and both need a budget; this does
+    // not, and giving it one would hide the only kind of defect it can see.
+    if moved == 0 {
+        Relation::Held
+    } else {
+        let total = u64::from(small.width) * u64::from(small.height);
+        Relation::Broke(format!(
+            "{moved} of {total} pixels of the crop are not the page under it"
+        ))
+    }
+}
+
+/// **A render at twice the resolution, halved, is the render at one.**
+///
+/// Within a budget, and this is the only one of the three that needs one:
+/// resampling and anti-aliasing are not the same operation, so an edge pixel
+/// legitimately lands somewhere between the two. What the relation catches is
+/// a *grid* mistake — a half-pixel offset, an off-by-one in the page-to-device
+/// transform, a rounding that only shows at one scale — and those move whole
+/// regions rather than edges.
+fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
+    // A page big enough that rendering it twice over is the corpus runner's
+    // whole budget is one this relation declines rather than times out on.
+    if u64::from(base.width) * u64::from(base.height) > 4_000_000 {
+        return Relation::Skipped("the page is too large to render twice");
+    }
+    let doubled = page.render(&RenderOptions {
+        scale: render.scale * 2.0,
+        ..render.clone()
+    });
+    // **The two renders round their own sizes outward, independently**, so the
+    // doubled one can be a pixel short of twice the other: a page 1275.2 pixels
+    // wide is 1276 at one scale and 2551 at two, and 2551 is not 2552. The
+    // comparison runs over the region both grids cover rather than declining
+    // the file — declining it was the first draft, and it declined every page
+    // whose width was not a whole number of pixels.
+    let across = base.width.min(doubled.width / 2);
+    let down = base.height.min(doubled.height / 2);
+    if across == 0 || down == 0 {
+        return Relation::Skipped("the doubled render was scaled down");
+    }
+
+    let mut moved = 0u64;
+    let total = u64::from(across) * u64::from(down);
+    for y in 0..down {
+        for x in 0..across {
+            // The box filter: the four pixels of the doubled render that make
+            // up this one.
+            let mut sum = (0i32, 0i32, 0i32);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let p = channels(&doubled, x * 2 + dx, y * 2 + dy);
+                    sum = (sum.0 + p.0, sum.1 + p.1, sum.2 + p.2);
+                }
+            }
+            let filtered = (sum.0 / 4, sum.1 / 4, sum.2 / 4);
+            if differs(filtered, channels(base, x, y)) {
+                moved += 1;
+            }
+        }
+    }
+    if share(moved, total) <= DPI_BUDGET {
+        Relation::Held
+    } else {
+        Relation::Broke(format!(
+            "{moved} of {total} pixels ({:.1}%) differ, over a budget of {:.1}%",
+            share(moved, total) * 100.0,
+            DPI_BUDGET * 100.0
+        ))
+    }
+}
+
 // ---- probe: the record one corpus child writes ---------------------------
 
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 2;
+const PROBE_VERSION: u32 = 3;
 
 /// Opens and renders one file at a time, writing a record per file.
 ///
@@ -911,6 +1265,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     println!("rendered {rendered}");
 
     strict(&doc);
+    metamorphic(&doc, options, started.elapsed());
 
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");
@@ -937,17 +1292,27 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 /// structure is already known to be damaged, so a rewrite of it says nothing
 /// about the writer. An encrypted one is not eligible either, because without
 /// the password the rewrite cannot carry its streams.
-fn strict(doc: &Document) {
+/// Why a document's own bytes cannot be trusted for a rewrite, or `None`.
+///
+/// One definition, used by the strict pass and by the metamorphic relations
+/// that rewrite. Both are asking the same question — *is a rewrite of this
+/// document a comparison or a repair?* — and two spellings of it would drift.
+fn cleanly_read(doc: &Document) -> Option<&'static str> {
     if doc.ladder_level() != LadderLevel::Trust {
-        println!("strict ineligible the file needed the leniency ladder to open");
-        return;
+        return Some("the file needed the leniency ladder to open");
     }
     if !doc.warnings().is_empty() {
-        println!("strict ineligible the file opened with warnings");
-        return;
+        return Some("the file opened with warnings");
     }
     if doc.is_encrypted() {
-        println!("strict ineligible the file is encrypted");
+        return Some("the file is encrypted");
+    }
+    None
+}
+
+fn strict(doc: &Document) {
+    if let Some(why) = cleanly_read(doc) {
+        println!("strict ineligible {why}");
         return;
     }
 

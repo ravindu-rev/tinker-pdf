@@ -117,6 +117,36 @@ impl CorpusReport {
         out
     }
 
+    /// How many files each metamorphic relation was **asked** of, by name.
+    ///
+    /// Asked and held are two counts and both are recorded, for the reason the
+    /// strict pass records eligible beside clean: a relation that declines the
+    /// hard files and holds on the rest is not a relation that held.
+    pub fn metamorphic_compared(&self) -> BTreeMap<String, u64> {
+        self.metamorphic(|verdict| verdict.compared())
+    }
+
+    /// How many files each relation held on.
+    pub fn metamorphic_held(&self) -> BTreeMap<String, u64> {
+        self.metamorphic(|verdict| verdict.held())
+    }
+
+    fn metamorphic(
+        &self,
+        wanted: fn(&crate::runner::MetaVerdict) -> bool,
+    ) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for file in &self.files {
+            for (name, verdict) in &file.metamorphic {
+                let slot = out.entry(name.clone()).or_default();
+                if wanted(verdict) {
+                    *slot += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// How many files reported each warning label, most common first when
     /// rendered.
     pub fn warnings(&self) -> BTreeMap<String, u64> {
@@ -350,6 +380,25 @@ impl Run {
                                 .map(|(k, v)| (k, Json::count(v))),
                         ),
                     ),
+                    // Roadmap step 7. Counts and never rates, and **both**
+                    // counts: a relation's held figure means nothing without
+                    // the number of files it was asked of.
+                    (
+                        "metamorphic",
+                        Json::object(corpus.metamorphic_compared().into_iter().map(
+                            |(name, compared)| {
+                                let held =
+                                    corpus.metamorphic_held().get(&name).copied().unwrap_or(0);
+                                (
+                                    name,
+                                    Json::object([
+                                        ("compared", Json::count(compared)),
+                                        ("held", Json::count(held)),
+                                    ]),
+                                )
+                            },
+                        )),
+                    ),
                 ])
             })
             .collect();
@@ -487,6 +536,7 @@ mod tests {
                 .map(|c| (*c).to_string())
                 .collect::<BTreeSet<_>>(),
             millis: 1,
+            metamorphic: BTreeMap::new(),
             strict: crate::runner::Strict::Checked {
                 structure: 0,
                 semantics: 0,

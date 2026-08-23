@@ -48,6 +48,8 @@
 //! land in the same slot as a no-faces figure would either look like a large
 //! improvement or bake in a bar no plain run can clear.
 
+use std::collections::BTreeMap;
+
 use crate::json::Json;
 use crate::report::Run;
 
@@ -63,6 +65,13 @@ pub struct Bar {
     pub strict_eligible: u64,
     /// How many of those rewrites carried no structural defect.
     pub strict_clean: u64,
+    /// Per metamorphic relation (roadmap step 7): how many files it was asked
+    /// of, and how many it held on.
+    ///
+    /// A map rather than fields, because the relations are a list that grows:
+    /// a bar recorded before a relation existed simply has no entry for it,
+    /// and a run that adds one is an improvement rather than a refusal.
+    pub metamorphic: BTreeMap<String, (u64, u64)>,
 }
 
 /// A committed ratchet.
@@ -247,6 +256,57 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 bar.name, bar.strict_eligible, bar.total
             ));
         }
+
+        // The fourth axis (roadmap step 7): the metamorphic relations. Two
+        // comparisons per relation and for the strict pass's reason — a
+        // relation that quietly stopped being asked would otherwise raise its
+        // own hold rate by shrinking what it is a rate of.
+        let compared_now = corpus.metamorphic_compared();
+        let held_now = corpus.metamorphic_held();
+        for (relation, (compared_before, held_before)) in &bar.metamorphic {
+            let compared = compared_now.get(relation).copied().unwrap_or(0);
+            let held = held_now.get(relation).copied().unwrap_or(0);
+            if compared == 0 && *compared_before > 0 {
+                out.regressions.push(format!(
+                    "{}: `{relation}` was asked of no file at all against a bar of {}",
+                    bar.name, compared_before
+                ));
+                continue;
+            }
+            if !holds(*held_before, *compared_before, held, compared) {
+                out.regressions.push(format!(
+                    "{}: `{relation}` held on {held}/{compared}, worse than the \
+                     recorded {held_before}/{compared_before}",
+                    bar.name
+                ));
+            } else if u128::from(held) * u128::from(*compared_before)
+                > u128::from(*held_before) * u128::from(compared)
+            {
+                out.improvements.push(format!(
+                    "{}: `{relation}` held on {held}/{compared}, up from \
+                     {held_before}/{compared_before}",
+                    bar.name
+                ));
+            }
+            if !holds(*compared_before, bar.total, compared, total) {
+                out.regressions.push(format!(
+                    "{}: `{relation}` was asked of {compared}/{total} files, down \
+                     from {compared_before}/{}; declining the hard files is not a \
+                     better rate",
+                    bar.name, bar.total
+                ));
+            }
+        }
+        for relation in compared_now.keys() {
+            if !bar.metamorphic.contains_key(relation) {
+                out.improvements.push(format!(
+                    "{}: `{relation}` held on {}/{} — new, with no recorded bar",
+                    bar.name,
+                    held_now.get(relation).copied().unwrap_or(0),
+                    compared_now.get(relation).copied().unwrap_or(0),
+                ));
+            }
+        }
     }
 
     for corpus in &now.corpora {
@@ -310,6 +370,24 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
         let degraded = count("degraded")?;
         let strict_eligible = count("strict_eligible")?;
         let strict_clean = count("strict_clean")?;
+        let mut metamorphic = BTreeMap::new();
+        if let Some(Json::Object(relations)) = entry.get("metamorphic") {
+            for (relation, verdict) in relations {
+                let read = |key: &str| -> Result<u64, String> {
+                    verdict.get(key).and_then(Json::as_u64).ok_or_else(|| {
+                        format!("`{name}`'s `{relation}` has no whole-number `{key}`")
+                    })
+                };
+                let (compared, held) = (read("compared")?, read("held")?);
+                if held > compared || compared > total {
+                    return Err(format!(
+                        "`{name}` records `{relation}` holding on {held} of {compared} \
+                         files out of {total}, which cannot be"
+                    ));
+                }
+                metamorphic.insert(relation.clone(), (compared, held));
+            }
+        }
         if passed > total || degraded > total {
             return Err(format!(
                 "`{name}` records {passed} passed and {degraded} degraded out \
@@ -332,6 +410,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             degraded,
             strict_eligible,
             strict_clean,
+            metamorphic,
         });
     }
     if bars.is_empty() {
@@ -377,6 +456,7 @@ mod tests {
                     semantics: 0,
                     kinds: BTreeMap::new(),
                 },
+                metamorphic: BTreeMap::new(),
             });
         }
         out
@@ -407,6 +487,7 @@ mod tests {
                 degraded,
                 strict_eligible: total,
                 strict_clean: total,
+                metamorphic: BTreeMap::new(),
             }],
             complete: true,
             fonts: "none".to_string(),
