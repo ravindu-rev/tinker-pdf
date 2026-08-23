@@ -16,7 +16,7 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 924 tests proving the
+These come before any new feature. The suite is 2 940 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
@@ -32,18 +32,18 @@ thousands of documents nobody here authored.
   fixed — nothing is deleted before the check replacing it exists and has been
   injection-counted, and the steps keep the numbers the allowance rows in
   `xtask/src/main.rs` cite:
-  6. Analytic raster fixtures: pages whose correct raster is computable in
-     closed form by an independent in-test function. (M)
   7. Metamorphic probes over the real corpus — rotation, cropping and
      resolution coherence — with their own ratchet rows. (M)
   8. `tools/oracle-diff` deleted; the suite recounted. (S)
 
-  Steps 1 to 5 are done: `cargo xtask oracles` holds the boundary with a
+  Steps 1 to 6 are done: `cargo xtask oracles` holds the boundary with a
   build failure, the honesty pass corrected two claims about checks that were
   never wired, the strict validator retired the four qpdf tests and their
   job, `xps_conservation.rs` retired `xps_mutool.rs` and its job, and
   `epub_analytic.rs` and `epub_reftest.rs` retired `epub_browser.rs`, the
-  browser job and the epubcheck step. The validator found three defects in
+  browser job and the epubcheck step, and `analytic_coverage.rs` and
+  `render_analytic.rs` gave the rasterizer and the page a tier that answers to
+  arithmetic. The validator found three defects in
   this engine's own output on the way — a missing trailer `/ID`, a stale
   `/Prev` carried into a rewrite, and a cross-reference table with no free
   head — and its structural tier now runs over a rewrite of every corpus file
@@ -56,9 +56,12 @@ thousands of documents nobody here authored.
   two translations commute; two nested canvases that do not commute close it.
   And of step 5's six injections, **two were caught by the new suites alone**
   out of 2 935 tests, the browser oracle included: `text-indent` ignored, and
-  CSS 2.2 §13.3.2's `orphans` and `widows` ignored. What left with each oracle
-  is stated in [verification.md](verification.md) and is not narrowed by what
-  replaced it.
+  CSS 2.2 §13.3.2's `orphans` and `widows` ignored. Step 6's matrix found the
+  hole in its own first draft: two roundings the sampling grid performs were
+  caught by nothing but the determinism fingerprint, which notices that a pixel
+  moved and has no opinion about whether it should have. What left with each
+  oracle is stated in [verification.md](verification.md) and is not narrowed by
+  what replaced it.
 
   Exit: no test or CI job spawns a program the workspace did not build,
   `cargo xtask oracles` is green in `cargo xtask check`, and every row of

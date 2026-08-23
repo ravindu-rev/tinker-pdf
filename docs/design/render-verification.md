@@ -2,7 +2,7 @@
 
 When this is done, a page will be checkable against something other than
 this engine's own opinion of it. Today it is not:
-[verification.md](../verification.md) states the limit — 2 924 tests prove
+[verification.md](../verification.md) states the limit — 2 940 tests prove
 the engine agrees with itself, the 4 525-file corpus run proves a bitmap
 came back, and nothing proves the bitmap is *right*.
 
@@ -155,8 +155,8 @@ quietly stopped proving something is not.
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size |
 | --- | --- | --- | --- |
-| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | Expected coverage computed by an independent in-test function; byte-equal comparison; injections on the coverage rounding and on the nonzero winding rule each caught by a counted assertion | S |
-| 2 | Analytic operator fixtures at the facade (`tests/render_analytic.rs`): strokes, axial and radial shadings, separable blend modes, integer image scaling | Every expected raster computed from the clause's own formula; each fixture joins the determinism fingerprints and carries its own least-ink floor; injections on the blend expression and on the shading parametric each caught | M |
+| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | **Done.** `tests/analytic_coverage.rs`: expected coverage computed from the sampling grid by an in-test function, byte-equal; the injections on the coverage rounding and on the nonzero rule are each caught, and the rounding one is what the first draft missed | S |
+| 2 | Analytic operator fixtures at the facade (`tests/render_analytic.rs`): strokes, axial and radial shadings, separable blend modes, integer image scaling | **Done**, except the least-ink floor and the fingerprint enrolment: both shadings are compared per pixel over the whole page, the twelve separable modes over nine pairs, and the injections on the blend expression and on the shading parametric are each caught. Strokes live with the coverage fixtures rather than here, since they need no content stream | M |
 | 3 | Metamorphic probe modes in `tpdf probe` | The probe emits `rotate`, `crop` and `dpi` records; each relation is checked in-process so no image leaves the child; a seeded rotation bug makes the record say so | S |
 | 4 | `corpus-run` rows and ratchet entries for the three relations | `corpus/ratchet.json` carries per-corpus held and compared counts for each relation; hand-lowering one makes `corpus-run --check` exit nonzero with a `regression:` line; the dpi budget is recorded together with the measurement that set it | M |
 | 5 | Differential in-tree pairs | Type 3 glyph against path, tiling pattern against unrolled content, form XObject against inlined operators, shading pattern against `sh` — each pair byte-equal, each catching an injected divergence | S |

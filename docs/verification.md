@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 924 passed, 0 failed, 8 ignored** across 121 suites on
+is **2 940 passed, 0 failed, 8 ignored** across 123 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -249,6 +249,48 @@ browser oracle, which compares a continuous column and a five-page print at one
 page box. What the new suites do not have is the browser's own claim, and it is
 the largest single thing this migration cost: an independent implementation of
 CSS said where the boxes went, and now nothing does.
+
+### Rasters that answer to arithmetic
+
+The tier [design/render-verification.md](design/render-verification.md) calls
+*"the only tier that answers to mathematics"*, and where it applies it is worth
+more than a second renderer: an expected value computed from the geometry has no
+opinion to be wrong about.
+
+`tinker-pdf-raster/tests/analytic_coverage.rs` states the sampling grid —
+**sixteen sub-scanlines a row, exact horizontal spans in 1/256 of a pixel** —
+and computes every expectation from it. A rectangle on integers is exactly
+covered; half a pixel is 128 whichever axis the fraction is on; a corner cut on
+both is their product; nonzero minus even-odd is exactly the intersection; a
+diagonal edge is sixteen spans summed from the line's own equation; a stroked
+segment is length times width plus a cap term that is zero, a square, or bounded
+between the disc and the square inscribed in it, because a round cap is
+flattened to chords before it is filled and so is strictly smaller than `πr²`.
+
+`crates/tinker-pdf/tests/render_analytic.rs` does the same one level up, where a
+fixture needs a content stream: both shading types compared **per pixel across
+the whole page** against 8.7.4.5's parametric equations, the twelve separable
+blend modes of 11.3.5 over nine backdrop-and-source pairs, and an image at an
+integer scale as blocks of its samples.
+
+Three conventions had to be measured rather than assumed, and are now written
+down where the fixtures use them: a component reaches the page as
+`round(v × 255)`; a shading is sampled at the pixel's **centre**; and blending
+happens in **eight-bit fixed point** on both operands — `blend.rs` has no
+floating point in it at all, so ruling 4's bit-identical contract does not rest
+on anybody's `sqrt`. Eight of the twelve modes reproduce the clause exactly and
+the four that divide or take a root are within one level, and the fixture says
+which four, so a mode leaving the exact list is a visible change rather than a
+tolerance quietly absorbing it.
+
+**The injection matrix found the hole in the first draft of this tier**, which is
+the second time in this migration it has. Seven defects were reintroduced; five
+were caught. The two that were not — the accumulator rounding instead of
+truncating, and a sub-scanline taken at its floor rather than its ceiling — were
+caught by *nothing but the determinism fingerprint*, which notices that a pixel
+moved and has no opinion about whether it should have. Every offset in the file
+landed on a sixteenth, where both roundings are invisible. Offsets between the
+grid's own gradations close it.
 
 The epubcheck row is not a replacement either. `tests/epub/EPUBCHECK.tsv` holds
 what epubcheck 5.3.0 said about the six committed books when it was run, and it
