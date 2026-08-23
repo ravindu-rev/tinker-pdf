@@ -391,9 +391,19 @@ skipped it would leave every file "not eligible", which reads as a run that
 measured nothing rather than as a regression. `corpus.yml` and the
 fetched-EPUB job still need it, for the reason that job has always had: the
 books it reads cannot be committed, so they can fail to arrive as well as fail
-to read, and both look like a green tick. `cargo xtask oracles` keeps the
+to read, and both look like a green tick. The native `test` matrix now greps
+its own log too, and the gap that closes was a real one: ruling 4's macOS
+target was claimed from the fact that a `macos-14` leg exists, and a leg that
+runs the suite inside `cargo test --workspace` says nothing about whether
+`determinism.rs` was one of the tests it ran. `cargo xtask oracles` keeps the
 boundary itself from eroding by holding a build failure over any test that
 spawns a program the workspace did not build.
+
+The same rule applied to CI's own tooling would have saved five red runs.
+`taiki-e/install-action@cargo-fuzz` had been rewritten to a version tag, so the
+step installed nothing, exited 0, and the job died two steps later on `no such
+command: fuzz`. Every use of that action now names its tool explicitly, which
+is a spelling that cannot lose its argument.
 
 ## Bounds are measured against real inputs
 

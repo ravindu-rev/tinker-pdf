@@ -109,13 +109,15 @@ impl Huffman {
         let mut k = 0usize;
         for len in 1..16u32 {
             code = (code + u32::from(count[len as usize - 1])) << 1;
-            let mut c = code;
-            for _ in 0..count[len as usize] {
+            // Written as a counted range rather than a `for _` with a `c += 1`
+            // inside it: clippy 1.98 refuses the second form (`explicit_counter_loop`)
+            // and this checkout's 1.93 does not, which is how a lint nobody here
+            // can reproduce locally turned every CI leg red for five runs.
+            for c in (code..).take(count[len as usize] as usize) {
                 if let Some(&sym) = sorted.get(k) {
                     codes.push((sym, len as u8, reverse_bits(c, len)));
                 }
                 k += 1;
-                c += 1;
             }
         }
 

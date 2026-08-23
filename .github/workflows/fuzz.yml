@@ -79,7 +79,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      # `@v2` with an explicit `tool:` — see the note in ci.yml's
+      # `fuzz-seeds` job; a `@<tool-name>` tag can be rewritten into a
+      # version tag, after which this step installs nothing and succeeds.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Fuzz ${{ matrix.target }}
         run: |

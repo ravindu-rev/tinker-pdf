@@ -52,7 +52,15 @@ get() {
         return 0
     fi
     echo "  get   $1"
-    curl -fsSL --retry 3 --max-time 300 -o "$1.part" "$2"
+    # Six attempts over three minutes, not three. Measured: CI run
+    # 32621221290 saw Gutenberg answer 503, then 504, then 504 — three
+    # tries inside a few seconds, all of them inside one outage — and a
+    # red build whose cause was somebody else's afternoon. `--retry-all-
+    # errors` because a plain `--retry` declines to retry some of what
+    # a loaded mirror returns. The fetch still fails if the corpus is
+    # genuinely unreachable, which is the outcome the job wants.
+    curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors \
+        --retry-max-time 180 --max-time 300 -o "$1.part" "$2"
     mv "$1.part" "$1"
 }
 

@@ -33,6 +33,25 @@ jobs:
       # failure rather than something nobody notices. The wasm leg is the
       # `wasm-determinism` job below.
       - run: cargo test --workspace
+      # Ruling 4's fourth target is the reason this matrix has a macos-14 leg,
+      # and until now that leg proved it by *existing*. `cargo test --workspace`
+      # above does run `determinism.rs` — but a `#[ignore]` added one afternoon,
+      # a `cfg` that excluded the target, or a filter matching nothing all leave
+      # a green tick that says nothing, which is the hazard verification.md
+      # calls "a check that can be absent is red, not green". The wasm leg has
+      # greped its own log since the day it was written; the native legs now do
+      # too, so "measured on macOS" is a sentence with a run behind it.
+      #
+      # `shell: bash` because the windows leg's default is pwsh, where `tee`
+      # and `grep` are not these programs. `pipefail` because the pipe would
+      # otherwise return `tee`'s status and hide a failing suite.
+      - name: The determinism fingerprints were reproduced on this target
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test determinism 2>&1 | tee determinism.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
+          grep -Eq 'rendering_is_stable_across_targets [.]{3} ok' determinism.log
       # `cmap-predefined` off, *run* rather than merely linked: a build
       # without the CJK tables keeps the codespaces and drops the CIDs, and
       # `tinker-pdf-font/tests/predefined_cmaps_absent.rs` is the only place
@@ -106,7 +125,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      # `@v2` with an explicit `tool:`, never `@<tool-name>`. Dependabot
+      # rewrites a `@<tool-name>` tag into a version tag, and the action then
+      # installs NOTHING and exits 0 — which is how `fuzz-seeds` spent five
+      # runs reporting `error: no such command: fuzz` while every other job
+      # looked normal. The explicit form cannot lose its argument.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Build every target once
         run: cargo fuzz build
         # `-D warnings` from a nightly compiler would fail this on a lint
@@ -185,7 +211,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
-      - uses: taiki-e/install-action@wasmtime
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
       - uses: Swatinem/rust-cache@v2
       # Piped through `tee` so the run can be asserted on afterwards. A job
       # that compiled the test and executed nothing would exit 0 and look
@@ -250,5 +278,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - run: cargo deny check licenses bans sources
