@@ -723,6 +723,17 @@ pub fn rewrite(
         names,
         options.encryption.as_ref().map(|e| &e.entropy),
     );
+    // 7.5.6: a rewrite is one revision, so it has no earlier section to chain
+    // to. Both keys arrive from the *source* document's trailer — every file
+    // that was ever incrementally updated carries a `/Prev`, and a hybrid one
+    // carries an `/XRefStm` — and both name offsets in a file that no longer
+    // exists. The cross-reference-stream path already dropped them; the
+    // classic path did not, so a rewrite of any updated document sent every
+    // reader to an offset in the middle of the new file's objects. Ours
+    // repaired it and opened anyway, which is why nothing here noticed until
+    // the strict validator read the sections as written.
+    let identified = crate::edit::without(&identified, Name::PREV);
+    let identified = crate::edit::without(&identified, Name::XREF_STM);
     let trailer = &identified;
 
     if options.linearize {

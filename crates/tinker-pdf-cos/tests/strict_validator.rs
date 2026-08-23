@@ -29,11 +29,15 @@
 //!
 //! Both were found by running the injections, not by reading the code.
 
+mod surface_support;
+
 use std::sync::Arc;
 
+use surface_support::whole_surface_document;
+use tinker_pdf_cos::dest::DestKind;
 use tinker_pdf_cos::{
-    CosDocument, Defect, DocumentBuilder, DocumentEditor, Encryption, LadderLevel, WriteMode,
-    WriteOptions,
+    CosDocument, Defect, DocumentBuilder, DocumentEditor, Encryption, LadderLevel, OutlineEntry,
+    Target, WriteMode, WriteOptions,
 };
 
 // ---- the documents under test ----------------------------------------------
@@ -207,6 +211,84 @@ fn entry_offset(bytes: &[u8], num: u32, offset: u64) -> Vec<u8> {
     let mut out = bytes.to_vec();
     out[at..at + 10].copy_from_slice(format!("{offset:010}").as_bytes());
     out
+}
+
+/// Patches the first occurrence of `needle` **after** `anchor`.
+///
+/// `/Count` appears in a page tree and in an outline, `/Dest` in a link and in
+/// an outline item: a needle alone would hit whichever comes first in the file,
+/// which is not the structure the test is about.
+fn patch_after(bytes: &[u8], anchor: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+    assert_eq!(
+        needle.len(),
+        with.len(),
+        "an injection may not move offsets"
+    );
+    let from = find(bytes, anchor).expect("the anchor is in the fixture");
+    let at = from + find(&bytes[from..], needle).expect("the needle follows it");
+    patch_at(bytes, at, with)
+}
+
+/// A document with two links and a two-branch outline, one open and one closed.
+///
+/// The same shape the deleted qpdf oracle used, for the same reason: `/Prev`,
+/// `/Count`'s sign and a link's target are the structures a reader that walks
+/// forward and normalises as it goes cannot check.
+fn navigation() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for _ in 0..3 {
+        builder.add_page(200.0, 300.0, |_| {});
+    }
+    builder.add_page(200.0, 300.0, |page| {
+        assert!(page.link(
+            10.0,
+            20.0,
+            90.0,
+            40.0,
+            &Target::Page {
+                index: 2,
+                view: DestKind::Fit,
+            }
+        ));
+        assert!(page.link(
+            10.0,
+            50.0,
+            90.0,
+            70.0,
+            &Target::Uri("https://example.org/".to_string())
+        ));
+    });
+    assert!(builder.set_outline(vec![
+        OutlineEntry {
+            title: "Open".to_string(),
+            target: None,
+            open: true,
+            children: vec![OutlineEntry {
+                title: "Leaf".to_string(),
+                target: Some(Target::Page {
+                    index: 1,
+                    view: DestKind::Fit,
+                }),
+                open: true,
+                children: Vec::new(),
+            }],
+        },
+        OutlineEntry {
+            title: "Closed".to_string(),
+            target: None,
+            open: false,
+            children: vec![OutlineEntry {
+                title: "Hidden".to_string(),
+                target: Some(Target::Page {
+                    index: 2,
+                    view: DestKind::Fit,
+                }),
+                open: true,
+                children: Vec::new(),
+            }],
+        },
+    ]));
+    builder.finish()
 }
 
 // ---- the clean twins --------------------------------------------------------
@@ -782,4 +864,318 @@ fn a_prev_that_names_no_section_is_refused() {
         "trailer\n<< /Size 4 /Root 1 0 R /Prev 7 >>\n",
     );
     refused(bytes, "section-unreadable");
+}
+
+// ---- what the document says (7.7.3, 12.3.3, 12.5) ---------------------------
+
+/// The navigation fixture is itself clean, or nothing below means anything.
+#[test]
+fn a_document_with_links_and_an_outline_validates_clean() {
+    clean(navigation());
+}
+
+/// 7.7.3.2: the reader walks the page tree downwards and never asks a page
+/// what is above it, so a tree with no `/Parent` anywhere paginates, renders
+/// and round-trips.
+#[test]
+fn a_page_that_does_not_name_its_parent_is_refused() {
+    let bytes = navigation();
+    refused(
+        patch_after(&bytes, b"/Type /Page", b"/Parent", b"/Parenu"),
+        "page-parent-wrong",
+    );
+}
+
+#[test]
+fn a_count_that_is_not_the_leaves_below_it_is_refused() {
+    let bytes = navigation();
+    let at = find(&bytes, b"/Type /Pages").expect("a page tree node");
+    let count = at + find(&bytes[at..], b"/Count ").expect("its /Count") + 7;
+    let wider = format!("{:0width$}", 9, width = digits_at(&bytes, count).len());
+    refused(
+        patch_at(&bytes, count, wider.as_bytes()),
+        "page-count-wrong",
+    );
+}
+
+#[test]
+fn a_page_tree_node_with_no_kids_is_refused() {
+    refused(patch(&navigation(), b"/Kids", b"/Kidz"), "kids-malformed");
+}
+
+#[test]
+fn a_page_with_no_media_box_anywhere_is_refused() {
+    refused(
+        patch(&navigation(), b"/MediaBox", b"/MediaBoy"),
+        "media-box-absent",
+    );
+}
+
+#[test]
+fn a_media_box_that_encloses_nothing_is_refused() {
+    refused(
+        patch(&navigation(), b"[0 0 200 300]", b"[0 0 000 300]"),
+        "media-box-degenerate",
+    );
+}
+
+/// 12.5.2: the corners are stated lower-left then upper-right. This engine's
+/// own reader normalises a reversed pair on the way out, which is exactly why
+/// nothing else here notices one.
+#[test]
+fn a_link_rectangle_written_backwards_is_refused() {
+    let bytes = navigation();
+    refused(
+        patch_after(&bytes, b"/Link", b"[10 20 90 40]", b"[90 20 10 40]"),
+        "annot-rect-unordered",
+    );
+}
+
+#[test]
+fn an_annotation_with_no_subtype_is_refused() {
+    let bytes = navigation();
+    refused(
+        patch_after(&bytes, b"/Annots", b"/Subtype", b"/Subtypf"),
+        "annot-subtype-missing",
+    );
+}
+
+#[test]
+fn a_link_that_names_nothing_to_go_to_is_refused() {
+    let bytes = navigation();
+    refused(
+        patch_after(&bytes, b"/Link", b"/Dest", b"/Desu"),
+        "link-without-target",
+    );
+}
+
+/// **The fault only the outside reader ever caught.** 12.3.3's siblings link
+/// both ways; this reader walks `/Next` forward, which is enough to build the
+/// tree, so deleting every `/Prev` survived every round trip in this
+/// repository. A viewer walking up from a selected entry is what notices.
+#[test]
+fn an_outline_that_does_not_link_backwards_is_refused() {
+    let bytes = navigation();
+    let doc = CosDocument::open(bytes.clone()).expect("it opens");
+    let before = tinker_pdf_cos::outline(&doc).len();
+
+    let damaged = patch_after(&bytes, b"/Title", b"/Prev", b"/Preu");
+    let doc = CosDocument::open(damaged.clone()).expect("it opens");
+    assert_eq!(
+        tinker_pdf_cos::outline(&doc).len(),
+        before,
+        "the reader builds the same outline either way"
+    );
+    assert!(doc.warnings().is_empty(), "and says nothing");
+
+    refused(damaged, "outline-prev-wrong");
+}
+
+/// 12.3.3 Table 152: an open item states how many items it exposes and a
+/// closed one states the negative of that. The reader takes only the sign.
+#[test]
+fn an_outline_count_of_the_wrong_size_is_refused() {
+    let bytes = navigation();
+    let at = find(&bytes, b"/Type /Outlines").expect("an outline root");
+    let count = at + find(&bytes[at..], b"/Count ").expect("its /Count") + 7;
+    let wrong = format!("{:0width$}", 9, width = digits_at(&bytes, count).len());
+    refused(
+        patch_at(&bytes, count, wrong.as_bytes()),
+        "outline-count-wrong",
+    );
+}
+
+#[test]
+fn an_outline_item_with_no_title_is_refused() {
+    refused(
+        patch(&navigation(), b"/Title", b"/Titlf"),
+        "outline-title-missing",
+    );
+}
+
+/// The chain's ends are stated as well as walked, and a `/Next` that stops
+/// early leaves `/Last` naming an item the chain never reaches.
+#[test]
+fn an_outline_whose_ends_are_not_its_chain_is_refused() {
+    let bytes = navigation();
+    refused(
+        patch_after(&bytes, b"/Title", b"/Next", b"/Nexu"),
+        "outline-ends-wrong",
+    );
+}
+
+/// A `/Next` that names something which is not an outline item at all.
+#[test]
+fn an_outline_next_that_names_nothing_is_refused() {
+    let bytes = navigation();
+    let at = find(&bytes, b"/Next ").expect("a forward link") + 6;
+    let absent = format!("{:0width$}", 0, width = digits_at(&bytes, at).len());
+    refused(
+        patch_at(&bytes, at, absent.as_bytes()),
+        "outline-next-wrong",
+    );
+}
+
+// ---- the writer's whole surface ---------------------------------------------
+
+/// The document that uses every construct this writer can emit.
+///
+/// Its dictionaries are the ones the deleted oracle read back through
+/// `--show-object`, and they were read *there* because this engine's own
+/// reader supplies a default for most of them: `/Extend`, `/Domain`, `/XStep`
+/// and `/Encode` all have a reader-side fallback, so a shading written with the
+/// wrong key names round-trips through this crate and is an empty dictionary to
+/// anybody else.
+#[test]
+fn the_writers_whole_surface_validates_clean() {
+    clean(whole_surface_document());
+}
+
+#[test]
+fn an_alpha_outside_its_range_is_refused() {
+    refused(
+        patch(&whole_surface_document(), b"/ca 0.5", b"/ca 1.5"),
+        "ext-gstate-malformed",
+    );
+}
+
+#[test]
+fn a_blend_mode_that_is_not_one_of_the_sixteen_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/BM /Multiply",
+            b"/BM /Multiplx",
+        ),
+        "ext-gstate-malformed",
+    );
+}
+
+#[test]
+fn a_soft_mask_of_no_known_kind_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/S /Luminosity",
+            b"/S /Luminositx",
+        ),
+        "ext-gstate-malformed",
+    );
+}
+
+/// 11.6.6: a group that does not say it is a transparency group is one a
+/// reader composites as ordinary content.
+#[test]
+fn a_group_that_is_not_a_transparency_group_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/S /Transparency",
+            b"/S /Transparencx",
+        ),
+        "group-malformed",
+    );
+}
+
+/// 8.7.4.5.3: an axial shading is four numbers and a radial one is six, and
+/// the arity is the whole difference between them.
+#[test]
+fn a_shading_with_the_wrong_number_of_coordinates_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/Coords [0 0 300 0]",
+            b"/Coords [0 0 300  ]",
+        ),
+        "shading-malformed",
+    );
+}
+
+/// 7.10.4: k sub-functions want k-1 bounds. The reader defaults a missing
+/// `/Bounds` and draws a gradient either way.
+#[test]
+fn a_stitching_function_with_the_wrong_bounds_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/Bounds [0.35]",
+            b"/Bounds [    ]",
+        ),
+        "function-malformed",
+    );
+}
+
+/// 7.10.3: `/C0` and `/C1` are one colour each, in the same space.
+#[test]
+fn an_exponential_function_whose_ends_disagree_is_refused() {
+    refused(
+        patch(&whole_surface_document(), b"/C0 [1 0 0]", b"/C0 [1 0  ]"),
+        "function-malformed",
+    );
+}
+
+/// 8.7.3.1: a zero step paints one cell forever. The reader falls back to the
+/// cell's own size, so it draws a pattern either way.
+#[test]
+fn a_tiling_pattern_that_never_repeats_is_refused() {
+    refused(
+        patch(&whole_surface_document(), b"/XStep 12", b"/XStep 00"),
+        "pattern-malformed",
+    );
+}
+
+/// 9.7.1: a Type0 font has exactly one descendant, and the metrics live in it.
+#[test]
+fn a_composite_font_with_no_descendant_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/DescendantFonts",
+            b"/DescendantFonty",
+        ),
+        "font-malformed",
+    );
+}
+
+/// 9.7.4.3: `/W` is `c [w1 w2 ...]` or `first last w`, and nothing else.
+#[test]
+fn a_width_array_of_the_wrong_shape_is_refused() {
+    refused(
+        patch(&whole_surface_document(), b"/W [1 [700", b"/W [1 (700"),
+        "font-malformed",
+    );
+}
+
+/// 9.10.3: a `/ToUnicode` that is not a CMap maps nothing, and extraction
+/// hands back the codes instead of the characters without saying so.
+#[test]
+fn a_to_unicode_that_is_not_a_cmap_is_refused() {
+    refused(
+        patch(&whole_surface_document(), b"begincmap", b"beginXmap"),
+        "font-malformed",
+    );
+}
+
+/// 8.10.1: a form states the box its content is clipped to.
+#[test]
+fn a_form_with_no_bounding_box_is_refused() {
+    refused(
+        patch(
+            &whole_surface_document(),
+            b"/BBox [0 0 150 200]",
+            b"/BBox [0 0 150    ]",
+        ),
+        "xobject-malformed",
+    );
+}
+
+/// 7.8.3: a name a content stream will use, resolving to nothing. Object zero
+/// is always free, so naming it is naming the null object (7.3.10).
+#[test]
+fn a_resource_name_that_resolves_to_nothing_is_refused() {
+    let bytes = whole_surface_document();
+    let at = find(&bytes, b"/Font <</C0 ").expect("the font resource") + 12;
+    let digits = digits_at(&bytes, at);
+    let zero = format!("{:0width$}", 0, width = digits.len());
+    refused(patch_at(&bytes, at, zero.as_bytes()), "resource-unresolved");
 }

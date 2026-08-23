@@ -241,6 +241,110 @@ pub enum DefectKind {
         container: u32,
     },
 
+    // ---- the page tree (7.7.3) --------------------------------------------
+    /// 7.7.3.2: a node reached from `/Kids` is neither `/Page` nor `/Pages`.
+    PageNodeUntyped,
+    /// 7.7.3.2: a node's `/Parent` does not name the node that reached it.
+    /// The reader walks downwards only, so nothing else here ever looks.
+    PageParentWrong {
+        /// What the node names, when it names anything.
+        found: Option<ObjRef>,
+    },
+    /// 7.7.3.2: `/Count` is not the number of leaves below the node.
+    PageCountWrong {
+        /// What the node claims.
+        declared: i64,
+        /// What its subtree holds.
+        actual: u64,
+    },
+    /// 7.7.3.2: `/Kids` is absent, or is not an array of references.
+    KidsMalformed,
+    /// 7.7.3.2: the tree reaches a node it has already visited.
+    PageTreeCycle,
+    /// 7.7.3.3: no `/MediaBox` on the page or any ancestor. The reader assumes
+    /// US Letter and warns; nobody else has to.
+    MediaBoxAbsent,
+    /// 7.7.3.3: `/MediaBox` is not four numbers, or encloses no area.
+    MediaBoxDegenerate,
+
+    // ---- the outline (12.3.3) ---------------------------------------------
+    /// 12.3.3: an item's `/Parent` does not name the node that reached it.
+    OutlineParentWrong,
+    /// 12.3.3: the sibling chain runs both ways, and this item's `/Prev` does
+    /// not name the item before it. A reader that walks forward only — which
+    /// this one does — cannot tell.
+    OutlinePrevWrong,
+    /// 12.3.3: an item's `/Next` does not name the item after it.
+    OutlineNextWrong,
+    /// 12.3.3: `/First` or `/Last` does not name the chain's own ends.
+    OutlineEndsWrong,
+    /// 12.3.3 Table 152: `/Count` is not the number of items the node exposes,
+    /// negated when the node is closed.
+    OutlineCountWrong {
+        /// What the node claims.
+        declared: i64,
+        /// What it exposes.
+        actual: i64,
+    },
+    /// 12.3.3: an item has no `/Title`.
+    OutlineTitleMissing,
+
+    // ---- the resource graph (8.4, 8.7, 9.7) -------------------------------
+    //
+    // Every rule below names the entry at fault rather than getting a variant
+    // of its own: they are one family — a dictionary this writer emits that
+    // somebody else has to read — and a report wants to count the family and
+    // read the entry.
+    /// 7.8.3: a name in a resource dictionary resolves to nothing.
+    ResourceUnresolved,
+    /// 11.6.4.4/11.3.5: a graphics state parameter dictionary entry is not
+    /// what its table says.
+    ExtGStateMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// 11.6.6: a transparency group's own dictionary.
+    GroupMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// 8.7.4.5: a shading dictionary.
+    ShadingMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// 7.10: a function dictionary.
+    FunctionMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// 8.7.3: a pattern dictionary.
+    PatternMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// 9.5–9.7: a font dictionary.
+    FontMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+    /// 8.9/8.10: an image or form XObject.
+    XObjectMalformed {
+        /// The entry at fault.
+        entry: &'static str,
+    },
+
+    // ---- annotations (12.5) -----------------------------------------------
+    /// 12.5.2 Table 164: an annotation with no `/Subtype`.
+    AnnotSubtypeMissing,
+    /// 12.5.2: `/Rect` is not four numbers.
+    AnnotRectMalformed,
+    /// 12.5.2: `/Rect`'s corners are not in increasing order, so a viewer that
+    /// takes them as given draws an inverted or empty hot spot.
+    AnnotRectUnordered,
+    /// 12.5.6.5: a link annotation names neither `/Dest` nor `/A`.
+    LinkWithoutTarget,
+
     // ---- stream extents and filters (7.3.8, 7.4) --------------------------
     /// 7.3.8.2: `/Length` is absent, or indirect and unresolvable.
     StreamLengthUnresolved,
@@ -264,9 +368,15 @@ impl DefectKind {
             // down, so a rewrite of any document at all must be clean here.
             // The semantic tier arrives with the rules that read the
             // document's own dictionaries.
+            // A repair is tiered by what it repaired: a rewrite re-serialises
+            // every object and owns the result, but it copies stream *bytes*
+            // and page dictionaries from its source, so a sloppy filter tail
+            // or a page tree that loops is the source document's.
+            DefectKind::Repaired(kind)
+            | DefectKind::RepairedWhileReading(kind)
+            | DefectKind::ObjectRepaired(kind) => repair_tier(kind),
+
             DefectKind::OpenedLenient(_)
-            | DefectKind::Repaired(_)
-            | DefectKind::RepairedWhileReading(_)
             | DefectKind::HeaderMissing
             | DefectKind::HeaderVersionUnreadable
             | DefectKind::BinaryCommentMissing
@@ -295,7 +405,6 @@ impl DefectKind {
             | DefectKind::EntryPastSize { .. }
             | DefectKind::ObjectHeaderAbsent
             | DefectKind::ObjectHeaderMismatch { .. }
-            | DefectKind::ObjectRepaired(_)
             | DefectKind::ObjStmNotAStream { .. }
             | DefectKind::ObjStmHeaderMissing { .. }
             | DefectKind::ObjStmIndexOutOfRange { .. }
@@ -304,6 +413,35 @@ impl DefectKind {
             | DefectKind::StreamLengthUnresolved
             | DefectKind::StreamLengthNotExact { .. }
             | DefectKind::StreamDoesNotDecode => Tier::Structure,
+
+            // What the document says rather than how the file is laid out. A
+            // rewrite inherits every one of these from its source, which is
+            // why they are reported and never ratcheted.
+            DefectKind::PageNodeUntyped
+            | DefectKind::PageParentWrong { .. }
+            | DefectKind::PageCountWrong { .. }
+            | DefectKind::KidsMalformed
+            | DefectKind::PageTreeCycle
+            | DefectKind::MediaBoxAbsent
+            | DefectKind::MediaBoxDegenerate
+            | DefectKind::OutlineParentWrong
+            | DefectKind::OutlinePrevWrong
+            | DefectKind::OutlineNextWrong
+            | DefectKind::OutlineEndsWrong
+            | DefectKind::OutlineCountWrong { .. }
+            | DefectKind::OutlineTitleMissing
+            | DefectKind::AnnotSubtypeMissing
+            | DefectKind::AnnotRectMalformed
+            | DefectKind::AnnotRectUnordered
+            | DefectKind::LinkWithoutTarget
+            | DefectKind::ResourceUnresolved
+            | DefectKind::ExtGStateMalformed { .. }
+            | DefectKind::GroupMalformed { .. }
+            | DefectKind::ShadingMalformed { .. }
+            | DefectKind::FunctionMalformed { .. }
+            | DefectKind::PatternMalformed { .. }
+            | DefectKind::FontMalformed { .. }
+            | DefectKind::XObjectMalformed { .. } => Tier::Semantics,
         }
     }
 
@@ -350,6 +488,31 @@ impl DefectKind {
             DefectKind::StreamLengthUnresolved => "stream-length-unresolved",
             DefectKind::StreamLengthNotExact { .. } => "stream-length-not-exact",
             DefectKind::StreamDoesNotDecode => "stream-does-not-decode",
+            DefectKind::PageNodeUntyped => "page-node-untyped",
+            DefectKind::PageParentWrong { .. } => "page-parent-wrong",
+            DefectKind::PageCountWrong { .. } => "page-count-wrong",
+            DefectKind::KidsMalformed => "kids-malformed",
+            DefectKind::PageTreeCycle => "page-tree-cycle",
+            DefectKind::MediaBoxAbsent => "media-box-absent",
+            DefectKind::MediaBoxDegenerate => "media-box-degenerate",
+            DefectKind::OutlineParentWrong => "outline-parent-wrong",
+            DefectKind::OutlinePrevWrong => "outline-prev-wrong",
+            DefectKind::OutlineNextWrong => "outline-next-wrong",
+            DefectKind::OutlineEndsWrong => "outline-ends-wrong",
+            DefectKind::OutlineCountWrong { .. } => "outline-count-wrong",
+            DefectKind::OutlineTitleMissing => "outline-title-missing",
+            DefectKind::AnnotSubtypeMissing => "annot-subtype-missing",
+            DefectKind::AnnotRectMalformed => "annot-rect-malformed",
+            DefectKind::AnnotRectUnordered => "annot-rect-unordered",
+            DefectKind::LinkWithoutTarget => "link-without-target",
+            DefectKind::ResourceUnresolved => "resource-unresolved",
+            DefectKind::ExtGStateMalformed { .. } => "ext-gstate-malformed",
+            DefectKind::GroupMalformed { .. } => "group-malformed",
+            DefectKind::ShadingMalformed { .. } => "shading-malformed",
+            DefectKind::FunctionMalformed { .. } => "function-malformed",
+            DefectKind::PatternMalformed { .. } => "pattern-malformed",
+            DefectKind::FontMalformed { .. } => "font-malformed",
+            DefectKind::XObjectMalformed { .. } => "xobject-malformed",
         }
     }
 }
@@ -465,6 +628,72 @@ impl core::fmt::Display for DefectKind {
                 None => write!(f, "/Length {declared} and no endstream at all (7.3.8.1)"),
             },
             DefectKind::StreamDoesNotDecode => f.write_str("the filter chain refused it (7.4)"),
+            DefectKind::PageNodeUntyped => {
+                f.write_str("a node in the page tree is neither /Page nor /Pages (7.7.3.2)")
+            }
+            DefectKind::PageParentWrong { found } => match found {
+                Some(found) => write!(f, "/Parent names {found}, not the node above (7.7.3.2)"),
+                None => f.write_str("no /Parent at all (7.7.3.2)"),
+            },
+            DefectKind::PageCountWrong { declared, actual } => write!(
+                f,
+                "/Count {declared} against {actual} leaves below it (7.7.3.2)"
+            ),
+            DefectKind::KidsMalformed => {
+                f.write_str("/Kids is not an array of references (7.7.3.2)")
+            }
+            DefectKind::PageTreeCycle => f.write_str("the page tree loops (7.7.3.2)"),
+            DefectKind::MediaBoxAbsent => {
+                f.write_str("no /MediaBox on the page or any ancestor (7.7.3.3)")
+            }
+            DefectKind::MediaBoxDegenerate => {
+                f.write_str("/MediaBox is not four numbers enclosing an area (7.7.3.3)")
+            }
+            DefectKind::OutlineParentWrong => {
+                f.write_str("/Parent does not name the node above (12.3.3)")
+            }
+            DefectKind::OutlinePrevWrong => {
+                f.write_str("/Prev does not name the item before (12.3.3)")
+            }
+            DefectKind::OutlineNextWrong => {
+                f.write_str("/Next does not name the item after (12.3.3)")
+            }
+            DefectKind::OutlineEndsWrong => {
+                f.write_str("/First and /Last do not name the chain's ends (12.3.3)")
+            }
+            DefectKind::OutlineCountWrong { declared, actual } => write!(
+                f,
+                "/Count {declared} where the node exposes {actual} (Table 152)"
+            ),
+            DefectKind::OutlineTitleMissing => {
+                f.write_str("an outline item has no /Title (12.3.3)")
+            }
+            DefectKind::AnnotSubtypeMissing => {
+                f.write_str("an annotation has no /Subtype (Table 164)")
+            }
+            DefectKind::AnnotRectMalformed => f.write_str("/Rect is not four numbers (12.5.2)"),
+            DefectKind::AnnotRectUnordered => {
+                f.write_str("/Rect's corners are not in increasing order (12.5.2)")
+            }
+            DefectKind::LinkWithoutTarget => {
+                f.write_str("a link names neither /Dest nor /A (12.5.6.5)")
+            }
+            DefectKind::ResourceUnresolved => {
+                f.write_str("a name in a resource dictionary resolves to nothing (7.8.3)")
+            }
+            DefectKind::ExtGStateMalformed { entry } => {
+                write!(f, "the graphics state's {entry} (11.6.4.4)")
+            }
+            DefectKind::GroupMalformed { entry } => {
+                write!(f, "the transparency group's {entry} (11.6.6)")
+            }
+            DefectKind::ShadingMalformed { entry } => {
+                write!(f, "the shading's {entry} (8.7.4.5)")
+            }
+            DefectKind::FunctionMalformed { entry } => write!(f, "the function's {entry} (7.10)"),
+            DefectKind::PatternMalformed { entry } => write!(f, "the pattern's {entry} (8.7.3)"),
+            DefectKind::FontMalformed { entry } => write!(f, "the font's {entry} (9.7)"),
+            DefectKind::XObjectMalformed { entry } => write!(f, "the XObject's {entry} (8.8)"),
         }
     }
 }
@@ -503,6 +732,7 @@ pub fn validate(doc: &CosDocument) -> Vec<Defect> {
         buf: doc.bytes(),
         out: Vec::new(),
         seen_repairs: BTreeSet::new(),
+        visited: BTreeSet::new(),
     };
     let before = doc.warnings().len();
     v.ladder();
@@ -510,6 +740,7 @@ pub fn validate(doc: &CosDocument) -> Vec<Defect> {
     let sections = v.sections();
     v.trailer(&sections);
     v.entries(&sections);
+    v.semantics();
     v.repairs_raised_while_reading(before);
     v.out
 }
@@ -529,6 +760,54 @@ struct Section {
     trailer: Dict,
 }
 
+/// Which tier a repair belongs to, by what was repaired.
+///
+/// The file's syntax and its tables are the writer's whatever it was handed:
+/// a rewrite re-serialises every object, so a lexical repair in the *output*
+/// is this engine's own. Stream content and font programs are copied through,
+/// and the page and outline trees are the source's dictionaries — a rewrite of
+/// a document whose page tree loops produces a rewrite whose page tree loops.
+fn repair_tier(kind: WarningKind) -> Tier {
+    match kind {
+        WarningKind::PageTreeCycle
+        | WarningKind::PageTreeTruncated
+        | WarningKind::MediaBoxMissing
+        | WarningKind::PageCountMismatch
+        | WarningKind::TreeCycle
+        | WarningKind::TreeTruncated
+        | WarningKind::TreeOddEntries
+        | WarningKind::OutlineCycle
+        | WarningKind::OutlineTruncated
+        | WarningKind::FilterUnknown
+        | WarningKind::FilterParamsBad
+        | WarningKind::ImageCodecNotDecoded
+        | WarningKind::Filter(_)
+        | WarningKind::CMap(_)
+        | WarningKind::PredefinedCMapUnknown(_)
+        | WarningKind::PredefinedCMapApproximate(_) => Tier::Semantics,
+        _ => Tier::Structure,
+    }
+}
+
+/// Whether a leniency the reader performed is a defect in the *file*.
+///
+/// Two are not, and both say something about this build rather than about the
+/// document:
+///
+/// - [`WarningKind::ImageCodecNotDecoded`] is 7.4.9 working. A JPEG stays a
+///   JPEG until something wants pixels, and asking a DCT stream for bytes is
+///   how the validator checks that the chain resolves at all.
+/// - [`WarningKind::PredefinedCMapApproximate`] means the registry defines the
+///   CMap and this build did not compile its table in. The file is right; the
+///   binary is short. [`WarningKind::PredefinedCMapUnknown`] — no such CMap —
+///   stays a defect, because that one is the document's.
+fn is_a_defect(kind: WarningKind) -> bool {
+    !matches!(
+        kind,
+        WarningKind::ImageCodecNotDecoded | WarningKind::PredefinedCMapApproximate(_)
+    )
+}
+
 struct Validator<'a> {
     doc: &'a CosDocument,
     buf: &'a [u8],
@@ -537,6 +816,9 @@ struct Validator<'a> {
     /// one kind produces one defect rather than ten thousand. The report wants
     /// to know which rules a corpus breaks, not every instance of one.
     seen_repairs: BTreeSet<&'static str>,
+    /// Resources already checked. One font shared by a thousand pages is one
+    /// font, and a pattern whose own resources name it back is a loop.
+    visited: BTreeSet<ObjRef>,
 }
 
 impl Validator<'_> {
@@ -562,7 +844,7 @@ impl Validator<'_> {
             self.report(None, None, DefectKind::OpenedLenient(level));
         }
         for warning in self.doc.warnings() {
-            if self.seen_repairs.insert(warning.kind.as_str()) {
+            if is_a_defect(warning.kind) && self.seen_repairs.insert(warning.kind.as_str()) {
                 self.report(
                     warning.object,
                     Some(warning.offset),
@@ -580,7 +862,7 @@ impl Validator<'_> {
     /// the verdict — and they are the ones an ordinary open never shows.
     fn repairs_raised_while_reading(&mut self, before: usize) {
         for warning in self.doc.warnings().into_iter().skip(before) {
-            if self.seen_repairs.insert(warning.kind.as_str()) {
+            if is_a_defect(warning.kind) && self.seen_repairs.insert(warning.kind.as_str()) {
                 self.report(
                     warning.object,
                     Some(warning.offset),
@@ -986,7 +1268,7 @@ impl Validator<'_> {
     /// Parse-time repairs, one defect per distinct kind.
     fn repairs(&mut self, object: Option<ObjRef>, mut sink: WarningSink) {
         for warning in sink.take() {
-            if self.seen_repairs.insert(warning.kind.as_str()) {
+            if is_a_defect(warning.kind) && self.seen_repairs.insert(warning.kind.as_str()) {
                 self.report(
                     object.or(warning.object),
                     Some(warning.offset),
@@ -1325,6 +1607,1164 @@ impl Validator<'_> {
                 None,
                 DefectKind::ObjStmIndexOutOfRange { container, index },
             ),
+        }
+    }
+}
+
+/// The names the semantic rules need beyond the pre-interned set.
+///
+/// Interned once rather than per node: a page tree is walked whole, and a
+/// thousand-page document would otherwise take the intern table's lock ten
+/// thousand times to ask the same eleven questions.
+struct SemNames {
+    page: Name,
+    resources: Name,
+    font: Name,
+    x_object: Name,
+    ext_g_state: Name,
+    shading: Name,
+    pattern: Name,
+    group: Name,
+    s: Name,
+    cs: Name,
+    transparency: Name,
+    ca_lower: Name,
+    ca_upper: Name,
+    bm: Name,
+    smask: Name,
+    none: Name,
+    g: Name,
+    alpha: Name,
+    luminosity: Name,
+    shading_type: Name,
+    coords: Name,
+    function: Name,
+    function_type: Name,
+    domain: Name,
+    range: Name,
+    c0: Name,
+    c1: Name,
+    n_key: Name,
+    functions: Name,
+    bounds: Name,
+    encode: Name,
+    size: Name,
+    bits_per_sample: Name,
+    pattern_type: Name,
+    paint_type: Name,
+    tiling_type: Name,
+    bbox: Name,
+    x_step: Name,
+    y_step: Name,
+    form: Name,
+    image: Name,
+    width: Name,
+    height: Name,
+    color_space: Name,
+    bits_per_component: Name,
+    image_mask: Name,
+    type0: Name,
+    encoding: Name,
+    descendant_fonts: Name,
+    cid_system_info: Name,
+    registry: Name,
+    ordering: Name,
+    supplement: Name,
+    cid_to_gid_map: Name,
+    widths_key: Name,
+    font_descriptor: Name,
+    flags: Name,
+    to_unicode: Name,
+    base_font: Name,
+    annots: Name,
+    subtype: Name,
+    rect: Name,
+    link: Name,
+    dest: Name,
+    action: Name,
+    outlines: Name,
+    last: Name,
+    next: Name,
+    title: Name,
+}
+
+impl SemNames {
+    fn new(doc: &CosDocument) -> SemNames {
+        SemNames {
+            page: doc.intern(b"Page"),
+            resources: Name::RESOURCES,
+            font: doc.intern(b"Font"),
+            x_object: doc.intern(b"XObject"),
+            ext_g_state: doc.intern(b"ExtGState"),
+            shading: doc.intern(b"Shading"),
+            pattern: doc.intern(b"Pattern"),
+            group: doc.intern(b"Group"),
+            s: doc.intern(b"S"),
+            cs: doc.intern(b"CS"),
+            transparency: doc.intern(b"Transparency"),
+            ca_lower: doc.intern(b"ca"),
+            ca_upper: doc.intern(b"CA"),
+            bm: doc.intern(b"BM"),
+            smask: doc.intern(b"SMask"),
+            none: doc.intern(b"None"),
+            g: doc.intern(b"G"),
+            alpha: doc.intern(b"Alpha"),
+            luminosity: doc.intern(b"Luminosity"),
+            shading_type: doc.intern(b"ShadingType"),
+            coords: doc.intern(b"Coords"),
+            function: doc.intern(b"Function"),
+            function_type: doc.intern(b"FunctionType"),
+            domain: doc.intern(b"Domain"),
+            range: doc.intern(b"Range"),
+            c0: doc.intern(b"C0"),
+            c1: doc.intern(b"C1"),
+            n_key: doc.intern(b"N"),
+            functions: doc.intern(b"Functions"),
+            bounds: doc.intern(b"Bounds"),
+            encode: doc.intern(b"Encode"),
+            size: doc.intern(b"Size"),
+            bits_per_sample: doc.intern(b"BitsPerSample"),
+            pattern_type: doc.intern(b"PatternType"),
+            paint_type: doc.intern(b"PaintType"),
+            tiling_type: doc.intern(b"TilingType"),
+            bbox: doc.intern(b"BBox"),
+            x_step: doc.intern(b"XStep"),
+            y_step: doc.intern(b"YStep"),
+            form: doc.intern(b"Form"),
+            image: doc.intern(b"Image"),
+            width: doc.intern(b"Width"),
+            height: doc.intern(b"Height"),
+            color_space: doc.intern(b"ColorSpace"),
+            bits_per_component: doc.intern(b"BitsPerComponent"),
+            image_mask: doc.intern(b"ImageMask"),
+            type0: doc.intern(b"Type0"),
+            encoding: doc.intern(b"Encoding"),
+            descendant_fonts: doc.intern(b"DescendantFonts"),
+            cid_system_info: doc.intern(b"CIDSystemInfo"),
+            registry: doc.intern(b"Registry"),
+            ordering: doc.intern(b"Ordering"),
+            supplement: doc.intern(b"Supplement"),
+            cid_to_gid_map: doc.intern(b"CIDToGIDMap"),
+            widths_key: Name::W,
+            font_descriptor: doc.intern(b"FontDescriptor"),
+            flags: doc.intern(b"Flags"),
+            to_unicode: doc.intern(b"ToUnicode"),
+            base_font: doc.intern(b"BaseFont"),
+            annots: doc.intern(b"Annots"),
+            subtype: doc.intern(b"Subtype"),
+            rect: doc.intern(b"Rect"),
+            link: doc.intern(b"Link"),
+            dest: doc.intern(b"Dest"),
+            action: doc.intern(b"A"),
+            outlines: doc.intern(b"Outlines"),
+            last: doc.intern(b"Last"),
+            next: doc.intern(b"Next"),
+            title: doc.intern(b"Title"),
+        }
+    }
+}
+
+/// How deep either tree may go before this stops walking.
+///
+/// The reader has its own caps and warns when it hits them; this one is here
+/// so a hostile file cannot recurse the validator, and it is deliberately
+/// generous — a page tree that deep is already reported by the reader.
+const MAX_WALK_DEPTH: u32 = 64;
+
+impl Validator<'_> {
+    /// The document's own structures, as against the file's layout.
+    ///
+    /// Everything here is [`Tier::Semantics`]: a rewrite copies these
+    /// dictionaries from whatever it was handed, so a defect found in the
+    /// rewrite of somebody else's file is that file's and is reported rather
+    /// than ratcheted.
+    fn semantics(&mut self) {
+        let Some(catalog) = self.doc.catalog() else {
+            return;
+        };
+        let names = SemNames::new(self.doc);
+
+        if let Some(root) = catalog.get_ref(Name::PAGES) {
+            let mut seen = BTreeSet::new();
+            self.page_node(&names, root, None, Inherited::default(), 0, &mut seen);
+        }
+        if let Some(root) = catalog.get_ref(names.outlines) {
+            self.outline_root(&names, root);
+        }
+    }
+
+    /// One node of the page tree, returning the leaves below it.
+    fn page_node(
+        &mut self,
+        names: &SemNames,
+        node: ObjRef,
+        parent: Option<ObjRef>,
+        inherited: Inherited,
+        depth: u32,
+        seen: &mut BTreeSet<ObjRef>,
+    ) -> u64 {
+        if depth > MAX_WALK_DEPTH {
+            return 0;
+        }
+        if !seen.insert(node) {
+            self.report(Some(node), None, DefectKind::PageTreeCycle);
+            return 0;
+        }
+        let Ok(object) = self.doc.get(node) else {
+            return 0;
+        };
+        let Some(dict) = object.as_dict().cloned() else {
+            self.report(Some(node), None, DefectKind::PageNodeUntyped);
+            return 0;
+        };
+
+        // 7.7.3.2: every node but the root names the node above it. The reader
+        // walks downwards and never asks, so a tree with every `/Parent`
+        // deleted paginates, renders and round-trips — and a viewer that walks
+        // up from a page, which is how "which chapter is this" is answered,
+        // finds nothing.
+        if parent.is_some() {
+            let declared = dict.get_ref(Name::PARENT);
+            if declared != parent {
+                self.report(
+                    Some(node),
+                    None,
+                    DefectKind::PageParentWrong { found: declared },
+                );
+            }
+        }
+
+        // 7.7.3.3: inheritable, so a page with none is only wrong if no
+        // ancestor had one either.
+        let own_box = dict.contains_key(Name::MEDIA_BOX);
+        if own_box {
+            self.media_box(node, &dict);
+        }
+        // 7.7.3.4: `/Resources` is inheritable too, and a page that names none
+        // uses the nearest ancestor's rather than having none.
+        let own_resources = self
+            .doc
+            .resolve_key(&dict, names.resources)
+            .as_dict()
+            .cloned();
+        let inherited = Inherited {
+            media_box: own_box || inherited.media_box,
+            resources: own_resources.or(inherited.resources),
+        };
+
+        let kind = dict.get_name(Name::TYPE);
+        if kind == Some(names.page) {
+            if !inherited.media_box {
+                self.report(Some(node), None, DefectKind::MediaBoxAbsent);
+            }
+            self.annotations(names, node, &dict);
+            if let Some(resources) = inherited.resources {
+                self.resources(names, Some(node), &resources, 0);
+            }
+            return 1;
+        }
+        if kind != Some(Name::PAGES) {
+            self.report(Some(node), None, DefectKind::PageNodeUntyped);
+            return 0;
+        }
+
+        // 7.7.3.2: kids are indirect references, which is what lets a tree be
+        // shared and a page be found twice.
+        let Some(kids) = dict.get_array(Name::KIDS).map(<[Object]>::to_vec) else {
+            self.report(Some(node), None, DefectKind::KidsMalformed);
+            return 0;
+        };
+        let mut leaves = 0u64;
+        for kid in &kids {
+            match kid.as_objref() {
+                Some(kid) => {
+                    leaves +=
+                        self.page_node(names, kid, Some(node), inherited.clone(), depth + 1, seen);
+                }
+                None => self.report(Some(node), None, DefectKind::KidsMalformed),
+            }
+        }
+
+        if let Some(declared) = dict.get_int(Name::COUNT) {
+            if declared != i64::try_from(leaves).unwrap_or(i64::MAX) {
+                self.report(
+                    Some(node),
+                    None,
+                    DefectKind::PageCountWrong {
+                        declared,
+                        actual: leaves,
+                    },
+                );
+            }
+        } else {
+            self.report(
+                Some(node),
+                None,
+                DefectKind::PageCountWrong {
+                    declared: 0,
+                    actual: leaves,
+                },
+            );
+        }
+        leaves
+    }
+
+    /// 7.7.3.3: four numbers, and an area rather than a line.
+    fn media_box(&mut self, node: ObjRef, dict: &Dict) {
+        let value = self.doc.resolve_key(dict, Name::MEDIA_BOX);
+        let Some(box_) = value.as_array() else {
+            self.report(Some(node), None, DefectKind::MediaBoxDegenerate);
+            return;
+        };
+        let numbers: Option<Vec<f64>> = (box_.len() == 4)
+            .then(|| {
+                box_.iter()
+                    .map(Object::as_number)
+                    .collect::<Option<Vec<f64>>>()
+            })
+            .flatten();
+        let Some(numbers) = numbers else {
+            self.report(Some(node), None, DefectKind::MediaBoxDegenerate);
+            return;
+        };
+        let width = (numbers[2] - numbers[0]).abs();
+        let height = (numbers[3] - numbers[1]).abs();
+        if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+            self.report(Some(node), None, DefectKind::MediaBoxDegenerate);
+        }
+    }
+
+    /// 12.5: the annotations a page carries.
+    fn annotations(&mut self, names: &SemNames, page: ObjRef, dict: &Dict) {
+        let value = self.doc.resolve_key(dict, names.annots);
+        let Some(annots) = value.as_array().map(<[Object]>::to_vec) else {
+            return;
+        };
+        for entry in annots {
+            let reference = entry.as_objref();
+            let resolved = self.doc.resolve(&entry);
+            let Some(annot) = resolved.as_dict() else {
+                continue;
+            };
+            let at = reference.or(Some(page));
+
+            let subtype = annot.get_name(names.subtype);
+            if subtype.is_none() {
+                self.report(at, None, DefectKind::AnnotSubtypeMissing);
+            }
+
+            match annot.get_array(names.rect) {
+                Some(rect) if rect.len() == 4 => {
+                    let numbers: Option<Vec<f64>> = rect
+                        .iter()
+                        .map(Object::as_number)
+                        .collect::<Option<Vec<f64>>>();
+                    match numbers {
+                        // 12.5.2: the corners are stated lower-left then
+                        // upper-right, and a viewer that takes them as written
+                        // draws an inverted hot spot from a reversed pair. Our
+                        // own reader normalises them on the way out, which is
+                        // exactly why nothing else here notices.
+                        Some(numbers) => {
+                            if numbers[0] > numbers[2] || numbers[1] > numbers[3] {
+                                self.report(at, None, DefectKind::AnnotRectUnordered);
+                            }
+                        }
+                        None => self.report(at, None, DefectKind::AnnotRectMalformed),
+                    }
+                }
+                _ => self.report(at, None, DefectKind::AnnotRectMalformed),
+            }
+
+            // 12.5.6.5: a link with neither a destination nor an action is a
+            // rectangle that does nothing.
+            if subtype == Some(names.link)
+                && !annot.contains_key(names.dest)
+                && !annot.contains_key(names.action)
+            {
+                self.report(at, None, DefectKind::LinkWithoutTarget);
+            }
+        }
+    }
+
+    /// 12.3.3: the outline's root, and the chain below it.
+    fn outline_root(&mut self, names: &SemNames, root: ObjRef) {
+        let Ok(object) = self.doc.get(root) else {
+            return;
+        };
+        let Some(dict) = object.as_dict().cloned() else {
+            return;
+        };
+
+        let mut seen = BTreeSet::new();
+        let (visible, ends) =
+            self.outline_chain(names, dict.get_ref(Name::FIRST), root, 0, &mut seen);
+
+        // The root states every item the tree exposes, and is the one node
+        // that cannot be closed.
+        if let Some(declared) = dict.get_int(Name::COUNT) {
+            if declared != visible {
+                self.report(
+                    Some(root),
+                    None,
+                    DefectKind::OutlineCountWrong {
+                        declared,
+                        actual: visible,
+                    },
+                );
+            }
+        }
+        if ends != (dict.get_ref(Name::FIRST), dict.get_ref(names.last)) {
+            self.report(Some(root), None, DefectKind::OutlineEndsWrong);
+        }
+    }
+
+    /// One sibling chain: how many items it exposes, and its two ends.
+    fn outline_chain(
+        &mut self,
+        names: &SemNames,
+        first: Option<ObjRef>,
+        parent: ObjRef,
+        depth: u32,
+        seen: &mut BTreeSet<ObjRef>,
+    ) -> (i64, (Option<ObjRef>, Option<ObjRef>)) {
+        if depth > MAX_WALK_DEPTH {
+            return (0, (None, None));
+        }
+
+        let mut exposed = 0i64;
+        let mut previous: Option<ObjRef> = None;
+        let mut cursor = first;
+        let mut last = None;
+        while let Some(item) = cursor {
+            // A `/Next` that names an item already visited, or something that
+            // is not an outline item at all, is a chain a reader walks off the
+            // end of. Reported against the item that named it.
+            if !seen.insert(item) {
+                self.report(previous, None, DefectKind::OutlineNextWrong);
+                break;
+            }
+            let Ok(object) = self.doc.get(item) else {
+                self.report(previous, None, DefectKind::OutlineNextWrong);
+                break;
+            };
+            let Some(dict) = object.as_dict().cloned() else {
+                self.report(previous, None, DefectKind::OutlineNextWrong);
+                break;
+            };
+
+            if !dict.contains_key(names.title) {
+                self.report(Some(item), None, DefectKind::OutlineTitleMissing);
+            }
+            if dict.get_ref(Name::PARENT) != Some(parent) {
+                self.report(Some(item), None, DefectKind::OutlineParentWrong);
+            }
+            // The back half of the chain. Deleting every `/Prev` survives every
+            // round trip this repository had before the validator existed: the
+            // reader walks `/Next` forward, which is enough to build the tree,
+            // and a viewer walking up from a selected entry is the only thing
+            // that ever notices.
+            if dict.get_ref(Name::PREV) != previous {
+                self.report(Some(item), None, DefectKind::OutlinePrevWrong);
+            }
+
+            let children =
+                self.outline_chain(names, dict.get_ref(Name::FIRST), item, depth + 1, seen);
+            let (below, child_ends) = children;
+            if dict.contains_key(Name::FIRST) || dict.contains_key(names.last) {
+                if child_ends != (dict.get_ref(Name::FIRST), dict.get_ref(names.last)) {
+                    self.report(Some(item), None, DefectKind::OutlineEndsWrong);
+                }
+                // Table 152: an open item states how many items it exposes, a
+                // closed one states the negative of that, and either way the
+                // magnitude is the same number.
+                match dict.get_int(Name::COUNT) {
+                    Some(declared) if declared.abs() == below => {
+                        if declared > 0 {
+                            exposed += below;
+                        }
+                    }
+                    declared => self.report(
+                        Some(item),
+                        None,
+                        DefectKind::OutlineCountWrong {
+                            declared: declared.unwrap_or(0),
+                            actual: below,
+                        },
+                    ),
+                }
+            }
+            exposed += 1;
+
+            let following = dict.get_ref(names.next);
+            previous = Some(item);
+            last = Some(item);
+            cursor = following;
+        }
+
+        (exposed, (first, last))
+    }
+}
+
+/// What 7.7.3.4 lets a page take from the node above it.
+#[derive(Clone, Default)]
+struct Inherited {
+    media_box: bool,
+    resources: Option<Dict>,
+}
+
+/// 11.3.5's separable and non-separable blend modes, and nothing else.
+const BLEND_MODES: &[&[u8]] = &[
+    b"Normal",
+    b"Compatible",
+    b"Multiply",
+    b"Screen",
+    b"Overlay",
+    b"Darken",
+    b"Lighten",
+    b"ColorDodge",
+    b"ColorBurn",
+    b"HardLight",
+    b"SoftLight",
+    b"Difference",
+    b"Exclusion",
+    b"Hue",
+    b"Saturation",
+    b"Color",
+    b"Luminosity",
+];
+
+impl Validator<'_> {
+    /// One resource dictionary, and everything it names (7.8.3).
+    ///
+    /// The tolerant reader consults a *form's* resources nowhere at all, which
+    /// `features/rendering.md` records as a gap; this walks them, because a
+    /// dictionary nothing reads is a dictionary nothing checks.
+    fn resources(&mut self, names: &SemNames, at: Option<ObjRef>, res: &Dict, depth: u32) {
+        if depth > MAX_WALK_DEPTH {
+            return;
+        }
+        for category in [
+            names.font,
+            names.x_object,
+            names.ext_g_state,
+            names.shading,
+            names.pattern,
+        ] {
+            let value = self.doc.resolve_key(res, category);
+            let Some(dict) = value.as_dict().cloned() else {
+                continue;
+            };
+            for (_, entry) in dict.entries().to_vec() {
+                let reference = entry.as_objref();
+                if let Some(reference) = reference {
+                    if !self.visited.insert(reference) {
+                        continue;
+                    }
+                }
+                let resolved = self.doc.resolve(&entry);
+                let Some(item) = resolved.as_dict().cloned() else {
+                    // 7.8.3: a name that resolves to nothing is a name the
+                    // content stream will use and the reader will skip.
+                    self.report(reference.or(at), None, DefectKind::ResourceUnresolved);
+                    continue;
+                };
+                let at = reference.or(at);
+                if category == names.font {
+                    self.font(names, at, &item, depth);
+                } else if category == names.x_object {
+                    self.xobject(names, at, &resolved, &item, depth);
+                } else if category == names.ext_g_state {
+                    self.ext_gstate(names, at, &item, depth);
+                } else if category == names.shading {
+                    self.shading(names, at, &item, depth);
+                } else {
+                    self.pattern(names, at, &resolved, &item, depth);
+                }
+            }
+        }
+    }
+
+    /// 11.6.4.4 and 11.3.5: the graphics state parameters.
+    fn ext_gstate(&mut self, names: &SemNames, at: Option<ObjRef>, dict: &Dict, depth: u32) {
+        for (key, entry) in [(names.ca_lower, "/ca"), (names.ca_upper, "/CA")] {
+            if let Some(value) = dict.get(key) {
+                let alpha = value.as_number();
+                if !alpha.is_some_and(|a| (0.0..=1.0).contains(&a)) {
+                    self.report(at, None, DefectKind::ExtGStateMalformed { entry });
+                }
+            }
+        }
+
+        if let Some(value) = dict.get(names.bm) {
+            let known = |name: Name| {
+                self.doc
+                    .name_bytes(name)
+                    .is_some_and(|bytes| BLEND_MODES.contains(&&bytes[..]))
+            };
+            let ok = match value {
+                Object::Name(name) => known(*name),
+                // 11.6.4.4: an array of names, first supported one wins.
+                Object::Array(names) => names
+                    .iter()
+                    .all(|value| value.as_name().is_some_and(&known)),
+                _ => false,
+            };
+            if !ok {
+                self.report(at, None, DefectKind::ExtGStateMalformed { entry: "/BM" });
+            }
+        }
+
+        // 11.6.5.2: a soft mask is `/None` or a dictionary naming a group.
+        if let Some(value) = dict.get(names.smask) {
+            let resolved = self.doc.resolve(value);
+            match resolved.as_ref() {
+                Object::Name(name) if *name == names.none => {}
+                Object::Dict(mask) => {
+                    let kind = mask.get_name(names.s);
+                    if kind != Some(names.alpha) && kind != Some(names.luminosity) {
+                        self.report(
+                            at,
+                            None,
+                            DefectKind::ExtGStateMalformed { entry: "/SMask /S" },
+                        );
+                    }
+                    let group = self.doc.resolve_key(mask, names.g);
+                    match group.as_dict() {
+                        Some(form) => {
+                            let form = form.clone();
+                            self.group(names, at, &form);
+                        }
+                        None => self.report(
+                            at,
+                            None,
+                            DefectKind::ExtGStateMalformed { entry: "/SMask /G" },
+                        ),
+                    }
+                }
+                _ => self.report(at, None, DefectKind::ExtGStateMalformed { entry: "/SMask" }),
+            }
+        }
+
+        let _ = depth;
+    }
+
+    /// 11.6.6: a transparency group's own dictionary.
+    fn group(&mut self, names: &SemNames, at: Option<ObjRef>, holder: &Dict) {
+        let value = self.doc.resolve_key(holder, names.group);
+        let Some(group) = value.as_dict() else {
+            return;
+        };
+        if group.get_name(names.s) != Some(names.transparency) {
+            self.report(at, None, DefectKind::GroupMalformed { entry: "/S" });
+        }
+        // 11.6.6: the group's colour space is a name or an array, and a group
+        // declared in one this engine composites in another is the whole of
+        // the roadmap's transparency item — so an unreadable /CS is a defect
+        // rather than something to default away.
+        if let Some(cs) = group.get(names.cs) {
+            let resolved = self.doc.resolve(cs);
+            if !matches!(resolved.as_ref(), Object::Name(_) | Object::Array(_)) {
+                self.report(at, None, DefectKind::GroupMalformed { entry: "/CS" });
+            }
+        }
+    }
+
+    /// 8.7.4.5: a shading dictionary, by its own type.
+    fn shading(&mut self, names: &SemNames, at: Option<ObjRef>, dict: &Dict, depth: u32) {
+        let Some(kind) = dict.get_int(names.shading_type) else {
+            self.report(
+                at,
+                None,
+                DefectKind::ShadingMalformed {
+                    entry: "/ShadingType",
+                },
+            );
+            return;
+        };
+        if !(1..=7).contains(&kind) {
+            self.report(
+                at,
+                None,
+                DefectKind::ShadingMalformed {
+                    entry: "/ShadingType",
+                },
+            );
+            return;
+        }
+
+        // 8.7.4.5.3 and 8.7.4.5.4: four numbers for an axis, six for two
+        // circles, and the arity is the whole difference between them.
+        let wanted = match kind {
+            2 => Some(4),
+            3 => Some(6),
+            _ => None,
+        };
+        if let Some(wanted) = wanted {
+            let coords = self.doc.resolve_key(dict, names.coords);
+            let ok = coords
+                .as_array()
+                .is_some_and(|c| c.len() == wanted && c.iter().all(|v| v.as_number().is_some()));
+            if !ok {
+                self.report(at, None, DefectKind::ShadingMalformed { entry: "/Coords" });
+            }
+        }
+
+        if matches!(kind, 1..=3) {
+            let function = self.doc.resolve_key(dict, names.function);
+            match function.as_ref() {
+                Object::Dict(_) | Object::Stream(_) => {
+                    let function = function.as_dict().cloned().unwrap_or_default();
+                    self.function(names, at, &function, depth + 1);
+                }
+                Object::Array(entries) => {
+                    for entry in entries.clone() {
+                        let resolved = self.doc.resolve(&entry);
+                        match resolved.as_dict() {
+                            Some(function) => {
+                                let function = function.clone();
+                                self.function(names, at, &function, depth + 1);
+                            }
+                            None => self.report(
+                                at,
+                                None,
+                                DefectKind::ShadingMalformed { entry: "/Function" },
+                            ),
+                        }
+                    }
+                }
+                _ => self.report(
+                    at,
+                    None,
+                    DefectKind::ShadingMalformed { entry: "/Function" },
+                ),
+            }
+        }
+    }
+
+    /// 7.10: a function, by its own type.
+    fn function(&mut self, names: &SemNames, at: Option<ObjRef>, dict: &Dict, depth: u32) {
+        if depth > MAX_WALK_DEPTH {
+            return;
+        }
+        let numbers = |value: &Object| -> Option<usize> {
+            value
+                .as_array()
+                .filter(|a| a.iter().all(|v| v.as_number().is_some()))
+                .map(<[Object]>::len)
+        };
+
+        // 7.10.2: every function states its domain. The reader defaults a
+        // missing one to [0 1], which is why nothing else notices.
+        let domain = self.doc.resolve_key(dict, names.domain);
+        match numbers(&domain) {
+            Some(len) if len >= 2 && len % 2 == 0 => {}
+            _ => self.report(at, None, DefectKind::FunctionMalformed { entry: "/Domain" }),
+        }
+
+        let Some(kind) = dict.get_int(names.function_type) else {
+            self.report(
+                at,
+                None,
+                DefectKind::FunctionMalformed {
+                    entry: "/FunctionType",
+                },
+            );
+            return;
+        };
+
+        match kind {
+            // 7.10.2: sampled, and the sample table needs its shape stated.
+            0 => {
+                let size = self.doc.resolve_key(dict, names.size);
+                if size.as_array().is_none_or(<[Object]>::is_empty) {
+                    self.report(at, None, DefectKind::FunctionMalformed { entry: "/Size" });
+                }
+                if dict.get_int(names.bits_per_sample).is_none() {
+                    self.report(
+                        at,
+                        None,
+                        DefectKind::FunctionMalformed {
+                            entry: "/BitsPerSample",
+                        },
+                    );
+                }
+                if numbers(&self.doc.resolve_key(dict, names.range)).is_none() {
+                    self.report(at, None, DefectKind::FunctionMalformed { entry: "/Range" });
+                }
+            }
+            // 7.10.3: exponential interpolation between two tuples.
+            2 => {
+                let c0 = numbers(&self.doc.resolve_key(dict, names.c0)).unwrap_or(1);
+                let c1 = numbers(&self.doc.resolve_key(dict, names.c1)).unwrap_or(1);
+                if c0 != c1 {
+                    self.report(
+                        at,
+                        None,
+                        DefectKind::FunctionMalformed {
+                            entry: "/C0 and /C1",
+                        },
+                    );
+                }
+                if dict.get_number(names.n_key).is_none() {
+                    self.report(at, None, DefectKind::FunctionMalformed { entry: "/N" });
+                }
+            }
+            // 7.10.4: k sub-functions, k-1 bounds, k encode pairs.
+            3 => {
+                let value = self.doc.resolve_key(dict, names.functions);
+                let Some(sub) = value.as_array().map(<[Object]>::to_vec) else {
+                    self.report(
+                        at,
+                        None,
+                        DefectKind::FunctionMalformed {
+                            entry: "/Functions",
+                        },
+                    );
+                    return;
+                };
+                let k = sub.len();
+                if numbers(&self.doc.resolve_key(dict, names.bounds)) != Some(k.saturating_sub(1)) {
+                    self.report(at, None, DefectKind::FunctionMalformed { entry: "/Bounds" });
+                }
+                if numbers(&self.doc.resolve_key(dict, names.encode)) != Some(k * 2) {
+                    self.report(at, None, DefectKind::FunctionMalformed { entry: "/Encode" });
+                }
+                for entry in sub {
+                    let resolved = self.doc.resolve(&entry);
+                    if let Some(function) = resolved.as_dict() {
+                        let function = function.clone();
+                        self.function(names, at, &function, depth + 1);
+                    }
+                }
+            }
+            // 7.10.5: a PostScript calculator, whose range is not optional.
+            4 => {
+                if numbers(&self.doc.resolve_key(dict, names.range)).is_none() {
+                    self.report(at, None, DefectKind::FunctionMalformed { entry: "/Range" });
+                }
+            }
+            _ => self.report(
+                at,
+                None,
+                DefectKind::FunctionMalformed {
+                    entry: "/FunctionType",
+                },
+            ),
+        }
+    }
+
+    /// 8.7.3: a tiling pattern's cell and spacing, or a shading pattern.
+    fn pattern(
+        &mut self,
+        names: &SemNames,
+        at: Option<ObjRef>,
+        object: &Object,
+        dict: &Dict,
+        depth: u32,
+    ) {
+        match dict.get_int(names.pattern_type) {
+            Some(1) => {
+                if object.as_stream().is_none() {
+                    self.report(
+                        at,
+                        None,
+                        DefectKind::PatternMalformed {
+                            entry: "cell, which is a stream",
+                        },
+                    );
+                }
+                self.rectangle(at, dict, names.bbox, |entry| DefectKind::PatternMalformed {
+                    entry,
+                });
+                // 8.7.3.1: the steps are what a cell repeats at, and a zero
+                // one is a pattern that paints one cell forever. The reader
+                // falls back to the cell's own size, so it draws either way.
+                for (key, entry) in [(names.x_step, "/XStep"), (names.y_step, "/YStep")] {
+                    let step = self.doc.resolve_key(dict, key);
+                    if !step.as_number().is_some_and(|v| v != 0.0 && v.is_finite()) {
+                        self.report(at, None, DefectKind::PatternMalformed { entry });
+                    }
+                }
+                if !matches!(dict.get_int(names.paint_type), Some(1 | 2)) {
+                    self.report(
+                        at,
+                        None,
+                        DefectKind::PatternMalformed {
+                            entry: "/PaintType",
+                        },
+                    );
+                }
+                if !matches!(dict.get_int(names.tiling_type), Some(1..=3)) {
+                    self.report(
+                        at,
+                        None,
+                        DefectKind::PatternMalformed {
+                            entry: "/TilingType",
+                        },
+                    );
+                }
+                let resources = self.doc.resolve_key(dict, names.resources);
+                if let Some(resources) = resources.as_dict().cloned() {
+                    self.resources(names, at, &resources, depth + 1);
+                }
+            }
+            Some(2) => {
+                let shading = self.doc.resolve_key(dict, names.shading);
+                match shading.as_dict() {
+                    Some(shading) => {
+                        let shading = shading.clone();
+                        self.shading(names, at, &shading, depth + 1);
+                    }
+                    None => {
+                        self.report(at, None, DefectKind::PatternMalformed { entry: "/Shading" })
+                    }
+                }
+            }
+            _ => self.report(
+                at,
+                None,
+                DefectKind::PatternMalformed {
+                    entry: "/PatternType",
+                },
+            ),
+        }
+    }
+
+    /// 8.8: an image or a form.
+    fn xobject(
+        &mut self,
+        names: &SemNames,
+        at: Option<ObjRef>,
+        object: &Object,
+        dict: &Dict,
+        depth: u32,
+    ) {
+        let subtype = dict.get_name(names.subtype);
+        if object.as_stream().is_none() {
+            self.report(
+                at,
+                None,
+                DefectKind::XObjectMalformed {
+                    entry: "body, which is a stream",
+                },
+            );
+            return;
+        }
+
+        if subtype == Some(names.form) {
+            self.rectangle(at, dict, names.bbox, |entry| DefectKind::XObjectMalformed {
+                entry,
+            });
+            self.group(names, at, dict);
+            let resources = self.doc.resolve_key(dict, names.resources);
+            if let Some(resources) = resources.as_dict().cloned() {
+                self.resources(names, at, &resources, depth + 1);
+            }
+            return;
+        }
+        if subtype != Some(names.image) {
+            self.report(at, None, DefectKind::XObjectMalformed { entry: "/Subtype" });
+            return;
+        }
+
+        for (key, entry) in [(names.width, "/Width"), (names.height, "/Height")] {
+            let value = self.doc.resolve_key(dict, key);
+            if value.as_int().is_none_or(|v| v <= 0) {
+                self.report(at, None, DefectKind::XObjectMalformed { entry });
+            }
+        }
+
+        // 8.9.5: a stencil mask states neither, and a JPEG 2000 image may
+        // carry its own colour space inside the codestream (8.9.5.4).
+        let stencil = dict.get_bool(names.image_mask) == Some(true);
+        let jpx = self
+            .doc
+            .filter_chain(dict, &mut WarningSink::new())
+            .iter()
+            .any(|spec| spec.filter == tinker_pdf_filters::Filter::Jpx);
+        if !stencil && !jpx {
+            if !dict.contains_key(names.color_space) {
+                self.report(
+                    at,
+                    None,
+                    DefectKind::XObjectMalformed {
+                        entry: "/ColorSpace",
+                    },
+                );
+            }
+            if dict.get_int(names.bits_per_component).is_none() {
+                self.report(
+                    at,
+                    None,
+                    DefectKind::XObjectMalformed {
+                        entry: "/BitsPerComponent",
+                    },
+                );
+            }
+        }
+    }
+
+    /// 9.5–9.7: a font, by whether it is composite.
+    fn font(&mut self, names: &SemNames, at: Option<ObjRef>, dict: &Dict, depth: u32) {
+        let Some(subtype) = dict.get_name(names.subtype) else {
+            self.report(at, None, DefectKind::FontMalformed { entry: "/Subtype" });
+            return;
+        };
+        if subtype != names.type0 {
+            // 9.6.2: a simple font names the face it wants.
+            if dict.get_name(names.base_font).is_none() {
+                self.report(at, None, DefectKind::FontMalformed { entry: "/BaseFont" });
+            }
+            return;
+        }
+
+        // 9.7.4: the encoding is what turns a string's bytes into CIDs, and
+        // without it nothing can say how wide a code even is.
+        let encoding = self.doc.resolve_key(dict, names.encoding);
+        if !matches!(encoding.as_ref(), Object::Name(_) | Object::Stream(_)) {
+            self.report(at, None, DefectKind::FontMalformed { entry: "/Encoding" });
+        }
+
+        // 9.7.1: exactly one descendant, which is where the metrics live.
+        let descendants = self.doc.resolve_key(dict, names.descendant_fonts);
+        let descendant = descendants
+            .as_array()
+            .filter(|entries| entries.len() == 1)
+            .and_then(<[Object]>::first)
+            .map(|entry| self.doc.resolve(entry));
+        let Some(descendant) = descendant.as_ref().and_then(|d| d.as_dict()).cloned() else {
+            self.report(
+                at,
+                None,
+                DefectKind::FontMalformed {
+                    entry: "/DescendantFonts",
+                },
+            );
+            return;
+        };
+
+        // 9.7.3: the registry, ordering and supplement a CID is meaningful in.
+        let info = self.doc.resolve_key(&descendant, names.cid_system_info);
+        let complete = info.as_dict().is_some_and(|info| {
+            info.get_string(names.registry).is_some()
+                && info.get_string(names.ordering).is_some()
+                && info.get_int(names.supplement).is_some()
+        });
+        if !complete {
+            self.report(
+                at,
+                None,
+                DefectKind::FontMalformed {
+                    entry: "/CIDSystemInfo",
+                },
+            );
+        }
+
+        // 9.7.4.2: a name or a stream. Absent means /Identity, which is legal.
+        if let Some(map) = descendant.get(names.cid_to_gid_map) {
+            let resolved = self.doc.resolve(map);
+            if !matches!(resolved.as_ref(), Object::Name(_) | Object::Stream(_)) {
+                self.report(
+                    at,
+                    None,
+                    DefectKind::FontMalformed {
+                        entry: "/CIDToGIDMap",
+                    },
+                );
+            }
+        }
+
+        // 9.7.4.3: `c [w1 w2 ...]` or `first last w`, and nothing else.
+        if let Some(widths) = self
+            .doc
+            .resolve_key(&descendant, names.widths_key)
+            .as_array()
+        {
+            let mut index = 0usize;
+            let mut ok = true;
+            while index < widths.len() {
+                let start = widths.get(index).and_then(Object::as_int);
+                let second = widths.get(index + 1).map(|value| self.doc.resolve(value));
+                match (start, second.as_ref().map(|value| value.as_ref())) {
+                    (Some(_), Some(Object::Array(run))) => {
+                        ok &= run.iter().all(|w| w.as_number().is_some());
+                        index += 2;
+                    }
+                    (Some(first), Some(Object::Int(last))) => {
+                        ok &= *last >= first
+                            && widths.get(index + 2).and_then(Object::as_number).is_some();
+                        index += 3;
+                    }
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                self.report(at, None, DefectKind::FontMalformed { entry: "/W" });
+            }
+        }
+
+        // 9.8: the descriptor, and the one flag a symbolic font cannot omit.
+        let descriptor = self.doc.resolve_key(&descendant, names.font_descriptor);
+        let flagged = descriptor
+            .as_dict()
+            .is_some_and(|d| d.get_int(names.flags).is_some());
+        if !flagged {
+            self.report(
+                at,
+                None,
+                DefectKind::FontMalformed {
+                    entry: "/FontDescriptor",
+                },
+            );
+        }
+
+        // 9.10.3: a `/ToUnicode` that is not a CMap maps nothing, and text
+        // extraction silently returns the codes instead of the characters.
+        if let Some(map) = dict.get_ref(names.to_unicode) {
+            let readable = self
+                .doc
+                .stream_decoded(map)
+                .ok()
+                .is_some_and(|data| find(&data, b"begincmap").is_some());
+            if !readable {
+                self.report(
+                    at,
+                    None,
+                    DefectKind::FontMalformed {
+                        entry: "/ToUnicode",
+                    },
+                );
+            }
+        }
+
+        let _ = depth;
+    }
+
+    /// Four numbers enclosing an area, under whichever rule wants them.
+    fn rectangle(
+        &mut self,
+        at: Option<ObjRef>,
+        dict: &Dict,
+        key: Name,
+        kind: impl Fn(&'static str) -> DefectKind,
+    ) {
+        let value = self.doc.resolve_key(dict, key);
+        let numbers: Option<Vec<f64>> = value
+            .as_array()
+            .filter(|a| a.len() == 4)
+            .and_then(|a| a.iter().map(Object::as_number).collect());
+        let Some(numbers) = numbers else {
+            self.report(at, None, kind("/BBox"));
+            return;
+        };
+        let width = (numbers[2] - numbers[0]).abs();
+        let height = (numbers[3] - numbers[1]).abs();
+        if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+            self.report(at, None, kind("/BBox"));
         }
     }
 }
