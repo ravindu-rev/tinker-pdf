@@ -71,6 +71,11 @@ jobs:
           # And prove positively that files were seen, rather than trusting an
           # exit status that a zero-file run would also produce.
           grep -Eq '^all +[1-9][0-9]* files' corpus-run.log
+          # The same for ruling 13's axis. A child that skipped the strict pass
+          # — an older `tpdf`, a build where it was cfg'd out — would leave
+          # every file "not eligible", which reads as a run that measured
+          # nothing rather than as a regression.
+          grep -Eq '^strict +[1-9][0-9]* rewritten' corpus-run.log
 
       # Kept whatever the outcome: when the bar moves, the per-file record is
       # the only thing that says which files moved and why.

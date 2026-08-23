@@ -779,11 +779,25 @@ pub fn rewrite(
         Vec::new()
     };
 
+    // F.2.2: the linearization parameter dictionary describes *this file's*
+    // layout, and an ordinary rewrite is not that layout. It arrives here from
+    // any source that was linearized, nothing references it, and carrying it
+    // through makes the new file claim a fast-web-view layout whose hint
+    // stream and first-page section are gone. Emptied rather than dropped, so
+    // the numbering the rest of the file uses does not move.
+    let linearized = names.intern(b"Linearized");
+    let hollow = Written::Object(Object::Dict(Dict::new()));
+
     for (num, object) in &objects.entries {
         if packed.contains(num) {
             continue;
         }
+        let stale = matches!(
+            object,
+            Written::Object(Object::Dict(dict)) if dict.contains_key(linearized)
+        );
         offsets.push((*num, out.len() as u64));
+        let object = if stale { &hollow } else { object };
         write_entry(&mut out, *num, object, names, options.compress, crypt);
     }
 
@@ -1010,6 +1024,21 @@ fn write_classic_xref(out: &mut Vec<u8>, offsets: &[(u32, u64)]) {
         // zero to exist and be free.
         out.extend_from_slice(b"0 1\n0000000000 65535 f \n");
         return;
+    }
+
+    // 7.5.4: object zero is the head of the free list, and it is not optional.
+    // The run-merging below writes it as part of a subsection that starts at
+    // one; a document whose lowest object number is two or more — which is
+    // every rewrite of a file that had a free slot low down — used to get no
+    // free head at all. Seventy-two corpus files produced such a table, and
+    // this engine's own reader never looked: the strict validator is what
+    // found it.
+    if offsets.first().is_some_and(|(num, _)| *num > 1) {
+        out.extend_from_slice(
+            b"0 1
+0000000000 65535 f 
+",
+        );
     }
 
     let mut index = 0usize;

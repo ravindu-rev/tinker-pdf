@@ -14,8 +14,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use tinker_pdf::{
-    CosDocument, Dict, Document, ObjRef, Object, RenderOptions, SimpleFontProvider, StreamObj,
-    XrefEntry,
+    CosDocument, Dict, Document, LadderLevel, ObjRef, Object, RenderOptions, SimpleFontProvider,
+    StreamObj, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -55,8 +55,8 @@ because the question `--strict` asks is not whether it opened but whether it
 is right.
 
 `probe` is the one the corpus runner spawns, one child process per file. It
-opens the file, renders every page, and writes a line-oriented record of what
-happened to stdout, ending in `done`. That last line is the whole point: a
+opens the file, renders every page, rewrites it and validates the rewrite, and
+writes a line-oriented record of what happened to stdout, ending in `done`. That last line is the whole point: a
 child that panicked, aborted or was killed for hanging leaves a record with no
 `done` in it, so the runner can tell a file that failed from a file that never
 finished, which a summary line printed at the end could not.
@@ -833,7 +833,7 @@ fn check(options: &Options) -> Result<(), String> {
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 1;
+const PROBE_VERSION: u32 = 2;
 
 /// Opens and renders one file at a time, writing a record per file.
 ///
@@ -859,6 +859,11 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
             // On one line, and last but for the sentinel, so a reason
             // containing anything at all cannot be mistaken for another key.
             println!("opened no {}", one_line(&message));
+            // Said in its own words rather than left out: a record that simply
+            // omits the strict pass reads as a child that skipped it, and "the
+            // file did not open" is a different fact from "this build does not
+            // run the pass".
+            println!("strict ineligible the file did not open");
             println!("ms {}", started.elapsed().as_millis());
             println!("done");
             return;
@@ -905,11 +910,78 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     }
     println!("rendered {rendered}");
 
+    strict(&doc);
+
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");
     }
     println!("ms {}", started.elapsed().as_millis());
     println!("done");
+}
+
+/// Ruling 13's validator, over a **rewrite** of the file rather than over the
+/// file itself.
+///
+/// The corpus is other people's documents, and the question the ratchet asks
+/// is about *this writer*: given a document it could read cleanly, does it
+/// produce a file that holds up to ISO 32000 read strictly. So the source is
+/// re-serialised first and the verdict is passed on the result.
+///
+/// Only [`Tier::Structure`] is comparable that way, and the tier split is why:
+/// a rewrite owns the header, the sections, the offsets and the extents
+/// whatever it was handed, and inherits the page tree, the outline and the
+/// resource dictionaries from its source. A `/Rect` written backwards in
+/// somebody's 2003 invoice is reported here and belongs to the invoice.
+///
+/// A file that needed the leniency ladder to open is not eligible: its own
+/// structure is already known to be damaged, so a rewrite of it says nothing
+/// about the writer. An encrypted one is not eligible either, because without
+/// the password the rewrite cannot carry its streams.
+fn strict(doc: &Document) {
+    if doc.ladder_level() != LadderLevel::Trust {
+        println!("strict ineligible the file needed the leniency ladder to open");
+        return;
+    }
+    if !doc.warnings().is_empty() {
+        println!("strict ineligible the file opened with warnings");
+        return;
+    }
+    if doc.is_encrypted() {
+        println!("strict ineligible the file is encrypted");
+        return;
+    }
+
+    println!("strict eligible");
+    let saved = doc.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    let Ok(again) = Document::open(saved) else {
+        // Not an ineligibility: a rewrite this engine cannot re-open is the
+        // worst defect on this axis, and filing it as "not measured" would
+        // make the number go up by hiding it.
+        println!("strict structure 1");
+        println!("strict semantics 0");
+        println!("strict kind rewrite-did-not-open 1");
+        return;
+    };
+
+    let defects = again.validate();
+    let structure = defects
+        .iter()
+        .filter(|defect| defect.kind.tier() == Tier::Structure)
+        .count();
+    println!("strict structure {structure}");
+    println!(
+        "strict semantics {}",
+        defects.len().saturating_sub(structure)
+    );
+    // By kind rather than one line per defect: a damaged source can produce
+    // thousands of the same finding, and the report wants to know which rules
+    // a corpus breaks.
+    for (kind, count) in tinker_pdf::kind_counts(&defects) {
+        println!("strict kind {kind} {count}");
+    }
 }
 
 /// Anything that would break the one-record-per-line format, flattened.

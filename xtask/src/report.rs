@@ -20,7 +20,7 @@ use crate::json::Json;
 use crate::runner::FileResult;
 
 /// The schema version of both documents.
-pub const SCHEMA: u64 = 1;
+pub const SCHEMA: u64 = 2;
 
 /// One corpus's results.
 #[derive(Clone, Debug, Default)]
@@ -83,6 +83,40 @@ impl CorpusReport {
         out
     }
 
+    /// How many files the strict pass ran on (ruling 13).
+    ///
+    /// A file is eligible when this engine read it cleanly and could rewrite
+    /// it, which is what makes the rate below a statement about the *writer*
+    /// rather than about the corpus.
+    pub fn strict_eligible(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|file| file.strict.eligible())
+            .count() as u64
+    }
+
+    /// How many of those rewrites carried no structural defect at all.
+    pub fn strict_clean(&self) -> u64 {
+        self.files.iter().filter(|file| file.strict.clean()).count() as u64
+    }
+
+    /// How many files each strict defect kind was found in.
+    ///
+    /// Files rather than occurrences, for the reason `capabilities` counts
+    /// files: "eleven documents have a backwards `/Rect`" is the number that
+    /// decides whether a rule is worth acting on.
+    pub fn strict_kinds(&self) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for file in &self.files {
+            if let crate::runner::Strict::Checked { kinds, .. } = &file.strict {
+                for label in kinds.keys() {
+                    *out.entry(label.clone()).or_default() += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// How many files reported each warning label, most common first when
     /// rendered.
     pub fn warnings(&self) -> BTreeMap<String, u64> {
@@ -93,6 +127,33 @@ impl CorpusReport {
             }
         }
         out
+    }
+}
+
+/// One file's strict verdict, as the report carries it.
+fn strict_json(strict: &crate::runner::Strict) -> Json {
+    match strict {
+        crate::runner::Strict::Ineligible(reason) => Json::object([
+            ("eligible", Json::Bool(false)),
+            ("reason", Json::string(reason)),
+        ]),
+        crate::runner::Strict::Checked {
+            structure,
+            semantics,
+            kinds,
+        } => Json::object([
+            ("eligible", Json::Bool(true)),
+            ("structure", Json::count(*structure)),
+            ("semantics", Json::count(*semantics)),
+            (
+                "kinds",
+                Json::object(
+                    kinds
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Json::count(*v as u64))),
+                ),
+            ),
+        ]),
     }
 }
 
@@ -177,6 +238,7 @@ impl Run {
                                 ),
                             ));
                         }
+                        fields.push(("strict", strict_json(&file.strict)));
                         Json::object(fields)
                     })
                     .collect();
@@ -216,6 +278,17 @@ impl Run {
             ("total", Json::count(corpus.total())),
             ("passed", Json::count(corpus.passed())),
             ("degraded", Json::count(corpus.degraded())),
+            ("strict_eligible", Json::count(corpus.strict_eligible())),
+            ("strict_clean", Json::count(corpus.strict_clean())),
+            (
+                "strict_kinds",
+                Json::object(
+                    corpus
+                        .strict_kinds()
+                        .into_iter()
+                        .map(|(k, v)| (k, Json::count(v))),
+                ),
+            ),
             (
                 "outcomes",
                 Json::object(
@@ -257,6 +330,8 @@ impl Run {
                     ("total", Json::count(corpus.total())),
                     ("passed", Json::count(corpus.passed())),
                     ("degraded", Json::count(corpus.degraded())),
+                    ("strict_eligible", Json::count(corpus.strict_eligible())),
+                    ("strict_clean", Json::count(corpus.strict_clean())),
                     (
                         "outcomes",
                         Json::object(
@@ -314,6 +389,18 @@ impl Run {
             "all",
             self.total(),
             self.passed()
+        ));
+
+        // Ruling 13's axis, printed as its own line rather than folded into
+        // the one above: it answers a different question — of the files this
+        // engine read cleanly, how many produced a rewrite that holds up to
+        // ISO 32000 read strictly — and a job that greps for it can tell that
+        // the pass ran at all.
+        let eligible: u64 = self.corpora.iter().map(CorpusReport::strict_eligible).sum();
+        let clean: u64 = self.corpora.iter().map(CorpusReport::strict_clean).sum();
+        lines.push(format!(
+            "{:<14} {:>6} rewritten  {:>6} validate strictly",
+            "strict", eligible, clean
         ));
         if !self.complete() {
             lines.push(String::from(
@@ -400,6 +487,11 @@ mod tests {
                 .map(|c| (*c).to_string())
                 .collect::<BTreeSet<_>>(),
             millis: 1,
+            strict: crate::runner::Strict::Checked {
+                structure: 0,
+                semantics: 0,
+                kinds: BTreeMap::new(),
+            },
         }
     }
 

@@ -1381,3 +1381,81 @@ fn an_ordinary_layout_is_not_held_to_annex_f() {
     );
     clean(bytes);
 }
+
+/// A document whose lowest object number is not one still gets a free head.
+///
+/// The writer merges object zero into a subsection that starts at one, so a
+/// set numbered from two produced a table with no free head at all — which is
+/// a table several readers refuse outright, and which this engine's own reader
+/// never looks at. Seventy-two rewrites of corpus files had one before the
+/// strict pass over the corpus found it.
+#[test]
+fn a_table_whose_objects_start_above_one_still_heads_its_free_list() {
+    use tinker_pdf_cos::write::{rewrite, ObjectSet};
+    use tinker_pdf_cos::{Name, NameTable, Object};
+
+    let names = NameTable::new();
+    let mut objects = ObjectSet::new();
+    let mut catalog = tinker_pdf_cos::Dict::new();
+    catalog.insert(Name::TYPE, Object::Name(names.intern(b"Catalog")));
+    catalog.insert(Name::PAGES, Object::Ref(tinker_pdf_cos::ObjRef::new(3, 0)));
+    objects.insert(2, Object::Dict(catalog));
+
+    let mut pages = tinker_pdf_cos::Dict::new();
+    pages.insert(Name::TYPE, Object::Name(Name::PAGES));
+    pages.insert(Name::COUNT, Object::Int(1));
+    pages.insert(
+        Name::KIDS,
+        Object::Array(vec![Object::Ref(tinker_pdf_cos::ObjRef::new(4, 0))]),
+    );
+    objects.insert(3, Object::Dict(pages));
+
+    let mut page = tinker_pdf_cos::Dict::new();
+    page.insert(Name::TYPE, Object::Name(names.intern(b"Page")));
+    page.insert(Name::PARENT, Object::Ref(tinker_pdf_cos::ObjRef::new(3, 0)));
+    page.insert(
+        Name::MEDIA_BOX,
+        Object::Array(vec![
+            Object::Int(0),
+            Object::Int(0),
+            Object::Int(200),
+            Object::Int(100),
+        ]),
+    );
+    objects.insert(4, Object::Dict(page));
+
+    let mut trailer = tinker_pdf_cos::Dict::new();
+    trailer.insert(Name::ROOT, Object::Ref(tinker_pdf_cos::ObjRef::new(2, 0)));
+
+    let bytes = rewrite(&objects, &trailer, &WriteOptions::default(), &names);
+    clean(bytes);
+}
+
+/// A rewrite of a linearized file does not claim to be linearized.
+///
+/// F.2.2's parameter dictionary describes *that* file's layout: where the
+/// hint stream is, where the first page's section ends, where the main table
+/// starts. An ordinary rewrite has none of those, and carrying the dictionary
+/// through — which every rewrite of a linearized source did — makes the new
+/// file claim a fast-web-view layout it does not have. The pass over the
+/// corpus is what found it.
+#[test]
+fn a_rewrite_of_a_linearized_file_makes_no_claim_about_annex_f() {
+    let linearized = linearized();
+    assert!(
+        find(&linearized, b"/Linearized").is_some(),
+        "the source claims it"
+    );
+
+    let doc = Arc::new(CosDocument::open(linearized).expect("it opens"));
+    let plain = DocumentEditor::new(doc).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: false,
+        ..WriteOptions::default()
+    });
+    assert!(
+        find(&plain, b"/Linearized").is_none(),
+        "and the rewrite does not"
+    );
+    clean(plain);
+}

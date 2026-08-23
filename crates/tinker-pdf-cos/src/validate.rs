@@ -416,7 +416,6 @@ impl DefectKind {
             | DefectKind::XrefStreamTypeUnknown { .. }
             | DefectKind::TrailerRootMissing
             | DefectKind::TrailerSizeMissing
-            | DefectKind::RootNotACatalog
             | DefectKind::EncryptWithoutId
             | DefectKind::IdMalformed
             | DefectKind::SizeTooSmall { .. }
@@ -441,7 +440,11 @@ impl DefectKind {
             // What the document says rather than how the file is laid out. A
             // rewrite inherits every one of these from its source, which is
             // why they are reported and never ratcheted.
-            DefectKind::PageNodeUntyped
+            // The trailer is the writer's and `/Root` being *there* is its
+            // business; what the object it names says about itself is the
+            // document's, and a rewrite copies it through.
+            DefectKind::RootNotACatalog
+            | DefectKind::PageNodeUntyped
             | DefectKind::PageParentWrong { .. }
             | DefectKind::PageCountWrong { .. }
             | DefectKind::KidsMalformed

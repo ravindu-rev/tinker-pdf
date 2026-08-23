@@ -97,6 +97,41 @@ pub struct FileResult {
     pub capabilities: BTreeSet<String>,
     /// How long the child took, in milliseconds, as the runner measured it.
     pub millis: u64,
+    /// What the strict validator said about a **rewrite** of this file, or
+    /// why the file was not eligible for one (ruling 13).
+    pub strict: Strict,
+}
+
+/// The strict pass's verdict on one file.
+///
+/// `Ineligible` is not a failure and not a pass: the ratchet counts eligible
+/// files and clean ones, so a corpus of files this engine cannot read cleanly
+/// cannot flatter the rate by being counted as either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Strict {
+    /// The child did not run the pass, and said why.
+    Ineligible(String),
+    /// It ran, and the rewrite carried this many defects.
+    Checked {
+        /// [`Tier::Structure`] defects — the writer's own.
+        structure: u64,
+        /// [`Tier::Semantics`] defects — inherited from the source.
+        semantics: u64,
+        /// How many defects of each kind, by label.
+        kinds: BTreeMap<String, usize>,
+    },
+}
+
+impl Strict {
+    /// Whether the pass ran at all.
+    pub fn eligible(&self) -> bool {
+        matches!(self, Strict::Checked { .. })
+    }
+
+    /// Whether it ran and found nothing the writer owns.
+    pub fn clean(&self) -> bool {
+        matches!(self, Strict::Checked { structure: 0, .. })
+    }
 }
 
 impl FileResult {
@@ -121,6 +156,7 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         warnings: BTreeMap::new(),
         capabilities: BTreeSet::new(),
         millis,
+        strict: Strict::Ineligible("the child produced no record".to_string()),
     };
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
@@ -262,7 +298,7 @@ fn hash(text: &str) -> u64 {
 
 /// The record format's version. A record announcing anything else is refused
 /// rather than half-read.
-const PROBE_VERSION: u32 = 1;
+const PROBE_VERSION: u32 = 2;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -281,6 +317,11 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut complete = false;
     let mut warnings = BTreeMap::new();
     let mut capabilities = BTreeSet::new();
+    let mut why_not: Option<String> = None;
+    let mut eligible = None;
+    let mut structure = 0u64;
+    let mut semantics = 0u64;
+    let mut defects: BTreeMap<String, usize> = BTreeMap::new();
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -316,6 +357,29 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                 let count: usize = count.trim().parse().unwrap_or(1);
                 *warnings.entry(label.trim().to_string()).or_default() += count;
             }
+            "strict" => {
+                let (what, rest) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
+                match what.trim() {
+                    "eligible" => eligible = Some(String::new()),
+                    "ineligible" => {
+                        let reason = rest.trim();
+                        eligible = None;
+                        why_not = Some(if reason.is_empty() {
+                            "the child did not say why".to_string()
+                        } else {
+                            reason.to_string()
+                        });
+                    }
+                    "structure" => structure = rest.trim().parse().unwrap_or(0),
+                    "semantics" => semantics = rest.trim().parse().unwrap_or(0),
+                    "kind" => {
+                        let (label, count) = rest.rsplit_once(' ').unwrap_or((rest.trim(), "1"));
+                        let count: usize = count.trim().parse().unwrap_or(1);
+                        *defects.entry(label.trim().to_string()).or_default() += count;
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -328,6 +392,19 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     if version != Some(PROBE_VERSION) {
         return None;
     }
+
+    let strict = match (eligible.is_some(), why_not) {
+        (true, _) => Strict::Checked {
+            structure,
+            semantics,
+            kinds: defects,
+        },
+        // A record that says nothing about the pass at all is one from a child
+        // that skipped it, which is a defect in the child rather than a fact
+        // about the file — so it is not eligible and says so.
+        (false, Some(reason)) => Strict::Ineligible(reason),
+        (false, None) => Strict::Ineligible("the record does not mention it".to_string()),
+    };
 
     let outcome = match opened {
         Some(true) if rendered >= pages => Outcome::Passed,
@@ -346,6 +423,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         warnings,
         capabilities,
         millis,
+        strict,
     })
 }
 
@@ -353,8 +431,10 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 1\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
-                        cap jbig2\nrendered 3\nwarn render:UnreadableFont 2\nms 40\ndone\n";
+    const GOOD: &str = "probe 2\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+                        cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
+                        strict semantics 2\nstrict kind annot-rect-unordered 2\n\
+                        warn render:UnreadableFont 2\nms 40\ndone\n";
 
     #[test]
     fn a_complete_record_reads() {
@@ -365,6 +445,47 @@ mod tests {
         assert_eq!(result.warnings["render:UnreadableFont"], 2);
         assert!(result.capabilities.contains("jbig2"));
         assert!(result.degraded());
+        assert!(result.strict.eligible());
+        assert!(
+            result.strict.clean(),
+            "a rewrite with no structural defect is clean, whatever it inherited: {:?}",
+            result.strict
+        );
+    }
+
+    /// The strict pass has three answers and they are three different
+    /// facts: it did not run, it ran and found something the writer owns,
+    /// or it ran and found only what came in with the source.
+    #[test]
+    fn the_strict_pass_reports_its_own_three_outcomes() {
+        let skipped = GOOD.replace(
+            "strict eligible\nstrict structure 0\n",
+            "strict ineligible the file is encrypted\n",
+        );
+        let result = parse_record(&skipped).expect("it is complete");
+        assert!(!result.strict.eligible());
+        assert!(!result.strict.clean(), "not measured is not clean");
+        assert!(
+            matches!(&result.strict, Strict::Ineligible(why) if why.contains("encrypted")),
+            "{:?}",
+            result.strict
+        );
+
+        let broken = GOOD.replace("strict structure 0", "strict structure 3");
+        let result = parse_record(&broken).expect("it is complete");
+        assert!(result.strict.eligible());
+        assert!(!result.strict.clean());
+
+        // A record that never mentions the pass is a child that skipped
+        // it, which is a defect in the child rather than a fact about the
+        // file — so it is not eligible and says so.
+        let silent: Vec<&str> = GOOD
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("strict"))
+            .collect();
+        let silent = format!("{}\n", silent.join("\n"));
+        let result = parse_record(&silent).expect("it is complete");
+        assert!(!result.strict.eligible());
     }
 
     /// The sentinel is the isolation. Without it a child killed halfway
@@ -374,19 +495,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 1\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 2\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 1", "probe 2")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 1\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 2", "probe 7")).is_none());
+        // And the version the strict pass replaced: a record without that
+        // pass means something else by the same keys.
+        assert!(parse_record(&GOOD.replace("probe 2", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 2\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 1\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 2\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -399,7 +523,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 1\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 2\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -408,7 +532,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 1\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 2\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),

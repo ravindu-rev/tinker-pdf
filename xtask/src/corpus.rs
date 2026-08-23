@@ -329,8 +329,17 @@ fn ratchet_note(run: &Run) -> String {
         "Pass rate per corpus. `passed` means a bitmap came back for every \
          page without crashing or timing out (ruling 2) — a placeholder \
          counts. `degraded` is the second axis: files that rendered with \
-         something reported. Measured {faces} Compared by integer \
-         cross-multiplication, never as floats: \
+         something reported. Measured {faces} `strict_eligible` and \
+         `strict_clean` are ruling 13's third axis, and they are about the \
+         *writer*: every file this engine read cleanly is rewritten in \
+         memory and the rewrite is validated against ISO 32000 read \
+         strictly. Only the structural tier counts — the header, the \
+         cross-reference sections, the offsets, the stream extents, the \
+         trailer — because a rewrite copies the page tree, the \
+         annotations and the resource dictionaries from its source, and a \
+         defect there belongs to the source. A file this engine could not \
+         read cleanly is not eligible and is counted as neither. Compared \
+         by integer cross-multiplication, never as floats: \
          passed_now * total_before >= passed_before * total_now."
     )
 }

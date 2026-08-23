@@ -7,7 +7,7 @@
         "jpx": 12,
         "mesh-shading": 10
       },
-      "degraded": 464,
+      "degraded": 422,
       "name": "pdfjs",
       "outcomes": {
         "crashed": 0,
@@ -16,13 +16,15 @@
         "timed_out": 0
       },
       "passed": 963,
+      "strict_clean": 842,
+      "strict_eligible": 842,
       "total": 974
     },
     {
       "capabilities": {
         "jpx": 7
       },
-      "degraded": 92,
+      "degraded": 87,
       "name": "verapdf",
       "outcomes": {
         "crashed": 0,
@@ -31,6 +33,8 @@
         "timed_out": 1
       },
       "passed": 2906,
+      "strict_clean": 2890,
+      "strict_eligible": 2890,
       "total": 2907
     },
     {
@@ -44,6 +48,8 @@
         "timed_out": 0
       },
       "passed": 608,
+      "strict_clean": 487,
+      "strict_eligible": 487,
       "total": 637
     },
     {
@@ -57,12 +63,14 @@
         "timed_out": 0
       },
       "passed": 7,
+      "strict_clean": 6,
+      "strict_eligible": 6,
       "total": 7
     }
   ],
   "limits": [],
-  "note": "Pass rate per corpus. `passed` means a bitmap came back for every page without crashing or timing out (ruling 2) — a placeholder counts. `degraded` is the second axis: files that rendered with something reported. Measured WITHOUT font faces: this engine bundles none, so `degraded` here is dominated by documents that embed no font and therefore draw no text. It is a fact about this build's font policy as much as about the engine. Re-measure with --fonts to see the other number. Compared by integer cross-multiplication, never as floats: passed_now * total_before >= passed_before * total_now.",
-  "schema": 1,
+  "note": "Pass rate per corpus. `passed` means a bitmap came back for every page without crashing or timing out (ruling 2) — a placeholder counts. `degraded` is the second axis: files that rendered with something reported. Measured WITHOUT font faces: this engine bundles none, so `degraded` here is dominated by documents that embed no font and therefore draw no text. It is a fact about this build's font policy as much as about the engine. Re-measure with --fonts to see the other number. `strict_eligible` and `strict_clean` are ruling 13's third axis, and they are about the *writer*: every file this engine read cleanly is rewritten in memory and the rewrite is validated against ISO 32000 read strictly. Only the structural tier counts — the header, the cross-reference sections, the offsets, the stream extents, the trailer — because a rewrite copies the page tree, the annotations and the resource dictionaries from its source, and a defect there belongs to the source. A file this engine could not read cleanly is not eligible and is counted as neither. Compared by integer cross-multiplication, never as floats: passed_now * total_before >= passed_before * total_now.",
+  "schema": 2,
   "settings": {
     "dpi": 72,
     "fonts": "none",

@@ -55,25 +55,30 @@ fn main() {
         // Dies mid-record: everything up to `rendered` and then nothing. This
         // is the one an exit code cannot catch, because the process exits 0.
         "truncate" => {
-            println!("probe 1");
+            println!("probe 2");
             println!("file {file}");
             println!("opened yes");
             println!("pages 9");
         }
         "unopenable" => {
-            println!("probe 1");
+            println!("probe 2");
             println!("file {file}");
             println!("opened no not a PDF: no indirect objects found");
             println!("ms 1");
             println!("done");
         }
         other => {
-            println!("probe 1");
+            println!("probe 2");
             println!("file {file}");
             println!("opened yes");
             println!("ladder Trust");
             println!("pages 2");
             println!("rendered 2");
+            // The strict pass, which a record of this version has to carry:
+            // the stub writes no file, so it says it ran and found nothing.
+            println!("strict eligible");
+            println!("strict structure 0");
+            println!("strict semantics 0");
             if other == "degraded" {
                 println!("cap jbig2");
                 println!("warn render:UnsupportedImage(JBIG2Decode) 1");
