@@ -75,10 +75,6 @@ pub const NEVER_PUBLISHED: &[(&str, &str)] = &[
     ("tools/tpdf", "a debug CLI, not a product"),
     ("tools/pdfcmp", "a test comparator, not a product"),
     (
-        "tools/oracle-diff",
-        "a test harness that shells out to other engines",
-    ),
-    (
         "fuzz",
         "a libFuzzer harness; it links a C++ runtime the engine refuses",
     ),

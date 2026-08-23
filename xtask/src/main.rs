@@ -402,7 +402,6 @@ const ALLOWED: &[(&str, &[&str])] = &[
 /// opening documents itself.
 const TOOLS: &[(&str, &[&str])] = &[
     ("tools/pdfcmp", &["tinker-pdf"]),
-    ("tools/oracle-diff", &["tinker-pdf"]),
     ("tools/tpdf", &["tinker-pdf"]),
     ("xtask", &["tinker-pdf-crypto"]),
 ];
@@ -545,11 +544,6 @@ fn check_libm() -> Result<(), Vec<String>> {
 /// allowance leave in the same commit as the thing it allowed, instead of
 /// standing for a year after the debt is paid.
 const SPAWNERS: &[(&str, &str)] = &[
-    (
-        "tools/oracle-diff/src/main.rs",
-        "DEBT (step 8): retired ruling 9's external-renderer harness. Wired \
-         into no test and no CI job; the whole tool is deleted",
-    ),
     (
         "crates/tinker-pdf-css/tests/unimplemented_property_does_not_build.rs",
         "PERMANENT: spawns `rustc` on a snippet that must fail to compile. It \

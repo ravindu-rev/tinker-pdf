@@ -16,59 +16,13 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 944 tests proving the
+These come before any new feature. The suite is 2 939 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **First-party verification.** Ruling 13 retires the subprocess oracles.
-  **No test and no CI job invokes one any more**; what is left of this item is
-  the two tiers of first-party evidence the last oracle's departure was
-  supposed to buy, and until they exist the suite is thinner than the count
-  suggests. Evidence: the four properties
-  [verification.md](verification.md) names as not coming back. The order is
-  fixed — nothing is deleted before the check replacing it exists and has been
-  injection-counted, and the steps keep the numbers the allowance rows in
-  `xtask/src/main.rs` cite:
-  8. `tools/oracle-diff` deleted; the suite recounted. (S)
-
-  Steps 1 to 7 are done. `cargo xtask oracles` holds the boundary with a build
-  failure and the honesty pass corrected two claims about checks that were
-  never wired. The strict validator retired the four qpdf tests and their job;
-  `xps_conservation.rs` retired `xps_mutool.rs` and its job; `epub_analytic.rs`
-  and `epub_reftest.rs` retired `epub_browser.rs`, the browser job and the
-  epubcheck step. `analytic_coverage.rs` and `render_analytic.rs` gave the
-  rasterizer and the page a tier that answers to arithmetic, and `tpdf probe`'s
-  three metamorphic relations gave `corpus/ratchet.json` a fourth axis over the
-  4 525 real files. The validator found three defects in this engine's own
-  output on the way — a missing trailer `/ID`, a stale `/Prev` carried into a
-  rewrite, and a cross-reference table with no free head — and its structural
-  tier now runs over a rewrite of every corpus file with its own ratchet row.
-
-  Steps 4 and 5 each found a hole nothing in the suite could see, which is
-  what an injection matrix is for. Composing the painter's open scopes
-  outermost-first was caught by **nothing at all** — 0 of 892 — because every
-  `RenderTransform` in all eight committed XPS packages is a translation and
-  two translations commute; two nested canvases that do not commute close it.
-  And of step 5's six injections, **two were caught by the new suites alone**
-  out of 2 935 tests, the browser oracle included: `text-indent` ignored, and
-  CSS 2.2 §13.3.2's `orphans` and `widows` ignored. Step 6's matrix found the
-  hole in its own first draft: two roundings the sampling grid performs were
-  caught by nothing but the determinism fingerprint, which notices that a pixel
-  moved and has no opinion about whether it should have. Step 7 found two of
-  its own: instrumenting the probe turned three files that had always passed
-  into timeouts and wrote that in as the new bar, and one 219-byte file that
-  opens through the rescan ladder has a **rewrite that never returns** —
-  three minutes in, the rotation relation had not come back. What left with
-  each oracle is stated in [verification.md](verification.md) and is not
-  narrowed by what replaced it.
-
-  Exit: no test or CI job spawns a program the workspace did not build,
-  `cargo xtask oracles` is green in `cargo xtask check`, and every row of
-  [verification.md](verification.md)'s migration table reads **done**. (L,
-  [design/render-verification.md](design/render-verification.md))
 - **A rewrite that does not come back.** `pdfjs/test/pdfs/bug1980958.pdf` is
   219 bytes, opens through the rescan ladder with a synthesised root, and
   renders its 10 × 10 page in under two seconds — and `editor().save()` over

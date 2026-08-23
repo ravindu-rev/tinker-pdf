@@ -145,11 +145,14 @@ its file is listed in `SPAWNERS` with the reason it may — and a row there
 whose file has stopped spawning fails too, so an allowance cannot outlive
 the thing it allowed.
 
-**No row is a test oracle any more.** The four qpdf rows left with the strict
-validator, the mutool row with `xps_conservation.rs`, and the browser and
-epubcheck rows with `epub_analytic.rs` and `epub_reftest.rs` — every allowance
-in the same commit as the test it allowed. One `DEBT` row is left and it is a
-tool nothing calls: `tools/oracle-diff`, deleted at the roadmap's step 8.
+**Every row is `PERMANENT`, and none of them adjudicates a document.** What is
+left spawns `rustc` to prove a type refuses a state, `curl` and `tar` to fetch
+corpora this repository then verifies against its own SHA-256, `cargo` to build
+and publish, and the corpus child, which is a workspace binary built from the
+same revision. The four qpdf rows left with the strict validator, the mutool row
+with `xps_conservation.rs`, the browser and epubcheck rows with
+`epub_analytic.rs` and `epub_reftest.rs`, and `tools/oracle-diff` was deleted
+outright — every allowance in the same commit as the thing it allowed.
 
 The `RAN` / `SKIPPED` discipline outlives the oracles it was written for. A
 skip exits 0 and reads exactly like a pass, so every job that depends on

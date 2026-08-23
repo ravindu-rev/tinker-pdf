@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 944 passed, 0 failed, 8 ignored** across 123 suites on
+is **2 939 passed, 0 failed, 8 ignored** across 122 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -174,13 +174,21 @@ real producers emitted, published normative data (Adobe's CMap resources,
 the Unicode character database), and the committed output of a tool that was
 run once, which is a dated measurement rather than a check.
 
-**The migration's deletions are finished and the table below is the record of
-them.** No test and no CI job in this repository invokes an outside program to
-adjudicate a document any more. The order was fixed throughout: no oracle test
-or job was deleted before the first-party check replacing it existed and had
-been injection-counted. What that cost is the third column of the last two rows
-and the four properties named further down — the [roadmap](ROADMAP.md) carries
-the two tiers of evidence still owed.
+**The migration is finished and the table below is its record.** No test and no
+CI job in this repository invokes an outside program to adjudicate a document,
+and the harness that could have driven one — `tools/oracle-diff` — is deleted
+rather than left standing. The order held throughout: no oracle test or job was
+deleted before the first-party check replacing it existed and had been
+injection-counted, and every allowance in `xtask/src/main.rs` left in the same
+commit as the thing it allowed.
+
+What it cost is the third column of the last two rows and the four properties
+named below. What it bought is the four sections after the table: a strict
+validator, a conservation census, analytic layout and reftest pairs, rasters
+that answer to arithmetic, and a fourth corpus axis of relations between two
+renders. Each was injection-counted before the oracle it replaced was deleted,
+and **three of those matrices found a hole in the check's own first draft** —
+which is the argument for running them rather than reasoning about them.
 
 | Was proving | Oracle | Replaced by | State |
 | --- | --- | --- | --- |
@@ -417,9 +425,6 @@ gap is manageable and a false claim is not — nobody goes looking.
   pixels, not mean difference. `--diff` writes a per-pixel heat map beside
   the verdict, because a number that fails without a picture wastes a
   human's morning.
-- **`oracle-diff`** (`tools/oracle-diff`): the external-renderer harness of
-  retired ruling 9. Wired into no test and no CI job, and deleted when the
-  last oracle it could drive is gone ([roadmap](ROADMAP.md)).
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`
