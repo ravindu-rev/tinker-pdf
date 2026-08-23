@@ -170,21 +170,27 @@ fn value_of(doc: &CosDocument, name: &str) -> String {
 /// The fixture's own length is pinned beside them so a change in the writer is
 /// separable from a change in the filler: if only the last three move, the
 /// filler moved; if all four move, the writer did.
+///
+/// All four moved once, and the writer is why: every file this engine writes
+/// now carries the trailer `/ID` of 7.5.5 Table 15, which is seventy-five
+/// bytes the fixture and all three saves did not have before. The incremental
+/// pins moved by the same amount as the rewrite's, which is the shape that
+/// says one thing changed rather than several.
 #[test]
 fn a_successful_fill_produces_the_bytes_it_always_did() {
-    assert_eq!(form_document().bytes().len(), 776, "the fixture itself");
+    assert_eq!(form_document().bytes().len(), 851, "the fixture itself");
 
     let mut editor = DocumentEditor::new(form_document());
     assert!(editor.set_field_value("name", "Ada"));
     let incremental = save(&editor, WriteMode::Incremental);
-    assert_eq!(incremental.len(), 1428);
-    assert_eq!(fnv(&incremental), 0x8232_6b9a_7160_4130, "incremental save");
+    assert_eq!(incremental.len(), 1578);
+    assert_eq!(fnv(&incremental), 0xd148_6157_0e6d_8dc4, "incremental save");
 
     let mut editor = DocumentEditor::new(form_document());
     assert!(editor.set_field_value("name", "Ada"));
     let rewritten = save(&editor, WriteMode::Rewrite);
-    assert_eq!(rewritten.len(), 1047);
-    assert_eq!(fnv(&rewritten), 0xfda2_4c36_1d03_5f1d, "full rewrite");
+    assert_eq!(rewritten.len(), 1122);
+    assert_eq!(fnv(&rewritten), 0x731b_34b7_ad72_8826, "full rewrite");
 
     // Two fills and a reset, so the pin covers `reset_form` and the second
     // allocation path as well as the first.
@@ -193,8 +199,8 @@ fn a_successful_fill_produces_the_bytes_it_always_did() {
     assert!(editor.set_field_value("short", "abcd"));
     assert!(editor.reset_form().is_empty());
     let reset = save(&editor, WriteMode::Incremental);
-    assert_eq!(reset.len(), 2350);
-    assert_eq!(fnv(&reset), 0xb8a4_57c7_c992_a54f, "fill, fill, reset");
+    assert_eq!(reset.len(), 2500);
+    assert_eq!(fnv(&reset), 0x7add_adc4_e306_a306, "fill, fill, reset");
 }
 
 // ---------------------------------------------------------------------------

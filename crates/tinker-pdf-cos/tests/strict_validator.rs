@@ -76,6 +76,41 @@ fn packed() -> Vec<u8> {
     })
 }
 
+/// The two halves of the trailer's `/ID`.
+fn identifier(doc: &CosDocument) -> (Vec<u8>, Vec<u8>) {
+    let id = doc
+        .trailer()
+        .get_array(tinker_pdf_cos::Name::ID)
+        .expect("every file this engine writes carries one");
+    let part = |index: usize| -> Vec<u8> {
+        id.get(index)
+            .and_then(tinker_pdf_cos::Object::as_string)
+            .map(|s| s.bytes.clone())
+            .expect("two strings")
+    };
+    (part(0), part(1))
+}
+
+/// The same document, sealed with the deterministic entropy gap 19 uses.
+fn encrypted() -> Vec<u8> {
+    let mut entropy = [0u8; 48];
+    for (index, byte) in entropy.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(7).wrapping_add(11);
+    }
+    let doc = Arc::new(CosDocument::open(document(3)).expect("it opens"));
+    DocumentEditor::new(doc).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: false,
+        encryption: Some(Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy,
+        }),
+        ..WriteOptions::default()
+    })
+}
+
 // ---- reading a verdict ------------------------------------------------------
 
 fn verdict(bytes: Vec<u8>) -> Vec<Defect> {
@@ -362,17 +397,18 @@ fn a_trailer_whose_root_is_not_a_catalog_is_refused() {
     );
 }
 
-/// 7.5.5 Table 15 requires `/ID` whenever `/Encrypt` is present. Until this
-/// engine wrote one, an outside reader was the only thing that said so.
+/// Encryption moves every length in the file and the hint tables measure the
+/// ciphertext, so the sealed linearized layout is held to the same rules.
 #[test]
-fn an_encrypted_file_with_no_id_is_refused() {
+fn an_encrypted_linearized_file_validates_clean() {
     let mut entropy = [0u8; 48];
     for (index, byte) in entropy.iter_mut().enumerate() {
         *byte = (index as u8).wrapping_mul(7).wrapping_add(11);
     }
-    let doc = Arc::new(CosDocument::open(document(3)).expect("it opens"));
+    let doc = Arc::new(CosDocument::open(document(6)).expect("it opens"));
     let sealed = DocumentEditor::new(doc).save(&WriteOptions {
         mode: WriteMode::Rewrite,
+        linearize: true,
         object_streams: false,
         encryption: Some(Encryption {
             user_password: "open-me".to_string(),
@@ -390,10 +426,119 @@ fn an_encrypted_file_with_no_id_is_refused() {
     );
     let defects = tinker_pdf_cos::validate(&doc);
     assert!(
+        defects.is_empty(),
+        "found {:?}",
+        defects.iter().map(Defect::to_string).collect::<Vec<_>>()
+    );
+}
+
+/// 7.5.5 Table 15 requires `/ID` whenever `/Encrypt` is present. Until this
+/// engine wrote one, an outside reader was the only thing that said so.
+#[test]
+fn an_encrypted_file_with_no_id_is_refused() {
+    let sealed = encrypted();
+
+    // The writer's own output, first: it carries the identifier now, and the
+    // rule below would pass for the wrong reason if it did not.
+    let doc = CosDocument::open(sealed.clone()).expect("it opens");
+    assert!(
+        doc.authenticate("open-me").is_ok(),
+        "it really is encrypted"
+    );
+    assert!(
+        tinker_pdf_cos::validate(&doc).is_empty(),
+        "an encrypted file validates clean"
+    );
+
+    // And with the identifier taken back out of the trailer, by a name change
+    // that leaves every offset where it was.
+    let damaged = patch(&sealed, b"/ID [", b"/IE [");
+    let doc = CosDocument::open(damaged).expect("it opens");
+    assert!(doc.authenticate("open-me").is_ok());
+    let defects = tinker_pdf_cos::validate(&doc);
+    assert!(
         labels(&defects).contains(&"encrypt-without-id"),
         "found {:?}",
         defects.iter().map(Defect::to_string).collect::<Vec<_>>()
     );
+}
+
+/// 14.4: the first string is the document's permanent identifier and the
+/// second changes with each revision.
+#[test]
+fn an_id_that_is_not_two_strings_is_refused() {
+    let bytes = rewritten();
+    // `/ID [<..> <..>]` with the second string's opening delimiter turned into
+    // part of the first, which leaves one string where Table 15 wants two.
+    let at = find(&bytes, b"/ID [").expect("an /ID") + 5;
+    let end = bytes[at..]
+        .iter()
+        .position(|b| *b == b']')
+        .expect("the array ends")
+        + at;
+    let mut damaged = bytes.clone();
+    for byte in &mut damaged[at..end] {
+        if *byte == b'>' || *byte == b'<' {
+            *byte = b'0';
+        }
+    }
+    refused(damaged, "id-malformed");
+}
+
+/// The identifier is a property of the document, so the half 14.4 calls
+/// permanent survives being saved again and the half it calls the revision's
+/// does not.
+#[test]
+fn a_rewrite_keeps_the_permanent_identifier_and_moves_the_other() {
+    let first = rewritten();
+    let doc = CosDocument::open(first.clone()).expect("it opens");
+    let before = identifier(&doc);
+
+    let mut editor = DocumentEditor::new(Arc::new(doc));
+    assert!(editor.delete_page(2), "the document is not the one it was");
+    let second = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: false,
+        ..WriteOptions::default()
+    });
+    let after = identifier(&CosDocument::open(second).expect("it opens"));
+
+    assert_eq!(before.0, after.0, "the permanent half is the document's");
+    assert_ne!(before.1, after.1, "the other half is the revision's");
+    assert_eq!(before.0.len(), 16, "sixteen bytes, as everybody writes");
+}
+
+/// Two saves of the same document produce the same identifier, on every
+/// target: it is a hash of the document rather than of the moment (ruling 4).
+#[test]
+fn the_identifier_is_a_function_of_the_document() {
+    let once = identifier(&CosDocument::open(rewritten()).expect("it opens"));
+    let again = identifier(&CosDocument::open(rewritten()).expect("it opens"));
+    assert_eq!(once, again);
+
+    // A different document, a different identifier — or the hash is not
+    // reading the document at all.
+    let doc = Arc::new(CosDocument::open(document(4)).expect("it opens"));
+    let other = DocumentEditor::new(doc).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: false,
+        ..WriteOptions::default()
+    });
+    let other = identifier(&CosDocument::open(other).expect("it opens"));
+    assert_ne!(once.0, other.0);
+}
+
+/// An encrypted file's identifier is not a hash of its plaintext.
+///
+/// It would otherwise be a confirmation oracle: anybody holding a candidate
+/// document could hash it and check the `/ID` in the clear, with no password.
+/// The caller's entropy goes into the hash for exactly this reason, so the
+/// same document sealed with different entropy is a different identifier.
+#[test]
+fn an_encrypted_identifier_is_not_the_plaintexts() {
+    let plain = identifier(&CosDocument::open(rewritten()).expect("it opens"));
+    let sealed = identifier(&CosDocument::open(encrypted()).expect("it opens"));
+    assert_ne!(plain.0, sealed.0, "the entropy is in the hash");
 }
 
 // ---- streams ----------------------------------------------------------------

@@ -27,6 +27,19 @@
 //!   find the arithmetic that is not target-stable. That is the failure this
 //!   file exists for, and it is the one that is silent everywhere else.
 //!
+//! # The three document hashes moved once, and this is why
+//!
+//! *August 2026.* Every file this engine writes now carries the trailer `/ID`
+//! of 7.5.5 Table 15, which it never did on any path — an outside reader found
+//! that, and the strict validator refuses it now. So the synthesised document,
+//! the synthesised fixed document and the synthesised book are all seventy-odd
+//! bytes longer than they were and hash differently. Nothing about the
+//! *rendering* moved: the render fingerprints beside them did not change, which
+//! is the pair of facts that says this was the writer rather than the
+//! rasterizer. The identifier is a hash of the document rather than of the
+//! moment, so these hashes stay stable across targets and runs, which is the
+//! property ruling 4 needs and a timestamped identifier could not have given.
+//!
 //! # Why every fixture asserts that it painted something
 //!
 //! *Added August 2026.* The `text` fixture named Helvetica and embedded no
@@ -2448,7 +2461,7 @@ fn the_synthesised_document_is_the_same_bytes_on_every_target() {
         .collect();
     assert_eq!(
         hash,
-        "ddf0996c5d4b0a1e070784d9c3a6954f2c0b9fee2f9bcd9558c3047ea99658c6",
+        "775c5c8126e1e566df503cad9086292563302d499951ed1d76b22ec95e9858db",
         "the synthesised document is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2584,7 +2597,7 @@ fn the_synthesised_fixed_document_is_the_same_bytes_on_every_target() {
         .collect();
     assert_eq!(
         hash,
-        "aed81359bf5d42df7cd71bbe006efb01e21d558b74ae28ebce760d913fefa2a7",
+        "cd716c28d0d004a710d974050e7e22e11e3c3c351d76c543fef1e313cfc9f019",
         "the synthesised fixed document is not the bytes it was; see this \
          test's doc comment for what that means and how to tell it apart from \
          a rendering change. The document is {} bytes.",
@@ -2724,7 +2737,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "b2a11a163496b7982dedb1ecf924464d509e7b3b214aa0efaceafa54bd58c6a7",
+        "352adfa42ef1e3e4bd44d7b939523232453289986de083f0c4594886f4d360fb",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2810,12 +2823,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "b2a11a163496b7982dedb1ecf924464d509e7b3b214aa0efaceafa54bd58c6a7",
+        "352adfa42ef1e3e4bd44d7b939523232453289986de083f0c4594886f4d360fb",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "7530969d466b6060db99b7ef7722461a207b36352c61368ea7a3505c24589dac",
+        "7bfc3ef059ba6e2c1233f2e9cc0e23f2db572dca82e69e23f2f0b2d312f46e9b",
         "the book at 600 x 800 is not the bytes it was"
     );
 

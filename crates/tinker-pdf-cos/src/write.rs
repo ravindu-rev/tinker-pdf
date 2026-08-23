@@ -585,7 +585,11 @@ pub fn incremental_update(
     let xref_at = out.len() as u64;
     write_classic_xref(&mut out, &offsets);
 
-    let mut trailer = trailer.clone();
+    // 14.4: an update keeps the document's permanent identifier and moves the
+    // second string, so a reader can tell two revisions of one document from
+    // two documents. Derived from the objects this revision actually writes,
+    // which is what makes it move at all.
+    let mut trailer = with_identifier(trailer, changed, names, None);
     // The *changed* set's highest number is not the file's. Writing it
     // unqualified clobbered the correct value the caller passes in, and a
     // conforming reader must then ignore every object above it — including
@@ -616,6 +620,93 @@ pub fn incremental_update(
     out
 }
 
+/// The trailer with the `/ID` 7.5.5 Table 15 asks for.
+///
+/// **Required whenever `/Encrypt` is present**, and strongly recommended
+/// otherwise — and until this existed no file this engine wrote carried one on
+/// any path. An outside reader is what found that; the strict validator is
+/// what refuses it now.
+///
+/// # Where the bytes come from
+///
+/// A hash of the document, not of the moment. 14.4 suggests deriving the
+/// identifier from the time, the path and the file's size; a clock is banned
+/// from this engine's output by ruling 4, and a path is not a thing a byte
+/// slice has. So the identifier is SHA-256 over the objects as they serialise
+/// and over the trailer that names them, truncated to the sixteen bytes
+/// everybody writes. Same document in, same identifier out, on every target —
+/// which is the property ruling 4 needs and a timestamp cannot give.
+///
+/// Serialised uncompressed and unencrypted deliberately: the identifier is a
+/// property of the *document*, so saving it twice with different options gives
+/// the same `/ID[0]`, which is what 14.4 means by a permanent identifier.
+///
+/// # Why the entropy goes in when there is any
+///
+/// A plaintext-derived identifier on an encrypted file is a confirmation
+/// oracle: anybody holding a candidate document can hash it and check the
+/// `/ID` in the clear, without the password. Mixing in the caller's entropy —
+/// which is already secret, already fixed for the call, and already what the
+/// file key is built from — makes the identifier say "this file" rather than
+/// "this content".
+///
+/// # `/ID[0]` survives, except where keeping it would leak
+///
+/// 14.4: the first string is the document's permanent identifier and the
+/// second changes with each revision. A trailer that already carries a usable
+/// first string keeps it, so a rewrite is recognisably the same document it
+/// was read from, and only the second half moves.
+///
+/// **An encrypted write derives both halves.** Inheriting the first would
+/// carry a plaintext-derived identifier into the sealed file, and in the
+/// ordinary create-then-encrypt flow that plaintext never existed anywhere a
+/// reader could see it — so the inherited string would be the one thing in the
+/// file that answers "is this that document?" for free. The linkage to the
+/// source's identifier is lost, which is a real cost and the smaller one; 14.4
+/// suggests a derivation rather than requiring one, and Table 15 requires only
+/// that the two strings be there.
+fn with_identifier(
+    trailer: &Dict,
+    objects: &ObjectSet,
+    names: &NameTable,
+    entropy: Option<&[u8; 48]>,
+) -> Dict {
+    let mut hasher = tinker_pdf_crypto::sha2::Sha256::new();
+    let mut scratch = Vec::new();
+    for (num, entry) in objects.iter() {
+        scratch.clear();
+        write_entry(&mut scratch, *num, entry, names, false, None);
+        hasher.update(&scratch);
+    }
+    // The trailer as well: two documents with the same objects and different
+    // /Root are different documents.
+    scratch.clear();
+    write_dict(&mut scratch, trailer, names, 0);
+    hasher.update(&scratch);
+    if let Some(entropy) = entropy {
+        hasher.update(entropy);
+    }
+    let digest = hasher.finish();
+    let derived = PdfString::hex(digest.get(..16).unwrap_or_default().to_vec());
+
+    let inherited = trailer
+        .get_array(Name::ID)
+        .and_then(<[Object]>::first)
+        .and_then(Object::as_string)
+        .filter(|first| !first.bytes.is_empty());
+    let permanent = match (inherited, entropy) {
+        (Some(first), None) => first.clone(),
+        _ => derived.clone(),
+    };
+
+    let mut out = trailer.clone();
+    out.insert(
+        Name::ID,
+        Object::Array(vec![Object::String(permanent), Object::String(derived)]),
+    );
+    out
+}
+
 /// Writes a whole document afresh.
 #[must_use]
 pub fn rewrite(
@@ -624,6 +715,16 @@ pub fn rewrite(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Vec<u8> {
+    // Before the layout is chosen, so the linearized writer receives the same
+    // trailer the ordinary one would.
+    let identified = with_identifier(
+        trailer,
+        objects,
+        names,
+        options.encryption.as_ref().map(|e| &e.entropy),
+    );
+    let trailer = &identified;
+
     if options.linearize {
         // A document with no catalog or no pages has no first page to put
         // first; the ordinary layout is then the only honest one, rather than
