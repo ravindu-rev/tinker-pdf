@@ -471,9 +471,35 @@ gap is manageable and a false claim is not — nobody goes looking.
   (data-file provenance gate), `versions`, `check`, `corpus-fetch` /
   `corpus-run` / `corpus-licences`, `release`, `nuget-stage`.
 
-## What is deliberately outside the suite
+## Clocks: outside the suite, and not nowhere
 
-Wall-clock benchmarks. Clocks are banned from tests by assertion, so
-performance numbers in these docs are one-time measurements with dates, not
-regression guards. A criterion bench suite is a [roadmap](ROADMAP.md) item;
-`criterion` is already on the exempt tooling list.
+Clocks stay banned from **tests**. `bounds_ledger.rs` bans `Instant::now` from
+itself so that every hardening bound is a property of an input rather than of a
+machine, and that does not change.
+
+They live in `crates/tinker-pdf/benches/engine.rs` instead — six operations
+under criterion, which is exempt tooling by name and whose plotting stack is
+switched off so the dependency tree stays four crates deep. `cargo bench` runs
+weekly in `bench.yml` and keeps its numbers as artefacts; it is scheduled rather
+than gating, because a hosted runner swings 20 % between two runs of identical
+code and a benchmark that fails a pull request on that teaches people to ignore
+it. The useful mode is criterion's own comparison, which needs two revisions on
+one machine:
+
+```sh
+cargo bench -p tinker-pdf -- --save-baseline before
+cargo bench -p tinker-pdf -- --baseline before
+```
+
+## Six examples, run rather than compiled
+
+`crates/tinker-pdf/examples/` is the documented end-to-end usage: open, render,
+extract, edit, create, convert. Each runs with no arguments against a committed
+fixture, so trying one needs no corpus and no download.
+
+CI **runs all six and greps each one's output**, which is the same rule as
+everywhere else on this page: `cargo clippy --all-targets` already compiles
+them, and a program that compiles and prints nothing is indistinguishable from
+one that works. The greps assert content — `the original, untouched` from the
+incremental save, `read back page 1 says` from the writer reading back what it
+wrote — so an example reduced to an error message fails the job.

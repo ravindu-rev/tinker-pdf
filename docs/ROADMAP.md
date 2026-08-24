@@ -57,14 +57,6 @@ thousands of documents nobody here authored.
   local registry is needed because `cargo publish --dry-run` resolves
   against the live index, so the eight non-leaf crates cannot be proved
   without it. Exit: one observed tag run, all legs green. (S–M)
-- **Examples and benchmarks.** There is no `examples/` directory; the
-  demonstrated end-to-end usage is doctests, three CLI tools and a browser
-  demo. And every performance number in these docs is a one-time
-  measurement, because clocks are banned from tests by assertion — a
-  criterion bench suite (criterion is already exempt tooling) would turn
-  the 318× rasterizer result into a regression guard. Exit: `examples/`
-  covering open/render/extract/edit/create/convert; `cargo bench` runs in
-  a scheduled job. (S)
 
 ## Tier 2 — close the named refusals, by measured reachability
 

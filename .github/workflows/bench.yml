@@ -1,0 +1,65 @@
+# Wall-clock benchmarks.
+#
+# Scheduled and dispatchable, never on the path between a push and a review.
+# A benchmark that gates a pull request measures the runner it happened to land
+# on: GitHub's hosted runners are shared machines, and a 20 % swing between two
+# runs of identical code is ordinary. So this reports rather than gates.
+#
+# What it is for is the thing the test suite structurally cannot do. Clocks are
+# banned from assertions here — `bounds_ledger.rs` bans `Instant::now` from
+# itself so that every bound is a property of an input rather than of a machine
+# — which means every performance figure in `docs/` has been a one-time
+# measurement with a date beside it and nothing to stop it regressing. These
+# numbers, kept as artefacts, are what a regression is eventually noticed
+# against.
+#
+# Criterion compares two revisions itself, and that is the useful mode:
+#
+#   cargo bench -p tinker-pdf -- --save-baseline before
+#   cargo bench -p tinker-pdf -- --baseline before
+name: bench
+
+on:
+  schedule:
+    # 05:00 UTC on Mondays. After the nightly corpus run, so the two are never
+    # competing for a runner, and weekly because nothing here changes daily.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `--release` is implied by `cargo bench`, but the profile is worth
+      # naming: a debug-profile benchmark measures the absence of inlining.
+      - name: Measure
+        run: |
+          set -o pipefail
+          cargo bench -p tinker-pdf 2>&1 | tee bench.log
+          # The same hazard as everywhere else in this repository: a bench
+          # target that compiled and measured nothing exits 0. Six operations
+          # are named in `benches/engine.rs`; if none of them reported a time,
+          # this job proved nothing.
+          grep -Eq 'time:+\[' bench.log
+
+      - name: Keep the numbers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: |
+            bench.log
+            target/criterion/
+          if-no-files-found: warn
+          retention-days: 90

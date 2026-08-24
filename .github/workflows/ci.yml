@@ -68,6 +68,36 @@ jobs:
       # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan
       # 00 and ruling 8 say what the graph is; ruling 4 says why the platform
       # libm may not appear where the output is pixels.
+      # The examples are ordinary cargo targets, so the clippy line above
+      # already compiles them. This *runs* them, because an example that
+      # compiles and draws nothing is the same green tick as one that works
+      # — the hazard verification.md names, applied to the six programs
+      # that are the documented end-to-end usage of this library.
+      #
+      # Each runs with no arguments against a committed fixture, so no
+      # corpus is fetched and nothing is downloaded.
+      - name: Every example runs, and says something
+        shell: bash
+        run: |
+          set -o pipefail
+          for example in open render extract edit create convert; do
+            echo "::group::$example"
+            cargo run -p tinker-pdf --example "$example" \
+              2>&1 | tee "example-$example.log"
+            test -s "example-$example.log" || {
+              echo "::error::example $example printed nothing"
+              exit 1
+            }
+            echo "::endgroup::"
+          done
+          # And one positive assertion per example, so "it printed
+          # something" cannot be an error message.
+          grep -q 'pages     3' example-open.log
+          grep -q 'rendered  ' example-render.log
+          grep -q 'Tinker fixture' example-extract.log
+          grep -q 'the original, untouched' example-edit.log
+          grep -q 'read back page 1 says' example-create.log
+          grep -q 'as a document' example-convert.log
       - run: cargo run -p xtask -- check
 
   fuzz-targets:

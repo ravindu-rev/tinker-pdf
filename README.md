@@ -63,6 +63,15 @@ for page in doc.pages() {
 let mut editor = doc.editor();
 ```
 
+Six runnable examples cover the rest, each with no arguments needed:
+
+```sh
+cargo run -p tinker-pdf --example open       # and render, extract, edit,
+cargo run -p tinker-pdf --example create     # convert
+```
+
+See [crates/tinker-pdf/examples/](crates/tinker-pdf/examples/).
+
 ## What it does
 
 | | |
