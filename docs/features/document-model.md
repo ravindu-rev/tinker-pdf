@@ -134,7 +134,7 @@ for (depth, item) in tinker_pdf::OutlineItem::flatten(&doc.outline()) {
 
 ## Verified
 
-As of August 2026, in the workspace suite of 2 948 passing tests:
+As of August 2026, in the workspace suite of 2 951 passing tests:
 
 - `crates/tinker-pdf/tests/tinker_parity.rs` — the ported parity tests
   ([ruling 12](../rulings.md)): `pdf_version()` returns exactly `"PDF 1.7"`, the three-level

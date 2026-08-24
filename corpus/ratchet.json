@@ -11,11 +11,11 @@
       "metamorphic": {
         "crop": {
           "compared": 830,
-          "held": 789
+          "held": 790
         },
         "dpi": {
           "compared": 944,
-          "held": 899
+          "held": 904
         },
         "rotate": {
           "compared": 839,
@@ -75,7 +75,7 @@
         },
         "dpi": {
           "compared": 582,
-          "held": 573
+          "held": 574
         },
         "rotate": {
           "compared": 479,

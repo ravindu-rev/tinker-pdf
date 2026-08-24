@@ -2213,9 +2213,17 @@ fn rendering_is_stable_across_targets() {
         // so the whole of image sampling — every row of the policy matrix,
         // the bilinear weights and the pyramid — was outside what this file
         // measured.
+        //
+        // Re-recorded August 2026 when minification stopped interpolating and
+        // started averaging: 0.77 % of this page's pixels moved, mean 0.001,
+        // worst 0.24, all of it the one minified placement. The new value is
+        // the *correct* one and the old was not, which this file could never
+        // have said on its own — a fingerprint pins the engine against itself,
+        // so it reports that an answer changed and never that it was wrong.
+        // `tinker-pdf-raster/tests/analytic_sampling.rs` is what says which.
         (
             "image",
-            "8cca4e2c1380f630e1c85da93b3a6add4349156d704adbffca7d45d917244f38",
+            "58eedf585a421b601f2d0c4c435c44a94ec6bbe5fae517060b4d691e5f234ed1",
         ),
         // Added August 2026 with gap 11. Groups, isolation, knockout and an
         // ExtGState soft mask reach no other fixture here at all.

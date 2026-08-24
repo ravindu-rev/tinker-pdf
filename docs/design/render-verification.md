@@ -2,7 +2,7 @@
 
 When this is done, a page will be checkable against something other than
 this engine's own opinion of it. Today it is not:
-[verification.md](../verification.md) states the limit — 2 948 tests prove
+[verification.md](../verification.md) states the limit — 2 951 tests prove
 the engine agrees with itself, the 4 525-file corpus run proves a bitmap
 came back, and nothing proves the bitmap is *right*.
 

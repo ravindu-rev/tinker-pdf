@@ -16,26 +16,29 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 948 tests proving the
+These come before any new feature. The suite is 2 951 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **Images are sampled differently at different resolutions.** The `dpi`
-  relation — render at twice the scale, box-filter down, require agreement —
-  fails on nine qpdf files and every one of them carries an image. The two
-  PCLM files disagree on **23.4 %** of their pixels (107 592 of 459 869); the
-  inline-image files on 4.4–5.4 %; the budget is 2 %. No text-only or
-  vector-only file in 4 525 fails it. A wrong colour or a wrong shape commutes
-  with the scale and leaves the relation green, so what this names is a *grid*
-  mistake: an image's device rectangle, or its sampling of source pixels, is a
-  function of the render scale when it must not be. Two of the nine were found
-  only when the metamorphic budget was resited and they became eligible.
-  Evidence: 9 of 582 files compared, August 2026, named per file in
-  `corpus/report.json`. Exit: qpdf's `dpi` row holds on every image-carrying
-  file, and a fixture pins one PCLM strip at two scales. (M)
+- **Image edges are quantised to whole device pixels.** A destination pixel is
+  painted in full or not at all, by whether the image's device rectangle
+  contains its centre, so an image placed at a fractional offset has a jagged
+  edge — and abutting strips, which is how every PCLM scan is built, tile
+  differently at different scales. It is what remains of the `dpi` relation's
+  eight failures after minification was fixed below: the two PCLM files
+  disagree on 17.3 % of their pixels (was 23.4 %), the six inline-image files
+  on 3.2–4.4 % (was 4.4–5.4 %), against a 2 % budget, and no text-only or
+  vector-only file in 4 525 fails at all. The fix is partial coverage at the
+  edge, and it is **not free**: source-over compositing of two half-covered
+  draws is not the average of them, so seams that tile exactly today would
+  gain a line of background — the conflation artefact every renderer in this
+  imaging model has. That trade is the work, and it wants a design note rather
+  than a patch. Evidence: 8 of 582 files compared, August 2026, named per file
+  in `corpus/report.json`. Exit: an analytic test pins a half-covered image
+  edge against its area; qpdf's `dpi` row holds on the PCLM pair. (M)
 - **A bundled face set, behind a feature.** Measured rather than argued:
   `corpus/ratchet-fonts.json` is the same 4 525 files with a face supplied,
   and **52 % of all reported degradation was the absence of one** — 1 045
