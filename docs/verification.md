@@ -82,11 +82,15 @@ minutes, and "timed out" is also what a 900-page scan says. The limit of the
 signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
 *made no observable progress for half its budget*. The second axis — 1 045 files
-(23 %) rendering *with something reported* — is measured without font
-faces: this build bundles none, so the number is dominated by documents
-that draw no text without a provider, `ratchet.json` says so in its own
-note, and `corpus-run` refuses to compare a `--fonts` run against a bar
-recorded without them.
+(23.1 %) rendering *with something reported* — is measured without font faces,
+and there is now a second bar that says what that costs.
+`corpus/ratchet-fonts.json` is the same 4 525 files with a face supplied and
+reports **506 (11.2 %)**, so **52 % of all reported degradation was the absence
+of a face** rather than a defect in the engine. The face is one this repository
+writes for itself (`cargo xtask synth-face`) — every glyph from 32 up a filled
+box — so it answers *was a face available* and nothing more, needs no licence
+and no download, and is the same bytes on every machine. The two bars live in
+two files and `corpus-run` refuses to compare either against the other.
 
 The fourth axis is the metamorphic one, and its denominator is worth being
 honest about. A relation is not asked of a file that has already spent much of

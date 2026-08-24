@@ -140,13 +140,62 @@ let doc = Document::open(bytes)?
 // would extract perfectly and render none of it, reporting UnreadableFont.
 ```
 
+## What the missing faces cost, measured
+
+This engine bundles no font programs, so a document that names Helvetica and
+embeds nothing extracts its text perfectly and draws none of it. That is a
+policy, and until now the corpus could not separate its cost from the engine's
+own defects: every such file counts as *rendered with something reported*, and
+`corpus/ratchet.json` said so in its own note without being able to say how
+much.
+
+Both numbers now exist. `corpus/ratchet-fonts.json` is the same 4 525 files
+measured with a face supplied — the one `cargo xtask synth-face` writes, whose
+every glyph from 32 up is a filled box, so it answers *was a face available*
+and nothing else:
+
+| Corpus | Files | Degraded, no faces | Degraded, with a face |
+| --- | ---: | ---: | ---: |
+| pdf.js | 974 | 422 | 300 |
+| veraPDF | 2 907 | 87 | 72 |
+| qpdf | 637 | 530 | 130 |
+| PDF Association | 7 | 6 | 4 |
+| **Total** | **4 525** | **1 045 (23.1 %)** | **506 (11.2 %)** |
+
+**539 of the 1 045 — 52 % — were the absence of a face**, and in qpdf's corpus
+it is three quarters of them. The face is synthesised rather than fetched for
+the reason `substitute_fonts.rs` gives about its own: no licence, no download,
+and the same bytes on every machine forever. A bar measured against whatever
+face a runner image happened to ship would not be a bar.
+
+Neither figure says the text was *set* correctly; both say whether a glyph was
+drawn at all.
+
+Recording the second bar found a defect in the corpus probe rather than in the
+engine, which is worth keeping because of the shape of it. The two metamorphic
+relations that rewrite a document reopened it **without the provider**, so the
+rotated or cropped copy had no way to draw text the original had drawn. With no
+faces anywhere the two renders were equally blank and the relations held; with
+faces, 309 of pdf.js's 839 files failed `rotate` instead of 219. A comparison
+between two renders is only a comparison if both are made under the same
+conditions, and nothing could see that until one of the conditions existed.
+
+**The decision this settles.** The base 14 are required to be available by
+9.6.2.2, so a conforming file that names one and embeds nothing is a file this
+engine cannot draw — which makes the absent faces a conformance gap rather than
+only a policy. A `bundled-fonts` feature carrying the Liberation family, off by
+default, is therefore on the [roadmap](../ROADMAP.md) with this measurement as
+its evidence. Off by default because the seam is still the right answer for a
+host that has faces of its own, and because the crates stay small for everyone
+who does.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
 | Shaping: GSUB/GPOS, kerning, bidi — advances are per-character from `/Widths`/`/W` | none — layout uses the file's own advances; nothing is dropped, so nothing warns | Long a stated non-goal, since overturned: the roadmap stages a shaping leaf crate | [ROADMAP](../ROADMAP.md) |
 | CFF subsetting on write | `tinker_pdf_font::subset` answers `None`; the whole face is embedded | A CFF subset needs its charstring INDEX rebuilt, and a broken subset renders *almost* right | [ROADMAP](../ROADMAP.md) |
-| Bundled fallback faces | `RenderWarning::UnreadableFont` when no provider answers | Bundling is a licensing decision and directory reading an OS dependency; the seam is `FontProvider` | this page |
+| Bundled fallback faces | `RenderWarning::UnreadableFont` when no provider answers | Measured at 52 % of all corpus degradation and **decided**: a `bundled-fonts` feature ships Liberation, staged as its own item | [ROADMAP](../ROADMAP.md) |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
 | Registry CID tables in a `cmap-predefined`-off build | `WarningKind::PredefinedCMapApproximate`, `CMap::is_approximate` | Codespaces still ship (4.6 KB) so strings split right; the CIDs are admitted guesses | this page |

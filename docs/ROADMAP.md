@@ -42,11 +42,21 @@ thousands of documents nobody here authored.
   from CI configuration and no run has been watched. Exit: one commit with
   the `macos-14` leg and the `wasm-determinism` job green together,
   observed. (S)
-- **A `--fonts` corpus bar.** The corpus's 24 % rendered-with-warnings rate
-  is dominated by the no-bundled-faces policy, so it measures the policy as
-  much as the engine. Record a bar with a font provider supplied, and
-  decide whether a minimal bundled face set ships. Exit: a second ratchet
-  row `corpus-run --fonts` refuses to regress against. (M)
+- **A bundled face set, behind a feature.** Measured rather than argued:
+  `corpus/ratchet-fonts.json` is the same 4 525 files with a face supplied,
+  and **52 % of all reported degradation was the absence of one** — 1 045
+  files down to 506, and in qpdf's corpus 530 down to 130
+  ([features/fonts.md](features/fonts.md)). The base 14 are required to be
+  available by 9.6.2.2, so a conforming file naming Helvetica and embedding
+  nothing is one this engine cannot draw, which makes this a conformance gap
+  rather than only a policy. Decided: a `bundled-fonts` feature carrying the
+  Liberation family, **off by default**, because the `FontProvider` seam
+  remains the right answer for a host with faces of its own. It brings back
+  `deny.toml`'s OFL-1.1 entry, a `THIRDPARTY.md` section and a third corpus
+  bar, all in the commit that adds the faces — which is what that allowlist
+  comment already says it is waiting for. Exit: a `bundled-fonts` build
+  renders base-14 text with no provider installed; a third ratchet row holds.
+  (M)
 - **An observed release.** The packaging pipeline is built and has been
   dry-run end-to-end on Windows/x86_64 only; every Linux and macOS leg, and
   the one-tag-produces-all-four claim, exist in `release.yml` unobserved. A

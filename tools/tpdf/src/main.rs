@@ -935,7 +935,12 @@ impl Relation {
 /// rotation and crop ones cost a save and a reopen as well, so asking every
 /// page of a four-thousand-file corpus would turn a twenty-second timeout into
 /// the thing being measured.
-fn metamorphic(doc: &Document, options: &Options, spent: std::time::Duration) {
+fn metamorphic(
+    doc: &Document,
+    options: &Options,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+    spent: std::time::Duration,
+) {
     // **The relations may not cost the file its outcome**, and this line is
     // there because they did. Each one re-renders the first page and two of
     // them save and reopen the document, so on a slow file the extra work ran
@@ -998,9 +1003,9 @@ fn metamorphic(doc: &Document, options: &Options, spent: std::time::Duration) {
             // which is several seconds of silence on a large file — and is
             // where a rewrite that does not terminate stops.
             println!("phase meta-rotate");
-            rotation(doc, &base, &render).print("rotate");
+            rotation(doc, &base, &render, fonts).print("rotate");
             println!("phase meta-crop");
-            cropping(doc, &page, &base, &render).print("crop");
+            cropping(doc, &page, &base, &render, fonts).print("crop");
         }
         Some(why) => {
             Relation::Skipped(why).print("rotate");
@@ -1032,13 +1037,28 @@ fn differs(a: (i32, i32, i32), b: (i32, i32, i32)) -> bool {
 /// its axes swapped. Nothing about the content changes, so this is an equality
 /// and not a budget — and it catches every place a rotation is applied to the
 /// geometry and not to the clip, or to the text and not to the images.
-fn rotation(doc: &Document, base: &Bitmap, render: &RenderOptions) -> Relation {
+fn rotation(
+    doc: &Document,
+    base: &Bitmap,
+    render: &RenderOptions,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) -> Relation {
     let mut editor = doc.editor();
     if !editor.rotate_page(0, 90) {
         return Relation::Skipped("the page would not rotate");
     }
     let Ok(turned) = Document::open(editor.save(&WriteOptions::default())) else {
         return Relation::Skipped("the rotated document would not reopen");
+    };
+    // **With the same faces**, and this is not a detail. The relation compares
+    // two renders of one document, so the two must be rendered under the same
+    // conditions; reopening without the provider gave the rotated copy no way
+    // to draw text that the original drew. Measured: 309 of pdf.js's 839 files
+    // failed `rotate` under `--fonts` and 219 without it, and the difference
+    // was entirely this line.
+    let turned = match fonts {
+        Some(provider) => turned.with_fonts(provider.clone()),
+        None => turned,
     };
     let Some(page) = turned.page(0) else {
         return Relation::Skipped("the rotated document lost its page");
@@ -1078,7 +1098,13 @@ fn rotation(doc: &Document, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// The crop box is the middle half of the page, in whole pixels at the scale
 /// being rendered, so the comparison needs no resampling: every pixel of the
 /// cropped render has a pixel of the full one it must equal exactly.
-fn cropping(doc: &Document, page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
+fn cropping(
+    doc: &Document,
+    page: &Page,
+    base: &Bitmap,
+    render: &RenderOptions,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) -> Relation {
     let (x0, y0, x1, y1) = page.crop_box();
     let (width, height) = (x1 - x0, y1 - y0);
     if !(width.is_finite() && height.is_finite()) || width < 4.0 || height < 4.0 {
@@ -1106,6 +1132,11 @@ fn cropping(doc: &Document, page: &Page, base: &Bitmap, render: &RenderOptions) 
     }
     let Ok(cropped) = Document::open(editor.save(&WriteOptions::default())) else {
         return Relation::Skipped("the cropped document would not reopen");
+    };
+    // With the same faces, for `rotation`'s reason.
+    let cropped = match fonts {
+        Some(provider) => cropped.with_fonts(provider.clone()),
+        None => cropped,
     };
     let Some(page) = cropped.page(0) else {
         return Relation::Skipped("the cropped document lost its page");
@@ -1326,7 +1357,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 
     println!("phase strict");
     strict(&doc);
-    metamorphic(&doc, options, started.elapsed());
+    metamorphic(&doc, options, fonts, started.elapsed());
 
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");

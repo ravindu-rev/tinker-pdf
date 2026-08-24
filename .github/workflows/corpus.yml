@@ -77,6 +77,32 @@ jobs:
           # nothing rather than as a regression.
           grep -Eq '^strict +[1-9][0-9]* rewritten' corpus-run.log
 
+      # The second bar, and a second job rather than a second step: one
+      # failing must not stop the other from being measured, and the two
+      # answer different questions.
+      #
+      # `--fonts synthetic` writes the face `cargo xtask synth-face` writes —
+      # every glyph from 32 up a filled box — and measures against it. No
+      # licence, no fetch, no dependence on what faces this runner image
+      # happens to ship. It answers "was a face available" and nothing else:
+      # the shapes are wrong, and the difference between the two bars is how
+      # much of the degradation was the absence of a face rather than a defect
+      # in the engine.
+      - name: Run the corpus with a face, and hold that bar too
+        run: |
+          set -o pipefail
+          cargo run --release -p xtask -- corpus-run             --timeout 20 --dpi 72 --fonts synthetic             --report corpus/report-fonts.json --check             2>&1 | tee corpus-fonts.log
+
+          if grep -q 'INCOMPLETE' corpus-fonts.log; then
+            echo "::error::the with-faces corpus run did not describe the"                  "whole corpus, so it proves nothing about a regression"
+            exit 1
+          fi
+          grep -Eq '^all +[1-9][0-9]* files' corpus-fonts.log
+          # And prove the face actually reached the child. A `--fonts` run
+          # whose provider silently loaded nothing would look exactly like a
+          # no-faces run measured against the wrong bar.
+          grep -q 'wrote the synthetic face' corpus-fonts.log
+
       # Kept whatever the outcome: when the bar moves, the per-file record is
       # the only thing that says which files moved and why.
       - name: Keep the per-file report
@@ -84,6 +110,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: corpus-report
-          path: corpus/report.json
+          path: |
+            corpus/report.json
+            corpus/report-fonts.json
           if-no-files-found: warn
           retention-days: 14
