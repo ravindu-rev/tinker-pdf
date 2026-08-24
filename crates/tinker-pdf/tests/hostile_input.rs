@@ -166,6 +166,10 @@ fn exercise(bytes: Vec<u8>) {
 
     let _ = doc.ladder_level();
     let _ = doc.warnings();
+    // Ruling 13's validator reads the cross-reference sections out of the
+    // bytes itself, which is a second parser over hostile input and belongs
+    // here for exactly that reason.
+    let _ = doc.validate();
     let _ = doc.metadata();
     let _ = doc.pdf_version();
     let _ = doc.page_count();

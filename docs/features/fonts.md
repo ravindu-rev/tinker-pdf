@@ -3,10 +3,13 @@
 Every font format a PDF can carry is parsed in `crates/tinker-pdf-font` —
 bytes in, metrics and outlines out, no PDF types on its API (ruling 8,
 [rulings](../rulings.md)) — and the facade binds those programs to font
-dictionaries, encodings and CMaps. The engine bundles no font programs and
-reads no directories, by policy: bundling a face is a licensing decision and
-reading a directory is an operating-system dependency `wasm32-unknown-unknown`
-does not have. A document that embeds its fonts needs nothing else; one that
+dictionaries, encodings and CMaps. The engine reads no font directories, by
+policy: that is an operating-system dependency `wasm32-unknown-unknown` does
+not have. It bundles no font programs **by default** either — a face is a
+licensing decision, and the host that has one supplies it — but the
+`bundled-fonts` feature carries twelve Liberation faces for the host that has
+none, which is a decision this page's measurement settled rather than a
+default that changed. A document that embeds its fonts needs nothing else; one that
 does not draws no text without a host-supplied [`FontProvider`](#api), and the
 gap is reported, never silent.
 
@@ -140,13 +143,107 @@ let doc = Document::open(bytes)?
 // would extract perfectly and render none of it, reporting UnreadableFont.
 ```
 
+## What the missing faces cost, measured
+
+This engine bundles no font programs, so a document that names Helvetica and
+embeds nothing extracts its text perfectly and draws none of it. That is a
+policy, and until now the corpus could not separate its cost from the engine's
+own defects: every such file counts as *rendered with something reported*, and
+`corpus/ratchet.json` said so in its own note without being able to say how
+much.
+
+Both numbers now exist. `corpus/ratchet-fonts.json` is the same 4 525 files
+measured with a face supplied — the one `cargo xtask synth-face` writes, whose
+every glyph from 32 up is a filled box, so it answers *was a face available*
+and nothing else:
+
+| Corpus | Files | No faces | Synthetic face | Bundled faces |
+| --- | ---: | ---: | ---: | ---: |
+| pdf.js | 974 | 422 | 300 | 305 |
+| veraPDF | 2 907 | 87 | 72 | 72 |
+| qpdf | 637 | 530 | 130 | 152 |
+| PDF Association | 7 | 6 | 4 | 4 |
+| **Total** | **4 525** | **1 045 (23.1 %)** | **506 (11.2 %)** | **533 (11.8 %)** |
+
+Three bars, in three files, and `corpus-run` refuses to compare any of them
+against another. The last column is the faces this project now ships
+(`corpus/ratchet-bundled.json`); the middle one is a face it synthesises for
+the measurement (`corpus/ratchet-fonts.json`), every glyph a filled box.
+
+**The bundled column is 27 files worse, and that is the bundled set being
+right.** Every one of the 27 is a symbolic font — an embedded face the engine
+could not read, with `/Flags` bit 3 set — which the bundled faces decline and
+one all-purpose face silently answered with squares. The synthetic bar was
+flattering itself on those files, and the difference between the two columns is
+exactly the size of that flattery.
+
+**512 of the 1 045 — 49 % — were the absence of a face**, and in qpdf's corpus
+it is three quarters of them. The synthetic face exists so the measurement can
+be reproduced anywhere: no licence, no download, the same bytes on every
+machine forever, and no dependence on what a runner image happens to ship.
+
+Neither figure says the text was *set* correctly; both say whether a glyph was
+drawn at all.
+
+Recording the second bar found a defect in the corpus probe rather than in the
+engine, which is worth keeping because of the shape of it. The two metamorphic
+relations that rewrite a document reopened it **without the provider**, so the
+rotated or cropped copy had no way to draw text the original had drawn. With no
+faces anywhere the two renders were equally blank and the relations held; with
+faces, 309 of pdf.js's 839 files failed `rotate` instead of 219. A comparison
+between two renders is only a comparison if both are made under the same
+conditions, and nothing could see that until one of the conditions existed.
+
+**What it settled.** The base 14 are required to be available by 9.6.2.2, so a
+conforming file that names one and embeds nothing was a file this engine could
+not draw — a conformance gap rather than only a policy. The `bundled-fonts`
+feature below is the answer, and this measurement is why it exists.
+
+## The bundled faces
+
+`bundled-fonts`, **off by default**, embeds the twelve Liberation faces —
+Sans, Serif and Mono, four styles each. They are metric-compatible with Arial,
+Times New Roman and Courier New, which are in turn what every reader
+substitutes for Helvetica, Times and Courier, so the advance widths match what
+the document's own `/Widths` array already says. That is twelve of the standard
+14; Symbol and ZapfDingbats are the other two and are declined rather than
+approximated.
+
+```toml
+tinker-pdf = { version = "0.0.1", features = ["bundled-fonts"] }
+```
+
+Three things about the shape of it:
+
+- **The bundled set is asked last.** A host provider is consulted first and the
+  bundled faces answer only what it declines — per *request*, not per document,
+  so a host with a face for the body text and none for the monospaced code
+  sample gets both right. Turning the feature on can therefore only add
+  answers; it cannot take one away.
+- **Symbolic fonts are declined by name as well as by flag.** A base-14 font
+  dictionary carries no `/FontDescriptor`, so `/Flags` is zero and the symbolic
+  bit is absent for exactly the two faces that need it. Without the name check
+  a `/BaseFont /Symbol` page rendered its text as Latin letters — legible,
+  plausible and wrong, which is worse than the gap it replaced.
+- **The family comes from the name before the flags**, for the same reason:
+  producers set the serif bit wrongly all the time, and a document that embeds
+  nothing names `Helvetica`, `Times-Roman` or `Courier` exactly. The names nest
+  — `sans-serif` contains `serif`, `DejaVu Sans Mono` contains `sans` — so the
+  narrowest claim is tested first, and each of those sentences is a test.
+
+Off by default because a desktop application, a server with a font package or a
+web page with a face already loaded all have better faces than these and a way
+to hand them over, and none of them should carry 4.2 MB of ours. `FontProvider`
+remains the seam either way. Provenance and the OFL text are in
+[THIRDPARTY.md](../../THIRDPARTY.md).
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
 | Shaping: GSUB/GPOS, kerning, bidi — advances are per-character from `/Widths`/`/W` | none — layout uses the file's own advances; nothing is dropped, so nothing warns | Long a stated non-goal, since overturned: the roadmap stages a shaping leaf crate | [ROADMAP](../ROADMAP.md) |
 | CFF subsetting on write | `tinker_pdf_font::subset` answers `None`; the whole face is embedded | A CFF subset needs its charstring INDEX rebuilt, and a broken subset renders *almost* right | [ROADMAP](../ROADMAP.md) |
-| Bundled fallback faces | `RenderWarning::UnreadableFont` when no provider answers | Bundling is a licensing decision and directory reading an OS dependency; the seam is `FontProvider` | this page |
+| Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
 | Registry CID tables in a `cmap-predefined`-off build | `WarningKind::PredefinedCMapApproximate`, `CMap::is_approximate` | Codespaces still ship (4.6 KB) so strings split right; the CIDs are admitted guesses | this page |
@@ -184,7 +281,7 @@ let doc = Document::open(bytes)?
   targets, asserting a least-ink floor so a face that stops drawing cannot
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
-- The whole workspace stands at 2 790 passed / 0 failed / 8 ignored
+- The whole workspace stands at 2 952 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026), and the corpus run — 4 525 files, 4 484
   rendered every page, 0 crashes — exercises real embedded fonts of every
   kind here. See [verification](../verification.md).

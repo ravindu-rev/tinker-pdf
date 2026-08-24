@@ -152,13 +152,14 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   `the_synthesised_document_fits_inside_what_was_charged_for_it` measures the
   page-overhead charge against documents of 1 to 200 pages. Pictures are
   asserted against literal expected pixels, not only against another render.
-- `crates/tinker-pdf/tests/cbz_qpdf.rs` — the synthesised document is saved
-  and checked by qpdf as a subprocess, so "the CBZ produced a valid document"
-  is a third party's claim; the tests print `RAN`/`SKIPPED` and CI greps for
-  the first and fails on the second. **This check is on its way out**: ruling
-  9 is retired and ruling 13 replaces it with a first-party strict validator,
-  after which nobody outside this repository reads the file at all
-  ([ROADMAP](../ROADMAP.md)).
+- `crates/tinker-pdf/tests/cbz_validated.rs` — the synthesised document and
+  the same document saved back are both held to the strict validator, and the
+  pages are read out of the catalog's own `/Kids` rather than through the
+  tolerant page walk: the `/MediaBox` from each page object and the dimensions
+  from each image XObject's own `/Width`, which are two independent claims. It
+  replaces the qpdf oracle retired with ruling 9, and **what left with that
+  oracle is that a reader nobody here wrote accepts the file**
+  ([verification](../verification.md)).
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 17 unit tests over
   ordering and classification.
@@ -174,5 +175,5 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take.
   Two of the 24 targets.
-- The whole workspace: `cargo test --workspace` is 2 790 passed, 0 failed,
+- The whole workspace: `cargo test --workspace` is 2 952 passed, 0 failed,
   8 ignored (Windows x86_64, as of August 2026).

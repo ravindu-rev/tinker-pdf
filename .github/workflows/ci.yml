@@ -33,6 +33,25 @@ jobs:
       # failure rather than something nobody notices. The wasm leg is the
       # `wasm-determinism` job below.
       - run: cargo test --workspace
+      # Ruling 4's fourth target is the reason this matrix has a macos-14 leg,
+      # and until now that leg proved it by *existing*. `cargo test --workspace`
+      # above does run `determinism.rs` — but a `#[ignore]` added one afternoon,
+      # a `cfg` that excluded the target, or a filter matching nothing all leave
+      # a green tick that says nothing, which is the hazard verification.md
+      # calls "a check that can be absent is red, not green". The wasm leg has
+      # greped its own log since the day it was written; the native legs now do
+      # too, so "measured on macOS" is a sentence with a run behind it.
+      #
+      # `shell: bash` because the windows leg's default is pwsh, where `tee`
+      # and `grep` are not these programs. `pipefail` because the pipe would
+      # otherwise return `tee`'s status and hide a failing suite.
+      - name: The determinism fingerprints were reproduced on this target
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test determinism 2>&1 | tee determinism.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
+          grep -Eq 'rendering_is_stable_across_targets [.]{3} ok' determinism.log
       # `cmap-predefined` off, *run* rather than merely linked: a build
       # without the CJK tables keeps the codespaces and drops the CIDs, and
       # `tinker-pdf-font/tests/predefined_cmaps_absent.rs` is the only place
@@ -45,10 +64,48 @@ jobs:
       # and passes while proving nothing.
       - run: cargo test -p tinker-pdf-font --no-default-features
       - run: cargo test -p tinker-pdf --no-default-features
+      # The other feature, and the opposite direction: `bundled-fonts` adds
+      # twelve Liberation faces and changes what a document that embeds no font
+      # renders to. Several tests state "without a face there is nothing to
+      # draw", which is true of the default build and false of this one, so a
+      # leg that never builds it would let those two claims drift apart. Run
+      # rather than checked, for the reason every other line here is.
+      - run: cargo test -p tinker-pdf --features bundled-fonts
+      - run: cargo clippy -p tinker-pdf --features bundled-fonts --all-targets -- -D warnings
       # Two design rules the compiler cannot enforce: a new crate edge
       # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan
       # 00 and ruling 8 say what the graph is; ruling 4 says why the platform
       # libm may not appear where the output is pixels.
+      # The examples are ordinary cargo targets, so the clippy line above
+      # already compiles them. This *runs* them, because an example that
+      # compiles and draws nothing is the same green tick as one that works
+      # — the hazard verification.md names, applied to the six programs
+      # that are the documented end-to-end usage of this library.
+      #
+      # Each runs with no arguments against a committed fixture, so no
+      # corpus is fetched and nothing is downloaded.
+      - name: Every example runs, and says something
+        shell: bash
+        run: |
+          set -o pipefail
+          for example in open render extract edit create convert; do
+            echo "::group::$example"
+            cargo run -p tinker-pdf --example "$example" \
+              2>&1 | tee "example-$example.log"
+            test -s "example-$example.log" || {
+              echo "::error::example $example printed nothing"
+              exit 1
+            }
+            echo "::endgroup::"
+          done
+          # And one positive assertion per example, so "it printed
+          # something" cannot be an error message.
+          grep -q 'pages     3' example-open.log
+          grep -q 'rendered  ' example-render.log
+          grep -q 'Tinker fixture' example-extract.log
+          grep -q 'the original, untouched' example-edit.log
+          grep -q 'read back page 1 says' example-create.log
+          grep -q 'as a document' example-convert.log
       - run: cargo run -p xtask -- check
 
   fuzz-targets:
@@ -106,9 +163,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      # `@v2` with an explicit `tool:`, never `@<tool-name>`. Dependabot
+      # rewrites a `@<tool-name>` tag into a version tag, and the action then
+      # installs NOTHING and exits 0 — which is how `fuzz-seeds` spent five
+      # runs reporting `error: no such command: fuzz` while every other job
+      # looked normal. The explicit form cannot lose its argument.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # `--target` named explicitly. The cargo-fuzz that
+      # `taiki-e/install-action` puts on the runner is a musl build, and
+      # cargo-fuzz takes its own build triple as the default target — so
+      # it asked for `x86_64-unknown-linux-musl`, which links libc
+      # statically, which the address sanitizer refuses. Naming the target
+      # makes the job independent of how the tool it uses was compiled.
       - name: Build every target once
-        run: cargo fuzz build
+        run: cargo fuzz build --target x86_64-unknown-linux-gnu
         # `-D warnings` from a nightly compiler would fail this on a lint
         # that has nothing to do with the code under test.
         env:
@@ -119,7 +189,8 @@ jobs:
           failed=()
           for target in $(cargo fuzz list); do
             echo "::group::$target"
-            if ! cargo fuzz run "$target" "fuzz/corpus/$target" -- \
+            if ! cargo fuzz run --target x86_64-unknown-linux-gnu \
+                 "$target" "fuzz/corpus/$target" -- \
                  -max_total_time=20 -timeout=20; then
               failed+=("$target")
             fi
@@ -185,7 +256,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
-      - uses: taiki-e/install-action@wasmtime
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
       - uses: Swatinem/rust-cache@v2
       # Piped through `tee` so the run can be asserted on afterwards. A job
       # that compiled the test and executed nothing would exit 0 and look
@@ -203,111 +276,6 @@ jobs:
             determinism.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
-
-  qpdf-linearization:
-    # The external arbiter plan 09 names for Annex F. `tests/linearized.rs`
-    # checks everything the engine can check about its own output; it cannot
-    # check whether the format was understood, and the hint tables are exactly
-    # where that mattered — bit-packed structures this repository wrote and
-    # nothing here read, wrong in five ways with every test green.
-    #
-    # Ruling 9: qpdf is invoked, never linked and never vendored, and its
-    # output is a transient comparison reference.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y qpdf
-      - run: qpdf --version
-      # The same shape as `wasm-determinism` above, for the same reason. These
-      # tests skip when qpdf is absent, and a skip exits 0 and looks exactly
-      # like a pass — so the job reads its own output and fails unless it can
-      # see that the oracle ran. `pipefail` because the pipe would otherwise
-      # return `tee`'s status and hide a real failure; `--nocapture` because a
-      # passing test's stdout is swallowed otherwise and there would be
-      # nothing to read.
-      - name: Validate linearized output against qpdf
-        run: |
-          set -o pipefail
-          cargo test -p tinker-pdf-cos --test qpdf_oracle -- --nocapture \
-            2>&1 | tee qpdf-oracle.log
-          # The skip is checked first and on its own, so the reason reaches
-          # the log. A bare `grep -q RAN` fails the step too, but under
-          # `bash -e` it fails it *silently* — a red tick with nothing saying
-          # the oracle never ran is only half of what this job is for.
-          if grep -q 'qpdf-oracle: SKIPPED' qpdf-oracle.log; then
-            echo "::error::qpdf was not found, so the linearization oracle" \
-                 "SKIPPED rather than passed"
-            exit 1
-          fi
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' qpdf-oracle.log
-          grep -q 'qpdf-oracle: RAN' qpdf-oracle.log
-      # The three synthesised-container oracles, in the same job because they
-      # want the same binary and the same posture. Gap 29 milestone 5 wrote
-      # `tests/cbz_qpdf.rs`, gap 30 milestone 4 wrote `tests/xps_qpdf.rs` and
-      # gap 31 milestone 4 wrote `tests/epub_qpdf.rs`, and all three are exit
-      # criteria of the form "saving it produces a file qpdf reads clean" —
-      # which is a claim CI has to be able to see. Until this step existed they
-      # ran only under `cargo test --workspace`, where a skipped oracle exits 0
-      # and reads exactly like a pass, which is the failure gap 20 built the
-      # grep for in the first place.
-      - name: Validate synthesised container documents against qpdf
-        run: |
-          set -o pipefail
-          cargo test -p tinker-pdf --test cbz_qpdf --test xps_qpdf \
-            --test epub_qpdf -- \
-            --nocapture 2>&1 | tee container-oracle.log
-          if grep -q 'qpdf-oracle: SKIPPED' container-oracle.log; then
-            echo "::error::qpdf was not found, so the CBZ, XPS and EPUB" \
-                 "oracles SKIPPED rather than passed"
-            exit 1
-          fi
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' container-oracle.log
-          grep -q 'qpdf-oracle: RAN' container-oracle.log
-
-  mutool-xps-oracle:
-    # Ruling 9's oracle for XPS itself: mutool reads XPS, and it is already
-    # one of ruling 9's four named oracles. Ruling 9 permits exactly that,
-    # because an oracle is invoked and never linked.
-    #
-    # `qpdf-linearization` above reads the PDF this engine wrote and says
-    # whether it is a well-formed PDF. It has never seen an XPS. This job reads
-    # **both** — the package and the document synthesised from it — so what it
-    # compares is two readings of one source by two independent programs, which
-    # is the only thing in the repository that can catch a mistake this engine
-    # makes consistently in both directions.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y mupdf-tools
-      # `mutool -v` writes its banner to stderr and exits 0. A `|| true` here
-      # would hide a missing binary, which is the whole failure this job exists
-      # to prevent.
-      - run: mutool -v
-      # The same shape as `qpdf-linearization` above, for the reason gap 20
-      # learned it: these tests skip when mutool is absent, and a skip exits 0
-      # and looks exactly like a pass — so the job reads its own output and
-      # fails unless it can see that the oracle ran. Row 9's own words are that
-      # the job is **red when the tool is missing**.
-      - name: Check the XPS reader against mutool
-        run: |
-          set -o pipefail
-          cargo test -p tinker-pdf --test xps_mutool -- --nocapture \
-            2>&1 | tee mutool-oracle.log
-          # The skip is checked first and on its own, so the reason reaches the
-          # log. A bare `grep -q RAN` fails the step too, but under `bash -e` it
-          # fails it *silently* — a red tick with nothing saying the oracle
-          # never ran is only half of what this job is for.
-          if grep -q 'mutool-oracle: SKIPPED' mutool-oracle.log; then
-            echo "::error::mutool was not found, so the XPS oracle SKIPPED" \
-                 "rather than passed"
-            exit 1
-          fi
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' mutool-oracle.log
-          grep -q 'mutool-oracle: RAN' mutool-oracle.log
 
   epub-corpus:
     # Gap 31 milestone 1's second corpus, and the only one CI has to fetch.
@@ -349,86 +317,13 @@ jobs:
           fi
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub-corpus.log
           grep -q 'epub-corpus: RAN' epub-corpus.log
-      # epubcheck, on the EPUB itself — and it checks the **input**, not this
-      # engine. It is the W3C's conformance checker, and what it gives is
-      # exactly one thing: when this engine and a book disagree, epubcheck says
-      # whose fault it is. A book it rejects is one this engine is entitled to
-      # refuse; a book it accepts and this engine mis-reads is this engine's
-      # bug. Ruling 9's posture, unchanged — a subprocess, never linked, its
-      # output transient. Pinned to 5.3.0 and fetched from the release rather
-      # than from a distribution package, so the verdicts in
-      # `tests/epub/EPUBCHECK.tsv` are compared against the same tool that
-      # produced them.
-      - name: Check the committed corpus against epubcheck
-        run: |
-          set -o pipefail
-          curl -fsSL --retry 3 -o epubcheck.zip \
-            https://github.com/w3c/epubcheck/releases/download/v5.3.0/epubcheck-5.3.0.zip
-          unzip -q epubcheck.zip
-          TINKER_EPUBCHECK="$PWD/epubcheck-5.3.0/epubcheck.jar" \
-            cargo test -p tinker-pdf --test epub -- --nocapture \
-            2>&1 | tee epubcheck.log
-          if grep -q 'epubcheck-oracle: SKIPPED' epubcheck.log; then
-            echo "::error::epubcheck did not run, so the recorded verdicts" \
-                 "SKIPPED rather than passed"
-            exit 1
-          fi
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epubcheck.log
-          grep -q 'epubcheck-oracle: RAN' epubcheck.log
-
-  browser-oracle:
-    # Ruling 9's **fifth** oracle, added by its own amendment in gap 31
-    # milestone 8, and the only one here that exists because a *previous*
-    # oracle is not good enough.
-    #
-    # `mutool-xps-oracle` above compares this engine against mutool and gap 30
-    # recorded the risk: where the oracle is wrong about XPS, this engine will
-    # agree with it and both will be wrong. XPS markup has one right answer so
-    # the risk is bounded. CSS does not work like that — mutool's EPUB layout
-    # is itself a partial CSS implementation, so **disagreeing with mutool is
-    # not evidence of a bug** and there is no fourth-oracle answer to fall back
-    # on. A browser is the reference implementation of CSS.
-    #
-    # `ubuntu-latest` ships Chromium via `chromium-browser`, and the test looks
-    # for it by path or by `TINKER_BROWSER`. It is invoked, never linked and
-    # never vendored, and the PDF it prints is read back through this
-    # repository's own reader and thrown away with `target/`.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y chromium-browser
-      # A `|| true` here would hide a missing binary, which is the whole
-      # failure this job exists to prevent.
-      - run: chromium-browser --version
-      # The same shape as `qpdf-linearization` above, for the reason gap 20
-      # learned it and row 8 restates: the job is **red when the browser is
-      # missing**, because a skipped oracle exits 0 and reads exactly like a
-      # pass.
-      - name: Compare the EPUB reader against a headless browser
-        env:
-          TINKER_BROWSER: /usr/bin/chromium-browser
-        run: |
-          set -o pipefail
-          cargo test -p tinker-pdf --test epub_browser -- --nocapture \
-            --test-threads=1 2>&1 | tee browser-oracle.log
-          # The skip is checked first and on its own, so the reason reaches the
-          # log. A bare `grep -q RAN` fails the step too, but under `bash -e` it
-          # fails it *silently* — a red tick with nothing saying the oracle
-          # never ran is only half of what this job is for.
-          if grep -q 'browser-oracle: SKIPPED' browser-oracle.log; then
-            echo "::error::no headless browser was found, so the EPUB layout" \
-                 "oracle SKIPPED rather than passed"
-            exit 1
-          fi
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' browser-oracle.log
-          grep -q 'browser-oracle: RAN' browser-oracle.log
 
   licenses:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - run: cargo deny check licenses bans sources

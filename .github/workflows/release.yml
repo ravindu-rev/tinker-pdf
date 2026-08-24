@@ -9,7 +9,7 @@
 # ## The hazard this file is written against
 #
 # `cargo test` with a filter matching nothing prints `0 passed` and exits 0.
-# The `wasm-determinism` and `qpdf-linearization` jobs in ci.yml are both
+# The `wasm-determinism` job in ci.yml, and the oracle jobs beside it, are all
 # written to *prove they ran* for that reason. A release job is the same hazard
 # with worse consequences: a job that builds nothing, uploads nothing and
 # reports success is indistinguishable from one that worked, and the thing it
@@ -54,6 +54,42 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           cargo run -p xtask -- release --plan --tag "${GITHUB_REF_NAME}"
+
+  # The fifteen crates, packaged and *verified*, against each other rather
+  # than against crates.io.
+  #
+  # This is the half of the pipeline that had never run. `cargo publish
+  # --dry-run` resolves against the live index, and nothing of this name has
+  # ever been published there, so ten of the fifteen crates failed with `no
+  # matching package named tinker-pdf-crypto` — which reads exactly like a
+  # broken manifest and is not one. Only the five leaves were ever exercised.
+  #
+  # `--local-registry` patches each crate's registry dependencies at the
+  # unpacked `.crate` archives the earlier steps left in `target/package/`, so
+  # every crate is verified against the same bytes its dependents would
+  # download. See `local_registry_dry_run` for why the patch set is "everything
+  # published before this one" rather than either narrower or wider.
+  crates:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Package and verify every crate against the ones before it
+        run: |
+          set -o pipefail
+          cargo run -p xtask -- release --local-registry --only crates \
+            2>&1 | tee crates.log
+          # The hazard this whole file is written against: a job that built
+          # nothing and reported success. `--only crates` with a broken plan
+          # would run zero steps and exit 0, which is indistinguishable from
+          # fifteen passing.
+          grep -Eq 'release: 1[5-9] step\(s\) ran' crates.log
+          # And nothing may be left unproved, which is the entire point of
+          # the flag: without it this number is ten.
+          grep -q 'release: .*0 unprovable without publishing' crates.log
 
   # Plan 26 milestone 3: one wheel per platform, not one per interpreter.
   #
@@ -331,7 +367,7 @@ jobs:
   # assertion, and it is the only thing in this file that checks the claim the
   # milestone actually makes.
   artefacts:
-    needs: [wheels, npm, nuget, demo]
+    needs: [crates, wheels, npm, nuget, demo]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

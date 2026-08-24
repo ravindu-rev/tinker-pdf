@@ -25,6 +25,7 @@ fails the same allowlist a crate licence would.
 | --- | --- | --- |
 | `crates/tinker-pdf-font/data/cmap-resources` | [adobe-type-tools/cmap-resources](https://github.com/adobe-type-tools/cmap-resources) at `f5cf3bc` (2023-11-15) | `BSD-3-Clause` |
 | `crates/tinker-pdf-layout/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
+| `crates/tinker-pdf-font/data/liberation` | [liberationfonts/liberation-fonts](https://github.com/liberationfonts/liberation-fonts), release `2.1.5` (2021-10-01) | `OFL-1.1` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -75,6 +76,151 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### `crates/tinker-pdf-font/data/liberation`
+
+The Liberation family: twelve TrueType faces, four each of Sans, Serif and
+Mono, metric-compatible with Arial, Times New Roman and Courier New — which
+are in turn the faces every reader substitutes for Helvetica, Times and
+Courier. That is twelve of the standard 14 fonts 9.6.2.2 requires a reader to
+have; the other two are Symbol and ZapfDingbats, and see below.
+
+They are here because of a measurement rather than an argument.
+`corpus/ratchet-fonts.json` is the same 4 525 corpus files rendered with a
+face supplied, against `corpus/ratchet.json` without one, and **52 % of all
+reported degradation was the absence of a face** — 1 045 files down to 506,
+and in qpdf's corpus 530 down to 130. A conforming file that names Helvetica
+and embeds nothing is one this engine could not draw, which makes the absence
+a conformance gap rather than only a policy
+([features/fonts.md](docs/features/fonts.md)).
+
+**Off by default.** The `bundled-fonts` feature is opt-in on `tinker-pdf` and
+`tinker-pdf-font`, because a host that has faces of its own should not carry
+4.2 MB of ours, and because `FontProvider` is still the better answer where
+one exists. With the feature off nothing here is compiled in and the engine
+behaves exactly as it always has.
+
+Fetched from the upstream release archive
+`liberation-fonts-ttf-2.1.5.tar.gz`, whose SHA-256 is
+
+```text
+7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0
+```
+
+Only the twelve `.ttf` files are vendored, with upstream's `LICENSE` and
+`AUTHORS` beside them for provenance. The sources, the build system and the
+changelog are not: nothing here builds a font.
+
+Unlike the other two trees, these are **not** compiled into tables by a build
+script — a font program is already the form the rasterizer wants, so
+`include_bytes!` embeds them as they are. The OFL's redistribution terms
+therefore apply to the bytes themselves rather than to a derived table, which
+is the simpler case: clause 2 requires the licence to travel with them, and it
+does, twice — beside the data and reproduced here in full:
+
+```text
+Digitized data copyright (c) 2010 Google Corporation
+	with Reserved Font Arimo, Tinos and Cousine.
+Copyright (c) 2012 Red Hat, Inc.
+	with Reserved Font Name Liberation.
+
+This Font Software is licensed under the SIL Open Font License,
+Version 1.1.
+
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+
+PREAMBLE The goals of the Open Font License (OFL) are to stimulate
+worldwide development of collaborative font projects, to support the font
+creation efforts of academic and linguistic communities, and to provide
+a free and open framework in which fonts may be shared and improved in
+partnership with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves.
+The fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works.  The fonts and derivatives,
+however, cannot be released under any other type of license.  The
+requirement for fonts to remain under this license does not apply to
+any document created using the fonts or their derivatives.
+
+ 
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such.
+This may include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components
+as distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting ? in part or in whole ?
+any of the components of the Original Version, by changing formats or
+by porting the Font Software to a new environment.
+
+"Author" refers to any designer, engineer, programmer, technical writer
+or other person who contributed to the Font Software.
+
+
+PERMISSION & CONDITIONS
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,in
+   Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+   redistributed and/or sold with any software, provided that each copy
+   contains the above copyright notice and this license. These can be
+   included either as stand-alone text files, human-readable headers or
+   in the appropriate machine-readable metadata fields within text or
+   binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+   Name(s) unless explicit written permission is granted by the
+   corresponding Copyright Holder. This restriction only applies to the
+   primary font name as presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+   Software shall not be used to promote, endorse or advertise any
+   Modified Version, except to acknowledge the contribution(s) of the
+   Copyright Holder(s) and the Author(s) or with their explicit written
+   permission.
+
+5) The Font Software, modified or unmodified, in part or in whole, must
+   be distributed entirely under this license, and must not be distributed
+   under any other license. The requirement for fonts to remain under
+   this license does not apply to any document created using the Font
+   Software.
+
+
+ 
+TERMINATION
+This license becomes null and void if any of the above conditions are not met.
+
+ 
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT.  IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER
+DEALINGS IN THE FONT SOFTWARE.
 ```
 
 ### `crates/tinker-pdf-layout/data/ucd`
@@ -154,9 +300,11 @@ not redistributed in any built artefact.
 
 ## What is deliberately not here
 
-No bundled typefaces. `crates/tinker-pdf/tests/substitute_fonts.rs` states the
-position: the engine carries no font anyone has to licence, and a host that
-wants one supplies it through `FontProvider`. If that changes —
-plan 05 M10 reserves a place for the Liberation
-family under OFL-1.1 — the faces, the licence text and the `deny.toml`
-allowlist entry all arrive in the same commit, and this section says so instead.
+No typefaces beyond the twelve above. Symbol and ZapfDingbats — the two of the
+standard 14 that are not text faces — have no Liberation equivalent, and
+substituting a text face for a symbolic font draws confidently wrong glyphs,
+which `FontProvider::substitute` names as the reason declining is a legitimate
+answer. Nothing reads a font directory either: that is an operating-system
+dependency, and `wasm32-unknown-unknown` has no filesystem at all. A host with
+faces of its own still supplies them through `FontProvider`, which remains the
+seam whether the feature is on or off.

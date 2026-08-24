@@ -16,76 +16,30 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 790 tests proving the
+These come before any new feature. The suite is 2 952 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **First-party verification.** Ruling 13 retires the subprocess oracles,
-  and between that decision and the last replacement this suite is losing
-  evidence it has not yet regained — `qpdf_oracle.rs`, `xps_mutool.rs`,
-  `epub_browser.rs` and the epubcheck verdicts each remain the only outside
-  read of something. Evidence: the four properties
-  [verification.md](verification.md) names as not coming back, and the
-  nine-of-ten injection matrix whose tenth fault only qpdf ever caught. The
-  order is fixed — nothing is deleted before the check replacing it exists
-  and has been injection-counted:
-  1. `cargo xtask oracles`: the boundary itself, held by a build failure
-     rather than by habit. (S)
-  2. The honesty pass: a `jpx-oracle` CI job that greps a marker no code
-     emits, and two claims about checks that were never wired. (S)
-  3. A strict validator — own output re-opened with the leniency ladder
-     off, plus the structures the tolerant reader never consults — then the
-     four qpdf tests and their job. (M)
-  4. XPS conservation from an independent markup walk, then `xps_mutool.rs`
-     and its job. (M)
-  5. EPUB reftest pairs and analytic layout, then `epub_browser.rs`, the
-     browser job, and the epubcheck step. (M)
-  6. Analytic raster fixtures: pages whose correct raster is computable in
-     closed form by an independent in-test function. (M)
-  7. Metamorphic probes over the real corpus — rotation, cropping and
-     resolution coherence — with their own ratchet rows. (M)
-  8. `tools/oracle-diff` deleted; the suite recounted. (S)
-
-  Exit: no test or CI job spawns a program the workspace did not build,
-  `cargo xtask oracles` is green in `cargo xtask check`, and every row of
-  [verification.md](verification.md)'s migration table reads **done**. (L,
-  [design/render-verification.md](design/render-verification.md))
-- **The macOS and wasm determinism legs, observed.** Three of ruling 4's
-  four targets are measured on one machine
-  ([features/determinism.md](features/determinism.md)); macOS is claimed
-  from CI configuration and no run has been watched. Exit: one commit with
-  the `macos-14` leg and the `wasm-determinism` job green together,
-  observed. (S)
-- **`/ID` on encrypted writes.** 7.5.5 Table 15 requires a trailer `/ID`
-  whenever `/Encrypt` is present; no file this engine encrypts carries one.
-  An outside reader found it, and its complaint is currently allowed through
-  *by name*, which costs an assertion. Needs a decision on deriving the ID
-  (the 48 caller-supplied entropy bytes are fully consumed today). Exit: the
-  strict validator refuses a trailer carrying `/Encrypt` and no `/ID`, that
-  rule is injection-counted, and the by-name allowance is gone with the
-  oracle that needed it. (S)
-- **A `--fonts` corpus bar.** The corpus's 24 % rendered-with-warnings rate
-  is dominated by the no-bundled-faces policy, so it measures the policy as
-  much as the engine. Record a bar with a font provider supplied, and
-  decide whether a minimal bundled face set ships. Exit: a second ratchet
-  row `corpus-run --fonts` refuses to regress against. (M)
-- **An observed release.** The packaging pipeline is built and has been
-  dry-run end-to-end on Windows/x86_64 only; every Linux and macOS leg, and
-  the one-tag-produces-all-four claim, exist in `release.yml` unobserved. A
-  local registry is needed because `cargo publish --dry-run` resolves
-  against the live index, so the eight non-leaf crates cannot be proved
-  without it. Exit: one observed tag run, all legs green. (S–M)
-- **Examples and benchmarks.** There is no `examples/` directory; the
-  demonstrated end-to-end usage is doctests, three CLI tools and a browser
-  demo. And every performance number in these docs is a one-time
-  measurement, because clocks are banned from tests by assertion — a
-  criterion bench suite (criterion is already exempt tooling) would turn
-  the 318× rasterizer result into a regression guard. Exit: `examples/`
-  covering open/render/extract/edit/create/convert; `cargo bench` runs in
-  a scheduled job. (S)
+- **Image edges are quantised to whole device pixels.** A destination pixel is
+  painted in full or not at all, by whether the image's device rectangle
+  contains its centre, so an image placed at a fractional offset has a jagged
+  edge — and abutting strips, which is how every PCLM scan is built, tile
+  differently at different scales. It is what remains of the `dpi` relation's
+  eight failures once minification stopped interpolating
+  ([features/rasterizer.md](features/rasterizer.md)): the two PCLM files
+  disagree on 17.3 % of their pixels (was 23.4 %), the six inline-image files
+  on 3.2–4.4 % (was 4.4–5.4 %), against a 2 % budget, and no text-only or
+  vector-only file in 4 525 fails at all. The fix is partial coverage at the
+  edge, and it is **not free**: source-over compositing of two half-covered
+  draws is not the average of them, so seams that tile exactly today would
+  gain a line of background — the conflation artefact every renderer in this
+  imaging model has. That trade is the work, and it wants a design note rather
+  than a patch. Evidence: 8 of 582 files compared, August 2026, named per file
+  in `corpus/report.json`. Exit: an analytic test pins a half-covered image
+  edge against its area; qpdf's `dpi` row holds on the PCLM pair. (M)
 
 ## Tier 2 — close the named refusals, by measured reachability
 

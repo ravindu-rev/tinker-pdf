@@ -16,7 +16,7 @@
 //! # Why the allow, and why the path attribute
 //!
 //! Six test binaries include this module — `xps_opc.rs`, `xps_spine.rs`,
-//! `xps_markup.rs`, `xps_glyphs.rs`, `xps_qpdf.rs` and gap 31's `epub_ocf.rs`
+//! `xps_markup.rs`, `xps_glyphs.rs`, `xps_validated.rs` and gap 31's `epub_ocf.rs`
 //! — and each compiles its own copy and uses a different subset. The ZIP writer
 //! comes from `cbz_support` by path rather than by a second `mod` declaration
 //! in each binary, so an XPS test never has to know that the archive builder it
@@ -35,6 +35,16 @@
 
 #[path = "../cbz_support/mod.rs"]
 mod archive_writer;
+
+/// The raw-dictionary readers, by path for `archive_writer`'s reason: ruling
+/// 13's conservation harness reads a synthesised document the way
+/// `xps_validated.rs` does — out of the dictionaries, never through the typed
+/// readers — and an XPS test should not have to know which file that module was
+/// first written for.
+#[path = "../validated_support/mod.rs"]
+pub mod validated;
+
+pub mod conservation;
 
 pub use archive_writer::{distinct_pixels, grey_jpeg, rgb_png, zip, Damage, ZipFile};
 

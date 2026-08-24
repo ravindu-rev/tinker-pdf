@@ -86,6 +86,46 @@ excluding the CMap registry its own `build.rs` requires, workspace
 dependencies without `version` beside `path`, and the managed-only NuGet
 package above.
 
+**And ten of the fifteen crates had never been in it.** `cargo publish
+--dry-run` resolves dependencies against the live index, and nothing named
+`tinker-pdf-*` has ever been published there, so every crate above the five
+leaves failed with `no matching package named tinker-pdf-crypto` — which reads
+exactly like a broken manifest and is not one. The dry run's answer was to
+report those steps as unprovable and carry on, so "the pipeline has been
+exercised end to end" covered a third of it.
+
+`cargo run -p xtask -- release --local-registry` closes that. Each crate's
+registry dependencies are patched at `target/package/<name>-<version>/` — the
+unpacked archive the previous step left behind — so every crate is *verified
+against the same bytes its dependents would download*, which is nearer to a
+real publish than building against this checkout would be. The patch set is
+everything published before that crate: one level deep is not enough, because a
+packaged dependency has registry dependencies of its own, and the whole
+workspace is too much, because nothing is packaged when the first crate runs.
+Both were tried, and both failures are written into the test that pins the
+width. The whole pipeline now reports **23 of 24 steps run, 0 unprovable** —
+the one skip is `dotnet nuget push`, which has no harmless form.
+
+**Observed, on one tag, 24 August 2026.**
+[Run 32690957039](https://github.com/ravindu-rev/tinker-pdf/actions/runs/32690957039)
+at `bf1630b`: thirteen jobs, twelve green and `publish` skipped, which is what
+a tag push is supposed to do — publishing needs a deliberate
+`workflow_dispatch` carrying `publish: true` and a tag cannot reach it. The
+`crates` job packaged and verified all fifteen crates on Linux, reporting `15
+step(s) ran, 0 skipped, 0 unprovable`. The collector counted what came out:
+
+```
+wheels=3 (abi3=3) wasm=1 nupkg=1
+RELEASE-ARTEFACTS: ALL FOUR PRESENT
+```
+
+Three abi3 wheels — `manylinux_2_17_x86_64`, `win_amd64`, `macosx_11_0_arm64`
+— one npm package carrying `tinker_pdf_js_bg.wasm`, one `TinkerPdf.0.0.1.nupkg`
+with all three native libraries staged into it, and the browser demo built.
+Until this run every Linux and macOS leg in `release.yml` was configuration
+nobody had watched, and "one tag produces all four" was a claim rather than a
+measurement. **Nothing was published, and nothing has been.**
+
 ## API
 
 ```python

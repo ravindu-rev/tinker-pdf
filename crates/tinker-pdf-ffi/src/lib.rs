@@ -595,7 +595,7 @@ endobj
         );
         bytes.extend_from_slice(
             b"4 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>
 endobj
 ",
         );
@@ -648,7 +648,7 @@ endobj
         assert_eq!(
             inked(unsafe { &*before }),
             0,
-            "without a face there is nothing to draw"
+            "without a face there is nothing to draw. `Symbol` rather than              `Helvetica`, so this holds in a `bundled-fonts` build too: the              bundled faces decline symbolic fonts by name, and a face the              caller hands over is still used"
         );
 
         let face = boxy_font();

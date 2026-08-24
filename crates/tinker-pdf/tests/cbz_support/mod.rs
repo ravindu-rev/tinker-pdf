@@ -15,7 +15,7 @@
 //!
 //! # Why the allow
 //!
-//! Two test binaries include this module — `cbz.rs` and `cbz_qpdf.rs` — and
+//! Two test binaries include this module — `cbz.rs` and `cbz_validated.rs` — and
 //! each compiles its own copy. Every item here is used by at least one of them
 //! and none is used by both, so whichever binary does not use a given fixture
 //! reports it dead. The alternative is splitting the file along a seam that

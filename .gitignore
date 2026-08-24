@@ -14,6 +14,8 @@ corpus/files/
 # artefact, not a baseline -- `corpus/ratchet.json` is the committed bar, and
 # it is three orders of magnitude smaller.
 corpus/report.json
+corpus/report-fonts.json
+corpus/report-bundled.json
 testdata/golden/actual/
 bindings/dotnet/bin/
 bindings/dotnet/obj/

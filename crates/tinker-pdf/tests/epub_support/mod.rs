@@ -27,10 +27,11 @@
 
 #![allow(
     dead_code,
-    reason = "shared by three test binaries; each uses a different subset"
+    reason = "shared by several test binaries; each uses a different subset"
 )]
 
 pub mod conservation;
+pub mod layout;
 pub mod typeface;
 
 use tinker_pdf_zip::{Archive, Entry, Limits, Method};

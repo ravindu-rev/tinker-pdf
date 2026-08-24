@@ -853,7 +853,7 @@ mod tests {
     /// one stream we happen to look at.
     fn all_streams(doc: &CosDocument) -> String {
         let mut out = Vec::new();
-        for number in 1..=doc.max_object_number() {
+        for (number, _) in doc.xref().iter() {
             if let Ok(bytes) = doc.stream_decoded(ObjRef::new(number, 0)) {
                 out.extend_from_slice(&bytes);
                 out.push(b'\n');

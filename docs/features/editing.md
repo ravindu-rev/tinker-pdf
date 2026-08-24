@@ -22,7 +22,10 @@ filled and then read back returns the filled value, not the saved one);
 through the document's name table.
 
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
-multiple of 90, stored as `/Rotate`), `insert_page` (a blank page of the
+multiple of 90, stored as `/Rotate`), `set_crop_box` (14.11.2, written as the
+caller states it and never clipped here — 14.11.2 lets a crop box and a media
+box disagree and the *reader* reconciles them; a rectangle of no area is
+refused), `insert_page` (a blank page of the
 given size), `import_page` (a page and its resource closure copied from
 another `CosDocument`), `keep_pages` (the complement of delete, in one
 call), `append_content` (operators appended to a page's content array) and
@@ -99,7 +102,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
 `document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
 `delete()`, `intern()`, `transaction()`, `page_refs()`, `delete_page()`,
-`move_page()`, `rotate_page()`, `insert_page()`, `import_page()`,
+`move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
+`import_page()`,
 `keep_pages()`, `append_content()`, `page_box()`, `flatten_annotations()`,
 `add_annotation()`, the [forms](forms.md) methods, and `save(&WriteOptions)
 -> Vec<u8>`. `redact::{Redaction, RedactionReport, apply}` live in the facade
@@ -133,6 +137,7 @@ because glyph coverage needs both the content tokenizer and font metrics
   terminates, scaled and rotated runs, and the needle-bytes-absent assertion
   over every decompressed stream.
 - Every edited document is written through the [writer](writing.md), whose
-  output is checked by qpdf in CI (`qpdf_oracle.rs`); the `render_page` and
+  output is held to the strict validator (`strict_validator.rs`); the
+  `render_page` and
   `cos_document` fuzz targets cover the reader side of what the editor
   produces.

@@ -8,7 +8,7 @@
 //! its own progress note: **markup order**, `/CropBox` and `/BleedBox` from
 //! `ContentBox` and `BleedBox`, resolving the payload parts by **media type**
 //! rather than by root element, and qpdf on the produced file. The qpdf half is
-//! `tests/xps_qpdf.rs`; the rest is here.
+//! `tests/xps_validated.rs`; the rest is here.
 //!
 //! # Why the fixtures are built rather than borrowed
 //!

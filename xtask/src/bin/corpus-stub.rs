@@ -48,32 +48,54 @@ fn main() {
             std::process::abort();
         }
         // Never returns, and writes nothing, so the only thing that ends it is
-        // the runner's timeout.
+        // the runner's timeout. This is the shape of a non-terminating loop.
         "hang" => loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         },
+        // Never returns either, and is therefore killed by the same timeout —
+        // but it keeps saying where it is. This is the shape of a file that is
+        // merely enormous, and the runner must not call it the same thing as
+        // `hang`: a hang is a bound to find and a slow file is a machine to
+        // buy, and they are never the same afternoon's work.
+        "crawl" => {
+            println!("probe 3");
+            println!("file {file}");
+            println!("opened yes");
+            println!("pages 9000");
+            let mut page = 0u32;
+            loop {
+                page += 1;
+                println!("page {page}/9000");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
         // Dies mid-record: everything up to `rendered` and then nothing. This
         // is the one an exit code cannot catch, because the process exits 0.
         "truncate" => {
-            println!("probe 1");
+            println!("probe 3");
             println!("file {file}");
             println!("opened yes");
             println!("pages 9");
         }
         "unopenable" => {
-            println!("probe 1");
+            println!("probe 3");
             println!("file {file}");
             println!("opened no not a PDF: no indirect objects found");
             println!("ms 1");
             println!("done");
         }
         other => {
-            println!("probe 1");
+            println!("probe 3");
             println!("file {file}");
             println!("opened yes");
             println!("ladder Trust");
             println!("pages 2");
             println!("rendered 2");
+            // The strict pass, which a record of this version has to carry:
+            // the stub writes no file, so it says it ran and found nothing.
+            println!("strict eligible");
+            println!("strict structure 0");
+            println!("strict semantics 0");
             if other == "degraded" {
                 println!("cap jbig2");
                 println!("warn render:UnsupportedImage(JBIG2Decode) 1");

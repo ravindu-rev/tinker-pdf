@@ -20,6 +20,12 @@ cmap-predefined = [
   "tinker-pdf-content/cmap-predefined",
   "tinker-pdf-render/cmap-predefined",
 ]
+# The twelve Liberation faces (9.6.2.2's standard 14, less the two symbolic
+# ones), embedded rather than read from a directory. Off by default: a host
+# with faces of its own supplies them through `FontProvider` and should not
+# carry 4.2 MB of ours. When it is on, the bundled set is asked *after* the
+# host's provider, so turning it on can only add answers.
+bundled-fonts = ["tinker-pdf-font/bundled-fonts"]
 
 [dependencies]
 tinker-pdf-cos = { workspace = true }
@@ -46,6 +52,13 @@ tinker-pdf-css = { workspace = true }
 tinker-pdf-layout = { workspace = true }
 
 [dev-dependencies]
+# The only third-party crate in this workspace's own tree, and it is exempt
+# tooling by name in `Cargo.toml`'s header rule and `CONTRIBUTING.md`: it
+# measures the engine and is not part of it. `default-features = false` drops
+# the HTML reports and their plotting stack, which would pull a dozen crates in
+# to draw pictures nobody looks at in a scheduled job; `cargo_bench_support` is
+# what makes plain `cargo bench` work without `cargo-criterion` installed.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tinker-pdf-cos = { workspace = true }
 # `tests/xps.rs` recomputes the XPS corpus's committed inventory through this
 # reader and compares it against the one .NET's `System.IO.Compression` wrote,
@@ -72,3 +85,10 @@ tinker-pdf-css = { workspace = true }
 # graph check counts a dev-dependency as an edge, so the sixth amendment in
 # `ALLOWED` carries the argument for this one too.
 tinker-pdf-layout = { workspace = true }
+
+# Wall-clock benchmarks, outside the suite on purpose — see the module note in
+# `benches/engine.rs`. `harness = false` is criterion's requirement: it brings
+# its own `main`, so cargo's `#[bench]` harness must be off.
+[[bench]]
+name = "engine"
+harness = false

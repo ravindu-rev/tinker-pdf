@@ -138,6 +138,7 @@ addition, not a break.
   synthesised fixed document and a synthesised book hash as *bytes*
   ([determinism](determinism.md)), so object numbering, key order and
   stream framing cannot drift silently.
-- Every built document is qpdf-checked in CI through the container-format
-  oracles (`cbz_qpdf.rs`, `xps_qpdf.rs`, `epub_qpdf.rs`), since those
+- Every built document is held to the strict validator through the
+  container-format suites (`cbz_validated.rs`, `xps_validated.rs`,
+  `epub_validated.rs`), since those
   formats produce their PDFs through this API.

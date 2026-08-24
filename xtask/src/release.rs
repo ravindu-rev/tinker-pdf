@@ -155,6 +155,15 @@ pub struct Options {
     pub tag: Option<String>,
     /// Print the plan and run nothing at all, not even the dry-run commands.
     pub plan_only: bool,
+    /// Build each crate's dry run against the **packaged** copies of the
+    /// crates before it, instead of against crates.io.
+    ///
+    /// Without it, only the two crates with no internal dependencies can be
+    /// dry-run at all: `cargo publish --dry-run` resolves against the live
+    /// index, so the other eight fail with `no matching package named
+    /// tinker-pdf-crypto` — which reads exactly like a broken manifest and is
+    /// not one. The eight have therefore never been exercised.
+    pub local_registry: bool,
 }
 
 /// Parses `release`'s arguments.
@@ -168,6 +177,7 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
             "--dry-run" => options.execute = false,
             "--execute" => options.execute = true,
             "--plan" => options.plan_only = true,
+            "--local-registry" => options.local_registry = true,
             "--only" => {
                 let name = rest
                     .next()
@@ -300,6 +310,80 @@ pub fn released_graph(root: &Path) -> Vec<(String, Vec<String>)> {
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// The crates this one depends on inside the workspace, or `None` for a leaf.
+fn internal_dependencies_of<'a>(
+    graph: &'a [(String, Vec<String>)],
+    name: &str,
+) -> Option<&'a Vec<String>> {
+    graph
+        .iter()
+        .find(|(crate_name, _)| crate_name == name)
+        .map(|(_, deps)| deps)
+        .filter(|deps| !deps.is_empty())
+}
+
+/// A dry run that resolves this crate's internal dependencies against the
+/// **packaged** copies of them rather than against crates.io.
+///
+/// `cargo publish --dry-run` packages the crate, then *verifies* it by
+/// building the package — and that build resolves `tinker-pdf-cos = "0.0.1"`
+/// from the registry, where nothing of that name has ever been published. So
+/// eight of the ten crates could not be dry-run at all, and the pipeline's
+/// claim to have been exercised end to end covered the two leaves.
+///
+/// `[patch.crates-io]`, injected through `--config`, redirects each of those
+/// requirements at `target/package/<name>-<version>/` — which is the unpacked
+/// `.crate` archive that the *previous* step in the publish order left behind.
+/// So each crate is verified against the same bytes its dependents would
+/// download, which is nearer to what a real publish does than building against
+/// this checkout would be.
+///
+/// Three things it deliberately does not do:
+///
+/// - `--locked`, because patching changes what the resolver picks and the
+///   lockfile describes the unpatched graph. The real publish keeps it.
+/// - `--allow-dirty` is passed, because this is a dry run over a working
+///   checkout and refusing to look at uncommitted work is the wrong trade
+///   here. The live command has neither flag.
+///
+/// It patches **everything published before this crate**, which is neither its
+/// direct dependencies nor the whole workspace, and both of those were tried
+/// first. One level deep is not enough: the packaged copy of
+/// `tinker-pdf-color` has `tinker-pdf-math` as a registry dependency of its
+/// own, so the level below the patch resolves against an index where nothing
+/// of that name exists — a failure eleven steps in. The whole workspace is too
+/// much: `target/package/tinker-pdf-0.0.1` does not exist while the first
+/// crate is being packaged. The publish order is topological, so every crate
+/// this one can reach is already behind it and already packaged, and the cost
+/// is an unused-patch *warning* for the ones it does not reach.
+fn local_registry_dry_run(
+    root: &Path,
+    name: &str,
+    published: &[String],
+    version: &str,
+) -> Vec<String> {
+    let mut out = vec![
+        "cargo".into(),
+        "publish".into(),
+        "-p".into(),
+        name.to_string(),
+        "--dry-run".into(),
+        "--allow-dirty".into(),
+    ];
+    for dep in published {
+        let at = root.join("target/package").join(format!("{dep}-{version}"));
+        out.push("--config".into());
+        // Single quotes around the path: it is a TOML string, and a Windows
+        // path is full of backslashes that a basic string would read as
+        // escapes.
+        out.push(format!(
+            "patch.crates-io.{dep}.path='{}'",
+            at.display().to_string().replace('\\', "/")
+        ));
+    }
     out
 }
 
@@ -518,7 +602,29 @@ pub fn plan(root: &Path, options: &Options) -> Result<Vec<Step>, String> {
         registry_note: None,
     });
 
-    for name in &order {
+    for (index, name) in order.iter().enumerate() {
+        let dry = if options.local_registry {
+            local_registry_dry_run(root, name, &order[..index], &workspace)
+        } else {
+            vec![
+                "cargo".into(),
+                "publish".into(),
+                "-p".into(),
+                name.clone(),
+                "--locked".into(),
+                "--dry-run".into(),
+            ]
+        };
+        let note = if options.local_registry {
+            None
+        } else {
+            internal_dependencies_of(&graph, name).map(|deps| {
+                format!(
+                    "this crate depends on {} inside the workspace, and `cargo publish                      --dry-run` resolves against the live index — so this step cannot run                      until they are published. Re-run with --local-registry to build it                      against their packaged copies instead",
+                    deps.join(", ")
+                )
+            })
+        };
         steps.push(Step {
             stage: Stage::Crates,
             label: format!("{name} to crates.io"),
@@ -529,17 +635,10 @@ pub fn plan(root: &Path, options: &Options) -> Result<Vec<Step>, String> {
                 name.clone(),
                 "--locked".into(),
             ],
-            dry: Some(vec![
-                "cargo".into(),
-                "publish".into(),
-                "-p".into(),
-                name.clone(),
-                "--locked".into(),
-                "--dry-run".into(),
-            ]),
+            dry: Some(dry),
             publishes: true,
             cwd: ".".into(),
-            registry_note: None,
+            registry_note: note,
         });
     }
 
@@ -1126,6 +1225,115 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The safety property holds under `--local-registry` too.**
+    ///
+    /// A separate test rather than a loop over both, because the flag rewrites
+    /// exactly the commands the property is about: the crates stage's dry runs.
+    /// A `--local-registry` that dropped `--dry-run` while adding its patches
+    /// would publish fifteen crates on the first person who tried it, and the
+    /// test above would not have noticed because it only builds the default
+    /// options.
+    #[test]
+    fn the_local_registry_dry_run_still_publishes_nothing() {
+        let options = Options {
+            local_registry: true,
+            ..Options::default()
+        };
+        let steps = plan(&repo_root(), &options).expect("a plan");
+        let crates: Vec<&Step> = steps
+            .iter()
+            .filter(|step| step.stage == Stage::Crates)
+            .collect();
+        assert!(
+            crates.len() >= 15,
+            "every crate has a step: {}",
+            crates.len()
+        );
+        for step in &crates {
+            let dry = step.dry.as_ref().expect("a dry command");
+            assert_ne!(dry, &step.live, "{}: a dry run would publish", step.label);
+            assert!(
+                dry.contains(&"--dry-run".to_string()),
+                "{}: {dry:?}",
+                step.label
+            );
+            assert!(
+                !dry.contains(&"--locked".to_string()),
+                "{}: patching changes what the resolver picks, so the lockfile                  cannot also be enforced",
+                step.label
+            );
+        }
+    }
+
+    /// The patch set is **everything published before this crate**, which is
+    /// the only width that works.
+    ///
+    /// Measured both ways before it was written down. Patching a crate's own
+    /// dependencies is too narrow — the packaged `tinker-pdf-color` has
+    /// `tinker-pdf-math` as a registry dependency of its own, and the level
+    /// below the patch fails eleven steps in. Patching the whole workspace is
+    /// too wide — `target/package/tinker-pdf-0.0.1` does not exist yet while
+    /// the first crate is being packaged.
+    #[test]
+    fn each_crate_is_patched_against_the_ones_before_it() {
+        let options = Options {
+            local_registry: true,
+            ..Options::default()
+        };
+        let steps = plan(&repo_root(), &options).expect("a plan");
+        let crates: Vec<&Step> = steps
+            .iter()
+            .filter(|step| step.stage == Stage::Crates)
+            .collect();
+
+        let patched = |step: &Step| -> usize {
+            step.dry
+                .as_ref()
+                .map(|dry| dry.iter().filter(|arg| *arg == "--config").count())
+                .unwrap_or(0)
+        };
+
+        let first = crates.first().expect("a first crate");
+        assert_eq!(
+            patched(first),
+            0,
+            "{}: nothing has been packaged yet",
+            first.label
+        );
+        for (index, step) in crates.iter().enumerate() {
+            assert_eq!(
+                patched(step),
+                index,
+                "{}: patched against {} crates, but {index} come before it",
+                step.label,
+                patched(step)
+            );
+        }
+    }
+
+    /// With the flag, no crate step carries a "cannot be proved" note; without
+    /// it, ten do.
+    ///
+    /// The ten is the measurement the flag exists for: five of the fifteen
+    /// crates have no internal dependencies and could always be dry-run, and
+    /// the other ten never had been.
+    #[test]
+    fn the_flag_is_what_makes_the_non_leaf_crates_provable() {
+        let notes = |local: bool| -> usize {
+            let options = Options {
+                local_registry: local,
+                ..Options::default()
+            };
+            plan(&repo_root(), &options)
+                .expect("a plan")
+                .iter()
+                .filter(|step| step.stage == Stage::Crates && step.registry_note.is_some())
+                .count()
+        };
+        assert_eq!(notes(false), 10, "the crates a plain dry run cannot reach");
+        assert_eq!(notes(true), 0, "and none of them once it can");
     }
 
     /// And the four uploads are all there. A step silently dropped from the

@@ -104,7 +104,12 @@ fn ink(bitmap: &tinker_pdf::Bitmap) -> usize {
         .count()
 }
 
+/// Without a provider **and without the bundled faces**, which is what this
+/// crate's default build is. `cfg`-gated rather than deleted: it is still the
+/// claim a default build makes, and a `bundled-fonts` build makes the opposite
+/// one three tests below.
 #[test]
+#[cfg(not(feature = "bundled-fonts"))]
 fn without_a_provider_the_text_is_extracted_but_not_drawn() {
     let doc = Document::open(document()).expect("it opens");
     let page = doc.page(0).expect("a page");
@@ -191,7 +196,12 @@ fn the_substituted_glyphs_land_where_the_text_is() {
 
 /// A provider that declines leaves the page exactly as it was, rather than
 /// drawing a placeholder nobody asked for.
+///
+/// Not true of a `bundled-fonts` build, and deliberately so: there, a
+/// declining provider falls through to the faces this build carries, which is
+/// the whole point of the chain.
 #[test]
+#[cfg(not(feature = "bundled-fonts"))]
 fn a_declining_provider_changes_nothing() {
     struct Declines;
     impl FontProvider for Declines {
@@ -503,5 +513,118 @@ endobj
             .warnings
             .contains(&tinker_pdf::RenderWarning::UnreadableFont),
         "and the font is no longer unreadable"
+    );
+}
+
+// ---- the bundled faces (roadmap Tier 1) ----------------------------------
+//
+// Everything above is about the seam: a face the *host* supplies. These are
+// about the other answer, for the host that has none — the twelve Liberation
+// faces a `bundled-fonts` build carries. The tests are `cfg`-gated rather than
+// skipped at run time, so a build without the feature does not compile them
+// and cannot report them as passing.
+
+/// **A base-14 document draws its text with no provider installed.**
+///
+/// The exact document the first test in this file renders blank. That pair is
+/// the whole claim of the feature, and it is why the two live in one file: the
+/// gap and its closing are the same fixture, one `--features` apart.
+#[test]
+#[cfg(feature = "bundled-fonts")]
+fn a_bundled_build_draws_base_fourteen_text_with_no_provider() {
+    let doc = Document::open(document()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&RenderOptions::default());
+
+    assert!(
+        ink(&bitmap) > 0,
+        "nothing was drawn, warnings: {:?}",
+        bitmap.warnings
+    );
+    assert!(
+        !bitmap
+            .warnings
+            .contains(&tinker_pdf::RenderWarning::UnreadableFont),
+        "and the font is not reported unreadable: {:?}",
+        bitmap.warnings
+    );
+}
+
+/// **A host provider still wins**, and the bundled set answers only what it
+/// declines.
+///
+/// Turning the feature on must not take a face away from anybody. The check is
+/// per *request* rather than per document: this provider answers for the
+/// regular face and declines symbolic fonts, and both halves have to hold at
+/// once.
+#[test]
+#[cfg(feature = "bundled-fonts")]
+fn a_host_provider_is_asked_first_and_the_bundled_faces_only_after() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counting(AtomicUsize);
+    impl FontProvider for Counting {
+        fn substitute(&self, _: &FontRequest) -> Option<Arc<Vec<u8>>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(boxy_font()))
+        }
+    }
+
+    let provider = Arc::new(Counting(AtomicUsize::new(0)));
+    let doc = Document::open(document())
+        .expect("it opens")
+        .with_fonts(provider.clone());
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+
+    assert!(provider.0.load(Ordering::Relaxed) > 0, "the host was asked");
+    assert!(ink(&bitmap) > 0, "and its face drew: {:?}", bitmap.warnings);
+
+    // The host's face is the boxy one, so every glyph is a filled square and
+    // the page is far darker than Liberation would make it. Ink count is the
+    // cheapest way to tell the two apart without a fingerprint.
+    let bundled = Document::open(document())
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(
+        ink(&bitmap) > ink(&bundled),
+        "the host's boxes ({}) should out-ink Liberation ({})",
+        ink(&bitmap),
+        ink(&bundled)
+    );
+}
+
+/// **A symbolic font is still declined**, feature or no feature.
+///
+/// Symbol and ZapfDingbats are two of the standard 14 and neither has a
+/// Liberation equivalent. Drawing a text face for one puts letters where the
+/// document meant arrows: legible, plausible and wrong, which is worse than
+/// the gap it replaces. So this is the one row of the standard 14 the feature
+/// deliberately does not close, and it is asserted rather than assumed.
+#[test]
+#[cfg(feature = "bundled-fonts")]
+fn a_symbolic_font_is_declined_by_the_bundled_faces_too() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Symbol");
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 24.0, 20.0, 40.0, "abgd");
+    });
+
+    let doc = Document::open(builder.finish()).expect("it opens");
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert_eq!(ink(&bitmap), 0, "a symbolic font draws nothing");
+    assert!(
+        bitmap
+            .warnings
+            .contains(&tinker_pdf::RenderWarning::UnreadableFont),
+        "and says so: {:?}",
+        bitmap.warnings
     );
 }

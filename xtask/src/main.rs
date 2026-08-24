@@ -33,9 +33,18 @@ release options:
   --plan          print the steps and run nothing at all
   --only STAGE    preflight | crates | wheel | npm | nuget; repeatable
   --tag vX.Y.Z    fail unless the tag matches the workspace version
+  --local-registry
+                  verify each crate against the packaged copies of the crates
+                  before it, instead of against crates.io. Without it, ten of
+                  the fifteen cannot be dry-run at all: `cargo publish
+                  --dry-run` resolves against the live index and nothing of
+                  this name has ever been published there
 
   cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
                                  bindings/dotnet/runtimes/<rid>/native/
+
+  cargo xtask synth-face [--out PATH]    write the synthetic face `--fonts
+                                 synthetic` measures with, so it can be looked at
 
   cargo xtask corpus-fetch [--record] [--force] [--corpus NAME]
                                          fetch and verify the pinned corpora
@@ -47,12 +56,18 @@ corpus-run options:
   --timeout N     seconds per file before the child is killed (default 20)
   --dpi D         render resolution (default 72)
   --fonts PATH    a face, or directory of faces, for documents embedding none
+  --fonts synthetic
+                  the face this repository writes for itself, so the second
+                  bar needs no licence, no fetch and no runner image. The
+                  keyword wins over a directory of that name
   --jobs N        files at once (default: the core count)
   --sample N      at most N files per corpus, recorded as a limit
   --child PATH    the program to spawn (default: tpdf beside this binary)
   --report PATH   write the full per-file report here
-  --check         compare against corpus/ratchet.json; fail on a regression
-  --record        rewrite corpus/ratchet.json from this run
+  --check         compare against the bar for this --fonts setting; fail on a
+                  regression. corpus/ratchet.json without faces,
+                  corpus/ratchet-fonts.json with them — never each other
+  --record        rewrite that bar from this run
   --strict        with --check, a rise in the degradation rate also fails
 
   cargo xtask help
@@ -103,6 +118,7 @@ fn main() -> ExitCode {
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
+        "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -113,6 +129,37 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `cargo xtask synth-face` — write the face the second corpus bar uses.
+///
+/// Exists so the face is a file somebody can open rather than an argument
+/// nobody can inspect. `corpus-run --fonts synthetic` writes the same bytes to
+/// the same place and does not need this to have been run.
+fn synth_face(args: &[String]) -> Result<(), String> {
+    let root = repo_root();
+    let mut path = xtask::face::default_path(&root);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--out" => {
+                index += 1;
+                path = std::path::PathBuf::from(
+                    args.get(index).ok_or("`--out` needs a path")?.clone(),
+                );
+            }
+            other => return Err(format!("unknown option `{other}`")),
+        }
+        index += 1;
+    }
+    xtask::face::write(&path)?;
+    println!(
+        "synth-face: wrote {} ({} bytes, {})",
+        path.display(),
+        xtask::face::bytes().len(),
+        xtask::face::SYNTHETIC
+    );
+    Ok(())
 }
 
 /// A task whose failure is one message rather than a list of problems.
@@ -402,7 +449,6 @@ const ALLOWED: &[(&str, &[&str])] = &[
 /// opening documents itself.
 const TOOLS: &[(&str, &[&str])] = &[
     ("tools/pdfcmp", &["tinker-pdf"]),
-    ("tools/oracle-diff", &["tinker-pdf"]),
     ("tools/tpdf", &["tinker-pdf"]),
     ("xtask", &["tinker-pdf-crypto"]),
 ];
@@ -529,12 +575,15 @@ fn check_libm() -> Result<(), Vec<String>> {
 ///   bytes this repository then verifies against its own SHA-256; `cargo`
 ///   builds and publishes; the child the corpus runner spawns is a workspace
 ///   binary built from the same revision.
-/// - **A debt, with a milestone against it.** The four qpdf tests, the XPS
-///   render comparison, the browser and epubcheck. Each is an oracle of
-///   retired ruling 9, still running because ruling 13's order is fixed:
-///   nothing is deleted before the first-party check replacing it exists and
-///   has been injection-counted. Each row names the step of the roadmap's
-///   first-party-verification item that removes it.
+/// - **A debt, with a milestone against it.** The XPS render comparison, the
+///   browser and epubcheck. Each is an oracle of retired ruling 9, still
+///   running because ruling 13's order is fixed: nothing is deleted before the
+///   first-party check replacing it exists and has been injection-counted.
+///   Each row names the step of the roadmap's first-party-verification item
+///   that removes it. The four qpdf tests left in step 3 with the strict
+///   validator, and `xps_mutool.rs` left in step 4 with the conservation
+///   suite — every one of their rows leaving in the same commit as the test it
+///   allowed, which is the half of this check that catches a stale allowance.
 ///
 /// The check runs both ways. A file that spawns something and is not here is
 /// a build failure — that is the boundary. And a row here whose file no
@@ -542,52 +591,6 @@ fn check_libm() -> Result<(), Vec<String>> {
 /// allowance leave in the same commit as the thing it allowed, instead of
 /// standing for a year after the debt is paid.
 const SPAWNERS: &[(&str, &str)] = &[
-    (
-        "crates/tinker-pdf-cos/tests/qpdf_oracle.rs",
-        "DEBT (step 3): retired ruling 9's qpdf oracle over linearized and \
-         encrypted output. Leaves with the strict validator, once the ten-fault \
-         injection matrix recorded in this file is caught 10/10 in-tree",
-    ),
-    (
-        "crates/tinker-pdf/tests/cbz_qpdf.rs",
-        "DEBT (step 3): qpdf reads the document synthesised from a comic \
-         archive. Leaves with the strict validator",
-    ),
-    (
-        "crates/tinker-pdf/tests/xps_qpdf.rs",
-        "DEBT (step 3): qpdf reads the document synthesised from a fixed \
-         document. Leaves with the strict validator",
-    ),
-    (
-        "crates/tinker-pdf/tests/epub_qpdf.rs",
-        "DEBT (step 3): qpdf reads the document synthesised from a book. \
-         Leaves with the strict validator",
-    ),
-    (
-        "crates/tinker-pdf/tests/xps_mutool.rs",
-        "DEBT (step 4): a second reader's rendering of an XPS package, which \
-         is the only check here that catches a mistake this engine makes \
-         consistently in both directions. Leaves with the conservation suite, \
-         and what it proved does not come back",
-    ),
-    (
-        "crates/tinker-pdf/tests/epub_browser.rs",
-        "DEBT (step 5): a headless browser lays out the committed books. \
-         Retired ruling 9's own reasoning is that a browser is the reference \
-         implementation of CSS, so this is the costliest row to lose. Leaves \
-         with the reftest pairs",
-    ),
-    (
-        "crates/tinker-pdf/tests/epub.rs",
-        "DEBT (step 5): epubcheck says whose fault an engine-versus-book \
-         disagreement is. Leaves when EPUBCHECK.tsv freezes into a dated \
-         record with no arbiter behind it",
-    ),
-    (
-        "tools/oracle-diff/src/main.rs",
-        "DEBT (step 8): retired ruling 9's external-renderer harness. Wired \
-         into no test and no CI job; the whole tool is deleted",
-    ),
     (
         "crates/tinker-pdf-css/tests/unimplemented_property_does_not_build.rs",
         "PERMANENT: spawns `rustc` on a snippet that must fail to compile. It \
@@ -860,6 +863,18 @@ fn allowed_licenses(root: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(root.join("deny.toml")) else {
         return Vec::new();
     };
+    allowed_licenses_in(&text)
+}
+
+/// The same reading, over text, so it can be tested on inputs this repository
+/// does not happen to contain.
+///
+/// Split out when the allowlist stopped containing a commented-out entry: the
+/// test for "a comment is not an allowance" had been written against
+/// `deny.toml`'s own OFL-1.1 line, so the day that line became real the test
+/// asserted the project's font policy rather than the parser's behaviour, and
+/// failed for the change it should have been indifferent to.
+fn allowed_licenses_in(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_allow = false;
     for line in text.lines() {
@@ -1065,16 +1080,44 @@ mod tests {
         assert!(declared_vendor_trees(text).is_empty());
     }
 
-    /// A commented-out allowlist entry is not an allowance. `deny.toml` has
-    /// one — OFL-1.1, kept as prose after the fonts it described turned out
-    /// not to exist — and reading it as live would make this check pass for a
-    /// licence the project has decided it does not currently ship.
+    /// A commented-out allowlist entry is not an allowance.
+    ///
+    /// Reading one as live would let a licence the project has decided against
+    /// pass this gate on the strength of a paragraph explaining why it does
+    /// not ship — and `deny.toml`'s allowlist is mostly paragraphs.
     #[test]
     fn a_commented_allowlist_entry_does_not_allow() {
-        let root = repo_root();
-        let allowed = allowed_licenses(&root);
-        assert!(allowed.contains(&"BSD-3-Clause".to_string()), "{allowed:?}");
-        assert!(!allowed.contains(&"OFL-1.1".to_string()), "{allowed:?}");
+        let text = "[licenses]
+allow = [
+  \"MIT\",
+  # \"GPL-3.0\",
+                      \"Zlib\",
+]
+";
+        let allowed = allowed_licenses_in(text);
+        assert_eq!(allowed, vec!["MIT".to_string(), "Zlib".to_string()]);
+    }
+
+    /// And this repository's own allowlist reads as it looks.
+    ///
+    /// A separate test from the one above, because they answer different
+    /// questions: that one is about the parser and stays true whatever is
+    /// allowed, this one is about what is allowed and changes when the project
+    /// changes its mind. Merging them is how the parser's test came to fail on
+    /// the day the fonts arrived.
+    #[test]
+    fn this_repositorys_allowlist_reads_as_it_looks() {
+        let allowed = allowed_licenses(&repo_root());
+        for spdx in [
+            "MIT",
+            "Apache-2.0",
+            "BSD-3-Clause",
+            "Unicode-3.0",
+            "OFL-1.1",
+        ] {
+            assert!(allowed.contains(&spdx.to_string()), "{spdx}: {allowed:?}");
+        }
+        assert!(!allowed.iter().any(|id| id.contains("GPL")), "{allowed:?}");
     }
 
     /// The same rule as the graph check: it runs against this repository.

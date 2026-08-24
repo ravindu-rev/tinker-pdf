@@ -67,11 +67,29 @@ double-writes. The sampling policy is decided per draw by `sampling_for`: at
 or above 1:1 on both axes, one nearest tap unless the image asked to be
 smoothed (`/Interpolate`, Table 89, an opt-in defined for magnification —
 false means the author wanted hard pixels, and 1:1 stays byte-preserving);
-bilinear on any downscale; and past 2:1 on an axis, exact 2×2 box-filter
-averaging into a `Pyramid` of halved levels until the residual is within
-2:1, then bilinear. The level count branches on 16.16 fixed-point integers,
+and on **any** downscale, the average of every sample the destination pixel
+covers, weighted by how much of it the pixel covers — with exact 2×2
+box-filter averaging into a `Pyramid` of halved levels first, until the
+residual is within 4:1, so the footprint is at most four samples per axis and
+the cost per pixel is bounded whatever the ratio.
+
+That average is the definition of a downscale rather than a choice, and
+`tinker-pdf-raster/tests/analytic_sampling.rs` evaluates it independently and
+compares. It used to be an interpolation — four taps weighted by distance,
+whatever the ratio — which is exact only at powers of two, where the pyramid
+has already done the work and the interpolation has nothing left to do.
+Between them it kept whichever samples the grid landed near: mean absolute
+error against the definition was 43 levels out of 255 at 1.5:1 and 26 at 3:1,
+against 0.16 and 0.25 now. That is most images on most pages, because a page
+scale is rarely a power of two, and no fingerprint could have found it — a
+fingerprint pins the engine against itself and every target was reproducing
+the same wrong answer.
+
+The level count branches on 16.16 fixed-point integers,
 because `log2` is a transcendental and a count one different is not a
-rounding difference — it is a different image. The pyramid belongs to the
+rounding difference — it is a different image. The weights are integers for
+the same reason: an area is a product of two overlaps, and in floats the
+accumulation order would decide the last bit. The pyramid belongs to the
 caller, so an image's lifetime is decided where it is known. A stencil's
 PDF name stayed behind as `ImageDraw::tint` (8.9.6.2): the image says
 where, the caller says what.

@@ -33,6 +33,16 @@ default = ["cmap-predefined"]
 # codespace table -- it just reports an approximate mapping instead of
 # inventing CIDs.
 cmap-predefined = ["dep:tinker-pdf-filters"]
+# The twelve Liberation faces, embedded with `include_bytes!`. Off by default,
+# and the default is the interesting half: a host with faces of its own should
+# not carry 4.2 MB of ours, and `FontProvider` is the better answer wherever
+# one exists. What this adds is an answer for the host that has none — worth
+# 52 % of the corpus's reported degradation, measured in
+# `corpus/ratchet-fonts.json` against `corpus/ratchet.json`.
+#
+# No `dep:` and no build script: a font program is already the form the
+# rasterizer wants, so unlike the CMap registry there is nothing to compile.
+bundled-fonts = []
 
 [dependencies]
 # Inflating the compiled tables. A sibling leaf crate with no dependencies of

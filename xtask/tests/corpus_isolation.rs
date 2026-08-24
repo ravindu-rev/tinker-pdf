@@ -166,10 +166,10 @@ fn a_file_that_aborts_and_a_file_that_hangs_both_reach_the_report() {
         "the aborting file: {:?}",
         outcome_of(&results, "bb-aborts")
     );
-    assert_eq!(
-        *outcome_of(&results, "cc-hangs"),
-        Outcome::TimedOut,
-        "the hanging file"
+    assert!(
+        matches!(outcome_of(&results, "cc-hangs"), Outcome::Stalled { .. }),
+        "the hanging file: {:?}",
+        outcome_of(&results, "cc-hangs")
     );
     assert!(
         matches!(outcome_of(&results, "ff-unopenable"), Outcome::Failed(reason)
@@ -228,11 +228,60 @@ fn the_timeout_bounds_the_whole_run() {
     let elapsed = started.elapsed();
 
     assert_eq!(results.len(), 3);
-    assert!(results.iter().all(|r| r.outcome == Outcome::TimedOut));
+    assert!(
+        results
+            .iter()
+            .all(|r| matches!(r.outcome, Outcome::Stalled { .. })),
+        "children that write nothing at all are stalled, not merely slow: {:?}",
+        results.iter().map(|r| &r.outcome).collect::<Vec<_>>()
+    );
     assert!(
         elapsed < Duration::from_secs(8),
         "three 500 ms timeouts two at a time took {elapsed:?}; the children \
          sleep for a minute each, so this only passes if they were killed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A hang is not a slow file, and the report says which.**
+///
+/// Both are killed at the timeout and neither finishes its record, so an exit
+/// status cannot tell them apart and neither can the record. What separates
+/// them is whether the child was still *saying* anything: `crawl` names a page
+/// every fifty milliseconds and `hang` sleeps in silence, and the runner reads
+/// the capture file's length to tell them apart.
+///
+/// This is the assertion the roadmap item asks for, and the reason it is asked
+/// for is a measurement: `pdfjs/test/pdfs/bug1980958.pdf` renders in under two
+/// seconds and did not finish a rewrite in three minutes, and the corpus run
+/// recorded the same word for it as for a 900-page scan.
+#[test]
+fn a_child_that_stopped_speaking_is_not_a_child_that_is_merely_slow() {
+    let (dir, files) = synthetic_corpus("stall", &[("aa-crawls", "crawl"), ("bb-hangs", "hang")]);
+    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(4), 2);
+
+    let crawling = outcome_of(&results, "aa-crawls");
+    assert!(
+        matches!(crawling, Outcome::TimedOut { .. }),
+        "a child still naming pages is slow, not stuck: {crawling:?}"
+    );
+    if let Outcome::TimedOut { at } = crawling {
+        assert!(
+            at.starts_with("page "),
+            "and the report says how far it got: {at:?}"
+        );
+    }
+
+    let hanging = outcome_of(&results, "bb-hangs");
+    assert!(
+        matches!(hanging, Outcome::Stalled { .. }),
+        "a child that has said nothing for half its budget is stuck: {hanging:?}"
+    );
+
+    assert_ne!(
+        crawling.label(),
+        hanging.label(),
+        "the whole point is that these are different words"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -247,9 +296,10 @@ fn the_report_carries_both_states_by_name() {
             ("aa-good", "pass"),
             ("bb-aborts", "abort"),
             ("cc-hangs", "hang"),
+            ("dd-crawls", "crawl"),
         ],
     );
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 3);
+    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(4), 4);
 
     let run = Run {
         corpora: vec![CorpusReport {
@@ -269,11 +319,17 @@ fn the_report_carries_both_states_by_name() {
     assert!(text.contains("\"path\": \"aa-good.pdf\""), "{text}");
     assert!(text.contains("\"outcome\": \"crashed\""), "{text}");
     assert!(text.contains("\"outcome\": \"timed_out\""), "{text}");
+    assert!(text.contains("\"outcome\": \"stalled\""), "{text}");
     assert!(text.contains("\"complete\": true"), "{text}");
+    // The phase is in the file too. A run whose report says only "stalled"
+    // sends whoever reads it back to reproduce the hang before they can start
+    // on it; one that says where it stopped does not.
+    assert!(text.contains("\"at\": \"page "), "{text}");
 
     let outcomes = run.corpora[0].outcomes();
     assert_eq!(outcomes["passed"], 1);
     assert_eq!(outcomes["crashed"], 1);
+    assert_eq!(outcomes["stalled"], 1);
     assert_eq!(outcomes["timed_out"], 1);
 
     let _ = std::fs::remove_dir_all(&dir);

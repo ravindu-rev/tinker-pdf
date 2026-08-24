@@ -91,9 +91,11 @@ fn book(body: &str) -> Vec<u8> {
 
 /// The markup, the user-agent sheet, the cascade and layout, at a stated page.
 ///
-/// The same path `epub_browser.rs` uses, and for the same reason: a fixture
-/// that asked the reader for its pages could see *whether* the text arrived and
-/// not *where*, and where is the whole of §17.
+/// The same path `epub_support::layout` takes, and for the same reason: a
+/// fixture that asked the reader for its pages could see *whether* the text
+/// arrived and not *where*, and where is the whole of §17. (It read
+/// `epub_browser.rs` until ruling 13 retired that oracle at the roadmap's
+/// step 5.)
 fn engine(body: &str, width_px: f64, height_px: f64) -> (xhtml::Dom, StyleTree, Layout) {
     let document = chapter(body);
     let dom = xhtml::read(document.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT).expect("markup");

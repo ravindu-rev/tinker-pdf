@@ -1,12 +1,9 @@
 //! Substitute fonts, supplied by the host (plans 05, 15).
 //!
 //! Most documents do not embed the standard 14 fonts, because a reader is
-//! required to have them. This engine has none: it bundles no font programs
-//! and reads no directories, because bundling a face is a licensing decision
-//! and reading a directory is an operating-system dependency, and
-//! `wasm32-unknown-unknown` has no filesystem at all.
-//!
-//! So the seam goes here instead. A host that has fonts — a desktop
+//! required to have them. This engine reads no font directories — that is an
+//! operating-system dependency and `wasm32-unknown-unknown` has no filesystem
+//! at all — so the seam goes here instead. A host that has fonts — a desktop
 //! application, a server with a font package installed, a web page with a
 //! face already loaded — supplies them through [`FontProvider`], and the
 //! engine asks for one only when a document does not embed its own.
@@ -14,6 +11,13 @@
 //! Without a provider, such a document extracts its text perfectly (the
 //! metrics are built in) and draws none of it. That is a visible gap rather
 //! than a silent one: the render reports `UnreadableFont`.
+//!
+//! `BundledFonts` is the answer for a host that has no faces to supply, and
+//! it is off by default: `bundled-fonts` carries twelve Liberation faces,
+//! asked *after* whatever the host provided. What it is worth was measured
+//! rather than argued — 52 % of the corpus's reported degradation was the
+//! absence of a face — and the default stays off because a host that has
+//! better faces should not carry 4.2 MB of these.
 
 use std::sync::Arc;
 
@@ -222,6 +226,97 @@ pub(crate) fn font_dict(doc: &CosDocument, resources: &Dict, name: &[u8]) -> Opt
 #[must_use]
 pub(crate) fn is_substitutable(font: &Font) -> bool {
     !matches!(font.kind(), tinker_pdf_cos::FontKind::Type3)
+}
+
+/// The twelve faces a `bundled-fonts` build carries.
+///
+/// Not something a caller has to install: it is the *last* place a request
+/// goes, after whatever provider the host supplied. A host that has better
+/// faces keeps them and this answers only what that one declines, which is
+/// what makes the feature additive rather than a policy change.
+///
+/// Off by default, and off is still the right default. What it is worth was
+/// measured rather than argued — `corpus/ratchet-fonts.json` against
+/// `corpus/ratchet.json`, and 52 % of all reported degradation was the absence
+/// of a face — but a desktop application, a server with a font package or a
+/// web page with a face already loaded all have something better than
+/// Liberation and a way to hand it over.
+#[cfg(feature = "bundled-fonts")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BundledFonts;
+
+#[cfg(feature = "bundled-fonts")]
+impl FontProvider for BundledFonts {
+    fn substitute(&self, request: &FontRequest) -> Option<Arc<Vec<u8>>> {
+        use tinker_pdf_font::bundled::{face, family_for, Family};
+
+        let family = family_for(
+            &request.base_font,
+            request.serif,
+            request.fixed_pitch,
+            request.symbolic,
+        )?;
+        let index = match family {
+            Family::Sans => 0,
+            Family::Serif => 4,
+            Family::Mono => 8,
+        } + usize::from(request.bold)
+            + (usize::from(request.italic) << 1);
+
+        // One heap copy per face that is actually asked for, kept forever.
+        // The trait hands back an `Arc<Vec<u8>>` and the faces are
+        // `&'static [u8]`, so a copy is unavoidable; what is avoidable is
+        // making it per page, and making all twelve when a document uses one.
+        static FACES: [std::sync::OnceLock<Arc<Vec<u8>>>; 12] =
+            [const { std::sync::OnceLock::new() }; 12];
+        let slot = FACES.get(index)?;
+        Some(Arc::clone(slot.get_or_init(|| {
+            Arc::new(face(family, request.bold, request.italic).to_vec())
+        })))
+    }
+}
+
+/// Two providers in order: the host's, then whatever answers for it.
+#[cfg(feature = "bundled-fonts")]
+struct Chain {
+    first: Arc<dyn FontProvider>,
+    then: Arc<dyn FontProvider>,
+}
+
+#[cfg(feature = "bundled-fonts")]
+impl FontProvider for Chain {
+    fn substitute(&self, request: &FontRequest) -> Option<Arc<Vec<u8>>> {
+        // Per request, not per document. A host provider that has a face for
+        // the body text and none for the monospaced code sample must be able
+        // to answer one and decline the other, which a document-level "did the
+        // host supply a provider?" test cannot express.
+        self.first
+            .substitute(request)
+            .or_else(|| self.then.substitute(request))
+    }
+}
+
+/// What the engine will actually ask, given what the caller supplied.
+///
+/// The one place the bundled faces are attached, so `open_with` and
+/// `with_fonts` cannot disagree about whether they apply. With the feature off
+/// this is the identity and compiles to nothing.
+#[must_use]
+pub(crate) fn effective(supplied: Option<Arc<dyn FontProvider>>) -> Option<Arc<dyn FontProvider>> {
+    #[cfg(not(feature = "bundled-fonts"))]
+    {
+        supplied
+    }
+    #[cfg(feature = "bundled-fonts")]
+    {
+        Some(match supplied {
+            None => Arc::new(BundledFonts),
+            Some(first) => Arc::new(Chain {
+                first,
+                then: Arc::new(BundledFonts),
+            }),
+        })
+    }
 }
 
 #[cfg(test)]

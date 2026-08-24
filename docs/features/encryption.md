@@ -122,7 +122,6 @@ let bytes = doc.editor().save(&WriteOptions {
 | Public-key and vendor handlers (`Adobe.PubSec` and kin) | `AuthError::UnsupportedHandler` | only the `Standard` handler is implemented; a foreign `/Filter` is refused rather than guessed | [ROADMAP](../ROADMAP.md) Tier 3 |
 | Writing R5 | none offered — the writer emits R6 and nothing else | R5 is the withdrawn draft; reading it works and carries `HandlerNote::DeprecatedRevision5` | [pdf20-deltas](../pdf20-deltas.md) |
 | Encrypting an incremental update | no typed variant: the incremental writer takes no cipher, so the combination cannot be requested | an update inherits the original file's encryption, which needs the original file key plumbed through | [ROADMAP](../ROADMAP.md) Tier 2 |
-| `/ID` on encrypted saves | qpdf's `invalid /ID in trailer dictionary`, allowed through the oracle *by name* so nothing else hides behind it | 7.5.5 Table 15 requires `/ID` beside `/Encrypt`; all 48 entropy bytes are already consumed and no derivation is decided | [ROADMAP](../ROADMAP.md) Tier 1 |
 | Wrong password / unencrypted document | `AuthError::WrongPassword`, `AuthError::NotEncrypted` | the ordinary API errors, typed so a prompt loop can tell them apart | — |
 
 ## Verified
@@ -146,12 +145,17 @@ encrypt-on-save through the engine's own reader: password required,
 content and `/Info` strings ciphertext on disk and intact after
 authentication, owner and user passwords distinguished, `/P` surviving
 the trip, identical plaintexts encrypting differently, and encryption
-composed with object streams. `crates/tinker-pdf-cos/tests/qpdf_oracle.rs`
-holds the encrypted linearized output against `qpdf --check` and a
-`--decrypt`ed copy against qpdf's clean-summary line, qpdf invoked as a
-subprocess and never linked. Ruling 9 is retired: this check is replaced by
-a first-party strict validator, and the `/ID` row above closes with it
-([ROADMAP](../ROADMAP.md)).
+composed with object streams. `crates/tinker-pdf-cos/tests/strict_validator.rs`
+holds the encrypted output — plain and linearized — to ISO 32000 read
+strictly, including 7.5.5 Table 15's `/ID`, which no file this engine wrote
+carried until the validator refused one.
+
+That identifier is a hash of the document rather than of the moment (ruling 4
+bans a clock), and on an encrypted write the caller's entropy goes into the
+hash. Without it the identifier would be a confirmation oracle: anybody
+holding a candidate document could hash it and check the `/ID`, which is in
+the clear, with no password. For the same reason an encrypted write derives
+*both* halves instead of inheriting 14.4's permanent one from its source.
 
 Two of the 24 fuzz targets are this feature's: `crypt` drives
 authentication with input-chosen field widths and both decrypt paths over
@@ -159,5 +163,5 @@ a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
 `handler.rs` so seeds and carve order cannot drift, including the one
 pre-R6 seed that genuinely authenticates. All of it rides in the
-workspace suite: 2 790 passed, 0 failed, 8 ignored (Windows x86_64,
+workspace suite: 2 952 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).

@@ -74,10 +74,27 @@ reflowable book, whose pagination is a function of the open options.
 | `x86_64-pc-windows-msvc` | measured — the committed fingerprint table is this one |
 | `wasm32-wasip1` | measured, under wasmtime — tests width: 64-bit against 32-bit, where a `usize` assumption would show |
 | `x86_64-unknown-linux-gnu` | measured, full suite green — tests everything below the arithmetic: a different `std`, allocator and linker |
-| `aarch64-apple-darwin` | **claimed**, from CI configuration only — no observed run |
+| `aarch64-apple-darwin` | measured — observed 23 August 2026, [run 32670809479](https://github.com/ravindu-rev/tinker-pdf/actions/runs/32670809479) at `b76e6f9` |
 
-The macOS leg is the one open item: the CI job exists and is guarded
-against reporting success without running anything, but no run has been
-watched. Settling it is one observed CI run with that leg green beside a
-green `wasm-determinism` job on the same commit — the
-[roadmap](../ROADMAP.md)'s Tier 1 carries it.
+**All four are measured, and the fourth took some getting to.** The macOS
+row said *claimed, from CI configuration only* for as long as it did because
+nobody had watched a run, and watching one found out why: `cargo clippy
+--workspace --all-targets -- -D warnings` runs before `cargo test` in that
+job and had been failing on every operating system for at least five runs,
+so the leg had never reached the fingerprints at all. Three separate lints
+had to be fixed, each found only by pushing, because CI's stable was 1.98
+and the checkout doing the fixing was on 1.93.
+
+The run recorded above has `test (macos-14)` and `wasm-determinism` green
+on the same commit, which is what this claim needed. The native legs now
+grep their own logs for `rendering_is_stable_across_targets ... ok`, the way
+the wasm leg always has: `cargo test --workspace` does run those tests, but
+a green tick from it is not evidence that it did, and an `#[ignore]` added
+one afternoon would look identical. That is
+[verification.md](../verification.md)'s "a check that can be absent is red,
+not green", applied to the last place it was missing.
+
+One thing settled itself along the way. The suite, fingerprints included,
+passes on rustc 1.98 as well as on 1.93 — so ruling 4's arithmetic survived
+a compiler version bump on this target, which is the kind of property only
+ever noticed when it fails.

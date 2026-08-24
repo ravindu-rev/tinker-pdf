@@ -43,6 +43,11 @@ pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
+/// The strict validator's verdict (ruling 13), behind [`Document::validate`].
+///
+/// `kind_counts` and `tier_counts` are how a report says *which* rules a file
+/// broke without carrying every instance of them.
+pub use tinker_pdf_cos::{kind_counts, tier_counts, Defect, DefectKind, Tier};
 pub use tinker_pdf_cos::{
     Action, Attachment, AuthError, AuthLevel, DestKind, Destination, DocumentScript, Field,
     FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
@@ -531,7 +536,7 @@ impl Document {
                 .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
             return Ok(Document {
                 inner: Arc::new(inner),
-                fonts: options.fonts.clone(),
+                fonts: fonts::effective(options.fonts.clone()),
                 archive: Some(Arc::new(report)),
             });
         }
@@ -539,7 +544,7 @@ impl Document {
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
         Ok(Document {
             inner: Arc::new(inner),
-            fonts: options.fonts.clone(),
+            fonts: fonts::effective(options.fonts.clone()),
             archive: None,
         })
     }
@@ -580,7 +585,9 @@ impl Document {
     /// pages this cannot move.
     #[must_use]
     pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> Document {
-        self.fonts = Some(provider);
+        // Through the same seam `open_with` uses, so the two cannot disagree
+        // about whether a `bundled-fonts` build's own faces apply.
+        self.fonts = fonts::effective(Some(provider));
         if let Some(report) = self.archive.as_mut() {
             if report.layout().is_some() {
                 Arc::make_mut(report).warn(ArchiveWarning::FontsAttachedAfterPagination);
@@ -610,6 +617,23 @@ impl Document {
     #[must_use]
     pub fn warnings(&self) -> Vec<Warning> {
         self.inner.warnings()
+    }
+
+    /// Reads the file again strictly, and reports what a tolerant read let
+    /// through (ruling 13).
+    ///
+    /// [`Document::warnings`] says what the *reader* repaired. This says what
+    /// is wrong with the file, which is a larger set: the reader's repairs
+    /// plus every structure it never consults — the cross-reference sections
+    /// as the bytes spell them, stream extents against `endstream`, the
+    /// trailer against Table 15. An empty verdict is the strongest statement
+    /// this repository makes about a file it wrote.
+    ///
+    /// Authenticate an encrypted document first: a stream that cannot be
+    /// decrypted reads as one that does not decode.
+    #[must_use]
+    pub fn validate(&self) -> Vec<Defect> {
+        tinker_pdf_cos::validate(&self.inner)
     }
 
     /// Whether the document is encrypted.

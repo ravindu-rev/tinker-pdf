@@ -44,7 +44,7 @@ tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-cont
 tinker-pdf-xml ───────────────────────────────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-css ─────→ tinker-pdf-layout ──────────────────────────────────────────────→ tinker-pdf
 
-tools: pdfcmp (no engine deps) · oracle-diff (retired, ruling 13) · tpdf (depends on facade)
+tools: pdfcmp (no engine deps) · tpdf (depends on facade)
 ```
 
 **Ten leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
@@ -65,7 +65,9 @@ parser and encoding tables; a fourth crate whose only job is to hold two
 tables would be worse). The graph cannot cycle, because `filters` depends
 on nothing.
 
-`tinker-pdf-cos` owns file syntax, xref, repair, and the writer.
+`tinker-pdf-cos` owns file syntax, xref, repair, the writer, and the strict
+validator that reads a file back with the repairs turned off (ruling 13,
+[verification](verification.md)).
 `tinker-pdf-content` is the content-stream interpreter plus `trait Device`,
 and ships the text device; the rasterizing device lives in
 `tinker-pdf-render`. Because the two devices are in different crates, the
@@ -85,7 +87,7 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | Crate | Role | ~LOC | Feature doc | Fuzz targets |
 | --- | --- | ---: | --- | --- |
 | `tinker-pdf` | facade; the only public surface | 24 300 | all of [features/](README.md) | `render_page` |
-| `tinker-pdf-cos` | file syntax, object store, writer | 29 600 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script` |
+| `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script` |
 | `tinker-pdf-filters` | stream filters + image codecs | 21 800 | [filters](features/filters.md) | `ascii_filters`, `ccitt`, `inflate`, `jbig2`, `jpeg`, `jpx`, `lzw`, `png` |
 | `tinker-pdf-crypto` | ciphers, hashes, security handlers | 3 000 | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
 | `tinker-pdf-font` | font and CMap parsing, subsetting | 8 400 | [fonts](features/fonts.md) | `cff`, `cmap`, `sfnt`, `truetype`, `type1` |
@@ -100,10 +102,10 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
-Tools: `tpdf` (debug CLI over the facade), `pdfcmp` (perceptual
-comparator), `oracle-diff` (the external-renderer harness of retired ruling
-9, wired into nothing and scheduled for deletion) — all described in
-[verification.md](verification.md). `xtask` holds the workspace police
+Tools: `tpdf` (debug CLI over the facade) and `pdfcmp` (perceptual
+comparator), both described in [verification.md](verification.md). There is no
+third: `oracle-diff`, the external-renderer harness of retired ruling 9, was
+deleted with the last oracle it could have driven. `xtask` holds the workspace police
 (`dag`, `libm`, `oracles`, `vendor`, `versions`, `check`) and the release,
 corpus and packaging machinery.
 

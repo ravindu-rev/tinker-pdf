@@ -135,13 +135,20 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of August 2026, `cargo test --workspace` runs 2 790 tests (0 failed,
+As of August 2026, `cargo test --workspace` runs 2 952 tests (0 failed,
 8 ignored, Windows x86_64), and the parts that cover opening are named
 ([verification](../verification.md)):
 
 - **`crates/tinker-pdf-cos/tests/corrupt.rs`** — the ladder on damage built
   byte by byte: truncated tails, junk before `%PDF-`, lying offsets, dead
   `startxref`, each asserting the exact rung and the exact warning.
+- **`crates/tinker-pdf-cos/tests/strict_validator.rs`** — the ladder read
+  from the other side. `validate` opens a file with every leniency counted as
+  a defect and walks the cross-reference sections out of the bytes, which is
+  how two repairs nobody could see were found: an entry whose offset points a
+  few bytes *before* its object, and one whose generation the table invented.
+  Both open at `Trust` with no warning, because the reader lexes forward for
+  the first and normalises the second.
 - **`crates/tinker-pdf-cos/tests/document.rs`, `object_grammar.rs`,
   `proptest_lexer.rs`, `proptest_document.rs`** — the grammar, the store and
   property-tested round-trips for string and name escaping.

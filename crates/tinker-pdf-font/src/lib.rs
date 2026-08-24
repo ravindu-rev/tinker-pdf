@@ -3,6 +3,10 @@
 //! Feature documentation: `docs/features/fonts.md`.
 
 pub mod base14;
+/// The twelve faces a `bundled-fonts` build carries (9.6.2.2's standard 14,
+/// less the two symbolic ones).
+#[cfg(feature = "bundled-fonts")]
+pub mod bundled;
 pub mod cff;
 pub mod cmap;
 pub mod encoding;

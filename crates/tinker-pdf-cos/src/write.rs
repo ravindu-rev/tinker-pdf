@@ -585,7 +585,11 @@ pub fn incremental_update(
     let xref_at = out.len() as u64;
     write_classic_xref(&mut out, &offsets);
 
-    let mut trailer = trailer.clone();
+    // 14.4: an update keeps the document's permanent identifier and moves the
+    // second string, so a reader can tell two revisions of one document from
+    // two documents. Derived from the objects this revision actually writes,
+    // which is what makes it move at all.
+    let mut trailer = with_identifier(trailer, changed, names, None);
     // The *changed* set's highest number is not the file's. Writing it
     // unqualified clobbered the correct value the caller passes in, and a
     // conforming reader must then ignore every object above it — including
@@ -616,6 +620,93 @@ pub fn incremental_update(
     out
 }
 
+/// The trailer with the `/ID` 7.5.5 Table 15 asks for.
+///
+/// **Required whenever `/Encrypt` is present**, and strongly recommended
+/// otherwise — and until this existed no file this engine wrote carried one on
+/// any path. An outside reader is what found that; the strict validator is
+/// what refuses it now.
+///
+/// # Where the bytes come from
+///
+/// A hash of the document, not of the moment. 14.4 suggests deriving the
+/// identifier from the time, the path and the file's size; a clock is banned
+/// from this engine's output by ruling 4, and a path is not a thing a byte
+/// slice has. So the identifier is SHA-256 over the objects as they serialise
+/// and over the trailer that names them, truncated to the sixteen bytes
+/// everybody writes. Same document in, same identifier out, on every target —
+/// which is the property ruling 4 needs and a timestamp cannot give.
+///
+/// Serialised uncompressed and unencrypted deliberately: the identifier is a
+/// property of the *document*, so saving it twice with different options gives
+/// the same `/ID[0]`, which is what 14.4 means by a permanent identifier.
+///
+/// # Why the entropy goes in when there is any
+///
+/// A plaintext-derived identifier on an encrypted file is a confirmation
+/// oracle: anybody holding a candidate document can hash it and check the
+/// `/ID` in the clear, without the password. Mixing in the caller's entropy —
+/// which is already secret, already fixed for the call, and already what the
+/// file key is built from — makes the identifier say "this file" rather than
+/// "this content".
+///
+/// # `/ID[0]` survives, except where keeping it would leak
+///
+/// 14.4: the first string is the document's permanent identifier and the
+/// second changes with each revision. A trailer that already carries a usable
+/// first string keeps it, so a rewrite is recognisably the same document it
+/// was read from, and only the second half moves.
+///
+/// **An encrypted write derives both halves.** Inheriting the first would
+/// carry a plaintext-derived identifier into the sealed file, and in the
+/// ordinary create-then-encrypt flow that plaintext never existed anywhere a
+/// reader could see it — so the inherited string would be the one thing in the
+/// file that answers "is this that document?" for free. The linkage to the
+/// source's identifier is lost, which is a real cost and the smaller one; 14.4
+/// suggests a derivation rather than requiring one, and Table 15 requires only
+/// that the two strings be there.
+fn with_identifier(
+    trailer: &Dict,
+    objects: &ObjectSet,
+    names: &NameTable,
+    entropy: Option<&[u8; 48]>,
+) -> Dict {
+    let mut hasher = tinker_pdf_crypto::sha2::Sha256::new();
+    let mut scratch = Vec::new();
+    for (num, entry) in objects.iter() {
+        scratch.clear();
+        write_entry(&mut scratch, *num, entry, names, false, None);
+        hasher.update(&scratch);
+    }
+    // The trailer as well: two documents with the same objects and different
+    // /Root are different documents.
+    scratch.clear();
+    write_dict(&mut scratch, trailer, names, 0);
+    hasher.update(&scratch);
+    if let Some(entropy) = entropy {
+        hasher.update(entropy);
+    }
+    let digest = hasher.finish();
+    let derived = PdfString::hex(digest.get(..16).unwrap_or_default().to_vec());
+
+    let inherited = trailer
+        .get_array(Name::ID)
+        .and_then(<[Object]>::first)
+        .and_then(Object::as_string)
+        .filter(|first| !first.bytes.is_empty());
+    let permanent = match (inherited, entropy) {
+        (Some(first), None) => first.clone(),
+        _ => derived.clone(),
+    };
+
+    let mut out = trailer.clone();
+    out.insert(
+        Name::ID,
+        Object::Array(vec![Object::String(permanent), Object::String(derived)]),
+    );
+    out
+}
+
 /// Writes a whole document afresh.
 #[must_use]
 pub fn rewrite(
@@ -624,6 +715,27 @@ pub fn rewrite(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Vec<u8> {
+    // Before the layout is chosen, so the linearized writer receives the same
+    // trailer the ordinary one would.
+    let identified = with_identifier(
+        trailer,
+        objects,
+        names,
+        options.encryption.as_ref().map(|e| &e.entropy),
+    );
+    // 7.5.6: a rewrite is one revision, so it has no earlier section to chain
+    // to. Both keys arrive from the *source* document's trailer — every file
+    // that was ever incrementally updated carries a `/Prev`, and a hybrid one
+    // carries an `/XRefStm` — and both name offsets in a file that no longer
+    // exists. The cross-reference-stream path already dropped them; the
+    // classic path did not, so a rewrite of any updated document sent every
+    // reader to an offset in the middle of the new file's objects. Ours
+    // repaired it and opened anyway, which is why nothing here noticed until
+    // the strict validator read the sections as written.
+    let identified = crate::edit::without(&identified, Name::PREV);
+    let identified = crate::edit::without(&identified, Name::XREF_STM);
+    let trailer = &identified;
+
     if options.linearize {
         // A document with no catalog or no pages has no first page to put
         // first; the ordinary layout is then the only honest one, rather than
@@ -667,11 +779,25 @@ pub fn rewrite(
         Vec::new()
     };
 
+    // F.2.2: the linearization parameter dictionary describes *this file's*
+    // layout, and an ordinary rewrite is not that layout. It arrives here from
+    // any source that was linearized, nothing references it, and carrying it
+    // through makes the new file claim a fast-web-view layout whose hint
+    // stream and first-page section are gone. Emptied rather than dropped, so
+    // the numbering the rest of the file uses does not move.
+    let linearized = names.intern(b"Linearized");
+    let hollow = Written::Object(Object::Dict(Dict::new()));
+
     for (num, object) in &objects.entries {
         if packed.contains(num) {
             continue;
         }
+        let stale = matches!(
+            object,
+            Written::Object(Object::Dict(dict)) if dict.contains_key(linearized)
+        );
         offsets.push((*num, out.len() as u64));
+        let object = if stale { &hollow } else { object };
         write_entry(&mut out, *num, object, names, options.compress, crypt);
     }
 
@@ -784,6 +910,20 @@ fn packable(object: &Object) -> bool {
     !matches!(object, Object::Stream(_))
 }
 
+/// One row of a cross-reference stream, before it is packed into `/W` fields.
+///
+/// Named rather than written as a tuple because the three forms are 7.5.8.2's
+/// three types and the middle field means something different in each: a byte
+/// offset in type 1 and a container's object number in type 2.
+enum Row {
+    /// Type 0: free. Object zero always is; nothing else here ever is.
+    Free,
+    /// Type 1: at this byte offset in the file.
+    AtOffset(u64),
+    /// Type 2: the k-th object of the container.
+    InStream(usize),
+}
+
 /// Writes a cross-reference stream (7.5.8).
 ///
 /// Needed rather than preferred once objects live in containers: a classic
@@ -799,46 +939,84 @@ fn write_xref_stream(
     objects: &ObjectSet,
     names: &NameTable,
 ) {
-    let stream_number = container.saturating_add(1);
     // Every object that has an offset, not just the container. `/Encrypt` is
     // numbered above it, and sizing from the container alone left that object
     // with no entry at all: the file reopened as unencrypted with zero pages
     // while its content was genuinely ciphertext, which is unrecoverable.
-    let highest = offsets
+    let highest_written = offsets
         .iter()
         .map(|(num, _)| *num)
         .max()
-        .unwrap_or(stream_number)
-        .max(stream_number);
-    let size = highest.saturating_add(1);
+        .unwrap_or(container)
+        .max(container);
+    // The stream is an object as well, and it takes the next number after
+    // everything already written — not `container + 1`, which is the number
+    // `/Encrypt` takes on an encrypted rewrite. Those two collided, so such a
+    // file carried **two objects numbered the same**, and the reason nothing
+    // noticed is that neither of them is found by number: a reader reaches the
+    // stream through `startxref` and `/Encrypt` through the trailer. The dense
+    // table hid it further, by resolving the collision in favour of whichever
+    // branch it tested first.
+    let stream_number = highest_written.saturating_add(1);
+    let size = stream_number.saturating_add(1);
+
+    // One row per object that exists, in a map, and then `/Index` subsections
+    // over the runs — the same device `write_classic_xref` has always used,
+    // spelled the way 7.5.8.2 Table 17 spells it.
+    //
+    // This used to write `0..size` densely and look up each number by scanning
+    // `offsets` and `packed`. Two defects in one loop. The scans made it
+    // quadratic in the object count, which is invisible until a file is large.
+    // The density made it unbounded in the highest object *number*, which is a
+    // different thing entirely: `pdfjs/test/pdfs/bug1980958.pdf` holds four
+    // objects and numbers the last of them `i32::MAX`, so the loop ran two
+    // thousand million times and `Vec::with_capacity(size * 8)` asked for
+    // seventeen gigabytes to hold the result.
+    //
+    // A reader that ignores `/Index` reads the default `[0 Size]` and gets the
+    // wrong rows, so this is not a free choice — but `/Index` is not optional
+    // to support either, and this engine's own reader has honoured it since
+    // the cross-reference stream reader was written.
+    let mut rows: BTreeMap<u32, Row> = BTreeMap::new();
+    // Object zero heads the free list, and 7.5.8.2 keeps that requirement from
+    // the classic table.
+    rows.insert(0, Row::Free);
+    for (num, offset) in offsets {
+        rows.insert(*num, Row::AtOffset(*offset));
+    }
+    for (index, num) in packed.iter().enumerate() {
+        // A packed object is only in a container if it has no offset of its
+        // own; an object written twice would be a defect upstream of here, and
+        // the offset is the entry a reader can act on.
+        rows.entry(*num).or_insert(Row::InStream(index));
+    }
+    rows.insert(stream_number, Row::AtOffset(out.len() as u64));
 
     // Three bytes of offset covers 16 MB; four covers 4 GB, which is past
     // what any single PDF should be.
-    let mut data = Vec::with_capacity((size as usize) * 8);
-    for num in 0..size {
-        if num == 0 {
-            // Object zero heads the free list.
-            data.push(0);
-            data.extend_from_slice(&[0, 0, 0, 0]);
-            data.extend_from_slice(&[255, 255]);
-            continue;
+    let mut data = Vec::with_capacity(rows.len() * 8);
+    let mut index_pairs: Vec<(u32, u32)> = Vec::new();
+    for (num, row) in &rows {
+        match index_pairs.last_mut() {
+            Some((first, count)) if *first + *count == *num => *count += 1,
+            _ => index_pairs.push((*num, 1)),
         }
-        if let Some((_, offset)) = offsets.iter().find(|(n, _)| *n == num) {
-            data.push(1);
-            data.extend_from_slice(&(*offset as u32).to_be_bytes());
-            data.extend_from_slice(&0u16.to_be_bytes());
-        } else if let Some(index) = packed.iter().position(|n| *n == num) {
-            data.push(2);
-            data.extend_from_slice(&container.to_be_bytes());
-            data.extend_from_slice(&(index as u16).to_be_bytes());
-        } else if num == stream_number {
-            data.push(1);
-            data.extend_from_slice(&(out.len() as u32).to_be_bytes());
-            data.extend_from_slice(&0u16.to_be_bytes());
-        } else {
-            data.push(0);
-            data.extend_from_slice(&[0, 0, 0, 0]);
-            data.extend_from_slice(&[255, 255]);
+        match row {
+            Row::Free => {
+                data.push(0);
+                data.extend_from_slice(&[0, 0, 0, 0]);
+                data.extend_from_slice(&[255, 255]);
+            }
+            Row::AtOffset(offset) => {
+                data.push(1);
+                data.extend_from_slice(&(*offset as u32).to_be_bytes());
+                data.extend_from_slice(&0u16.to_be_bytes());
+            }
+            Row::InStream(index) => {
+                data.push(2);
+                data.extend_from_slice(&container.to_be_bytes());
+                data.extend_from_slice(&(*index as u16).to_be_bytes());
+            }
         }
     }
 
@@ -867,6 +1045,24 @@ fn write_xref_stream(
     dict.insert(
         Name::W,
         Object::Array(vec![Object::Int(1), Object::Int(4), Object::Int(2)]),
+    );
+    // 7.5.8.2 Table 17: which object numbers the rows above describe. Its
+    // default is `[0 Size]`, which is what this stream used to be — and what
+    // made its cost a function of the highest object number rather than of the
+    // object count.
+    dict.insert(
+        Name::INDEX,
+        Object::Array(
+            index_pairs
+                .iter()
+                .flat_map(|(first, count)| {
+                    [
+                        Object::Int(i64::from(*first)),
+                        Object::Int(i64::from(*count)),
+                    ]
+                })
+                .collect(),
+        ),
     );
     // A stale /Prev would point at a revision this file does not contain.
     let dict = crate::edit::without(&dict, Name::PREV);
@@ -898,6 +1094,21 @@ fn write_classic_xref(out: &mut Vec<u8>, offsets: &[(u32, u64)]) {
         // zero to exist and be free.
         out.extend_from_slice(b"0 1\n0000000000 65535 f \n");
         return;
+    }
+
+    // 7.5.4: object zero is the head of the free list, and it is not optional.
+    // The run-merging below writes it as part of a subsection that starts at
+    // one; a document whose lowest object number is two or more — which is
+    // every rewrite of a file that had a free slot low down — used to get no
+    // free head at all. Seventy-two corpus files produced such a table, and
+    // this engine's own reader never looked: the strict validator is what
+    // found it.
+    if offsets.first().is_some_and(|(num, _)| *num > 1) {
+        out.extend_from_slice(
+            b"0 1
+0000000000 65535 f 
+",
+        );
     }
 
     let mut index = 0usize;

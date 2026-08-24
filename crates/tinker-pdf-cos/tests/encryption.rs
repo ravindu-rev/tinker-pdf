@@ -103,7 +103,7 @@ fn content_decrypts_and_decodes_after_authentication() {
     assert!(
         text.contains("BT"),
         "decrypted content should hold text operators, got: {}",
-        &text.chars().take(80).collect::<String>()
+        text.chars().take(80).collect::<String>()
     );
 }
 

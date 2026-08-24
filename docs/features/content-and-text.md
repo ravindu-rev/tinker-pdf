@@ -156,9 +156,9 @@ Two of the 15 determinism render fingerprints exercise this path directly —
 `text` and `optional` in `crates/tinker-pdf/tests/determinism.rs` — beside
 the 3 document byte-hashes. The `content_tokenizer` and `render_page` fuzz
 targets are among the 24 with committed seed corpora; `hostile_input.rs`
-sweeps the same shapes on stable. `tools/oracle-diff` can run an external
-text extractor for comparison, but it is wired into no test and no CI job,
-and ruling 13 retires it. Across the corpus, 4 484 of
+sweeps the same shapes on stable. Nothing compares this extractor against
+another one: ruling 13 ended that, and the harness that could have driven one
+is deleted. Across the corpus, 4 484 of
 4 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 2 790 passed / 0 failed / 8 ignored (Windows x86_64,
+--workspace` stands at 2 952 passed / 0 failed / 8 ignored (Windows x86_64,
 as of August 2026).

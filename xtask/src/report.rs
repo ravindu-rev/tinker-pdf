@@ -20,7 +20,7 @@ use crate::json::Json;
 use crate::runner::FileResult;
 
 /// The schema version of both documents.
-pub const SCHEMA: u64 = 1;
+pub const SCHEMA: u64 = 2;
 
 /// One corpus's results.
 #[derive(Clone, Debug, Default)]
@@ -83,6 +83,70 @@ impl CorpusReport {
         out
     }
 
+    /// How many files the strict pass ran on (ruling 13).
+    ///
+    /// A file is eligible when this engine read it cleanly and could rewrite
+    /// it, which is what makes the rate below a statement about the *writer*
+    /// rather than about the corpus.
+    pub fn strict_eligible(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|file| file.strict.eligible())
+            .count() as u64
+    }
+
+    /// How many of those rewrites carried no structural defect at all.
+    pub fn strict_clean(&self) -> u64 {
+        self.files.iter().filter(|file| file.strict.clean()).count() as u64
+    }
+
+    /// How many files each strict defect kind was found in.
+    ///
+    /// Files rather than occurrences, for the reason `capabilities` counts
+    /// files: "eleven documents have a backwards `/Rect`" is the number that
+    /// decides whether a rule is worth acting on.
+    pub fn strict_kinds(&self) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for file in &self.files {
+            if let crate::runner::Strict::Checked { kinds, .. } = &file.strict {
+                for label in kinds.keys() {
+                    *out.entry(label.clone()).or_default() += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// How many files each metamorphic relation was **asked** of, by name.
+    ///
+    /// Asked and held are two counts and both are recorded, for the reason the
+    /// strict pass records eligible beside clean: a relation that declines the
+    /// hard files and holds on the rest is not a relation that held.
+    pub fn metamorphic_compared(&self) -> BTreeMap<String, u64> {
+        self.metamorphic(|verdict| verdict.compared())
+    }
+
+    /// How many files each relation held on.
+    pub fn metamorphic_held(&self) -> BTreeMap<String, u64> {
+        self.metamorphic(|verdict| verdict.held())
+    }
+
+    fn metamorphic(
+        &self,
+        wanted: fn(&crate::runner::MetaVerdict) -> bool,
+    ) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for file in &self.files {
+            for (name, verdict) in &file.metamorphic {
+                let slot = out.entry(name.clone()).or_default();
+                if wanted(verdict) {
+                    *slot += 1;
+                }
+            }
+        }
+        out
+    }
+
     /// How many files reported each warning label, most common first when
     /// rendered.
     pub fn warnings(&self) -> BTreeMap<String, u64> {
@@ -93,6 +157,33 @@ impl CorpusReport {
             }
         }
         out
+    }
+}
+
+/// One file's strict verdict, as the report carries it.
+fn strict_json(strict: &crate::runner::Strict) -> Json {
+    match strict {
+        crate::runner::Strict::Ineligible(reason) => Json::object([
+            ("eligible", Json::Bool(false)),
+            ("reason", Json::string(reason)),
+        ]),
+        crate::runner::Strict::Checked {
+            structure,
+            semantics,
+            kinds,
+        } => Json::object([
+            ("eligible", Json::Bool(true)),
+            ("structure", Json::count(*structure)),
+            ("semantics", Json::count(*semantics)),
+            (
+                "kinds",
+                Json::object(
+                    kinds
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Json::count(*v as u64))),
+                ),
+            ),
+        ]),
     }
 }
 
@@ -161,6 +252,18 @@ impl Run {
                         {
                             fields.push(("reason", Json::string(reason)));
                         }
+                        // Where a killed child had got to. Written for both
+                        // states rather than only for the stalled one: "timed
+                        // out at page 340 of 900" and "stalled at strict" are
+                        // the two sentences that save whoever reads this from
+                        // reproducing the run before they can start on it.
+                        if let crate::runner::Outcome::TimedOut { at }
+                        | crate::runner::Outcome::Stalled { at } = &file.outcome
+                        {
+                            if !at.is_empty() {
+                                fields.push(("at", Json::string(at)));
+                            }
+                        }
                         if !file.capabilities.is_empty() {
                             fields.push((
                                 "capabilities",
@@ -175,6 +278,35 @@ impl Run {
                                         .iter()
                                         .map(|(k, v)| (k.clone(), Json::count(*v as u64))),
                                 ),
+                            ));
+                        }
+                        if file.cost != crate::runner::Cost::default() {
+                            fields.push((
+                                "cost",
+                                Json::object([
+                                    ("bytes", Json::count(file.cost.bytes)),
+                                    ("objects", Json::count(file.cost.objects)),
+                                    ("pixels", Json::count(file.cost.pixels)),
+                                ]),
+                            ));
+                        }
+                        fields.push(("strict", strict_json(&file.strict)));
+                        // The fourth axis, per file. Without it the ratchet
+                        // can say `dpi held on 572 of 580, worse than the
+                        // recorded 572 of 579` and nothing in the run says
+                        // *which* file — which makes the number a verdict
+                        // rather than a lead, and `corpus.yml` keeps this
+                        // report precisely so a moved bar can be followed up.
+                        if !file.metamorphic.is_empty() {
+                            fields.push((
+                                "metamorphic",
+                                Json::object(file.metamorphic.iter().map(|(name, verdict)| {
+                                    let mut row = vec![("verdict", Json::string(verdict.label()))];
+                                    if !verdict.detail().is_empty() {
+                                        row.push(("detail", Json::string(verdict.detail())));
+                                    }
+                                    (name.clone(), Json::object(row))
+                                })),
                             ));
                         }
                         Json::object(fields)
@@ -216,6 +348,17 @@ impl Run {
             ("total", Json::count(corpus.total())),
             ("passed", Json::count(corpus.passed())),
             ("degraded", Json::count(corpus.degraded())),
+            ("strict_eligible", Json::count(corpus.strict_eligible())),
+            ("strict_clean", Json::count(corpus.strict_clean())),
+            (
+                "strict_kinds",
+                Json::object(
+                    corpus
+                        .strict_kinds()
+                        .into_iter()
+                        .map(|(k, v)| (k, Json::count(v))),
+                ),
+            ),
             (
                 "outcomes",
                 Json::object(
@@ -257,6 +400,8 @@ impl Run {
                     ("total", Json::count(corpus.total())),
                     ("passed", Json::count(corpus.passed())),
                     ("degraded", Json::count(corpus.degraded())),
+                    ("strict_eligible", Json::count(corpus.strict_eligible())),
+                    ("strict_clean", Json::count(corpus.strict_clean())),
                     (
                         "outcomes",
                         Json::object(
@@ -274,6 +419,25 @@ impl Run {
                                 .into_iter()
                                 .map(|(k, v)| (k, Json::count(v))),
                         ),
+                    ),
+                    // Roadmap step 7. Counts and never rates, and **both**
+                    // counts: a relation's held figure means nothing without
+                    // the number of files it was asked of.
+                    (
+                        "metamorphic",
+                        Json::object(corpus.metamorphic_compared().into_iter().map(
+                            |(name, compared)| {
+                                let held =
+                                    corpus.metamorphic_held().get(&name).copied().unwrap_or(0);
+                                (
+                                    name,
+                                    Json::object([
+                                        ("compared", Json::count(compared)),
+                                        ("held", Json::count(held)),
+                                    ]),
+                                )
+                            },
+                        )),
                     ),
                 ])
             })
@@ -299,7 +463,7 @@ impl Run {
             let outcomes = corpus.outcomes();
             lines.push(format!(
                 "{:<14} {:>6} files  {:>6} passed  {:>6} degraded  \
-                 (failed {}, crashed {}, timed out {})",
+                 (failed {}, crashed {}, timed out {}, stalled {})",
                 corpus.name,
                 corpus.total(),
                 corpus.passed(),
@@ -307,6 +471,11 @@ impl Run {
                 outcomes.get("failed").copied().unwrap_or(0),
                 outcomes.get("crashed").copied().unwrap_or(0),
                 outcomes.get("timed_out").copied().unwrap_or(0),
+                // Its own column, not folded into the one before it. A stalled
+                // file is a defect in this engine and a timed-out one is a
+                // large document; a single number for both is what let a
+                // non-terminating rewrite sit in the corpus unnoticed.
+                outcomes.get("stalled").copied().unwrap_or(0),
             ));
         }
         lines.push(format!(
@@ -314,6 +483,18 @@ impl Run {
             "all",
             self.total(),
             self.passed()
+        ));
+
+        // Ruling 13's axis, printed as its own line rather than folded into
+        // the one above: it answers a different question — of the files this
+        // engine read cleanly, how many produced a rewrite that holds up to
+        // ISO 32000 read strictly — and a job that greps for it can tell that
+        // the pass ran at all.
+        let eligible: u64 = self.corpora.iter().map(CorpusReport::strict_eligible).sum();
+        let clean: u64 = self.corpora.iter().map(CorpusReport::strict_clean).sum();
+        lines.push(format!(
+            "{:<14} {:>6} rewritten  {:>6} validate strictly",
+            "strict", eligible, clean
         ));
         if !self.complete() {
             lines.push(String::from(
@@ -389,6 +570,8 @@ mod tests {
         FileResult {
             path: path.to_string(),
             outcome,
+            cost: crate::runner::Cost::default(),
+            bundled_faces: false,
             pages: 1,
             rendered: 1,
             warnings: warnings
@@ -400,6 +583,12 @@ mod tests {
                 .map(|c| (*c).to_string())
                 .collect::<BTreeSet<_>>(),
             millis: 1,
+            metamorphic: BTreeMap::new(),
+            strict: crate::runner::Strict::Checked {
+                structure: 0,
+                semantics: 0,
+                kinds: BTreeMap::new(),
+            },
         }
     }
 
@@ -417,7 +606,14 @@ mod tests {
                     ),
                     file("c.pdf", Outcome::Failed("no".into()), &[], &["jpx"]),
                     file("d.pdf", Outcome::Crashed("boom".into()), &[], &[]),
-                    file("e.pdf", Outcome::TimedOut, &[], &[]),
+                    file(
+                        "e.pdf",
+                        Outcome::TimedOut {
+                            at: "page 3/900".into(),
+                        },
+                        &[],
+                        &[],
+                    ),
                 ],
             }],
             limits: Vec::new(),

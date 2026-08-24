@@ -63,7 +63,8 @@ outline, so both slots share one warning path and cannot diverge.
 **Images.** `/SMask` (Table 89, 11.6.5.3), `/Decode` (8.9.5.2), stencil
 masks that take the current fill colour (8.9.6.2) and inline images (8.9.7)
 all draw. `/Interpolate` (Table 89) selects bilinear sampling on
-magnification; minification goes through a box pyramid. A codec this build
+magnification; minification averages every sample a pixel covers, through a
+box pyramid that bounds the footprint ([rasterizer](rasterizer.md)). A codec this build
 does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
 distinguishable from a blank one.
@@ -184,5 +185,5 @@ helpers `Page::render` composes.
   stable.
 - Corpus, as of August 2026: 4 525 files, 4 484 rendered every page, zero
   crashes.
-- The workspace stands at 2 790 passed / 0 failed / 8 ignored
+- The workspace stands at 2 952 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md).
