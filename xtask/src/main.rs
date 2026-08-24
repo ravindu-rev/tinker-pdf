@@ -863,6 +863,18 @@ fn allowed_licenses(root: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(root.join("deny.toml")) else {
         return Vec::new();
     };
+    allowed_licenses_in(&text)
+}
+
+/// The same reading, over text, so it can be tested on inputs this repository
+/// does not happen to contain.
+///
+/// Split out when the allowlist stopped containing a commented-out entry: the
+/// test for "a comment is not an allowance" had been written against
+/// `deny.toml`'s own OFL-1.1 line, so the day that line became real the test
+/// asserted the project's font policy rather than the parser's behaviour, and
+/// failed for the change it should have been indifferent to.
+fn allowed_licenses_in(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_allow = false;
     for line in text.lines() {
@@ -1068,16 +1080,44 @@ mod tests {
         assert!(declared_vendor_trees(text).is_empty());
     }
 
-    /// A commented-out allowlist entry is not an allowance. `deny.toml` has
-    /// one — OFL-1.1, kept as prose after the fonts it described turned out
-    /// not to exist — and reading it as live would make this check pass for a
-    /// licence the project has decided it does not currently ship.
+    /// A commented-out allowlist entry is not an allowance.
+    ///
+    /// Reading one as live would let a licence the project has decided against
+    /// pass this gate on the strength of a paragraph explaining why it does
+    /// not ship — and `deny.toml`'s allowlist is mostly paragraphs.
     #[test]
     fn a_commented_allowlist_entry_does_not_allow() {
-        let root = repo_root();
-        let allowed = allowed_licenses(&root);
-        assert!(allowed.contains(&"BSD-3-Clause".to_string()), "{allowed:?}");
-        assert!(!allowed.contains(&"OFL-1.1".to_string()), "{allowed:?}");
+        let text = "[licenses]
+allow = [
+  \"MIT\",
+  # \"GPL-3.0\",
+                      \"Zlib\",
+]
+";
+        let allowed = allowed_licenses_in(text);
+        assert_eq!(allowed, vec!["MIT".to_string(), "Zlib".to_string()]);
+    }
+
+    /// And this repository's own allowlist reads as it looks.
+    ///
+    /// A separate test from the one above, because they answer different
+    /// questions: that one is about the parser and stays true whatever is
+    /// allowed, this one is about what is allowed and changes when the project
+    /// changes its mind. Merging them is how the parser's test came to fail on
+    /// the day the fonts arrived.
+    #[test]
+    fn this_repositorys_allowlist_reads_as_it_looks() {
+        let allowed = allowed_licenses(&repo_root());
+        for spdx in [
+            "MIT",
+            "Apache-2.0",
+            "BSD-3-Clause",
+            "Unicode-3.0",
+            "OFL-1.1",
+        ] {
+            assert!(allowed.contains(&spdx.to_string()), "{spdx}: {allowed:?}");
+        }
+        assert!(!allowed.iter().any(|id| id.contains("GPL")), "{allowed:?}");
     }
 
     /// The same rule as the graph check: it runs against this repository.

@@ -571,6 +571,7 @@ mod tests {
             path: path.to_string(),
             outcome,
             cost: crate::runner::Cost::default(),
+            bundled_faces: false,
             pages: 1,
             rendered: 1,
             warnings: warnings

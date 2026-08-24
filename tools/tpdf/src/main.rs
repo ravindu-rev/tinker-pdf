@@ -39,6 +39,8 @@ options:
   --dpi D      resolution for render (default 150)
   --out DIR    where render writes its PNMs
   --fonts PATH a face, or a directory of faces, for documents that embed none
+  --fonts bundled
+               the faces this build carries; refused unless it carries any
   --password P the password to open an encrypted file with
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
@@ -222,6 +224,30 @@ impl Options {
         let Some(path) = self.fonts.as_deref() else {
             return Ok(None);
         };
+
+        // `--fonts bundled` is not a path: it means "whatever faces this build
+        // carries", which the facade supplies without a provider at all. It
+        // exists so a corpus run can *say* it measured them, since a child
+        // built without the feature would otherwise produce the no-faces
+        // numbers and have them recorded as the bundled bar.
+        //
+        // Refused outright rather than ignored when the feature is off, for
+        // that reason: the whole value of the flag is that it cannot be
+        // satisfied by a build that has no faces.
+        if path == BUNDLED {
+            #[cfg(feature = "bundled-fonts")]
+            {
+                return Ok(None);
+            }
+            #[cfg(not(feature = "bundled-fonts"))]
+            {
+                return Err(
+                    "--fonts bundled: this build carries no faces. Rebuild with                      `--features bundled-fonts`, or name a path"
+                        .to_string(),
+                );
+            }
+        }
+
         let path = Path::new(path);
 
         if path.is_file() {
@@ -1248,6 +1274,16 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// than reading the fields it recognises and inventing the rest.
 const PROBE_VERSION: u32 = 3;
 
+/// The `--fonts` value meaning "whatever faces this build carries".
+const BUNDLED: &str = "bundled";
+
+/// Whether this build carries the twelve Liberation faces.
+///
+/// Written into the record so a run cannot claim to have measured faces a
+/// child did not have. It is a `cfg`, so it is the compiler's answer rather
+/// than a flag anybody can pass.
+const BUNDLED_FACES: bool = cfg!(feature = "bundled-fonts");
+
 /// Opens and renders one file at a time, writing a record per file.
 ///
 /// Never returns `Err` for anything the file did: the runner reads outcomes
@@ -1292,6 +1328,9 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     };
 
     println!("opened yes");
+    if BUNDLED_FACES {
+        println!("build bundled-fonts");
+    }
     println!("ladder {:?}", doc.ladder_level());
     let pages = doc.page_count();
     println!("pages {pages}");

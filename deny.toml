@@ -28,16 +28,21 @@ allow = [
   "Unicode-3.0",
   "Unlicense",
   "Zlib",
-  # OFL-1.1 was here, commented "bundled substitute fonts (Liberation family),
-  # an asset not code". There are none, and there never have been:
-  # `crates/tinker-pdf/tests/substitute_fonts.rs` synthesises its face on the
-  # spot precisely so that "the repository carries no font anyone has to
-  # licence". An allowlist entry describing an asset that does not exist reads
-  # as evidence the engine ships faces, which is the exact false impression the
-  # real font-parity blocker turns on — a document naming Helvetica and
-  # embedding nothing extracts its text and draws none of it. When plan 05's
-  # M10 bundles Liberation, the entry comes back in the same commit as the
-  # faces, the THIRDPARTY.md section and the `bundled-fonts` feature.
+  # OFL-1.1 for the Liberation family, an asset rather than code. It left this
+  # list once, when an audit found it describing faces that did not exist —
+  # an allowlist entry for an absent asset reads as evidence the engine ships
+  # fonts, which is the exact false impression the real gap turns on. The
+  # condition for its return was stated then and is met now: it comes back in
+  # the same commit as the faces themselves, the THIRDPARTY.md section and the
+  # `bundled-fonts` feature, and not one of the four earlier than the others.
+  #
+  # What made it worth doing is a measurement rather than an argument.
+  # `corpus/ratchet-fonts.json` is the same 4 525 corpus files rendered with a
+  # face supplied, and 52 % of all reported degradation was the absence of one.
+  # The base 14 are required to be available by 9.6.2.2, so a conforming file
+  # naming Helvetica and embedding nothing is one this engine could not draw:
+  # a conformance gap rather than only a policy.
+  "OFL-1.1",
 ]
 
 [bans]

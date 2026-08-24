@@ -20,6 +20,12 @@ cmap-predefined = [
   "tinker-pdf-content/cmap-predefined",
   "tinker-pdf-render/cmap-predefined",
 ]
+# The twelve Liberation faces (9.6.2.2's standard 14, less the two symbolic
+# ones), embedded rather than read from a directory. Off by default: a host
+# with faces of its own supplies them through `FontProvider` and should not
+# carry 4.2 MB of ours. When it is on, the bundled set is asked *after* the
+# host's provider, so turning it on can only add answers.
+bundled-fonts = ["tinker-pdf-font/bundled-fonts"]
 
 [dependencies]
 tinker-pdf-cos = { workspace = true }

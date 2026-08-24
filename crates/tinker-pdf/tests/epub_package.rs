@@ -776,7 +776,13 @@ fn comic_archive() -> Vec<u8> {
 /// A one-page PDF drawing text in a base font it does not embed.
 fn pdf_naming_a_font_it_does_not_embed() -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
-    builder.add_base_font(b"F1", b"Helvetica");
+    // `Symbol` rather than `Helvetica`, so the control stays a document with a
+    // missing face in a `bundled-fonts` build too: the bundled set declines
+    // symbolic faces by name, because drawing a text face for one puts letters
+    // where the document meant arrows. The seam this test is about — a
+    // provider passed at `open` reaching the render — is unaffected, since
+    // `SimpleFontProvider` answers for it.
+    builder.add_base_font(b"F1", b"Symbol");
     builder.add_page(200.0, 100.0, |page| {
         page.text(b"F1", 24.0, 20.0, 40.0, "HELLO");
     });

@@ -32,7 +32,7 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 
 ## Measured, not claimed
 
-As of August 2026: **2 951 tests** (0 failed) across 120 suites; corpus of
+As of August 2026: **2 952 tests** (0 failed) across 120 suites; corpus of
 **4 525** documents with **4 484 rendering every page and zero crashes**, and
 **4 225 of 4 225** rewrites of them validating against ISO 32000 read
 strictly;
@@ -82,11 +82,12 @@ See [crates/tinker-pdf/examples/](crates/tinker-pdf/examples/).
 | Containers | [CBZ](docs/features/cbz.md) · [XPS](docs/features/xps.md) · [EPUB](docs/features/epub.md) |
 | Embed | [bindings](docs/features/bindings.md) — C, Python, JavaScript/wasm, .NET |
 
-Two honest limits worth knowing up front: the engine bundles no font
-faces — a document that embeds none draws no text unless the host supplies
-faces through `FontProvider` — and while its output is proven stable and
-valid, comparing its pages against independent renderers at corpus scale
-is still owed. That, and everything else it does not yet do, is ordered in
+Two honest limits worth knowing up front: the engine bundles no font faces
+**by default** — a document that embeds none draws no text unless the host
+supplies faces through `FontProvider`, or the `bundled-fonts` feature is on,
+which carries twelve Liberation faces for hosts that have none — and while its
+output is proven stable and valid, comparing its pages against independent
+renderers at corpus scale is still owed. That, and everything else it does not yet do, is ordered in
 [docs/ROADMAP.md](docs/ROADMAP.md), with design docs for the major items
 in [docs/design/](docs/design/).
 

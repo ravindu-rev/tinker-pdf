@@ -134,6 +134,13 @@ pub struct FileResult {
     /// What the metamorphic relations said about the first page, by name
     /// (roadmap step 7): `rotate`, `crop`, `dpi`.
     pub metamorphic: BTreeMap<String, MetaVerdict>,
+    /// Whether the child that produced this record was built with the twelve
+    /// bundled faces.
+    ///
+    /// The child's own `cfg`, not a flag: a run measured against faces is a
+    /// different measurement from one without them, and this is what stops the
+    /// two being recorded in each other's slot.
+    pub bundled_faces: bool,
     /// What this document costs to work on, as properties of the document.
     ///
     /// Reported so that the gate deciding which files the relations are asked
@@ -257,6 +264,7 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         // same as a relation that held: an empty map counts as neither
         // compared nor held.
         metamorphic: BTreeMap::new(),
+        bundled_faces: false,
         cost: Cost::default(),
     };
 
@@ -473,6 +481,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut defects: BTreeMap<String, usize> = BTreeMap::new();
     let mut metamorphic: BTreeMap<String, MetaVerdict> = BTreeMap::new();
     let mut cost = Cost::default();
+    let mut bundled_faces = false;
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -498,6 +507,11 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                     } else {
                         reason.trim().to_string()
                     });
+                }
+            }
+            "build" => {
+                if rest.trim() == "bundled-fonts" {
+                    bundled_faces = true;
                 }
             }
             "cost" => {
@@ -607,6 +621,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         millis,
         strict,
         metamorphic,
+        bundled_faces,
         cost,
     })
 }

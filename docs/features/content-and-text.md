@@ -160,5 +160,5 @@ sweeps the same shapes on stable. Nothing compares this extractor against
 another one: ruling 13 ended that, and the harness that could have driven one
 is deleted. Across the corpus, 4 484 of
 4 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 2 951 passed / 0 failed / 8 ignored (Windows x86_64,
+--workspace` stands at 2 952 passed / 0 failed / 8 ignored (Windows x86_64,
 as of August 2026).

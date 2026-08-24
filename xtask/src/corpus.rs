@@ -65,13 +65,28 @@ pub const RATCHET_FONTS_PATH: &str = "corpus/ratchet-fonts.json";
 /// identify afterwards is not a measurement.
 pub const SYNTHETIC_FONTS: &str = "synthetic";
 
+/// The `--fonts` value that means "the faces the child's own build carries".
+///
+/// Passed through to `tpdf`, which refuses it unless it was built with
+/// `bundled-fonts` — so this cannot quietly record a no-faces run as the
+/// bundled bar. The setting names the family and its version, because a
+/// different face set is a different measurement and the comparator's refusal
+/// works on the setting string.
+pub const BUNDLED_FONTS: &str = "bundled";
+
+/// What a bundled run records as its `--fonts` setting.
+pub const BUNDLED_SETTING: &str = "bundled-liberation-2.1.5";
+
+/// Where the bundled-faces bar lives.
+pub const RATCHET_BUNDLED_PATH: &str = "corpus/ratchet-bundled.json";
+
 /// Which bar a run compares against, from what it was measured with.
 #[must_use]
 pub fn ratchet_path(fonts: &str) -> &'static str {
-    if fonts == "none" {
-        RATCHET_PATH
-    } else {
-        RATCHET_FONTS_PATH
+    match fonts {
+        "none" => RATCHET_PATH,
+        BUNDLED_SETTING => RATCHET_BUNDLED_PATH,
+        _ => RATCHET_FONTS_PATH,
     }
 }
 
@@ -90,6 +105,7 @@ fn resolve_fonts(root: &Path, args: &RunArgs) -> Result<(String, Option<String>)
                 Some(path.display().to_string()),
             ))
         }
+        Some(BUNDLED_FONTS) => Ok((BUNDLED_SETTING.to_string(), Some(BUNDLED_FONTS.to_string()))),
         Some(path) => Ok((path.to_string(), Some(path.to_string()))),
     }
 }
@@ -296,6 +312,31 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             fonts,
         },
     };
+
+    // **The child's faces and the run's setting must agree.** A `tpdf` built
+    // with `bundled-fonts` measures every file with twelve Liberation faces
+    // whether or not anybody asked, so a plain run against that binary
+    // produces the bundled numbers and would record them as the no-faces bar —
+    // a silent 52 % improvement that is not one. The child says which it is,
+    // in its own record, from its own `cfg`; this is where the two are
+    // compared, and it refuses rather than resolves.
+    let carried = run
+        .corpora
+        .iter()
+        .flat_map(|corpus| corpus.files.iter())
+        .any(|file| file.bundled_faces);
+    let asked = run.settings.fonts == crate::corpus::BUNDLED_SETTING;
+    if carried != asked {
+        return Err(if carried {
+            format!(
+                "the child was built with `bundled-fonts`, so every file was                  measured with twelve faces, and this run is recorded as                  `{}`. Rebuild `tpdf` without the feature, or run with                  `--fonts bundled`.",
+                run.settings.fonts
+            )
+        } else {
+            "`--fonts bundled` was asked for and the child carries no faces;              rebuild `tpdf` with `--features bundled-fonts`"
+                .to_string()
+        });
+    }
 
     for line in run.summary_lines() {
         println!("{line}");

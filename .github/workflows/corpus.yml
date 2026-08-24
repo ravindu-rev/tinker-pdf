@@ -103,6 +103,26 @@ jobs:
           # no-faces run measured against the wrong bar.
           grep -q 'wrote the synthetic face' corpus-fonts.log
 
+      # The third bar: the faces this project ships, rather than one it
+      # synthesises. `tpdf` is rebuilt with the feature, because the child's
+      # own `cfg` is what decides — `corpus-run` refuses a run whose `--fonts`
+      # setting and whose child's build disagree, in either direction, so a
+      # bundled binary cannot quietly record the no-faces bar and a plain one
+      # cannot be passed off as this.
+      - name: Rebuild the child with the faces this project ships
+        run: cargo build --release -p tpdf --features bundled-fonts
+
+      - name: Run the corpus with the bundled faces, and hold that bar too
+        run: |
+          set -o pipefail
+          cargo run --release -p xtask -- corpus-run             --timeout 20 --dpi 72 --fonts bundled             --report corpus/report-bundled.json --check             2>&1 | tee corpus-bundled.log
+
+          if grep -q 'INCOMPLETE' corpus-bundled.log; then
+            echo "::error::the bundled-faces corpus run did not describe the"                  "whole corpus, so it proves nothing about a regression"
+            exit 1
+          fi
+          grep -Eq '^all +[1-9][0-9]* files' corpus-bundled.log
+
       # Kept whatever the outcome: when the bar moves, the per-file record is
       # the only thing that says which files moved and why.
       - name: Keep the per-file report
@@ -113,5 +133,6 @@ jobs:
           path: |
             corpus/report.json
             corpus/report-fonts.json
+            corpus/report-bundled.json
           if-no-files-found: warn
           retention-days: 14

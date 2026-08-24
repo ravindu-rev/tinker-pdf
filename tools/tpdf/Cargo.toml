@@ -13,3 +13,9 @@ publish = false
 
 [dependencies]
 tinker-pdf = { workspace = true }
+
+[features]
+# Passed straight through, so `--fonts bundled` has something to mean. `tpdf`
+# is what `corpus-run` spawns, and the third corpus bar is measured by building
+# this with the feature on.
+bundled-fonts = ["tinker-pdf/bundled-fonts"]

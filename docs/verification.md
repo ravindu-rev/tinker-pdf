@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 951 passed, 0 failed, 8 ignored** across 122 suites on
+is **2 952 passed, 0 failed, 8 ignored** across 122 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -83,14 +83,29 @@ signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
 *made no observable progress for half its budget*. The second axis — 1 045 files
 (23.1 %) rendering *with something reported* — is measured without font faces,
-and there is now a second bar that says what that costs.
-`corpus/ratchet-fonts.json` is the same 4 525 files with a face supplied and
-reports **506 (11.2 %)**, so **52 % of all reported degradation was the absence
-of a face** rather than a defect in the engine. The face is one this repository
-writes for itself (`cargo xtask synth-face`) — every glyph from 32 up a filled
-box — so it answers *was a face available* and nothing more, needs no licence
-and no download, and is the same bytes on every machine. The two bars live in
-two files and `corpus-run` refuses to compare either against the other.
+and there are now two more bars that say what that costs.
+`corpus/ratchet-fonts.json` is the same 4 525 files with a synthesised face
+supplied and reports **506 (11.2 %)**; `corpus/ratchet-bundled.json` is the
+same files with the twelve Liberation faces the `bundled-fonts` feature ships
+and reports **533 (11.8 %)**. So roughly **half of all reported degradation was
+the absence of a face** rather than a defect in the engine.
+
+The synthetic face is one this repository writes for itself (`cargo xtask
+synth-face`) — every glyph from 32 up a filled box — so it answers *was a face
+available* and nothing more, needs no licence and no download, and is the same
+bytes on every machine. That it scores 27 files *better* than the real faces is
+the interesting part: every one of the 27 is a symbolic font that the bundled
+set declines and one all-purpose face answered with squares, so the synthetic
+bar flatters itself by exactly that much
+([features/fonts.md](features/fonts.md)).
+
+The three bars live in three files and `corpus-run` refuses to compare any
+against another — and refuses harder than that for the bundled one, because the
+child's faces are a property of how `tpdf` was compiled rather than of the
+command line. A `tpdf` built with the feature measures every file with twelve
+faces whether or not anybody asked, so it reports its own `cfg` in its record
+and the runner fails the run when that and the `--fonts` setting disagree, in
+either direction.
 
 The fourth axis is the metamorphic one, and its denominator is worth being
 honest about. A relation is not asked of a file that has already spent much of

@@ -536,7 +536,7 @@ impl Document {
                 .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
             return Ok(Document {
                 inner: Arc::new(inner),
-                fonts: options.fonts.clone(),
+                fonts: fonts::effective(options.fonts.clone()),
                 archive: Some(Arc::new(report)),
             });
         }
@@ -544,7 +544,7 @@ impl Document {
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
         Ok(Document {
             inner: Arc::new(inner),
-            fonts: options.fonts.clone(),
+            fonts: fonts::effective(options.fonts.clone()),
             archive: None,
         })
     }
@@ -585,7 +585,9 @@ impl Document {
     /// pages this cannot move.
     #[must_use]
     pub fn with_fonts(mut self, provider: Arc<dyn FontProvider>) -> Document {
-        self.fonts = Some(provider);
+        // Through the same seam `open_with` uses, so the two cannot disagree
+        // about whether a `bundled-fonts` build's own faces apply.
+        self.fonts = fonts::effective(Some(provider));
         if let Some(report) = self.archive.as_mut() {
             if report.layout().is_some() {
                 Arc::make_mut(report).warn(ArchiveWarning::FontsAttachedAfterPagination);

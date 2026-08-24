@@ -16,7 +16,7 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 951 tests proving the
+These come before any new feature. The suite is 2 952 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
@@ -40,21 +40,6 @@ thousands of documents nobody here authored.
   than a patch. Evidence: 8 of 582 files compared, August 2026, named per file
   in `corpus/report.json`. Exit: an analytic test pins a half-covered image
   edge against its area; qpdf's `dpi` row holds on the PCLM pair. (M)
-- **A bundled face set, behind a feature.** Measured rather than argued:
-  `corpus/ratchet-fonts.json` is the same 4 525 files with a face supplied,
-  and **52 % of all reported degradation was the absence of one** — 1 045
-  files down to 506, and in qpdf's corpus 530 down to 130
-  ([features/fonts.md](features/fonts.md)). The base 14 are required to be
-  available by 9.6.2.2, so a conforming file naming Helvetica and embedding
-  nothing is one this engine cannot draw, which makes this a conformance gap
-  rather than only a policy. Decided: a `bundled-fonts` feature carrying the
-  Liberation family, **off by default**, because the `FontProvider` seam
-  remains the right answer for a host with faces of its own. It brings back
-  `deny.toml`'s OFL-1.1 entry, a `THIRDPARTY.md` section and a third corpus
-  bar, all in the commit that adds the faces — which is what that allowlist
-  comment already says it is waiting for. Exit: a `bundled-fonts` build
-  renders base-14 text with no provider installed; a third ratchet row holds.
-  (M)
 
 ## Tier 2 — close the named refusals, by measured reachability
 

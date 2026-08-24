@@ -324,12 +324,21 @@ fn hidden_text_is_still_extracted_and_still_not_drawn() {
 
     let shown = make(true);
     assert!(shown.text().plain_text().contains("hidden words"));
+    // The same text in a visible layer *does* reach the glyph path, and the
+    // evidence for that depends on whether this build has a face to draw with:
+    // without one the path reports `UnreadableFont`, with one it puts ink past
+    // the rectangle at x = 9. Either is the glyph path having been entered,
+    // which is the property; asserting only the warning made this test a
+    // statement about the font policy instead, and a `bundled-fonts` build
+    // failed it for doing the right thing.
+    let shown = shown.render(&RenderOptions::default());
+    let reached = shown.warnings.contains(&RenderWarning::UnreadableFont)
+        || ink_bounds(&shown).is_some_and(|(_, _, x1, _)| x1 > 9);
     assert!(
-        shown
-            .render(&RenderOptions::default())
-            .warnings
-            .contains(&RenderWarning::UnreadableFont),
-        "the same text in a visible layer does reach the glyph path"
+        reached,
+        "the same text in a visible layer does reach the glyph path: {:?} {:?}",
+        shown.warnings,
+        ink_bounds(&shown)
     );
 }
 

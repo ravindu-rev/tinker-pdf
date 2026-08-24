@@ -64,6 +64,14 @@ jobs:
       # and passes while proving nothing.
       - run: cargo test -p tinker-pdf-font --no-default-features
       - run: cargo test -p tinker-pdf --no-default-features
+      # The other feature, and the opposite direction: `bundled-fonts` adds
+      # twelve Liberation faces and changes what a document that embeds no font
+      # renders to. Several tests state "without a face there is nothing to
+      # draw", which is true of the default build and false of this one, so a
+      # leg that never builds it would let those two claims drift apart. Run
+      # rather than checked, for the reason every other line here is.
+      - run: cargo test -p tinker-pdf --features bundled-fonts
+      - run: cargo clippy -p tinker-pdf --features bundled-fonts --all-targets -- -D warnings
       # Two design rules the compiler cannot enforce: a new crate edge
       # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan
       # 00 and ruling 8 say what the graph is; ruling 4 says why the platform

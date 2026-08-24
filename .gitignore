@@ -15,6 +15,7 @@ corpus/files/
 # it is three orders of magnitude smaller.
 corpus/report.json
 corpus/report-fonts.json
+corpus/report-bundled.json
 testdata/golden/actual/
 bindings/dotnet/bin/
 bindings/dotnet/obj/

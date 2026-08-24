@@ -447,6 +447,7 @@ mod tests {
                 path: format!("{index}.pdf"),
                 outcome,
                 cost: crate::runner::Cost::default(),
+                bundled_faces: false,
                 pages: 1,
                 rendered: 1,
                 warnings,

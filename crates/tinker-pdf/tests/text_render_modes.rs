@@ -217,7 +217,7 @@ fn a_clip_mode_with_no_resolvable_glyphs_clips_everything() {
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
    /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
 4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
-5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>\nendobj\n\
 trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
         content.len()
     )
