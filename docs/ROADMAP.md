@@ -36,12 +36,6 @@ thousands of documents nobody here authored.
   Evidence: 9 of 582 files compared, August 2026, named per file in
   `corpus/report.json`. Exit: qpdf's `dpi` row holds on every image-carrying
   file, and a fixture pins one PCLM strip at two scales. (M)
-- **The macOS and wasm determinism legs, observed.** Three of ruling 4's
-  four targets are measured on one machine
-  ([features/determinism.md](features/determinism.md)); macOS is claimed
-  from CI configuration and no run has been watched. Exit: one commit with
-  the `macos-14` leg and the `wasm-determinism` job green together,
-  observed. (S)
 - **A bundled face set, behind a feature.** Measured rather than argued:
   `corpus/ratchet-fonts.json` is the same 4 525 files with a face supplied,
   and **52 % of all reported degradation was the absence of one** — 1 045
