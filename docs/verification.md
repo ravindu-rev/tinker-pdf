@@ -435,6 +435,30 @@ step installed nothing, exited 0, and the job died two steps later on `no such
 command: fuzz`. Every use of that action now names its tool explicitly, which
 is a spelling that cannot lose its argument.
 
+## The release, observed
+
+`release.yml` had been configuration rather than evidence: the pipeline was
+dry-run end to end on Windows only, and every Linux and macOS leg in it — three
+wheel platforms, three native libraries, the npm package, the NuGet package,
+the browser demo — existed unwatched. Two things closed that.
+
+`cargo run -p xtask -- release --local-registry` made the crates stage
+provable at all. `cargo publish --dry-run` resolves against the live index, and
+nothing named `tinker-pdf-*` is on it, so ten of the fifteen crates failed with
+`no matching package named tinker-pdf-crypto` — a sentence that reads exactly
+like a broken manifest. Each crate is now verified against the unpacked
+`.crate` archives of the crates before it, which is the same bytes its
+dependents would download.
+
+Then one tag, watched:
+[run 32690957039](https://github.com/ravindu-rev/tinker-pdf/actions/runs/32690957039)
+at `bf1630b`, 24 August 2026. Twelve jobs green, `publish` skipped — a tag
+push cannot reach it, because publishing requires a `workflow_dispatch`
+carrying `publish: true`. Fifteen crates verified, three abi3 wheels, one wasm
+package, one `.nupkg` with three native libraries staged into it, and the
+collector counting all four by name. **Nothing was published, and nothing has
+been.**
+
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in

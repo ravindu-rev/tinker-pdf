@@ -51,17 +51,6 @@ thousands of documents nobody here authored.
   comment already says it is waiting for. Exit: a `bundled-fonts` build
   renders base-14 text with no provider installed; a third ratchet row holds.
   (M)
-- **An observed release.** The pipeline now dry-runs **completely** on
-  Windows/x86_64 — 23 of 24 steps, 0 unprovable, the one skip being `dotnet
-  nuget push`, which has no harmless form. `--local-registry` is what closed
-  the gap: `cargo publish --dry-run` resolves against the live index, so ten
-  of the fifteen crates could not be dry-run at all and the pipeline's claim
-  to have been exercised covered the five leaves
-  ([features/bindings.md](features/bindings.md)). `release.yml` gains a
-  `crates` job that runs it and greps its own log. What remains is
-  observation: every Linux and macOS leg, and the one-tag-produces-all-four
-  claim, still exist in that file unwatched. Exit: one observed tag run, all
-  legs green. (S)
 
 ## Tier 2 — close the named refusals, by measured reachability
 
