@@ -33,6 +33,12 @@ release options:
   --plan          print the steps and run nothing at all
   --only STAGE    preflight | crates | wheel | npm | nuget; repeatable
   --tag vX.Y.Z    fail unless the tag matches the workspace version
+  --local-registry
+                  verify each crate against the packaged copies of the crates
+                  before it, instead of against crates.io. Without it, ten of
+                  the fifteen cannot be dry-run at all: `cargo publish
+                  --dry-run` resolves against the live index and nothing of
+                  this name has ever been published there
 
   cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
                                  bindings/dotnet/runtimes/<rid>/native/

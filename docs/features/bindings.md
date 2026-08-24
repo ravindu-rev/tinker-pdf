@@ -86,6 +86,26 @@ excluding the CMap registry its own `build.rs` requires, workspace
 dependencies without `version` beside `path`, and the managed-only NuGet
 package above.
 
+**And ten of the fifteen crates had never been in it.** `cargo publish
+--dry-run` resolves dependencies against the live index, and nothing named
+`tinker-pdf-*` has ever been published there, so every crate above the five
+leaves failed with `no matching package named tinker-pdf-crypto` — which reads
+exactly like a broken manifest and is not one. The dry run's answer was to
+report those steps as unprovable and carry on, so "the pipeline has been
+exercised end to end" covered a third of it.
+
+`cargo run -p xtask -- release --local-registry` closes that. Each crate's
+registry dependencies are patched at `target/package/<name>-<version>/` — the
+unpacked archive the previous step left behind — so every crate is *verified
+against the same bytes its dependents would download*, which is nearer to a
+real publish than building against this checkout would be. The patch set is
+everything published before that crate: one level deep is not enough, because a
+packaged dependency has registry dependencies of its own, and the whole
+workspace is too much, because nothing is packaged when the first crate runs.
+Both were tried, and both failures are written into the test that pins the
+width. The whole pipeline now reports **23 of 24 steps run, 0 unprovable** —
+the one skip is `dotnet nuget push`, which has no harmless form.
+
 ## API
 
 ```python

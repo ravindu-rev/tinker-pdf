@@ -186,5 +186,5 @@ it drives the lexer, parser and evaluator with arbitrary text against a
 live `Host` and asserts two properties — no panic (ruling 1), and that a
 run never spends more budget than it was given, which is how a bounded
 interpreter is kept bounded rather than believed bounded. All of it rides
-in the workspace suite: 2 943 passed, 0 failed, 8 ignored (Windows x86_64,
+in the workspace suite: 2 948 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).
