@@ -28,7 +28,8 @@ thousands of documents nobody here authored.
   contains its centre, so an image placed at a fractional offset has a jagged
   edge — and abutting strips, which is how every PCLM scan is built, tile
   differently at different scales. It is what remains of the `dpi` relation's
-  eight failures after minification was fixed below: the two PCLM files
+  eight failures once minification stopped interpolating
+  ([features/rasterizer.md](features/rasterizer.md)): the two PCLM files
   disagree on 17.3 % of their pixels (was 23.4 %), the six inline-image files
   on 3.2–4.4 % (was 4.4–5.4 %), against a 2 % budget, and no text-only or
   vector-only file in 4 525 fails at all. The fix is partial coverage at the
