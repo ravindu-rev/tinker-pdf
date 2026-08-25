@@ -94,6 +94,16 @@ struct Tally {
     sbhuff: u32,
     /// Text regions that refine their symbols (bit 1).
     sbrefine: u32,
+    /// Text regions by REFCORNER (bits 4-5): which corner of a symbol its
+    /// coordinate names, and therefore where the symbol is put.
+    corners: [u32; 4],
+    /// Text regions with TRANSPOSED set (bit 6): S runs down the page rather
+    /// than across it.
+    transposed: u32,
+    /// Text regions with a non-zero SBDSOFFSET (bits 10-14, signed).
+    dsoffset: u32,
+    /// Text regions with more than one strip (bits 2-3, LOGSBSTRIPS).
+    striped: u32,
     /// Headers that would not parse — a truncated or damaged stream.
     unparsable: u32,
 }
@@ -109,6 +119,12 @@ impl Tally {
         self.context_retained += other.context_retained;
         self.sbhuff += other.sbhuff;
         self.sbrefine += other.sbrefine;
+        for (slot, count) in self.corners.iter_mut().zip(other.corners) {
+            *slot += count;
+        }
+        self.transposed += other.transposed;
+        self.dsoffset += other.dsoffset;
+        self.striped += other.striped;
         self.unparsable += other.unparsable;
     }
 
@@ -188,6 +204,16 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     }
                     if flags & 0x0002 != 0 {
                         tally.sbrefine += 1;
+                    }
+                    tally.corners[((flags >> 4) & 3) as usize] += 1;
+                    if flags & 0x0040 != 0 {
+                        tally.transposed += 1;
+                    }
+                    if (flags >> 10) & 0x1F != 0 {
+                        tally.dsoffset += 1;
+                    }
+                    if (flags >> 2) & 3 != 0 {
+                        tally.striped += 1;
                     }
                 }
             }
@@ -461,6 +487,26 @@ fn census_of_the_corpus_jbig2() {
         "SBREFINE (text refinement)     {:>6}   in {:>3} files",
         total.sbrefine,
         files_with(|t| t.sbrefine)
+    );
+    println!();
+    println!("REFCORNER bottom-left  {:>6}", total.corners[0]);
+    println!("REFCORNER top-left     {:>6}", total.corners[1]);
+    println!("REFCORNER bottom-right {:>6}", total.corners[2]);
+    println!("REFCORNER top-right    {:>6}", total.corners[3]);
+    println!(
+        "TRANSPOSED             {:>6}   in {:>3} files",
+        total.transposed,
+        files_with(|t| t.transposed)
+    );
+    println!(
+        "SBDSOFFSET non-zero    {:>6}   in {:>3} files",
+        total.dsoffset,
+        files_with(|t| t.dsoffset)
+    );
+    println!(
+        "more than one strip    {:>6}   in {:>3} files",
+        total.striped,
+        files_with(|t| t.striped)
     );
     println!(
         "context used                   {:>6}   in {:>3} files",

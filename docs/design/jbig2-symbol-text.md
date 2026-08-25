@@ -135,6 +135,27 @@ Huffman and refinement is unlocked by neither alone. Of the 43:
 | then refinement | 9 | **28** |
 | needs both | 10 | 43 |
 
+The same census was extended before milestone 4 was written, because clause
+6.4's placement rules are the part of this item where a wrong guess decodes
+*plausibly* rather than visibly, and which of them a file uses is a question
+about files. Over the 58 text regions:
+
+| | regions | files |
+| --- | ---: | ---: |
+| REFCORNER top-left | 48 | |
+| REFCORNER bottom-left | 4 | |
+| REFCORNER bottom-right | 3 | |
+| REFCORNER top-right | 3 | |
+| more than one strip (LOGSBSTRIPS > 0) | 55 | 43 |
+| SBDSOFFSET non-zero | 25 | 24 |
+| TRANSPOSED | 4 | 4 |
+
+So milestone 4 owes all four corners, the strip coordinate and SBDSOFFSET —
+multi-strip is the norm rather than the exception, and a build that assumed one
+strip would mis-place almost every symbol in the corpus. TRANSPOSED is the one
+placement variant thin enough to stage: four regions in four files, and it
+refuses by name until it is built.
+
 **So refinement comes before Huffman, and milestones 5 and 6 are swapped from
 the order this document first proposed.** The expectation was
 arithmetic ≫ Huffman ≫ refinement, on the grounds that `jbig2enc` emits only
