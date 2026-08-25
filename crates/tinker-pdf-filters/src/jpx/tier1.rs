@@ -312,6 +312,16 @@ pub(crate) struct Block {
     /// at the end of every cleanup pass.
     visited: Vec<bool>,
     magnitude: Vec<u32>,
+    /// Table A.19 bit 3, and the row the current stripe stops at.
+    ///
+    /// Vertically causal context formation treats everything in the *next*
+    /// stripe as insignificant, so a stripe can be decoded knowing nothing
+    /// below it. Only a coefficient in a stripe's last row has a neighbour
+    /// there at all, and the four passes reach those neighbours through one
+    /// function, so this is one field and one branch rather than four
+    /// context rules.
+    causal: bool,
+    stripe_end: usize,
 }
 
 impl Block {
@@ -327,7 +337,23 @@ impl Block {
             known: vec![0; n],
             visited: vec![false; n],
             magnitude: vec![0; n],
+            causal: false,
+            stripe_end: usize::MAX,
         }
+    }
+
+    /// Turns on vertically causal context formation (Table A.19 bit 3).
+    fn set_causal(&mut self, causal: bool) {
+        self.causal = causal;
+    }
+
+    /// Names the stripe now being coded, for [`Block::significant`].
+    fn enter_stripe(&mut self, top: usize) {
+        // A stripe is four rows whatever the last one holds, and the bound is
+        // the *stripe's*, not the rows present in it: a code-block whose
+        // height is not a multiple of four has a short final stripe with
+        // nothing below it either way.
+        self.stripe_end = top.saturating_add(4);
     }
 
     const fn at(&self, x: usize, y: usize) -> usize {
@@ -343,6 +369,12 @@ impl Block {
     /// free to hand them over in any order.
     fn significant(&self, x: isize, y: isize) -> bool {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
+            return false;
+        }
+        if self.causal && y as usize >= self.stripe_end {
+            // Table A.19 bit 3: the stripe below this one does not exist for
+            // context formation. Every one of D.2's context rules reaches its
+            // neighbours through here, so this is the whole of the mode.
             return false;
         }
         self.sigma[self.at(x as usize, y as usize)]
@@ -473,6 +505,7 @@ impl Coder<'_, '_> {
     /// neighbour.
     fn significance_pass(&mut self, block: &mut Block, plane: u32) {
         for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
+            block.enter_stripe(top);
             for y in top..top + rows {
                 let i = block.at(x, y);
                 if block.sigma[i] {
@@ -502,6 +535,7 @@ impl Coder<'_, '_> {
     /// bit-plane's significance propagation pass.
     fn refinement_pass(&mut self, block: &mut Block, plane: u32) {
         for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
+            block.enter_stripe(top);
             for y in top..top + rows {
                 let i = block.at(x, y);
                 // π excludes the coefficients this plane's significance pass
@@ -529,6 +563,7 @@ impl Coder<'_, '_> {
     /// run-length mode for a column of four that is entirely quiet.
     fn cleanup_pass(&mut self, block: &mut Block, plane: u32) -> Result<(), Refusal> {
         for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
+            block.enter_stripe(top);
             let mut y = top;
             // The run-length mode. Four rows, none significant, none coded by
             // this plane's significance pass, and every one of the four with
@@ -607,7 +642,7 @@ pub(crate) fn decode_code_block(
     height: u32,
     passes: u32,
     orientation: Orientation,
-    segmentation_symbols: bool,
+    style: CodingStyle,
     contexts: &mut MqContexts,
     work: &mut u64,
 ) -> Result<Decoded, Refusal> {
@@ -662,10 +697,11 @@ pub(crate) fn decode_code_block(
     // half of `set_state` that had to exist for this line to be right.
     contexts.reset();
     let mut block = Block::new(width as usize, height as usize, orientation);
+    block.set_causal(style.vertically_causal);
     let mut coder = Coder {
         mq: MqDecoder::new(data),
         contexts,
-        segmentation_symbols,
+        segmentation_symbols: style.segmentation_symbols,
     };
 
     for i in 0..passes {
@@ -675,12 +711,35 @@ pub(crate) fn decode_code_block(
             Pass::Refinement => coder.refinement_pass(&mut block, plane),
             Pass::Cleanup => coder.cleanup_pass(&mut block, plane)?,
         }
+        if style.reset_contexts {
+            // Table A.19 bit 1: back to Table D.7's states at every pass
+            // boundary. The arithmetic decoder's own registers are *not*
+            // reset — that is `TERMALL`, a different bit and a different
+            // question, and conflating the two decodes the second pass of
+            // every block as noise.
+            coder.contexts.reset();
+        }
     }
     Ok(Decoded {
         coefficients: block.coefficients(),
         half_planes: block.half_planes(),
         planes,
     })
+}
+
+/// The Table A.19 code-block style bits that change how decisions are read.
+///
+/// A struct rather than three `bool` parameters: they arrive together, they are
+/// all `bool`, and two of them transposed at a call site decodes plausibly
+/// wrong rather than visibly so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodingStyle {
+    /// D.5's four-decision check at the end of each cleanup pass.
+    pub(crate) segmentation_symbols: bool,
+    /// Table A.19 bit 1.
+    pub(crate) reset_contexts: bool,
+    /// Table A.19 bit 3.
+    pub(crate) vertically_causal: bool,
 }
 
 /// What one code-block decode yields.
@@ -725,20 +784,18 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>, tiles: &mut [Tile]) -> Resul
     for tile in tiles.iter_mut() {
         let index = tile.index;
         for (c, component) in tile.components.iter_mut().enumerate() {
-            let style = stream.style_for(index, c);
-            let segmentation_symbols = style.segmentation_symbols();
+            let coding = stream.style_for(index, c);
+            let style = CodingStyle {
+                segmentation_symbols: coding.segmentation_symbols(),
+                reset_contexts: coding.reset_contexts(),
+                vertically_causal: coding.vertically_causal(),
+            };
             for resolution in &mut component.resolutions {
                 for band in &mut resolution.bands {
                     let orientation = band.orientation;
                     for precinct in &mut band.precincts {
                         for block in &mut precinct.blocks {
-                            decode_one(
-                                block,
-                                orientation,
-                                segmentation_symbols,
-                                &mut contexts,
-                                &mut work,
-                            )?;
+                            decode_one(block, orientation, style, &mut contexts, &mut work)?;
                         }
                     }
                 }
@@ -751,7 +808,7 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>, tiles: &mut [Tile]) -> Resul
 fn decode_one(
     block: &mut CodeBlock,
     orientation: Orientation,
-    segmentation_symbols: bool,
+    style: CodingStyle,
     contexts: &mut MqContexts,
     work: &mut u64,
 ) -> Result<(), Refusal> {
@@ -761,7 +818,7 @@ fn decode_one(
         block.height(),
         block.passes,
         orientation,
-        segmentation_symbols,
+        style,
         contexts,
         work,
     )?;
@@ -794,19 +851,34 @@ pub(crate) mod encoder {
 
     /// Encodes `values` — signed coefficients whose magnitudes fit `planes`
     /// bits — as `3 * planes - 2` coding passes.
+    /// Table D.7's initial states, which the coder starts from and which
+    /// `RESET` returns to at every coding pass boundary.
+    fn initial_states(mq: &mut MqEncoder) {
+        for index in 0..super::CONTEXTS {
+            mq.set_state(index, 0, 0);
+        }
+        for (index, state_) in [(super::ZERO_CODING, 4u8), (RUN_LENGTH, 3), (UNIFORM, 46)] {
+            mq.set_state(index, state_, 0);
+        }
+    }
+
     pub(crate) fn encode_code_block(
         values: &[i32],
         w: usize,
         h: usize,
         planes: u32,
         orientation: Orientation,
-        segmentation_symbols: bool,
+        style: super::CodingStyle,
     ) -> (Vec<u8>, u32) {
+        let segmentation_symbols = style.segmentation_symbols;
         let mut state = super::Block::new(w, h, orientation);
+        // The encoder forms its contexts from the same neighbourhood the
+        // decoder will, so a mode that changes context formation has to be
+        // mirrored here or the round trip proves only that both are wrong in
+        // the same way.
+        state.set_causal(style.vertically_causal);
         let mut mq = MqEncoder::new(super::CONTEXTS);
-        for (index, state_) in [(super::ZERO_CODING, 4u8), (RUN_LENGTH, 3), (UNIFORM, 46)] {
-            mq.set_state(index, state_, 0);
-        }
+        initial_states(&mut mq);
 
         let magnitude: Vec<u32> = values.iter().map(|v| v.unsigned_abs()).collect();
         let negative: Vec<bool> = values.iter().map(|v| *v < 0).collect();
@@ -817,6 +889,7 @@ pub(crate) mod encoder {
             match pass {
                 Pass::Significance => {
                     for (top, rows, x) in state.stripes().collect::<Vec<_>>() {
+                        state.enter_stripe(top);
                         for y in top..top + rows {
                             let at = state.at(x, y);
                             if state.sigma[at] {
@@ -841,6 +914,7 @@ pub(crate) mod encoder {
                 }
                 Pass::Refinement => {
                     for (top, rows, x) in state.stripes().collect::<Vec<_>>() {
+                        state.enter_stripe(top);
                         for y in top..top + rows {
                             let at = state.at(x, y);
                             if !state.sigma[at] || state.visited[at] {
@@ -856,6 +930,7 @@ pub(crate) mod encoder {
                 }
                 Pass::Cleanup => {
                     for (top, rows, x) in state.stripes().collect::<Vec<_>>() {
+                        state.enter_stripe(top);
                         let mut y = top;
                         if rows == 4
                             && (top..top + 4).all(|y| {
@@ -908,6 +983,9 @@ pub(crate) mod encoder {
                         }
                     }
                 }
+            }
+            if style.reset_contexts {
+                initial_states(&mut mq);
             }
         }
         (mq.flush(), passes)

@@ -95,17 +95,26 @@ per component, Annex B tier-2 — tag trees, packet headers, precincts and all
 five progression orders (B.12) — Annex D tier-1 on the shared MQ coder,
 Annex E dequantisation, both Annex F inverse wavelets (the reversible 5/3 and
 the irreversible 9/7 in fixed point) and the Annex G and I colour pipeline,
-palettes and `cdef` included. An opacity channel is carried out separately in
+palettes and `cdef` included. Four of Table A.19's six code-block styles
+decode: segmentation symbols (D.5's integrity check), `RESET`'s return to
+Table D.7's states at every pass boundary, `VERTICALLY_CAUSAL`'s stripe that
+depends on nothing beneath it, and `PREDICTABLE`, which constrains an encoder
+and leaves a decoder's reading unchanged. An opacity channel is carried out separately in
 `JpxOpacity` because what it is *for* is `/SMaskInData`'s rule (8.9.5.4) and
 that decision stays outside the crate. The decoder's stance is that a wrong
 JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
 coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists. Measured against the
-corpus's nineteen JPX files as of August 2026: 15 decode and 4 refuse by name.
-The fifteenth used to be a sixteenth case — never asked for at all, because its
-image sits two form XObjects deep and a form's own `/Resources` were consulted
-nowhere; it decodes now ([rendering](rendering.md)).
+corpus's nineteen readable JPX files as of August 2026: **16 decode and 3
+refuse by name**, and **none of the three is a code-block style**. One is a
+budget (`jpx-budget-spent`, a ruling 1 hardening limit rather than a
+capability gap) and two are veraPDF fixtures that are deliberately
+non-conformant. It was 15 and 4: the file that moved is `jp2k-resetprob.pdf`,
+whose only unusual bit is `RESET`. The fifteenth had been a case of its own —
+never asked for at all, because its image sits two form XObjects deep and a
+form's own `/Resources` were consulted nowhere; that one decodes now too
+([rendering](rendering.md)).
 
 **Container codecs, not `/Filter` names.** No PDF stream is a PNG file, but
 the archive formats need one, so the crate also exports a PNG decoder
@@ -155,7 +164,7 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPX markers RGN, POC, PPM, PPT, CRG (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it | [ROADMAP](../ROADMAP.md) |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
-| JPX coding features: five of Table A.19's six code-block styles, unmappable `colr`, unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan | [ROADMAP](../ROADMAP.md) |
+| JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | T.800 allows 38 bits; the sample path carries 16, so this is refused rather than truncated | [ROADMAP](../ROADMAP.md) |
 | JPX tile-parts out of order | `Warning::JpxStructureInvalid` | Decoding them would need buffering the whole codestream speculatively | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |

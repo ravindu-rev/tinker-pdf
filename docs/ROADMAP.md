@@ -62,14 +62,21 @@ warning contract), with corpus reachability measured.
   Exit: group colour space honoured in compositing, pinned by fixtures
   that differ only in the group's space. (M–L, folded into
   [design/icc.md](design/icc.md))
-- **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, five of Table A.19's
-  six code-block styles, out-of-order tile-parts — every entry reachable
-  and named, measured 4 refusals of 19 corpus files. Ruling 13 costs this
-  item its cheapest source of fixtures: a codestream exercising a new
-  partition can no longer be produced by asking an encoder for one, so each
-  is hand-authored and transcribed, the discipline JBIG2 took from T.88's
-  Annex H. Exit: refusal rows retire one by one as corpus files demand
-  them. (M–L)
+- **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, `BYPASS` and `TERMALL`,
+  out-of-order tile-parts — every entry reachable and named. **Now 3 refusals
+  of 19 corpus files, from 4, and not one of them a code-block style**:
+  `RESET`, `VERTICALLY_CAUSAL` and `PREDICTABLE` decode, which retired the
+  one code-block style a corpus file actually demanded
+  (`jp2k-resetprob.pdf`). Of the three left, one is a budget rather than a
+  capability and two are veraPDF fixtures refusing for a different feature. Ruling 13 costs this item its cheapest source of fixtures: a
+  codestream exercising a new partition can no longer be produced by asking
+  an encoder for one, so each is hand-authored, or round-tripped through the
+  in-tree test encoder with the mode mirrored on both sides and asserted to
+  disagree when it is not. What is left divides cleanly: the five markers are
+  header work with no corpus reachability, and `BYPASS` and `TERMALL` both
+  need a length per coding pass out of the packet header (B.10.7's multiple
+  codeword segments) rather than anything tier-1 can do alone. Exit: refusal
+  rows retire one by one as corpus files demand them. (M–L)
 - **Full ICC colour.** ICC and CIE spaces are approximated by component
   count today, stated on the type. An own CMM — profile parsing,
   transforms, rendering intents — is the capability. Exit: ICC profiles

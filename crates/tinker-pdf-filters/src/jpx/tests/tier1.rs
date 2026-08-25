@@ -24,8 +24,8 @@
 
 use crate::jpx::tier1::{
     initial_contexts, magnitude_refinement_context, pass_at, sign_coding_context,
-    zero_coding_context, Pass, MAGNITUDE_REFINEMENT, MAX_PASSES, RUN_LENGTH, SIGN_CODING, UNIFORM,
-    ZERO_CODING,
+    zero_coding_context, CodingStyle, Pass, MAGNITUDE_REFINEMENT, MAX_PASSES, RUN_LENGTH,
+    SIGN_CODING, UNIFORM, ZERO_CODING,
 };
 use crate::jpx::tier2::Orientation;
 use crate::mq::MqDecoder;
@@ -387,8 +387,17 @@ fn a_code_block_round_trips_through_all_three_passes() {
         Orientation::Hh,
     ] {
         for segmentation in [false, true] {
-            let (data, passes) =
-                encode_code_block(&values, w, h, planes, orientation, segmentation);
+            let (data, passes) = encode_code_block(
+                &values,
+                w,
+                h,
+                planes,
+                orientation,
+                CodingStyle {
+                    segmentation_symbols: segmentation,
+                    ..CodingStyle::default()
+                },
+            );
 
             let mut contexts = initial_contexts();
             let mut work = u64::MAX;
@@ -398,7 +407,10 @@ fn a_code_block_round_trips_through_all_three_passes() {
                 h as u32,
                 passes,
                 orientation,
-                segmentation,
+                CodingStyle {
+                    segmentation_symbols: segmentation,
+                    ..CodingStyle::default()
+                },
                 &mut contexts,
                 &mut work,
             )
@@ -431,7 +443,17 @@ fn a_segmentation_symbol_catches_a_decoder_out_of_step() {
     use crate::jpx::tier1::{decode_code_block, encoder::encode_code_block};
 
     let values: Vec<i32> = vec![5, -3, 0, 7, -1, 2, 6, 0, 0, -7, 1, 3, 4, 0, -2, 5];
-    let (data, passes) = encode_code_block(&values, 4, 4, 4, Orientation::Ll, true);
+    let (data, passes) = encode_code_block(
+        &values,
+        4,
+        4,
+        4,
+        Orientation::Ll,
+        CodingStyle {
+            segmentation_symbols: true,
+            ..CodingStyle::default()
+        },
+    );
 
     // Flip a byte in the middle of the codeword segment. The MQ decoder does
     // not fail on this -- it cannot, every byte is a legal codeword -- it just
@@ -448,7 +470,10 @@ fn a_segmentation_symbol_catches_a_decoder_out_of_step() {
         4,
         passes,
         Orientation::Ll,
-        true,
+        CodingStyle {
+            segmentation_symbols: true,
+            ..CodingStyle::default()
+        },
         &mut contexts,
         &mut work,
     );
@@ -485,7 +510,14 @@ fn a_truncated_code_block_records_the_depth_each_coefficient_reached() {
 
     let values: Vec<i32> = vec![5, -3, 0, 7, -1, 2, 6, 0, 0, -7, 1, 3, 4, 0, -2, 5];
     let planes = 4;
-    let (data, passes) = encode_code_block(&values, 4, 4, planes, Orientation::Ll, false);
+    let (data, passes) = encode_code_block(
+        &values,
+        4,
+        4,
+        planes,
+        Orientation::Ll,
+        CodingStyle::default(),
+    );
 
     // Every pass count the encoder's stream can be cut to, including the ones
     // that do not land on a plane boundary -- which is the case a rate
@@ -499,7 +531,7 @@ fn a_truncated_code_block_records_the_depth_each_coefficient_reached() {
             4,
             cut,
             Orientation::Ll,
-            false,
+            CodingStyle::default(),
             &mut contexts,
             &mut work,
         )
@@ -540,7 +572,7 @@ fn a_truncated_code_block_records_the_depth_each_coefficient_reached() {
             4,
             cut,
             Orientation::Ll,
-            false,
+            CodingStyle::default(),
             &mut contexts,
             &mut work,
         )
@@ -621,4 +653,116 @@ fn the_pass_sequence_covers_every_plane_at_every_pass_count() {
         // to the bottom, which is what `planes` claims by definition.
         assert_eq!(last, 0, "{passes} passes did not reach the lowest plane");
     }
+}
+
+/// **Table A.19's RESET and VERTICALLY_CAUSAL are load-bearing**, not accepted
+/// and ignored.
+///
+/// A flag a decoder merely *tolerates* is worse than one it refuses: the
+/// picture comes out, so nothing reports anything, and it is wrong. So each
+/// mode is asserted twice — a stream coded with it decodes back to its own
+/// values, and the same stream decoded **without** it does not. The second
+/// half is the injection, built into the test rather than run once by hand:
+/// delete the mode from the decoder and the round trip still passes, but the
+/// disagreement assertion fails.
+///
+/// The values are chosen to have significant coefficients in the last row of a
+/// stripe, because that is the only place vertically causal context formation
+/// can differ: a stripe is four rows and only its bottom row has a neighbour
+/// in the stripe below.
+#[test]
+fn a_code_block_style_that_changes_context_state_changes_what_is_decoded() {
+    use crate::jpx::tier1::{decode_code_block, encoder::encode_code_block, CodingStyle};
+
+    #[rustfmt::skip]
+    let values: Vec<i32> = vec![
+        5, -3,  0,  7,  2, -6,  1,  0,
+       -1,  2,  6,  0,  0,  3, -4,  5,
+        0, -7,  1,  3,  6,  0,  2, -1,
+        4,  0, -2,  5, -3,  7,  0,  2,
+        3,  1, -5,  0,  4, -2,  6,  0,
+       -6,  4,  0,  2,  1,  0, -3,  7,
+        0,  5,  3, -1,  0,  6,  2, -4,
+        7, -2,  0,  6, -5,  1,  4,  0,
+    ];
+    let planes = 4;
+
+    for mode in [
+        CodingStyle {
+            reset_contexts: true,
+            ..CodingStyle::default()
+        },
+        CodingStyle {
+            vertically_causal: true,
+            ..CodingStyle::default()
+        },
+        CodingStyle {
+            reset_contexts: true,
+            vertically_causal: true,
+            ..CodingStyle::default()
+        },
+    ] {
+        let (data, passes) = encode_code_block(&values, 8, 8, planes, Orientation::Ll, mode);
+
+        let decode = |style: CodingStyle| {
+            let mut contexts = initial_contexts();
+            let mut work = u64::MAX;
+            decode_code_block(
+                &data,
+                8,
+                8,
+                passes,
+                Orientation::Ll,
+                style,
+                &mut contexts,
+                &mut work,
+            )
+            .expect("a well-formed code-block")
+            .coefficients
+        };
+
+        assert_eq!(
+            decode(mode),
+            values,
+            "{mode:?}: a stream coded with the mode must decode back through it"
+        );
+        assert_ne!(
+            decode(CodingStyle::default()),
+            values,
+            "{mode:?}: the same stream decoded without the mode must NOT come \
+             back — if it does, the mode is being accepted and ignored"
+        );
+    }
+}
+
+/// PREDICTABLE is accepted and changes nothing a decoder does, which is what
+/// Table A.19 bit 4 means.
+///
+/// Predictable termination constrains how an *encoder* flushes so that a
+/// decoder can detect corruption; the decisions are read exactly as before. So
+/// the assertion is that the bit is accepted and that it is not silently
+/// treated as one of its neighbours in the byte — a build that confused it
+/// with RESET would decode every pass after the first as noise.
+#[test]
+fn predictable_termination_is_accepted_and_decodes_identically() {
+    use crate::jpx::tier1::{decode_code_block, encoder::encode_code_block, CodingStyle};
+
+    let values: Vec<i32> = vec![5, -3, 0, 7, -1, 2, 6, 0, 0, -7, 1, 3, 4, 0, -2, 5];
+    let (data, passes) =
+        encode_code_block(&values, 4, 4, 4, Orientation::Ll, CodingStyle::default());
+
+    let mut contexts = initial_contexts();
+    let mut work = u64::MAX;
+    let got = decode_code_block(
+        &data,
+        4,
+        4,
+        passes,
+        Orientation::Ll,
+        CodingStyle::default(),
+        &mut contexts,
+        &mut work,
+    )
+    .expect("a well-formed code-block");
+    assert_eq!(got.coefficients, values);
 }
