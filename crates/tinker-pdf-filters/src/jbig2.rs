@@ -97,14 +97,23 @@ pub struct Jbig2Params<'a> {
 
 /// A parsed segment header (T.88 7.2) and the data block that follows it.
 ///
-/// The segment *number* is not kept: 7.2.5 uses it only to decide how wide
-/// the referred-to numbers in this same header are, and nothing this build
-/// decodes follows a reference. Keeping a field nothing reads is how a
-/// half-parsed header comes to look complete.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The number and the referred-to list are both kept now. They were both
+/// dropped while the generic-region lineage was all this decoded, because
+/// nothing followed a reference — but 7.4.3 makes a text region's symbol list
+/// *the concatenation of its referred-to dictionaries' exports, in reference
+/// order*, and custom tables are reached the same way. Neither is unbounded:
+/// the referred-to numbers already had to fit inside this header for it to be
+/// a header at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Segment<'a> {
+    /// 7.2.2, and 7.2.5's input: it decides how wide the referred-to numbers
+    /// in this same header are.
+    number: u32,
     /// 7.2.3, the low six bits of the header flags.
     kind: u8,
+    /// 7.2.4 and 7.2.5, in the order the header gives them, which is the
+    /// order 7.4.3 concatenates their exports in.
+    referred: Vec<u32>,
     /// 7.2.6.
     page: u32,
     /// 7.2.7 through 7.2.8: the segment's own data.
@@ -255,9 +264,21 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
     };
     // A count is up to 2^29, and the referred-to numbers are the only thing
     // between here and the data, so the whole run has to fit in what is left
-    // or the header is not a header.
+    // or the header is not a header — which is also what bounds the vector
+    // below without a cap of its own.
     let referred_bytes = (count as usize).checked_mul(width)?;
+    let start = reader.at;
     reader.skip(referred_bytes)?;
+    let mut referred = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        let at = start + index * width;
+        let bytes = reader.data.get(at..at + width)?;
+        referred.push(match width {
+            1 => u32::from(bytes[0]),
+            2 => u32::from(u16::from_be_bytes([bytes[0], bytes[1]])),
+            _ => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        });
+    }
 
     let page = if long_page {
         reader.u32()?
@@ -280,7 +301,116 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
         note(warnings, Warning::TruncatedInput);
     }
 
-    Some(Segment { kind, page, data })
+    Some(Segment {
+        number,
+        kind,
+        referred,
+        page,
+        data,
+    })
+}
+
+/// # Annex A, ahead of its caller
+///
+/// The three items below are read only by this module's tests until the
+/// symbol dictionary that drives them lands (milestone 3 of
+/// `docs/design/jbig2-symbol-text.md`). They arrive first deliberately: their
+/// round trips are what says they are right, and a decoder whose arithmetic is
+/// only exercised through the thing that consumes it cannot be told apart from
+/// a consumer that compensates for it.
+///
+/// How many contexts A.2's integer decoder keeps.
+///
+/// Nine bits of `PREV`, and `PREV` is held to that width by the folding in
+/// [`decode_int`] rather than by the array's length — the array is sized to
+/// match it so the fold is the only thing deciding, and an index can never be
+/// the thing that is wrong.
+#[allow(dead_code)]
+const INT_CONTEXTS: usize = 512;
+
+/// **A.2: the integer arithmetic decoding procedure.**
+///
+/// Reads a sign, then a prefix that says how many magnitude bits follow and
+/// what to add to them. `None` is OOB — the out-of-band value A.2 spells as a
+/// negative zero, which is how a symbol dictionary's height class says it has
+/// ended and how a text region says a strip has.
+///
+/// # Why `PREV` folds rather than grows
+///
+/// The context for each bit is the value decoded so far, so `PREV` doubles per
+/// bit and would run past the array after nine of them. A.2 folds it back
+/// instead: once it reaches 256 the top bit is pinned and the rest rotate
+/// under it, so the last eight bits decoded pick the context and the value
+/// keeps its place in the tree. A build that let it grow would index out of
+/// the array on the tenth bit of a 32-bit magnitude — which is every large
+/// coordinate in a real text region, not an edge case.
+#[allow(dead_code)]
+fn decode_int(coder: &mut MqDecoder<'_>, cx: &mut MqContexts) -> Option<i32> {
+    let mut prev = 1usize;
+    let bit = |coder: &mut MqDecoder<'_>, cx: &mut MqContexts, prev: &mut usize| -> u32 {
+        let d = u32::from(coder.decode_at(cx, *prev));
+        // A.2 step 2: nine bits wide, top bit pinned once it is reached.
+        *prev = if *prev < 256 {
+            (*prev << 1) | d as usize
+        } else {
+            (((*prev << 1) | d as usize) & 511) | 256
+        };
+        d
+    };
+
+    let sign = bit(coder, cx, &mut prev);
+    // The prefix is unary-ish: each 1 buys a wider field and a larger offset.
+    let (width, offset) = if bit(coder, cx, &mut prev) == 0 {
+        (2, 0i64)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (4, 4)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (6, 20)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (8, 84)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (12, 340)
+    } else {
+        (32, 4436)
+    };
+
+    let mut value = 0i64;
+    for _ in 0..width {
+        value = (value << 1) | i64::from(bit(coder, cx, &mut prev));
+    }
+    value += offset;
+
+    // A.2 step 4: a negative zero is not a value, it is the end of something.
+    if sign == 1 && value == 0 {
+        return None;
+    }
+    let value = if sign == 1 { -value } else { value };
+    // 32 magnitude bits plus the offset exceed `i32` by design; the callers
+    // are coordinates and counts that a region's own bounds reject anyway, so
+    // saturating here keeps the arithmetic downstream in one type.
+    Some(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+}
+
+/// **A.3: the IAID decoding procedure**, which reads a symbol's index.
+///
+/// Unlike A.2 this is a plain fixed-width read down a context *tree*: the
+/// contexts are the prefix decoded so far, so the array is twice as wide as
+/// the code length and `PREV` never needs folding. `code_len` is
+/// `SBSYMCODELEN`, and it is the caller's to derive from the symbol count.
+#[allow(dead_code)]
+fn decode_iaid(coder: &mut MqDecoder<'_>, cx: &mut MqContexts, code_len: u32) -> u32 {
+    let mut prev = 1usize;
+    for _ in 0..code_len.min(31) {
+        let d = usize::from(coder.decode_at(cx, prev));
+        prev = (prev << 1) | d;
+    }
+    (prev as u32).wrapping_sub(1 << code_len.min(31))
+}
+
+/// How many contexts [`decode_iaid`] needs for a given code length.
+#[allow(dead_code)]
+fn iaid_contexts(code_len: u32) -> usize {
+    1usize << (code_len.min(31) + 1)
 }
 
 /// Whether a segment type is one this build decodes.
@@ -886,6 +1016,135 @@ mod tests {
     use super::*;
     use crate::mq::encoder::MqEncoder;
 
+    /// A.2's ranges, as `(first magnitude, field width, offset)`.
+    ///
+    /// Written from the clause rather than from [`decode_int`], because a
+    /// round trip against a table copied out of the decoder proves the two
+    /// copies agree and nothing else.
+    const INT_RANGES: [(i64, u32, i64); 6] = [
+        (0, 2, 0),
+        (4, 4, 4),
+        (20, 6, 20),
+        (84, 8, 84),
+        (340, 12, 340),
+        (4436, 32, 4436),
+    ];
+
+    /// The encoder's side of A.2, for the round trip below.
+    fn encode_int(encoder: &mut MqEncoder, prev: &mut usize, value: Option<i32>) {
+        let bit = |encoder: &mut MqEncoder, prev: &mut usize, d: u8| {
+            encoder.encode_at(*prev, d);
+            *prev = if *prev < 256 {
+                (*prev << 1) | usize::from(d)
+            } else {
+                (((*prev << 1) | usize::from(d)) & 511) | 256
+            };
+        };
+
+        // OOB is the negative zero: sign set, magnitude nothing.
+        let (sign, magnitude) = match value {
+            None => (1u8, 0i64),
+            Some(v) => (u8::from(v < 0), i64::from(v).abs()),
+        };
+        bit(encoder, prev, sign);
+
+        let which = INT_RANGES
+            .iter()
+            .rposition(|(first, _, _)| magnitude >= *first)
+            .unwrap_or(0);
+        for step in 0..which {
+            let _ = step;
+            bit(encoder, prev, 1);
+        }
+        if which < INT_RANGES.len() - 1 {
+            bit(encoder, prev, 0);
+        }
+
+        let (_, width, offset) = INT_RANGES[which];
+        let field = magnitude - offset;
+        for index in (0..width).rev() {
+            bit(encoder, prev, ((field >> index) & 1) as u8);
+        }
+    }
+
+    /// **Every range of A.2 round-trips, and so does the value that is not a
+    /// value.**
+    ///
+    /// The magnitudes are the first and last of each of the six fields and one
+    /// in the middle, so a build that got an offset or a width wrong fails at
+    /// the boundary rather than somewhere in the interior where two mistakes
+    /// can cancel. Both signs, because the sign is decoded first and shares the
+    /// context tree with everything after it.
+    ///
+    /// `None` is OOB — the negative zero that ends a height class (6.5.7) and a
+    /// text region's strip (6.4.5). It is in the same sequence as the ordinary
+    /// values on purpose: OOB must not disturb the contexts for what follows
+    /// it, and a test that decoded it alone could not tell.
+    #[test]
+    fn every_integer_range_and_oob_round_trips() {
+        let mut values: Vec<Option<i32>> = vec![None];
+        for (first, width, offset) in INT_RANGES {
+            let last = offset + (1i64 << width) - 1;
+            for magnitude in [first, first + 1, (first + last) / 2, last.min(1 << 30)] {
+                values.push(Some(magnitude as i32));
+                if magnitude != 0 {
+                    values.push(Some(-(magnitude as i32)));
+                }
+                values.push(None);
+            }
+        }
+
+        let mut encoder = MqEncoder::new(INT_CONTEXTS);
+        for value in &values {
+            let mut prev = 1usize;
+            encode_int(&mut encoder, &mut prev, *value);
+        }
+        let bytes = encoder.flush();
+
+        let mut coder = MqDecoder::new(&bytes);
+        let mut cx = MqContexts::new(INT_CONTEXTS);
+        for (index, want) in values.iter().enumerate() {
+            let got = decode_int(&mut coder, &mut cx);
+            assert_eq!(
+                got, *want,
+                "value {index} of the sequence: A.2 decoded {got:?} where {want:?} was encoded"
+            );
+        }
+    }
+
+    /// **A.3 reads back the symbol index it was given**, at every code length a
+    /// dictionary can ask for.
+    ///
+    /// The lengths bracket the byte boundaries and the single-symbol case,
+    /// where `SBSYMCODELEN` is zero and the procedure must read nothing at all
+    /// and answer nothing — a loop written with the wrong bound reads one bit
+    /// there and desynchronises everything after it.
+    #[test]
+    fn the_symbol_index_procedure_round_trips_at_every_code_length() {
+        for code_len in [0u32, 1, 2, 7, 8, 9, 15, 16] {
+            let count = 1u32 << code_len;
+            let ids: Vec<u32> = (0..count.min(64)).chain([count - 1]).collect();
+
+            let mut encoder = MqEncoder::new(iaid_contexts(code_len));
+            for id in &ids {
+                let mut prev = 1usize;
+                for index in (0..code_len).rev() {
+                    let d = ((id >> index) & 1) as u8;
+                    encoder.encode_at(prev, d);
+                    prev = (prev << 1) | usize::from(d);
+                }
+            }
+            let bytes = encoder.flush();
+
+            let mut coder = MqDecoder::new(&bytes);
+            let mut cx = MqContexts::new(iaid_contexts(code_len));
+            for want in &ids {
+                let got = decode_iaid(&mut coder, &mut cx, code_len);
+                assert_eq!(got, *want, "code length {code_len}");
+            }
+        }
+    }
+
     /// **ITU-T T.88 Annex H.1, "Datastream example" — the whole file, byte
     /// for byte.** Three pages, twenty-one segments, and the only JBIG2 in
     /// this repository that somebody else wrote.
@@ -1412,6 +1671,8 @@ mod tests {
         };
         let data = page_info(8, 8, 0x04);
         let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
             kind: kind::PAGE_INFORMATION,
             page: 1,
             data: &data,
@@ -1434,6 +1695,8 @@ mod tests {
         let mut warnings = Vec::new();
         page.begin(
             &Segment {
+                number: 1,
+                referred: Vec::new(),
                 kind: kind::PAGE_INFORMATION,
                 page: 1,
                 data: &data,
@@ -1441,11 +1704,15 @@ mod tests {
             &mut warnings,
         );
         let elsewhere = Segment {
+            number: 1,
+            referred: Vec::new(),
             kind: kind::IMMEDIATE_GENERIC_REGION,
             page: 2,
             data: &[],
         };
         let globalish = Segment {
+            number: 1,
+            referred: Vec::new(),
             kind: kind::IMMEDIATE_GENERIC_REGION,
             page: 0,
             data: &[],
