@@ -29,6 +29,7 @@ use core::ops::Range;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use tinker_pdf_crypto::handler::FileKey;
 use tinker_pdf_crypto::Permissions;
 use tinker_pdf_filters::FilterError;
 
@@ -288,6 +289,11 @@ struct Security {
     decryptor: Arc<dyn Decryptor>,
     has_decryptor: bool,
     auth_level: AuthLevel,
+    /// The authenticated file key, for the one caller that has to *encrypt*:
+    /// an incremental update appends into a file whose `/Encrypt` still
+    /// stands, so it has to reproduce that file's encryption rather than
+    /// invent its own.
+    key: Option<FileKey>,
 }
 
 impl fmt::Debug for CosDocument {
@@ -419,6 +425,7 @@ impl CosDocument {
                 decryptor: Arc::new(IdentityDecryptor),
                 has_decryptor: false,
                 auth_level: AuthLevel::None,
+                key: None,
             }),
             encrypt: None,
             ladder,
@@ -500,10 +507,29 @@ impl CosDocument {
     /// their containing object loads. `Arc`s already handed out keep the
     /// values they were given.
     pub fn set_decryptor(&self, decryptor: Arc<dyn Decryptor>) {
+        self.install_security(decryptor, None);
+    }
+
+    /// [`CosDocument::set_decryptor`], also keeping the key it was built from.
+    pub fn set_decryptor_with_key(&self, decryptor: Arc<dyn Decryptor>, key: FileKey) {
+        self.install_security(decryptor, Some(key));
+    }
+
+    /// The authenticated file key, if this document has one.
+    ///
+    /// Cloned out rather than borrowed, because the lock is not the caller's
+    /// to hold across a whole save.
+    #[must_use]
+    pub fn file_key(&self) -> Option<FileKey> {
+        self.security.read_lock().key.clone()
+    }
+
+    fn install_security(&self, decryptor: Arc<dyn Decryptor>, key: Option<FileKey>) {
         {
             let mut security = self.security.write_lock();
             security.decryptor = decryptor;
             security.has_decryptor = true;
+            security.key = key;
         }
         // Everything already loaded was read as plaintext out of ciphertext.
         // Both caches are dropped so the next read goes back to the buffer;
@@ -639,7 +665,7 @@ impl CosDocument {
             }
         }
 
-        self.set_decryptor(auth.decryptor);
+        self.set_decryptor_with_key(auth.decryptor, auth.key);
         self.security.write_lock().auth_level = auth.level;
         Ok(auth.level)
     }

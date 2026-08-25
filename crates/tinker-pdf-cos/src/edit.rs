@@ -1533,14 +1533,23 @@ impl DocumentEditor {
 
         let trailer = self.doc.trailer().clone();
         match options.mode {
-            WriteMode::Incremental => write::incremental_update(
-                self.doc.bytes(),
-                &set,
-                &trailer,
-                self.doc.last_startxref(),
-                self.doc.names_table(),
-                options.compress,
-            ),
+            WriteMode::Incremental => {
+                // 7.6.2: the update is sealed with the key the document was
+                // opened with, because it appends into a file whose /Encrypt
+                // still stands. An unencrypted document, or one never
+                // authenticated, has no key and writes in the clear as before.
+                let key = self.doc.file_key();
+                let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
+                write::incremental_update(
+                    self.doc.bytes(),
+                    &set,
+                    &trailer,
+                    self.doc.last_startxref(),
+                    self.doc.names_table(),
+                    options.compress,
+                    cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
+                )
+            }
             WriteMode::Rewrite => {
                 // 7.6.1: a rewrite decrypts on the way through — `stream_raw`
                 // hands back plaintext once a decryptor is installed, and the

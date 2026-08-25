@@ -89,7 +89,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object};
-use crate::write::{write_object, ObjectSet, StreamCipher, StreamData, WriteOptions, Written};
+use crate::write::{
+    write_object, ObjectCipher, ObjectSet, StreamCipher, StreamData, WriteOptions, Written,
+};
 
 /// How many digits every patchable integer in the parameter dictionary gets.
 ///

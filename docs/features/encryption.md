@@ -2,7 +2,10 @@
 
 The standard security handler, both directions: documents encrypted at any
 revision from R2 to R6 open, authenticate and decrypt, and documents are
-encrypted on save at R6 (AES-256). Every primitive — MD5, SHA-1, SHA-2,
+encrypted on save at R6 (AES-256). An *incremental* save is the one place the
+writer does not choose: it appends into a file whose `/Encrypt` still stands,
+so it re-encrypts with that file's own key and methods, whichever of the four
+they are ([writing](writing.md)). Every primitive — MD5, SHA-1, SHA-2,
 RC4, AES-CBC — is the project's own, living in the `tinker-pdf-crypto` leaf
 crate (bytes and plain scalars in, bytes and values out, no PDF types on
 its surface — ruling 8, [rulings](../rulings.md)), which is what lets it be
@@ -121,7 +124,6 @@ let bytes = doc.editor().save(&WriteOptions {
 | --- | --- | --- | --- |
 | Public-key and vendor handlers (`Adobe.PubSec` and kin) | `AuthError::UnsupportedHandler` | only the `Standard` handler is implemented; a foreign `/Filter` is refused rather than guessed | [ROADMAP](../ROADMAP.md) Tier 3 |
 | Writing R5 | none offered — the writer emits R6 and nothing else | R5 is the withdrawn draft; reading it works and carries `HandlerNote::DeprecatedRevision5` | [pdf20-deltas](../pdf20-deltas.md) |
-| Encrypting an incremental update | no typed variant: the incremental writer takes no cipher, so the combination cannot be requested | an update inherits the original file's encryption, which needs the original file key plumbed through | [ROADMAP](../ROADMAP.md) Tier 2 |
 | Wrong password / unencrypted document | `AuthError::WrongPassword`, `AuthError::NotEncrypted` | the ordinary API errors, typed so a prompt loop can tell them apart | — |
 
 ## Verified
@@ -163,5 +165,5 @@ a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
 `handler.rs` so seeds and carve order cannot drift, including the one
 pre-R6 seed that genuinely authenticates. All of it rides in the
-workspace suite: 2 952 passed, 0 failed, 8 ignored (Windows x86_64,
+workspace suite: 2 963 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).

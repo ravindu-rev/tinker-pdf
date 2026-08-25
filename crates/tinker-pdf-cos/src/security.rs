@@ -132,6 +132,15 @@ fn to_handler_params(params: &EncryptParams) -> HandlerParams {
 pub struct Authenticated {
     /// The decryptor to install on the document.
     pub decryptor: Arc<dyn Decryptor>,
+    /// The file key itself, kept so the writer can reproduce this document's
+    /// encryption when it appends to it.
+    ///
+    /// Reading needs only the `Decryptor` trait, and for eleven revisions that
+    /// is all this carried. An incremental update is the one operation that
+    /// has to *encrypt* — it appends into a file whose `/Encrypt` still
+    /// stands — and it cannot ask a trait object for the key it was built
+    /// from.
+    pub key: FileKey,
     /// Which password matched.
     pub level: AuthLevel,
     /// Leniency the handler applied, for the document's warning list.
@@ -154,10 +163,11 @@ pub fn authenticate(params: &EncryptParams, password: &str) -> Result<Authentica
     let key = handler::authenticate(&hp, password.as_bytes()).ok_or(AuthError::WrongPassword)?;
 
     let notes = key.notes().to_vec();
-    let decryptor = StandardDecryptor { key };
+    let decryptor = StandardDecryptor { key: key.clone() };
     let level = decryptor.auth_level();
     Ok(Authenticated {
         decryptor: Arc::new(decryptor),
+        key,
         level,
         notes,
     })
