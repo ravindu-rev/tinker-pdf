@@ -7,19 +7,19 @@
         "jpx": 12,
         "mesh-shading": 10
       },
-      "degraded": 422,
+      "degraded": 382,
       "metamorphic": {
         "crop": {
-          "compared": 830,
-          "held": 790
+          "compared": 829,
+          "held": 791
         },
         "dpi": {
           "compared": 944,
-          "held": 904
+          "held": 908
         },
         "rotate": {
-          "compared": 839,
-          "held": 620
+          "compared": 838,
+          "held": 681
         }
       },
       "name": "pdfjs",
@@ -30,19 +30,19 @@
         "timed_out": 0
       },
       "passed": 963,
-      "strict_clean": 842,
-      "strict_eligible": 842,
+      "strict_clean": 841,
+      "strict_eligible": 841,
       "total": 974
     },
     {
       "capabilities": {
         "jpx": 7
       },
-      "degraded": 87,
+      "degraded": 55,
       "metamorphic": {
         "crop": {
           "compared": 2885,
-          "held": 2883
+          "held": 2885
         },
         "dpi": {
           "compared": 2906,
@@ -50,7 +50,7 @@
         },
         "rotate": {
           "compared": 2888,
-          "held": 2829
+          "held": 2865
         }
       },
       "name": "verapdf",
@@ -71,11 +71,11 @@
       "metamorphic": {
         "crop": {
           "compared": 471,
-          "held": 466
+          "held": 465
         },
         "dpi": {
           "compared": 582,
-          "held": 574
+          "held": 577
         },
         "rotate": {
           "compared": 479,
@@ -100,7 +100,7 @@
       "metamorphic": {
         "crop": {
           "compared": 6,
-          "held": 5
+          "held": 6
         },
         "dpi": {
           "compared": 7,

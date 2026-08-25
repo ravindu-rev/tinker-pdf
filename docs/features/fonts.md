@@ -159,26 +159,26 @@ and nothing else:
 
 | Corpus | Files | No faces | Synthetic face | Bundled faces |
 | --- | ---: | ---: | ---: | ---: |
-| pdf.js | 974 | 422 | 300 | 305 |
-| veraPDF | 2 907 | 87 | 72 | 72 |
-| qpdf | 637 | 530 | 130 | 152 |
+| pdf.js | 974 | 382 | 190 | 199 |
+| veraPDF | 2 907 | 55 | 39 | 39 |
+| qpdf | 637 | 530 | 110 | 132 |
 | PDF Association | 7 | 6 | 4 | 4 |
-| **Total** | **4 525** | **1 045 (23.1 %)** | **506 (11.2 %)** | **533 (11.8 %)** |
+| **Total** | **4 525** | **973 (21.5 %)** | **343 (7.6 %)** | **374 (8.3 %)** |
 
 Three bars, in three files, and `corpus-run` refuses to compare any of them
 against another. The last column is the faces this project now ships
 (`corpus/ratchet-bundled.json`); the middle one is a face it synthesises for
 the measurement (`corpus/ratchet-fonts.json`), every glyph a filled box.
 
-**The bundled column is 27 files worse, and that is the bundled set being
-right.** Every one of the 27 is a symbolic font — an embedded face the engine
+**The bundled column is 31 files worse, and that is the bundled set being
+right.** Every one of them is a symbolic font — an embedded face the engine
 could not read, with `/Flags` bit 3 set — which the bundled faces decline and
 one all-purpose face silently answered with squares. The synthetic bar was
 flattering itself on those files, and the difference between the two columns is
 exactly the size of that flattery.
 
-**512 of the 1 045 — 49 % — were the absence of a face**, and in qpdf's corpus
-it is three quarters of them. The synthetic face exists so the measurement can
+**630 of the 973 — 65 % — were the absence of a face**, and in qpdf's corpus it
+is four fifths of them. The synthetic face exists so the measurement can
 be reproduced anywhere: no licence, no download, the same bytes on every
 machine forever, and no dependence on what a runner image happens to ship.
 
@@ -281,7 +281,7 @@ remains the seam either way. Provenance and the OFL text are in
   targets, asserting a least-ink floor so a face that stops drawing cannot
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
-- The whole workspace stands at 2 952 passed / 0 failed / 8 ignored
+- The whole workspace stands at 2 963 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026), and the corpus run — 4 525 files, 4 484
   rendered every page, 0 crashes — exercises real embedded fonts of every
   kind here. See [verification](../verification.md).

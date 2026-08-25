@@ -880,10 +880,26 @@ const DPI_BUDGET: f64 = 0.02;
 /// percent on 90 of them, and 0.29% at the ninetieth percentile, with one file
 /// at 14%.
 ///
-/// One percent sits above the noise and far below anything structural: a
+/// One percent sat above that noise and far below anything structural: a
 /// rotation applied to the geometry and not to the clip, or to the text and not
 /// to the images, moves whole regions rather than the rims of glyphs.
-const ROTATE_BUDGET: f64 = 0.01;
+///
+/// **Raised to two percent in August 2026, and the reason is that the noise it
+/// was measured against has changed.** Every figure above was taken when an
+/// image edge was quantised to whole device pixels: images alone did not
+/// anti-alias, so they alone transposed exactly, and the 0.29% was glyph rims
+/// and nothing else. Image edges are soft now
+/// (`docs/design/image-edges.md`), and a soft edge at a fractional offset does
+/// not transpose to the byte any more than a glyph's does — on long straight
+/// edges there is simply more of it. Two qpdf files sit at 1.7%: hundreds of
+/// separately placed, quarter-turned scans, measured at exactly 1.0% with hard
+/// edges and 1.7% with soft ones, which is the whole of the difference.
+///
+/// Two percent keeps the structural distance the original figure was chosen
+/// for — a misapplied rotation moves whole regions, tens of percent, and the
+/// one file at 14% is still caught — and it is the same figure `DPI_BUDGET`
+/// already carries for the same class of reason.
+const ROTATE_BUDGET: f64 = 0.02;
 
 /// How long a file may already have taken before its relations are skipped.
 ///

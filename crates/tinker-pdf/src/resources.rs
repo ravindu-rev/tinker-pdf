@@ -37,7 +37,18 @@ pub struct PageResources {
     fonts: HashMap<Vec<u8>, Arc<cos_font::Font>>,
     font_ids: HashMap<Vec<u8>, u64>,
     /// The embedded font program of each font, by the id the interpreter uses.
-    programs: HashMap<u64, Arc<Vec<u8>>>,
+    ///
+    /// **Decoded on first use, not at construction.** A font program is an
+    /// inflate of a stream that is routinely a megabyte, and since a form
+    /// XObject's own `/Resources` became a scope of their own there is one of
+    /// these per form rather than one per page — a document of nine hundred
+    /// objects went from 537 ms to 24.7 s doing it eagerly, and one corpus
+    /// file stopped making progress at all. Most scopes are opened to resolve
+    /// an image or a pattern and never ask for a glyph.
+    ///
+    /// `None` is cached as firmly as a hit: a font with no embedded program
+    /// must not be looked up again on every glyph.
+    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
     /// Which glyph a code selects, per font, resolved lazily.
     resources: Option<Dict>,
     /// Decoded images, kept because a page may draw one many times.
@@ -52,6 +63,19 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
+    /// Nested scopes already built, by the form's own object number.
+    ///
+    /// A page may invoke one form a thousand times — a stamp, a rule, a
+    /// letterhead — and building its resources is not cheap: every font in the
+    /// dictionary is parsed and the optional-content configuration is bound
+    /// again. Two pdf.js corpus files stopped making progress at all when this
+    /// was rebuilt per invocation, which is what put the cache here.
+    ///
+    /// Keyed by the XObject's reference rather than by the resource name,
+    /// because two names can reach one form and a name means nothing outside
+    /// the dictionary it was looked up in. `None` is cached too: "this form
+    /// brought no resources" is an answer worth not recomputing.
+    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
     /// The host's substitute faces, kept so a resource dictionary *inside*
     /// this one can be read with the same configuration.
     ///
@@ -218,7 +242,6 @@ impl PageResources {
     ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
-        let mut programs = HashMap::new();
         let mut resources = None;
 
         if let Some(dict) = page.resources.as_ref() {
@@ -227,11 +250,6 @@ impl PageResources {
                 if let Some(bytes) = doc.name_bytes(name) {
                     let key = bytes.to_vec();
                     let id = u64::from(name.id());
-                    if let Some(program) =
-                        program_for(doc, &key, dict, &font, provider.map(|p| &**p))
-                    {
-                        programs.insert(id, program);
-                    }
                     font_ids.insert(key.clone(), id);
                     fonts.insert(key, font);
                 }
@@ -242,7 +260,8 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs,
+            programs: Mutex::new(HashMap::new()),
+            form_scopes: Mutex::new(HashMap::new()),
             resources,
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
@@ -266,16 +285,11 @@ impl PageResources {
     ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
-        let mut programs = HashMap::new();
 
         for (name, font) in cos_font::from_resources(doc, &dict) {
             if let Some(bytes) = doc.name_bytes(name) {
                 let key = bytes.to_vec();
                 let id = u64::from(name.id());
-                if let Some(program) = program_for(doc, &key, &dict, &font, provider.map(|p| &**p))
-                {
-                    programs.insert(id, program);
-                }
                 font_ids.insert(key.clone(), id);
                 fonts.insert(key, font);
             }
@@ -285,7 +299,8 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs,
+            programs: Mutex::new(HashMap::new()),
+            form_scopes: Mutex::new(HashMap::new()),
             resources: Some(dict),
             images: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
@@ -391,6 +406,53 @@ impl PageResources {
             ystep: number(b"YStep").unwrap_or(0.0),
             uncolored,
         }))
+    }
+
+    /// The `/Resources` a form XObject brings with it (8.10.1).
+    ///
+    /// A form written beside one document and pasted into another carries the
+    /// only dictionary its names resolve in — which is why a stamp annotation
+    /// whose appearance invokes a second form can name an image the page has
+    /// never heard of. A form that omits the key resolves against the invoking
+    /// scope, which is what its producer is relying on.
+    ///
+    /// The `provider` is carried into the nested scope for the reason the
+    /// tiling path carries it: without it a form would be the one place in a
+    /// document where a `FontProvider` the caller installed does not apply.
+    fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+        let (dict, reference) = self.xobject(name)?;
+        let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
+        if let Ok(cache) = self.form_scopes.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return hit.clone();
+            }
+        }
+        let built = self.build_form_resources(&dict);
+        if let Ok(mut cache) = self.form_scopes.lock() {
+            cache.insert(key, built.clone());
+        }
+        built
+    }
+
+    fn build_form_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
+        let subtype = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Form" {
+            return None;
+        }
+        let own = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Resources"))
+            .as_dict()
+            .cloned()?;
+        Some(Arc::new(PageResources::from_dict(
+            &self.doc,
+            own,
+            self.provider.as_ref(),
+        )))
     }
 
     fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
@@ -856,6 +918,10 @@ impl FontSource for PageResources {
         Some((content, matrix))
     }
 
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+        self.form_resources(name)
+    }
+
     fn form(&self, name: &[u8]) -> Option<tinker_pdf_content::Form> {
         let (dict, reference) = self.xobject(name)?;
         let subtype = self
@@ -1038,6 +1104,10 @@ impl FontSource for PageResources {
 }
 
 impl GlyphSource for PageResources {
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+        self.form_resources(name)
+    }
+
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         if let Ok(cache) = self.outlines.read() {
             if let Some(hit) = cache.get(&(font_id, code)) {
@@ -1470,9 +1540,32 @@ impl PageResources {
         }
     }
 
+    /// The embedded font program behind a font id, decoded once.
+    fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
+        if let Ok(cache) = self.programs.lock() {
+            if let Some(hit) = cache.get(&font_id) {
+                return hit.clone();
+            }
+        }
+        let name = self
+            .font_ids
+            .iter()
+            .find(|(_, id)| **id == font_id)
+            .map(|(name, _)| name.clone());
+        let built = name.as_ref().and_then(|name| {
+            let font = self.fonts.get(name)?;
+            let resources = self.resources.as_ref()?;
+            program_for(&self.doc, name, resources, font, self.provider.as_deref())
+        });
+        if let Ok(mut cache) = self.programs.lock() {
+            cache.insert(font_id, built.clone());
+        }
+        built
+    }
+
     /// Pulls one glyph's outline out of an embedded font program.
     fn extract_outline(&self, font_id: u64, code: u32) -> Option<Outline> {
-        let program = self.programs.get(&font_id)?;
+        let program = self.program(font_id)?;
 
         // The font's own character mapping decides which glyph a code means.
         let name = self
@@ -1484,7 +1577,7 @@ impl PageResources {
         let text = font.text_of(code);
         let ch = text.chars().next();
 
-        if let Some(sfnt) = Sfnt::parse(program) {
+        if let Some(sfnt) = Sfnt::parse(&program) {
             // An OpenType font may carry its outlines in a `CFF ` table
             // instead of `glyf` — that is what the `OTTO` tag means. The sfnt
             // parser accepts `OTTO`, so such a font took this branch, found
@@ -1535,7 +1628,7 @@ impl PageResources {
             return Some(scale(&outline, 1.0 / units));
         }
 
-        if let Some(cff) = Cff::parse(program) {
+        if let Some(cff) = Cff::parse(&program) {
             return self.cff_outline(&cff, font, &name, code);
         }
 
@@ -1543,7 +1636,7 @@ impl PageResources {
         // reached the two parsers above, both declined them correctly, and the
         // glyph was silently absent — an embedded Type 1 font drew nothing and
         // said nothing about why.
-        if let Some(type1) = Type1::parse(program) {
+        if let Some(type1) = Type1::parse(&program) {
             // Type 1 addresses glyphs by *name*: through the encoding the PDF
             // font dictionary specifies, or through the font's own built-in
             // one. The index is not a glyph id.

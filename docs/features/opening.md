@@ -135,7 +135,7 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of August 2026, `cargo test --workspace` runs 2 952 tests (0 failed,
+As of August 2026, `cargo test --workspace` runs 2 963 tests (0 failed,
 8 ignored, Windows x86_64), and the parts that cover opening are named
 ([verification](../verification.md)):
 

@@ -69,6 +69,18 @@ does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
 distinguishable from a blank one.
 
+**Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
+pasted in from another document resolves its names in the dictionary it brought
+rather than in the page's. Both seams change scope together — the interpreter
+resolves fonts, colours and ExtGState, the device resolves images, shadings and
+patterns — because they are asked about the same form, by the same name, at the
+same moment. A form that omits the key falls back to the invoking scope, which
+is what its producer is relying on. An annotation's appearance stream gets the
+same treatment by a different route: it is reached by reference rather than by
+name, so `Page::render` announces it instead of the interpreter, and until it
+did an appearance's images resolved against the page while its text resolved
+against the appearance.
+
 **Transparency.** `/Group /S /Transparency` on a form XObject composites as
 a unit (11.6.6), with isolation (11.4.4), knockout (11.4.5) and backdrop
 removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. ExtGState
@@ -157,7 +169,6 @@ helpers `Page::render` composes.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | Transparency-group colour spaces; page-level `/Group` | none — composites in RGB silently | A group declared in CMYK or Lab blends in the wrong space (11.4.7) | [ROADMAP](../ROADMAP.md) |
-| A form XObject's own `/Resources` | none — recorded non-goal; inherited resources only | The reason one corpus JPX file is never asked for | [ROADMAP](../ROADMAP.md) |
 | Exact ICC/CIE colour | `ColorSpace::Approximated`, stated on the type | Component count decides the reading, the 8.6.5.5 fallback | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -185,5 +196,5 @@ helpers `Page::render` composes.
   stable.
 - Corpus, as of August 2026: 4 525 files, 4 484 rendered every page, zero
   crashes.
-- The workspace stands at 2 952 passed / 0 failed / 8 ignored
+- The workspace stands at 2 963 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md).

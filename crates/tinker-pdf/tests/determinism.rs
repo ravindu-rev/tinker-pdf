@@ -2223,7 +2223,7 @@ fn rendering_is_stable_across_targets() {
         // `tinker-pdf-raster/tests/analytic_sampling.rs` is what says which.
         (
             "image",
-            "58eedf585a421b601f2d0c4c435c44a94ec6bbe5fae517060b4d691e5f234ed1",
+            "5ee2846126ede02cb65622d5b909bd806347abb025c8f1fa173df36e727678e1",
         ),
         // Added August 2026 with gap 11. Groups, isolation, knockout and an
         // ExtGState soft mask reach no other fixture here at all.
@@ -2245,7 +2245,7 @@ fn rendering_is_stable_across_targets() {
         // only the filter crate's own tests standing in front of it.
         (
             "jbig2",
-            "cd20bc1e5c786e245402ba94d700f2a91a267c36e0922d2bc98be5e897839abd",
+            "183bb295fa31b620a48b3d10cd1e5850180fc3a016e47630c166c334446aa3e9",
         ),
         // Added August 2026 with gap 10. Nothing above draws a mesh, so the
         // whole of 8.7.4.5.5 to 8.7.4.5.8 -- the packed vertex stream, the
@@ -2271,7 +2271,7 @@ fn rendering_is_stable_across_targets() {
         // show up here and nowhere else.
         (
             "jpx",
-            "d9d0a1f733de50ca06fae32655bc240854d573679698ce7a8e8095640972ef4d",
+            "4da27b74f85dbec9e9891499c2d082009cec5e838efeefc371d77e1bf0659de8",
         ),
         // Added August 2026 with gap 29 milestone 6, and the first entry here
         // whose document is *synthesised* rather than parsed -- so it is the
@@ -2296,7 +2296,7 @@ fn rendering_is_stable_across_targets() {
         // wrote, as well as the renderer every other row here covers.
         (
             "xps",
-            "3e91e30f90903a7b5a91f0442c965acc2519ab22ce7e1c9c5f9b6392e2f74751",
+            "9551458aff13b14485b22f5c8e12265229273886bf8489500fb700c0c07d1f30",
         ),
         // Added August 2026 with gap 31 milestone 13, and **the first entry
         // here whose page number is not a property of the file**: this is page

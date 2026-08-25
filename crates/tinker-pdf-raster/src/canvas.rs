@@ -651,7 +651,7 @@ fn place(
 }
 
 /// `a * b / 255`, rounded, in integers.
-fn mul255(a: u32, b: u32) -> u32 {
+pub(crate) fn mul255(a: u32, b: u32) -> u32 {
     let product = a * b + 128;
     (product + (product >> 8)) >> 8
 }

@@ -16,30 +16,31 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 952 tests proving the
+These come before any new feature. The suite is 2 963 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **Image edges are quantised to whole device pixels.** A destination pixel is
-  painted in full or not at all, by whether the image's device rectangle
-  contains its centre, so an image placed at a fractional offset has a jagged
-  edge — and abutting strips, which is how every PCLM scan is built, tile
-  differently at different scales. It is what remains of the `dpi` relation's
-  eight failures once minification stopped interpolating
-  ([features/rasterizer.md](features/rasterizer.md)): the two PCLM files
-  disagree on 17.3 % of their pixels (was 23.4 %), the six inline-image files
-  on 3.2–4.4 % (was 4.4–5.4 %), against a 2 % budget, and no text-only or
-  vector-only file in 4 525 fails at all. The fix is partial coverage at the
-  edge, and it is **not free**: source-over compositing of two half-covered
-  draws is not the average of them, so seams that tile exactly today would
-  gain a line of background — the conflation artefact every renderer in this
-  imaging model has. That trade is the work, and it wants a design note rather
-  than a patch. Evidence: 8 of 582 files compared, August 2026, named per file
-  in `corpus/report.json`. Exit: an analytic test pins a half-covered image
-  edge against its area; qpdf's `dpi` row holds on the PCLM pair. (M)
+- **Resampling is not coherent across scale on strip-built scans.** What is
+  left of the `dpi` relation's eight failures after image edges, magnification
+  and conflation were each measured and fixed
+  ([design/image-edges.md](design/image-edges.md),
+  [features/rasterizer.md](features/rasterizer.md)). Three of the eight now
+  hold outright; `pclm-in.pdf` improved from 17.3 % of pixels disagreeing to
+  15.9 %, against a 2 % budget, and kept `rotate` and `crop`. The residual is
+  neither edges nor conflation — both were isolated and measured out, and a
+  render and the box-filtered render at twice the scale now agree to 0.00 % on
+  a synthetic source at every ratio tried — so what remains is resampling
+  itself on real scans, and it wants its own evidence before it wants a patch.
+  Carried with it: the two `inline-images-ii-*` files break `rotate` at 1.7 %
+  against a 1 % budget, because an anti-aliased image edge at a fractional
+  offset does not transpose exactly where a quantised one did. That is a
+  budget to revisit or an artefact to remove, and it is stated rather than
+  absorbed. Evidence: `tpdf probe --dpi 72` over the eight qpdf files, August
+  2026, per file in [design/image-edges.md](design/image-edges.md). Exit: the
+  `dpi` row holds on the PCLM pair, and `rotate` holds on all eight. (M)
 
 ## Tier 2 — close the named refusals, by measured reachability
 
@@ -55,11 +56,6 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Form XObject `/Resources`.** A form's own resource dictionary is
-  consulted nowhere — tiling patterns' are, forms' are not (recorded in
-  [features/rendering.md](features/rendering.md)); it is already the reason
-  one of the 19 JPX corpus files never reaches the decoder. Exit: a form
-  resolving its own resources renders; the JPX unreached file decodes. (M)
 - **Transparency group colour spaces and page-level `/Group`.** The engine
   composites in RGB throughout and does not read a page-level `/Group`
   (11.4.7), so a group declared in CMYK or Lab blends in the wrong space.
@@ -80,11 +76,6 @@ warning contract), with corpus reachability measured.
   drive conversion; known-answer tables computed from the specification's
   own equations hold for matrix/TRC profiles. (L,
   [design/icc.md](design/icc.md))
-- **Incremental update with encryption.** An incremental save of an
-  encrypted document needs the original file key plumbed to the
-  incremental writer; today the combination is refused. Exit: fill a form
-  in an encrypted file, save incrementally, and the saved file decrypts and
-  passes the strict validator. (M)
 
 ## Tier 3 — capabilities absent today
 

@@ -78,10 +78,10 @@ JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
 coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists. Measured against the
-corpus's nineteen JPX files as of August 2026: 14 decode, 4 refuse by name,
-and 1 is never asked for (a form-resources non-goal recorded in
-[rendering](rendering.md) and the [ROADMAP](../ROADMAP.md), not a codec
-limit).
+corpus's nineteen JPX files as of August 2026: 15 decode and 4 refuse by name.
+The fifteenth used to be a sixteenth case — never asked for at all, because its
+image sits two form XObjects deep and a form's own `/Resources` were consulted
+nowhere; it decodes now ([rendering](rendering.md)).
 
 **Container codecs, not `/Filter` names.** No PDF stream is a PNG file, but
 the archive formats need one, so the crate also exports a PNG decoder
@@ -173,6 +173,6 @@ wants the reason to survive it.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 2 952 passed / 0 failed / 8 ignored
+  workspace stands at 2 963 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md) for
   the full harness.

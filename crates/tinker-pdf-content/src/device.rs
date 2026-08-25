@@ -132,7 +132,8 @@ pub trait Device {
     fn end_marked_content(&mut self) {}
 
     /// A form XObject is about to be interpreted; returning false skips it.
-    fn begin_form(&mut self, id: u64) -> bool {
+    fn begin_form(&mut self, id: u64, name: &[u8]) -> bool {
+        let _ = name;
         let _ = id;
         true
     }

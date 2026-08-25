@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use core::mem;
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
 pub mod mesh;
@@ -29,8 +30,12 @@ use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, MaskKind, PixelFormat},
     fill::{fill, Mask},
+    fragments::Fragments,
     geom::{FillRule, Path},
-    image::{draw_image, ImageDraw, ImageSource, Pyramid, Transform},
+    image::{
+        accumulate_image, draw_image, image_bounds, image_coverage, ImageDraw, ImageSource,
+        Pyramid, Transform,
+    },
     mesh::{draw_mesh, MeshDraw},
     stroke::{stroke, LineCap, LineJoin, StrokeStyle},
 };
@@ -330,6 +335,21 @@ pub trait GlyphSource {
         let _ = (name, request);
         None
     }
+    /// The resources a form XObject brings with it, if it has its own
+    /// (8.10.1).
+    ///
+    /// The device's half of `FontSource::form_scope`. Both are asked about the
+    /// same form, by the same name, at the same moment, so the two scopes stay
+    /// in step without either seam handing the other a resource dictionary.
+    /// Shared and cached by the implementor, for `FontSource::form_scope`'s
+    /// reason: a page invoking one form many times must not rebuild it.
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// A `GlyphSource` that has nothing, for callers that only want geometry.
@@ -484,10 +504,79 @@ struct MaskFrame {
     clip_depth: usize,
 }
 
+/// The most pixels a run of images may be held over: a quarter of a page.
+///
+/// A run buffers four bytes a pixel, so this is 64 MB at the bound — against
+/// the 268 MB an `Rgba8` canvas of [`MAX_PAGE_PIXELS`] would need, which is
+/// why the two are related rather than chosen apart. An A4 page at 300 dpi is
+/// 8.7 Mpx and well inside it.
+///
+/// Past the bound, images composite one at a time exactly as they did before
+/// runs existed: abutting ones conflate again. That is a quality loss and not
+/// a correctness one, and it is bounded memory rather than a page that will
+/// not render (ruling 1). It is not a `bounds_ledger.rs` row for
+/// [`MAX_PAGE_PIXELS`]'s reason: both are properties of the scale the caller
+/// asked for rather than counts read out of a document, and that ledger
+/// measures documents.
+const MAX_IMAGE_RUN_PIXELS: u64 = MAX_PAGE_PIXELS / 4;
+
+/// A mask's identity: where it is and whose coverage it holds.
+type MaskId = (i32, i32, u32, u32, usize);
+
+/// A run of consecutive image draws, accumulated before any of it is
+/// composited.
+struct ImageRun {
+    /// Coverage and premultiplied colour so far.
+    fragments: Fragments,
+    /// The constant alpha every draw in the run was made with.
+    alpha: f64,
+    /// The blend mode every draw in the run was made with.
+    blend: RasterBlend,
+    /// The clip and soft mask in force when the run was opened.
+    ///
+    /// A run survives `q`, `Q` and a form boundary, because none of those
+    /// draws anything — but any of them can put a *different* clip in force,
+    /// and a run composited under the wrong one would paint through it. Each
+    /// mask is identified by its rectangle and the address of its coverage,
+    /// which is cheap and cannot collide while the mask is alive.
+    masks: (Option<MaskId>, Option<MaskId>),
+    /// The device rectangle the run has put coverage in, as
+    /// `(x0, y0, x1, y1)` with the far edges exclusive.
+    ///
+    /// Kept so that asking whether a new draw *overlaps* the run costs the
+    /// band where the two meet rather than either of them whole. Abutting
+    /// strips share one row; a picture laid over another shares its area, and
+    /// only the second ends the run.
+    covered: (i32, i32, i32, i32),
+}
+
+/// Whichever resource dictionary is in force: the caller's, or a form's own.
+///
+/// The device's half of `FontSource`'s scope. Both are asked for the same form
+/// by the same name at the same moment, so they change together without either
+/// crate handing the other a resource dictionary it should not know about.
+enum Scope<'g, G> {
+    /// The caller's, borrowed for the whole render.
+    Borrowed(&'g G),
+    /// A form's own, shared with whatever cached it.
+    Owned(Arc<G>),
+}
+
+impl<G> core::ops::Deref for Scope<'_, G> {
+    type Target = G;
+
+    fn deref(&self) -> &G {
+        match self {
+            Scope::Borrowed(glyphs) => glyphs,
+            Scope::Owned(glyphs) => glyphs,
+        }
+    }
+}
+
 /// The rasterizing device.
 pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
-    glyphs: &'g G,
+    glyphs: Scope<'g, G>,
     /// The transform from PDF user space to device pixels.
     base: Matrix,
     clip: Option<Mask>,
@@ -549,6 +638,30 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// repeatedly, and forty thousand identical warnings is not a report.
     group_budget_spent: bool,
     groups: Vec<GroupFrame>,
+    /// Resource scopes pushed by the caller rather than by a form, innermost
+    /// last.
+    ///
+    /// An annotation's appearance stream carries its own `/Resources` and is
+    /// reached by *reference*, not by a name in anybody's dictionary — so the
+    /// interpreter cannot announce it the way it announces a form, and the
+    /// caller says so instead. Until this existed the appearance's resources
+    /// reached the interpreter and not the device, so a name that resolved for
+    /// text did not resolve for an image.
+    pushed_scopes: Vec<Scope<'g, G>>,
+    /// The resource scope each open form displaced, innermost last.
+    ///
+    /// `None` for a form that brought no `/Resources` of its own, which is the
+    /// common case and costs one `Option` rather than a clone of the page's.
+    form_scopes: Vec<Option<Scope<'g, G>>>,
+    /// Consecutive image draws held back so that abutting ones do not
+    /// conflate (`tinker_pdf_raster::fragments`).
+    ///
+    /// A run of images composited one at a time lets the page through
+    /// wherever two of them share an edge, which is what every scanned
+    /// document assembled from strips is made of. Held here rather than in
+    /// the rasterizer because *when a run ends* is a question about the
+    /// content stream, and only this layer sees that.
+    run: Option<ImageRun>,
     /// The soft mask in force, in the current canvas's coordinates (11.6.5).
     ///
     /// On the device rather than in the graphics state, because it is pixels
@@ -586,7 +699,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g G) -> Renderer<'g, G> {
         Renderer {
             canvas,
-            glyphs,
+            glyphs: Scope::Borrowed(glyphs),
             base,
             clip: None,
             clip_stack: Vec::new(),
@@ -597,6 +710,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             missing_fonts: 0,
             text_clip: None,
             text_clip_requested: false,
+            run: None,
+            pushed_scopes: Vec::new(),
+            form_scopes: Vec::new(),
             marked_content: Vec::new(),
             hidden_depth: 0,
             group_buffers: 0,
@@ -662,6 +778,62 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         false
     }
 
+    /// How the clip and the soft mask in force can be told apart cheaply.
+    fn mask_ids(&self) -> (Option<MaskId>, Option<MaskId>) {
+        let id = |mask: &Mask| {
+            (
+                mask.x0,
+                mask.y0,
+                mask.width,
+                mask.height,
+                mask.data.as_ptr() as usize,
+            )
+        };
+        (self.clip.as_ref().map(id), self.soft.as_ref().map(id))
+    }
+
+    /// Resolves names against `resources` until [`Renderer::pop_resources`].
+    ///
+    /// For a content stream the caller reached by reference — an annotation's
+    /// appearance — where there is no name for the interpreter to announce.
+    pub fn push_resources(&mut self, resources: Arc<G>) {
+        let outer = mem::replace(&mut self.glyphs, Scope::Owned(resources));
+        self.pushed_scopes.push(outer);
+    }
+
+    /// Restores the scope [`Renderer::push_resources`] displaced.
+    pub fn pop_resources(&mut self) {
+        if let Some(outer) = self.pushed_scopes.pop() {
+            self.glyphs = outer;
+        }
+    }
+
+    /// Composites the run of images held back so far, if any.
+    ///
+    /// Called at the top of every device operation that is not an image draw,
+    /// which is what makes the run's graphics state constant: the clip and the
+    /// soft mask can only change through one of those, so the state in force
+    /// now is the state every draw in the run was made with.
+    fn flush_run(&mut self) {
+        let Some(run) = self.run.take() else {
+            return;
+        };
+        let stop = self.stop_predicate();
+        let combined = self.combined_mask();
+        let clip = combined
+            .as_ref()
+            .or(self.clip.as_ref())
+            .or(self.soft.as_ref());
+        run.fragments.composite_region(
+            &mut self.canvas,
+            run.covered,
+            run.alpha,
+            run.blend,
+            clip,
+            Some(&stop),
+        );
+    }
+
     /// Record that the group budget declined one, for a single report at
     /// `finish`.
     fn note_group_budget(&mut self) {
@@ -671,6 +843,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// The canvas and everything the render had to tolerate.
     #[must_use]
     pub fn finish(mut self) -> (Canvas, Vec<RenderWarning>) {
+        // Before anything reads the canvas: a page whose last operation was an
+        // image would otherwise hand back a canvas the run never reached.
+        self.flush_run();
         // A group that was opened and never closed would otherwise hand the
         // caller the *group's* buffer as the page. The interpreter balances
         // its own calls, but `Renderer` is public and this is the one failure
@@ -1595,6 +1770,27 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             let area = self.coverage(&quad, FillRule::NonZero, None);
             self.knockout_restore(&area);
         }
+        // Whether this draw joins the run held back so that abutting images do
+        // not conflate, or goes straight to the canvas. Decided here, before
+        // the clip is borrowed, because ending a run needs `&mut self`.
+        let bounds = image_bounds(&unit_to_device, self.canvas.width, self.canvas.height);
+        let pixels = u64::from(self.canvas.width) * u64::from(self.canvas.height);
+        // 11.4.5 gives every element inside a knockout group its own shape, so
+        // a run there would restore the wrong one.
+        let direct = self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS;
+        let masks = self.mask_ids();
+        let state_changed = self.run.as_ref().is_some_and(|run| {
+            run.alpha.to_bits() != state.fill_alpha.to_bits()
+                || run.blend != blend_mode(state.blend)
+                || run.masks != masks
+        });
+        // A different graphics state, or a picture laid *over* another rather
+        // than beside it: both end the run. Fragments are added, so an overlap
+        // added rather than composited would show both pictures at once.
+        if direct || state_changed || self.run_would_overlap(&unit_to_device) {
+            self.flush_run();
+        }
+
         // The same predicate the fill and the stroker are given. It was a
         // second hand-rolled closure here until gap 15 gave the other two
         // hooks one, and two spellings of the same question is how one of them
@@ -1631,7 +1827,54 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // function. That identity lives with the resource cache, which is
         // phase 08's, so this deliberately does not invent one.
         let mut pyramid = Pyramid::new();
-        draw_image(&mut self.canvas, &draw, &mut pyramid);
+        if direct {
+            draw_image(&mut self.canvas, &draw, &mut pyramid);
+            return;
+        }
+
+        let extent = (self.canvas.width, self.canvas.height);
+        let run = self.run.get_or_insert_with(|| ImageRun {
+            fragments: Fragments::new(0, 0, extent.0, extent.1),
+            alpha: state.fill_alpha,
+            blend: blend_mode(state.blend),
+            masks,
+            covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+        });
+        accumulate_image(&mut run.fragments, &draw, &mut pyramid, extent);
+        if let Some((bx0, by0, bw, bh)) = bounds {
+            run.covered = (
+                run.covered.0.min(bx0),
+                run.covered.1.min(by0),
+                run.covered.2.max(bx0.saturating_add(bw as i32)),
+                run.covered.3.max(by0.saturating_add(bh as i32)),
+            );
+        }
+    }
+
+    /// Whether a draw would land on coverage a run is already holding.
+    ///
+    /// Abutment is not overlap. Two strips share one row of pixels, and the
+    /// question is asked only of that row — the intersection of the draw's own
+    /// rectangle with the rectangle the run has painted — rather than of
+    /// either draw whole, so the common case costs a band and not a page.
+    fn run_would_overlap(&self, t: &Transform) -> bool {
+        let Some(run) = &self.run else {
+            return false;
+        };
+        let Some((bx0, by0, bw, bh)) = image_bounds(t, self.canvas.width, self.canvas.height)
+        else {
+            return false;
+        };
+        let (cx0, cy0, cx1, cy1) = run.covered;
+        let x0 = bx0.max(cx0);
+        let y0 = by0.max(cy0);
+        let x1 = bx0.saturating_add(bw as i32).min(cx1);
+        let y1 = by0.saturating_add(bh as i32).min(cy1);
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        let shape = image_coverage(t, x0, y0, (x1 - x0) as u32, (y1 - y0) as u32, None);
+        run.fragments.would_overlap(&shape)
     }
 
     /// Converts interpreter path segments into a rasterizer path.
@@ -1793,6 +2036,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() || self.hidden() {
             return;
         }
@@ -1832,6 +2078,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // A clip is a full fill of its own path plus an intersect, and it had
         // no check at all — so a render cancelled while a clip operator was
         // pending still paid for both. Skipping it cannot leak ink: every
@@ -1859,6 +2108,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_text(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // Before the accumulated outline is rasterized, for the same reason as
         // `clip_path`: a text clip is a fill over every glyph of the object at
         // once, which is the largest single clip a page can ask for.
@@ -1906,6 +2158,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() || self.hidden() {
             return;
         }
@@ -1987,6 +2242,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // Before the clipping mode is recorded, and before the outline is
         // looked for. A glyph in a hidden layer must not add to the text
         // clip -- 9.3.6's modes 4 to 7 would otherwise let an invisible
@@ -2178,6 +2436,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() || self.hidden() {
             return;
         }
@@ -2287,12 +2548,21 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
-    fn begin_form(&mut self, _id: u64) -> bool {
+    fn begin_form(&mut self, _id: u64, name: &[u8]) -> bool {
         self.clip_stack.push((self.clip.clone(), self.soft.clone()));
+        // 8.10.1: a form's own `/Resources`, if it brought any. The
+        // interpreter asks its own seam the same question about the same name,
+        // so the two scopes open and close together.
+        let nested = self.glyphs.form_scope(name);
+        self.form_scopes
+            .push(nested.map(|scope| mem::replace(&mut self.glyphs, Scope::Owned(scope))));
         !self.stopping()
     }
 
     fn end_form(&mut self, _id: u64) {
+        if let Some(Some(outer)) = self.form_scopes.pop() {
+            self.glyphs = outer;
+        }
         if let Some((clip, soft)) = self.clip_stack.pop() {
             self.clip = clip;
             self.soft = soft;
@@ -2300,6 +2570,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn begin_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // A group inside a layer that is off paints nothing, so there is
         // nothing to buffer. Declining also leaves the interpreter's 11.6.6
         // state reset undone, which is right: nothing is going to paint.
@@ -2310,6 +2583,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_group(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         self.close_group();
     }
 
@@ -2319,6 +2595,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         bbox: &[PathSegment],
         _state: &GraphicsState,
     ) -> bool {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() {
             return false;
         }
@@ -2326,10 +2605,16 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_soft_mask(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         self.close_soft_mask();
     }
 
     fn clear_soft_mask(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         self.soft = None;
     }
 }

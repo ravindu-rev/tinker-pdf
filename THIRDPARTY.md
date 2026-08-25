@@ -88,9 +88,9 @@ have; the other two are Symbol and ZapfDingbats, and see below.
 
 They are here because of a measurement rather than an argument.
 `corpus/ratchet-fonts.json` is the same 4 525 corpus files rendered with a
-face supplied, against `corpus/ratchet.json` without one, and **52 % of all
-reported degradation was the absence of a face** — 1 045 files down to 506,
-and in qpdf's corpus 530 down to 130. A conforming file that names Helvetica
+face supplied, against `corpus/ratchet.json` without one, and **65 % of all
+reported degradation was the absence of a face** — 973 files down to 343,
+and in qpdf's corpus 530 down to 110. A conforming file that names Helvetica
 and embeds nothing is one this engine could not draw, which makes the absence
 a conformance gap rather than only a policy
 ([features/fonts.md](docs/features/fonts.md)).

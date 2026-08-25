@@ -14,8 +14,10 @@
 //! The sampling policy is recorded in `docs/features/rasterizer.md`.
 
 use crate::blend::BlendMode;
-use crate::canvas::{Canvas, Color};
-use crate::fill::Mask;
+use crate::canvas::{mul255, Canvas, Color};
+use crate::fill::{fill, Mask};
+use crate::fragments::Fragments;
+use crate::geom::{FillRule, Path};
 
 /// A decoded image: its samples, and how many of them there are.
 ///
@@ -250,10 +252,10 @@ pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -
             filter: if interpolate {
                 Filter::Bilinear
             } else {
-                Filter::Nearest
+                Filter::Area
             },
             halvings: (0, 0),
-            footprint: (ONE, ONE),
+            footprint: (across.max(1), down.max(1)),
         };
     }
     let halvings = (halvings(across, image.width), halvings(down, image.height));
@@ -529,6 +531,104 @@ impl<'a> ImageDraw<'a> {
 /// needs are built into it and left there. Pass a fresh [`Pyramid::new`] to
 /// throw them away, or keep one beside the image to reuse them.
 pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyramid) {
+    let alpha = draw.alpha.clamp(0.0, 1.0);
+    let (width, height) = (canvas.width, canvas.height);
+    walk(
+        draw,
+        pyramid,
+        width,
+        height,
+        |px, py, color, covered, own| {
+            let clip = draw.clip.map_or(255, |mask| mask.at(px as i32, py as i32));
+            if clip == 0 {
+                return;
+            }
+            let effective = alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0
+                * f64::from(clip)
+                / 255.0;
+            canvas.blend_pixel_with(px, py, color, effective, draw.blend);
+        },
+    );
+}
+
+/// Adds an image draw to a run instead of compositing it.
+///
+/// The run's own graphics state — alpha, blend mode and clip — is applied when
+/// it reaches the canvas, so this deliberately ignores all three: a run is one
+/// element for compositing purposes, which is the whole reason abutting strips
+/// stop conflating. See [`crate::fragments`].
+///
+/// `bounds` is the canvas extent the draw is clipped to, which is the same
+/// extent [`draw_image`] would have used.
+pub fn accumulate_image(
+    fragments: &mut Fragments,
+    draw: &ImageDraw<'_>,
+    pyramid: &mut Pyramid,
+    canvas: (u32, u32),
+) {
+    walk(
+        draw,
+        pyramid,
+        canvas.0,
+        canvas.1,
+        |px, py, color, covered, own| {
+            fragments.add(
+                px,
+                py,
+                color,
+                mul255(u32::from(covered), u32::from(own)) as u8,
+            );
+        },
+    );
+}
+
+/// The device pixels an image draw can reach, as `(x0, y0, width, height)`.
+///
+/// What a caller needs to size a run before accumulating into one, and the
+/// same rectangle the draw itself will visit.
+#[must_use]
+pub fn image_bounds(t: &Transform, width: u32, height: u32) -> Option<(i32, i32, u32, u32)> {
+    let (x0, x1, y0, y1) = device_bounds(t, width, height)?;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0 as i32, y0 as i32, x1 - x0, y1 - y0))
+}
+
+/// The coverage an image draw puts on each device pixel of a region.
+///
+/// Exposed because a caller accumulating a run has to know whether a draw
+/// lands on coverage it is already holding before it adds any, and that
+/// question is about the geometry rather than the samples. The region is the
+/// caller's so the question can be asked of the band where two draws meet
+/// rather than of either draw whole.
+#[must_use]
+pub fn image_coverage(
+    t: &Transform,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Mask {
+    unit_quad(t, x0, y0, width, height, stop)
+}
+
+/// Walks the destination pixels of one image draw, handing each to `emit` as
+/// its colour, the share of the pixel the image's own rectangle covers, and
+/// the sample's own alpha.
+///
+/// The two consumers differ only in what they do with those: [`draw_image`]
+/// composites immediately, [`accumulate_image`] adds to a run. Splitting them
+/// any earlier than this would give the engine two samplers, which is exactly
+/// how the two would come to disagree about a boundary.
+fn walk(
+    draw: &ImageDraw<'_>,
+    pyramid: &mut Pyramid,
+    width: u32,
+    height: u32,
+    mut emit: impl FnMut(u32, u32, Color, u8, u8),
+) {
     let image = &draw.image;
     if image.width == 0 || image.height == 0 {
         return;
@@ -537,10 +637,34 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
         return; // A degenerate transform maps the image to nothing.
     };
 
-    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, canvas.width, canvas.height)
-    else {
+    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, width, height) else {
         return;
     };
+
+    // `device_bounds` clamps each edge to the canvas independently, so an
+    // image entirely off one side comes back with its far edge *below* its
+    // near one — 5000..100 for a stamp a page-width to the right. The draw
+    // loop's ranges are empty either way and always were; the coverage mask
+    // below would take its size from the difference, and an underflow there is
+    // a four-billion-pixel allocation rather than a wrong pixel (ruling 1).
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
+    // 8.9.5.2: the image occupies the unit square of its transform, and the
+    // edge of that square is where a destination pixel is only *partly*
+    // covered. Rasterised through the crate's own path filler rather than
+    // measured a second time here, so an image edge anti-aliases exactly as a
+    // filled path does — same sub-scanline grid, same fixed point, same
+    // cancellation. `docs/design/image-edges.md` records what this trades.
+    let shape = unit_quad(
+        &draw.unit_to_device,
+        x0 as i32,
+        y0 as i32,
+        x1 - x0,
+        y1 - y0,
+        draw.stop,
+    );
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
     let filter = sampling.filter;
@@ -548,39 +672,106 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
     // the policy asked for no reduction.
     let image = &pyramid.reduce(image, sampling.halvings);
 
-    let alpha = draw.alpha.clamp(0.0, 1.0);
     for py in y0..y1 {
         if draw.stop.is_some_and(|stop| stop()) {
             return;
         }
         for px in x0..x1 {
-            // Sample at the pixel's centre.
-            let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
-            if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+            let covered = shape.at(px as i32, py as i32);
+            if covered == 0 {
                 continue;
             }
+
+            // Sample at the pixel's centre, clamped into the unit square. The
+            // quad above decided how *much* of the pixel the image reaches; a
+            // centre just outside it still needs a colour, and an image has
+            // none outside itself, so the nearest edge is the answer — which
+            // is what `bilinear` already does between samples. A centre inside
+            // is untouched, so this reaches only the pixels the old
+            // containment test dropped whole.
+            let (u, v) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
+            let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
 
             let sample = match filter {
                 Filter::Nearest => nearest(image, u, v),
                 Filter::Bilinear => bilinear(image, u, v),
                 Filter::Area => area(image, u, v, sampling.footprint),
             };
-            let Some((r, g, b, coverage)) = sample else {
+            let Some((r, g, b, own)) = sample else {
                 continue;
             };
-            if coverage == 0 {
+            if own == 0 {
                 continue;
             }
-            let clip = draw.clip.map_or(255, |mask| mask.at(px as i32, py as i32));
-            if clip == 0 {
-                continue;
-            }
-
-            let effective = alpha * f64::from(coverage) / 255.0 * f64::from(clip) / 255.0;
-            let color = draw.tint.unwrap_or(Color::rgb(r, g, b));
-            canvas.blend_pixel_with(px, py, color, effective, draw.blend);
+            emit(
+                px,
+                py,
+                draw.tint.unwrap_or(Color::rgb(r, g, b)),
+                covered,
+                own,
+            );
         }
     }
+}
+
+/// The image's unit square in device space, as coverage over the pixels the
+/// draw visits.
+///
+/// 11.4.5 calls this the element's *shape*, and the render layer already
+/// builds the same quad for a knockout group's restore. Here it is the
+/// anti-aliasing: a pixel the square half covers takes half the paint.
+///
+/// The tolerance cannot matter — four corners and four straight edges have
+/// nothing to flatten — but `fill` takes one, so it is named rather than left
+/// as a bare number somebody would later try to tune.
+fn unit_quad(
+    t: &Transform,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Mask {
+    /// Unused: the quad has no curves.
+    const TOLERANCE: f64 = 0.2;
+
+    // Snapped to the sweep's own horizontal grid. `fill` takes a crossing as
+    // `(x * 256) as i64`, which truncates, and an image rectangle placed by a
+    // translation lands on a 1/256 boundary far more often than not — every
+    // strip of every scan does. The translation is exact but the arithmetic
+    // that applies it need not be: `a + (e - t)` and `(a + e) - t` differ by
+    // an ulp, and an ulp below a grid line truncates to the unit beneath it.
+    // Rounding here makes the two spellings the same coverage. `round` is one
+    // of the operations IEEE 754 pins exactly, so this costs no determinism
+    // (ruling 4). Found by the `crop` relation, which requires a cropped page
+    // to be the sub-rectangle of the whole one *exactly*, on `pclm-in.pdf`.
+    let snap = |value: f64| (value * 256.0).round() / 256.0;
+
+    let mut quad = Path::new();
+    for (index, (x, y)) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        .iter()
+        .enumerate()
+    {
+        let (x, y) = t.apply(*x, *y);
+        let (x, y) = (snap(x), snap(y));
+        if index == 0 {
+            quad.move_to(x, y);
+        } else {
+            quad.line_to(x, y);
+        }
+    }
+    quad.close();
+
+    fill(
+        &quad,
+        FillRule::NonZero,
+        x0,
+        y0,
+        width,
+        height,
+        TOLERANCE,
+        stop,
+    )
 }
 
 /// The destination pixels the unit square can reach, clipped to the canvas.
@@ -809,6 +1000,42 @@ mod tests {
         draw_image(canvas, &ImageDraw::new(*image, t), &mut Pyramid::new());
     }
 
+    /// An image wholly off the canvas draws nothing and **allocates nothing**.
+    ///
+    /// `device_bounds` clamps the near edge up to zero and the far edge down
+    /// to the canvas independently, so a placement past one side comes back
+    /// far-below-near — `5000..64` for the case below. The draw loop's ranges
+    /// were empty either way, which is why this was invisible until the
+    /// coverage mask started taking its *size* from the difference: the
+    /// subtraction underflowed and asked for four billion pixels. Found by the
+    /// qpdf corpus, on `pclm-out.pdf`, as a 1.2 TB allocation abort (ruling 1).
+    #[test]
+    fn an_image_entirely_off_the_canvas_costs_nothing() {
+        let rgb = ramp(8);
+        let image = ImageSource {
+            width: 8,
+            height: 8,
+            rgb: &rgb,
+            alpha: &[],
+        };
+        let mut canvas = Canvas::new(64, 64, PixelFormat::Rgb8, Color::WHITE);
+        for (e, f) in [(5000.0, 0.0), (-5000.0, 0.0), (0.0, 5000.0), (0.0, -5000.0)] {
+            let placement = Transform {
+                a: 32.0,
+                b: 0.0,
+                c: 0.0,
+                d: -32.0,
+                e,
+                f: f + 32.0,
+            };
+            draw(&mut canvas, &image, placement);
+        }
+        assert!(
+            canvas.data.iter().all(|byte| *byte == 255),
+            "an image off every side of the canvas left ink on it"
+        );
+    }
+
     #[test]
     fn a_one_to_one_blit_preserves_every_byte() {
         let rgb = ramp(8);
@@ -927,7 +1154,24 @@ mod tests {
     }
 
     /// Plan 07's first two rows: the flag is the only thing that decides
-    /// whether a magnified image is smoothed.
+    /// whether a magnified image is **smoothed**.
+    ///
+    /// The claim is about smoothing, and it still holds — but it is no longer
+    /// the same as "the filter is `Nearest`". Magnifying without the flag now
+    /// averages the destination pixel's *own* footprint, which above 1:1 is
+    /// smaller than one sample: a pixel inside a sample reads that sample and
+    /// nothing else, and only a pixel straddling the boundary between two
+    /// mixes them. That is the sample's edge anti-aliased, not the image
+    /// blurred, and it is what `/Interpolate false` asks for — hard pixels.
+    ///
+    /// Nearest was quantising every internal sample boundary to whole device
+    /// pixels, which is the same defect as the image's outer edge one level
+    /// down, and it is what the `dpi` corpus relation was breaking on: a
+    /// render at twice the scale resolves those boundaries twice as finely, so
+    /// box-filtering it back down could not reproduce the coarser render.
+    /// Measured on a 512-square source, share of pixels disagreeing between a
+    /// render and the box-filtered render at twice the scale: **49.9 % before,
+    /// 0.00 % after**, at every ratio tried.
     #[test]
     fn magnification_smooths_only_when_the_file_asks() {
         let rgb = ramp(2);
@@ -937,20 +1181,24 @@ mod tests {
             rgb: &rgb,
             alpha: &[],
         };
-        // Eight device pixels per axis for two samples: 4x.
-        assert_eq!(
-            sampling_for(&image, &over(8.0), false).filter,
-            Filter::Nearest
+        // Eight device pixels per axis for two samples: 4x. The footprint is a
+        // quarter of a sample, so the average has one sample to take except on
+        // a boundary.
+        let hard = sampling_for(&image, &over(8.0), false);
+        assert_eq!(hard.filter, Filter::Area);
+        assert!(
+            hard.footprint.0 < ONE && hard.footprint.1 < ONE,
+            "a magnified pixel covers less than a sample: {:?}",
+            hard.footprint
         );
         assert_eq!(
             sampling_for(&image, &over(8.0), true).filter,
             Filter::Bilinear
         );
-        // And at exactly 1:1, which must stay byte-preserving without the flag.
-        assert_eq!(
-            sampling_for(&image, &over(2.0), false).filter,
-            Filter::Nearest
-        );
+        // And at exactly 1:1 the footprint is exactly one sample, which is what
+        // keeps a 1:1 blit byte-preserving.
+        let one_to_one = sampling_for(&image, &over(2.0), false);
+        assert_eq!(one_to_one.footprint, (ONE, ONE));
     }
 
     #[test]

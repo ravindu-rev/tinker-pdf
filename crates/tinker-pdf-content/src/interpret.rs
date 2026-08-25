@@ -8,6 +8,8 @@
 use crate::device::{Device, Glyph, ImageRef, PathSegment};
 use crate::state::{GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode};
 use crate::tokenizer::{Token, Tokenizer};
+use core::mem;
+use std::sync::Arc;
 
 /// Everything the interpreter needs from a page's resources.
 ///
@@ -63,6 +65,29 @@ pub enum SoftMask {
     None,
     /// A group to render and read back as a mask.
     Group(Box<MaskGroup>),
+}
+
+/// Whichever resource dictionary is in force: the caller's, or a form's own.
+///
+/// A borrow while the page's own resources are in force, which is every
+/// content stream and most of every other one; owned only while a form that
+/// brought its own is running.
+enum Scope<'d, F> {
+    /// The caller's, borrowed for the whole run.
+    Borrowed(&'d F),
+    /// A form's own, shared with whatever cached it.
+    Owned(Arc<F>),
+}
+
+impl<F> core::ops::Deref for Scope<'_, F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        match self {
+            Scope::Borrowed(fonts) => fonts,
+            Scope::Owned(fonts) => fonts,
+        }
+    }
 }
 
 /// The `/SMask` dictionary's group, resolved (11.6.5.2).
@@ -144,6 +169,30 @@ pub trait FontSource {
     /// A form XObject, when the interpreter should recurse into one.
     /// Returning `None` skips it.
     fn form(&self, name: &[u8]) -> Option<Form> {
+        let _ = name;
+        None
+    }
+
+    /// The resources a form XObject brings with it, if it has its own.
+    ///
+    /// 8.10.1: a form's `/Resources` names what its content stream may refer
+    /// to, and a form written beside one document and pasted into another
+    /// brings the only dictionary its names resolve in. Returning `None` keeps
+    /// the invoking scope, which is what a form that omits the key relies on
+    /// and what every reader does.
+    ///
+    /// The device is asked the same question at the same moment, by name,
+    /// through [`Device::begin_form`] — the two seams resolve the same form
+    /// independently rather than passing a resource object between them, which
+    /// is what keeps a crate that must not know what a resource dictionary is
+    /// from having to hold one.
+    /// Shared rather than owned, and cached by the implementor: a page that
+    /// invokes one form a thousand times must not build its resources a
+    /// thousand times. Two corpus files stalled outright when it did.
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
         let _ = name;
         None
     }
@@ -256,7 +305,7 @@ pub fn interpret<D: Device, F: FontSource>(
 ) {
     let mut interp = Interpreter {
         device,
-        fonts,
+        fonts: Scope::Borrowed(fonts),
         stack: Vec::new(),
         gs: GraphicsState::new(initial),
         saved: Vec::new(),
@@ -278,7 +327,7 @@ pub fn interpret<D: Device, F: FontSource>(
 
 struct Interpreter<'d, D: Device, F: FontSource> {
     device: &'d mut D,
-    fonts: &'d F,
+    fonts: Scope<'d, F>,
     stack: Vec<Token>,
     gs: GraphicsState,
     saved: Vec<GraphicsState>,
@@ -1024,9 +1073,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             return;
         }
         let id = self.fonts.font_id(name);
-        if !self.device.begin_form(id) {
+        // 8.10.1: a form may bring its own resources, and the device is asked
+        // for the same form by the same name so that both seams change scope
+        // together.
+        let nested = self.fonts.form_scope(name);
+        if !self.device.begin_form(id, name) {
             return;
         }
+        let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
 
         // 8.10.2: a form's /Matrix maps its space into the current one, and
         // its content runs with the surrounding state saved.
@@ -1092,6 +1146,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.path = saved_path;
         self.text_matrix = saved_text;
         self.line_matrix = saved_line;
+        if let Some(outer) = outer {
+            self.fonts = outer;
+        }
         self.device.end_form(id);
     }
 

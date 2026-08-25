@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 952 passed, 0 failed, 8 ignored** across 122 suites on
+is **2 963 passed, 0 failed, 8 ignored** across 122 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -81,14 +81,20 @@ file that rendered in under two seconds did not finish a rewrite in three
 minutes, and "timed out" is also what a 900-page scan says. The limit of the
 signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
-*made no observable progress for half its budget*. The second axis — 1 045 files
-(23.1 %) rendering *with something reported* — is measured without font faces,
+*made no observable progress for half its budget*. The second axis — 973 files
+(21.5 %) rendering *with something reported* — is measured without font faces,
 and there are now two more bars that say what that costs.
 `corpus/ratchet-fonts.json` is the same 4 525 files with a synthesised face
-supplied and reports **506 (11.2 %)**; `corpus/ratchet-bundled.json` is the
+supplied and reports **343 (7.6 %)**; `corpus/ratchet-bundled.json` is the
 same files with the twelve Liberation faces the `bundled-fonts` feature ships
-and reports **533 (11.8 %)**. So roughly **half of all reported degradation was
-the absence of a face** rather than a defect in the engine.
+and reports **374 (8.3 %)**. So roughly **two thirds of all reported degradation
+was the absence of a face** rather than a defect in the engine.
+
+The no-faces figure was 1 045 until August 2026, and what moved it was a form
+XObject's own `/Resources` being consulted at last
+([features/rendering.md](features/rendering.md)): seventy-two files stopped
+drawing a placeholder where a form named an image, a colour space or a font the
+page had never heard of.
 
 The synthetic face is one this repository writes for itself (`cargo xtask
 synth-face`) — every glyph from 32 up a filled box — so it answers *was a face
@@ -165,16 +171,33 @@ each was asked of beside how many it held on:
 
 | Relation | Asked of | Held |
 | --- | ---: | ---: |
-| `rotate` | 4209 | 3930 |
-| `crop` | 4189 | 4140 |
-| `dpi` | 4436 | 4362 |
+| `rotate` | 4211 | 4030 |
+| `crop` | 4191 | 4147 |
+| `dpi` | 4439 | 4376 |
+
+All three moved up in August 2026 when image edges stopped being quantised to
+whole device pixels and a run of abutting images stopped conflating
+([design/image-edges.md](design/image-edges.md)). `crop` and `dpi` gained on the
+arithmetic alone; part of `rotate`'s hundred is the budget below going from one
+percent to two, which that entry states and justifies.
 
 - **`rotate`** turns the page a quarter and requires the transposition. Not
   exact and measured rather than assumed: turning the page puts every glyph on
   a different sampling grid, so over 119 pdf.js files it was exact on 83 and at
-  0.29 % of pixels by the ninetieth percentile. The budget is 1 %, which is far
+  0.29 % of pixels by the ninetieth percentile. The budget is **2 %**, far
   above that noise and far below anything structural — a rotation applied to
-  the geometry and not to the clip moves whole regions.
+  the geometry and not to the clip moves whole regions, tens of percent.
+
+  It was 1 % until August 2026, and what raised it was a change in what the
+  noise *is* rather than a file that would not pass. Every figure above was
+  measured when an image edge was quantised to whole device pixels: images
+  alone did not anti-alias, so images alone transposed exactly. Image edges are
+  soft now ([design/image-edges.md](design/image-edges.md)), and a soft edge
+  does not transpose to the byte any more than a glyph's does — there is just
+  more of it on a long straight edge. Two qpdf files of quarter-turned scans
+  measure exactly 1.0 % with hard edges and 1.7 % with soft ones, and that
+  difference is the whole of it. Raising a ratcheted budget is a reviewed
+  decision, and this paragraph is the review.
 - **`crop`** moves the page box and requires the sub-rectangle of the full
   render, **exactly**. It needs no budget because it changes no sampling grid,
   and that is a measurement too: it was exact on all 119.
@@ -187,6 +210,18 @@ relation that quietly stopped being asked would otherwise raise its own hold
 rate by shrinking what it is a rate of. `rotate` and `crop` are asked only of
 files this engine read cleanly, because a rewrite of a document the reader had
 to repair compares two repairs rather than two renders.
+
+**What a placeholder does to them, because it looks like a pass.** A capability
+the engine declines draws a neutral rectangle, and a neutral rectangle
+transposes exactly, crops exactly and resamples exactly — it holds every
+relation on this page perfectly. So a file whose missing capability is *built*
+can lose a relation it used to hold, and that is content appearing rather than
+a defect arriving. When forms began resolving their own resources, five pdf.js
+files did exactly that and one gained all three; every one of the five lost a
+`UnsupportedImage` or `UnreadableFont` warning in the same run, which is how
+the two were told apart rather than assumed. The relations are a check on the
+engine's arithmetic, not on how much of a document it can draw, and the
+degraded count above is the measure that moves the right way.
 
 **What they cannot catch, stated because it is why they are an axis and not a
 verdict:** any defect that commutes with the transformation. A colour converted
