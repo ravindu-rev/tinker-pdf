@@ -211,11 +211,90 @@ injection at the bottom of `jbig2.rs` already does.
 | 1 | Corpus census of the JBIG2 files | **Done.** `crates/tinker-pdf/tests/jbig2_census.rs` prints per-file SDHUFF/SBHUFF/SDREFAGG/SBREFINE/retention tallies; numbers recorded above; milestones 5 and 6 swapped by them | S |
 | 2 | Segment references + Annex A integer decoders | **Done.** `Segment` carries its number and referred-to list; `every_integer_range_and_oob_round_trips` covers all six A.2 fields at both ends and OOB, `the_symbol_index_procedure_round_trips_at_every_code_length` covers A.3 including `SBSYMCODELEN` zero; the committed fuzz seeds are replayed on stable by `tests/jbig2_seeds.rs` | M |
 | 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | **Done**, with one exit criterion changed and the change stated: symbols round-trip pixel-for-pixel against an `MqEncoder`-built dictionary over three height classes and all four templates; 6.5.10's export runs select across imported and new symbols; the variants this build declines refuse under `Jbig2VariantSkipped`. Annex H.2's *published symbol bitmaps* are not in this repository — H.1's datastream is, its generic-region picture is, its symbol pictures are not — so the pixel-for-pixel claim is against a fixture this repository builds rather than against the standard. Milestone 4 recovers the standard's own adjudication: the annex's text region composites those symbols into a page, and that page can be compared with what H.1 publishes | M |
-| 4 | Text region, arithmetic (SBREFINE refused by name) | `ANNEX_H` page with arithmetic text region matches the published page bitmap in its window; `a_symbol_dictionary_file_refuses_and_says_so` flips to a success assertion; `Jbig2RefinementSkipped` reachability test passes; seed-writer test emits the new fixtures | M |
+| 4 | Text region, arithmetic (SBREFINE and TRANSPOSED refused by name) | **Done**, with the exit criterion changed and the change stated below: `a_text_region_places_its_symbols_where_6_4_5_computes` places symbols across two strips at the coordinates 6.4.5 computes, through a round trip; `a_text_region_whose_dictionary_refused_is_refused_by_name` holds a region whose referred-to dictionary is absent or refused to refusing **whole**; all four reference corners handled, SBDSOFFSET and multi-strip regions decoded. The annex's own page moves to milestone 6 | M |
 | 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
 | 7 | Bounds and fuzz hardening | `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES`, `MAX_JBIG2_TEXT_INSTANCES` rows in `bounds_ledger.rs`, each measured against a real `jbig2enc`/OCRmyPDF output and none refusing it; a recorded fuzz session over the extended seeds with zero crashes | S |
 | 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; every JBIG2-bearing corpus file renders without a placeholder warning, counted; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |
+
+### What Annex H.1 cannot adjudicate, and when it can
+
+Milestone 3's row promised that *"milestone 4 recovers the standard's own
+adjudication: the annex's text region composites those symbols into a page, and
+that page can be compared with what H.1 publishes."* It does not, and the reason
+is worth recording rather than working around.
+
+Annex H.1's page 2 codes its text region arithmetically — segment 10 — but that
+segment refers to segments **0 and 9**, and segment 0 is *page 1's Huffman
+symbol dictionary*. 7.4.3 numbers a text region's symbols across the
+concatenation of every dictionary it refers to, in reference order, so with
+segment 0 refused the numbering is short by that dictionary's exports and every
+instance would draw a different symbol at the right place. The annex's
+arithmetic page depends on the Huffman variant, so its picture arrives at
+**milestone 6**, not here — and that is an argument for Huffman that the
+file-count tally does not make on its own.
+
+What this milestone lands instead is the refusal that situation demands, plus a
+round trip for the placement plumbing. Both are honest about what they are:
+
+- **The refusal is the load-bearing half.** A region whose referred-to
+  dictionary is absent or refused is refused whole, because drawing it
+  renumbered produces a page that looks like text and says something else —
+  the failure mode this lineage has that a generic region does not. It is
+  reached by the annex's own page 2, which is the fixture.
+- **The round trip proves plumbing, not convention.** Both sides share one
+  reading of 6.4.5, so it shows the strip coordinate accumulating, the
+  out-of-band value ending a strip rather than the region, the gap being
+  measured from the previous symbol's far edge rather than its origin, and the
+  symbol code being as wide as the count needs. It cannot show that the
+  placement convention itself is right. Nothing here can until milestone 6.
+
+### What the corpus said, which is better than either
+
+Measured after the milestone landed, over the 102 JBIG2-bearing corpus files,
+counting files whose render reports **any** JBIG2 warning (`tpdf probe`, 72 dpi,
+August 2026):
+
+| | files |
+| --- | ---: |
+| before | 65 |
+| after | **52** |
+| newly clean | 13 |
+| newly warning | 0 |
+
+The thirteen are worth listing, because of what they are named:
+
+```
+bitmap-symbol.pdf                     bitmap-symbol-textbottomleft.pdf
+bitmap-symbol-textcomposite.pdf       bitmap-symbol-textbottomright.pdf
+bitmap-symbol-big-segmentid.pdf       bitmap-symbol-texttopright.pdf
+bitmap-symbol-negative-sbdsoffset.pdf issue17871_bottom_right.pdf
+bitmap-composite-and-xnor-text.pdf    issue17871_top_right.pdf
+bitmap-composite-or-xor-replace-text.pdf  jbig2_symbol_offset.pdf
+issue20439.pdf
+```
+
+These are documents nobody here authored, written by somebody else to exercise
+precisely the parts of 6.4.5 that had to be derived rather than read: **three of
+the four reference corners by name**, a negative `SBDSOFFSET`, the combination
+operators, and a segment number wide enough to widen its own referred-to fields.
+A decoder that had the corner convention backwards would still produce no
+warning on them — so this is not proof — but it is a great deal better than a
+round trip against an encoder sharing one reading, and it is the strongest
+adjudication available before the annex's page arrives at milestone 6.
+
+The 52 that remain are the ones the census predicted: Huffman, refinement, and
+the halftone lineage that is a non-goal.
+
+One thing about the convention *is* settled by reading rather than by fixture,
+and it removes half the risk: 6.4.5 advances the running coordinate past the
+symbol's width **before** drawing for the two right-hand reference corners and
+**after** drawing for the two left-hand ones. Both orders leave the symbol's
+left edge at the value the coordinate held on entry and leave the coordinate at
+the symbol's far edge, so the horizontal placement is corner-independent and
+only the vertical coordinate branches on TOP versus BOTTOM. The census found all
+four corners in use — TOPLEFT in 48 of 58 regions, BOTTOMLEFT in 4, and three
+each of the right-hand pair — so none of them could have been skipped.
 
 ## Dependencies
 

@@ -45,7 +45,7 @@
 //! already uses. A region declaring 2^32 pixels is refused rather than
 //! attempted (ruling 1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::mq::{MqContexts, MqDecoder};
 use crate::{Capability, FilterError, Warning};
@@ -415,6 +415,23 @@ fn iaid_contexts(code_len: u32) -> usize {
     1usize << (code_len.min(31) + 1)
 }
 
+/// 7.4.1.5's external combination operators, over one pixel.
+///
+/// Shared by [`Bitmap::composite`] and the clipped placement a text region
+/// needs, so the two cannot come to disagree about what XNOR means.
+fn combine(destination: u32, source: u32, op: u8) -> u32 {
+    match op {
+        1 => source & destination,
+        2 => source ^ destination,
+        3 => !(source ^ destination) & 1,
+        4 => source,
+        // 0 is OR, and so is anything 7.4.1.5 leaves undefined: a region drawn
+        // with an operator nobody defined should still appear rather than
+        // erase what is under it.
+        _ => source | destination,
+    }
+}
+
 /// The most symbols one dictionary may export or decode.
 ///
 /// `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit and attacker-controlled, and
@@ -588,6 +605,214 @@ fn symbol_dictionary(
     Some(exported)
 }
 
+/// The most symbol instances one text region may place.
+///
+/// `SBNUMINSTANCES` is 32-bit and each instance is a composite over the region,
+/// so the count is work rather than memory and a per-instance bound would not
+/// bound it.
+const MAX_JBIG2_TEXT_INSTANCES: u32 = 1 << 22;
+
+/// 7.4.4.1.1's REFCORNER values.
+mod corner {
+    pub const TOPLEFT: u8 = 1;
+    pub const TOPRIGHT: u8 = 3;
+}
+
+/// **Clause 6.4: a text region**, arithmetic, without refinement.
+///
+/// Symbols arrive in *strips*: a vertical coordinate shared by a run of them,
+/// then along each strip a horizontal coordinate that accumulates, ended by the
+/// out-of-band value. Both coordinates are deltas all the way down, so a single
+/// misread leaves everything after it displaced rather than absent — which is
+/// why the corpus census measured which of these knobs real files use before
+/// any of this was written. Fifty-five of the corpus's fifty-eight text regions
+/// use more than one strip.
+///
+/// # Where a symbol goes
+///
+/// `REFCORNER` names which corner of the symbol its coordinate refers to, and
+/// the useful consequence is that **the horizontal placement does not depend on
+/// it**. 6.4.5 advances the running coordinate past the symbol's width *before*
+/// drawing for the two right-hand corners and *after* drawing for the two
+/// left-hand ones, so the symbol's left edge is the value the coordinate held on
+/// entry either way, and it ends at the symbol's far edge either way. The corner
+/// decides only whether the other coordinate names the top of the symbol or its
+/// bottom.
+fn text_region(
+    segment: &Segment<'_>,
+    symbols: &[Bitmap],
+    ceiling: usize,
+    warnings: &mut Vec<Warning>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut reader = Reader::new(segment.data);
+    let info = RegionInfo::read(&mut reader)?;
+    // 7.4.4.1.1.
+    let flags = reader.u16()?;
+    let huff = flags & 0x0001 != 0;
+    let refine = flags & 0x0002 != 0;
+    let log_strips = u32::from((flags >> 2) & 0x0003);
+    let corner = ((flags >> 4) & 0x0003) as u8;
+    let transposed = flags & 0x0040 != 0;
+    let comb_op = ((flags >> 7) & 0x0003) as u8;
+    let default_pixel = flags & 0x0200 != 0;
+    // Bits 10 to 14 are a signed five-bit field.
+    let ds_offset = {
+        let raw = i32::from((flags >> 10) & 0x001F);
+        if raw > 15 {
+            raw - 32
+        } else {
+            raw
+        }
+    };
+
+    if huff || refine || transposed {
+        // All three are scheduled, and the census counted each: Huffman fifteen
+        // files, refinement thirteen, transposed four.
+        note(warnings, Warning::Jbig2VariantSkipped);
+        return None;
+    }
+
+    // 7.4.4.5.
+    let instances = reader.u32()?;
+    if instances > MAX_JBIG2_TEXT_INSTANCES {
+        note(warnings, Warning::Jbig2SymbolLimitHit);
+        return None;
+    }
+    if symbols.is_empty() {
+        // Every instance names a symbol; with no dictionary behind it there is
+        // nothing to place, and an empty region is not a region.
+        note(warnings, Warning::Jbig2SegmentSkipped);
+        return None;
+    }
+
+    let code_len = symbol_code_length(symbols.len());
+    let strips = 1i64 << log_strips;
+
+    let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Warning::Jbig2RegionTooLarge);
+        return None;
+    };
+    if default_pixel {
+        region.fill_black();
+    }
+
+    let mut coder = MqDecoder::new(reader.rest());
+    let mut iadt = MqContexts::new(INT_CONTEXTS);
+    let mut iafs = MqContexts::new(INT_CONTEXTS);
+    let mut iads = MqContexts::new(INT_CONTEXTS);
+    let mut iait = MqContexts::new(INT_CONTEXTS);
+    let mut iaid = MqContexts::new(iaid_contexts(code_len));
+
+    // 6.4.5 step 1: the first strip coordinate is the negative of what is
+    // coded, which is what lets a region's first strip begin above its origin.
+    let mut strip_t = -i64::from(decode_int(&mut coder, &mut iadt)?) * strips;
+    let mut first_s: i64 = 0;
+    let mut placed = 0u32;
+
+    while placed < instances {
+        let delta = decode_int(&mut coder, &mut iadt)?;
+        strip_t = strip_t.checked_add(i64::from(delta).checked_mul(strips)?)?;
+
+        // A strip's first symbol is placed relative to the previous strip's
+        // first, not to the previous symbol.
+        first_s = first_s.checked_add(i64::from(decode_int(&mut coder, &mut iafs)?))?;
+        let mut cur_s = first_s;
+        let mut first = true;
+
+        loop {
+            if !first {
+                // OOB ends the strip. Anything else is the gap to the next
+                // symbol, measured from the far edge of the last one.
+                let Some(gap) = decode_int(&mut coder, &mut iads) else {
+                    break;
+                };
+                cur_s = cur_s
+                    .checked_add(i64::from(gap))?
+                    .checked_add(i64::from(ds_offset))?;
+            }
+            first = false;
+            if placed >= instances {
+                // More instances than the header promised, which is what sized
+                // the work; a longer region is a broken stream.
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+
+            let cur_t = if strips == 1 {
+                0
+            } else {
+                i64::from(decode_int(&mut coder, &mut iait)?)
+            };
+            let t = strip_t.checked_add(cur_t)?;
+            let id = decode_iaid(&mut coder, &mut iaid, code_len) as usize;
+            // A code the dictionary does not define is a damaged stream rather
+            // than a reason to stop: the last symbol stands in, which keeps the
+            // strip's coordinates advancing by a plausible width.
+            let symbol = symbols.get(id).or_else(|| symbols.last())?;
+
+            let width = i64::from(symbol.width);
+            let height = i64::from(symbol.height);
+            let x = cur_s;
+            let y = if corner == corner::TOPLEFT || corner == corner::TOPRIGHT {
+                t
+            } else {
+                t.checked_sub(height - 1)?
+            };
+            composite_signed(&mut region, symbol, x, y, comb_op);
+
+            cur_s = cur_s.checked_add(width - 1)?;
+            placed += 1;
+        }
+    }
+
+    Some((info, region))
+}
+
+/// 6.4.5's symbol code width: as many bits as the symbol count needs.
+fn symbol_code_length(count: usize) -> u32 {
+    let mut bits = 0u32;
+    while bits < 31 && (1usize << bits) < count {
+        bits += 1;
+    }
+    bits
+}
+
+/// [`Bitmap::composite`] at a coordinate that may be negative.
+///
+/// A symbol placed above or left of the region's origin is ordinary — 6.4.5's
+/// first strip coordinate is explicitly the negative of what is coded — and the
+/// part that falls outside is clipped rather than refused.
+fn composite_signed(into: &mut Bitmap, source: &Bitmap, x: i64, y: i64, op: u8) {
+    if x >= i64::from(into.width) || y >= i64::from(into.height) {
+        return;
+    }
+    if x >= 0 && y >= 0 {
+        into.composite(source, x as u32, y as u32, op);
+        return;
+    }
+    // The clipped case, pixel by pixel: `Bitmap::composite` takes an unsigned
+    // origin, and shifting the source instead would need a second bitmap.
+    for row in 0..source.height {
+        let Some(ty) = y.checked_add(i64::from(row)) else {
+            continue;
+        };
+        if ty < 0 || ty >= i64::from(into.height) {
+            continue;
+        }
+        for col in 0..source.width {
+            let Some(tx) = x.checked_add(i64::from(col)) else {
+                continue;
+            };
+            if tx < 0 || tx >= i64::from(into.width) {
+                continue;
+            }
+            let value = source.get(col as i32, row as i32);
+            let existing = into.get(tx as i32, ty as i32);
+            into.set(tx as u32, ty as u32, combine(existing, value, op));
+        }
+    }
+}
+
 /// Whether a segment type is one this build decodes.
 ///
 /// Everything else is skipped **and recorded**, which is what keeps the
@@ -597,6 +822,9 @@ fn understood(kind: u8) -> bool {
     matches!(
         kind,
         kind::SYMBOL_DICTIONARY
+            | kind::INTERMEDIATE_TEXT_REGION
+            | kind::IMMEDIATE_TEXT_REGION
+            | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
             | kind::IMMEDIATE_GENERIC_REGION
             | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
             | kind::PAGE_INFORMATION
@@ -626,9 +854,6 @@ fn carries_content(kind: u8) -> bool {
     matches!(
         kind,
         kind::INTERMEDIATE_GENERIC_REGION
-            | kind::INTERMEDIATE_TEXT_REGION
-            | kind::IMMEDIATE_TEXT_REGION
-            | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
             | kind::PATTERN_DICTIONARY
             | kind::INTERMEDIATE_HALFTONE_REGION
             | kind::IMMEDIATE_HALFTONE_REGION
@@ -676,6 +901,14 @@ struct Bitmap {
 impl Bitmap {
     /// An all-white bitmap, or `None` if it would exceed `ceiling` — the
     /// checked multiply of [`packed_size`], before any allocation.
+    /// Paints every pixel black (1 in JBIG2's sense, 6.2.2).
+    ///
+    /// 7.4.4.1.1's default pixel value: a text region may start from a black
+    /// page and knock symbols out of it.
+    fn fill_black(&mut self) {
+        self.bits.iter_mut().for_each(|byte| *byte = 0xFF);
+    }
+
     fn new(width: u32, height: u32, ceiling: usize) -> Option<Bitmap> {
         let bytes = packed_size(width, height, ceiling)?;
         Some(Bitmap {
@@ -746,17 +979,7 @@ impl Bitmap {
                 }
                 let s = source.get(sx as i32, sy as i32);
                 let d = self.get(dx as i32, dy as i32);
-                let value = match op {
-                    1 => s & d,
-                    2 => s ^ d,
-                    3 => !(s ^ d),
-                    4 => s,
-                    // 0 is OR, and so is anything 7.4.1.5 leaves undefined:
-                    // a region drawn with an operator nobody defined should
-                    // still appear rather than erase what is under it.
-                    _ => s | d,
-                };
-                self.set(dx, dy, value);
+                self.set(dx, dy, combine(d, s, op));
             }
         }
     }
@@ -1092,6 +1315,8 @@ pub fn decode(
     };
     let mut page = Page {
         symbols: BTreeMap::new(),
+        seen: BTreeSet::new(),
+        refused: BTreeSet::new(),
         bitmap,
         number: None,
         regions: 0,
@@ -1112,12 +1337,18 @@ pub fn decode(
         if !page.owns(segment) {
             continue;
         }
+        page.seen.insert(segment.number);
         match segment.kind {
             kind::PAGE_INFORMATION => page.begin(segment, warnings),
             kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION => {
                 page.draw_generic(segment, max_output, warnings);
             }
             kind::SYMBOL_DICTIONARY => page.read_symbols(segment, max_output, warnings),
+            kind::INTERMEDIATE_TEXT_REGION
+            | kind::IMMEDIATE_TEXT_REGION
+            | kind::IMMEDIATE_LOSSLESS_TEXT_REGION => {
+                page.draw_text(segment, max_output, warnings);
+            }
             _ => {}
         }
     }
@@ -1142,6 +1373,23 @@ struct Page {
     /// reference order*, and anything that iterates has to do so the same way
     /// on every target (ruling 4).
     symbols: BTreeMap<u32, Vec<Bitmap>>,
+    /// Every segment number this stream has offered, whatever its type.
+    ///
+    /// A text region refers to its dictionaries *and* to its custom tables, and
+    /// the two have to be told apart: a table contributes no symbols and is not
+    /// a gap, while a dictionary that is absent or refused is. A number that
+    /// was never seen at all is the second case — T.88 Annex H.1's page 2 is
+    /// exactly that, referring to a dictionary that belongs to page 1.
+    seen: BTreeSet<u32>,
+    /// Symbol dictionaries that were offered and refused, by segment number.
+    ///
+    /// A text region numbers its symbols across the *concatenation* of every
+    /// dictionary it refers to (7.4.3), so one missing dictionary does not cost
+    /// its own symbols — it renumbers all of them, and every instance after the
+    /// gap draws the wrong glyph at the right place. That is worse than drawing
+    /// nothing and it looks like a working decoder, so a region that refers to
+    /// one of these is refused whole.
+    refused: BTreeSet<u32>,
     /// The page association of the page information segment, once one has
     /// been seen. A multi-page JBIG2 file pasted into a PDF stream carries
     /// segments for pages this image is not, and compositing those would
@@ -1225,8 +1473,55 @@ impl Page {
             Some(exported) => {
                 self.symbols.insert(segment.number, exported);
             }
-            None => note(warnings, Warning::Jbig2SegmentSkipped),
+            None => {
+                self.refused.insert(segment.number);
+                note(warnings, Warning::Jbig2SegmentSkipped);
+            }
         }
+    }
+
+    /// 7.4.4: decodes a text region and composites it.
+    ///
+    /// Its symbols are the concatenation of the dictionaries it refers to, in
+    /// reference order (7.4.3) — the same rule a dictionary uses for its own
+    /// imports, and the reason both keep the referred-to list rather than the
+    /// set of it. The instance codes in the region are indices into that
+    /// concatenation, so a dictionary that was refused shortens the list and
+    /// every symbol after it would be the wrong one: a region whose referred-to
+    /// dictionaries did not all arrive is refused rather than drawn wrong.
+    ///
+    /// Like [`Page::draw_generic`], `regions` moves only when a bitmap actually
+    /// arrived, so a file whose only text region refused still reaches the
+    /// refusal instead of returning the blank page it was composited onto.
+    fn draw_text(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+        let dangling = |number: &u32| {
+            !self.symbols.contains_key(number)
+                && (self.refused.contains(number) || !self.seen.contains(number))
+        };
+        if segment.referred.iter().any(dangling) {
+            // T.88 Annex H.1's own page 2 is this case: its arithmetic text
+            // region refers to page 1's *Huffman* dictionary as well as its
+            // own, so until the Huffman variant lands the numbering is short by
+            // that dictionary's exports and every instance would draw the wrong
+            // symbol. Named rather than attempted.
+            note(warnings, Warning::Jbig2VariantSkipped);
+            return;
+        }
+        let mut symbols = Vec::new();
+        for number in &segment.referred {
+            // A referred-to segment that is not a dictionary at all is
+            // ordinary — a text region refers to its custom tables the same
+            // way — and contributes nothing to the numbering.
+            if let Some(exports) = self.symbols.get(number) {
+                symbols.extend(exports.iter().cloned());
+            }
+        }
+        let Some((info, region)) = text_region(segment, &symbols, ceiling, warnings) else {
+            note(warnings, Warning::Jbig2SegmentSkipped);
+            return;
+        };
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
     }
 
     /// Whether a segment's page association names this page.
@@ -1731,6 +2026,209 @@ mod tests {
         data
     }
 
+    /// One symbol instance for [`text_region_segment`].
+    struct Instance {
+        /// Which exported symbol, by index.
+        id: u32,
+        /// The gap from the previous instance's far edge, or `None` for the
+        /// first in a strip — which takes 6.4.5's `FIRSTS` delta instead.
+        gap: Option<i32>,
+        /// The coordinate within the strip, ignored when there is one strip.
+        t: i32,
+    }
+
+    /// A text region segment (7.4.4) over an arithmetic coder, laid out the way
+    /// [`symbol_dictionary_with_exports`] lays a dictionary out: one context
+    /// array with a base per procedure, which is the same stream the decoder's
+    /// array-per-procedure reads.
+    ///
+    /// `strips` is `SBSTRIPS`, and each strip is `(first_s_delta, instances)`.
+    fn text_region_segment(
+        width: u32,
+        height: u32,
+        corner: u8,
+        strips: u32,
+        symbols: usize,
+        strip_t: &[i32],
+        strip_rows: &[(i32, Vec<Instance>)],
+    ) -> Vec<u8> {
+        let log_strips = strips.trailing_zeros();
+        let instances: u32 = strip_rows.iter().map(|(_, run)| run.len() as u32).sum();
+
+        let mut data = Vec::new();
+        // 7.4.1: the region segment information field.
+        data.extend_from_slice(&width.to_be_bytes());
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // x
+        data.extend_from_slice(&0u32.to_be_bytes()); // y
+        data.push(0); // external combination operator: OR
+                      // 7.4.4.1.1: arithmetic, no refinement, no transposition, OR, and no
+                      // SBDSOFFSET — every knob this milestone does not implement is off, and
+                      // the ones it does are exercised by the fixtures rather than defaulted.
+        let flags = ((log_strips as u16) << 2) | (u16::from(corner) << 4);
+        data.extend_from_slice(&flags.to_be_bytes());
+        data.extend_from_slice(&instances.to_be_bytes());
+
+        let code_len = symbol_code_length(symbols);
+        let id_len = iaid_contexts(code_len);
+        let mut encoder = MqEncoder::new(INT_CONTEXTS * 4 + id_len);
+        let (iadt, iafs, iads, iait) = (0, INT_CONTEXTS, INT_CONTEXTS * 2, INT_CONTEXTS * 3);
+        let iaid = INT_CONTEXTS * 4;
+        let mut prevs = [1usize; 4];
+
+        // 6.4.5 step 1: the initial strip coordinate, negated by the decoder.
+        encode_int_at(&mut encoder, iadt, &mut prevs[0], Some(0));
+        for (index, (first_s, run)) in strip_rows.iter().enumerate() {
+            let delta = strip_t.get(index).copied().unwrap_or(0);
+            encode_int_at(&mut encoder, iadt, &mut prevs[0], Some(delta));
+            encode_int_at(&mut encoder, iafs, &mut prevs[1], Some(*first_s));
+            for instance in run {
+                if let Some(gap) = instance.gap {
+                    encode_int_at(&mut encoder, iads, &mut prevs[2], Some(gap));
+                }
+                if strips > 1 {
+                    encode_int_at(&mut encoder, iait, &mut prevs[3], Some(instance.t));
+                }
+                // A.3: the symbol code is a fixed-width tree walk rather than
+                // one of Annex A's integer procedures.
+                let mut prev = 1usize;
+                for bit in (0..code_len).rev() {
+                    let d = ((instance.id >> bit) & 1) as u8;
+                    encoder.encode_at(iaid + prev, d);
+                    prev = (prev << 1) | usize::from(d);
+                }
+            }
+            // OOB ends the strip.
+            encode_int_at(&mut encoder, iads, &mut prevs[2], None);
+        }
+
+        data.extend(encoder.flush());
+        data
+    }
+
+    /// **Milestone 4.** A text region places the symbols a dictionary exported,
+    /// at the coordinates 6.4.5 computes, across two strips.
+    ///
+    /// The fixture is a round trip against an encoder written from the same
+    /// clause, so what it proves is that the *plumbing* holds: the strip
+    /// coordinate accumulating, the out-of-band value ending a strip rather
+    /// than the region, the gap being measured from the previous symbol's far
+    /// edge rather than its origin, the symbol code being as wide as the count
+    /// needs, and the region landing where its segment says. It cannot prove
+    /// the placement convention itself — both sides share one reading of the
+    /// clause — and T.88 Annex H.1's own page cannot either, for a reason the
+    /// test below records.
+    #[test]
+    fn a_text_region_places_its_symbols_where_6_4_5_computes() {
+        // Two symbols, two and three wide, both two high.
+        let dictionary = symbol_dictionary_data(&[&[&["##", "##"], &["###", "###"]]], 0);
+        let region = text_region_segment(
+            12,
+            6,
+            corner::TOPLEFT,
+            1,
+            2,
+            &[0, 3],
+            &[
+                (
+                    0,
+                    vec![
+                        Instance {
+                            id: 0,
+                            gap: None,
+                            t: 0,
+                        },
+                        // The first symbol is two wide, so the running
+                        // coordinate stands at 1 and a gap of 3 puts this one
+                        // at 4 — which is what "from the far edge" means.
+                        Instance {
+                            id: 1,
+                            gap: Some(3),
+                            t: 0,
+                        },
+                    ],
+                ),
+                (
+                    1,
+                    vec![Instance {
+                        id: 0,
+                        gap: None,
+                        t: 0,
+                    }],
+                ),
+            ],
+        );
+
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(12, 6, 0));
+        stream.extend(header(1, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        stream.extend(header_referring(
+            2,
+            kind::IMMEDIATE_TEXT_REGION,
+            1,
+            &[1],
+            &region,
+        ));
+
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 12,
+            height: 6,
+        };
+        let bits = decode(&stream, &params, 1 << 20, &mut warnings)
+            .expect("an arithmetic text region is decoded");
+        assert_eq!(
+            picture(&bits, 12, 6),
+            [
+                "##..###.....",
+                "##..###.....",
+                "............",
+                ".##.........",
+                ".##.........",
+                "............",
+            ],
+            "warnings: {warnings:?}"
+        );
+    }
+
+    /// A text region whose dictionary refused is refused **whole**, by name.
+    ///
+    /// 7.4.3 numbers a region's symbols across the concatenation of every
+    /// dictionary it refers to, so a missing one does not cost its own symbols
+    /// — it renumbers all of them, and every instance after the gap draws the
+    /// wrong symbol at the right place. A decoder that carried on would produce
+    /// a page that looks like text and says something else.
+    ///
+    /// **T.88 Annex H.1's page 2 is exactly this case**, which is why the
+    /// annex cannot adjudicate this milestone: its arithmetic text region
+    /// (segment 10) refers to segments 0 and 9, and segment 0 is page 1's
+    /// *Huffman* dictionary. The published page appears when the Huffman
+    /// variant lands, and until then this is what correct looks like.
+    #[test]
+    fn a_text_region_whose_dictionary_refused_is_refused_by_name() {
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 64,
+            height: 56,
+        };
+        let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings)
+            .expect("the page's generic region still decodes");
+
+        assert!(
+            warnings.contains(&Warning::Jbig2VariantSkipped),
+            "the text region refers to a Huffman dictionary and must say so: \
+             {warnings:?}"
+        );
+        // And it drew nothing: the text region sits in the page's top rows,
+        // above the generic region this build does decode.
+        let page = picture(&bits, 64, 56);
+        assert!(
+            page[0..11].iter().all(|row| !row.contains('#')),
+            "a refused text region put ink on the page"
+        );
+    }
+
     /// [`encode_int`] against a context array that begins at `base`.
     fn encode_int_at(encoder: &mut MqEncoder, base: usize, prev: &mut usize, value: Option<i32>) {
         *prev = 1;
@@ -2016,6 +2514,25 @@ mod tests {
         out
     }
 
+    /// [`header`], for a segment that refers to others (7.2.4, 7.2.5).
+    ///
+    /// The referred-to numbers are one byte each here, which 7.2.5 allows for
+    /// any segment numbered 256 or below — every fixture in this file is.
+    fn header_referring(number: u32, kind: u8, page: u8, refers: &[u32], data: &[u8]) -> Vec<u8> {
+        assert!(number <= 256 && refers.len() <= 4, "the short forms only");
+        let mut out = Vec::new();
+        out.extend_from_slice(&number.to_be_bytes());
+        out.push(kind & 0x3F);
+        out.push((refers.len() as u8) << 5);
+        for referred in refers {
+            out.push(*referred as u8);
+        }
+        out.push(page);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
     /// A page information segment's nineteen bytes (T.88 7.4.8).
     fn page_info(width: u32, height: u32, flags: u8) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2202,6 +2719,8 @@ mod tests {
     fn the_page_default_pixel_value_starts_the_page_black() {
         let mut page = Page {
             symbols: BTreeMap::new(),
+            seen: BTreeSet::new(),
+            refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
@@ -2226,6 +2745,8 @@ mod tests {
         let data = page_info(8, 8, 0);
         let mut page = Page {
             symbols: BTreeMap::new(),
+            seen: BTreeSet::new(),
+            refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,

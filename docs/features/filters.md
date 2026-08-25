@@ -51,19 +51,43 @@ MSB-first, rows byte-padded — exactly the shape `/BitsPerComponent 1`
 describes, so `/ImageMask`, `/Decode` and `/ColorSpace` compose with a fax
 the way they do with any other image.
 
-**JBIG2** (JBIG2Decode, 7.4.7; T.88): the generic-region lineage. The MQ
-arithmetic coder (T.88 Annex E) lives in its own module, `mq.rs`, shared with
-the JPEG 2000 tier-1 coder — T.88 Annex E and T.800 Annex C are the same coder
-— with `MqContexts::set_state` covering the one place the two callers differ
-(T.88 E.3.6 against T.800 Table D.7). Around it: clause 7 segment headers, the
-embedded organisation of D.3 with `/JBIG2Globals` read first, generic regions
-under templates 0–3 with AT pixels and typical prediction (TPGDON, 6.2.5.7),
-and MMR (6.2.6) through the same T.6 decoder a fax uses. Polarity is returned
-in JBIG2's own sense (1 = black, 6.2.2); the inversion belongs at the PDF
-boundary beside `/ImageMask` and `/Decode`. A file whose page composited no
-region — the symbol-dictionary lineage, see below — is refused rather than
-returned as a blank white page that reads as a successful decode of a blank
-scan.
+**JBIG2** (JBIG2Decode, 7.4.7; T.88): the generic-region and symbol lineages.
+The MQ arithmetic coder (T.88 Annex E) lives in its own module, `mq.rs`, shared
+with the JPEG 2000 tier-1 coder — T.88 Annex E and T.800 Annex C are the same
+coder — with `MqContexts::set_state` covering the one place the two callers
+differ (T.88 E.3.6 against T.800 Table D.7). Around it: clause 7 segment
+headers with their referred-to lists, the embedded organisation of D.3 with
+`/JBIG2Globals` read first, generic regions under templates 0–3 with AT pixels
+and typical prediction (TPGDON, 6.2.5.7), and MMR (6.2.6) through the same T.6
+decoder a fax uses.
+
+**Symbol dictionaries (6.5) and text regions (6.4) decode, arithmetically**:
+Annex A's integer procedures and A.3's symbol-index procedure over the shared
+coder; 6.5's height classes with one coder and one adaptive context set carried
+across every symbol in a dictionary, as 6.5.8.1 requires; 6.5.10's export runs
+selecting across imported and new symbols; and 6.4.5's strip decoding — the
+strip coordinate accumulating, the out-of-band value ending a strip, gaps
+measured from the previous symbol's far edge, `SBDSOFFSET`, multi-strip regions
+and all four reference corners. What a dictionary exports is keyed by segment
+number, and a region's symbols are the concatenation of its referred-to
+dictionaries' exports *in reference order* (7.4.3).
+
+That last rule is why a region whose referred-to dictionary is **absent or
+refused is refused whole** rather than drawn from what did arrive: the
+numbering is shared, so a missing dictionary does not cost its own symbols, it
+renumbers all of them and every instance draws a different symbol at the right
+place — a page that looks like text and says something else. T.88 Annex H.1's
+own page 2 is that case, its arithmetic text region referring to page 1's
+Huffman dictionary.
+
+Measured over the corpus's 102 JBIG2-bearing files in August 2026, counting
+files whose render reports any JBIG2 warning: **65 before this lineage landed,
+52 after**, and none gained one.
+
+Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
+belongs at the PDF boundary beside `/ImageMask` and `/Decode`. A file whose
+page composited no region at all is refused rather than returned as a blank
+white page that reads as a successful decode of a blank scan.
 
 **JPEG 2000** (JPXDecode, 7.4.9; T.800): the JP2/JPX box container of Annex I
 and bare J2K codestreams, Annex A marker segments with COC and QCC overriding
@@ -124,7 +148,10 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| JBIG2 symbol dictionary + text region (T.88 6.4, 6.5) | `FilterError::Unsupported(Capability::Jbig2)`, reason in `Warning::Jbig2SegmentSkipped` | The common OCR-pipeline output; a page with no composited region draws the placeholder rather than a blank page reported as success | [ROADMAP](../ROADMAP.md) |
+| JBIG2 Huffman-coded dictionaries and text regions (SDHUFF, SBHUFF), refinement and aggregate coding (SDREFAGG, SBREFINE, segment types 40/42/43), and transposed text regions | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. Measured: of the 43 corpus files in this lineage, refinement unlocks 9 and Huffman 5 | [ROADMAP](../ROADMAP.md) |
+| JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | [ROADMAP](../ROADMAP.md) |
+| JBIG2 halftone regions and pattern dictionaries (6.6, 6.7; types 16, 20, 22, 23) | `Warning::Jbig2SegmentSkipped` | A third lineage; 16 corpus files carry it and nothing else | [ROADMAP](../ROADMAP.md) |
+| JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPX markers RGN, POC, PPM, PPT, CRG (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it | [ROADMAP](../ROADMAP.md) |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
