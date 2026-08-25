@@ -180,6 +180,21 @@ pub enum Warning {
     /// JBIG2: a region or page declared more pixels than the output ceiling
     /// allows, so it was refused rather than allocated.
     Jbig2RegionTooLarge,
+    /// JBIG2: a *variant* of a segment this build decodes — the Huffman or the
+    /// refinement coding of a symbol dictionary or text region, or a retained
+    /// context from another segment.
+    ///
+    /// Distinct from [`Warning::Jbig2SegmentSkipped`] on purpose. That one
+    /// means a lineage nobody has started; this one means a file that is one
+    /// scheduled milestone away, and the corpus census in
+    /// `docs/design/jbig2-symbol-text.md` counted how many files each is.
+    /// Folding the two together is how the residual after a capability lands
+    /// comes to look like the refusal it replaced.
+    Jbig2VariantSkipped,
+    /// JBIG2: a symbol dictionary asked for more symbols, or more pixels of
+    /// them, than the bounds allow — or promised a count its own data did not
+    /// keep to.
+    Jbig2SymbolLimitHit,
 
     // ---- JPEG 2000 (T.800) -----------------------------------------------
     //
@@ -299,6 +314,8 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
+            Self::Jbig2VariantSkipped => "jbig2-variant-skipped",
+            Self::Jbig2SymbolLimitHit => "jbig2-symbol-limit-hit",
             Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
             Self::JpxMarkerUnknown => "jpx-marker-unknown",
             Self::JpxStructureInvalid => "jpx-structure-invalid",
@@ -340,6 +357,8 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
+            Self::Jbig2VariantSkipped => "JBIG2 coding variant not decoded here",
+            Self::Jbig2SymbolLimitHit => "JBIG2 symbol dictionary past its bounds",
             Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
             Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
             Self::JpxStructureInvalid => "JPX codestream or box structure invalid",

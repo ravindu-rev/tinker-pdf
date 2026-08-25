@@ -45,6 +45,8 @@
 //! already uses. A region declaring 2^32 pixels is refused rather than
 //! attempted (ruling 1).
 
+use std::collections::BTreeMap;
+
 use crate::mq::{MqContexts, MqDecoder};
 use crate::{Capability, FilterError, Warning};
 
@@ -413,6 +415,179 @@ fn iaid_contexts(code_len: u32) -> usize {
     1usize << (code_len.min(31) + 1)
 }
 
+/// The most symbols one dictionary may export or decode.
+///
+/// `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit and attacker-controlled, and
+/// each new symbol is an allocation. Measured against real OCR output at
+/// milestone 7 of `docs/design/jbig2-symbol-text.md`; until then it is a
+/// ceiling rather than a ledger row, and it is generous enough that no page of
+/// text approaches it (ruling 1).
+const MAX_JBIG2_SYMBOLS: u32 = 100_000;
+
+/// The most pixels one dictionary's symbols may occupy in total.
+///
+/// A per-symbol bound is not a work bound once the count branches: ten thousand
+/// symbols of a thousand pixels each is a bitmap nobody asked for, and every
+/// one of them is individually reasonable.
+const MAX_JBIG2_SYMBOL_PIXELS: u64 = 1 << 26;
+
+/// **Clause 6.5: a symbol dictionary**, arithmetic, without refinement.
+///
+/// Returns the symbols the dictionary *exports* (6.5.10), which is a selection
+/// over its imported symbols followed by its new ones — not the new ones alone.
+/// A dictionary that re-exports what it imported is ordinary, and a text region
+/// numbers its symbols across the whole exported run.
+///
+/// `None` is the refusal, and the caller turns it into the named warning. What
+/// is refused here rather than decoded: the Huffman variant (SDHUFF), the
+/// refinement and aggregate variant (SDREFAGG), and a dictionary that consumes
+/// a retained context from another segment — all three are later milestones,
+/// and all three are counted in the corpus census that scheduled them.
+fn symbol_dictionary(
+    segment: &Segment<'_>,
+    imported: &[Bitmap],
+    ceiling: usize,
+    warnings: &mut Vec<Warning>,
+) -> Option<Vec<Bitmap>> {
+    let mut reader = Reader::new(segment.data);
+    // 7.4.3.1.1.
+    let flags = reader.u16()?;
+    let huff = flags & 0x0001 != 0;
+    let refagg = flags & 0x0002 != 0;
+    let context_used = flags & 0x0100 != 0;
+    let template = ((flags >> 10) & 0x0003) as u8;
+
+    if huff || refagg || context_used {
+        // Named rather than lumped in with "a segment type this build does not
+        // decode": these are variants of a segment it *does* decode, and the
+        // difference is what tells a file that needs milestone 5 from one that
+        // needs a lineage nobody has started.
+        note(warnings, Warning::Jbig2VariantSkipped);
+        return None;
+    }
+
+    // 7.4.3.1.2: four AT pairs for template 0, one for the others. Reading the
+    // wrong number puts the coded data at the wrong offset, so this decodes as
+    // noise rather than as a slightly wrong picture.
+    let mut at = NOMINAL_AT[template as usize];
+    let pairs = if template == 0 { 4 } else { 1 };
+    for slot in at.iter_mut().take(pairs) {
+        let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+            note(warnings, Warning::TruncatedInput);
+            return None;
+        };
+        *slot = (dx, dy);
+    }
+
+    // 7.4.3.1.4 and 7.4.3.1.5.
+    let num_ex = reader.u32()?;
+    let num_new = reader.u32()?;
+    if num_new > MAX_JBIG2_SYMBOLS || num_ex > MAX_JBIG2_SYMBOLS {
+        note(warnings, Warning::Jbig2SymbolLimitHit);
+        return None;
+    }
+
+    let mut coder = MqDecoder::new(reader.rest());
+    let mut generic = MqContexts::new(1 << template_bits(template));
+    // A.1: one context set per procedure, each 512 wide, all of them living as
+    // long as the dictionary does.
+    let mut iadh = MqContexts::new(INT_CONTEXTS);
+    let mut iadw = MqContexts::new(INT_CONTEXTS);
+    let mut iaex = MqContexts::new(INT_CONTEXTS);
+    let mut iaai = MqContexts::new(INT_CONTEXTS);
+    let _ = &mut iaai; // 6.5.8.2's aggregate count; unread until milestone 5.
+
+    let mut new_symbols: Vec<Bitmap> = Vec::new();
+    let mut spent: u64 = 0;
+    // 6.5.5: symbols arrive in height classes, each taller than the last.
+    let mut height: i64 = 0;
+    while (new_symbols.len() as u32) < num_new {
+        let delta = decode_int(&mut coder, &mut iadh)?;
+        height = height.checked_add(i64::from(delta))?;
+        if height <= 0 || height > i64::from(u32::MAX) {
+            note(warnings, Warning::Jbig2SymbolLimitHit);
+            return None;
+        }
+
+        // Within a class the widths accumulate too, and OOB ends the class.
+        let mut width: i64 = 0;
+        // The `None` here is OOB — a value the format defines to end the
+        // height class — rather than the reader running out of anything.
+        while let Some(delta) = decode_int(&mut coder, &mut iadw) {
+            width = width.checked_add(i64::from(delta))?;
+            if width <= 0 || width > i64::from(u32::MAX) {
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+            if (new_symbols.len() as u32) >= num_new {
+                // More symbols than the header promised. The header is what
+                // sized everything downstream, so this is a broken stream
+                // rather than a longer dictionary.
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+
+            spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
+            if spent > MAX_JBIG2_SYMBOL_PIXELS {
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+            let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
+                note(warnings, Warning::Jbig2RegionTooLarge);
+                return None;
+            };
+            // 6.5.8.1: the generic procedure, over the dictionary's own coder
+            // and context set. TPGDON is off for a symbol — 6.5.8.1 says so,
+            // and a symbol is too short for it to pay anyway.
+            decode_generic_into(&mut coder, &mut generic, template, false, &at, &mut symbol);
+            new_symbols.push(symbol);
+        }
+    }
+
+    // 6.5.10: the export flags are run lengths over the imported symbols
+    // followed by the new ones, alternating between runs that are not exported
+    // and runs that are, starting with the former.
+    let total = imported.len().checked_add(new_symbols.len())?;
+    let mut exported = Vec::new();
+    let mut index = 0usize;
+    let mut exporting = false;
+    while index < total {
+        let run = decode_int(&mut coder, &mut iaex)?;
+        if run < 0 {
+            return None;
+        }
+        let run = run as usize;
+        if exporting {
+            for offset in 0..run {
+                let at = index.checked_add(offset)?;
+                if at >= total {
+                    break;
+                }
+                let symbol = if at < imported.len() {
+                    imported.get(at)?.clone()
+                } else {
+                    new_symbols.get(at - imported.len())?.clone()
+                };
+                exported.push(symbol);
+            }
+        }
+        index = index.checked_add(run)?;
+        exporting = !exporting;
+        if run == 0 && index == 0 && exported.is_empty() && !exporting {
+            // A pair of zero-length runs makes no progress and would spin.
+            break;
+        }
+    }
+
+    if exported.len() as u32 != num_ex {
+        // The count the header promised is what a text region will index
+        // against, so a disagreement is not a smaller dictionary.
+        note(warnings, Warning::Jbig2SymbolLimitHit);
+        return None;
+    }
+    Some(exported)
+}
+
 /// Whether a segment type is one this build decodes.
 ///
 /// Everything else is skipped **and recorded**, which is what keeps the
@@ -421,7 +596,8 @@ fn iaid_contexts(code_len: u32) -> usize {
 fn understood(kind: u8) -> bool {
     matches!(
         kind,
-        kind::IMMEDIATE_GENERIC_REGION
+        kind::SYMBOL_DICTIONARY
+            | kind::IMMEDIATE_GENERIC_REGION
             | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
             | kind::PAGE_INFORMATION
             | kind::END_OF_PAGE
@@ -450,7 +626,6 @@ fn carries_content(kind: u8) -> bool {
     matches!(
         kind,
         kind::INTERMEDIATE_GENERIC_REGION
-            | kind::SYMBOL_DICTIONARY
             | kind::INTERMEDIATE_TEXT_REGION
             | kind::IMMEDIATE_TEXT_REGION
             | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
@@ -750,13 +925,32 @@ fn decode_arithmetic(
 ) {
     let mut coder = MqDecoder::new(data);
     let mut contexts = MqContexts::new(1 << template_bits(template));
+    decode_generic_into(&mut coder, &mut contexts, template, tpgdon, at, into);
+}
+
+/// 6.2.5.7's row loop, over a coder and a context set the **caller** owns.
+///
+/// A region is one bitmap and can keep both to itself, which is what
+/// [`decode_arithmetic`] does. A symbol dictionary cannot: 6.5.8.1 decodes
+/// every symbol in the dictionary from one coder with one adaptive context set
+/// carried across all of them, so the state that makes symbol two cheap is the
+/// state symbol one left behind. Restarting either per symbol decodes the
+/// first one correctly and then noise.
+fn decode_generic_into(
+    coder: &mut MqDecoder<'_>,
+    contexts: &mut MqContexts,
+    template: u8,
+    tpgdon: bool,
+    at: &[(i8, i8); 4],
+    into: &mut Bitmap,
+) {
     let mut ltp = 0u8;
 
     for y in 0..into.height {
         if tpgdon {
             // 6.2.5.7: one decision per row against a context the standard
             // fixes, toggling "this row is the same as the last one".
-            ltp ^= coder.decode_at(&mut contexts, tpgdon_context(template));
+            ltp ^= coder.decode_at(contexts, tpgdon_context(template));
             if ltp == 1 {
                 if y > 0 {
                     into.copy_row(y - 1, y);
@@ -766,7 +960,7 @@ fn decode_arithmetic(
         }
         for x in 0..into.width {
             let cx = context(into, template, at, x as i32, y as i32);
-            let pixel = coder.decode_at(&mut contexts, cx);
+            let pixel = coder.decode_at(contexts, cx);
             into.set(x, y, u32::from(pixel));
         }
     }
@@ -897,6 +1091,7 @@ pub fn decode(
         return Err(FilterError::Unsupported(Capability::Jbig2));
     };
     let mut page = Page {
+        symbols: BTreeMap::new(),
         bitmap,
         number: None,
         regions: 0,
@@ -922,6 +1117,7 @@ pub fn decode(
             kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION => {
                 page.draw_generic(segment, max_output, warnings);
             }
+            kind::SYMBOL_DICTIONARY => page.read_symbols(segment, max_output, warnings),
             _ => {}
         }
     }
@@ -939,6 +1135,13 @@ pub fn decode(
 struct Page {
     /// Packed 1-bpp rows, most significant bit first, 1 = black.
     bitmap: Bitmap,
+    /// What each symbol dictionary exported, by its segment number (7.4.3).
+    ///
+    /// A `BTreeMap` rather than a hash map because a text region's symbol list
+    /// is the concatenation of its referred-to dictionaries' exports *in
+    /// reference order*, and anything that iterates has to do so the same way
+    /// on every target (ruling 4).
+    symbols: BTreeMap<u32, Vec<Bitmap>>,
     /// The page association of the page information segment, once one has
     /// been seen. A multi-page JBIG2 file pasted into a PDF stream carries
     /// segments for pages this image is not, and compositing those would
@@ -998,6 +1201,32 @@ impl Page {
         };
         self.bitmap.composite(&region, info.x, info.y, info.op);
         self.regions += 1;
+    }
+
+    /// 7.4.3: decodes a symbol dictionary and keeps what it exported.
+    ///
+    /// Nothing draws yet — a dictionary is not a region and does not count as
+    /// one, so a file of dictionaries alone still refuses. The text region that
+    /// reads these is the next milestone.
+    ///
+    /// Its imports are the concatenation of the dictionaries it refers to, in
+    /// reference order (7.4.3). A reference this file has not seen is not an
+    /// error here: it leaves the import list short, the export count then
+    /// disagrees with the header, and the dictionary refuses by name rather
+    /// than exporting symbols numbered against a list that was never built.
+    fn read_symbols(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+        let mut imported = Vec::new();
+        for number in &segment.referred {
+            if let Some(exports) = self.symbols.get(number) {
+                imported.extend(exports.iter().cloned());
+            }
+        }
+        match symbol_dictionary(segment, &imported, ceiling, warnings) {
+            Some(exported) => {
+                self.symbols.insert(segment.number, exported);
+            }
+            None => note(warnings, Warning::Jbig2SegmentSkipped),
+        }
     }
 
     /// Whether a segment's page association names this page.
@@ -1406,6 +1635,306 @@ mod tests {
     /// bitmap, which is the same thing: every template reads only pixels
     /// above the current row or left of it on it, so by the time a decoder
     /// forms a context it holds exactly these values.
+    /// Encodes a symbol dictionary segment's data part (7.4.3 and 6.5), the
+    /// arithmetic variant, exporting every new symbol.
+    ///
+    /// The mirror of [`symbol_dictionary`], written from the clause: height
+    /// classes in ascending order, widths accumulating inside each, OOB to end
+    /// a class, and 6.5.10's alternating export runs. One coder and one
+    /// generic context set across the whole dictionary, which is the thing the
+    /// round trip is really checking.
+    fn symbol_dictionary_data(classes: &[&[&[&str]]], template: u8) -> Vec<u8> {
+        let count: usize = classes.iter().map(|class| class.len()).sum();
+        symbol_dictionary_with_exports(
+            classes,
+            template,
+            &[Some(0), Some(count as i32)],
+            count as u32,
+        )
+    }
+
+    /// The same, with 6.5.10's export runs and the promised count given
+    /// explicitly, so a test can select across imported symbols or promise a
+    /// count the data does not keep.
+    fn symbol_dictionary_with_exports(
+        classes: &[&[&[&str]]],
+        template: u8,
+        runs: &[Option<i32>],
+        num_ex: u32,
+    ) -> Vec<u8> {
+        let at = NOMINAL_AT[template as usize];
+        let count: usize = classes.iter().map(|class| class.len()).sum();
+
+        let mut data = Vec::new();
+        // 7.4.3.1.1: arithmetic, no refinement, this template.
+        data.extend_from_slice(&(u16::from(template) << 10).to_be_bytes());
+        for (dx, dy) in at.iter().take(if template == 0 { 4 } else { 1 }) {
+            data.push(*dx as u8);
+            data.push(*dy as u8);
+        }
+        data.extend_from_slice(&num_ex.to_be_bytes()); // SDNUMEXSYMS
+        data.extend_from_slice(&(count as u32).to_be_bytes()); // SDNUMNEWSYMS
+
+        // The decoder keeps one `MqContexts` array per procedure; the encoder
+        // has a single array, so the procedures are laid out end to end in it
+        // and each is given a base. Context states are per index either way,
+        // and the coder's own registers are shared either way, which is what
+        // makes the two arrangements the same stream.
+        let generic_len = 1usize << template_bits(template);
+        let mut encoder = MqEncoder::new(generic_len + INT_CONTEXTS * 3);
+        let mut height = 0i64;
+        let mut prevs = [1usize; 3]; // IADH, IADW, IAEX.
+        let iadh = generic_len;
+        let iadw = iadh + INT_CONTEXTS;
+        let iaex = iadw + INT_CONTEXTS;
+
+        for class in classes {
+            let class_height = class
+                .first()
+                .map(|rows| rows.len() as i64)
+                .unwrap_or_default();
+            encode_int_at(
+                &mut encoder,
+                iadh,
+                &mut prevs[0],
+                Some((class_height - height) as i32),
+            );
+            height = class_height;
+
+            let mut width = 0i64;
+            for rows in *class {
+                let symbol = bitmap_from(rows);
+                encode_int_at(
+                    &mut encoder,
+                    iadw,
+                    &mut prevs[1],
+                    Some((i64::from(symbol.width) - width) as i32),
+                );
+                width = i64::from(symbol.width);
+                for y in 0..symbol.height {
+                    for x in 0..symbol.width {
+                        let cx = context(&symbol, template, &at, x as i32, y as i32);
+                        encoder.encode_at(cx, symbol.get(x as i32, y as i32) as u8);
+                    }
+                }
+            }
+            // OOB ends the height class.
+            encode_int_at(&mut encoder, iadw, &mut prevs[1], None);
+        }
+
+        // 6.5.10: alternating runs, the first of them not exported.
+        for run in runs {
+            encode_int_at(&mut encoder, iaex, &mut prevs[2], *run);
+        }
+
+        data.extend(encoder.flush());
+        data
+    }
+
+    /// [`encode_int`] against a context array that begins at `base`.
+    fn encode_int_at(encoder: &mut MqEncoder, base: usize, prev: &mut usize, value: Option<i32>) {
+        *prev = 1;
+        let bit = |encoder: &mut MqEncoder, prev: &mut usize, d: u8| {
+            encoder.encode_at(base + *prev, d);
+            *prev = if *prev < 256 {
+                (*prev << 1) | usize::from(d)
+            } else {
+                (((*prev << 1) | usize::from(d)) & 511) | 256
+            };
+        };
+        let (sign, magnitude) = match value {
+            None => (1u8, 0i64),
+            Some(v) => (u8::from(v < 0), i64::from(v).abs()),
+        };
+        bit(encoder, prev, sign);
+        let which = INT_RANGES
+            .iter()
+            .rposition(|(first, _, _)| magnitude >= *first)
+            .unwrap_or(0);
+        for _ in 0..which {
+            bit(encoder, prev, 1);
+        }
+        if which < INT_RANGES.len() - 1 {
+            bit(encoder, prev, 0);
+        }
+        let (_, width, offset) = INT_RANGES[which];
+        let field = magnitude - offset;
+        for index in (0..width).rev() {
+            bit(encoder, prev, ((field >> index) & 1) as u8);
+        }
+    }
+
+    /// **A symbol dictionary decodes back the symbols it was built from**,
+    /// pixel for pixel, across several height classes.
+    ///
+    /// Clause 6.5's shape is two nested accumulations — heights across classes,
+    /// widths inside one — ended by an out-of-band value, and every symbol
+    /// after the first is decoded from adaptive state the ones before it left
+    /// behind (6.5.8.1). So the interesting failures are all *downstream*: a
+    /// build that restarts the contexts per symbol, or loses the width
+    /// accumulator, or reads OOB as a width, decodes symbol one correctly and
+    /// then noise. Three classes with several symbols each is the smallest
+    /// fixture where all three of those show.
+    ///
+    /// The symbols are asymmetric on both axes on purpose: a transposed
+    /// width and height, or a row and column swapped in the context, survives
+    /// any square fixture.
+    #[test]
+    fn a_symbol_dictionary_round_trips_its_symbols() {
+        let short: [&[&str]; 2] = [&["#..#", ".##.", "#..#"], &["####", "#...", "#..#"]];
+        let tall: [&[&str]; 3] = [
+            &["#.", "##", "#.", "..", "#."],
+            &["#####", ".#...", ".#...", ".#...", "..###"],
+            &["#", "#", "#", "#", "."],
+        ];
+        let taller: [&[&str]; 1] = [&[
+            "#..#..#", "......#", "#######", ".#...#.", "#.....#", "##...##", "....#..",
+        ]];
+        let classes: [&[&[&str]]; 3] = [&short, &tall, &taller];
+
+        for template in 0..4u8 {
+            let data = symbol_dictionary_data(&classes, template);
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+            };
+            let mut warnings = Vec::new();
+            let exported = symbol_dictionary(&segment, &[], 1 << 20, &mut warnings)
+                .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
+
+            let expected: Vec<&[&str]> = classes.iter().flat_map(|c| c.iter().copied()).collect();
+            assert_eq!(exported.len(), expected.len(), "template {template}");
+            for (index, rows) in expected.iter().enumerate() {
+                let want = bitmap_from(rows);
+                let got = &exported[index];
+                assert_eq!(
+                    (got.width, got.height),
+                    (want.width, want.height),
+                    "template {template}, symbol {index}: dimensions"
+                );
+                for y in 0..want.height {
+                    for x in 0..want.width {
+                        assert_eq!(
+                            got.get(x as i32, y as i32),
+                            want.get(x as i32, y as i32),
+                            "template {template}, symbol {index}, pixel ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A dictionary exports what 6.5.10's runs select, out of its imported
+    /// symbols as well as its new ones.**
+    ///
+    /// The export flags run over the imported symbols *followed by* the new
+    /// ones, so a dictionary can re-export what it was given, drop what it
+    /// decoded, or interleave the two — and a text region numbers its symbols
+    /// across whatever comes out. A build that exported only the new symbols
+    /// passes every single-dictionary fixture and then puts the wrong glyph on
+    /// every page of a document whose dictionaries chain.
+    #[test]
+    fn export_runs_select_across_imported_and_new_symbols() {
+        let new_symbols: [&[&str]; 2] = [&["##", ".#"], &["#.", "##"]];
+        let classes: [&[&[&str]]; 1] = [&new_symbols];
+        let imported = [bitmap_from(&["#"]), bitmap_from(&[".."])];
+
+        // Skip one, take two, skip one: the second imported symbol and the
+        // first new one.
+        let runs = [Some(1), Some(2), Some(1)];
+        let data = symbol_dictionary_with_exports(&classes, 0, &runs, 2);
+
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::SYMBOL_DICTIONARY,
+            page: 1,
+            data: &data,
+        };
+        let mut warnings = Vec::new();
+        let exported = symbol_dictionary(&segment, &imported, 1 << 20, &mut warnings)
+            .unwrap_or_else(|| panic!("it did not decode: {warnings:?}"));
+
+        assert_eq!(exported.len(), 2, "two symbols were selected");
+        assert_eq!(
+            (exported[0].width, exported[0].height),
+            (2, 1),
+            "the first export is the second *imported* symbol, not a new one"
+        );
+        assert_eq!(
+            (exported[1].width, exported[1].height),
+            (2, 2),
+            "the second export is the first new symbol"
+        );
+    }
+
+    /// **Every variant this milestone does not decode refuses by its own
+    /// name**, rather than as the segment type nobody has started.
+    ///
+    /// `Jbig2SegmentSkipped` means a lineage with no work behind it;
+    /// `Jbig2VariantSkipped` means a file one scheduled milestone away. The
+    /// corpus census counted how many files each of those is, and folding them
+    /// together is how the residual after a capability lands comes to look
+    /// like the refusal it replaced.
+    #[test]
+    fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
+        // SDHUFF, SDREFAGG, and a consumed retained context.
+        for flags in [0x0001u16, 0x0002, 0x0100] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&flags.to_be_bytes());
+            data.extend_from_slice(&[0; 8]); // AT, template 0.
+            data.extend_from_slice(&1u32.to_be_bytes());
+            data.extend_from_slice(&1u32.to_be_bytes());
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none(),
+                "flags {flags:#06x} decoded"
+            );
+            assert_eq!(
+                warnings,
+                vec![Warning::Jbig2VariantSkipped],
+                "flags {flags:#06x} refused under the wrong name"
+            );
+        }
+    }
+
+    /// **A dictionary promising more symbols than it holds is refused**, not
+    /// truncated.
+    ///
+    /// `SDNUMEXSYMS` is what a text region indexes against, so a dictionary
+    /// that comes up short would silently renumber every symbol after the gap.
+    #[test]
+    fn a_dictionary_that_does_not_keep_its_promised_count_is_refused() {
+        let new_symbols: [&[&str]; 1] = [&["#"]];
+        let classes: [&[&[&str]]; 1] = [&new_symbols];
+        // One symbol encoded, two exports promised.
+        let data = symbol_dictionary_with_exports(&classes, 0, &[Some(0), Some(1)], 2);
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::SYMBOL_DICTIONARY,
+            page: 1,
+            data: &data,
+        };
+        let mut warnings = Vec::new();
+        assert!(symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none());
+        assert!(
+            warnings.contains(&Warning::Jbig2SymbolLimitHit),
+            "{warnings:?}"
+        );
+    }
+
     fn encode_arithmetic(
         source: &Bitmap,
         template: u8,
@@ -1650,10 +2179,17 @@ mod tests {
         );
         assert_eq!(
             warnings,
-            vec![Warning::Jbig2SegmentSkipped],
+            vec![Warning::TruncatedInput, Warning::Jbig2SegmentSkipped],
             "the globals' symbol dictionary has to be seen, or a file whose \
              whole payload is shared would refuse without saying why"
         );
+        // `TruncatedInput` is the stronger form of what this always
+        // asserted. The four bytes here stand in for a dictionary, and
+        // while nothing decoded one they were skipped unread; now that
+        // clause 6.5 runs, the same bytes are read far enough to be short
+        // of an AT pixel. A segment cannot be found truncated without
+        // having been reached, so the enumeration order this test is named
+        // for is what put it there.
     }
 
     /// 7.4.8.5 bit 2: a page that starts black.
@@ -1665,6 +2201,7 @@ mod tests {
     #[test]
     fn the_page_default_pixel_value_starts_the_page_black() {
         let mut page = Page {
+            symbols: BTreeMap::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
@@ -1688,6 +2225,7 @@ mod tests {
     fn a_segment_for_another_page_is_not_composited_onto_this_one() {
         let data = page_info(8, 8, 0);
         let mut page = Page {
+            symbols: BTreeMap::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,

@@ -141,6 +141,15 @@ arithmetic ≫ Huffman ≫ refinement, on the grounds that `jbig2enc` emits only
 arithmetic coding; the corpus is not all `jbig2enc`, and refinement unlocks
 nearly twice what Huffman does. That is what milestone 1 was for.
 
+**One thing the annex does not give.** H.1's datastream is committed byte for
+byte and its *generic region* picture is transcribed beside it, but its symbol
+bitmaps are not, and they cannot be invented. So milestone 3's symbols are
+pinned against a dictionary this repository encodes — a real round trip over
+clause 6.5, and weaker than the standard's own answer in exactly the way ruling
+13 warns about, since both sides share one reading. Milestone 4 is where the
+annex adjudicates again: its text region composites those symbols onto a page,
+and the page is published.
+
 **Conformance fixtures already committed.** The `ANNEX_H` constant in
 `jbig2.rs`'s tests is the whole T.88 Annex H.1 datastream, byte for byte, and
 its pages carry symbol dictionaries and text regions in both coding variants —
@@ -180,7 +189,7 @@ injection at the bottom of `jbig2.rs` already does.
 |---|---|---|---|
 | 1 | Corpus census of the JBIG2 files | **Done.** `crates/tinker-pdf/tests/jbig2_census.rs` prints per-file SDHUFF/SBHUFF/SDREFAGG/SBREFINE/retention tallies; numbers recorded above; milestones 5 and 6 swapped by them | S |
 | 2 | Segment references + Annex A integer decoders | **Done.** `Segment` carries its number and referred-to list; `every_integer_range_and_oob_round_trips` covers all six A.2 fields at both ends and OOB, `the_symbol_index_procedure_round_trips_at_every_code_length` covers A.3 including `SBSYMCODELEN` zero; the committed fuzz seeds are replayed on stable by `tests/jbig2_seeds.rs` | M |
-| 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | `ANNEX_H`'s arithmetic symbol dictionary decodes; exported symbol count and bitmaps assert pixel-for-pixel against the annex; import-from-referred-dictionary and export-flag runs unit-tested | M |
+| 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | **Done**, with one exit criterion changed and the change stated: symbols round-trip pixel-for-pixel against an `MqEncoder`-built dictionary over three height classes and all four templates; 6.5.10's export runs select across imported and new symbols; the variants this build declines refuse under `Jbig2VariantSkipped`. Annex H.2's *published symbol bitmaps* are not in this repository — H.1's datastream is, its generic-region picture is, its symbol pictures are not — so the pixel-for-pixel claim is against a fixture this repository builds rather than against the standard. Milestone 4 recovers the standard's own adjudication: the annex's text region composites those symbols into a page, and that page can be compared with what H.1 publishes | M |
 | 4 | Text region, arithmetic (SBREFINE refused by name) | `ANNEX_H` page with arithmetic text region matches the published page bitmap in its window; `a_symbol_dictionary_file_refuses_and_says_so` flips to a success assertion; `Jbig2RefinementSkipped` reachability test passes; seed-writer test emits the new fixtures | M |
 | 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
