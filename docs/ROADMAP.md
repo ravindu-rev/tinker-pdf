@@ -65,9 +65,16 @@ warning contract), with corpus reachability measured.
   groups are not reported, because for those RGB is the same arithmetic rather
   than an approximation. What is left is making CMYK and Lab *right*:
   `CmykA8` buffers, separable blends over complemented components, and
-  conversion at the three group boundaries. Exit: group colour space honoured
-  in compositing, pinned by fixtures that differ only in the group's space.
-  (M–L, folded into [design/icc.md](design/icc.md))
+  conversion at the three group boundaries.
+
+  **Reachability, now measured rather than assumed: 35 of the 4 525 corpus
+  files declare a `/DeviceCMYK` transparency group** — more than JPX (19) or
+  mesh shadings (10) had when those were built — and **not one declares
+  `/Lab`**. So the compositing half is scheduled by ruling 3 on the CMYK case
+  alone, and Lab can keep refusing by name with no corpus pressure behind it.
+  Exit: group colour space honoured in compositing, pinned by fixtures that
+  differ only in the group's space. (M–L, folded into
+  [design/icc.md](design/icc.md))
 - **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, `BYPASS` and `TERMALL`,
   out-of-order tile-parts — every entry reachable and named. **Now 3 refusals
   of 19 corpus files, from 4, and not one of them a code-block style**:

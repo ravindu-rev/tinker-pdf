@@ -89,8 +89,10 @@ no `Do` and so is read off the page dictionary — and reduced to the shape a
 compositor needs: how many components, and whether they are subtractive.
 Compositing happens in RGB, which is the same arithmetic for a one- or
 three-component group and a different one for CMYK or Lab; those two are
-reported by name rather than blended silently, once per space. Making them
-right is [design/icc.md](../design/icc.md)'s stage 1. ExtGState
+reported by name rather than blended silently, once per space. Measured over
+the 4 525 corpus files, August 2026: **35 declare a `/DeviceCMYK` group and
+none declares `/Lab`**. Making them right is
+[design/icc.md](../design/icc.md)'s stage 1. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
 (fully masked, the default that does not invert every drop shadow), and
