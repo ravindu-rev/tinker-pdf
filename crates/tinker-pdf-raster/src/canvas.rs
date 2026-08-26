@@ -37,7 +37,18 @@ impl PixelFormat {
     /// Whether the format carries alpha.
     #[must_use]
     pub fn has_alpha(self) -> bool {
-        matches!(self, PixelFormat::GrayA8 | PixelFormat::Rgba8)
+        // A `match` rather than the `matches!` this was, because `matches!` is
+        // not exhaustiveness-checked and this is the worst place in the crate
+        // to forget a format. A variant missing here does not fail to compile
+        // and does not panic: `blend` stops writing the alpha byte,
+        // `alpha_at` answers 255 for every pixel, and `recolor` and
+        // `remove_backdrop` become silent no-ops — an uncoloured pattern
+        // painting its own colours, and a non-isolated group counting its
+        // backdrop twice. Four wrong pictures, no error.
+        match self {
+            PixelFormat::GrayA8 | PixelFormat::Rgba8 => true,
+            PixelFormat::Gray8 | PixelFormat::Rgb8 => false,
+        }
     }
 }
 
@@ -403,7 +414,17 @@ impl Canvas {
     /// accumulation from here on, and 11.4.7.2 needs it separate from the
     /// backdrop's in order to take the backdrop out again.
     pub fn adopt_backdrop(&mut self, backdrop: Canvas) {
-        if backdrop.width != self.width || backdrop.height != self.height {
+        // Format as well as size. Today the two cannot differ — a group buffer
+        // takes its format from the canvas it will composite onto — but that
+        // is an invariant of the *caller*, not of this method, and it is
+        // exactly the invariant a group buffer in its own colour space breaks.
+        // Mismatched formats here would walk one stride with the other's
+        // channel count and read colour out of alignment: a picture, not a
+        // panic.
+        if backdrop.width != self.width
+            || backdrop.height != self.height
+            || backdrop.format != self.format
+        {
             return;
         }
         let channels = color_channels(self.format);
@@ -501,7 +522,14 @@ impl Canvas {
     /// shape from its alpha and this engine, like the buffers it inherits,
     /// carries only the one number.
     pub fn knock_out(&mut self, initial: &Canvas, mask: &Mask) {
-        if initial.width != self.width || initial.height != self.height {
+        // See `adopt_backdrop`: the format check is the same insurance against
+        // the same coming change. `initial` is a `snapshot` of this buffer
+        // today, so it cannot differ — which is precisely why nothing would
+        // notice if it started to.
+        if initial.width != self.width
+            || initial.height != self.height
+            || initial.format != self.format
+        {
             return;
         }
         let components = self.format.components();
@@ -733,20 +761,46 @@ fn blend(
         let mixed = mode.apply(cb, cs);
         *out = mul255(255 - backdrop_alpha, cs) + mul255(backdrop_alpha, mixed);
     }
-    if mode.is_nonseparable() && channels == 3 {
+    if mode.is_nonseparable() {
+        // 11.3.5.3's four modes are defined over three components, and a
+        // one-channel buffer is a grey — so the clause applies to it exactly,
+        // by replicating that grey into three and taking the first component
+        // back. A grey blended with a grey comes out grey under all four, so
+        // nothing is lost in the round trip.
+        //
+        // This used to be gated on `channels == 3`, which sent a `Gray8`
+        // render through `apply`'s `_ => cs` fall-through instead. That paints
+        // the *source*, and three of the four modes reduce to the *backdrop*
+        // on achromatic operands: `/BM /Hue` over two greys came out 127 levels
+        // wrong, and only at one channel, so the same page rendered two ways
+        // disagreed with itself.
+        let pick = |slot: Option<&u8>, first: Option<&u8>| -> u32 {
+            u32::from(*if channels == 1 { first } else { slot }.unwrap_or(&0))
+        };
         let cb = [
-            dst.first().map_or(0, |v| u32::from(*v)),
-            dst.get(1).map_or(0, |v| u32::from(*v)),
-            dst.get(2).map_or(0, |v| u32::from(*v)),
+            pick(dst.first(), dst.first()),
+            pick(dst.get(1), dst.first()),
+            pick(dst.get(2), dst.first()),
         ];
         let cs = [
-            u32::from(source[0]),
-            u32::from(source[1]),
-            u32::from(source[2]),
+            pick(source.first(), source.first()),
+            pick(source.get(1), source.first()),
+            pick(source.get(2), source.first()),
         ];
         let mixed = mode.apply_nonseparable(cb, cs);
-        for (i, out) in blended.iter_mut().enumerate() {
-            *out = mul255(255 - backdrop_alpha, cs[i]) + mul255(backdrop_alpha, mixed[i]);
+        // Bounded by `channels`, like the separable loop above it. The bound is
+        // redundant today — this branch only runs when `channels` is already 3
+        // and `blended` is three wide — and it is here because the *next* thing
+        // to touch this file is a fourth colour channel, which would widen
+        // `blended` and leave this loop reading `cs[3]` off a three-element
+        // array. That is a panic in a crate that forbids unsafe code, on any
+        // page carrying `/BM /Luminosity`, reached by nothing in the suite
+        // until `blend_modes.rs` grew the two tests that now cover it.
+        for (i, out) in blended.iter_mut().enumerate().take(channels) {
+            let (Some(cs), Some(mixed)) = (cs.get(i), mixed.get(i)) else {
+                continue;
+            };
+            *out = mul255(255 - backdrop_alpha, *cs) + mul255(backdrop_alpha, *mixed);
         }
     }
 
