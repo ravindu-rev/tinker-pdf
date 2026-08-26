@@ -56,6 +56,63 @@ pub struct Group {
     /// `/K`: each element composites against the group's *initial* backdrop
     /// rather than against the elements before it (11.4.5).
     pub knockout: bool,
+    /// `/CS`: the space the group's contents are composited in (11.6.6).
+    ///
+    /// `None` where the group declares no space, which 11.6.6 permits — the
+    /// group then inherits the space it is composited into.
+    pub space: Option<GroupSpace>,
+}
+
+/// Which of 11.6.6's blending spaces a group's `/CS` names.
+///
+/// The *shape* of the space rather than the space itself, and deliberately so.
+/// A blend formula in 11.3.5 acts on component values, so what a compositor
+/// needs from `/CS` is how many components there are and whether they are
+/// subtractive — not the palette, the tint transform or the profile that
+/// decides what those components *mean*. Keeping it to that also keeps
+/// [`Group`] `Copy`, which every save and restore of the graphics state relies
+/// on.
+///
+/// Exact conversion between these — which is what makes a CMYK group blend
+/// like one rather than merely be named as one — is `docs/design/icc.md`'s
+/// stage 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupSpace {
+    /// One component, additive.
+    Gray,
+    /// Three components, additive.
+    Rgb,
+    /// Four components, subtractive.
+    Cmyk,
+    /// CIE L*a*b*, whose components are not in `0..1` at all.
+    Lab,
+}
+
+impl GroupSpace {
+    /// Whether compositing this group in RGB is the same arithmetic as
+    /// compositing it in its own space.
+    ///
+    /// True for grey and RGB, and the grey case is worth stating rather than
+    /// assuming: a separable blend applied per channel to `R = G = B` produces
+    /// `R' = G' = B'` equal to the same blend applied to the single grey
+    /// channel, because each channel's formula is the same function of the
+    /// same two numbers. Subtractive components are a different formula, and
+    /// `/Lab`'s are not even in the unit interval.
+    #[must_use]
+    pub fn blends_as_rgb(self) -> bool {
+        matches!(self, GroupSpace::Gray | GroupSpace::Rgb)
+    }
+
+    /// What to call it in a warning.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            GroupSpace::Gray => "DeviceGray",
+            GroupSpace::Rgb => "DeviceRGB",
+            GroupSpace::Cmyk => "DeviceCMYK",
+            GroupSpace::Lab => "Lab",
+        }
+    }
 }
 
 /// An ExtGState `/SMask` (11.6.5.1).
@@ -1654,6 +1711,7 @@ mod tests {
             group: Some(Group {
                 isolated: true,
                 knockout: false,
+                space: None,
             }),
         };
         interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
@@ -1662,7 +1720,8 @@ mod tests {
             device.begins,
             vec![Group {
                 isolated: true,
-                knockout: false
+                knockout: false,
+                space: None,
             }],
             "the group's own attributes reach the device"
         );

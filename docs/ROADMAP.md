@@ -56,12 +56,18 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Transparency group colour spaces and page-level `/Group`.** The engine
-  composites in RGB throughout and does not read a page-level `/Group`
-  (11.4.7), so a group declared in CMYK or Lab blends in the wrong space.
-  Exit: group colour space honoured in compositing, pinned by fixtures
-  that differ only in the group's space. (M–L, folded into
-  [design/icc.md](design/icc.md))
+- **Transparency group colour spaces.** The engine composites in RGB
+  throughout, so a group declared in CMYK or Lab blends in the wrong space.
+  **Half of this has landed**: `/CS` is now read on a form's group and on the
+  page-level `/Group` of 11.4.7 — which nothing read before — and a space this
+  build cannot blend in is reported by name instead of silently, which is what
+  ruling 2 asks of a capability that is absent. One- and three-component
+  groups are not reported, because for those RGB is the same arithmetic rather
+  than an approximation. What is left is making CMYK and Lab *right*:
+  `CmykA8` buffers, separable blends over complemented components, and
+  conversion at the three group boundaries. Exit: group colour space honoured
+  in compositing, pinned by fixtures that differ only in the group's space.
+  (M–L, folded into [design/icc.md](design/icc.md))
 - **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, `BYPASS` and `TERMALL`,
   out-of-order tile-parts — every entry reachable and named. **Now 3 refusals
   of 19 corpus files, from 4, and not one of them a code-block style**:

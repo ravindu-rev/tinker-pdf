@@ -923,6 +923,12 @@ impl Page {
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
+        // 11.4.7: the page itself may declare a transparency group, and its
+        // `/CS` is the space the whole page composites in. Nothing invokes it,
+        // so it is read here rather than reaching the device through a `Do`.
+        if let Some(space) = resources.page_group_space(&self.inner) {
+            renderer.note_page_group_space(space);
+        }
         interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
         if options.annotations {
             // After the content, because an annotation sits on top of the

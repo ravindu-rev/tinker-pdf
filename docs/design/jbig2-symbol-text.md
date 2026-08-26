@@ -213,6 +213,33 @@ injection at the bottom of `jbig2.rs` already does.
 | 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | **Done**, with one exit criterion changed and the change stated: symbols round-trip pixel-for-pixel against an `MqEncoder`-built dictionary over three height classes and all four templates; 6.5.10's export runs select across imported and new symbols; the variants this build declines refuse under `Jbig2VariantSkipped`. Annex H.2's *published symbol bitmaps* are not in this repository — H.1's datastream is, its generic-region picture is, its symbol pictures are not — so the pixel-for-pixel claim is against a fixture this repository builds rather than against the standard. Milestone 4 recovers the standard's own adjudication: the annex's text region composites those symbols into a page, and that page can be compared with what H.1 publishes | M |
 | 4 | Text region, arithmetic (SBREFINE and TRANSPOSED refused by name) | **Done**, with the exit criterion changed and the change stated below: `a_text_region_places_its_symbols_where_6_4_5_computes` places symbols across two strips at the coordinates 6.4.5 computes, through a round trip; `a_text_region_whose_dictionary_refused_is_refused_by_name` holds a region whose referred-to dictionary is absent or refused to refusing **whole**; all four reference corners handled, SBDSOFFSET and multi-strip regions decoded. The annex's own page moves to milestone 6 | M |
 | 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
+
+### Milestone 5 has an anchor, and it is better than the round trip
+
+Annex H.1 carries no refinement *region* segment — a walk of its twenty-one
+segments finds none of types 40, 42 or 43 — but **page 3 is a refinement
+fixture in both of the other two shapes**. Segment 17 is a symbol dictionary
+with `SDREFAGG=1` importing from segment 16, which is 6.5.8.2's
+refinement/aggregate symbol coding at `GRTEMPLATE=0`; segment 18 is a text
+region with `SBREFINE=1` at `GRTEMPLATE=1`. So the standard's own datastream
+exercises clause 6.3 through **both** templates, and the fixture is already
+committed to this repository.
+
+The exit criterion should therefore be page 3 decoding, not an
+`MqEncoder`-built fixture round-tripping against an encoder that mirrors the
+decoder's own reading. That is the same correction milestones 3 and 4 each had
+to make after the fact; this one is available before the code rather than
+after it.
+
+**What blocks the milestone is the two context templates themselves.**
+6.3.5.3's figures decide which thirteen pixels and which ten form the context,
+and a template wrong by one pixel does not fail — the arithmetic decoder
+desynchronises and returns *a picture*. That is precisely the failure mode this
+module's refusals exist to prevent, and it is why the module's own header says
+a wrong JBIG2 decode is worth less than a refusal. The templates are
+transcribed from the figures or the milestone does not land; it refuses by
+name, under `Jbig2VariantSkipped`, until they are.
+
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
 | 7 | Bounds and fuzz hardening | `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES`, `MAX_JBIG2_TEXT_INSTANCES` rows in `bounds_ledger.rs`, each measured against a real `jbig2enc`/OCRmyPDF output and none refusing it; a recorded fuzz session over the extended seeds with zero crashes | S |
 | 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; every JBIG2-bearing corpus file renders without a placeholder warning, counted; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |

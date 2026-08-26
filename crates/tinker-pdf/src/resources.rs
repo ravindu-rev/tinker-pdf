@@ -214,6 +214,28 @@ fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
     out
 }
 
+/// 11.6.6's `/CS`, reduced to the blending space a compositor needs.
+///
+/// By component count, plus `/Lab` named separately because its components are
+/// not in `0..1` and no count would say so. An `ICCBased` space reaches here as
+/// `ColorSpace::Approximated`, which is 8.6.5.5's alternate-space reading and
+/// carries exactly the count this needs; what the profile would have said about
+/// the *meaning* of those components is `docs/design/icc.md`'s.
+fn group_space(space: tinker_pdf_color::ColorSpace) -> tinker_pdf_content::GroupSpace {
+    use tinker_pdf_content::GroupSpace;
+    if matches!(space, tinker_pdf_color::ColorSpace::Lab { .. }) {
+        return GroupSpace::Lab;
+    }
+    match space.components() {
+        1 => GroupSpace::Gray,
+        4 => GroupSpace::Cmyk,
+        // Three, or anything a group has no business declaring, reads as RGB —
+        // which is what this build composites in, so an unexpected count is
+        // the case that needs no warning rather than the one that does.
+        _ => GroupSpace::Rgb,
+    }
+}
+
 impl PageResources {
     /// The font resource names that could not be resolved.
     #[must_use]
@@ -270,6 +292,37 @@ impl PageResources {
             provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
+    }
+
+    /// The page's own transparency group space (11.4.7), if it declares one.
+    ///
+    /// A page-level `/Group` is not a form's: nothing invokes it, so there is
+    /// no `Do` for the interpreter to notice and no `Group` value to carry.
+    /// 11.4.7 makes it the space the *page* composites in, which is why it is
+    /// read here and asked for by `Page::render` rather than arriving through
+    /// the content stream like every other group.
+    #[must_use]
+    pub fn page_group_space(
+        &self,
+        page: &cos_pages::Page,
+    ) -> Option<tinker_pdf_content::GroupSpace> {
+        let object = self.doc.get(page.reference).ok()?;
+        let dict = object.as_dict()?;
+        let group = self.doc.resolve_key(dict, self.doc.intern(b"Group"));
+        let group = group.as_dict()?;
+        // 11.6.6: the subtype is checked rather than the key's presence, for
+        // the reason `form_from` checks it — 8.10.3's `/S /Reference` group is
+        // a different thing wearing the same key.
+        let subtype = self
+            .doc
+            .resolve_key(group, self.doc.intern(b"S"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Transparency" {
+            return None;
+        }
+        let cs = group.get(self.doc.intern(b"CS")).cloned()?;
+        self.parse_space(&cs, 0).map(group_space)
     }
 
     /// Reads a resource dictionary that is not a page's.
@@ -1381,6 +1434,17 @@ impl PageResources {
                         .resolve_key(group, self.doc.intern(b"K"))
                         .as_bool()
                         .unwrap_or(false),
+                    // 11.6.6: `/CS` names the space the group's contents are
+                    // composited in. Resolved through the same seam every
+                    // other colour space goes through — the `/BC` backdrop of
+                    // a luminosity soft mask already read this key, and read
+                    // it this way — then reduced to the shape a compositor
+                    // needs.
+                    space: group
+                        .get(self.doc.intern(b"CS"))
+                        .cloned()
+                        .and_then(|cs| self.parse_space(&cs, 0))
+                        .map(group_space),
                 })
             });
 

@@ -8,7 +8,7 @@
 //! here is asserted as a *number* against a control render that differs in one
 //! key rather than as "it drew something".
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
 fn render(bytes: Vec<u8>) -> tinker_pdf::Bitmap {
     Document::open(bytes)
@@ -1013,4 +1013,117 @@ fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
         bitmap.data.iter().any(|&b| b != bitmap.data[0]),
         "something was drawn"
     );
+}
+
+// ---- the group's own colour space (11.6.6, 11.4.7) --------------------------
+
+/// A page whose single form XObject is a transparency group declaring `cs` as
+/// its `/Group /CS`, plus an optional page-level `/Group` in `page_cs`.
+fn group_in_space(cs: Option<&str>, page_cs: Option<&str>) -> Vec<u8> {
+    let group = match cs {
+        Some(cs) => format!("/Group << /S /Transparency /CS {cs} >>"),
+        None => "/Group << /S /Transparency >>".to_string(),
+    };
+    let page_group = match page_cs {
+        Some(cs) => format!("/Group << /S /Transparency /CS {cs} >>"),
+        None => String::new(),
+    };
+    let form = "0 0 1 rg 10 10 40 40 re f";
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+             2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+             3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60] \
+             {page_group} /Resources << /XObject << /Fm 5 0 R >> >> \
+             /Contents 4 0 R >> endobj\n\
+             4 0 obj << /Length 8 >> stream\n/Fm Do\nendstream endobj\n\
+             5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 60 60] \
+             {group} /Length {} >> stream\n{form}\nendstream endobj\n",
+            form.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b"trailer << /Root 1 0 R /Size 6 >>\n%%EOF\n");
+    out
+}
+
+fn group_space_warnings(bytes: Vec<u8>) -> Vec<String> {
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&RenderOptions::at_dpi(72.0));
+    bitmap
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            RenderWarning::UnsupportedGroupSpace { space } => Some(space.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A group declared in a space this build does not blend in says so**, and a
+/// group declared in one it does says nothing.
+///
+/// The pair is the assertion. A test that only checked the CMYK case would
+/// pass on a build that warned about every group, which would be a worse
+/// engine reporting a problem it does not have — and one that only checked the
+/// RGB case would pass on a build that never warned at all, which is the
+/// behaviour this replaces.
+///
+/// Grey is on the quiet side deliberately: 11.3.5's separable formulas applied
+/// per channel to `R = G = B` are the same arithmetic as applied to one grey
+/// channel, so reporting it would be reporting an approximation that is not
+/// one.
+#[test]
+fn a_group_space_this_build_cannot_blend_in_is_named_and_one_it_can_is_not() {
+    for quiet in [None, Some("/DeviceRGB"), Some("/DeviceGray")] {
+        assert!(
+            group_space_warnings(group_in_space(quiet, None)).is_empty(),
+            "{quiet:?} blends as RGB and must not be reported"
+        );
+    }
+
+    assert_eq!(
+        group_space_warnings(group_in_space(Some("/DeviceCMYK"), None)),
+        vec!["DeviceCMYK".to_string()],
+        "a CMYK group blends subtractive components and this build does not"
+    );
+    assert_eq!(
+        group_space_warnings(group_in_space(
+            Some("[/Lab << /WhitePoint [0.9505 1 1.089] >>]"),
+            None
+        )),
+        vec!["Lab".to_string()],
+        "Lab's components are not even in the unit interval"
+    );
+}
+
+/// **A page-level `/Group` is read**, which nothing in this engine did before.
+///
+/// 11.4.7 puts a group on the page object itself, and it reaches no `Do` — so
+/// a build that only handled form groups would report nothing here and look
+/// exactly like a build that handled it correctly. The form group is left in
+/// RGB so the only thing the warning can be about is the page's.
+#[test]
+fn a_page_level_group_declares_the_space_the_page_composites_in() {
+    assert_eq!(
+        group_space_warnings(group_in_space(Some("/DeviceRGB"), Some("/DeviceCMYK"))),
+        vec!["DeviceCMYK".to_string()],
+        "the page's own /Group /CS was not read"
+    );
+    assert!(
+        group_space_warnings(group_in_space(Some("/DeviceRGB"), Some("/DeviceRGB"))).is_empty(),
+    );
+}
+
+/// The report is once per space, not once per group.
+///
+/// A scanned page can open hundreds of groups and a warning list is read by a
+/// person; two hundred identical lines is a list nobody finishes.
+#[test]
+fn many_groups_in_one_unsupported_space_are_reported_once() {
+    let warnings = group_space_warnings(group_in_space(Some("/DeviceCMYK"), Some("/DeviceCMYK")));
+    assert_eq!(warnings, vec!["DeviceCMYK".to_string()]);
 }

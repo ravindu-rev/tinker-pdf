@@ -76,6 +76,21 @@ impl CancelToken {
 // an `f64`. `PartialEq` is what the deduplication in the renderer uses.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderWarning {
+    /// A transparency group declared a blending space this build does not
+    /// composite in, so its contents were blended in RGB instead (11.6.6).
+    ///
+    /// Named rather than silent, which is the whole of ruling 2: a group
+    /// declared in `/DeviceCMYK` has 11.3.5's separable formulas applied to
+    /// subtractive components, and applying them to RGB instead is not a
+    /// near-miss — `Multiply` over ink is `Screen`'s shape over light. The
+    /// page still renders, and it says which group and which space.
+    ///
+    /// One- and three-component spaces are *not* reported, because for those
+    /// RGB is the same arithmetic rather than an approximation of it.
+    UnsupportedGroupSpace {
+        /// The space the group asked for.
+        space: String,
+    },
     /// An image used a codec that is not built in; a placeholder was drawn.
     UnsupportedImage {
         /// Which codec.
@@ -834,6 +849,37 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         );
     }
 
+    /// Reports the *page's* own group space (11.4.7).
+    ///
+    /// Public because a page-level group has no `Do` to arrive through: the
+    /// facade reads it off the page dictionary and hands it here. It reaches
+    /// the same reporting path as a form's group, so a document whose page and
+    /// whose forms both ask for CMYK says so once.
+    pub fn note_page_group_space(&mut self, space: tinker_pdf_content::GroupSpace) {
+        if !space.blends_as_rgb() {
+            self.note_group_space(space);
+        }
+    }
+
+    /// Record that a group asked to be composited in a space this build does
+    /// not blend in, once per space rather than once per group.
+    ///
+    /// Once per space because a page that opens two hundred CMYK groups has
+    /// one problem, not two hundred, and a warning list is read by a person.
+    fn note_group_space(&mut self, space: tinker_pdf_content::GroupSpace) {
+        let named = space.name();
+        if self
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::UnsupportedGroupSpace { space } if space == named))
+        {
+            return;
+        }
+        self.warnings.push(RenderWarning::UnsupportedGroupSpace {
+            space: named.to_string(),
+        });
+    }
+
     /// Record that the group budget declined one, for a single report at
     /// `finish`.
     fn note_group_budget(&mut self) {
@@ -882,6 +928,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// is the memory blowup the plan's risk table names, multiplied by the
     /// nesting depth.
     fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
+        // 11.6.6: reported before the depth and budget checks, because a group
+        // declined for a budget is a group whose space was never honoured
+        // either, and the two are different reasons to look at a page.
+        if let Some(space) = group.space {
+            if !space.blends_as_rgb() {
+                self.note_group_space(space);
+            }
+        }
         if self.groups.len() >= MAX_GROUP_DEPTH {
             return false;
         }
