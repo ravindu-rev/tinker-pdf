@@ -106,21 +106,51 @@ three points: painting a source colour into a group whose space differs
 (source components → group space), initialising a non-isolated group's
 backdrop (parent space → group space, 11.4.4), and `close_group`
 compositing the finished buffer onto the parent (group space → parent
-space). In stage 1 the device relations already in `ColorSpace::to_rgb`
-supply the forward direction and their stated inverses (RGB→CMYK with
-`k = min(1-r, 1-g, 1-b)` undercolour removal) supply the backward one,
-named on the type as approximations; stage 2 replaces both ends with
-profile transforms without moving the call sites. Soft-mask luminosity
-(11.6.5.2) reads the group's own space, which fixes `/BC` handling for
-CMYK mask groups for free.
+space). In stage 1 the device relations of 8.6.4.4 supply the forward
+direction and their inverse — RGB→CMYK with `k = min(1-r, 1-g, 1-b)`
+undercolour removal — supplies the backward one; stage 2 replaces both ends
+with profile transforms without moving the call sites.
 
-**Proof.** New fixtures in `crates/tinker-pdf/tests/determinism.rs`, in
-pairs that differ only in the group's `/CS` — the same two colours
-multiplied inside an RGB group and inside a CMYK group, an isolated and a
-non-isolated variant, and one page-level `/Group` file. Each pair's two
-fingerprints are committed and asserted *unequal*, which is the injection
-test built into the fixture: revert to compositing in RGB and the pair
-renders identical, so the suite goes red.
+**That inverse is exact, not an approximation, and this paragraph used to say
+otherwise.** Maximum undercolour removal makes each channel's intermediate
+error smaller than half a level, so RGB→CMYK→RGB is the identity for all
+sixteen million colours — swept exhaustively as 32 896 `(v, max)` pairs, since
+`K` is fixed by the maximum and each channel is then independent. What *is*
+approximate is the other direction: a CMYK value that did not come from the
+inverse — a rich black — comes back as its pure-K equivalent. Nothing in this
+engine authors CMYK components (`resolve_color` flattens every source colour to
+sRGB at the resource seam), so every value in a group buffer originated from
+the inverse and round-trips. The day components cross that seam, this is the
+paragraph to revisit. Soft-mask luminosity (11.6.5.2) reads the group's
+own space — but **not for free, and not where this doc expected**. `to_mask`
+reads through `Canvas::pixel`, which already applies the group's own relation,
+so the space arrives on its own. The real defect was the *weighting*:
+11.6.5.2's luminosity is 11.3.5.3's `Lum`, and the code reached for
+`Color::luma`'s Rec.601 coefficients instead of the clause's 0.3/0.59/0.11 —
+the very pair `blend.rs` records as "the difference between matching a
+reference renderer and not". They differ by a level on a saturated colour and
+not at all on a grey, which is why no fixture had noticed. The `/BC` default
+needed nothing: `Rgb::BLACK` is right in every space, Lab included, because
+`L = 0` converts to RGB(0,0,0) like every other black.
+
+**Proof.** Pairs that differ only in the group's `/CS`, asserted *unequal*.
+
+**Not `Multiply`, which is what this paragraph first proposed.** Writing the
+ink split as `k = 1 - max(r,g,b)` makes the complemented components exactly
+`(R/max, G/max, B/max, max)`, so a separable blend `f` recombines to
+`R' = f(R1/max1, R2/max2) * f(max1, max2)`. For a product the two `max` terms
+cancel and the answer is `R1 * R2` — RGB's answer. A multiplied pair renders
+*identically* in both spaces and would have passed on a build that ignored
+`/CS` altogether. Measured differences, in levels of 255: Normal and Multiply
+0 when opaque, Darken 8.5, Lighten 29, Screen 36, Difference and Exclusion 255;
+every mode differs under partial alpha.
+
+So `Difference` carries the pair, and the invariance is kept as a *second*
+test rather than discarded: an opaque `Multiply` must agree in both spaces
+within a level. That is the assertion that catches a complement applied on one
+side of the blend and not the other — and it earned its place, because
+removing the complement leaves the `Difference` pair passing and fails only the
+invariance one.
 
 ### Stage 2: the CMM
 

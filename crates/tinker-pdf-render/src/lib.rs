@@ -1165,7 +1165,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // which is why the common mask costs its bounding box.
         let outside = {
             let raw = match kind {
-                MaskKind::Luminosity => background.luma(),
+                // The identical function `to_mask` uses inside the box. Two
+                // weightings here would put a step exactly at the mask's
+                // bounding-box edge — a halo on a drop shadow, which reads as
+                // a design choice rather than a defect.
+                MaskKind::Luminosity => background.luminosity(),
                 MaskKind::Alpha => 0,
             };
             mask.transfer

@@ -97,6 +97,27 @@ impl Color {
         a: 0,
     };
 
+    /// 11.6.5.2's luminosity, which is 11.3.5.3's `Lum`.
+    ///
+    /// The specification's own 0.3 / 0.59 / 0.11, not the Rec.601 weights
+    /// [`Color::luma`] carries. `blend.rs` already records why the two are kept
+    /// apart — they differ in the third digit, "which is invisible on any one
+    /// pixel and is the difference between matching a reference renderer and
+    /// not" — and a soft mask asks the same question `Lum` does, so it gets the
+    /// same answer. That it did not was a defect: `MaskKind`'s own doc cites
+    /// 11.6.5.2 by clause number and the code reached for the other weighting.
+    ///
+    /// `luma` stays where it is. It answers a different question — what a
+    /// *grey buffer* stores a colour as — and its weights sum to exactly 1000,
+    /// which is what makes a grey round-trip through it unchanged.
+    #[must_use]
+    pub fn luminosity(self) -> u8 {
+        let value =
+            (u32::from(self.r) * 300 + u32::from(self.g) * 590 + u32::from(self.b) * 110 + 500)
+                / 1000;
+        value.min(255) as u8
+    }
+
     /// The grey this colour reads as, by the usual luma weights.
     #[must_use]
     pub fn luma(self) -> u8 {
@@ -629,7 +650,7 @@ impl Canvas {
                     continue;
                 };
                 let value = match kind {
-                    MaskKind::Luminosity => color.luma(),
+                    MaskKind::Luminosity => color.luminosity(),
                     MaskKind::Alpha => color.a,
                 };
                 let value = transfer.map_or(value, |lut| {
@@ -1002,6 +1023,30 @@ fn blend(
 
 #[cfg(test)]
 mod tests {
+
+    /// **A soft mask and a grey buffer weigh colour differently, on purpose.**
+    ///
+    /// 11.6.5.2's luminosity is 11.3.5.3's `Lum`, whose coefficients the
+    /// specification gives as 0.3 / 0.59 / 0.11. `luma`'s are Rec.601's
+    /// 0.299 / 0.587 / 0.114, and they are what a *grey buffer* stores a colour
+    /// as — chosen so the weights sum to exactly 1000 and a grey survives the
+    /// round trip.
+    ///
+    /// They differ in the third digit, which is one level on a saturated
+    /// colour and nothing at all on the greys every existing fixture uses — so
+    /// `to_mask` reaching for the wrong one moved no fingerprint and would have
+    /// gone on not moving one. This is the assertion that noticed.
+    #[test]
+    fn a_soft_mask_uses_the_clauses_weights_and_a_grey_buffer_uses_luma() {
+        let red = Color::rgb(255, 0, 0);
+        assert_eq!(red.luminosity(), 77, "0.3 x 255, the clause's weight");
+        assert_eq!(red.luma(), 76, "0.299 x 255, Rec.601's");
+
+        // And the property that keeps `luma` where it is: a grey is itself.
+        for v in [0u8, 1, 77, 128, 254, 255] {
+            assert_eq!(Color::rgb(v, v, v).luma(), v, "grey {v} round-trips");
+        }
+    }
 
     /// **The device relation round-trips exactly**, which is the lemma the
     /// whole CMYK path rests on.
