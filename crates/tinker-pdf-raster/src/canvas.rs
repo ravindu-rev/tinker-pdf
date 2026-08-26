@@ -173,12 +173,54 @@ impl Canvas {
         }
     }
 
-    fn encode(&self, color: Color) -> [u8; 4] {
+    /// One pixel of `src`, in *this* canvas's storage, with its own alpha.
+    ///
+    /// When the two canvases store pixels the same way this reads the bytes
+    /// straight across; otherwise it goes through [`Canvas::pixel`] and
+    /// [`Canvas::encode`], which is what every cross-format copy has always
+    /// done.
+    ///
+    /// # Why the same-format path is correctness and not speed
+    ///
+    /// For the formats that exist today the two paths produce the same bytes —
+    /// `Gray8`'s round trip survives because `luma` of a replicated grey is
+    /// that grey exactly, its weights summing to 1000 — so this could be
+    /// deleted tomorrow and no test would notice. It is here for the format
+    /// after them. A buffer holding *subtractive* components has no lossless
+    /// trip through an RGB `Color`: the relation is exact in one direction and
+    /// a projection in the other, so a group nested inside another group of
+    /// its own kind would have its ink re-derived at every composite — a
+    /// picture, and a different one. Same-format copies must not go through
+    /// `Color`, and the cheapest way to guarantee that is for them never to.
+    ///
+    /// `a_same_format_copy_is_the_bytes_it_started_as` pins the equivalence.
+    fn source_from(&self, src: &Canvas, sx: u32, sy: u32) -> Option<([u8; 5], u32)> {
+        if src.format == self.format {
+            let components = src.format.components();
+            let base = (sy as usize) * src.stride + (sx as usize) * components;
+            let raw = src.data.get(base..base + components)?;
+            let mut word = [0u8; 5];
+            word.get_mut(..components)?.copy_from_slice(raw);
+            return Some((word, src.alpha_at(sx, sy)));
+        }
+        let color = src.pixel(sx, sy)?;
+        Some((self.encode(color), u32::from(color.a)))
+    }
+
+    /// A colour, in the bytes this canvas stores per pixel.
+    ///
+    /// Five wide rather than four, which is one more than any format uses
+    /// today. The width is the widest a format *will* need — four colour
+    /// channels and an alpha — and sizing it here rather than at the first
+    /// four-channel format keeps that change to the arms of this match. Every
+    /// consumer already slices to `components()`, so the spare byte is never
+    /// read and never reaches `data`.
+    fn encode(&self, color: Color) -> [u8; 5] {
         match self.format {
-            PixelFormat::Gray8 => [color.luma(), 0, 0, 0],
-            PixelFormat::GrayA8 => [color.luma(), color.a, 0, 0],
-            PixelFormat::Rgb8 => [color.r, color.g, color.b, 0],
-            PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a],
+            PixelFormat::Gray8 => [color.luma(), 0, 0, 0, 0],
+            PixelFormat::GrayA8 => [color.luma(), color.a, 0, 0, 0],
+            PixelFormat::Rgb8 => [color.r, color.g, color.b, 0, 0],
+            PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a, 0],
         }
     }
 
@@ -346,19 +388,18 @@ impl Canvas {
                     (i64::from(col) - i64::from(at.0)) as u32,
                     (i64::from(row) - i64::from(at.1)) as u32,
                 );
-                let Some(color) = src.pixel(sx, sy) else {
+                let Some((source, own)) = self.source_from(src, sx, sy) else {
                     continue;
                 };
                 let coverage = mask.map_or(255, |mask| u32::from(mask.at(col as i32, row as i32)));
                 if coverage == 0 {
                     continue;
                 }
-                let effective = mul255(mul255(u32::from(color.a), alpha), coverage);
+                let effective = mul255(mul255(own, alpha), coverage);
                 if effective == 0 {
                     continue;
                 }
 
-                let source = self.encode(color);
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 let backdrop = self.backdrop_alpha(col, row);
                 blend(
@@ -389,13 +430,13 @@ impl Canvas {
                 ) else {
                     continue;
                 };
-                let Some(color) = self.pixel(x, y) else {
+                let Some((word, _)) = out.source_from(self, x, y) else {
                     continue;
                 };
                 // A source without an alpha channel is opaque; `pixel` already
                 // says so, and the copy has to carry that or a non-isolated
                 // group over a page would think it had nothing underneath.
-                let pixel = out.encode(color);
+                let pixel = word;
                 let components = out.format.components();
                 let base = (row as usize) * out.stride + (col as usize) * components;
                 if let Some(slot) = out.data.get_mut(base..base + components) {
@@ -726,7 +767,7 @@ fn color_channels(format: PixelFormat) -> usize {
 /// the two are the same number and every line below is what it was.
 fn blend(
     dst: Option<&mut [u8]>,
-    source: &[u8; 4],
+    source: &[u8; 5],
     alpha: u32,
     format: PixelFormat,
     mode: BlendMode,
@@ -751,7 +792,11 @@ fn blend(
     // backdrop is there. Where it is absent the source passes through
     // unblended, which is what keeps `Multiply` from turning a transparent
     // buffer black.
-    let mut blended = [0u32; 3];
+    // Four, for the widest colour-channel count a format will carry. Both
+    // loops below bound themselves by `channels`, so the spare entry is never
+    // read; it is sized here so that adding a four-channel format is an arm of
+    // `encode` rather than a change to this arithmetic.
+    let mut blended = [0u32; 4];
     for (i, out) in blended.iter_mut().enumerate().take(channels) {
         let (Some(slot), Some(src)) = (dst.get(i), source.get(i)) else {
             continue;
@@ -837,6 +882,87 @@ fn blend(
 
 #[cfg(test)]
 mod tests {
+
+    /// **A same-format copy is the bytes it started as**, which is the identity
+    /// `Canvas::source_from`'s fast path rests on.
+    ///
+    /// Asserted directly rather than by comparing the two paths, because there
+    /// is no toggle between them and adding one would be a second code path to
+    /// keep in step. What is checked is the property instead: for every format,
+    /// the bytes a pixel is stored as are exactly what `encode(pixel(..))`
+    /// produces, so reading them straight across cannot differ from the long
+    /// way round.
+    ///
+    /// `Gray8` is the interesting row. Its long way round replicates the grey
+    /// into three channels and takes `luma` of them again, and that survives
+    /// only because the weights sum to exactly 1000 — 299 + 587 + 114. A
+    /// weighting that did not would make the fast path a behaviour change
+    /// rather than an optimisation, and this test is where that would show.
+    #[test]
+    fn a_same_format_copy_is_the_bytes_it_started_as() {
+        let colours = [
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(200, 60, 20),
+            Color::rgb(17, 17, 17),
+            Color {
+                r: 40,
+                g: 90,
+                b: 200,
+                a: 128,
+            },
+            Color::TRANSPARENT,
+        ];
+        for format in [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+        ] {
+            for colour in colours {
+                let canvas = Canvas::new(1, 1, format, colour);
+                let components = format.components();
+                let stored = &canvas.data[..components];
+                let long_way = canvas.pixel(0, 0).map(|c| canvas.encode(c));
+                let long_way = long_way.expect("a pixel");
+                assert_eq!(
+                    stored,
+                    &long_way[..components],
+                    "{format:?} at {colour:?}: the stored bytes and the \
+                     encode-of-pixel round trip disagree, so a same-format copy \
+                     is not a copy"
+                );
+            }
+        }
+    }
+
+    /// And the copy itself, end to end: `extract` of a whole canvas in its own
+    /// format reproduces it byte for byte.
+    #[test]
+    fn extracting_a_canvas_in_its_own_format_reproduces_it() {
+        for format in [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+        ] {
+            let mut canvas = Canvas::new(4, 3, format, Color::rgb(10, 20, 30));
+            canvas.blend_pixel(1, 1, Color::rgb(200, 60, 20), 1.0);
+            canvas.blend_pixel(
+                2,
+                2,
+                Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 128,
+                },
+                0.5,
+            );
+            let copy = canvas.extract((0, 0), 4, 3, format);
+            assert_eq!(copy.data, canvas.data, "{format:?}");
+        }
+    }
     use super::*;
     use crate::fill::fill;
     use crate::geom::{FillRule, Path};
