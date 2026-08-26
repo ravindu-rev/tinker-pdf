@@ -50,8 +50,18 @@ hard. `Mask::uniform` carries a soft mask's value outside the region its
 group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
 — which is not zero unless `/BC` is black.
 
-**Compositing.** A `Canvas` stores pixels in one of four formats (`Gray8`,
-`GrayA8`, `Rgb8`, `Rgba8`) and composites in integer arithmetic throughout.
+**Compositing.** A `Canvas` stores pixels in one of five formats (`Gray8`,
+`GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`) and composites in integer arithmetic
+throughout. `CmykA8` is the one **subtractive** format — its components are
+quantities of ink — and it exists for transparency groups that declare
+`/DeviceCMYK`, whose blends the specification says happen over ink rather than
+over light ([rendering](rendering.md)). It is not a format a page comes back
+in. The two device relations of 8.6.4.4 live here rather than in
+`tinker-pdf-color`, for the reason `Color::luma`'s coefficients do — a
+rasterizer turns stored components into light, and a leaf takes bytes and plain
+values in; a test holds the copy to the original so the two cannot drift. The
+inverse takes maximum undercolour removal, which makes it **exact**: every one
+of the sixteen million colours survives the round trip.
 `fill_mask_with` blends a colour through a mask under any of the sixteen
 `BlendMode`s — the twelve separable modes of 11.3.5.2 and the four
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an

@@ -856,7 +856,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// the same reporting path as a form's group, so a document whose page and
     /// whose forms both ask for CMYK says so once.
     pub fn note_page_group_space(&mut self, space: tinker_pdf_content::GroupSpace) {
-        if !space.blends_as_rgb() {
+        // The same predicate a form group uses: what is reported is a space
+        // this build cannot give a buffer of, not a space that differs from
+        // RGB. A page group in CMYK gets a CMYK page canvas and is converted
+        // for the caller at the end, so there is nothing to report; a page
+        // group in Lab still composites in RGB, and still says so.
+        if group_format(space).is_none() {
             self.note_group_space(space);
         }
     }
@@ -927,15 +932,37 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// bounding box and never larger. Sizing the buffer to the page instead
     /// is the memory blowup the plan's risk table names, multiplied by the
     /// nesting depth.
-    fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
-        // 11.6.6: reported before the depth and budget checks, because a group
-        // declined for a budget is a group whose space was never honoured
-        // either, and the two are different reasons to look at a page.
-        if let Some(space) = group.space {
-            if !space.blends_as_rgb() {
-                self.note_group_space(space);
-            }
+    /// The same colours as `parent`, but carrying alpha.
+    ///
+    /// What a buffer needs whatever it is for: a group, a soft mask and a
+    /// tiling cell are all shapes over nothing, so each must record where it
+    /// painted as well as what it painted.
+    fn alpha_format(parent: PixelFormat) -> PixelFormat {
+        match parent {
+            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+            PixelFormat::CmykA8 => PixelFormat::CmykA8,
         }
+    }
+
+    /// The buffer a transparency group declaring `space` composites in
+    /// (11.6.6), or `None` for a space this build does not blend in.
+    ///
+    /// Keyed by the shape of the space rather than by its identity, which is
+    /// all a blend formula needs: how many components, and whether they are
+    /// subtractive. `/Lab` is the `None`: its components are not in the unit
+    /// interval at all, so 11.3.5's formulas have nothing to say about them,
+    /// and the corpus asks for it zero times.
+    fn group_format_of(space: tinker_pdf_content::GroupSpace) -> Option<PixelFormat> {
+        match space {
+            tinker_pdf_content::GroupSpace::Gray => Some(PixelFormat::GrayA8),
+            tinker_pdf_content::GroupSpace::Rgb => Some(PixelFormat::Rgba8),
+            tinker_pdf_content::GroupSpace::Cmyk => Some(PixelFormat::CmykA8),
+            tinker_pdf_content::GroupSpace::Lab => None,
+        }
+    }
+
+    fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
         if self.groups.len() >= MAX_GROUP_DEPTH {
             return false;
         }
@@ -960,9 +987,23 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // A group buffer must carry alpha whatever the page format is: it
         // starts as nothing and accumulates a shape, and a format without an
         // alpha channel has no way to say where the group did not paint.
-        let format = match self.canvas.format {
-            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+        // 11.6.6: the group composites in the space it declared, so its buffer
+        // holds that space's components. Where it declared none it inherits the
+        // one it will be composited into, which is what "the group's colour
+        // space is the one it is painted onto" comes to in practice.
+        //
+        // Reported before the depth and budget checks below, because a group
+        // declined for a budget is a group whose space was never honoured
+        // either, and those are different reasons to look at a page.
+        let format = match group.space {
+            Some(space) => match Self::group_format_of(space) {
+                Some(format) => format,
+                None => {
+                    self.note_group_space(space);
+                    Self::alpha_format(self.canvas.format)
+                }
+            },
+            None => Self::alpha_format(self.canvas.format),
         };
         let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
         // 11.4.4: an isolated group composites against nothing, so its buffer
@@ -1132,10 +1173,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .map_or(raw, |lut| lut.get(raw as usize).copied().unwrap_or(raw))
         };
 
-        let format = match self.canvas.format {
-            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
-        };
+        let format = Self::alpha_format(self.canvas.format);
         let buffer = Canvas::new(width, height, format, background);
 
         let frame = MaskFrame {
@@ -1643,10 +1681,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         // A cell is a shape over nothing, so its buffer must carry alpha
         // whatever the page's format is.
-        let format = match self.canvas.format {
-            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
-        };
+        let format = Self::alpha_format(self.canvas.format);
         let request = TileRequest {
             to_pixels: to_device.then(&Matrix::translate(-tx0, -ty0)),
             bbox: tiling.bbox,
@@ -2898,12 +2933,87 @@ pub fn page_pixels(width_pt: f64, height_pt: f64, scale: f64) -> (u32, u32) {
 /// Convenience: a white canvas of the right size for a page.
 #[must_use]
 pub fn page_canvas(width_pt: f64, height_pt: f64, scale: f64, format: PixelFormat) -> Canvas {
+    page_canvas_in(width_pt, height_pt, scale, page_format(format))
+}
+
+/// [`page_canvas`], in exactly the format asked for.
+///
+/// What a page declaring its own transparency group needs (11.4.7): the page
+/// composites in the group's space and is converted for the caller afterwards,
+/// so this one does *not* coerce.
+#[must_use]
+pub fn page_canvas_in(width_pt: f64, height_pt: f64, scale: f64, format: PixelFormat) -> Canvas {
     let (w, h) = page_pixels(width_pt, height_pt, scale);
     Canvas::new(w, h, format, Color::WHITE)
 }
 
+/// The buffer a transparency group declaring `space` composites in (11.6.6),
+/// or `None` for a space this build does not blend in.
+#[must_use]
+pub fn group_format(space: tinker_pdf_content::GroupSpace) -> Option<PixelFormat> {
+    match space {
+        tinker_pdf_content::GroupSpace::Gray => Some(PixelFormat::GrayA8),
+        tinker_pdf_content::GroupSpace::Rgb => Some(PixelFormat::Rgba8),
+        tinker_pdf_content::GroupSpace::Cmyk => Some(PixelFormat::CmykA8),
+        tinker_pdf_content::GroupSpace::Lab => None,
+    }
+}
+
+/// The format a *page* may be handed back in.
+///
+/// `CmykA8` exists so a transparency group can composite over ink (11.6.6). It
+/// is deliberately not a format a page comes back in, and the reason is that
+/// `Bitmap` says how many components it has and nothing about what they mean:
+/// every consumer that reads three bytes and calls them red, green and blue —
+/// this repository's own `examples/render.rs` writes a PPM that way — would
+/// emit cyan, magenta and yellow under those names and look almost right.
+///
+/// So a caller asking for it gets `Rgba8`, which carries the same alpha and
+/// the colours the name promises. Silently, because there is nothing for the
+/// caller to do about it: the request was for pixels, and pixels are what comes
+/// back.
+#[must_use]
+pub fn page_format(format: PixelFormat) -> PixelFormat {
+    match format {
+        PixelFormat::CmykA8 => PixelFormat::Rgba8,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// **The two crates agree about ink and light.**
+    ///
+    /// `tinker-pdf-raster` carries its own byte-level copy of 8.6.4.4's device
+    /// relation rather than depending on `tinker-pdf-color` for it — the same
+    /// call the crate graph makes for `Color::luma`'s coefficients, and the
+    /// alternative was a fifth leaf-to-leaf edge for eight lines of
+    /// arithmetic. A duplicate that can drift is worth nothing, so this holds
+    /// the copy to the original over every combination that matters.
+    ///
+    /// This crate is where it lives because this crate already depends on both.
+    #[test]
+    fn the_two_crates_agree_on_the_device_relation() {
+        let space = tinker_pdf_color::ColorSpace::DeviceCmyk;
+        let levels = [0u8, 1, 17, 64, 128, 191, 254, 255];
+        for &c in &levels {
+            for &m in &levels {
+                for &y in &levels {
+                    for &k in &levels {
+                        let ours = tinker_pdf_raster::canvas::cmyk_to_rgb(c, m, y, k);
+                        let unit = |v: u8| f64::from(v) / 255.0;
+                        let theirs = space.to_rgb(&[unit(c), unit(m), unit(y), unit(k)]);
+                        assert_eq!(
+                            ours, theirs,
+                            "({c}, {m}, {y}, {k}): the rasterizer and the colour \
+                             crate disagree about 8.6.4.4"
+                        );
+                    }
+                }
+            }
+        }
+    }
     use super::*;
     use tinker_pdf_content::interpret;
     use tinker_pdf_content::FontSource;

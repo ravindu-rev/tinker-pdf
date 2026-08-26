@@ -83,16 +83,26 @@ against the appearance.
 
 **Transparency.** `/Group /S /Transparency` on a form XObject composites as
 a unit (11.6.6), with isolation (11.4.4), knockout (11.4.5) and backdrop
-removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. `/CS` is read
-too — on a form's group and on the **page's own** group (11.4.7), which reaches
-no `Do` and so is read off the page dictionary — and reduced to the shape a
-compositor needs: how many components, and whether they are subtractive.
-Compositing happens in RGB, which is the same arithmetic for a one- or
-three-component group and a different one for CMYK or Lab; those two are
-reported by name rather than blended silently, once per space. Measured over
-the 4 525 corpus files, August 2026: **35 declare a `/DeviceCMYK` group and
-none declares `/Lab`**. Making them right is
-[design/icc.md](../design/icc.md)'s stage 1. ExtGState
+removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. `/CS` is read and
+**honoured** — on a form's group and on the **page's own** group (11.4.7),
+which reaches no `Do` and so is read off the page dictionary.
+
+A group composites in the space it declared: its buffer holds that space's
+components, and conversion happens at the group's boundaries rather than per
+element. `/DeviceCMYK` gets a `CmykA8` buffer, and because 11.3.5's separable
+formulas are written for additive components, a subtractive channel enters and
+leaves them complemented — only the blend function, since 11.3.6's weighting
+averages colour values in the group's own space. The four non-separable modes
+(11.3.5.3) reason about hue and luminosity, which ink quantities do not have,
+so on a CMYK buffer their operands convert to light, blend, and convert back.
+A page-level group decides the format of the page canvas itself and is
+converted for the caller at the end, which is 11.4.7's own last step; a page is
+never handed back in CMYK, because a `Bitmap` says how many components it has
+and nothing about what they mean.
+
+`/Lab` is the one still composited in RGB and reported by name: its components
+are not in the unit interval at all. Measured over the 4 525 corpus files,
+August 2026: **35 declare a `/DeviceCMYK` group and none declares `/Lab`**. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
 (fully masked, the default that does not invert every drop shadow), and
@@ -177,7 +187,7 @@ helpers `Page::render` composes.
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
-| Blending a group in the space it declares | `RenderWarning::UnsupportedGroupSpace` | 11.3.5's formulas over subtractive components are not the same arithmetic over additive ones, so a CMYK or Lab group is blended in RGB and **named**. One- and three-component spaces are not reported: for those RGB is the same arithmetic rather than an approximation of it | [ROADMAP](../ROADMAP.md) |
+| Blending a group declared in `/Lab` | `RenderWarning::UnsupportedGroupSpace` | Its components are not in the unit interval, so 11.3.5's formulas have nothing to say about them; the group composites in RGB and is **named**. Grey, RGB and CMYK groups all composite in their own space now | [ROADMAP](../ROADMAP.md) |
 | Exact ICC/CIE colour | `ColorSpace::Approximated`, stated on the type | Component count decides the reading, the 8.6.5.5 fallback | [ROADMAP](../ROADMAP.md) |
 
 ## Verified

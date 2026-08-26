@@ -56,40 +56,16 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Transparency group colour spaces.** The engine composites in RGB
-  throughout, so a group declared in CMYK or Lab blends in the wrong space.
-  **Half of this has landed**: `/CS` is now read on a form's group and on the
-  page-level `/Group` of 11.4.7 — which nothing read before — and a space this
-  build cannot blend in is reported by name instead of silently, which is what
-  ruling 2 asks of a capability that is absent. One- and three-component
-  groups are not reported, because for those RGB is the same arithmetic rather
-  than an approximation. What is left is making CMYK and Lab *right*:
-  `CmykA8` buffers, separable blends over complemented components, and
-  conversion at the three group boundaries.
+- **Transparency group colour spaces.** *Done.* A group composites in the
+  space its `/Group /CS` declares (11.6.6) — `CmykA8` buffers, separable blends
+  over complemented components, non-separable ones converted to light and back
+  — and the page-level `/Group` of 11.4.7 decides the page canvas's own format,
+  converted for the caller at the end. `/Lab` remains composited in RGB and
+  reported by name, which no corpus file asks for. What is *not* claimed: the
+  blend is in CMYK with maximum undercolour removal rather than in the author's
+  CMYK, because `resolve_color` flattens every source colour to sRGB before the
+  renderer sees it — carrying components through that seam belongs with the CMM.
 
-  **Reachability, now measured rather than assumed: 35 of the 4 525 corpus
-  files declare a `/DeviceCMYK` transparency group** — more than JPX (19) or
-  mesh shadings (10) had when those were built — and **not one declares
-  `/Lab`**. So the compositing half is scheduled by ruling 3 on the CMYK case
-  alone, and Lab can keep refusing by name with no corpus pressure behind it.
-  Exit: group colour space honoured in compositing, pinned by fixtures that
-  differ only in the group's space. (M–L, folded into
-  [design/icc.md](design/icc.md))
-- **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, `BYPASS` and `TERMALL`,
-  out-of-order tile-parts — every entry reachable and named. **Now 3 refusals
-  of 19 corpus files, from 4, and not one of them a code-block style**:
-  `RESET`, `VERTICALLY_CAUSAL` and `PREDICTABLE` decode, which retired the
-  one code-block style a corpus file actually demanded
-  (`jp2k-resetprob.pdf`). Of the three left, one is a budget rather than a
-  capability and two are veraPDF fixtures refusing for a different feature. Ruling 13 costs this item its cheapest source of fixtures: a
-  codestream exercising a new partition can no longer be produced by asking
-  an encoder for one, so each is hand-authored, or round-tripped through the
-  in-tree test encoder with the mode mirrored on both sides and asserted to
-  disagree when it is not. What is left divides cleanly: the five markers are
-  header work with no corpus reachability, and `BYPASS` and `TERMALL` both
-  need a length per coding pass out of the packet header (B.10.7's multiple
-  codeword segments) rather than anything tier-1 can do alone. Exit: refusal
-  rows retire one by one as corpus files demand them. (M–L)
 - **Full ICC colour.** ICC and CIE spaces are approximated by component
   count today, stated on the type. An own CMM — profile parsing,
   transforms, rendering intents — is the capability. Exit: ICC profiles

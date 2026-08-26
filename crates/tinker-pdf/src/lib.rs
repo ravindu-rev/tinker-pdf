@@ -905,8 +905,6 @@ impl Page {
         // smaller surface, which crops instead of scaling.
         let applied = tinker_pdf_render::page_scale(w, h, scale);
 
-        let canvas = tinker_pdf_render::page_canvas(w, h, applied, options.format);
-
         // Ruling 2: the caller gets a whole page rather than a fragment, and
         // is told the resolution is not the one they asked for.
         let scaled_down = applied < scale;
@@ -919,14 +917,25 @@ impl Page {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
 
+        // 11.4.7: the page itself may declare a transparency group, and its
+        // `/CS` is the space the *whole page* composites in. Nothing invokes
+        // it, so it is read here rather than reaching the device through a
+        // `Do` — and, unlike a form's group, it decides the format of the page
+        // canvas itself rather than of a buffer over it. The bitmap is
+        // converted back for the caller at the end; 11.4.7 says the page group
+        // is composited and then converted to the output device's space, which
+        // is exactly those two steps.
+        let page_space = resources.page_group_space(&self.inner);
+        let canvas_format = page_space
+            .and_then(tinker_pdf_render::group_format)
+            .unwrap_or(options.format);
+        let canvas = tinker_pdf_render::page_canvas_in(w, h, applied, canvas_format);
+
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
-        // 11.4.7: the page itself may declare a transparency group, and its
-        // `/CS` is the space the whole page composites in. Nothing invokes it,
-        // so it is read here rather than reaching the device through a `Do`.
-        if let Some(space) = resources.page_group_space(&self.inner) {
+        if let Some(space) = page_space {
             renderer.note_page_group_space(space);
         }
         interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
@@ -962,6 +971,15 @@ impl Page {
                 applied,
             });
         }
+
+        // Back to something a caller can read. A page group composited over
+        // ink comes back as light, which is 11.4.7's own last step.
+        let wanted = tinker_pdf_render::page_format(options.format);
+        let canvas = if canvas.format == wanted {
+            canvas
+        } else {
+            canvas.extract((0, 0), canvas.width, canvas.height, wanted)
+        };
 
         Bitmap {
             width: canvas.width,

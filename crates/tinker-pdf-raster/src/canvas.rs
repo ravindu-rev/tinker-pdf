@@ -20,6 +20,18 @@ pub enum PixelFormat {
     Rgb8,
     /// Red, green, blue and alpha.
     Rgba8,
+    /// Cyan, magenta, yellow, black and alpha.
+    ///
+    /// The one **subtractive** format: its components are quantities of ink,
+    /// so more of one is darker where more of a `Rgb8` channel is lighter.
+    /// 11.3.5's blend formulas are written for additive components, so a
+    /// subtractive channel enters and leaves them complemented — see `blend`.
+    ///
+    /// It exists for transparency groups that declare `/DeviceCMYK` as their
+    /// `/Group /CS` (11.6.6), which is a group whose blends the specification
+    /// says happen over ink. It is not offered as a page format: see
+    /// `Page::render`.
+    CmykA8,
 }
 
 impl PixelFormat {
@@ -31,6 +43,7 @@ impl PixelFormat {
             PixelFormat::GrayA8 => 2,
             PixelFormat::Rgb8 => 3,
             PixelFormat::Rgba8 => 4,
+            PixelFormat::CmykA8 => 5,
         }
     }
 
@@ -46,7 +59,7 @@ impl PixelFormat {
         // painting its own colours, and a non-isolated group counting its
         // backdrop twice. Four wrong pictures, no error.
         match self {
-            PixelFormat::GrayA8 | PixelFormat::Rgba8 => true,
+            PixelFormat::GrayA8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 => true,
             PixelFormat::Gray8 | PixelFormat::Rgb8 => false,
         }
     }
@@ -221,6 +234,10 @@ impl Canvas {
             PixelFormat::GrayA8 => [color.luma(), color.a, 0, 0, 0],
             PixelFormat::Rgb8 => [color.r, color.g, color.b, 0, 0],
             PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a, 0],
+            PixelFormat::CmykA8 => {
+                let (c, m, y, k) = rgb_to_cmyk(color.r, color.g, color.b);
+                [c, m, y, k, color.a]
+            }
         }
     }
 
@@ -692,6 +709,15 @@ impl Canvas {
                 b: *px.get(2)?,
                 a: *px.get(3)?,
             },
+            PixelFormat::CmykA8 => {
+                let (r, g, b) = cmyk_to_rgb(*px.first()?, *px.get(1)?, *px.get(2)?, *px.get(3)?);
+                Color {
+                    r,
+                    g,
+                    b,
+                    a: *px.get(4)?,
+                }
+            }
         })
     }
 }
@@ -719,6 +745,52 @@ fn place(
     (x0, y0, x1, y1)
 }
 
+/// ISO 32000-1 8.6.4.4's device relation, in bytes: ink to light.
+///
+/// `R = (1 - C)(1 - K)`, and its two siblings. The same relation
+/// `tinker_pdf_color::ColorSpace::DeviceCmyk` states over `f64` components;
+/// this crate carries its own byte-level copy rather than taking a dependency
+/// on that one, for the reason it already carries [`Color::luma`]'s
+/// coefficients — a rasterizer knows how to turn stored components into light,
+/// and the crate graph says a leaf takes bytes and plain values in.
+/// `the_two_crates_agree_on_the_device_relation` holds the copy to the
+/// original so it cannot drift.
+#[must_use]
+pub fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
+    let white = 255 - u32::from(k);
+    let ink = |v: u8| mul255(255 - u32::from(v), white).min(255) as u8;
+    (ink(c), ink(m), ink(y))
+}
+
+/// 8.6.4.4's relation, inverted, with maximum undercolour removal.
+///
+/// `K` takes as much of the grey as it can — `K = 255 - max(R, G, B)` — and the
+/// three inks carry what is left. That choice makes the inverse **exact**:
+/// `cmyk_to_rgb(rgb_to_cmyk(x)) == x` for every one of the sixteen million
+/// colours, because each channel's intermediate error is bounded below half a
+/// level. `the_cmyk_round_trip_is_exact` sweeps every `(v, max)` pair that can
+/// occur and finds no exception.
+///
+/// The other direction is *not* an identity, and the difference matters. A
+/// CMYK value that did not come from here — a rich black, say — comes back as
+/// the pure-K black with the same colour, because that is the only split this
+/// function produces. Nothing in this engine authors CMYK components: a source
+/// colour is flattened to sRGB at the resource seam long before a buffer sees
+/// it, so every CMYK value in a group buffer originated here and round-trips.
+/// The day components are carried through that seam, this comment is the one
+/// to revisit.
+#[must_use]
+pub fn rgb_to_cmyk(r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
+    let white = u32::from(r.max(g).max(b));
+    if white == 0 {
+        // Black: all of it is `K`, and asking for the inks would divide by the
+        // white that is not there.
+        return (0, 0, 0, 255);
+    }
+    let ink = |v: u8| (255 - (u32::from(v) * 255 + white / 2) / white).min(255) as u8;
+    (ink(r), ink(g), ink(b), (255 - white).min(255) as u8)
+}
+
 /// `a * b / 255`, rounded, in integers.
 pub(crate) fn mul255(a: u32, b: u32) -> u32 {
     let product = a * b + 128;
@@ -730,6 +802,7 @@ fn color_channels(format: PixelFormat) -> usize {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => 1,
         PixelFormat::Rgb8 | PixelFormat::Rgba8 => 3,
+        PixelFormat::CmykA8 => 4,
     }
 }
 
@@ -797,16 +870,63 @@ fn blend(
     // read; it is sized here so that adding a four-channel format is an arm of
     // `encode` rather than a change to this arithmetic.
     let mut blended = [0u32; 4];
+    // 11.3.5's separable functions are written for *additive* components: they
+    // assume more of a channel is more light. A subtractive channel is a
+    // quantity of ink and runs the other way, so it enters and leaves them
+    // complemented. Only the blend function is complemented — the weighting
+    // around it is 11.3.6's, which averages colour *values* in the group's own
+    // space, so it works on the stored components either way.
+    let subtractive = matches!(format, PixelFormat::CmykA8);
     for (i, out) in blended.iter_mut().enumerate().take(channels) {
         let (Some(slot), Some(src)) = (dst.get(i), source.get(i)) else {
             continue;
         };
         let cs = u32::from(*src);
         let cb = u32::from(*slot);
-        let mixed = mode.apply(cb, cs);
+        let mixed = if subtractive {
+            255 - mode.apply(255 - cb, 255 - cs)
+        } else {
+            mode.apply(cb, cs)
+        };
         *out = mul255(255 - backdrop_alpha, cs) + mul255(backdrop_alpha, mixed);
     }
-    if mode.is_nonseparable() {
+    if mode.is_nonseparable() && subtractive {
+        // 11.3.5.3's four modes are defined over *RGB* values — they reason
+        // about hue, saturation and luminosity, which ink quantities do not
+        // have. So a subtractive buffer converts its operands to light, blends
+        // there, and converts the answer back.
+        //
+        // That round trip is not free: `rgb_to_cmyk` produces one particular
+        // ink split, so a rich black arrives back as its pure-K equivalent.
+        // The colour is the same and the *next* blend over it is not, which is
+        // why this is reported rather than done quietly — see
+        // `RenderWarning::ApproximatedGroupBlend`.
+        let (br, bg, bb) = cmyk_to_rgb(
+            dst.first().copied().unwrap_or(0),
+            dst.get(1).copied().unwrap_or(0),
+            dst.get(2).copied().unwrap_or(0),
+            dst.get(3).copied().unwrap_or(0),
+        );
+        let (sr, sg, sb) = cmyk_to_rgb(
+            source.first().copied().unwrap_or(0),
+            source.get(1).copied().unwrap_or(0),
+            source.get(2).copied().unwrap_or(0),
+            source.get(3).copied().unwrap_or(0),
+        );
+        let lit = mode.apply_nonseparable(
+            [u32::from(br), u32::from(bg), u32::from(bb)],
+            [u32::from(sr), u32::from(sg), u32::from(sb)],
+        );
+        let byte = |v: u32| v.min(255) as u8;
+        let (c, m, y, k) = rgb_to_cmyk(byte(lit[0]), byte(lit[1]), byte(lit[2]));
+        for (i, mixed) in [c, m, y, k].into_iter().enumerate() {
+            let (Some(out), Some(src)) = (blended.get_mut(i), source.get(i)) else {
+                continue;
+            };
+            *out = mul255(255 - backdrop_alpha, u32::from(*src))
+                + mul255(backdrop_alpha, u32::from(mixed));
+        }
+    } else if mode.is_nonseparable() {
         // 11.3.5.3's four modes are defined over three components, and a
         // one-channel buffer is a grey — so the clause applies to it exactly,
         // by replicating that grey into three and taking the first component
@@ -882,6 +1002,49 @@ fn blend(
 
 #[cfg(test)]
 mod tests {
+
+    /// **The device relation round-trips exactly**, which is the lemma the
+    /// whole CMYK path rests on.
+    ///
+    /// `rgb_to_cmyk` chooses maximum undercolour removal — `K` takes as much of
+    /// the grey as it can — and that choice is what makes the inverse exact
+    /// rather than approximate. Each channel's intermediate error is bounded
+    /// below half a level, so the round trip is the identity for every one of
+    /// the sixteen million colours.
+    ///
+    /// Swept over `(v, max)` rather than over `(r, g, b)`: `K` is fixed by the
+    /// maximum, and given `K` each channel is independent of the other two, so
+    /// every pair here stands for a whole family of colours and 32 896 of them
+    /// cover all 16 777 216.
+    #[test]
+    fn the_cmyk_round_trip_is_exact() {
+        for max in 0..=255u8 {
+            for v in 0..=max {
+                let (c, _, _, k) = rgb_to_cmyk(v, max, 0);
+                let (back, _, _) = cmyk_to_rgb(c, 0, 0, k);
+                assert_eq!(
+                    back, v,
+                    "v {v} of max {max} came back as {back}: the inverse is not \
+                     exact, and every CMYK group buffer shifts colour"
+                );
+            }
+        }
+    }
+
+    /// Black is all `K`, and white is no ink at all.
+    ///
+    /// The two ends the general sweep cannot reach: black has no white to
+    /// divide by, and 8.6.4.4's initial CMYK colour is `[0 0 0 1]` rather than
+    /// all zeros, so an implementation that read "no ink" as "black" would have
+    /// every group buffer start inverted.
+    #[test]
+    fn the_ends_of_the_ink_scale_are_where_they_should_be() {
+        assert_eq!(rgb_to_cmyk(0, 0, 0), (0, 0, 0, 255), "black is all K");
+        assert_eq!(rgb_to_cmyk(255, 255, 255), (0, 0, 0, 0), "white is no ink");
+        assert_eq!(cmyk_to_rgb(0, 0, 0, 255), (0, 0, 0));
+        assert_eq!(cmyk_to_rgb(0, 0, 0, 0), (255, 255, 255));
+        assert_eq!(cmyk_to_rgb(255, 0, 0, 0), (0, 255, 255), "cyan");
+    }
 
     /// **A same-format copy is the bytes it started as**, which is the identity
     /// `Canvas::source_from`'s fast path rests on.
