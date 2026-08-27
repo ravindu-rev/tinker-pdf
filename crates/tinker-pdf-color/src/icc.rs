@@ -17,6 +17,25 @@
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
 //! agree about everything this module reads.
 //!
+//! # Injection, counted
+//!
+//! Two defects were reintroduced and the suite run to see what caught them,
+//! which is this repository's standing practice for a guard: a guard that
+//! catches nothing when its defect is injected is not one.
+//!
+//! | Injected | Caught by, of 3 012 |
+//! | --- | ---: |
+//! | one coefficient of the D50-to-sRGB matrix off by 0.1 | **2** |
+//! | every gamma exponent multiplied by 1.05 | **3** |
+//!
+//! The matrix defect is caught by  and by
+//! the facade's , and by
+//! nothing else in the workspace — which is the argument for the round trip
+//! being the exit criterion rather than a nice-to-have. The curve defect adds
+//! , which is the assertion that
+//! localises it: the round trip says the answer moved, the ramp says the table
+//! is what moved.
+//!
 //! # Why a wrong parse is loud
 //!
 //! Unlike the arithmetic-coded formats elsewhere in this workspace, a profile
@@ -1006,6 +1025,126 @@ mod tests {
         assert!(
             table.windows(2).all(|w| w[0] <= w[1]),
             "the compiled curve is not monotone"
+        );
+    }
+
+    /// **The two fixed-point encodings decode to the numbers the format
+    /// defines**, bit pattern by bit pattern.
+    ///
+    /// `s15Fixed16Number` and `u8Fixed8Number` are the whole of ICC.1's
+    /// numeric vocabulary for the tags read here, and they are the one part of
+    /// this module whose right answers are *exact* — a scale or a shift wrong
+    /// by a factor of two is not a rounding difference, it is every colour in
+    /// the profile moved. Rounding, tolerances and the corpus have nothing to
+    /// say about these; they either are the format or they are not.
+    #[test]
+    fn the_fixed_point_encodings_are_exactly_what_the_format_says() {
+        // s15Fixed16: one is 0x0001_0000, and the sign is two's complement.
+        let s15 = |bits: u32| {
+            let tag = {
+                let mut out = b"XYZ ".to_vec();
+                out.extend_from_slice(&[0; 4]);
+                out.extend_from_slice(&bits.to_be_bytes());
+                out.extend_from_slice(&[0; 8]);
+                out
+            };
+            read_xyz(&tag).expect("an XYZ tag")[0]
+        };
+        assert_eq!(s15(0x0001_0000), 1.0, "one");
+        assert_eq!(s15(0x0000_8000), 0.5, "a half");
+        assert_eq!(s15(0x0000_0001), 1.0 / 65536.0, "the smallest step");
+        assert_eq!(s15(0x0000_0000), 0.0, "zero");
+        assert_eq!(s15(0xFFFF_0000), -1.0, "minus one is two's complement");
+        assert_eq!(s15(0x8000_0000), -32768.0, "the most negative");
+        assert_eq!(
+            s15(0x7FFF_FFFF),
+            32768.0 - 1.0 / 65536.0,
+            "the most positive"
+        );
+
+        // u8Fixed8, which is what a single-entry `curv` stores a gamma in.
+        let u8f8 = |bits: u16| {
+            let mut out = b"curv".to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&1u32.to_be_bytes());
+            out.extend_from_slice(&bits.to_be_bytes());
+            match read_curve(&out).expect("a curve") {
+                Curve::Gamma(g) => g,
+                other => panic!("expected a gamma, got {other:?}"),
+            }
+        };
+        assert_eq!(u8f8(0x0100), 1.0, "one");
+        assert_eq!(u8f8(0x0233), 563.0 / 256.0, "the usual 2.2");
+        assert_eq!(u8f8(0x0080), 0.5, "a half");
+        assert_eq!(u8f8(0xFFFF), 65535.0 / 256.0, "the largest");
+    }
+
+    /// **A linear curve compiles to a linear ramp**, every one of its 4 096
+    /// entries.
+    ///
+    /// The exact statement of what compiling *is*: a gamma of one is the
+    /// identity, so entry `i` must be `i` rescaled from the table's range to
+    /// sixteen bits and nothing else. Asserted for every entry rather than at
+    /// the ends, because a table that is right at both ends and wrong in the
+    /// middle is exactly what an off-by-one in the index arithmetic produces —
+    /// and the sRGB round trip would absorb it, since it samples the same
+    /// wrong table on the way in and out.
+    #[test]
+    fn a_linear_curve_compiles_to_a_linear_ramp() {
+        let table = compile_curve(&Curve::Gamma(1.0));
+        assert_eq!(table.len(), CURVE_ENTRIES);
+        for (i, entry) in table.iter().enumerate() {
+            let want = ((i as f64 / (CURVE_ENTRIES - 1) as f64) * 65535.0).round() as u16;
+            assert_eq!(
+                *entry, want,
+                "entry {i} of {CURVE_ENTRIES} is {entry}, not {want}"
+            );
+        }
+
+        // And `Identity` is the same table, since it is the same function.
+        assert_eq!(compile_curve(&Curve::Identity), table);
+    }
+
+    /// **A profile's columns reach the matrix**, which is the step between
+    /// parsing and transforming and the one the sRGB round trip cannot see.
+    ///
+    /// Halving the green column must halve green's contribution. The round trip
+    /// would notice too, but only as "not the identity any more"; this says
+    /// *which* number moved, which is what a failure needs to be actionable.
+    #[test]
+    fn the_columns_are_what_the_matrix_is_built_from() {
+        let full = Profile::parse(&srgb_profile()).expect("a profile");
+        let bright = Transform::compile(&full).expect("a transform");
+
+        let dimmed_bytes = build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(SRGB_R[0], SRGB_R[1], SRGB_R[2])),
+                (
+                    *b"gXYZ",
+                    xyz(SRGB_G[0] / 2.0, SRGB_G[1] / 2.0, SRGB_G[2] / 2.0),
+                ),
+                (*b"bXYZ", xyz(SRGB_B[0], SRGB_B[1], SRGB_B[2])),
+                (*b"rTRC", srgb_curve()),
+                (*b"gTRC", srgb_curve()),
+                (*b"bTRC", srgb_curve()),
+                (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
+            ],
+        );
+        let dimmed = Transform::compile(&Profile::parse(&dimmed_bytes).expect("a profile"))
+            .expect("a transform");
+
+        let (_, bright_g, _) = bright.apply(&[0.0, 1.0, 0.0]);
+        let (_, dim_g, _) = dimmed.apply(&[0.0, 1.0, 0.0]);
+        assert!(
+            dim_g < bright_g,
+            "halving the green column did not dim green: {bright_g} then {dim_g}"
+        );
+        // Half the light, encoded: sRGB puts linear 0.5 near 188 of 255.
+        assert!(
+            (186..=190).contains(&dim_g),
+            "half of green's light should encode near 188, got {dim_g}"
         );
     }
 }
