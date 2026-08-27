@@ -7,8 +7,11 @@
 //! # What is read, and why that is the right subset
 //!
 //! The census in `crates/tinker-pdf/tests/icc_census.rs` walked every profile
-//! in the four corpora — 2 750 of them, in half the files — and the shape it
-//! found decides the shape of this module. **2 287 are matrix/TRC** (three
+//! in the four corpora — 2 750 of them, in 2 313 files — and the shape it
+//! found decides the shape of this module. (Of those files only 449 name an
+//! `ICCBased` colour space that paints something; the rest carry the profile
+//! as a PDF/A `/OutputIntent`, which declares what a file was prepared for
+//! rather than converting anything.) **2 287 are matrix/TRC** (three
 //! `XYZ` columns and three tone curves) and **323 are grey** (one curve and a
 //! white point); together 95 %. The remaining 140 need the multi-dimensional
 //! `A2B*` lookup tables, which are refused by name here.

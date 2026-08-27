@@ -94,6 +94,15 @@ had 19 files and JBIG2 103.
 | every profile matrix/TRC | 1 932 |
 | carrying any LUT profile | 131 |
 
+**Two different numbers, and the difference matters.** 2 313 files carry a
+profile *stream*; only **449 name an `ICCBased` colour space** that paints
+anything. The gap is `/OutputIntent`: a PDF/A file declares the space it was
+prepared for whether or not any content is painted through it, which is why
+366 of the 449 and the great bulk of the 2 313 are veraPDF's. So "half the
+corpus carries a profile" is true and is not the reachability figure — the one
+that measures what this capability changes on a page is 449 files, 9.9 %,
+which is still the highest of any capability the corpus report tracks.
+
 So **matrix/TRC and grey together are 95 % of the profiles**, and the LUT
 machinery this document sizes at L on its own is the remaining 5 %. That splits
 the stage cleanly and puts the LUT milestone after the wiring rather than before

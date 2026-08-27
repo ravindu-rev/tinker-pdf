@@ -3,15 +3,16 @@
   "corpora": [
     {
       "capabilities": {
+        "iccbased": 80,
         "jbig2": 103,
         "jpx": 12,
         "mesh-shading": 10
       },
-      "degraded": 382,
+      "degraded": 365,
       "metamorphic": {
         "crop": {
           "compared": 829,
-          "held": 791
+          "held": 792
         },
         "dpi": {
           "compared": 944,
@@ -36,6 +37,7 @@
     },
     {
       "capabilities": {
+        "iccbased": 366,
         "jpx": 7
       },
       "degraded": 55,
@@ -66,7 +68,9 @@
       "total": 2907
     },
     {
-      "capabilities": {},
+      "capabilities": {
+        "iccbased": 3
+      },
       "degraded": 530,
       "metamorphic": {
         "crop": {
