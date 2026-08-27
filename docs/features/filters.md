@@ -82,7 +82,11 @@ Huffman dictionary.
 
 Measured over the corpus's 102 JBIG2-bearing files in August 2026, counting
 files whose render reports any JBIG2 warning: **65 before this lineage landed,
-52 after**, and none gained one.
+52 after the arithmetic variant, and 49 after the Huffman one**, and none
+gained one. Annex B's tables are reconstructed rather than transcribed, and
+what holds them to the standard is Annex H coding the same two symbols twice —
+once with `SDHUFF`, once through the MQ coder — which decode byte-identically
+([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
 
 Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
 belongs at the PDF boundary beside `/ImageMask` and `/Decode`. A file whose
@@ -157,7 +161,7 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| JBIG2 Huffman-coded dictionaries and text regions (SDHUFF, SBHUFF), refinement and aggregate coding (SDREFAGG, SBREFINE, segment types 40/42/43), and transposed text regions | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. Measured: of the 43 corpus files in this lineage, refinement unlocks 9 and Huffman 5 | [ROADMAP](../ROADMAP.md) |
+| JBIG2 refinement and aggregate coding (SDREFAGG, SBREFINE, segment types 40/42/43), transposed text regions, and custom code tables (type 53) | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF and SBHUFF left this row**: Annex B decodes, held to the standard by Annex H coding the same two symbols both ways. Measured: 25 corpus files still reach this, from 29 | [ROADMAP](../ROADMAP.md) |
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | [ROADMAP](../ROADMAP.md) |
 | JBIG2 halftone regions and pattern dictionaries (6.6, 6.7; types 16, 20, 22, 23) | `Warning::Jbig2SegmentSkipped` | A third lineage; 16 corpus files carry it and nothing else | [ROADMAP](../ROADMAP.md) |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |

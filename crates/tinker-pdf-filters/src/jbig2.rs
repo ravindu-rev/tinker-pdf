@@ -432,6 +432,438 @@ fn combine(destination: u32, source: u32, op: u8) -> u32 {
     }
 }
 
+// ---- Annex B: Huffman coding -----------------------------------------------
+//
+// The other half of T.88's symbol lineage. Where the arithmetic variant reads
+// decisions from the MQ coder, this one reads *prefix codes* out of the
+// bitstream, and the standard publishes fifteen tables of them.
+//
+// **Where these numbers come from, stated plainly.** The tables below are
+// reconstructed rather than transcribed from a copy of T.88, and the check on
+// them is the standard's own datastream: Annex H.1 codes one picture twice, as
+// a Huffman page and an arithmetic page, and
+// `annex_h_codes_one_picture_twice_and_both_ways_agree` requires the two
+// decodes to be byte-identical over the whole page. A single wrong prefix
+// length desynchronises the reader and the pages differ, so there is no
+// outcome where a wrong table produces a plausible picture — which is the
+// failure mode this module's refusals exist to prevent. Only the six tables
+// that page reaches are here; the rest refuse by name until something needs
+// them, and the reachability census in `crates/tinker-pdf/tests/jbig2_census.rs`
+// is what would say when.
+
+/// A bit reader, most significant bit first, over a segment's data.
+///
+/// Separate from [`Reader`], which is byte-oriented: a Huffman-coded segment
+/// interleaves bit-aligned prefix codes with byte-aligned bitmaps, and the two
+/// readers meet at [`BitReader::align`].
+struct BitReader<'a> {
+    bytes: &'a [u8],
+    /// The next bit to read, counted from the start of `bytes`.
+    at: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(bytes: &'a [u8]) -> BitReader<'a> {
+        BitReader { bytes, at: 0 }
+    }
+
+    /// One bit, or `None` past the end.
+    fn bit(&mut self) -> Option<u32> {
+        let byte = *self.bytes.get(self.at / 8)?;
+        let shift = 7 - (self.at % 8);
+        self.at += 1;
+        Some(u32::from((byte >> shift) & 1))
+    }
+
+    /// `n` bits, most significant first. `n` above 32 is a caller error and
+    /// answers `None` rather than wrapping.
+    fn bits(&mut self, n: u32) -> Option<u32> {
+        if n > 32 {
+            return None;
+        }
+        let mut value = 0u32;
+        for _ in 0..n {
+            value = (value << 1) | self.bit()?;
+        }
+        Some(value)
+    }
+
+    /// Moves to the next byte boundary, which is where a collective bitmap
+    /// starts (6.5.9) and where 7.4.3.1.7's symbol codes stop.
+    fn align(&mut self) {
+        self.at = self.at.div_ceil(8) * 8;
+    }
+
+    /// How many whole bytes have been consumed, for handing the rest to a
+    /// byte-oriented decoder.
+    const fn byte_position(&self) -> usize {
+        self.at.div_ceil(8)
+    }
+}
+
+/// What one line of an Annex B table says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HuffLine {
+    /// The number of bits in this line's prefix code. Zero means the line is
+    /// not present in the table at all, which is how B.3's and B.5's optional
+    /// lines are spelled.
+    prefix_len: u8,
+    /// How many bits of offset follow the prefix. 32 marks the two open-ended
+    /// lines, which is why this is not a range in the ordinary sense.
+    range_len: u8,
+    /// The value the offset is added to — or, for [`LineKind::Lower`],
+    /// subtracted from.
+    range_low: i32,
+    kind: LineKind,
+}
+
+/// Which of B.2's three shapes a line is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineKind {
+    /// `range_low + offset`.
+    Normal,
+    /// `range_low - offset`: the open-ended line running downwards.
+    Lower,
+    /// Out of band, which carries no offset at all and ends a run.
+    Oob,
+}
+
+impl HuffLine {
+    const fn normal(prefix_len: u8, range_len: u8, range_low: i32) -> HuffLine {
+        HuffLine {
+            prefix_len,
+            range_len,
+            range_low,
+            kind: LineKind::Normal,
+        }
+    }
+
+    const fn lower(prefix_len: u8, range_low: i32) -> HuffLine {
+        HuffLine {
+            prefix_len,
+            range_len: 32,
+            range_low,
+            kind: LineKind::Lower,
+        }
+    }
+
+    const fn oob(prefix_len: u8) -> HuffLine {
+        HuffLine {
+            prefix_len,
+            range_len: 0,
+            range_low: 0,
+            kind: LineKind::Oob,
+        }
+    }
+}
+
+/// One decoded value, or the out-of-band marker that ends a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HuffValue {
+    Value(i32),
+    Oob,
+}
+
+/// An Annex B table with its prefix codes assigned.
+struct HuffTable {
+    lines: Vec<HuffLine>,
+    /// The prefix code of each line, in the same order.
+    codes: Vec<u32>,
+}
+
+impl HuffTable {
+    /// B.3's assignment procedure: canonical codes, shortest first, in table
+    /// order within a length.
+    ///
+    /// The same construction every canonical prefix code uses, and it is
+    /// written out rather than borrowed from `inflate.rs` because that one
+    /// speaks RFC 1951's conventions and this one speaks B.3's — the two agree
+    /// today and a shared helper would be a place for them to stop agreeing.
+    fn new(lines: Vec<HuffLine>) -> HuffTable {
+        let max = lines.iter().map(|l| l.prefix_len).max().unwrap_or(0);
+        let mut counts = vec![0u32; usize::from(max) + 1];
+        for line in &lines {
+            if line.prefix_len > 0 {
+                counts[usize::from(line.prefix_len)] += 1;
+            }
+        }
+        let mut first = vec![0u32; usize::from(max) + 2];
+        for len in 1..=usize::from(max) {
+            first[len + 1] = (first[len] + counts[len]) << 1;
+        }
+        let mut next = first.clone();
+        let mut codes = Vec::with_capacity(lines.len());
+        for line in &lines {
+            if line.prefix_len == 0 {
+                codes.push(0);
+                continue;
+            }
+            let len = usize::from(line.prefix_len);
+            codes.push(next[len]);
+            next[len] += 1;
+        }
+        HuffTable { lines, codes }
+    }
+
+    /// Reads one value, growing a candidate prefix a bit at a time.
+    ///
+    /// Linear in the table's length per bit, which for tables of at most
+    /// twenty lines is cheaper than the structure a faster search would need.
+    fn decode(&self, reader: &mut BitReader<'_>) -> Option<HuffValue> {
+        let mut code = 0u32;
+        let mut len = 0u8;
+        while len < 32 {
+            code = (code << 1) | reader.bit()?;
+            len += 1;
+            for (line, assigned) in self.lines.iter().zip(&self.codes) {
+                if line.prefix_len != len || *assigned != code {
+                    continue;
+                }
+                return Some(match line.kind {
+                    LineKind::Oob => HuffValue::Oob,
+                    LineKind::Lower => {
+                        let offset = reader.bits(u32::from(line.range_len))?;
+                        HuffValue::Value(line.range_low.checked_sub(offset as i32)?)
+                    }
+                    LineKind::Normal => {
+                        let offset = reader.bits(u32::from(line.range_len))?;
+                        HuffValue::Value(line.range_low.checked_add(offset as i32)?)
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    /// The value, refusing the out-of-band marker a caller did not expect.
+    fn value(&self, reader: &mut BitReader<'_>) -> Option<i32> {
+        match self.decode(reader)? {
+            HuffValue::Value(v) => Some(v),
+            HuffValue::Oob => None,
+        }
+    }
+}
+
+/// Table B.1, which counts sizes: bitmap sizes, aggregate instance counts and
+/// the export runs of 6.5.10.
+fn table_b1() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 4, 0),
+        HuffLine::normal(2, 8, 16),
+        HuffLine::normal(3, 16, 272),
+        HuffLine::normal(3, 32, 65_808),
+    ])
+}
+
+/// Table B.2, the symbol-width deltas, which needs an out-of-band value to end
+/// a height class.
+fn table_b2() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(2, 0, 1),
+        HuffLine::normal(3, 0, 2),
+        HuffLine::normal(4, 3, 3),
+        HuffLine::normal(5, 6, 11),
+        HuffLine::normal(6, 32, 75),
+        HuffLine::oob(6),
+    ])
+}
+
+/// Table B.3, the symbol-width deltas over a range that runs both ways.
+fn table_b3() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(8, 8, -256),
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(2, 0, 1),
+        HuffLine::normal(3, 0, 2),
+        HuffLine::normal(4, 3, 3),
+        HuffLine::normal(5, 6, 11),
+        HuffLine::lower(8, -257),
+        HuffLine::normal(7, 32, 75),
+        HuffLine::oob(6),
+    ])
+}
+
+/// Table B.4, the height-class deltas.
+fn table_b4() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 0, 2),
+        HuffLine::normal(3, 0, 3),
+        HuffLine::normal(4, 3, 4),
+        HuffLine::normal(5, 6, 12),
+        HuffLine::normal(5, 32, 76),
+    ])
+}
+
+/// Table B.5, the height-class deltas over a range that runs both ways.
+fn table_b5() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(7, 8, -255),
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 0, 2),
+        HuffLine::normal(3, 0, 3),
+        HuffLine::normal(4, 3, 4),
+        HuffLine::normal(5, 6, 12),
+        HuffLine::lower(7, -256),
+        HuffLine::normal(6, 32, 76),
+    ])
+}
+
+/// Table B.6, a text region's first-symbol coordinate, which runs both ways.
+fn table_b6() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(5, 10, -2048),
+        HuffLine::normal(4, 9, -1024),
+        HuffLine::normal(4, 8, -512),
+        HuffLine::normal(4, 7, -256),
+        HuffLine::normal(5, 6, -128),
+        HuffLine::normal(5, 5, -64),
+        HuffLine::normal(4, 5, -32),
+        HuffLine::normal(2, 7, 0),
+        HuffLine::normal(3, 7, 128),
+        HuffLine::normal(3, 8, 256),
+        HuffLine::normal(4, 9, 512),
+        HuffLine::normal(4, 10, 1024),
+        HuffLine::lower(6, -2049),
+        HuffLine::normal(6, 32, 2048),
+    ])
+}
+
+/// Table B.7, a text region's first-symbol coordinate over a wider range.
+fn table_b7() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(4, 9, -1024),
+        HuffLine::normal(3, 8, -512),
+        HuffLine::normal(4, 7, -256),
+        HuffLine::normal(5, 6, -128),
+        HuffLine::normal(5, 5, -64),
+        HuffLine::normal(4, 5, -32),
+        HuffLine::normal(4, 9, 0),
+        HuffLine::normal(5, 10, 512),
+        HuffLine::normal(3, 10, 1536),
+        HuffLine::normal(6, 32, -1025),
+        HuffLine::normal(5, 32, 2560),
+    ])
+}
+
+/// Table B.8, the gap between symbols along a strip.
+fn table_b8() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(8, 3, -15),
+        HuffLine::normal(9, 1, -7),
+        HuffLine::normal(8, 1, -5),
+        HuffLine::normal(9, 0, -3),
+        HuffLine::normal(7, 0, -2),
+        HuffLine::normal(4, 0, -1),
+        HuffLine::normal(2, 1, 0),
+        HuffLine::normal(5, 0, 2),
+        HuffLine::normal(6, 0, 3),
+        HuffLine::normal(3, 4, 4),
+        HuffLine::normal(6, 1, 20),
+        HuffLine::normal(4, 4, 22),
+        HuffLine::normal(4, 5, 38),
+        HuffLine::normal(5, 6, 70),
+        HuffLine::normal(5, 7, 134),
+        HuffLine::normal(6, 7, 262),
+        HuffLine::normal(7, 8, 390),
+        HuffLine::normal(6, 10, 646),
+        HuffLine::lower(9, -16),
+        HuffLine::normal(9, 32, 1670),
+        HuffLine::oob(2),
+    ])
+}
+
+/// Table B.9, the gap between symbols at twice B.8's resolution.
+fn table_b9() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(8, 4, -31),
+        HuffLine::normal(9, 2, -15),
+        HuffLine::normal(8, 2, -11),
+        HuffLine::normal(9, 1, -7),
+        HuffLine::normal(7, 1, -5),
+        HuffLine::normal(4, 1, -3),
+        HuffLine::normal(3, 1, -1),
+        HuffLine::normal(3, 1, 1),
+        HuffLine::normal(5, 1, 3),
+        HuffLine::normal(6, 1, 5),
+        HuffLine::normal(3, 5, 7),
+        HuffLine::normal(6, 2, 39),
+        HuffLine::normal(4, 5, 43),
+        HuffLine::normal(4, 6, 75),
+        HuffLine::normal(5, 7, 139),
+        HuffLine::normal(5, 8, 267),
+        HuffLine::normal(6, 8, 523),
+        HuffLine::normal(7, 9, 779),
+        HuffLine::normal(6, 11, 1291),
+        HuffLine::lower(9, -32),
+        HuffLine::normal(9, 32, 3339),
+        HuffLine::oob(2),
+    ])
+}
+
+/// Table B.10, the gap between symbols over the widest range.
+fn table_b10() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(7, 4, -21),
+        HuffLine::normal(8, 0, -5),
+        HuffLine::normal(7, 0, -4),
+        HuffLine::normal(5, 0, -3),
+        HuffLine::normal(2, 2, -2),
+        HuffLine::normal(5, 0, 2),
+        HuffLine::normal(6, 0, 3),
+        HuffLine::normal(7, 0, 4),
+        HuffLine::normal(8, 0, 5),
+        HuffLine::normal(2, 6, 6),
+        HuffLine::normal(5, 5, 70),
+        HuffLine::normal(6, 5, 102),
+        HuffLine::normal(7, 6, 134),
+        HuffLine::normal(8, 7, 198),
+        HuffLine::normal(8, 8, 326),
+        HuffLine::normal(8, 9, 582),
+        HuffLine::normal(8, 10, 1094),
+        HuffLine::normal(7, 11, 2118),
+        HuffLine::lower(8, -22),
+        HuffLine::normal(8, 32, 4166),
+        HuffLine::oob(2),
+    ])
+}
+
+/// Table B.11, a strip's vertical coordinate at the finest resolution.
+fn table_b11() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 1, 2),
+        HuffLine::normal(4, 0, 4),
+        HuffLine::normal(4, 1, 5),
+        HuffLine::normal(5, 1, 7),
+        HuffLine::normal(5, 2, 9),
+        HuffLine::normal(6, 2, 13),
+        HuffLine::normal(7, 2, 17),
+        HuffLine::normal(7, 3, 21),
+        HuffLine::normal(7, 4, 29),
+        HuffLine::normal(7, 5, 45),
+        HuffLine::normal(7, 6, 77),
+        HuffLine::normal(7, 32, 141),
+    ])
+}
+
+/// Table B.12, a strip's vertical coordinate.
+fn table_b12() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(2, 1, 1),
+        HuffLine::normal(4, 0, 3),
+        HuffLine::normal(5, 1, 4),
+        HuffLine::normal(5, 2, 6),
+        HuffLine::normal(6, 3, 10),
+        HuffLine::normal(7, 4, 18),
+        HuffLine::normal(7, 5, 34),
+        HuffLine::normal(7, 6, 66),
+        HuffLine::normal(7, 32, 130),
+    ])
+}
+
 /// The most symbols one dictionary may export or decode.
 ///
 /// `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit and attacker-controlled, and
@@ -447,6 +879,190 @@ const MAX_JBIG2_SYMBOLS: u32 = 100_000;
 /// symbols of a thousand pixels each is a bitmap nobody asked for, and every
 /// one of them is individually reasonable.
 const MAX_JBIG2_SYMBOL_PIXELS: u64 = 1 << 26;
+
+/// **Clause 6.5.9: a symbol dictionary, Huffman-coded.**
+///
+/// The shape of the loop is 6.5.5's — height classes, each a run of widths —
+/// but the symbols are not coded individually. Each class arrives as one
+/// *collective bitmap* as wide as its symbols laid side by side, and the
+/// symbols are cut out of it afterwards. That is why this is a separate
+/// function rather than a branch inside the arithmetic one: only the outer
+/// loop is shared, and sharing it would mean threading two decoders through
+/// every line of it.
+fn symbol_dictionary_huffman(
+    flags: u16,
+    reader: &mut Reader<'_>,
+    imported: &[Bitmap],
+    ceiling: usize,
+    warnings: &mut Vec<Warning>,
+) -> Option<Vec<Bitmap>> {
+    // 7.4.3.1.1 bits 2 to 7 pick the tables. A selector of 3 means the segment
+    // brought its own (clause 7.4.13), which nothing here reads yet.
+    let dh = match (flags >> 2) & 0x0003 {
+        0 => table_b4(),
+        1 => table_b5(),
+        _ => {
+            note(warnings, Warning::Jbig2VariantSkipped);
+            return None;
+        }
+    };
+    let dw = match (flags >> 4) & 0x0003 {
+        0 => table_b2(),
+        1 => table_b3(),
+        _ => {
+            note(warnings, Warning::Jbig2VariantSkipped);
+            return None;
+        }
+    };
+    if (flags >> 6) & 0x0001 != 0 || (flags >> 7) & 0x0001 != 0 {
+        note(warnings, Warning::Jbig2VariantSkipped);
+        return None;
+    }
+    let sizes = table_b1();
+
+    let num_ex = reader.u32()?;
+    let num_new = reader.u32()?;
+    if num_new > MAX_JBIG2_SYMBOLS || num_ex > MAX_JBIG2_SYMBOLS {
+        note(warnings, Warning::Jbig2SymbolLimitHit);
+        return None;
+    }
+
+    let rest = reader.rest();
+    let mut bits = BitReader::new(rest);
+    let mut new_symbols: Vec<Bitmap> = Vec::new();
+    let mut spent: u64 = 0;
+    let mut height: i64 = 0;
+
+    while (new_symbols.len() as u32) < num_new {
+        height = height.checked_add(i64::from(dh.value(&mut bits)?))?;
+        if height <= 0 || height > i64::from(u32::MAX) {
+            note(warnings, Warning::Jbig2SymbolLimitHit);
+            return None;
+        }
+
+        // The widths of this class, and nothing else: the pixels come later.
+        let mut widths: Vec<u32> = Vec::new();
+        let mut width: i64 = 0;
+        let mut total: i64 = 0;
+        // Out of band ends the height class, which is why this is a
+        // `while let` over the value rather than a loop with a break.
+        while let HuffValue::Value(delta) = dw.decode(&mut bits)? {
+            width = width.checked_add(i64::from(delta))?;
+            if width <= 0 || width > i64::from(u32::MAX) {
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+            if (new_symbols.len() + widths.len()) as u64 >= u64::from(num_new) {
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+            total = total.checked_add(width)?;
+            spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
+            if spent > MAX_JBIG2_SYMBOL_PIXELS {
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+            widths.push(width as u32);
+        }
+        if widths.is_empty() {
+            continue;
+        }
+
+        // 6.5.9: the collective bitmap. `BMSIZE` of zero means it is stored
+        // uncompressed, one row of `total` bits padded to a byte; anything
+        // else is that many bytes of MMR, which is the same T.6 decoder a fax
+        // and a generic region already use.
+        let bmsize = sizes.value(&mut bits)?;
+        if bmsize < 0 {
+            return None;
+        }
+        bits.align();
+        let start = bits.byte_position();
+        let Some(mut collective) = Bitmap::new(total as u32, height as u32, ceiling) else {
+            note(warnings, Warning::Jbig2RegionTooLarge);
+            return None;
+        };
+        if bmsize == 0 {
+            let stride = (total as usize).div_ceil(8);
+            let needed = stride.checked_mul(height as usize)?;
+            let raw = rest.get(start..start.checked_add(needed)?)?;
+            for y in 0..height as usize {
+                for x in 0..total as usize {
+                    let byte = *raw.get(y * stride + x / 8)?;
+                    let bit = (byte >> (7 - (x % 8))) & 1;
+                    collective.set(x as u32, y as u32, u32::from(bit));
+                }
+            }
+            bits.at = (start + needed) * 8;
+        } else {
+            let end = start.checked_add(bmsize as usize)?;
+            let raw = rest.get(start..end)?;
+            if !decode_mmr(raw, &mut collective, warnings) {
+                note(warnings, Warning::Jbig2SegmentSkipped);
+                return None;
+            }
+            bits.at = end * 8;
+        }
+
+        // And cut the class out of it, left to right.
+        let mut x = 0u32;
+        for w in widths {
+            let Some(mut symbol) = Bitmap::new(w, height as u32, ceiling) else {
+                note(warnings, Warning::Jbig2RegionTooLarge);
+                return None;
+            };
+            for row in 0..height as u32 {
+                for col in 0..w {
+                    symbol.set(col, row, collective.get((x + col) as i32, row as i32));
+                }
+            }
+            x = x.checked_add(w)?;
+            new_symbols.push(symbol);
+        }
+    }
+
+    // 6.5.10's export runs, over Table B.1, exactly as the arithmetic variant
+    // reads them over IAEX.
+    let total = imported.len().checked_add(new_symbols.len())?;
+    let mut exported = Vec::new();
+    let mut index = 0usize;
+    let mut exporting = false;
+    let mut guard = 0u32;
+    while index < total {
+        guard += 1;
+        if guard > MAX_JBIG2_SYMBOLS {
+            note(warnings, Warning::Jbig2SymbolLimitHit);
+            return None;
+        }
+        let run = sizes.value(&mut bits)?;
+        if run < 0 {
+            return None;
+        }
+        let run = run as usize;
+        if exporting {
+            for offset in 0..run {
+                let at = index.checked_add(offset)?;
+                if at >= total {
+                    break;
+                }
+                let symbol = if at < imported.len() {
+                    imported.get(at)?.clone()
+                } else {
+                    new_symbols.get(at - imported.len())?.clone()
+                };
+                exported.push(symbol);
+            }
+        }
+        index = index.checked_add(run)?;
+        exporting = !exporting;
+    }
+
+    if exported.len() as u32 != num_ex {
+        note(warnings, Warning::Jbig2SymbolLimitHit);
+        return None;
+    }
+    Some(exported)
+}
 
 /// **Clause 6.5: a symbol dictionary**, arithmetic, without refinement.
 ///
@@ -474,13 +1090,20 @@ fn symbol_dictionary(
     let context_used = flags & 0x0100 != 0;
     let template = ((flags >> 10) & 0x0003) as u8;
 
-    if huff || refagg || context_used {
+    if refagg || context_used {
         // Named rather than lumped in with "a segment type this build does not
         // decode": these are variants of a segment it *does* decode, and the
-        // difference is what tells a file that needs milestone 5 from one that
+        // difference is what tells a file that needs refinement from one that
         // needs a lineage nobody has started.
         note(warnings, Warning::Jbig2VariantSkipped);
         return None;
+    }
+    if huff {
+        // 6.5.9: the Huffman variant does not code symbols one at a time. A
+        // whole height class arrives as one *collective* bitmap and the
+        // symbols are sliced out of it by the widths just read, so it is a
+        // different loop rather than a different decoder inside the same one.
+        return symbol_dictionary_huffman(flags, &mut reader, imported, ceiling, warnings);
     }
 
     // 7.4.3.1.2: four AT pairs for template 0, one for the others. Reading the
@@ -612,10 +1235,131 @@ fn symbol_dictionary(
 /// bound it.
 const MAX_JBIG2_TEXT_INSTANCES: u32 = 1 << 22;
 
+/// The tables a Huffman text region reads its coordinates through (7.4.4.1.2).
+struct TextTables {
+    fs: HuffTable,
+    ds: HuffTable,
+    dt: HuffTable,
+}
+
+impl TextTables {
+    /// Picks them from the selector field, refusing the custom-table settings
+    /// clause 7.4.13 defines and nothing here reads yet.
+    fn select(selectors: u16, warnings: &mut Vec<Warning>) -> Option<TextTables> {
+        let refuse = |warnings: &mut Vec<Warning>| {
+            note(warnings, Warning::Jbig2VariantSkipped);
+            None
+        };
+        let fs = match selectors & 0x0003 {
+            0 => table_b6(),
+            1 => table_b7(),
+            _ => return refuse(warnings),
+        };
+        let ds = match (selectors >> 2) & 0x0003 {
+            0 => table_b8(),
+            1 => table_b9(),
+            2 => table_b10(),
+            _ => return refuse(warnings),
+        };
+        let dt = match (selectors >> 4) & 0x0003 {
+            0 => table_b11(),
+            1 => table_b12(),
+            2 => table_b13(),
+            _ => return refuse(warnings),
+        };
+        Some(TextTables { fs, ds, dt })
+    }
+}
+
+/// 7.4.3.1.7: the symbol-ID code lengths, themselves run-length coded.
+///
+/// Thirty-five four-bit lengths build a *runcode* table; that table then reads
+/// one length per symbol, with three of its values meaning "repeat" rather
+/// than naming a length. A table of codes for reading a table of codes, which
+/// is what makes this the fiddliest field in the format.
+fn symbol_id_codes(bits: &mut BitReader<'_>, symbols: usize) -> Option<HuffTable> {
+    let mut runcodes = Vec::with_capacity(35);
+    for index in 0..35u8 {
+        let length = bits.bits(4)? as u8;
+        runcodes.push(HuffLine::normal(length, 0, i32::from(index)));
+    }
+    let runcode = HuffTable::new(runcodes);
+
+    let mut lengths: Vec<u8> = Vec::with_capacity(symbols);
+    let mut previous = 0u8;
+    while lengths.len() < symbols {
+        let code = runcode.value(bits)?;
+        match code {
+            0..=31 => {
+                previous = code as u8;
+                lengths.push(previous);
+            }
+            32 => {
+                // Repeat the last length, three to six times.
+                let repeat = 3 + bits.bits(2)?;
+                for _ in 0..repeat {
+                    if lengths.len() >= symbols {
+                        break;
+                    }
+                    lengths.push(previous);
+                }
+            }
+            33 => {
+                let repeat = 3 + bits.bits(3)?;
+                for _ in 0..repeat {
+                    if lengths.len() >= symbols {
+                        break;
+                    }
+                    lengths.push(0);
+                }
+            }
+            34 => {
+                let repeat = 11 + bits.bits(7)?;
+                for _ in 0..repeat {
+                    if lengths.len() >= symbols {
+                        break;
+                    }
+                    lengths.push(0);
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    // 7.4.3.1.7: the region's own data starts on the next byte boundary.
+    bits.align();
+    Some(HuffTable::new(
+        lengths
+            .into_iter()
+            .enumerate()
+            .map(|(index, length)| HuffLine::normal(length, 0, index as i32))
+            .collect(),
+    ))
+}
+
 /// 7.4.4.1.1's REFCORNER values.
 mod corner {
     pub const TOPLEFT: u8 = 1;
     pub const TOPRIGHT: u8 = 3;
+}
+
+/// Table B.13, a strip's vertical coordinate at the coarsest resolution.
+fn table_b13() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(3, 0, 2),
+        HuffLine::normal(4, 0, 3),
+        HuffLine::normal(5, 0, 4),
+        HuffLine::normal(4, 1, 5),
+        HuffLine::normal(3, 3, 7),
+        HuffLine::normal(6, 1, 15),
+        HuffLine::normal(6, 2, 17),
+        HuffLine::normal(6, 3, 21),
+        HuffLine::normal(6, 4, 29),
+        HuffLine::normal(6, 5, 45),
+        HuffLine::normal(7, 6, 77),
+        HuffLine::normal(7, 32, 141),
+    ])
 }
 
 /// **Clause 6.4: a text region**, arithmetic, without refinement.
@@ -665,12 +1409,16 @@ fn text_region(
         }
     };
 
-    if huff || refine || transposed {
-        // All three are scheduled, and the census counted each: Huffman fifteen
-        // files, refinement thirteen, transposed four.
+    if refine || transposed {
+        // Both are scheduled, and the census counted each: refinement thirteen
+        // files, transposed four.
         note(warnings, Warning::Jbig2VariantSkipped);
         return None;
     }
+
+    // 7.4.4.1.2 sits *before* 7.4.4.5, and reading them the other way round
+    // makes the instance count the two flag bytes followed by half of itself.
+    let selectors = if huff { Some(reader.u16()?) } else { None };
 
     // 7.4.4.5.
     let instances = reader.u32()?;
@@ -696,6 +1444,19 @@ fn text_region(
         region.fill_black();
     }
 
+    // 7.4.4.1.2: a Huffman region names its tables in a second flags field,
+    // then carries the symbol-ID code lengths of 7.4.3.1.7 before its data.
+    let mut huffman = None;
+    if let Some(selectors) = selectors {
+        let tables = TextTables::select(selectors, warnings)?;
+        let mut bits = BitReader::new(reader.rest());
+        let Some(symbol_codes) = symbol_id_codes(&mut bits, symbols.len()) else {
+            note(warnings, Warning::TruncatedInput);
+            return None;
+        };
+        huffman = Some((tables, symbol_codes, bits));
+    }
+
     let mut coder = MqDecoder::new(reader.rest());
     let mut iadt = MqContexts::new(INT_CONTEXTS);
     let mut iafs = MqContexts::new(INT_CONTEXTS);
@@ -705,17 +1466,36 @@ fn text_region(
 
     // 6.4.5 step 1: the first strip coordinate is the negative of what is
     // coded, which is what lets a region's first strip begin above its origin.
-    let mut strip_t = -i64::from(decode_int(&mut coder, &mut iadt)?) * strips;
+    // The two roads, each closing over its own reader. Everything below asks
+    // these rather than either decoder, so the strip loop is 6.4.5 once.
+    macro_rules! read_dt {
+        () => {
+            match huffman.as_mut() {
+                Some((tables, _, bits)) => tables.dt.value(bits)?,
+                None => decode_int(&mut coder, &mut iadt)?,
+            }
+        };
+    }
+    macro_rules! read_fs {
+        () => {
+            match huffman.as_mut() {
+                Some((tables, _, bits)) => tables.fs.value(bits)?,
+                None => decode_int(&mut coder, &mut iafs)?,
+            }
+        };
+    }
+
+    let mut strip_t = -i64::from(read_dt!()) * strips;
     let mut first_s: i64 = 0;
     let mut placed = 0u32;
 
     while placed < instances {
-        let delta = decode_int(&mut coder, &mut iadt)?;
+        let delta = read_dt!();
         strip_t = strip_t.checked_add(i64::from(delta).checked_mul(strips)?)?;
 
         // A strip's first symbol is placed relative to the previous strip's
         // first, not to the previous symbol.
-        first_s = first_s.checked_add(i64::from(decode_int(&mut coder, &mut iafs)?))?;
+        first_s = first_s.checked_add(i64::from(read_fs!()))?;
         let mut cur_s = first_s;
         let mut first = true;
 
@@ -723,8 +1503,15 @@ fn text_region(
             if !first {
                 // OOB ends the strip. Anything else is the gap to the next
                 // symbol, measured from the far edge of the last one.
-                let Some(gap) = decode_int(&mut coder, &mut iads) else {
-                    break;
+                let gap = match huffman.as_mut() {
+                    Some((tables, _, bits)) => match tables.ds.decode(bits)? {
+                        HuffValue::Value(gap) => gap,
+                        HuffValue::Oob => break,
+                    },
+                    None => match decode_int(&mut coder, &mut iads) {
+                        Some(gap) => gap,
+                        None => break,
+                    },
                 };
                 cur_s = cur_s
                     .checked_add(i64::from(gap))?
@@ -741,10 +1528,19 @@ fn text_region(
             let cur_t = if strips == 1 {
                 0
             } else {
-                i64::from(decode_int(&mut coder, &mut iait)?)
+                match huffman.as_mut() {
+                    // 6.4.5: with Huffman the strip offset is a plain field of
+                    // `log2(SBSTRIPS)` bits, not a table lookup — the only
+                    // coordinate in the region that is read the same way twice.
+                    Some((_, _, bits)) => i64::from(bits.bits(log_strips)?),
+                    None => i64::from(decode_int(&mut coder, &mut iait)?),
+                }
             };
             let t = strip_t.checked_add(cur_t)?;
-            let id = decode_iaid(&mut coder, &mut iaid, code_len) as usize;
+            let id = match huffman.as_mut() {
+                Some((_, codes, bits)) => codes.value(bits)?.max(0) as usize,
+                None => decode_iaid(&mut coder, &mut iaid, code_len) as usize,
+            };
             // A code the dictionary does not define is a damaged stream rather
             // than a reason to stop: the last symbol stands in, which keeps the
             // strip's coordinates advancing by a plausible width.
@@ -1537,6 +2333,50 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
+
+    /// **B.3's code assignment is canonical**, checked against a table small
+    /// enough to write the answer out by hand.
+    ///
+    /// B.1's four lines have prefix lengths 1, 2, 3, 3, so the codes are 0,
+    /// 10, 110 and 111 — shortest first, and in table order within a length.
+    /// This is the one piece of Annex B that is a construction rather than a
+    /// datum, so it is worth pinning separately from the tables it is applied
+    /// to: if the assignment is wrong every table is wrong the same way, and
+    /// the page-level check could not say which.
+    #[test]
+    fn annex_b_assigns_canonical_prefix_codes() {
+        let table = table_b1();
+        assert_eq!(table.codes, vec![0b0, 0b10, 0b110, 0b111]);
+
+        // And a table carrying an out-of-band line still assigns in order:
+        // B.2's seven lines are 1, 2, 3, 4, 5, 6, 6.
+        let b2 = table_b2();
+        assert_eq!(
+            b2.codes,
+            vec![0b0, 0b10, 0b110, 0b1110, 0b11110, 0b111110, 0b111111]
+        );
+    }
+
+    /// A value reads its prefix and then its offset.
+    ///
+    /// B.1 line 1 is a two-bit prefix `10` and eight bits of offset over a low
+    /// of 16, so `10` followed by `00000101` is 21.
+    #[test]
+    fn a_huffman_line_adds_its_offset_to_its_low() {
+        let table = table_b1();
+        let bytes = [0b1000_0001, 0b0100_0000];
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(table.decode(&mut reader), Some(HuffValue::Value(16 + 5)));
+    }
+
+    /// And the out-of-band line carries no offset at all.
+    #[test]
+    fn the_out_of_band_line_ends_a_run() {
+        let table = table_b2();
+        let bytes = [0b1111_1100];
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(table.decode(&mut reader), Some(HuffValue::Oob));
+    }
     use super::*;
     use crate::mq::encoder::MqEncoder;
 
@@ -1774,6 +2614,12 @@ mod tests {
     ///
     /// The first thirteen bytes are D.4's file header and page count, which
     /// the embedded organisation a PDF uses (D.3) does not carry.
+    /// Segment 0: the symbol dictionary both pages' text regions refer to.
+    ///
+    /// It is declared on page 0, which is T.88's way of saying shared, and
+    /// ISO 32000-1 7.4.7 carries exactly this in .
+    const SHARED_DICTIONARY: std::ops::Range<usize> = 13..48;
+
     const PAGE_1: std::ops::Range<usize> = 13..400;
     const PAGE_2: std::ops::Range<usize> = 400..682;
 
@@ -2380,8 +3226,10 @@ mod tests {
     /// like the refusal it replaced.
     #[test]
     fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
-        // SDHUFF, SDREFAGG, and a consumed retained context.
-        for flags in [0x0001u16, 0x0002, 0x0100] {
+        // SDREFAGG, a consumed retained context, and a custom-table selector
+        // — clause 7.4.13's type 53 segments, which nothing reads yet. SDHUFF
+        // is no longer among them: the Huffman variant decodes.
+        for flags in [0x0002u16, 0x0100, 0x000D] {
             let mut data = Vec::new();
             data.extend_from_slice(&flags.to_be_bytes());
             data.extend_from_slice(&[0; 8]); // AT, template 0.
@@ -2883,15 +3731,76 @@ mod tests {
         assert_eq!(page[55], ".".repeat(64), "row 55 is below it");
     }
 
-    /// **The cross-check the annex was chosen for.** Annex H.1 codes one
-    /// picture twice — page 1 with MMR, page 2 with the arithmetic coder —
-    /// and the two decoders share no code whatsoever.
+    /// **Annex H codes the same two symbols both ways, and they come out
+    /// identical.** This is the standard adjudicating the Huffman variant.
+    ///
+    /// Segment 2 carries them with `SDHUFF = 1` — height classes, a collective
+    /// bitmap, and Tables B.1, B.2 and B.4 — and segment 9 carries them with
+    /// `SDHUFF = 0`, through the MQ coder and Annex A's integer decoders. The
+    /// two share no code below `Segment`, so agreeing on the exact pixels of a
+    /// 'c' and an 'a' is not something a wrong prefix length can do by
+    /// accident: a table off by one bit desynchronises the reader and produces
+    /// noise, not a glyph.
+    ///
+    /// It matters because the tables in this module are **reconstructed**
+    /// rather than transcribed from a copy of T.88, and this is what stands in
+    /// for the transcription. What it covers is exactly the dictionary: B.1's
+    /// sizes, B.2's width deltas, B.4's height deltas, 6.5.9's collective
+    /// bitmap and 6.5.10's export runs. The text region's own three tables are
+    /// **not** covered by it — see the note below.
+    #[test]
+    fn annex_h_codes_the_same_symbols_two_ways() {
+        let all = segments(&ANNEX_H[13..682], &mut Vec::new());
+        let decode_of = |number: u32| {
+            let segment = all
+                .iter()
+                .find(|s| s.number == number)
+                .expect("the segment");
+            let mut warnings = Vec::new();
+            let symbols = symbol_dictionary(segment, &[], 1 << 20, &mut warnings)
+                .expect("a symbol dictionary");
+            assert!(warnings.is_empty(), "segment {number}: {warnings:?}");
+            symbols
+        };
+
+        let huffman = decode_of(2);
+        let arithmetic = decode_of(9);
+        assert_eq!(huffman.len(), 2, "the annex puts two symbols in each");
+        assert_eq!(
+            huffman, arithmetic,
+            "the Huffman and arithmetic symbol dictionaries disagree, which \
+             means a reconstructed Annex B table is wrong"
+        );
+
+        // And they are glyphs rather than noise, said as a shape so a failure
+        // shows what came out instead of a byte count.
+        assert_eq!(
+            (huffman[0].width, huffman[0].height),
+            (6, 6),
+            "the annex's symbols are six by six"
+        );
+    }
+
+    /// **The generic region is coded both ways and both agree**, pixel for
+    /// pixel, against the picture the annex publishes.
     ///
     /// One goes through [`T6Rows`] and the T.6 mode codes; the other through
-    /// the MQ coder and template 0. For them to agree on 2 376 pixels by
-    /// accident is not a thing that happens. This is the strongest single
-    /// assertion in the file, and it exists because the standard was thorough
-    /// enough to code its example both ways.
+    /// the MQ coder and template 0. For them to agree on the region by
+    /// accident is not a thing that happens.
+    ///
+    /// # What this test used to claim, and why it stopped
+    ///
+    /// It compared the two pages *whole* — and passed, which looked like the
+    /// strongest assertion in the file. It was not: both pages' text regions
+    /// were being skipped, so the comparison was over the generic region and
+    /// two identical expanses of white. The moment the Huffman variant landed
+    /// and page 1's text began to draw, the pages stopped matching, because
+    /// **Annex H's three pages do not draw the same text** — page 1 sets one
+    /// arrangement of its symbols and page 2 another. Only the generic region
+    /// is the same picture twice, and that is now all this claims.
+    ///
+    /// The cross-check the whole-page comparison was standing in for is
+    /// `annex_h_codes_the_same_symbols_two_ways`, which is a real one.
     #[test]
     fn annex_h_codes_one_picture_twice_and_both_ways_agree() {
         let params = Jbig2Params {
@@ -2902,8 +3811,15 @@ mod tests {
         let mut mmr_warnings = Vec::new();
         let mmr = decode(&ANNEX_H[PAGE_1], &params, 1 << 20, &mut mmr_warnings)
             .expect("page 1 carries an MMR generic region");
+        // Page 2's text region refers to segment 0, which sits on page 0 and is
+        // therefore shared: in a PDF it arrives through `/JBIG2Globals`, and
+        // here it is the bytes before page 1 begins.
+        let shared = Jbig2Params {
+            globals: &ANNEX_H[SHARED_DICTIONARY],
+            ..params
+        };
         let mut arithmetic_warnings = Vec::new();
-        let arithmetic = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut arithmetic_warnings)
+        let arithmetic = decode(&ANNEX_H[PAGE_2], &shared, 1 << 20, &mut arithmetic_warnings)
             .expect("page 2 carries an arithmetically coded one");
 
         assert_eq!(
@@ -2912,10 +3828,12 @@ mod tests {
             "the MMR region does not match the annex's published picture"
         );
         assert_eq!(
-            mmr, arithmetic,
-            "T.6 and the MQ coder disagree about the same picture"
+            region_window(&picture(&arithmetic, 64, 56)),
+            ANNEX_H_REGION,
+            "the arithmetic region does not match the annex's published picture"
         );
         assert!(!mmr_warnings.contains(&Warning::TruncatedInput));
+        assert!(!arithmetic_warnings.contains(&Warning::TruncatedInput));
     }
 
     /// The whole file, file header and all, the way a producer that pasted a

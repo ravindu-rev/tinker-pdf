@@ -212,7 +212,48 @@ injection at the bottom of `jbig2.rs` already does.
 | 2 | Segment references + Annex A integer decoders | **Done.** `Segment` carries its number and referred-to list; `every_integer_range_and_oob_round_trips` covers all six A.2 fields at both ends and OOB, `the_symbol_index_procedure_round_trips_at_every_code_length` covers A.3 including `SBSYMCODELEN` zero; the committed fuzz seeds are replayed on stable by `tests/jbig2_seeds.rs` | M |
 | 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | **Done**, with one exit criterion changed and the change stated: symbols round-trip pixel-for-pixel against an `MqEncoder`-built dictionary over three height classes and all four templates; 6.5.10's export runs select across imported and new symbols; the variants this build declines refuse under `Jbig2VariantSkipped`. Annex H.2's *published symbol bitmaps* are not in this repository — H.1's datastream is, its generic-region picture is, its symbol pictures are not — so the pixel-for-pixel claim is against a fixture this repository builds rather than against the standard. Milestone 4 recovers the standard's own adjudication: the annex's text region composites those symbols into a page, and that page can be compared with what H.1 publishes | M |
 | 4 | Text region, arithmetic (SBREFINE and TRANSPOSED refused by name) | **Done**, with the exit criterion changed and the change stated below: `a_text_region_places_its_symbols_where_6_4_5_computes` places symbols across two strips at the coordinates 6.4.5 computes, through a round trip; `a_text_region_whose_dictionary_refused_is_refused_by_name` holds a region whose referred-to dictionary is absent or refused to refusing **whole**; all four reference corners handled, SBDSOFFSET and multi-strip regions decoded. The annex's own page moves to milestone 6 | M |
+| 6 | Annex B Huffman: standard tables, 6.5.9's collective bitmaps, 7.4.3.1.7's symbol-ID codes | **Done.** `annex_h_codes_the_same_symbols_two_ways` holds the reconstructed tables to the annex's arithmetic twin; 44 to 47 files clean | M |
 | 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
+
+### Milestone 6 landed, and what actually adjudicates it
+
+Annex B's tables are **reconstructed rather than transcribed** — this repository
+has no copy of T.88 — so the question is what holds them to the standard. Two
+things turned out to be true, and one thing that was expected to be turned out
+not to be.
+
+**The dictionary has a real oracle.** Annex H codes the same two symbols twice:
+segment 2 carries them with `SDHUFF = 1`, through height classes, a collective
+bitmap and Tables B.1, B.2 and B.4; segment 9 carries them with `SDHUFF = 0`,
+through the MQ coder and Annex A's integer decoders. The two share no code below
+`Segment`, and they decode to **byte-identical** glyphs — a 'c' and an 'a', six
+by six. A prefix length wrong by one bit desynchronises the reader and yields
+noise, not a glyph, so this is the standard adjudicating the reconstruction.
+`annex_h_codes_the_same_symbols_two_ways` is that assertion.
+
+**The text region does not.** The plan was to lean on the whole-page comparison
+in `annex_h_codes_one_picture_twice_and_both_ways_agree`, on the reading that
+Annex H codes one picture as a Huffman page and an arithmetic page. It does not:
+pages 1 and 2 draw *different text* from their symbols. That was invisible until
+now because **both** pages' text regions were being skipped, so the whole-page
+assertion was comparing the generic region and two identical expanses of white
+— a vacuous claim that read as the strongest one in the file. It has been
+narrowed to what is actually true, which is that the generic region is coded
+both ways and both match the published picture.
+
+So B.6, B.8 and B.12 rest on weaker evidence than B.1, B.2 and B.4: the region
+decodes without error, places symbols of the right dimensions at varying
+baselines, and renders as legible glyphs rather than noise — which a wrong table
+would not survive, but which is not pixel-exactness. Said plainly here because
+the difference between the two halves is real and a reader should not have to
+infer it.
+
+**What it bought, measured over the 104 JBIG2-bearing corpus files:** 44 clean
+before, **47 after**, and files reporting `Jbig2VariantSkipped` down from 29 to
+25. The census predicted five; three arrived, because two of the five need
+refinement as well and are unlocked by neither stage alone — which is the
+overlap the census exists to show and the reason it counts *files* rather than
+segments.
 
 ### What a bound has to clear, and why milestone 7 cannot measure it here
 
