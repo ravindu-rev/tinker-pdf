@@ -293,6 +293,52 @@ position rules out for the same reason it rules out committing any corpus — or
 fetching a corpus that carries some. Neither is milestone 7's business to
 decide, so the rows land as stated estimates and the gap is named here.
 
+### Milestone 5 was attempted, and what the attempt established
+
+Clause 6.3 was written and run against Annex H page 3, on the reasoning that a
+wrong context template desynchronises the arithmetic decoder, the integer
+decoders after it return nonsense, and the strict count checks then refuse the
+segment — so the experiment could only cost a refusal, never a wrong picture.
+It was worth running, and it narrowed the problem to one artefact.
+
+**Everything around clause 6.3 decodes correctly.** Segment 17 is a symbol
+dictionary with `SDREFAGG = 1`, and its first symbol reads:
+
+```
+height = 6   width = 6   REFAGGNINST = 1
+```
+
+All three are right, which proves a chain of things that would each have broken
+it: 7.4.3.1.2's generic AT pixels are read at the right width for template 2,
+7.4.3.1.3's *refinement* AT pair is read only when `SDRTEMPLATE` is zero and at
+the right offset, the height-class loop and its `IADH`/`IADW` decoders are in
+step, and 6.5.8.2's aggregate header — `IAAI`, then the symbol identity, then
+`IARDX` and `IARDY` — is in the order the clause puts it. A mistake anywhere in
+that chain shows up as a nonsense value here, and none did.
+
+**The second symbol then reads `REFAGGNINST = -12`.** The decoder is out of step
+by the end of the first refinement, which places the defect inside
+`decode_refinement_into` and nowhere else — that is, in the **context template**
+itself. So what is missing is not clause 6.3's structure but 6.3.5.3's two
+figures: which thirteen pixels form `GRTEMPLATE 0`'s context and which ten form
+`GRTEMPLATE 1`'s, and in what order.
+
+**The guessed template was not kept.** A template reconstructed from memory
+would be code that refuses today and that a later reader might trust; the module
+already says a wrong JBIG2 decode is worth less than a refusal, and a wrong
+*guess* dressed as an implementation is worth less than an honest gap. What is
+recorded instead is the boundary: hand over 6.3.5.3's two layouts and the rest
+is verified to be waiting for them.
+
+**And unlike Huffman, there is no substitute.** Milestone 6 landed on the
+strength of Annex H coding the same two symbols twice — segment 2 with
+`SDHUFF`, segment 9 arithmetically — so the standard adjudicated the
+reconstruction pixel for pixel. Nothing in the annex codes one picture with and
+without refinement: page 3 is the only refinement fixture and it has no twin.
+The count checks would catch a desynchronised decoder, but they cannot
+distinguish a template that is right from one that is wrong in a way that stays
+in step, and that is the difference between evidence and a hope.
+
 ### Milestone 5 has an anchor, and it is better than the round trip
 
 Annex H.1 carries no refinement *region* segment — a walk of its twenty-one

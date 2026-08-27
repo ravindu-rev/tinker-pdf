@@ -47,27 +47,19 @@ thousands of documents nobody here authored.
 Each of these is refused by name today (ruling 2 — the placeholder-plus-
 warning contract), with corpus reachability measured.
 
-- **JBIG2 symbol dictionary and text region.** The highest-reachability
-  refusal in the engine: 103 files in the pdf.js corpus alone — more than
-  JPX (19) or mesh shadings (10) had when they were built. It is what OCR
-  pipelines emit, so most JBIG2 in circulation is this. The MQ coder is
-  already shared and in its own module; the generic-region lineage is
-  done. Exit: the symbol/text refusal rows leave
-  [features/filters.md](features/filters.md); corpus hit-rate for the
-  capability goes to ~zero. (L,
-  [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Full ICC colour.** *Done.* An own CMM in the
-  `tinker-pdf-color` leaf parses a profile and transforms through it:
-  matrix/TRC, grey, and the `mft1`/`mft2` lookup tables a printer profile
-  carries. **2 744 of the corpus's 2 750 profiles compile, 99.8 %**, and the
-  six that do not are named. The default rendering intent is honoured —
-  8.6.5.8 makes it `RelativeColorimetric`, which is the `A2B1` table — and
-  selecting a *non-default* one is measured and declined: **no corpus file sets
-  an ExtGState `/RenderingIntent`** and five carry the `ri` operator, so ruling
-  3 does not ask for it. What remains unbuilt is that selection and v4's
-  `mAB ` tables, three tags in the whole corpus. CalRGB and CalGray remain
-  approximated, which [design/icc.md](design/icc.md) lists as a non-goal.
-  (Closed on the evidence; reopen with a file that needs it.)
+- **JBIG2 refinement coding (clause 6.3).** The symbol/text lineage is
+  otherwise **done**: arithmetic and Huffman symbol dictionaries and text
+  regions decode, held to the standard by Annex H coding the same two symbols
+  both ways. What is left is refinement — `SDREFAGG`, `SBREFINE` and segment
+  types 40/42/43 — measured at **13 of the corpus's 102 JBIG2-bearing files**,
+  and it is blocked on one artefact rather than on effort. Clause 6.3 was
+  written and run: everything around it is verified correct (the refinement AT
+  offset, the aggregate header, `IARDX`/`IARDY`), and the decoder goes out of
+  step inside the context template alone, which is 6.3.5.3's two figures.
+  Unlike Annex B's tables, nothing in Annex H codes one picture with and
+  without refinement, so there is no cross-check to reconstruct against. Exit:
+  supply 6.3.5.3's layouts; Annex H page 3 then decodes.
+  (M, [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
 
 ## Tier 3 — capabilities absent today
 
