@@ -72,6 +72,41 @@ change, and stage 2 slots into the seam stage 1 builds (an ICCBased group
 `/CS` becomes just another space the boundary conversion handles). So:
 groups first, CMM second.
 
+### What the corpus carries, measured before any of this was built
+
+Ruling 3 wants a capability scheduled by what real documents need. The census in
+`crates/tinker-pdf/tests/icc_census.rs` reads the header and tag table of every
+ICC profile in the four corpora — bytes only, sharing no code with the colour
+crate, so it cannot agree with a parser that is wrong.
+
+**2 313 of 4 605 files carry a profile**, 2 750 profiles in all. That is half
+the corpus, and a far higher reachability than anything else in this tier: JPX
+had 19 files and JBIG2 103.
+
+| | profiles |
+| --- | ---: |
+| matrix/TRC — three `XYZ` columns and three tone curves | **2 287** |
+| grey — a single `kTRC` and a white point, no matrix | 323 |
+| needing a LUT (`A2B*` / `B2A*`) | **140** |
+
+| | files |
+| --- | ---: |
+| every profile matrix/TRC | 1 932 |
+| carrying any LUT profile | 131 |
+
+So **matrix/TRC and grey together are 95 % of the profiles**, and the LUT
+machinery this document sizes at L on its own is the remaining 5 %. That splits
+the stage cleanly and puts the LUT milestone after the wiring rather than before
+it: a build that transforms matrix and grey profiles and refuses LUT ones by
+name is right about nineteen profiles in twenty.
+
+Two more numbers the milestones need. The device classes are `mntr` 2 428,
+`prtr` 316, `scnr` 5; the data spaces are RGB 2 286, GRAY 323, CMYK 138, Lab 2.
+And the versions are **v2 2 739, v4 9, v5 2** — so v2 is not a legacy case to
+tolerate, it is the case, and v4's structural additions are worth exactly nine
+files. The largest profile in the corpus is **718 672 bytes**, which is the
+figure the profile-size bound in `bounds_ledger.rs` has to clear.
+
 ### Stage 1: transparency-group colour spaces
 
 **Plumbing.** `tinker_pdf_content::Group` (interpret.rs:50) gains
