@@ -31,6 +31,13 @@ use crate::optional::OptionalContent;
 /// one costs the extraction attempt once rather than on every occurrence.
 type OutlineCache = HashMap<(u64, u32), Option<Arc<Outline>>>;
 
+/// Compiled ICC transforms, by the profile stream's object number and
+/// generation.
+///
+/// The `None` is cached as deliberately as the `Some`: a profile that will
+/// not parse must be refused once rather than re-read at every `cs`.
+type IccCache = HashMap<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transform>>>;
+
 /// Everything one page's rendering needs from its resources.
 pub struct PageResources {
     doc: Arc<CosDocument>,
@@ -53,6 +60,13 @@ pub struct PageResources {
     resources: Option<Dict>,
     /// Decoded images, kept because a page may draw one many times.
     images: Mutex<HashMap<Vec<u8>, Option<Arc<DecodedImage>>>>,
+    /// Compiled ICC transforms, by the profile stream's object number.
+    ///
+    /// A transform is three 4 096-entry tables, and a page may name the same
+    /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
+    /// is cached too: a profile that would not parse must be refused once
+    /// rather than re-read and re-refused a thousand times.
+    icc: Mutex<IccCache>,
     /// Outlines already extracted, keyed by font and code.
     outlines: RwLock<OutlineCache>,
     /// Resource names that named no font this build could resolve, and — when
@@ -286,12 +300,47 @@ impl PageResources {
             form_scopes: Mutex::new(HashMap::new()),
             resources,
             images: Mutex::new(HashMap::new()),
+            icc: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
             provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
+    }
+
+    /// The compiled transform for an `ICCBased` profile stream, or `None`
+    /// where the profile cannot be made into one.
+    ///
+    /// `None` covers three different things, and deliberately does not
+    /// distinguish them here: a stream that will not decode, a profile
+    /// `Profile::parse` refuses by name, and a profile whose model has no
+    /// closed form yet — the `A2B*` lookup tables, which are 140 of the
+    /// corpus's 2 750. All three land on 8.6.5.5's alternate-space reading,
+    /// which is what the caller was doing before profiles were read at all, so
+    /// none of them costs a page anything it had.
+    fn icc_transform(
+        &self,
+        reference: tinker_pdf_cos::ObjRef,
+    ) -> Option<Arc<tinker_pdf_color::icc::Transform>> {
+        let key = (reference.num, reference.gen);
+        if let Ok(cache) = self.icc.lock() {
+            if let Some(found) = cache.get(&key) {
+                return found.clone();
+            }
+        }
+        let compiled = self
+            .doc
+            .stream_decoded(reference)
+            .ok()
+            .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
+            .as_ref()
+            .and_then(tinker_pdf_color::icc::Transform::compile)
+            .map(Arc::new);
+        if let Ok(mut cache) = self.icc.lock() {
+            cache.insert(key, compiled.clone());
+        }
+        compiled
     }
 
     /// The page's own transparency group space (11.4.7), if it declares one.
@@ -356,6 +405,7 @@ impl PageResources {
             form_scopes: Mutex::new(HashMap::new()),
             resources: Some(dict),
             images: Mutex::new(HashMap::new()),
+            icc: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
@@ -562,16 +612,31 @@ impl PageResources {
 
         match family.as_ref() {
             b"ICCBased" => {
-                // 8.6.5.5: a reader may use the alternate space, and the
-                // component count is what the data's shape actually is.
+                let reference = items.get(1).and_then(Object::as_objref);
                 let stream = items.get(1).map(|o| self.doc.resolve(o))?;
                 let n = stream
                     .as_dict()
                     .and_then(|d| d.get_int(self.doc.intern(b"N")))
                     .unwrap_or(3);
-                Some(ColorSpace::Approximated {
-                    components: n.clamp(1, 4) as usize,
-                })
+                let components = n.clamp(1, 4) as usize;
+
+                // The profile itself, if it can be read. Cached by object
+                // number: a page naming the same space at a thousand `cs`
+                // operators compiles it once.
+                if let Some(reference) = reference {
+                    if let Some(transform) = self.icc_transform(reference) {
+                        return Some(ColorSpace::Icc {
+                            transform,
+                            components,
+                        });
+                    }
+                }
+
+                // 8.6.5.5: a reader may use the alternate space, and the
+                // component count is what the data's shape actually is. This
+                // is where a profile that would not parse lands, which is
+                // exactly where it landed before profiles were read.
+                Some(ColorSpace::Approximated { components })
             }
             b"Indexed" | b"I" => {
                 let base = self.parse_space(items.get(1)?, depth + 1)?;

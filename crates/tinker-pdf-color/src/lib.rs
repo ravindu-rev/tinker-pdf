@@ -50,10 +50,27 @@ pub enum ColorSpace {
         /// The tint transform.
         tint: Box<Function>,
     },
+    /// An ICC space whose profile was read, with the transform it compiled to.
+    ///
+    /// The profile's own rendering rather than 8.6.5.5's alternate-space
+    /// approximation. `Arc` because a transform carries three 4 096-entry
+    /// tables and a page may name the same space at every one of a thousand
+    /// `cs` operators; compiling it once per resource dictionary and sharing it
+    /// is the difference between reading a profile and reading it repeatedly.
+    Icc {
+        /// The compiled transform.
+        transform: std::sync::Arc<icc::Transform>,
+        /// How many components the space takes, which is `/N` and is what
+        /// every caller that sizes a buffer asks for.
+        components: usize,
+    },
     /// A CIE-based or ICC space, approximated by its component count.
     ///
     /// 8.6.5.5 lets a reader use the alternate space, and that is what this
-    /// is: the shape of the data without the profile's exact rendering.
+    /// is: the shape of the data without the profile's exact rendering. Still
+    /// the answer for a CIE space, and for a profile [`icc::Profile::parse`]
+    /// refused — a profile that cannot be read leaves the page exactly as it
+    /// was before profiles were read at all.
     Approximated {
         /// How many components.
         components: usize,
@@ -91,6 +108,7 @@ impl ColorSpace {
             ColorSpace::DeviceCmyk => 4,
             ColorSpace::Indexed { .. } => 1,
             ColorSpace::Separation { components, .. } => *components,
+            ColorSpace::Icc { components, .. } => *components,
             ColorSpace::Approximated { components } => *components,
             ColorSpace::Lab { .. } => 3,
             // 8.7.3.2: an uncoloured pattern's operands are counted in the
@@ -108,6 +126,10 @@ impl ColorSpace {
             // Black in every device space, which for CMYK means all zeros
             // except the black ink.
             ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            // 8.6.8: an ICCBased space's initial colour is all zeros, whatever
+            // the profile makes of them — which for a subtractive profile is
+            // white rather than black, and is what the clause says.
+            ColorSpace::Icc { components, .. } => vec![0.0; *components],
             // 8.6.5.4: black is L=0 with no chroma, and zero is inside every
             // legal /Range, so the generic all-zeros answer is right here for
             // a different reason than it is elsewhere.
@@ -168,6 +190,9 @@ impl ColorSpace {
                 let b = raw(2).clamp(range[2], range[3]);
                 lab_to_rgb(l, a, b)
             }
+            // The profile's own transform, which is what this whole module
+            // exists to make possible.
+            ColorSpace::Icc { transform, .. } => transform.apply(components),
             ColorSpace::Approximated { components: n } => match n {
                 1 => ColorSpace::DeviceGray.to_rgb(components),
                 4 => ColorSpace::DeviceCmyk.to_rgb(components),

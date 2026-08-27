@@ -246,3 +246,101 @@ fn census_of_the_corpus_icc_profiles() {
     let largest = all.iter().map(|p| p.size).max().unwrap_or(0);
     println!("\nlargest profile: {largest} bytes");
 }
+
+/// **What the parser makes of them.** The other half of the census: the first
+/// walks the bytes independently, this one asks the real
+/// [`tinker_pdf_color::icc::Profile`] and counts what it says.
+///
+/// The two are deliberately separate. The census above establishes what is out
+/// there without consulting the parser, so it cannot be wrong in the same way;
+/// this one is the capability's own report card, and the interesting number is
+/// how far the two disagree.
+#[test]
+#[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
+fn what_the_parser_makes_of_the_corpus_profiles() {
+    use tinker_pdf_color::icc::{IccError, Profile as IccProfile, Transform};
+
+    let Some(root) = corpus_root() else {
+        println!("icc-reality: SKIPPED (no corpus; set TINKER_CORPUS)");
+        return;
+    };
+    let mut files = Vec::new();
+    pdfs_under(&root, &mut files);
+    files.sort();
+    println!("icc-reality: RAN over {} files", files.len());
+
+    // The raw profile bytes, not the census's summary of them.
+    let mut streams: Vec<Vec<u8>> = Vec::new();
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(doc) = Document::open(bytes) else {
+            continue;
+        };
+        let cos = doc.cos();
+        for (number, entry) in cos.xref().iter() {
+            if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+                continue;
+            }
+            let generation = match entry {
+                XrefEntry::Offset { gen, .. } => gen,
+                _ => 0,
+            };
+            let Ok(data) = cos.stream_decoded(ObjRef::new(number, generation)) else {
+                continue;
+            };
+            if data.len() > 132 && data.get(36..40) == Some(b"acsp") {
+                streams.push(data);
+            }
+        }
+    }
+
+    let mut compiled = 0u32;
+    let mut parsed_no_transform = 0u32;
+    let mut refused: BTreeMap<String, u32> = BTreeMap::new();
+    for bytes in &streams {
+        match IccProfile::parse(bytes) {
+            Ok(profile) => {
+                if Transform::compile(&profile).is_some() {
+                    compiled += 1;
+                } else {
+                    parsed_no_transform += 1;
+                }
+            }
+            Err(error) => {
+                let name = match error {
+                    IccError::TooShort => "TooShort",
+                    IccError::NotAProfile => "NotAProfile",
+                    IccError::SizeMismatch => "SizeMismatch",
+                    IccError::TagOutOfBounds => "TagOutOfBounds",
+                    IccError::TooLarge => "TooLarge",
+                    IccError::NeedsLut => "NeedsLut",
+                    IccError::UnsupportedPcs => "UnsupportedPcs",
+                    IccError::UnsupportedSpace => "UnsupportedSpace",
+                    IccError::MissingTags => "MissingTags",
+                    IccError::MalformedTag => "MalformedTag",
+                };
+                *refused.entry(name.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    let total = streams.len() as u32;
+    println!("\n{total} profile streams\n");
+    println!(
+        "compiled to a transform     {compiled:>6}  ({:.1} %)",
+        f64::from(compiled) * 100.0 / f64::from(total.max(1))
+    );
+    println!("parsed, no transform        {parsed_no_transform:>6}");
+    println!(
+        "refused by name             {:>6}",
+        total - compiled - parsed_no_transform
+    );
+    println!("\nrefusals, by reason:");
+    let mut rows: Vec<(&String, &u32)> = refused.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1));
+    for (name, count) in rows {
+        println!("  {count:>6}  {name}");
+    }
+}

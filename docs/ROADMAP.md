@@ -56,12 +56,17 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Full ICC colour.** ICC and CIE spaces are approximated by component
-  count today, stated on the type. An own CMM — profile parsing,
-  transforms, rendering intents — is the capability. Exit: ICC profiles
-  drive conversion; known-answer tables computed from the specification's
-  own equations hold for matrix/TRC profiles. (L,
-  [design/icc.md](design/icc.md))
+- **Full ICC colour.** *Mostly done.* An own CMM in the `tinker-pdf-color`
+  leaf parses a profile and compiles matrix/TRC and grey models into
+  fixed-point tables, and an `ICCBased` space is converted through its own
+  profile rather than by counting components. **2 607 of the corpus's 2 750
+  profiles compile, 94.8 %**, and every refusal is named. What is left is the
+  5 % — the `A2B*` lookup tables, which `design/icc.md` sizes at L on their own
+  and which 138 profiles in 131 files ask for — plus rendering intents
+  (`/Intent`, the `ri` operator, ExtGState `/RenderingIntent`), which are
+  parsed and discarded. CalRGB and CalGray remain approximated, which the
+  design doc lists as a non-goal. Exit for the remainder: LUT profiles
+  transform; intents select. (M, [design/icc.md](design/icc.md))
 
 ## Tier 3 — capabilities absent today
 

@@ -913,3 +913,168 @@ fn setting_a_colour_clears_the_pattern() {
         "the upper half is plain green, got {plain:?}"
     );
 }
+
+// ---- ICCBased, with the profile actually read (8.6.5.5) ---------------------
+
+/// An ICC profile with sRGB's primaries and the gamma given.
+///
+/// Built here rather than committed, because what matters is that the *engine*
+/// reads it: a fixture whose bytes came from a real profile would prove the
+/// same thing and be harder to vary.
+fn icc_profile(gamma: f64) -> Vec<u8> {
+    fn s15(value: f64) -> [u8; 4] {
+        (((value * 65536.0).round() as i32) as u32).to_be_bytes()
+    }
+    fn xyz(x: f64, y: f64, z: f64) -> Vec<u8> {
+        let mut out = b"XYZ ".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&s15(x));
+        out.extend_from_slice(&s15(y));
+        out.extend_from_slice(&s15(z));
+        out
+    }
+    let curve = {
+        let mut out = b"curv".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(&((gamma * 256.0).round() as u16).to_be_bytes());
+        out
+    };
+    let tags: Vec<([u8; 4], Vec<u8>)> = vec![
+        (*b"rXYZ", xyz(0.436_065, 0.222_488, 0.013_916)),
+        (*b"gXYZ", xyz(0.385_147, 0.716_873, 0.097_076)),
+        (*b"bXYZ", xyz(0.143_066, 0.060_607, 0.714_096)),
+        (*b"rTRC", curve.clone()),
+        (*b"gTRC", curve.clone()),
+        (*b"bTRC", curve),
+        (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
+    ];
+
+    let mut header = vec![0u8; 128];
+    header[12..16].copy_from_slice(b"mntr");
+    header[16..20].copy_from_slice(b"RGB ");
+    header[20..24].copy_from_slice(b"XYZ ");
+    header[36..40].copy_from_slice(b"acsp");
+    header[8..12].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+
+    let mut table = (tags.len() as u32).to_be_bytes().to_vec();
+    let mut body = Vec::new();
+    let start = 132 + tags.len() * 12;
+    for (signature, data) in &tags {
+        table.extend_from_slice(signature);
+        table.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+        table.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+    }
+    let mut out = header;
+    out.extend_from_slice(&table);
+    out.extend_from_slice(&body);
+    let size = out.len() as u32;
+    out[0..4].copy_from_slice(&size.to_be_bytes());
+    out
+}
+
+/// A page filling the whole area through an `ICCBased` space carrying
+/// `profile`.
+///
+/// Built as **bytes** rather than through `page_with_objects`, because a
+/// profile is binary and a stream is not a string: the first draft of this
+/// helper octal-escaped the profile the way `(...)` string syntax would, wrote
+/// that text into the stream, and the engine — correctly — declined to find a
+/// profile in it. Both tests passed the fallback's answer and read as the
+/// feature not working.
+fn iccbased_fill(profile: &[u8], components: &str) -> tinker_pdf::Bitmap {
+    let content = format!("/CS0 cs {components} scn 0 0 40 40 re f");
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(
+        b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n   /Resources << /ColorSpace << /CS0 [/ICCBased 5 0 R] >> >> /Contents 4 0 R >>\nendobj\n",
+    );
+    bytes.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len() + 1
+        )
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(
+        format!("5 0 obj\n<< /N 3 /Length {} >>\nstream\n", profile.len()).as_bytes(),
+    );
+    bytes.extend_from_slice(profile);
+    bytes.extend_from_slice(b"\nendstream\nendobj\n");
+    bytes.extend_from_slice(b"trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n");
+
+    tinker_pdf::Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default())
+}
+
+/// **An `ICCBased` space is converted through its profile**, not by counting
+/// its components.
+///
+/// The discriminating fixture is a profile with a gamma of **1.0**: its
+/// components are linear light, so a half is 0.5 of the light rather than of
+/// the encoding, and sRGB puts that at about 188. The component-count
+/// approximation this replaces reads the same operands as `/DeviceRGB` and
+/// paints 128. Sixty levels apart, so a build that ignored the profile cannot
+/// pass by being close.
+#[test]
+fn an_iccbased_space_is_converted_through_its_profile() {
+    let linear = iccbased_fill(&icc_profile(1.0), "0.5 0.5 0.5");
+    let at = |b: &tinker_pdf::Bitmap| {
+        let base = (b.height / 2) as usize * b.stride + (b.width / 2) as usize * b.components();
+        b.data[base]
+    };
+    let got = at(&linear);
+    assert!(
+        (186..=190).contains(&got),
+        "a linear-light half should encode to about 188, got {got}"
+    );
+
+    // And the ends are still the ends: a profile cannot move black or white.
+    assert_eq!(at(&iccbased_fill(&icc_profile(1.0), "0 0 0")), 0);
+    assert_eq!(at(&iccbased_fill(&icc_profile(1.0), "1 1 1")), 255);
+}
+
+/// **A profile that will not parse leaves the page exactly as it was.**
+///
+/// This is the half of the capability a caller relies on: reading profiles must
+/// never make a page worse than not reading them. A stream that is not a
+/// profile falls back to 8.6.5.5's alternate-space reading, which for three
+/// components is `/DeviceRGB` — so a half paints 128, the answer this engine
+/// gave before profiles were read at all.
+#[test]
+fn a_profile_that_will_not_parse_falls_back_to_the_component_count() {
+    let rubbish = vec![0u8; 300];
+    let got = {
+        let bitmap = iccbased_fill(&rubbish, "0.5 0.5 0.5");
+        let base = (bitmap.height / 2) as usize * bitmap.stride
+            + (bitmap.width / 2) as usize * bitmap.components();
+        bitmap.data[base]
+    };
+    assert_eq!(
+        got, 128,
+        "a refused profile must read as DeviceRGB, which is what it did before"
+    );
+}
+
+/// A profile's gamma reaches the page, which is the simplest statement that
+/// the curve is read rather than defaulted.
+///
+/// A gamma of 1.0 and a gamma of 2.2 disagree by a wide margin at a half, and
+/// a build that compiled the identity for every curve would paint the same
+/// byte for both.
+#[test]
+fn two_profiles_differing_only_in_gamma_paint_differently() {
+    let at = |b: tinker_pdf::Bitmap| {
+        let base = (b.height / 2) as usize * b.stride + (b.width / 2) as usize * b.components();
+        b.data[base]
+    };
+    let linear = at(iccbased_fill(&icc_profile(1.0), "0.5 0.5 0.5"));
+    let encoded = at(iccbased_fill(&icc_profile(2.2), "0.5 0.5 0.5"));
+    assert!(
+        linear.abs_diff(encoded) > 40,
+        "gamma 1.0 gave {linear} and gamma 2.2 gave {encoded}: the curve is not being read"
+    );
+}

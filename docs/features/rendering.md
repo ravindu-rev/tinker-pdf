@@ -17,8 +17,16 @@ convert as 8.6.4 says; `/Indexed` reads its palette over any base space
 (8.6.6.3); `/Separation` and `/DeviceN` run their real tint transforms into
 the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
-0..1 and clamping them there renders the whole space black. ICC and CIE
-spaces are `ColorSpace::Approximated` — read by component count, which is the
+0..1 and clamping them there renders the whole space black. An `ICCBased` space is converted
+through **its own profile** (ICC.1): the header and tag table are read, the
+three `XYZ` columns and three tone curves compile once into fixed-point
+tables, and each colour is a lookup plus an integer matrix multiply, so
+nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
+profiles are the same with one curve. Measured against the corpus's 2 750 real
+profiles: **2 607 compile, 94.8 %**, and the 143 that do not are named — 138
+need the `A2B*` lookup tables, 3 a data space with no transform here, 2 a
+connection space other than XYZ. Those and the CIE spaces (CalRGB, CalGray)
+are `ColorSpace::Approximated` — read by component count, which is the
 alternate-space reading 8.6.5.5 permits, and the approximation is stated on
 the type rather than hidden. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
@@ -188,7 +196,7 @@ helpers `Page::render` composes.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | Blending a group declared in `/Lab` | `RenderWarning::UnsupportedGroupSpace` | Its components are not in the unit interval, so 11.3.5's formulas have nothing to say about them; the group composites in RGB and is **named**. Grey, RGB and CMYK groups all composite in their own space now | [ROADMAP](../ROADMAP.md) |
-| Exact ICC/CIE colour | `ColorSpace::Approximated`, stated on the type | Component count decides the reading, the 8.6.5.5 fallback | [ROADMAP](../ROADMAP.md) |
+| An ICC profile this build cannot make a transform of | `ColorSpace::Approximated`, stated on the type | The `A2B*` lookup tables, a connection space other than XYZ, or a data space with no transform here — 143 of the corpus's 2 750 profiles. All three fall back to 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read. CalRGB and CalGray are still approximated | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 
