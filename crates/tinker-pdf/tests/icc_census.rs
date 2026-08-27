@@ -344,3 +344,238 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
         println!("  {count:>6}  {name}");
     }
 }
+
+/// **What the LUT profiles are made of.** The scoping question for the
+/// milestone `design/icc.md` sizes at L on its own.
+///
+/// `A2B0` is a *tag name*; what sits at it is one of four different structures.
+/// `mft1` and `mft2` are v2's, a matrix and three stages of table; `mAB ` and
+/// `mBA ` are v4's, which add per-channel curves either side and carry their
+/// own offsets. Which of the four the corpus actually uses decides whether this
+/// is one structure or four.
+#[test]
+#[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
+fn census_of_the_lut_profiles() {
+    let Some(root) = corpus_root() else {
+        println!("lut-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        return;
+    };
+    let mut files = Vec::new();
+    pdfs_under(&root, &mut files);
+    files.sort();
+
+    let mut kinds: BTreeMap<String, u32> = BTreeMap::new();
+    let mut shapes: BTreeMap<String, u32> = BTreeMap::new();
+    let mut grids: BTreeMap<u8, u32> = BTreeMap::new();
+    let mut seen = 0u32;
+
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(doc) = Document::open(bytes) else {
+            continue;
+        };
+        let cos = doc.cos();
+        for (number, entry) in cos.xref().iter() {
+            if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+                continue;
+            }
+            let generation = match entry {
+                XrefEntry::Offset { gen, .. } => gen,
+                _ => 0,
+            };
+            let Ok(data) = cos.stream_decoded(ObjRef::new(number, generation)) else {
+                continue;
+            };
+            if data.len() < 132 || data.get(36..40) != Some(b"acsp") {
+                continue;
+            }
+            let Some(count) = u32_at(&data, 128) else {
+                continue;
+            };
+            if count > 1024 {
+                continue;
+            }
+            for i in 0..count as usize {
+                let at = 132 + i * 12;
+                if data.len() < at + 12 {
+                    break;
+                }
+                let name = sig(&data, at);
+                if !name.starts_with("A2B") {
+                    continue;
+                }
+                let Some(offset) = u32_at(&data, at + 4).map(|v| v as usize) else {
+                    continue;
+                };
+                if data.len() < offset + 12 {
+                    continue;
+                }
+                seen += 1;
+                let kind = sig(&data, offset);
+                *kinds.entry(kind.clone()).or_default() += 1;
+                if kind == "mft1" || kind == "mft2" {
+                    let inputs = data[offset + 8];
+                    let outputs = data[offset + 9];
+                    let grid = data[offset + 10];
+                    *shapes
+                        .entry(format!("{kind} {inputs}->{outputs}"))
+                        .or_default() += 1;
+                    *grids.entry(grid).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    println!("lut-census: RAN\n{seen} A2B* tags\n");
+    println!("structure at the tag:");
+    for (kind, count) in &kinds {
+        println!("  {count:>5}  {kind}");
+    }
+    println!("\nshape (v2 tags only):");
+    let mut rows: Vec<(&String, &u32)> = shapes.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1));
+    for (shape, count) in rows.iter().take(10) {
+        println!("  {count:>5}  {shape}");
+    }
+    println!("\nCLUT grid points per axis:");
+    for (grid, count) in &grids {
+        println!("  {count:>5}  {grid}");
+    }
+}
+
+/// **Does the lookup-table path produce the colours ink makes?**
+///
+/// There is no second CMM to ask (ruling 13) and no published table for a
+/// printer profile, so the check is a property every CMYK profile must have
+/// whatever its make: paper is light, black ink is dark, and each primary is
+/// its own hue. Over hundreds of real profiles from real producers, those hold
+/// or the decoding is wrong — a shifted Lab axis or a mis-strided grid moves
+/// hues, and a hue that has moved fails these.
+#[test]
+#[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
+fn what_the_lookup_tables_make_of_ink() {
+    use tinker_pdf_color::icc::{Profile as IccProfile, Transform};
+
+    let Some(root) = corpus_root() else {
+        println!("lut-reality: SKIPPED (no corpus; set TINKER_CORPUS)");
+        return;
+    };
+    let mut files = Vec::new();
+    pdfs_under(&root, &mut files);
+    files.sort();
+
+    // One of each distinct profile, by its bytes, so a profile embedded in a
+    // hundred files is judged once.
+    let mut seen: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(doc) = Document::open(bytes) else {
+            continue;
+        };
+        let cos = doc.cos();
+        for (number, entry) in cos.xref().iter() {
+            if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+                continue;
+            }
+            let generation = match entry {
+                XrefEntry::Offset { gen, .. } => gen,
+                _ => 0,
+            };
+            let Ok(data) = cos.stream_decoded(ObjRef::new(number, generation)) else {
+                continue;
+            };
+            if data.len() > 132
+                && data.get(36..40) == Some(b"acsp")
+                && data.get(16..20) == Some(b"CMYK")
+            {
+                seen.insert(data);
+            }
+        }
+    }
+
+    let (mut judged, mut paper, mut ink, mut cyan, mut magenta, mut yellow) = (0, 0, 0, 0, 0, 0);
+    let mut failures: Vec<String> = Vec::new();
+    for bytes in &seen {
+        let Ok(profile) = IccProfile::parse(bytes) else {
+            continue;
+        };
+        let Some(transform) = Transform::compile(&profile) else {
+            continue;
+        };
+        judged += 1;
+        let at = |c: [f64; 4]| transform.apply(&c);
+
+        let white = at([0.0, 0.0, 0.0, 0.0]);
+        let black = at([0.0, 0.0, 0.0, 1.0]);
+        let c = at([1.0, 0.0, 0.0, 0.0]);
+        let m = at([0.0, 1.0, 0.0, 0.0]);
+        let y = at([0.0, 0.0, 1.0, 0.0]);
+
+        let luma = |p: (u8, u8, u8)| u32::from(p.0) + u32::from(p.1) + u32::from(p.2);
+        if luma(white) > 600 {
+            paper += 1;
+        } else if failures.len() < 5 {
+            failures.push(format!("no ink is {white:?}, which is not paper"));
+        }
+        if luma(black) < 300 {
+            ink += 1;
+        } else if failures.len() < 5 {
+            failures.push(format!("full black is {black:?}, which is not ink"));
+        }
+        // Cyan absorbs red; magenta absorbs green; yellow absorbs blue.
+        if c.0 < c.1 && c.0 < c.2 {
+            cyan += 1;
+        } else if failures.len() < 5 {
+            failures.push(format!("cyan is {c:?}"));
+        }
+        if m.1 < m.0 && m.1 < m.2 {
+            magenta += 1;
+        } else if failures.len() < 5 {
+            failures.push(format!("magenta is {m:?}"));
+        }
+        if y.2 < y.0 && y.2 < y.1 {
+            yellow += 1;
+        } else if failures.len() < 5 {
+            failures.push(format!("yellow is {y:?}"));
+        }
+    }
+
+    println!(
+        "lut-reality: RAN over {} distinct CMYK profiles",
+        seen.len()
+    );
+    println!("judged (parsed and compiled)  {judged:>5}");
+    println!("no ink is paper               {paper:>5}");
+    println!("full black is ink             {ink:>5}");
+    println!("cyan absorbs red              {cyan:>5}");
+    println!("magenta absorbs green         {magenta:>5}");
+    println!("yellow absorbs blue           {yellow:>5}");
+    for line in &failures {
+        println!("  ! {line}");
+    }
+
+    assert!(
+        judged > 0,
+        "no CMYK profile compiled, so this measured nothing"
+    );
+    // Every one of the five, on every profile. A single exception is a
+    // decoding defect rather than an unusual profile: these are properties of
+    // ink, not of a vendor's rendering.
+    for (name, count) in [
+        ("paper", paper),
+        ("ink", ink),
+        ("cyan", cyan),
+        ("magenta", magenta),
+        ("yellow", yellow),
+    ] {
+        assert_eq!(
+            count, judged,
+            "{name}: {count} of {judged} profiles agree, so the table is being \
+             read wrongly rather than a profile being unusual"
+        );
+    }
+}

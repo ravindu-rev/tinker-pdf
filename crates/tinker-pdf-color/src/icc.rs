@@ -12,9 +12,20 @@
 //! `ICCBased` colour space that paints something; the rest carry the profile
 //! as a PDF/A `/OutputIntent`, which declares what a file was prepared for
 //! rather than converting anything.) **2 287 are matrix/TRC** (three
-//! `XYZ` columns and three tone curves) and **323 are grey** (one curve and a
-//! white point); together 95 %. The remaining 140 need the multi-dimensional
-//! `A2B*` lookup tables, which are refused by name here.
+//! `XYZ` columns and three tone curves), **323 are grey** (one curve and a
+//! white point), and the remaining 140 carry a multi-dimensional `A2B*` lookup
+//! table — what a printer profile needs, because the relation between ink and
+//! light is not a matrix and no curve makes one of it.
+//!
+//! A second census asked what sits *at* those tags, since `A2B0` names four
+//! different structures: **409 `mft2`, 6 `mft1`, 3 `mAB `**, and 408 of the
+//! 415 v2 tables take four channels to three. So one structure is 99.3 % of
+//! them, and v4's `mAB ` — curves on both sides of the grid, each stage
+//! carrying its own offset — is refused by name rather than built for three
+//! tags.
+//!
+//! All three models together compile **2 744 of the corpus's 2 750 profiles,
+//! 99.8 %**.
 //!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
@@ -243,6 +254,170 @@ pub enum Model {
         /// `wtpt`, as `[X, Y, Z]`.
         white: [f64; 3],
     },
+    /// A sampled lookup table: `mft1` or `mft2` at an `A2B*` tag.
+    ///
+    /// What a printer profile carries, because the relation between ink and
+    /// light is not a matrix and no curve makes it one. The census found 409
+    /// `mft2` and 6 `mft1` against 3 of v4's `mAB `, and 408 of the 415 take
+    /// four channels to three — so this one structure is 99.3 % of the corpus's
+    /// lookup tables and `mAB ` is refused by name.
+    Lut(Lut),
+}
+
+/// `mft1` and `mft2`: three stages of table with a grid between them.
+///
+/// Each input channel goes through its own curve, the result indexes a
+/// multi-dimensional grid by interpolation, and each output channel comes back
+/// through another curve. The matrix ICC.1 puts in front is only applied when
+/// the *input* is the connection space, which for an `A2B*` tag it never is,
+/// so it is read and ignored rather than left unread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lut {
+    inputs: usize,
+    outputs: usize,
+    /// Grid points along each axis. Every axis has the same number, which is
+    /// `mft1`/`mft2`'s own restriction rather than one imposed here.
+    grid: usize,
+    /// One curve per input channel, sampled.
+    input_tables: Vec<Vec<u16>>,
+    /// `grid.pow(inputs)` entries of `outputs` values, the last axis fastest.
+    clut: Vec<u16>,
+    /// One curve per output channel, sampled.
+    output_tables: Vec<Vec<u16>>,
+    /// Whether the connection space is `Lab` rather than `XYZ`.
+    lab: bool,
+}
+
+/// The most grid points an axis may declare, and the most entries a CLUT may
+/// hold.
+///
+/// `grid.pow(inputs)` is where this format branches: the grid count is one
+/// byte and the input count another, so a profile can ask for 255^15 entries
+/// in two bytes. The corpus's largest is 11 points over four channels — 14 641
+/// entries — so the cap clears the thing the format is for by a wide margin
+/// while refusing the arithmetic that would not fit a machine (ruling 1).
+pub const MAX_CLUT_ENTRIES: usize = 1 << 22;
+
+impl Lut {
+    /// The connection-space value for `components`, each in `0..=1`.
+    ///
+    /// Integer throughout, like the rest of the pixel path: the input curves
+    /// and the grid interpolation are u32 arithmetic on 16-bit samples, and the
+    /// only floats are the caller's own components on the way in.
+    fn evaluate(&self, components: &[f64]) -> [f64; 3] {
+        // Stage one: each channel through its own curve.
+        let mut coords = Vec::with_capacity(self.inputs);
+        for channel in 0..self.inputs {
+            let value = components
+                .get(channel)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let table = &self.input_tables[channel];
+            coords.push(interpolate(table, value));
+        }
+
+        // Stage two: the grid. Multilinear over `inputs` axes, which is
+        // sixteen corners for the four-channel case the corpus is made of.
+        let last = self.grid - 1;
+        let mut base = Vec::with_capacity(self.inputs);
+        let mut frac = Vec::with_capacity(self.inputs);
+        for coordinate in &coords {
+            let scaled = f64::from(*coordinate) / 65535.0 * last as f64;
+            let floor = scaled.floor();
+            let index = (floor as usize).min(last.saturating_sub(1));
+            base.push(index);
+            frac.push(((scaled - index as f64) * 256.0).round().clamp(0.0, 256.0) as u64);
+        }
+        let corners = 1usize << self.inputs;
+        let mut mixed = [0u64; 3];
+        let mut total = 0u64;
+        for corner in 0..corners {
+            let mut weight = 1u64;
+            let mut offset = 0usize;
+            for axis in 0..self.inputs {
+                let high = corner & (1 << axis) != 0;
+                let step = if high { 1 } else { 0 };
+                weight *= if high { frac[axis] } else { 256 - frac[axis] };
+                let index = (base[axis] + step).min(last);
+                offset = offset * self.grid + index;
+            }
+            if weight == 0 {
+                continue;
+            }
+            total += weight;
+            for (channel, slot) in mixed.iter_mut().enumerate().take(self.outputs) {
+                let at = offset * self.outputs + channel;
+                *slot += weight * u64::from(self.clut.get(at).copied().unwrap_or(0));
+            }
+        }
+        let total = total.max(1);
+
+        // Stage three: each output channel back through its own curve.
+        let mut out = [0.0f64; 3];
+        for (channel, slot) in out.iter_mut().enumerate().take(self.outputs) {
+            let value = (mixed[channel] / total).min(65535) as u16;
+            let table = &self.output_tables[channel];
+            *slot = f64::from(interpolate(table, f64::from(value) / 65535.0)) / 65535.0;
+        }
+        out
+    }
+
+    /// The sRGB this table's connection-space value is.
+    fn to_rgb(&self, components: &[f64]) -> (u8, u8, u8) {
+        let pcs = self.evaluate(components);
+        if self.lab {
+            // ICC v2's *legacy* 16-bit Lab encoding, which is not v4's: full
+            // scale is 0xFF00 rather than 0xFFFF, so that an eight-bit 0xFF
+            // doubles to it exactly. Getting this wrong shifts every hue by a
+            // little under half a percent of the range — a plausible picture in
+            // slightly wrong colours, which is the failure this module's
+            // refusals exist to avoid, so it is written out rather than
+            // folded into a constant.
+            const FULL: f64 = 65535.0 / 65280.0;
+            let l = pcs[0] * FULL * 100.0;
+            let a = pcs[1] * FULL * 255.0 - 128.0;
+            let b = pcs[2] * FULL * 255.0 - 128.0;
+            crate::lab_to_rgb(l, a, b)
+        } else {
+            // XYZ, in the s15Fixed16 convention the connection space uses:
+            // 1.0 is 0x8000 of the 16-bit range, so full scale is just under
+            // two.
+            let scale = 65535.0 / 32768.0;
+            let [r, g, b] =
+                crate::xyz_d50_to_linear_srgb(pcs[0] * scale, pcs[1] * scale, pcs[2] * scale);
+            (
+                encode_component(r),
+                encode_component(g),
+                encode_component(b),
+            )
+        }
+    }
+}
+
+/// A sampled table at `x` in `0..=1`, linearly interpolated.
+fn interpolate(table: &[u16], x: f64) -> u16 {
+    if table.is_empty() {
+        return (x.clamp(0.0, 1.0) * 65535.0).round() as u16;
+    }
+    if table.len() == 1 {
+        return table[0];
+    }
+    let last = table.len() - 1;
+    let position = x.clamp(0.0, 1.0) * last as f64;
+    let floor = position.floor();
+    let index = (floor as usize).min(last);
+    let next = (index + 1).min(last);
+    let fraction = position - floor;
+    let a = f64::from(table[index]);
+    let b = f64::from(table[next]);
+    (a + (b - a) * fraction).round() as u16
+}
+
+/// Linear light to an sRGB byte, through the same table the matrix path uses.
+fn encode_component(linear: f64) -> u8 {
+    let clamped = (linear.clamp(0.0, 1.0) * 65536.0) as i64;
+    encode_srgb(clamped)
 }
 
 /// A big-endian reader that answers `None` rather than panicking.
@@ -335,11 +510,30 @@ impl Profile {
         let has_matrix =
             find(b"rXYZ").is_some() && find(b"gXYZ").is_some() && find(b"bXYZ").is_some();
         let has_grey = find(b"kTRC").is_some();
+
+        // A lookup table first, where there is one: a profile carrying both is
+        // carrying the table for the case the matrix cannot express, and the
+        // census says every such profile in the corpus is a printer's.
         if !has_matrix && !has_grey {
-            return Err(if find(b"A2B0").is_some() {
-                IccError::NeedsLut
-            } else {
-                IccError::MissingTags
+            let lab = &pcs == b"Lab ";
+            if !lab && &pcs != b"XYZ " {
+                return Err(IccError::UnsupportedPcs);
+            }
+            // A2B1 is the colorimetric intent and A2B0 the perceptual one;
+            // either is a conversion, and a profile carrying only one is
+            // ordinary.
+            let tag = find(b"A2B1")
+                .or_else(|| find(b"A2B0"))
+                .or_else(|| find(b"A2B2"));
+            let Some(tag) = tag else {
+                return Err(IccError::MissingTags);
+            };
+            return Ok(Profile {
+                space,
+                pcs,
+                class,
+                version,
+                model: Model::Lut(read_lut(tag, lab)?),
             });
         }
         if &pcs != b"XYZ " {
@@ -380,6 +574,97 @@ impl Profile {
             model,
         })
     }
+}
+
+/// An `mft1` or `mft2` tag: ICC.1's two v2 lookup tables.
+///
+/// They differ in exactly two ways — the sample width, and whether the two
+/// curve stages carry their own entry counts or are fixed at 256 — so they are
+/// read by one function with a flag rather than two that drift apart.
+fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
+    let reader = Reader { bytes: data };
+    let wide = match reader.sig(0).ok_or(IccError::MalformedTag)? {
+        s if &s == b"mft2" => true,
+        s if &s == b"mft1" => false,
+        // `mAB ` and `mBA ` are v4's, and a different structure: curves on both
+        // sides of the grid, each stage carrying its own offset. Three tags in
+        // the corpus against 415, so they are named rather than built.
+        _ => return Err(IccError::NeedsLut),
+    };
+
+    let byte = |at: usize| data.get(at).copied().ok_or(IccError::MalformedTag);
+    let inputs = byte(8)? as usize;
+    let outputs = byte(9)? as usize;
+    let grid = byte(10)? as usize;
+    if inputs == 0 || outputs == 0 || grid < 2 {
+        return Err(IccError::MalformedTag);
+    }
+    // Three is what the connection space is, and what `to_rgb` reads.
+    if outputs != 3 {
+        return Err(IccError::UnsupportedSpace);
+    }
+    // `grid.pow(inputs)` is the branch this format hides in two bytes.
+    let points = grid
+        .checked_pow(u32::try_from(inputs).map_err(|_| IccError::TooLarge)?)
+        .ok_or(IccError::TooLarge)?;
+    let entries = points.checked_mul(outputs).ok_or(IccError::TooLarge)?;
+    if entries > MAX_CLUT_ENTRIES {
+        return Err(IccError::TooLarge);
+    }
+
+    // The 3x3 matrix at offset 12 applies only when the input is the connection
+    // space, which at an `A2B*` tag it is not. Read past rather than read.
+    let mut at = 12 + 9 * 4;
+    let (input_entries, output_entries) = if wide {
+        let i = reader.u16(at).ok_or(IccError::MalformedTag)? as usize;
+        let o = reader.u16(at + 2).ok_or(IccError::MalformedTag)? as usize;
+        at += 4;
+        if i < 2 || o < 2 {
+            return Err(IccError::MalformedTag);
+        }
+        (i, o)
+    } else {
+        (256, 256)
+    };
+
+    let width = if wide { 2 } else { 1 };
+    let mut take = |count: usize| -> Result<Vec<u16>, IccError> {
+        let end = at
+            .checked_add(count.checked_mul(width).ok_or(IccError::TooLarge)?)
+            .ok_or(IccError::TooLarge)?;
+        let slice = data.get(at..end).ok_or(IccError::MalformedTag)?;
+        at = end;
+        Ok(if wide {
+            slice
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect()
+        } else {
+            // An eight-bit table is scaled to the sixteen-bit currency
+            // everything downstream speaks, so one evaluator serves both.
+            slice.iter().map(|b| u16::from(*b) * 257).collect()
+        })
+    };
+
+    let mut input_tables = Vec::with_capacity(inputs);
+    for _ in 0..inputs {
+        input_tables.push(take(input_entries)?);
+    }
+    let clut = take(entries)?;
+    let mut output_tables = Vec::with_capacity(outputs);
+    for _ in 0..outputs {
+        output_tables.push(take(output_entries)?);
+    }
+
+    Ok(Lut {
+        inputs,
+        outputs,
+        grid,
+        input_tables,
+        clut,
+        output_tables,
+        lab,
+    })
 }
 
 /// An `XYZType` tag: a signature, four reserved bytes, then one `XYZNumber`.
@@ -466,6 +751,8 @@ pub struct Transform {
     matrix: [[i32; 3]; 3],
     /// How many components go in.
     inputs: usize,
+    /// A sampled table, where the profile carries one instead of a matrix.
+    lut: Option<Lut>,
 }
 
 /// Entries in a compiled tone curve.
@@ -503,8 +790,18 @@ impl Transform {
                     curves: curves.iter().map(compile_curve).collect(),
                     matrix,
                     inputs: 3,
+                    lut: None,
                 })
             }
+            // A table is already the transform: there is nothing to compile,
+            // because its curves arrived sampled and its grid is the matrix's
+            // replacement rather than a factor of it.
+            Model::Lut(lut) => Some(Transform {
+                curves: Vec::new(),
+                matrix: [[0; 3]; 3],
+                inputs: lut.inputs,
+                lut: Some(lut.clone()),
+            }),
             Model::Grey { curve, .. } => {
                 // A grey profile's single curve makes a luminance, and the
                 // three sRGB channels are that luminance: the white point does
@@ -514,6 +811,7 @@ impl Transform {
                     curves: vec![compile_curve(curve)],
                     matrix: identity,
                     inputs: 1,
+                    lut: None,
                 })
             }
         }
@@ -533,6 +831,9 @@ impl Transform {
     /// between one target and the next.
     #[must_use]
     pub fn apply(&self, components: &[f64]) -> (u8, u8, u8) {
+        if let Some(lut) = &self.lut {
+            return lut.to_rgb(components);
+        }
         let mut linear = [0i64; 3];
         for (channel, slot) in linear.iter_mut().enumerate() {
             let index = if self.inputs == 1 { 0 } else { channel };
@@ -1148,6 +1449,173 @@ mod tests {
         assert!(
             (186..=190).contains(&dim_g),
             "half of green's light should encode near 188, got {dim_g}"
+        );
+    }
+
+    /// An `mft2` tag with the grid given verbatim.
+    ///
+    /// `clut` is `grid.pow(inputs)` entries of three values each, and the order
+    /// is the one the format states: the **last** input axis varies fastest.
+    fn mft2(inputs: usize, grid: usize, clut: &[[u16; 3]]) -> Vec<u8> {
+        let mut out = b"mft2".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.push(inputs as u8);
+        out.push(3);
+        out.push(grid as u8);
+        out.push(0);
+        // The 3x3 matrix, identity, which an A2B tag never applies.
+        for row in 0..3 {
+            for column in 0..3 {
+                let value: i32 = if row == column { 65536 } else { 0 };
+                out.extend_from_slice(&(value as u32).to_be_bytes());
+            }
+        }
+        // Two entries each side is the fewest the format allows, and makes the
+        // input and output stages the identity.
+        out.extend_from_slice(&2u16.to_be_bytes());
+        out.extend_from_slice(&2u16.to_be_bytes());
+        for _ in 0..inputs {
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&65535u16.to_be_bytes());
+        }
+        for entry in clut {
+            for value in entry {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        for _ in 0..3 {
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&65535u16.to_be_bytes());
+        }
+        out
+    }
+
+    fn lut_profile(space: &[u8; 4], pcs: &[u8; 4], tag: Vec<u8>) -> Vec<u8> {
+        build(space, pcs, &[(*b"A2B0", tag)])
+    }
+
+    /// **The grid interpolates linearly between its points**, which is the
+    /// closed form the whole table rests on.
+    ///
+    /// One input, two grid points, black at one end and white at the other: the
+    /// value at a half must be a half. Checked in the connection space rather
+    /// than through a colour conversion, so a failure means the interpolation
+    /// and not the encoding.
+    #[test]
+    fn a_lookup_table_interpolates_between_its_grid_points() {
+        let tag = mft2(1, 2, &[[0, 0, 0], [65535, 65535, 65535]]);
+        let profile = Profile::parse(&lut_profile(b"GRAY", b"XYZ ", tag)).expect("a LUT profile");
+        let Model::Lut(lut) = &profile.model else {
+            panic!("expected a LUT model");
+        };
+        for (input, want) in [(0.0, 0.0), (0.25, 0.25), (0.5, 0.5), (1.0, 1.0)] {
+            let got = lut.evaluate(&[input])[0];
+            assert!(
+                (got - want).abs() < 0.002,
+                "at {input} the grid gave {got}, not {want}"
+            );
+        }
+    }
+
+    /// **The last input axis varies fastest**, which is the one thing about a
+    /// multi-dimensional grid that cannot be inferred from a picture.
+    ///
+    /// Two axes, two points each, and a grid whose four entries are all
+    /// different. A build that strided the other way round reads `(0, 1)` where
+    /// `(1, 0)` is, which for a printer profile swaps cyan with magenta — a
+    /// plausible picture in the wrong colours, and exactly what the corpus
+    /// check above would catch only if the profile happened to be asymmetric.
+    /// This says it directly.
+    #[test]
+    fn the_last_grid_axis_varies_fastest() {
+        // (a, b) -> red channel: (0,0)=0, (0,1)=1, (1,0)=2, (1,1)=3, scaled.
+        let q = |n: u16| n * 21845; // 0, 21845, 43690, 65535
+        let tag = mft2(
+            2,
+            2,
+            &[[q(0), 0, 0], [q(1), 0, 0], [q(2), 0, 0], [q(3), 0, 0]],
+        );
+        let profile = Profile::parse(&lut_profile(b"GRAY", b"XYZ ", tag)).expect("a LUT profile");
+        let Model::Lut(lut) = &profile.model else {
+            panic!("expected a LUT model");
+        };
+        let at = |a: f64, b: f64| lut.evaluate(&[a, b])[0];
+        let near = |got: f64, want: f64| (got - want).abs() < 0.01;
+
+        assert!(near(at(0.0, 0.0), 0.0), "(0,0) gave {}", at(0.0, 0.0));
+        assert!(
+            near(at(0.0, 1.0), 1.0 / 3.0),
+            "(0,1) gave {} — the axes are strided the wrong way round",
+            at(0.0, 1.0)
+        );
+        assert!(
+            near(at(1.0, 0.0), 2.0 / 3.0),
+            "(1,0) gave {} — the axes are strided the wrong way round",
+            at(1.0, 0.0)
+        );
+        assert!(near(at(1.0, 1.0), 1.0), "(1,1) gave {}", at(1.0, 1.0));
+    }
+
+    /// A four-channel table is read at four channels, which is 408 of the
+    /// corpus's 415 v2 tables.
+    #[test]
+    fn a_four_channel_table_takes_four_channels() {
+        let grid = 2usize;
+        let entries = grid.pow(4);
+        // Every entry the same, so the answer is that value wherever it is
+        // asked — which is what a mis-sized CLUT cannot produce, because it
+        // would run off the end and read zeros.
+        let clut: Vec<[u16; 3]> = (0..entries).map(|_| [32768, 16384, 8192]).collect();
+        let tag = mft2(4, grid, &clut);
+        let profile = Profile::parse(&lut_profile(b"CMYK", b"XYZ ", tag)).expect("a LUT profile");
+        let transform = Transform::compile(&profile).expect("a transform");
+        assert_eq!(transform.inputs(), 4);
+
+        let Model::Lut(lut) = &profile.model else {
+            panic!("expected a LUT model");
+        };
+        for corner in [
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.3, 0.6, 0.1, 0.9],
+        ] {
+            let pcs = lut.evaluate(&corner);
+            assert!((pcs[0] - 0.5).abs() < 0.01, "{corner:?} gave {pcs:?}");
+            assert!((pcs[1] - 0.25).abs() < 0.01, "{corner:?} gave {pcs:?}");
+        }
+    }
+
+    /// v4's `mAB ` is refused by name: three tags in the corpus against 415,
+    /// and a different structure rather than a variation of this one.
+    #[test]
+    fn a_v4_lookup_table_is_refused_by_name() {
+        let mut tag = b"mAB ".to_vec();
+        tag.extend_from_slice(&[0; 28]);
+        assert_eq!(
+            Profile::parse(&lut_profile(b"CMYK", b"Lab ", tag)),
+            Err(IccError::NeedsLut)
+        );
+    }
+
+    /// A grid whose declared size cannot fit is refused before it is
+    /// allocated (ruling 1).
+    ///
+    /// `grid.pow(inputs)` is the branch this format hides in two bytes: 255
+    /// points over 15 channels is an entry count no machine holds, and both
+    /// numbers are one byte of file.
+    #[test]
+    fn an_impossible_grid_is_refused_before_it_is_allocated() {
+        let mut tag = b"mft2".to_vec();
+        tag.extend_from_slice(&[0; 4]);
+        tag.push(15); // inputs
+        tag.push(3); // outputs
+        tag.push(255); // grid points per axis
+        tag.push(0);
+        tag.extend_from_slice(&[0; 36 + 4]);
+        let parsed = Profile::parse(&lut_profile(b"CMYK", b"Lab ", tag));
+        assert!(
+            matches!(parsed, Err(IccError::TooLarge)),
+            "expected TooLarge, got {parsed:?}"
         );
     }
 }

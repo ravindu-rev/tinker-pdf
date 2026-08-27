@@ -56,17 +56,16 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Full ICC colour.** *Mostly done.* An own CMM in the `tinker-pdf-color`
-  leaf parses a profile and compiles matrix/TRC and grey models into
-  fixed-point tables, and an `ICCBased` space is converted through its own
-  profile rather than by counting components. **2 607 of the corpus's 2 750
-  profiles compile, 94.8 %**, and every refusal is named. What is left is the
-  5 % — the `A2B*` lookup tables, which `design/icc.md` sizes at L on their own
-  and which 138 profiles in 131 files ask for — plus rendering intents
-  (`/Intent`, the `ri` operator, ExtGState `/RenderingIntent`), which are
-  parsed and discarded. CalRGB and CalGray remain approximated, which the
-  design doc lists as a non-goal. Exit for the remainder: LUT profiles
-  transform; intents select. (M, [design/icc.md](design/icc.md))
+- **Full ICC colour.** *Done, bar the intents.* An own CMM in the
+  `tinker-pdf-color` leaf parses a profile and transforms through it:
+  matrix/TRC, grey, and the `mft1`/`mft2` lookup tables a printer profile
+  carries. **2 744 of the corpus's 2 750 profiles compile, 99.8 %**, and the
+  six that do not are named. What is left is rendering intents (`/Intent`, the
+  `ri` operator, ExtGState `/RenderingIntent`), which are parsed and discarded,
+  and v4's `mAB ` tables — three tags in the whole corpus. CalRGB and CalGray
+  remain approximated, which [design/icc.md](design/icc.md) lists as a
+  non-goal. Exit for the remainder: intents select a rendering. (S,
+  [design/icc.md](design/icc.md))
 
 ## Tier 3 — capabilities absent today
 

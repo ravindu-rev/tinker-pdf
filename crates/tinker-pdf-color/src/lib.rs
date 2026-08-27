@@ -249,7 +249,7 @@ pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
 /// what almost every file that uses Lab declares. A document with a different
 /// one is converted slightly wrongly rather than not at all — visibly closer
 /// than the alternative, which was rendering the whole space black.
-fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     // D50, normalized so Y is 1.
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 

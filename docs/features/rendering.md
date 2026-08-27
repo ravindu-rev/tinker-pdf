@@ -22,12 +22,15 @@ through **its own profile** (ICC.1): the header and tag table are read, the
 three `XYZ` columns and three tone curves compile once into fixed-point
 tables, and each colour is a lookup plus an integer matrix multiply, so
 nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
-profiles are the same with one curve. Measured against the corpus's 2 750 real
-profiles: **2 607 compile, 94.8 %** — and 449 of the 4 525 files name an
+profiles are the same with one curve. A printer profile carries a multi-dimensional lookup table
+instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
+interpolated grid between them — and those are read too, in the v2 shape that
+is 99.3 % of them. Measured against the corpus's 2 750 real
+profiles: **2 744 compile, 99.8 %** — and 449 of the 4 525 files name an
 `ICCBased` space that paints through one, which the corpus report counts as
-`iccbased` — and the 143 that do not are named — 138
-need the `A2B*` lookup tables, 3 a data space with no transform here, 2 a
-connection space other than XYZ. Those and the CIE spaces (CalRGB, CalGray)
+`iccbased`. The six that do not compile are named: 3 a data space with no
+transform here, 2 a connection space this build cannot reach, and 1 v4's
+`mAB ` table. Those and the CIE spaces (CalRGB, CalGray)
 are `ColorSpace::Approximated` — read by component count, which is the
 alternate-space reading 8.6.5.5 permits, and the approximation is stated on
 the type rather than hidden. `[/Pattern base]` carries the underlying space
