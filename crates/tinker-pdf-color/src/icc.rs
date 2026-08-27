@@ -28,11 +28,11 @@
 //! | one coefficient of the D50-to-sRGB matrix off by 0.1 | **2** |
 //! | every gamma exponent multiplied by 1.05 | **3** |
 //!
-//! The matrix defect is caught by  and by
-//! the facade's , and by
+//! The matrix defect is caught by `an_srgb_profile_transforms_to_itself` and by
+//! the facade's `an_iccbased_space_is_converted_through_its_profile`, and by
 //! nothing else in the workspace — which is the argument for the round trip
 //! being the exit criterion rather than a nice-to-have. The curve defect adds
-//! , which is the assertion that
+//! `a_linear_curve_compiles_to_a_linear_ramp`, which is the assertion that
 //! localises it: the round trip says the answer moved, the ramp says the table
 //! is what moved.
 //!
