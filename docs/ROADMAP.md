@@ -56,16 +56,18 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Full ICC colour.** *Done, bar the intents.* An own CMM in the
+- **Full ICC colour.** *Done.* An own CMM in the
   `tinker-pdf-color` leaf parses a profile and transforms through it:
   matrix/TRC, grey, and the `mft1`/`mft2` lookup tables a printer profile
   carries. **2 744 of the corpus's 2 750 profiles compile, 99.8 %**, and the
-  six that do not are named. What is left is rendering intents (`/Intent`, the
-  `ri` operator, ExtGState `/RenderingIntent`), which are parsed and discarded,
-  and v4's `mAB ` tables — three tags in the whole corpus. CalRGB and CalGray
-  remain approximated, which [design/icc.md](design/icc.md) lists as a
-  non-goal. Exit for the remainder: intents select a rendering. (S,
-  [design/icc.md](design/icc.md))
+  six that do not are named. The default rendering intent is honoured —
+  8.6.5.8 makes it `RelativeColorimetric`, which is the `A2B1` table — and
+  selecting a *non-default* one is measured and declined: **no corpus file sets
+  an ExtGState `/RenderingIntent`** and five carry the `ri` operator, so ruling
+  3 does not ask for it. What remains unbuilt is that selection and v4's
+  `mAB ` tables, three tags in the whole corpus. CalRGB and CalGray remain
+  approximated, which [design/icc.md](design/icc.md) lists as a non-goal.
+  (Closed on the evidence; reopen with a file that needs it.)
 
 ## Tier 3 — capabilities absent today
 

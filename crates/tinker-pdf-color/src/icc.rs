@@ -519,9 +519,17 @@ impl Profile {
             if !lab && &pcs != b"XYZ " {
                 return Err(IccError::UnsupportedPcs);
             }
-            // A2B1 is the colorimetric intent and A2B0 the perceptual one;
-            // either is a conversion, and a profile carrying only one is
-            // ordinary.
+            // A2B1 first, and not arbitrarily: ISO 32000-1 8.6.5.8 makes
+            // `RelativeColorimetric` the default rendering intent, and A2B1 is
+            // the tag that holds it. A2B0 (perceptual) and A2B2 (saturation)
+            // are the fallbacks for a profile that carries only one table,
+            // which is ordinary.
+            //
+            // Selecting between them by the intent in force is not built, and
+            // the corpus says why: **no file sets an ExtGState
+            // `/RenderingIntent` at all**, and five carry the `ri` operator.
+            // Choosing the default correctly is the whole of what the corpus
+            // asks for (ruling 3).
             let tag = find(b"A2B1")
                 .or_else(|| find(b"A2B0"))
                 .or_else(|| find(b"A2B2"));

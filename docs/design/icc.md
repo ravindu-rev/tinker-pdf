@@ -283,6 +283,31 @@ and maximum CLUT grid volume, measured against real embedded profiles.
 | 7 | Known-answer tables | **Done**, in the form the arithmetic allows: the fixed-point encodings are pinned bit pattern by bit pattern, a linear curve's compiled ramp is pinned entry by entry across all 4 096, and two injections are counted (2 and 3 of 3 012) | S |
 | 8 | Corpus movement | `corpus/report.json` shows the `iccbased` count; the metamorphic rows of [render-verification](render-verification.md) still hold over the files carrying profiles, so the new conversion path did not break resolution or rotation coherence | S |
 
+### Rendering intents, measured and declined
+
+Scope bullet three and milestone 6 both ask for intents: `/Intent` on the
+`ICCBased` stream, the `ri` operator, and ExtGState `/RenderingIntent`. Ruling
+3 says a capability is built when the corpus asks for it, so the corpus was
+asked:
+
+| | files |
+| --- | ---: |
+| ExtGState `/RenderingIntent` | **0** |
+| the `ri` operator | 5 |
+| `/Intent` anywhere | 50, overwhelmingly 8.9.5.1's on an image |
+
+Nothing sets an ExtGState intent, and an intent only changes an answer at all
+for a LUT profile carrying more than one `A2B*` table. So what the corpus
+actually asks for is that the **default** be right, and 8.6.5.8 makes that
+`RelativeColorimetric` — which is `A2B1`, which is what the parser reaches for
+first. Selecting a non-default intent is left unbuilt and said so here, rather
+than built for five files that may not even exercise it.
+
+The wrinkle if it is ever wanted: an intent is graphics state and a transform
+is compiled per colour space, so a space would need one compiled transform per
+intent rather than one. That is the reason it is not a two-line change, and it
+is worth knowing before someone estimates it at two lines.
+
 ### Three departures from the plan above, and why
 
 **No `RenderWarning` for a refused profile.** Milestone 6 asked for one under
