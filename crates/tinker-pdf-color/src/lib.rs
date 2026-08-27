@@ -18,6 +18,7 @@
 use tinker_pdf_math as math;
 
 pub mod function;
+pub mod icc;
 
 pub use function::Function;
 
@@ -192,6 +193,31 @@ fn byte(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// XYZ at D50 to linear sRGB, Bradford-adapted.
+///
+/// ICC.1 puts the profile connection space at D50 and sRGB is defined at D65,
+/// so the chromatic adaptation is part of this relation rather than a step
+/// beside it.
+///
+/// One constant with two callers: `/Lab` conversion (8.6.5.4) reaches the
+/// connection space through its own arithmetic and an ICC transform reaches it
+/// through a profile's columns, but from there both are doing the same thing.
+/// It was written out twice before an ICC transform existed to want it, and the
+/// two copies had already drifted in the fourth decimal.
+pub(crate) const XYZ_D50_TO_SRGB: [[f64; 3]; 3] = [
+    [3.134_136, -1.617_036, -0.490_662],
+    [-0.978_755, 1.916_143, 0.033_454],
+    [0.071_95, -0.228_988, 1.405_386],
+];
+
+/// [`XYZ_D50_TO_SRGB`], applied.
+pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
+    let row = |r: usize| {
+        XYZ_D50_TO_SRGB[r][0] * x + XYZ_D50_TO_SRGB[r][1] * y + XYZ_D50_TO_SRGB[r][2] * z
+    };
+    [row(0), row(1), row(2)]
+}
+
 /// CIE L*a*b* to sRGB, through XYZ (8.6.5.4).
 ///
 /// The white point is D50, which is what PDF's `/WhitePoint` defaults to and
@@ -221,10 +247,7 @@ fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     let y = WHITE[1] * finv(fy);
     let z = WHITE[2] * finv(fz);
 
-    // XYZ (D50) to linear sRGB, Bradford-adapted.
-    let r = 3.134_136 * x - 1.617_036 * y - 0.490_662 * z;
-    let g = -0.978_755 * x + 1.916_143 * y + 0.033_454 * z;
-    let bl = 0.071_95 * x - 0.228_988 * y + 1.405_386 * z;
+    let [r, g, bl] = xyz_d50_to_linear_srgb(x, y, z);
 
     let encode = |v: f64| -> u8 {
         let v = v.clamp(0.0, 1.0);

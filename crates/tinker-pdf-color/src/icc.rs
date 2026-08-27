@@ -1,0 +1,1011 @@
+//! ICC profiles (ICC.1 / ISO 15076-1), parsed.
+//!
+//! Bytes in, values out, with no PDF anywhere near it (ruling 8): an
+//! `ICCBased` stream is a COS object and resolving one is the facade's
+//! business, so what arrives here is the profile's own bytes and nothing else.
+//!
+//! # What is read, and why that is the right subset
+//!
+//! The census in `crates/tinker-pdf/tests/icc_census.rs` walked every profile
+//! in the four corpora — 2 750 of them, in half the files — and the shape it
+//! found decides the shape of this module. **2 287 are matrix/TRC** (three
+//! `XYZ` columns and three tone curves) and **323 are grey** (one curve and a
+//! white point); together 95 %. The remaining 140 need the multi-dimensional
+//! `A2B*` lookup tables, which are refused by name here.
+//!
+//! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
+//! legacy case to tolerate on the way to v4 — it is the case, and the two
+//! agree about everything this module reads.
+//!
+//! # Why a wrong parse is loud
+//!
+//! Unlike the arithmetic-coded formats elsewhere in this workspace, a profile
+//! read wrongly does not usually produce a plausible answer: the header
+//! carries `acsp` at a fixed offset, every tag names its own extent, and those
+//! extents have to lie inside the profile. A mis-parse hits one of those and
+//! becomes an [`IccError`], which the caller turns back into the
+//! component-count approximation it was already using. That is why this can be
+//! reconstructed from the format's structure with some confidence, where a
+//! JBIG2 context template could not.
+
+use crate::{ColorSpace, XYZ_D50_TO_SRGB};
+
+/// Why a profile could not be read.
+///
+/// Every one of these is a *refusal*, not a repair: a profile this module
+/// cannot make a transform out of leaves the caller with the approximation it
+/// already had, which is 8.6.5.5's alternate-space reading and is what the
+/// engine did before profiles were read at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IccError {
+    /// Shorter than the 128-byte header plus a tag count.
+    TooShort,
+    /// The `acsp` signature at offset 36 is absent, so these bytes are not a
+    /// profile however long they are.
+    NotAProfile,
+    /// The header's own size field disagrees with how many bytes arrived.
+    SizeMismatch,
+    /// A tag's offset and size do not lie inside the profile.
+    TagOutOfBounds,
+    /// More tags than [`MAX_ICC_TAGS`], or a profile past [`MAX_ICC_BYTES`].
+    TooLarge,
+    /// A tag this build does not read, where reading it is the only way to
+    /// build a transform — the `A2B*` lookup tables.
+    NeedsLut,
+    /// A connection space other than `XYZ`, which is the only one a matrix
+    /// profile can have.
+    UnsupportedPcs,
+    /// A data space this build has no transform for.
+    UnsupportedSpace,
+    /// The tags a transform needs are not all there.
+    MissingTags,
+    /// A curve or matrix tag whose own contents do not parse.
+    MalformedTag,
+}
+
+/// The most tags a profile may declare.
+///
+/// The tag table is `12 * count` bytes and the count is a 32-bit field, so it
+/// is checked before the table is walked (ruling 1). The corpus's busiest
+/// profile declares seventeen.
+pub const MAX_ICC_TAGS: u32 = 1024;
+
+/// The most bytes a profile may be.
+///
+/// The largest in the corpus is 718 672, a printer profile carrying a full set
+/// of lookup tables; this is the next power of two above it, which leaves the
+/// bound clearing the thing the format is for by better than a factor of two.
+pub const MAX_ICC_BYTES: usize = 1 << 21;
+
+/// A tone reproduction curve.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Curve {
+    /// `curv` with a count of zero: the identity.
+    Identity,
+    /// `curv` with a count of one: a pure gamma, stored as u8Fixed8.
+    Gamma(f64),
+    /// `curv` with a count above one: a sampled curve, interpolated.
+    Sampled(Vec<u16>),
+    /// `para`: one of ICC.1's five parametric forms, by function type and its
+    /// parameters in order.
+    Parametric {
+        /// Which of ICC.1's five forms.
+        function: u16,
+        /// Its parameters, in the order the clause lists them.
+        params: Vec<f64>,
+    },
+}
+
+impl Curve {
+    /// The curve at `x` in `0..=1`, answering in `0..=1`.
+    ///
+    /// Floating point, and deliberately: this runs once per entry when a
+    /// transform's tables are built, never per pixel. Ruling 4's ban is on the
+    /// pixel path, and `cargo xtask libm` sees the whole crate — which is why
+    /// the transcendental here is `tinker_pdf_math::pow` rather than the
+    /// platform's.
+    #[must_use]
+    pub fn eval(&self, x: f64) -> f64 {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            Curve::Identity => x,
+            Curve::Gamma(g) => tinker_pdf_math::pow(x, *g),
+            Curve::Sampled(points) => sample(points, x),
+            Curve::Parametric { function, params } => parametric(*function, params, x),
+        }
+    }
+}
+
+/// Linear interpolation through a sampled curve.
+fn sample(points: &[u16], x: f64) -> f64 {
+    if points.is_empty() {
+        return x;
+    }
+    if points.len() == 1 {
+        return f64::from(points[0]) / 65535.0;
+    }
+    let last = points.len() - 1;
+    let position = x * last as f64;
+    let lower = position.floor();
+    let index = (lower as usize).min(last);
+    let next = (index + 1).min(last);
+    let fraction = position - lower;
+    let a = f64::from(points[index]) / 65535.0;
+    let b = f64::from(points[next]) / 65535.0;
+    a + (b - a) * fraction
+}
+
+/// ICC.1's five parametric curve forms.
+///
+/// Written from the definitions rather than from a table of coefficients, so
+/// the shared shape — a power law with a linear segment below a threshold — is
+/// visible in the code the way it is in the clause. Type 3 is sRGB's own form
+/// and type 4 is the general one; the first three are it with terms dropped.
+fn parametric(function: u16, params: &[f64], x: f64) -> f64 {
+    let at = |i: usize| params.get(i).copied().unwrap_or(0.0);
+    let power = |base: f64, exponent: f64| {
+        if base <= 0.0 {
+            0.0
+        } else {
+            tinker_pdf_math::pow(base, exponent)
+        }
+    };
+    let (g, a, b, c, d, e, f) = (at(0), at(1), at(2), at(3), at(4), at(5), at(6));
+    match function {
+        0 => power(x, g),
+        1 => {
+            if a != 0.0 && x >= -b / a {
+                power(a * x + b, g)
+            } else {
+                0.0
+            }
+        }
+        2 => {
+            if a != 0.0 && x >= -b / a {
+                power(a * x + b, g) + c
+            } else {
+                c
+            }
+        }
+        3 => {
+            if x >= d {
+                power(a * x + b, g)
+            } else {
+                c * x
+            }
+        }
+        4 => {
+            if x >= d {
+                power(a * x + b, g) + e
+            } else {
+                c * x + f
+            }
+        }
+        // A form ICC.1 does not define. Answering the identity would be a
+        // guess; the caller sees `MalformedTag` through `Profile::parse`.
+        _ => x,
+    }
+}
+
+/// A profile, in the parts a transform is built from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    /// The data colour space, as its four-byte signature.
+    pub space: [u8; 4],
+    /// The profile connection space.
+    pub pcs: [u8; 4],
+    /// The device class.
+    pub class: [u8; 4],
+    /// The major version, which the census says is 2 for all but eleven
+    /// profiles in the corpus.
+    pub version: u8,
+    /// The transform this profile can supply.
+    pub model: Model,
+}
+
+/// What kind of transform a profile's tags describe.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Model {
+    /// Three columns and three curves: `linear = TRC(encoded)`, then a matrix
+    /// into the connection space.
+    MatrixTrc {
+        /// The `rXYZ`, `gXYZ`, `bXYZ` columns, row-major as `[X, Y, Z]` each.
+        columns: [[f64; 3]; 3],
+        /// `rTRC`, `gTRC`, `bTRC`.
+        curves: [Curve; 3],
+    },
+    /// One curve and a white point: a grey profile.
+    Grey {
+        /// `kTRC`.
+        curve: Curve,
+        /// `wtpt`, as `[X, Y, Z]`.
+        white: [f64; 3],
+    },
+}
+
+/// A big-endian reader that answers `None` rather than panicking.
+struct Reader<'a> {
+    bytes: &'a [u8],
+}
+
+impl Reader<'_> {
+    fn u32(&self, at: usize) -> Option<u32> {
+        let s = self.bytes.get(at..at.checked_add(4)?)?;
+        Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    }
+
+    fn u16(&self, at: usize) -> Option<u16> {
+        let s = self.bytes.get(at..at.checked_add(2)?)?;
+        Some(u16::from_be_bytes([s[0], s[1]]))
+    }
+
+    fn sig(&self, at: usize) -> Option<[u8; 4]> {
+        let s = self.bytes.get(at..at.checked_add(4)?)?;
+        Some([s[0], s[1], s[2], s[3]])
+    }
+
+    /// ICC.1's `s15Fixed16Number`: a signed 16.16 fixed-point value.
+    fn s15fixed16(&self, at: usize) -> Option<f64> {
+        Some(f64::from(self.u32(at)? as i32) / 65536.0)
+    }
+}
+
+impl Profile {
+    /// Reads a profile far enough to build a transform from it.
+    ///
+    /// # Errors
+    ///
+    /// Every failure is an [`IccError`] naming what was wrong, and every one of
+    /// them leaves the caller with the component-count approximation it had
+    /// before — a profile this cannot read never degrades a page, it only fails
+    /// to improve one.
+    pub fn parse(bytes: &[u8]) -> Result<Profile, IccError> {
+        if bytes.len() > MAX_ICC_BYTES {
+            return Err(IccError::TooLarge);
+        }
+        // 128 bytes of header, then a four-byte tag count.
+        if bytes.len() < 132 {
+            return Err(IccError::TooShort);
+        }
+        let reader = Reader { bytes };
+        if reader.sig(36) != Some(*b"acsp") {
+            return Err(IccError::NotAProfile);
+        }
+        // The header's own size, which a truncated stream disagrees with. A
+        // profile longer than its field is tolerated — trailing bytes after a
+        // profile are somebody else's — but a shorter one has lost data every
+        // tag offset below is about to index into.
+        let declared = reader.u32(0).ok_or(IccError::TooShort)? as usize;
+        if declared > bytes.len() {
+            return Err(IccError::SizeMismatch);
+        }
+
+        let class = reader.sig(12).ok_or(IccError::TooShort)?;
+        let space = reader.sig(16).ok_or(IccError::TooShort)?;
+        let pcs = reader.sig(20).ok_or(IccError::TooShort)?;
+        let version = (reader.u32(8).ok_or(IccError::TooShort)? >> 24) as u8;
+
+        let count = reader.u32(128).ok_or(IccError::TooShort)?;
+        if count > MAX_ICC_TAGS {
+            return Err(IccError::TooLarge);
+        }
+        let mut tags: Vec<([u8; 4], usize, usize)> = Vec::new();
+        for i in 0..count as usize {
+            let at = 132 + i.checked_mul(12).ok_or(IccError::TooLarge)?;
+            let signature = reader.sig(at).ok_or(IccError::TooShort)?;
+            let offset = reader.u32(at + 4).ok_or(IccError::TooShort)? as usize;
+            let size = reader.u32(at + 8).ok_or(IccError::TooShort)? as usize;
+            let end = offset.checked_add(size).ok_or(IccError::TagOutOfBounds)?;
+            if end > bytes.len() {
+                return Err(IccError::TagOutOfBounds);
+            }
+            tags.push((signature, offset, size));
+        }
+
+        let find = |want: &[u8; 4]| {
+            tags.iter()
+                .find(|(s, _, _)| s == want)
+                .map(|(_, offset, size)| &bytes[*offset..*offset + *size])
+        };
+
+        // A profile whose only route to the connection space is a lookup table
+        // is refused by name rather than half-read.
+        let has_matrix =
+            find(b"rXYZ").is_some() && find(b"gXYZ").is_some() && find(b"bXYZ").is_some();
+        let has_grey = find(b"kTRC").is_some();
+        if !has_matrix && !has_grey {
+            return Err(if find(b"A2B0").is_some() {
+                IccError::NeedsLut
+            } else {
+                IccError::MissingTags
+            });
+        }
+        if &pcs != b"XYZ " {
+            return Err(IccError::UnsupportedPcs);
+        }
+
+        let model = if has_matrix {
+            if &space != b"RGB " {
+                return Err(IccError::UnsupportedSpace);
+            }
+            let column = |tag: &[u8; 4]| -> Result<[f64; 3], IccError> {
+                let data = find(tag).ok_or(IccError::MissingTags)?;
+                read_xyz(data)
+            };
+            let curve = |tag: &[u8; 4]| -> Result<Curve, IccError> {
+                let data = find(tag).ok_or(IccError::MissingTags)?;
+                read_curve(data)
+            };
+            Model::MatrixTrc {
+                columns: [column(b"rXYZ")?, column(b"gXYZ")?, column(b"bXYZ")?],
+                curves: [curve(b"rTRC")?, curve(b"gTRC")?, curve(b"bTRC")?],
+            }
+        } else {
+            if &space != b"GRAY" {
+                return Err(IccError::UnsupportedSpace);
+            }
+            Model::Grey {
+                curve: read_curve(find(b"kTRC").ok_or(IccError::MissingTags)?)?,
+                white: read_xyz(find(b"wtpt").ok_or(IccError::MissingTags)?)?,
+            }
+        };
+
+        Ok(Profile {
+            space,
+            pcs,
+            class,
+            version,
+            model,
+        })
+    }
+}
+
+/// An `XYZType` tag: a signature, four reserved bytes, then one `XYZNumber`.
+fn read_xyz(data: &[u8]) -> Result<[f64; 3], IccError> {
+    let reader = Reader { bytes: data };
+    if reader.sig(0) != Some(*b"XYZ ") {
+        return Err(IccError::MalformedTag);
+    }
+    let at = |offset: usize| reader.s15fixed16(offset).ok_or(IccError::MalformedTag);
+    Ok([at(8)?, at(12)?, at(16)?])
+}
+
+/// A `curv` or `para` tag.
+fn read_curve(data: &[u8]) -> Result<Curve, IccError> {
+    let reader = Reader { bytes: data };
+    match reader.sig(0).ok_or(IccError::MalformedTag)? {
+        s if &s == b"curv" => {
+            let count = reader.u32(8).ok_or(IccError::MalformedTag)? as usize;
+            match count {
+                0 => Ok(Curve::Identity),
+                // One entry is a gamma in u8Fixed8 rather than a sample.
+                1 => Ok(Curve::Gamma(
+                    f64::from(reader.u16(12).ok_or(IccError::MalformedTag)?) / 256.0,
+                )),
+                _ => {
+                    let end = 12usize.checked_add(count.checked_mul(2).ok_or(IccError::TooLarge)?);
+                    let end = end.ok_or(IccError::TooLarge)?;
+                    if end > data.len() {
+                        return Err(IccError::MalformedTag);
+                    }
+                    let mut points = Vec::with_capacity(count);
+                    for i in 0..count {
+                        points.push(reader.u16(12 + i * 2).ok_or(IccError::MalformedTag)?);
+                    }
+                    Ok(Curve::Sampled(points))
+                }
+            }
+        }
+        s if &s == b"para" => {
+            let function = reader.u16(8).ok_or(IccError::MalformedTag)?;
+            // ICC.1 gives each form its own parameter count, in this order.
+            let needed = match function {
+                0 => 1,
+                1 => 3,
+                2 => 4,
+                3 => 5,
+                4 => 7,
+                _ => return Err(IccError::MalformedTag),
+            };
+            let mut params = Vec::with_capacity(needed);
+            for i in 0..needed {
+                params.push(
+                    reader
+                        .s15fixed16(12 + i * 4)
+                        .ok_or(IccError::MalformedTag)?,
+                );
+            }
+            Ok(Curve::Parametric { function, params })
+        }
+        _ => Err(IccError::MalformedTag),
+    }
+}
+
+/// A compiled transform: a profile's colours into 8-bit sRGB.
+///
+/// # Why this is integers, and where the floats went
+///
+/// Ruling 4 wants a page to render to the same bytes on every target, and the
+/// transcendental a tone curve is made of does not: `pow` rounds differently
+/// on every platform's libm, which is why `tinker-pdf-math` exists. So the
+/// curves are evaluated **once**, at compile time, into a table of
+/// [`CURVE_ENTRIES`] fixed-point entries, and per-pixel evaluation is a table
+/// lookup and an integer matrix multiply. Nothing on the pixel path can round
+/// differently anywhere.
+///
+/// The matrix is held in s15.16 — ICC.1's own `s15Fixed16Number`, which is
+/// what the profile stored it as, so no precision is invented on the way in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transform {
+    /// Per input channel, the curve sampled into 16-bit linear values.
+    curves: Vec<Vec<u16>>,
+    /// The profile's columns times the XYZ-to-sRGB matrix, in s15.16, so one
+    /// multiply takes linear device values straight to linear sRGB.
+    matrix: [[i32; 3]; 3],
+    /// How many components go in.
+    inputs: usize,
+}
+
+/// Entries in a compiled tone curve.
+///
+/// Enough that the step between neighbours is below what an eight-bit output
+/// can show — a 4 096-entry table over a gamma of 2.4 moves less than a
+/// thousandth of full scale per step, so the interpolation the lookup skips
+/// could not change a byte.
+pub const CURVE_ENTRIES: usize = 4096;
+
+/// One in s15.16.
+const ONE: i64 = 1 << 16;
+
+impl Transform {
+    /// Compiles a profile into a transform, or `None` for a model that has no
+    /// closed form here.
+    #[must_use]
+    pub fn compile(profile: &Profile) -> Option<Transform> {
+        match &profile.model {
+            Model::MatrixTrc { columns, curves } => {
+                // The profile's columns are the device primaries in XYZ, so
+                // the product with XYZ-to-sRGB is device-linear to sRGB-linear
+                // — one matrix rather than two, computed once here.
+                let mut matrix = [[0i32; 3]; 3];
+                for (row, out) in matrix.iter_mut().enumerate() {
+                    for (column, slot) in out.iter_mut().enumerate() {
+                        let mut sum = 0.0;
+                        for k in 0..3 {
+                            sum += XYZ_D50_TO_SRGB[row][k] * columns[column][k];
+                        }
+                        *slot = fixed(sum);
+                    }
+                }
+                Some(Transform {
+                    curves: curves.iter().map(compile_curve).collect(),
+                    matrix,
+                    inputs: 3,
+                })
+            }
+            Model::Grey { curve, .. } => {
+                // A grey profile's single curve makes a luminance, and the
+                // three sRGB channels are that luminance: the white point does
+                // not enter, because the answer is achromatic by construction.
+                let identity = [[fixed(1.0), 0, 0], [0, fixed(1.0), 0], [0, 0, fixed(1.0)]];
+                Some(Transform {
+                    curves: vec![compile_curve(curve)],
+                    matrix: identity,
+                    inputs: 1,
+                })
+            }
+        }
+    }
+
+    /// How many components this transform takes.
+    #[must_use]
+    pub const fn inputs(&self) -> usize {
+        self.inputs
+    }
+
+    /// Converts one colour to 8-bit sRGB.
+    ///
+    /// Integers throughout: a table lookup per channel, an s15.16 matrix
+    /// multiply in `i64`, then the sRGB transfer function from a second
+    /// compiled table. No float, no `pow`, nothing that rounds differently
+    /// between one target and the next.
+    #[must_use]
+    pub fn apply(&self, components: &[f64]) -> (u8, u8, u8) {
+        let mut linear = [0i64; 3];
+        for (channel, slot) in linear.iter_mut().enumerate() {
+            let index = if self.inputs == 1 { 0 } else { channel };
+            let value = components
+                .get(index)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let entry = (value * (CURVE_ENTRIES - 1) as f64).round() as usize;
+            let curve = self.curves.get(index.min(self.curves.len() - 1));
+            let sampled = curve
+                .and_then(|c| c.get(entry.min(CURVE_ENTRIES - 1)))
+                .copied()
+                .unwrap_or(0);
+            // 16-bit linear, promoted to s15.16 for the multiply below.
+            *slot = i64::from(sampled) * ONE / 65535;
+        }
+
+        let mut out = [0u8; 3];
+        for (row, slot) in out.iter_mut().enumerate() {
+            let mut sum = 0i64;
+            for (column, value) in linear.iter().enumerate() {
+                sum += i64::from(self.matrix[row][column]) * value / ONE;
+            }
+            *slot = encode_srgb(sum);
+        }
+        (out[0], out[1], out[2])
+    }
+}
+
+/// A curve, sampled into [`CURVE_ENTRIES`] 16-bit linear values.
+fn compile_curve(curve: &Curve) -> Vec<u16> {
+    (0..CURVE_ENTRIES)
+        .map(|i| {
+            let x = i as f64 / (CURVE_ENTRIES - 1) as f64;
+            let y = curve.eval(x).clamp(0.0, 1.0);
+            (y * 65535.0).round() as u16
+        })
+        .collect()
+}
+
+/// A real number in s15.16, saturating rather than wrapping.
+fn fixed(value: f64) -> i32 {
+    let scaled = (value * 65536.0).round();
+    if scaled > f64::from(i32::MAX) {
+        i32::MAX
+    } else if scaled < f64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        scaled as i32
+    }
+}
+
+/// sRGB's transfer function, from a table built once.
+///
+/// The encode direction — linear light to the byte a display expects — and the
+/// only place the output side of the pipeline could have needed a `pow` per
+/// pixel. 4 096 entries over `0..=1`, which is finer than the byte it produces.
+fn encode_srgb(linear: i64) -> u8 {
+    static TABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0..CURVE_ENTRIES)
+            .map(|i| {
+                let x = i as f64 / (CURVE_ENTRIES - 1) as f64;
+                // IEC 61966-2-1: a straight segment near black, a power law
+                // above it, joined so the two agree at the threshold.
+                let encoded = if x <= 0.003_130_8 {
+                    12.92 * x
+                } else {
+                    1.055 * tinker_pdf_math::pow(x, 1.0 / 2.4) - 0.055
+                };
+                (encoded.clamp(0.0, 1.0) * 255.0).round() as u8
+            })
+            .collect()
+    });
+    let clamped = linear.clamp(0, ONE);
+    let index = (clamped * (CURVE_ENTRIES as i64 - 1) / ONE) as usize;
+    table.get(index).copied().unwrap_or(0)
+}
+
+/// The colour space a profile's transform stands in for, when one cannot be
+/// built: 8.6.5.5's alternate-space reading, by component count.
+#[must_use]
+pub fn approximated(components: usize) -> ColorSpace {
+    ColorSpace::Approximated { components }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// sRGB's own primaries, chromatically adapted to D50 — which is what an
+    /// sRGB ICC profile stores, because ICC.1 puts the connection space there.
+    ///
+    /// These are the numbers in every sRGB profile ever shipped, and they are
+    /// here rather than in the module because they are a *fixture*: the module
+    /// reads whatever a profile says.
+    const SRGB_R: [f64; 3] = [0.436_065_674, 0.222_488_403, 0.013_916_015];
+    const SRGB_G: [f64; 3] = [0.385_147_095, 0.716_873_169, 0.097_076_416];
+    const SRGB_B: [f64; 3] = [0.143_066_406, 0.060_607_910, 0.714_096_069];
+
+    /// A `para` type 3 tag carrying sRGB's transfer function.
+    fn srgb_curve() -> Vec<u8> {
+        let mut out = b"para".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&3u16.to_be_bytes());
+        out.extend_from_slice(&[0; 2]);
+        for value in [2.4f64, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.040_45] {
+            out.extend_from_slice(&(((value * 65536.0).round() as i32) as u32).to_be_bytes());
+        }
+        out
+    }
+
+    /// A profile that says "these colours are already sRGB".
+    fn srgb_profile() -> Vec<u8> {
+        build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(SRGB_R[0], SRGB_R[1], SRGB_R[2])),
+                (*b"gXYZ", xyz(SRGB_G[0], SRGB_G[1], SRGB_G[2])),
+                (*b"bXYZ", xyz(SRGB_B[0], SRGB_B[1], SRGB_B[2])),
+                (*b"rTRC", srgb_curve()),
+                (*b"gTRC", srgb_curve()),
+                (*b"bTRC", srgb_curve()),
+                (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
+            ],
+        )
+    }
+
+    /// A minimal profile: a header, a tag count, and the tags asked for.
+    fn build(space: &[u8; 4], pcs: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut header = vec![0u8; 128];
+        header[12..16].copy_from_slice(b"mntr");
+        header[16..20].copy_from_slice(space);
+        header[20..24].copy_from_slice(pcs);
+        header[36..40].copy_from_slice(b"acsp");
+        header[8..12].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+
+        let mut table = Vec::new();
+        table.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+        let mut body = Vec::new();
+        let start = 132 + tags.len() * 12;
+        for (signature, data) in tags {
+            table.extend_from_slice(signature);
+            table.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+            table.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            body.extend_from_slice(data);
+        }
+
+        let mut out = header;
+        out.extend_from_slice(&table);
+        out.extend_from_slice(&body);
+        let size = out.len() as u32;
+        out[0..4].copy_from_slice(&size.to_be_bytes());
+        out
+    }
+
+    fn xyz(x: f64, y: f64, z: f64) -> Vec<u8> {
+        let mut out = b"XYZ ".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        for value in [x, y, z] {
+            out.extend_from_slice(&(((value * 65536.0).round() as i32) as u32).to_be_bytes());
+        }
+        out
+    }
+
+    fn gamma(g: f64) -> Vec<u8> {
+        let mut out = b"curv".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(&((g * 256.0).round() as u16).to_be_bytes());
+        out
+    }
+
+    fn matrix_profile() -> Vec<u8> {
+        build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(0.4360, 0.2225, 0.0139)),
+                (*b"gXYZ", xyz(0.3851, 0.7169, 0.0971)),
+                (*b"bXYZ", xyz(0.1431, 0.0606, 0.7141)),
+                (*b"rTRC", gamma(2.2)),
+                (*b"gTRC", gamma(2.2)),
+                (*b"bTRC", gamma(2.2)),
+                (*b"wtpt", xyz(0.9642, 1.0, 0.8249)),
+            ],
+        )
+    }
+
+    /// **A matrix/TRC profile parses into its columns and its curves**, which
+    /// is 95 % of what the corpus carries.
+    #[test]
+    fn a_matrix_profile_reads_its_columns_and_curves() {
+        let profile = Profile::parse(&matrix_profile()).expect("a well-formed profile");
+        assert_eq!(&profile.space, b"RGB ");
+        assert_eq!(profile.version, 2);
+        let Model::MatrixTrc { columns, curves } = profile.model else {
+            panic!("expected a matrix model");
+        };
+        // s15Fixed16 carries about five decimal digits, so the columns come
+        // back to within a rounding step of what was written.
+        assert!((columns[0][0] - 0.4360).abs() < 1e-4, "{:?}", columns[0]);
+        assert!((columns[1][1] - 0.7169).abs() < 1e-4);
+        assert!((columns[2][2] - 0.7141).abs() < 1e-4);
+        // `curv` with one entry stores gamma as u8Fixed8, whose resolution is
+        // 1/256 — so 2.2 comes back as 563/256, and asserting equality with
+        // 2.2 would be asserting the format is finer than it is.
+        let Curve::Gamma(g) = curves[0] else {
+            panic!("expected a gamma curve");
+        };
+        assert_eq!(g, 563.0 / 256.0, "u8Fixed8 quantises to 1/256");
+        assert!((g - 2.2).abs() < 1.0 / 256.0);
+    }
+
+    /// **Every refusal is reachable and named**, which is the half of a
+    /// capability that a caller relies on: a profile this cannot read must
+    /// leave the page exactly as the component-count approximation did.
+    #[test]
+    fn every_refusal_is_reachable_and_named() {
+        assert_eq!(Profile::parse(&[]), Err(IccError::TooShort));
+        assert_eq!(
+            Profile::parse(&[0u8; 200]),
+            Err(IccError::NotAProfile),
+            "no acsp"
+        );
+        assert_eq!(
+            Profile::parse(&vec![0u8; MAX_ICC_BYTES + 1][..]),
+            Err(IccError::TooLarge)
+        );
+
+        // A size field claiming more than arrived.
+        let mut truncated = matrix_profile();
+        let long = (truncated.len() as u32 + 64).to_be_bytes();
+        truncated[0..4].copy_from_slice(&long);
+        assert_eq!(Profile::parse(&truncated), Err(IccError::SizeMismatch));
+
+        // A tag whose extent leaves the profile.
+        let mut out_of_bounds = matrix_profile();
+        let huge = 0xFFFF_0000u32.to_be_bytes();
+        out_of_bounds[136..140].copy_from_slice(&huge);
+        assert_eq!(
+            Profile::parse(&out_of_bounds),
+            Err(IccError::TagOutOfBounds)
+        );
+
+        // A tag count past the cap.
+        let mut many = matrix_profile();
+        many[128..132].copy_from_slice(&(MAX_ICC_TAGS + 1).to_be_bytes());
+        assert_eq!(Profile::parse(&many), Err(IccError::TooLarge));
+
+        // A profile whose only road to the connection space is a lookup table.
+        let lut = build(b"CMYK", b"Lab ", &[(*b"A2B0", vec![0; 32])]);
+        assert_eq!(Profile::parse(&lut), Err(IccError::NeedsLut));
+
+        // A connection space a matrix cannot reach.
+        let lab_pcs = build(
+            b"RGB ",
+            b"Lab ",
+            &[
+                (*b"rXYZ", xyz(1.0, 0.0, 0.0)),
+                (*b"gXYZ", xyz(0.0, 1.0, 0.0)),
+                (*b"bXYZ", xyz(0.0, 0.0, 1.0)),
+            ],
+        );
+        assert_eq!(Profile::parse(&lab_pcs), Err(IccError::UnsupportedPcs));
+
+        // Columns without curves.
+        let partial = build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(1.0, 0.0, 0.0)),
+                (*b"gXYZ", xyz(0.0, 1.0, 0.0)),
+                (*b"bXYZ", xyz(0.0, 0.0, 1.0)),
+            ],
+        );
+        assert_eq!(Profile::parse(&partial), Err(IccError::MissingTags));
+
+        // A curve tag that is not a curve.
+        let bad_curve = build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(1.0, 0.0, 0.0)),
+                (*b"gXYZ", xyz(0.0, 1.0, 0.0)),
+                (*b"bXYZ", xyz(0.0, 0.0, 1.0)),
+                (*b"rTRC", b"nope____".to_vec()),
+                (*b"gTRC", gamma(1.0)),
+                (*b"bTRC", gamma(1.0)),
+            ],
+        );
+        assert_eq!(Profile::parse(&bad_curve), Err(IccError::MalformedTag));
+    }
+
+    /// **A grey profile is one curve and a white point**, and 323 of the
+    /// corpus's profiles are exactly that.
+    #[test]
+    fn a_grey_profile_reads_its_single_curve() {
+        let profile = build(
+            b"GRAY",
+            b"XYZ ",
+            &[(*b"kTRC", gamma(1.8)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
+        );
+        let parsed = Profile::parse(&profile).expect("a grey profile");
+        let Model::Grey { curve, white } = parsed.model else {
+            panic!("expected a grey model");
+        };
+        let Curve::Gamma(g) = curve else {
+            panic!("expected a gamma curve");
+        };
+        assert!((g - 1.8).abs() < 1.0 / 256.0, "u8Fixed8 quantises to 1/256");
+        assert!((white[1] - 1.0).abs() < 1e-4);
+    }
+
+    /// **The five parametric forms are the clause's own expressions**, checked
+    /// where they are supposed to agree with each other.
+    ///
+    /// Types 0 to 4 are one family with terms dropped: every one of them is a
+    /// power law, and the later ones add a linear segment below a threshold and
+    /// then an offset. So at parameters that switch the extra terms off, each
+    /// form must reproduce the one before it — which is checkable without a
+    /// table of expected outputs, and catches a parameter read in the wrong
+    /// order, which is the mistake this shape invites.
+    #[test]
+    fn the_parametric_forms_agree_where_they_should() {
+        let g = 2.4;
+        for x in [0.0, 0.1, 0.25, 0.5, 0.75, 1.0] {
+            let plain = Curve::Parametric {
+                function: 0,
+                params: vec![g],
+            }
+            .eval(x);
+
+            // Type 1 with a = 1, b = 0 is type 0.
+            let one = Curve::Parametric {
+                function: 1,
+                params: vec![g, 1.0, 0.0],
+            }
+            .eval(x);
+            assert!((plain - one).abs() < 1e-12, "type 1 at {x}");
+
+            // Type 2 adds c; with c = 0 it is type 1.
+            let two = Curve::Parametric {
+                function: 2,
+                params: vec![g, 1.0, 0.0, 0.0],
+            }
+            .eval(x);
+            assert!((plain - two).abs() < 1e-12, "type 2 at {x}");
+
+            // Type 3 with d = 0 never takes its linear branch.
+            let three = Curve::Parametric {
+                function: 3,
+                params: vec![g, 1.0, 0.0, 0.0, 0.0],
+            }
+            .eval(x);
+            assert!((plain - three).abs() < 1e-12, "type 3 at {x}");
+
+            // Type 4 with e = f = 0 and d = 0 is type 3.
+            let four = Curve::Parametric {
+                function: 4,
+                params: vec![g, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }
+            .eval(x);
+            assert!((plain - four).abs() < 1e-12, "type 4 at {x}");
+        }
+    }
+
+    /// A parametric curve takes its linear branch below the threshold.
+    ///
+    /// sRGB's own transfer function is a type 3, and the point of the form is
+    /// the straight segment near black: a build that ignored `d` would run the
+    /// power law all the way down and crush every shadow.
+    #[test]
+    fn a_parametric_curve_is_linear_below_its_threshold() {
+        let srgb = Curve::Parametric {
+            function: 3,
+            params: vec![2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045],
+        };
+        // Below the threshold: a straight line through the origin.
+        assert!((srgb.eval(0.02) - 0.02 / 12.92).abs() < 1e-9);
+        assert!((srgb.eval(0.0) - 0.0).abs() < 1e-12);
+        // Above it: the power law, and 1.0 maps to 1.0.
+        assert!((srgb.eval(1.0) - 1.0).abs() < 1e-6, "{}", srgb.eval(1.0));
+        // And it is continuous across the join, which is what the constants
+        // were chosen for.
+        let below = srgb.eval(0.040_449);
+        let above = srgb.eval(0.040_451);
+        assert!((below - above).abs() < 1e-5, "{below} against {above}");
+    }
+
+    /// A sampled curve interpolates, and its ends are its ends.
+    #[test]
+    fn a_sampled_curve_interpolates_between_its_points() {
+        let curve = Curve::Sampled(vec![0, 32_768, 65_535]);
+        assert!((curve.eval(0.0) - 0.0).abs() < 1e-9);
+        assert!((curve.eval(1.0) - 1.0).abs() < 1e-9);
+        assert!((curve.eval(0.5) - 0.5).abs() < 1e-4, "{}", curve.eval(0.5));
+        // A quarter of the way is halfway into the first segment.
+        assert!((curve.eval(0.25) - 0.25).abs() < 1e-4);
+    }
+
+    /// **An sRGB profile is the identity**, which is the exit criterion for a
+    /// transform and the one check that needs no table of expected numbers.
+    ///
+    /// A profile whose primaries are sRGB's and whose curves are sRGB's says
+    /// "these components are already sRGB". So compiling it and applying it
+    /// must give back the byte that went in. Every stage is exercised — the
+    /// parametric curve, the compiled table, the s15.16 matrix product with
+    /// XYZ-to-sRGB, and the encode table — and any one of them wrong by more
+    /// than a rounding step shows here.
+    ///
+    /// Within one level, which is what the design doc asks for and what the
+    /// arithmetic can promise: the curve table quantises to 4 096 steps and the
+    /// encode table to another 4 096, so two roundings sit between input and
+    /// output.
+    #[test]
+    fn an_srgb_profile_transforms_to_itself() {
+        let profile = Profile::parse(&srgb_profile()).expect("an sRGB profile");
+        let transform = Transform::compile(&profile).expect("a matrix transform");
+
+        let mut worst = 0i32;
+        for step in 0..=32u32 {
+            let value = f64::from(step) / 32.0;
+            let want = (value * 255.0).round() as i32;
+            let (r, g, b) = transform.apply(&[value, value, value]);
+            for got in [r, g, b] {
+                worst = worst.max((i32::from(got) - want).abs());
+            }
+            assert!(
+                (i32::from(r) - want).abs() <= 1,
+                "grey {value}: wanted {want}, got {r}"
+            );
+        }
+        assert!(worst <= 1, "worst channel error {worst} levels");
+
+        // And the primaries stay themselves rather than merely staying bright.
+        let (r, g, b) = transform.apply(&[1.0, 0.0, 0.0]);
+        assert!(r > 250 && g < 5 && b < 5, "red became ({r}, {g}, {b})");
+        let (r, g, b) = transform.apply(&[0.0, 0.0, 1.0]);
+        assert!(b > 250 && r < 5 && g < 5, "blue became ({r}, {g}, {b})");
+    }
+
+    /// **A grey profile makes greys**, and its curve decides which.
+    ///
+    /// The three output channels must be equal — a grey profile is achromatic
+    /// by construction — and a gamma of 1.0 makes the transform the sRGB
+    /// encode function alone, so mid-scale lands well above mid-grey. That is
+    /// the direction a build which forgot the encode step gets wrong.
+    #[test]
+    fn a_grey_profile_makes_greys() {
+        let profile = build(
+            b"GRAY",
+            b"XYZ ",
+            &[(*b"kTRC", gamma(1.0)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
+        );
+        let parsed = Profile::parse(&profile).expect("a grey profile");
+        let transform = Transform::compile(&parsed).expect("a grey transform");
+        assert_eq!(transform.inputs(), 1);
+
+        for value in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (r, g, b) = transform.apply(&[value]);
+            assert_eq!((r, g), (r, b), "grey {value} came out coloured");
+            assert_eq!(g, b);
+        }
+        assert_eq!(transform.apply(&[0.0]).0, 0, "black stays black");
+        assert_eq!(transform.apply(&[1.0]).0, 255, "white stays white");
+        // Linear 0.5 encodes to about 0.735 of full scale, not to 128.
+        let mid = transform.apply(&[0.5]).0;
+        assert!((186..=190).contains(&mid), "linear half encoded to {mid}");
+    }
+
+    /// **Nothing on the pixel path evaluates a curve.**
+    ///
+    /// The compiled tables are what ruling 4 rests on here: `pow` is not
+    /// target-stable, so it may run when a transform is built and never when
+    /// one is applied. Asserted by construction — the tables are the right
+    /// length and their ends are the curve's ends — because the alternative is
+    /// asserting the absence of a call, which no test can see.
+    #[test]
+    fn a_compiled_curve_is_a_table_of_the_right_shape() {
+        let curve = Curve::Parametric {
+            function: 3,
+            params: vec![2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.040_45],
+        };
+        let table = compile_curve(&curve);
+        assert_eq!(table.len(), CURVE_ENTRIES);
+        assert_eq!(table[0], 0, "the curve starts at zero");
+        assert_eq!(table[CURVE_ENTRIES - 1], 65_535, "and ends at one");
+        // Monotone, which every transfer function is and a mis-indexed table
+        // is not.
+        assert!(
+            table.windows(2).all(|w| w[0] <= w[1]),
+            "the compiled curve is not monotone"
+        );
+    }
+}
