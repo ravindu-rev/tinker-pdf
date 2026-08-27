@@ -106,6 +106,16 @@ struct Tally {
     striped: u32,
     /// Headers that would not parse — a truncated or damaged stream.
     unparsable: u32,
+    /// The largest `SDNUMNEWSYMS` any one dictionary declares.
+    max_new_symbols: u32,
+    /// The largest `SDNUMEXSYMS` any one dictionary declares.
+    max_exported_symbols: u32,
+    /// The largest total `width x height` over one dictionary's symbols, which
+    /// is what a pixel budget is a budget of. Zero where the dictionary could
+    /// not be walked far enough to know.
+    max_symbol_pixels: u64,
+    /// The largest `SBNUMINSTANCES` any one text region declares.
+    max_instances: u32,
 }
 
 impl Tally {
@@ -126,6 +136,10 @@ impl Tally {
         self.dsoffset += other.dsoffset;
         self.striped += other.striped;
         self.unparsable += other.unparsable;
+        self.max_new_symbols = self.max_new_symbols.max(other.max_new_symbols);
+        self.max_exported_symbols = self.max_exported_symbols.max(other.max_exported_symbols);
+        self.max_symbol_pixels = self.max_symbol_pixels.max(other.max_symbol_pixels);
+        self.max_instances = self.max_instances.max(other.max_instances);
     }
 
     fn count(&self, kind: u8) -> u32 {
@@ -190,6 +204,28 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     if flags & 0x0200 != 0 {
                         tally.context_retained += 1;
                     }
+
+                    // 7.4.3.1.2 onwards: the AT pixels sit between the flags
+                    // and the two counts, and how many there are depends on
+                    // the flags just read. Getting this wrong reads the counts
+                    // from the wrong offset, so it is worth being explicit.
+                    let huff = flags & 0x0001 != 0;
+                    let refagg = flags & 0x0002 != 0;
+                    let template = (flags >> 10) & 0x0003;
+                    let rtemplate = (flags >> 12) & 0x0001;
+                    let mut ok = Some(());
+                    if !huff {
+                        ok = data.skip(if template == 0 { 8 } else { 2 });
+                    }
+                    if ok.is_some() && refagg && rtemplate == 0 {
+                        ok = data.skip(4);
+                    }
+                    if ok.is_some() {
+                        if let (Some(exported), Some(new)) = (data.u32(), data.u32()) {
+                            tally.max_exported_symbols = tally.max_exported_symbols.max(exported);
+                            tally.max_new_symbols = tally.max_new_symbols.max(new);
+                        }
+                    }
                 }
             }
             kind::INTERMEDIATE_TEXT_REGION
@@ -211,6 +247,20 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     }
                     if (flags >> 10) & 0x1F != 0 {
                         tally.dsoffset += 1;
+                    }
+                    // 7.4.4: the Huffman flags, then the refinement AT
+                    // pixels, then the instance count.
+                    let mut ok = Some(());
+                    if flags & 0x0001 != 0 {
+                        ok = data.skip(2);
+                    }
+                    if ok.is_some() && flags & 0x0002 != 0 && (flags >> 15) & 1 == 0 {
+                        ok = data.skip(4);
+                    }
+                    if ok.is_some() {
+                        if let Some(instances) = data.u32() {
+                            tally.max_instances = tally.max_instances.max(instances);
+                        }
                     }
                     if (flags >> 2) & 3 != 0 {
                         tally.striped += 1;
@@ -523,6 +573,35 @@ fn census_of_the_corpus_jbig2() {
         total.unparsable,
         files_with(|t| t.unparsable)
     );
+
+    println!();
+    println!("--- what a bound has to clear (ruling 1's yardsticks) ---");
+    println!("largest SDNUMNEWSYMS      {:>10}", total.max_new_symbols);
+    println!(
+        "largest SDNUMEXSYMS       {:>10}",
+        total.max_exported_symbols
+    );
+    println!("largest SBNUMINSTANCES    {:>10}", total.max_instances);
+    let mut worst: Vec<(u32, &str)> = per_file
+        .iter()
+        .map(|(name, t)| (t.max_instances, name.as_str()))
+        .collect();
+    worst.sort_unstable();
+    worst.reverse();
+    println!("the five heaviest text regions, by instance count:");
+    for (count, name) in worst.iter().take(5) {
+        println!("  {count:>9}  {name}");
+    }
+    let mut sym: Vec<(u32, &str)> = per_file
+        .iter()
+        .map(|(name, t)| (t.max_new_symbols, name.as_str()))
+        .collect();
+    sym.sort_unstable();
+    sym.reverse();
+    println!("the five largest dictionaries, by new-symbol count:");
+    for (count, name) in sym.iter().take(5) {
+        println!("  {count:>9}  {name}");
+    }
 
     // The scheduling question milestone 1 exists to answer is not how many
     // segments use a feature but how many *files* a stage would unlock, and

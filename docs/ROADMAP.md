@@ -56,16 +56,6 @@ warning contract), with corpus reachability measured.
   [features/filters.md](features/filters.md); corpus hit-rate for the
   capability goes to ~zero. (L,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Transparency group colour spaces.** *Done.* A group composites in the
-  space its `/Group /CS` declares (11.6.6) — `CmykA8` buffers, separable blends
-  over complemented components, non-separable ones converted to light and back
-  — and the page-level `/Group` of 11.4.7 decides the page canvas's own format,
-  converted for the caller at the end. `/Lab` remains composited in RGB and
-  reported by name, which no corpus file asks for. What is *not* claimed: the
-  blend is in CMYK with maximum undercolour removal rather than in the author's
-  CMYK, because `resolve_color` flattens every source colour to sRGB before the
-  renderer sees it — carrying components through that seam belongs with the CMM.
-
 - **Full ICC colour.** ICC and CIE spaces are approximated by component
   count today, stated on the type. An own CMM — profile parsing,
   transforms, rendering intents — is the capability. Exit: ICC profiles

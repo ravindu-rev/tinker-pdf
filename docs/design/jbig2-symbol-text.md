@@ -214,6 +214,44 @@ injection at the bottom of `jbig2.rs` already does.
 | 4 | Text region, arithmetic (SBREFINE and TRANSPOSED refused by name) | **Done**, with the exit criterion changed and the change stated below: `a_text_region_places_its_symbols_where_6_4_5_computes` places symbols across two strips at the coordinates 6.4.5 computes, through a round trip; `a_text_region_whose_dictionary_refused_is_refused_by_name` holds a region whose referred-to dictionary is absent or refused to refusing **whole**; all four reference corners handled, SBDSOFFSET and multi-strip regions decoded. The annex's own page moves to milestone 6 | M |
 | 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
 
+### What a bound has to clear, and why milestone 7 cannot measure it here
+
+Milestone 7 asks for `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES` and
+`MAX_JBIG2_TEXT_INSTANCES` as ledger rows "each measured against a real
+`jbig2enc`/OCRmyPDF output". The census was extended to take that measurement,
+reading `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` off the segment
+headers of all 102 JBIG2-bearing files. What it found:
+
+| | largest in the corpus |
+| --- | ---: |
+| `SDNUMNEWSYMS` | **8** |
+| `SDNUMEXSYMS` | **11** |
+| `SBNUMINSTANCES` | **9** |
+
+Nothing in 102 files exceeds twenty of anything. A real OCR page carries
+hundreds of distinct symbols and thousands of instances, so **the corpus
+contains no real OCR JBIG2 at all** — every file in this lineage is a synthetic
+fixture, overwhelmingly pdf.js's own `bitmap-symbol-*` family, built to
+exercise one placement variant each. That is why they were so useful for
+milestone 4's REFCORNER and SBDSOFFSET coverage, and it is exactly why they are
+useless as a yardstick.
+
+So milestone 7's exit criterion cannot be met as written, and saying so is
+better than quietly satisfying it against files that would let any cap through.
+The rows must be **arithmetic about a plausible file, written down so it can be
+argued with** — which is what `bounds_ledger.rs`'s own header says its comic
+and document yardsticks already are — rather than a measurement dressed up as
+one. The arithmetic to argue with: a 300 dpi A4 text page reduces to a few
+hundred distinct glyph bitmaps and a few thousand placements, so a 200-page
+document sharing one global dictionary reaches the low tens of thousands of
+symbols and the low thousands of instances per region.
+
+Getting a real measurement needs a file this repository does not have. Adding
+one means either committing OCR output — which `corpus/README.md`'s licensing
+position rules out for the same reason it rules out committing any corpus — or
+fetching a corpus that carries some. Neither is milestone 7's business to
+decide, so the rows land as stated estimates and the gap is named here.
+
 ### Milestone 5 has an anchor, and it is better than the round trip
 
 Annex H.1 carries no refinement *region* segment — a walk of its twenty-one
