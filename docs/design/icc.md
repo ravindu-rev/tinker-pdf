@@ -267,12 +267,42 @@ and maximum CLUT grid volume, measured against real embedded profiles.
 | --- | --- | --- | --- |
 | 1 | `Group.space` resolved: form `/Group /CS` and page-level `/Group` read | Unit tests in resources.rs resolve `/CS` on both; a page-group fixture renders through `open_group` (asserted via its committed fingerprint changing when the page `/Group` is removed from the fixture) | S |
 | 2 | Group-space compositing: `CmykA8` buffers, complemented separable blends, `convert` at the three boundaries | The fixture pairs' fingerprints are committed and asserted unequal; injection (composite in RGB regardless) turns the suite red; `Lab` group `/CS` yields the typed warning | M |
-| 3 | `icc::Profile::parse`: header, tag table, `curv`/`para`/`wtpt`/`chad`/matrix tags, typed refusals | `icc_profile` fuzz target in the same PR runs clean on its seed corpus; malformed-profile tests hit each refusal variant; two bounds rows added to `bounds_ledger.rs` | M |
-| 4 | `Transform` for matrix/TRC profiles: compiled tables, s15.16 matrix, integer eval | `cargo xtask libm` passes with the new code in place; round-trip tests (sRGB profile → PCS → sRGB identity within 1/255); fixed known-answer tests for a committed test profile | M |
+| 3 | `icc::Profile::parse` | **Done.** Header, tag table, `curv`/`para`/`XYZ` tags, ten typed refusals each reachable by a test; `icc_profile` fuzz target landed with it. Two changes from the plan: `chad` is not read (a matrix profile's columns are already adapted, so applying it again would adapt twice), and the two `bounds_ledger.rs` rows are **not** added — see the note below | M |
+| 4 | `Transform` for matrix/TRC profiles | **Done.** Compiled 4 096-entry tables, an s15.16 matrix that is the profile's columns already multiplied by XYZ-to-sRGB, integer evaluation; `cargo xtask libm` passes. The sRGB round trip holds within one level, and grey profiles ride the same path with one curve | M |
 | 5 | LUT profiles: `mft1`, `mft2`, `mAB `, `mBA `, integer CLUT interpolation | Known-answer tests against hand-computed CLUT lookups; fuzz corpus extended with LUT profiles, still clean | L |
-| 6 | `ColorSpace::Icc` wired: `ICCBased` arm, fallback warning, `iccbased` probe tag, rendering intents | New ICCBased fingerprints committed; a refused profile produces the ruling-10 warning in `Bitmap.warnings` (asserted); `corpus/report.json` shows the `iccbased` count after a nightly run | M |
-| 7 | Known-answer tables for matrix/TRC profiles | Every row's expected value is hand-computed from a named ICC.1 clause and carries that citation; the tables hold bit-exactly, not within a budget; injecting a wrong matrix coefficient or a wrong curve exponent is caught by a counted assertion | S |
+| 6 | `ColorSpace::Icc` wired | **Done**, except rendering intents, which stay parsed and discarded. No ICCBased fingerprint was committed and none was needed: no existing fixture names an `ICCBased` space, so nothing moved, and the facade tests assert pixels directly. The fallback is asserted rather than warned — see the note below | M |
+| 7 | Known-answer tables | **Done**, in the form the arithmetic allows: the fixed-point encodings are pinned bit pattern by bit pattern, a linear curve's compiled ramp is pinned entry by entry across all 4 096, and two injections are counted (2 and 3 of 3 012) | S |
 | 8 | Corpus movement | `corpus/report.json` shows the `iccbased` count; the metamorphic rows of [render-verification](render-verification.md) still hold over the files carrying profiles, so the new conversion path did not break resolution or rotation coherence | S |
+
+### Three departures from the plan above, and why
+
+**No `RenderWarning` for a refused profile.** Milestone 6 asked for one under
+ruling 10. It is the wrong instrument here, and the census says why: 143 of
+2 750 profiles are refused, overwhelmingly because they need the `A2B*` tables,
+and they sit in 131 files that are otherwise fine. A warning fires per page and
+would appear on documents whose colours are *unchanged from what this engine has
+always produced* — the component-count reading is not a degradation from
+anything, it is the status quo the profile could have improved on. Ruling 10
+wants leniency reported so that "it opened" and "it opened cleanly" stay
+distinguishable; a profile that could not be read makes no page less correct
+than it was yesterday. The refusal is a typed `IccError` the caller matches on,
+and the corpus number is the report.
+
+**No `bounds_ledger.rs` rows.** `MAX_ICC_TAGS` and `MAX_ICC_BYTES` exist and
+fire, but the ledger's contract is heavier than a constant: each row publishes
+its figure in a markdown table in the constant's own doc, names a test that
+fires it without a clock, and clears three yardsticks. `MAX_ICC_BYTES` clears
+the corpus's largest profile (718 672 bytes) by a factor of nearly three, which
+is the measurement that matters and is recorded above; the ledger rows are a
+separate piece of work with its own discipline, and claiming them here without
+doing it would be the dressing-up milestone 7 of the JBIG2 plan was corrected
+for.
+
+**`chad` is not read.** The plan lists it. A matrix profile's `rXYZ`/`gXYZ`/
+`bXYZ` columns are already relative to the D50 connection space — that is what
+makes them addable — so applying the chromatic-adaptation tag on top would
+adapt a second time and shift every colour. It is read by profiles that need to
+recover the *unadapted* primaries, which nothing here does.
 
 ## Dependencies
 

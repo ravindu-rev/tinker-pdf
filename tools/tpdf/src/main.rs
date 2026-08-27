@@ -1612,6 +1612,16 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
                     }
                 }
             }
+            b"ColorSpace" | b"CS" => {
+                // An `ICCBased` space names its profile in the second element
+                // of an array (8.6.5.5). Counted because it is the highest
+                // reachability in the engine — half the corpus's files carry a
+                // profile — so the number is worth watching rather than
+                // inferring from a warning that no longer fires.
+                if names_iccbased(cos, value, depth) {
+                    found.insert("iccbased");
+                }
+            }
             b"ShadingType" => {
                 // 8.7.4.5.5-8: types 4 to 7 are the mesh shadings, which is
                 // exactly gap 10's scope. 1 to 3 are built.
@@ -1622,6 +1632,46 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
             _ => {}
         }
         scan_capabilities(cos, value, depth + 1, found);
+    }
+}
+
+/// Whether a `/ColorSpace` value names an `ICCBased` space.
+///
+/// The value may be the array itself, a reference to one, or a dictionary of
+/// named spaces each of which is one — which is why this walks rather than
+/// pattern-matching a single shape.
+fn names_iccbased(cos: &CosDocument, value: &Object, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let resolved;
+    let value = match value {
+        Object::Ref(reference) => match cos.get(*reference) {
+            Ok(object) => {
+                resolved = object;
+                &*resolved
+            }
+            Err(_) => return false,
+        },
+        other => other,
+    };
+    match value {
+        Object::Array(items) => {
+            let first = items
+                .first()
+                .and_then(Object::as_name)
+                .and_then(|n| cos.name_bytes(n).map(|b| b.to_vec()));
+            if first.as_deref() == Some(b"ICCBased") {
+                return true;
+            }
+            items
+                .iter()
+                .any(|item| names_iccbased(cos, item, depth + 1))
+        }
+        Object::Dict(dict) => dict
+            .iter()
+            .any(|(_, entry)| names_iccbased(cos, entry, depth + 1)),
+        _ => false,
     }
 }
 
