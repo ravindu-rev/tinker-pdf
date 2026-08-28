@@ -125,6 +125,14 @@ struct Options {
     raw: bool,
     stream: bool,
     strict: bool,
+    /// Print the record format version and stop, naming no file.
+    ///
+    /// The corpus runner asks before it spawns anything, because a child one
+    /// version behind writes a complete record the runner then refuses, once
+    /// per file — and four thousand refusals read as an engine that stopped
+    /// rendering rather than as a binary that needs rebuilding. Asking costs
+    /// one process at the start of a run that spawns thousands.
+    record_version: bool,
 }
 
 impl Options {
@@ -142,6 +150,7 @@ impl Options {
             raw: false,
             stream: false,
             strict: false,
+            record_version: false,
         };
 
         let mut index = 0;
@@ -192,13 +201,16 @@ impl Options {
                 "--raw" => options.raw = true,
                 "--stream" => options.stream = true,
                 "--strict" => options.strict = true,
+                "--record-version" => options.record_version = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
             index += 1;
         }
 
-        if options.files.is_empty() {
+        // `--record-version` names no file by design: it asks what this
+        // binary writes, which is true before any document exists.
+        if options.files.is_empty() && !options.record_version {
             return Err("no input file".to_string());
         }
         Ok(options)
@@ -1331,6 +1343,13 @@ impl Join {
 /// from the record, and reserves the exit code for "this process did not
 /// finish", which is the one thing a record cannot say about itself.
 fn probe(options: &Options) -> Result<(), String> {
+    // Before the font provider, so the answer does not depend on a `--fonts`
+    // path being resolvable: the question is what this binary writes, and it
+    // writes the same version whatever faces it was pointed at.
+    if options.record_version {
+        println!("probe {PROBE_VERSION}");
+        return Ok(());
+    }
     let fonts = options.font_provider()?;
     for path in &options.files {
         probe_one(options, path, fonts.as_ref());

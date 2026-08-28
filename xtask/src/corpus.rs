@@ -329,11 +329,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if carried != asked {
         return Err(if carried {
             format!(
-                "the child was built with `bundled-fonts`, so every file was                  measured with twelve faces, and this run is recorded as                  `{}`. Rebuild `tpdf` without the feature, or run with                  `--fonts bundled`.",
+                "the child was built with `bundled-fonts`, so every file was measured with twelve faces, and this run is recorded as `{}`. Rebuild `tpdf` without the feature, or run with `--fonts bundled`.",
                 run.settings.fonts
             )
         } else {
-            "`--fonts bundled` was asked for and the child carries no faces;              rebuild `tpdf` with `--features bundled-fonts`"
+            "`--fonts bundled` was asked for and the child carries no faces; rebuild `tpdf` with `--features bundled-fonts`"
                 .to_string()
         });
     }
@@ -578,15 +578,102 @@ fn resolve_child(args: &RunArgs, fonts: Option<&str>) -> Result<Child, String> {
         child_args.push("--fonts".to_string());
         child_args.push(fonts.to_string());
     }
-    Ok(Child {
+    let child = Child {
         program: sibling,
         args: child_args,
-    })
+    };
+    agrees_on_the_record_format(&child)?;
+    Ok(child)
+}
+
+/// Refuses a child whose record format this runner does not read.
+///
+/// Asked once, before the run, because the alternative is what it replaced: a
+/// child one version behind writes a complete record per file, the runner
+/// refuses each one as unreadable, and four thousand refusals arrive as
+/// `0/4525 passed` — which is indistinguishable from an engine that stopped
+/// rendering, and sends whoever reads it looking for a rendering bug that is
+/// not there. A stale binary is a different fact and now says so.
+///
+/// A child that does not understand the question at all is let through rather
+/// than refused: `--child` may name someone else's program, and this runner
+/// has no standing to require a flag of it. The per-file version check still
+/// catches a mismatch; this only makes the common case legible.
+fn agrees_on_the_record_format(child: &Child) -> Result<(), String> {
+    let asked = std::process::Command::new(&child.program)
+        .arg("probe")
+        .arg("--record-version")
+        .output();
+    let Ok(output) = asked else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    match record_version_disagreement(&child.program, &String::from_utf8_lossy(&output.stdout)) {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
+}
+
+/// The decision [`agrees_on_the_record_format`] makes, separated from the
+/// spawn so it can be tested without a binary to spawn.
+fn record_version_disagreement(program: &Path, said: &str) -> Option<String> {
+    let version = said
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("probe "))
+        .and_then(|rest| rest.trim().parse::<u32>().ok())?;
+    if version == runner::PROBE_VERSION {
+        return None;
+    }
+    Some(format!(
+        "{} writes probe records at version {version} and this runner reads version {}. Rebuild it: `cargo build -p tpdf` (add --release if this xtask is a release build).",
+        program.display(),
+        runner::PROBE_VERSION
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure this exists to replace: a child one version behind used to
+    /// produce four thousand unreadable records, which arrived as `0/4525
+    /// passed` — a message about rendering, for a problem about a binary.
+    #[test]
+    fn a_child_a_version_behind_is_named_rather_than_counted_as_a_regression() {
+        let stale = record_version_disagreement(
+            Path::new("target/release/tpdf"),
+            &format!("probe {}
+", runner::PROBE_VERSION - 1),
+        )
+        .expect("a version behind is a refusal");
+        assert!(stale.contains("writes probe records at version"), "{stale}");
+        assert!(stale.contains("cargo build -p tpdf"), "{stale}");
+        assert!(
+            record_version_disagreement(
+                Path::new("tpdf"),
+                &format!("probe {}
+", runner::PROBE_VERSION),
+            )
+            .is_none(),
+            "the version this runner reads is not a disagreement"
+        );
+    }
+
+    /// A `--child` naming somebody else's program owes this runner no flag,
+    /// so an answer it cannot read is let through. The per-file version check
+    /// still catches a real mismatch; the preflight only makes the common
+    /// case legible, and refusing on silence would make it a requirement.
+    #[test]
+    fn a_child_that_does_not_answer_is_let_through() {
+        for said in ["", "usage: someprog [options]", "probe", "probe next"] {
+            assert!(
+                record_version_disagreement(Path::new("other"), said).is_none(),
+                "{said:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_command_line_reads() {

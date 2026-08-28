@@ -339,6 +339,14 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
         // three different directions and one of them is not a floor.
         let now_tagged = corpus.tagged();
         match bar.tagged {
+            // A first measurement of zero is not an improvement. It is a
+            // corpus with no tagged files in it, or a walk that found none,
+            // and the two are told apart by looking rather than by a word
+            // that says the number went the right way.
+            None if now_tagged.files == 0 => out.notes.push(format!(
+                "{}: no file yielded a structure tree, and there is no recorded bar",
+                bar.name
+            )),
             None => out.improvements.push(format!(
                 "{}: {} files yield a structure tree with {} elements — new, with no recorded bar",
                 bar.name, now_tagged.files, now_tagged.elements
