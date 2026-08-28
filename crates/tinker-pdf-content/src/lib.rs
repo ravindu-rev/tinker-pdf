@@ -9,7 +9,7 @@ pub mod state;
 pub mod text;
 pub mod tokenizer;
 
-pub use device::{Device, Glyph, ImageRef, PathSegment};
+pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{interpret, FontSource, Form, Group, Layer, MaskGroup, SoftMask};
 pub use state::{
     BlendMode, GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode, TextState,

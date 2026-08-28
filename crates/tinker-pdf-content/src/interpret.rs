@@ -5,9 +5,10 @@
 //! which is what keeps one malformed instruction from desynchronizing the rest
 //! of the page.
 
-use crate::device::{Device, Glyph, ImageRef, PathSegment};
+use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode};
 use crate::tokenizer::{Token, Tokenizer};
+use tinker_pdf_cos::decode_text_string;
 
 /// Everything the interpreter needs from a page's resources.
 ///
@@ -233,10 +234,151 @@ pub trait FontSource {
         let _ = name;
         None
     }
+
+    /// The 14.6.2 and 14.9 values a *named* property list holds
+    /// (`/P /MC0 BDC`).
+    ///
+    /// The same `/Properties` sub-dictionary [`FontSource::optional_content`]
+    /// reads, asked a different question: that one wants a layer, this one
+    /// wants `/MCID` and the alternate descriptions 14.9 allows beside it. A
+    /// name may legitimately answer both, neither, or one — an `/OC` list is
+    /// an optional-content group with no `/MCID`, and a `/Span` list is a
+    /// property list with no layer — so they are two methods rather than one
+    /// returning a pair, and a build that supplies only one is not broken.
+    ///
+    /// `None` means the name reached no property list this build could read.
+    /// It never means "hidden": nothing in this method's answer can suppress
+    /// content.
+    fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
+        let _ = name;
+        None
+    }
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
 const MAX_FORM_DEPTH: u32 = 16;
+
+/// A `BDC`'s property list, in the two forms 14.6.2 gives it.
+///
+/// Three variants and not two: "the file wrote no readable list" is a
+/// different fact from "the file wrote an empty one", and only the first may
+/// ever be inferred from damage. Collapsing them would make a truncated
+/// stream indistinguishable from a producer that meant `<< >>`.
+enum Properties {
+    /// `/Tag /MC0 BDC` — a name into the page's `/Properties`.
+    Named(Vec<u8>),
+    /// `/Tag << … >> BDC` — an inline dictionary, already reassembled.
+    Inline(MarkedProps),
+    /// Neither: a `BDC` whose operands this build could not read.
+    None,
+}
+
+/// Reads the plain values out of a flattened inline property list.
+///
+/// `body` is every token strictly between the `<<` and its `>>`, in stream
+/// order. 7.8.2's tokenizer does not build dictionaries, so this walks the
+/// flat run: a name is a key, the token after it is its value, and a value
+/// that opens a container is skipped whole. Only 14.7.4.2's `/MCID` and
+/// 14.9's four text strings are kept — everything else a property list may
+/// carry (`/Type`, `/BBox`, `/Placement`, a producer's private entries) is
+/// read past rather than stored, because storing it would put a COS-shaped
+/// object in a crate that has no object model.
+///
+/// **Nothing here can fail.** A key with no value, a value of the wrong
+/// type, an unbalanced container, a run of bare values with no key at all:
+/// each is skipped and the walk continues. What comes back is what was
+/// legible, which for a damaged list is nothing — and nothing is a visible
+/// scope with no `/MCID`, which is the direction 14.6.2's failures are ruled
+/// to fall in.
+fn read_inline_properties(body: &[Token]) -> MarkedProps {
+    let mut props = MarkedProps::default();
+    let mut at = 0usize;
+
+    while at < body.len() && at < MAX_INLINE_PROPERTY_TOKENS {
+        let Some(Token::Name(key)) = body.get(at) else {
+            // A value where a key belongs. Step over exactly one token so a
+            // run of them costs one step each rather than stalling.
+            at += 1;
+            continue;
+        };
+        at += 1;
+        let Some(value) = body.get(at) else {
+            // 7.3.7's "a key with no value"; there is nothing after it.
+            break;
+        };
+        // A container-valued entry is skipped whole: none of the five keys
+        // read here is ever an array or a dictionary, and stepping into one
+        // would read its members as top-level keys.
+        if matches!(value, Token::ArrayOpen | Token::DictOpen) {
+            at = skip_container(body, at);
+            continue;
+        }
+        at += 1;
+
+        match (key.as_slice(), value) {
+            // 14.7.4.2: a non-negative integer. `f64` is what the tokenizer
+            // produces for every number, so integrality is checked rather
+            // than assumed — an `/MCID 3.5` names no marked sequence, and
+            // rounding it would join content to the wrong element.
+            (b"MCID", Token::Number(n)) => {
+                let integral = n.is_finite() && n.fract() == 0.0;
+                if integral && *n >= 0.0 && *n <= f64::from(u32::MAX) {
+                    props.mcid = Some(*n as u32);
+                }
+            }
+            // 14.9.2 to 14.9.5. All four are *text strings* (7.9.2.2), so
+            // they are decoded by the document's own rules rather than read
+            // as UTF-8: a `/Alt` written UTF-16BE is the common case, and
+            // taking its bytes literally yields interleaved NULs.
+            (b"ActualText", Token::String(bytes)) => {
+                props.actual_text = Some(decode_text_string(bytes));
+            }
+            (b"Alt", Token::String(bytes)) => props.alt = Some(decode_text_string(bytes)),
+            (b"Lang", Token::String(bytes)) => props.lang = Some(decode_text_string(bytes)),
+            (b"E", Token::String(bytes)) => props.expansion = Some(decode_text_string(bytes)),
+            _ => {}
+        }
+    }
+
+    props
+}
+
+/// The index just past the container opening at `at`.
+///
+/// Arrays and dictionaries are counted together, because 7.8.2 flattens both
+/// and a stream may close one with the other's delimiter. Treating them as
+/// one nesting level means a mismatched close ends the container instead of
+/// leaving the scan inside it forever, which is the failure that matters:
+/// this walk must terminate on every input, and it is not the place where a
+/// malformed inline dictionary gets diagnosed.
+fn skip_container(body: &[Token], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = at;
+    while index < body.len() && index < MAX_INLINE_PROPERTY_TOKENS {
+        match body[index] {
+            Token::ArrayOpen | Token::DictOpen => depth += 1,
+            Token::ArrayClose | Token::DictClose => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    index
+}
+
+/// How many tokens of one flattened inline property list are examined
+/// (14.6.2, 7.8.2).
+///
+/// The operand stack is already bounded to 512 by [`Interpreter::run`], so
+/// this can never be the binding limit today. It is named anyway because the
+/// scan below is the only place in the interpreter that walks the stack
+/// *forwards* over an unbounded number of key/value pairs, and a later
+/// change to the stack bound must not silently make that walk unbounded.
+const MAX_INLINE_PROPERTY_TOKENS: usize = 512;
 
 /// How many marked-content scopes may be open at once (14.6.2).
 ///
@@ -829,27 +971,30 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             // stop a page drawing, so it is the only one that looks at its
             // property list here.
             b"BDC" => {
-                let layer = self
-                    .optional_content_name()
-                    .and_then(|name| self.fonts.optional_content(&name));
-                // `BDC` is `tag properties`, so the tag is the operand
-                // **below** the property list — the same position
-                // `optional_content_name` looks in, asked for its own sake
-                // rather than only when the tag happens to be `/OC`.
-                let tag = match self.stack.iter().rev().nth(1) {
-                    Some(Token::Name(tag)) => tag.clone(),
-                    _ => Vec::new(),
+                let (tag, properties) = self.bdc_operands();
+                let (layer, props) = match &properties {
+                    // 8.11.3.2: only the `/OC` tag selects optional content,
+                    // and only the name form of the list can reach a group.
+                    Properties::Named(name) => {
+                        let layer = (tag.as_slice() == b"OC")
+                            .then(|| self.fonts.optional_content(name))
+                            .flatten();
+                        (layer, self.fonts.marked_content_properties(name))
+                    }
+                    Properties::Inline(props) => (None, Some(props.clone())),
+                    Properties::None => (None, None),
                 };
-                self.open_marked_content(&tag, layer);
+                let props = props.filter(|p| !p.is_empty());
+                self.open_marked_content(&tag, layer, props.as_ref());
             }
             // 14.6.1: `BMC` has a tag and no property list, so it can name
-            // no layer and always paints.
+            // no layer, carries no `/MCID`, and always paints.
             b"BMC" => {
                 let tag = match self.stack.last() {
                     Some(Token::Name(tag)) => tag.clone(),
                     _ => Vec::new(),
                 };
-                self.open_marked_content(&tag, None);
+                self.open_marked_content(&tag, None, None);
             }
             b"EMC" => self.close_marked_content(),
             // 14.6.1's marked-content *points*, which mark a position rather
@@ -864,40 +1009,118 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
     }
 
-    /// The name a `BDC`'s `/OC` property list gave, if it gave one (14.6.2).
+    /// A `BDC`'s two operands: its tag, and its property list (14.6.2).
     ///
-    /// `BDC` takes `tag properties`. Only the `/OC` tag selects optional
-    /// content — every other tag, `/Span` and `/Artifact` and the structure
-    /// element names, opens a scope that is structure and nothing else — and
-    /// only the name form of the property list can reach a layer.
+    /// `BDC` takes `tag properties`, and the property list is either a name
+    /// into the page's `/Properties` sub-dictionary or an inline dictionary
+    /// written out in the stream.
     ///
-    /// **The inline form cannot, and there is nothing to reassemble.**
-    /// 8.11.3.2 makes an `/OC` entry a reference to an optional content
-    /// group or a membership dictionary; 7.3.10 puts indirect references in
-    /// the file structure, where a content stream cannot write one. So an
-    /// inline `<< … >>` property list names no group in any document, and
-    /// this returns `None` for it — which means visible, the direction a
-    /// parse failure must fail in.
+    /// # The inline scan is back, and now it changes answers
     ///
-    /// The scan that reassembled 7.8.2's flattened `DictOpen`/`DictClose`
-    /// tokens to find the tag before the `<<` was written and then deleted:
-    /// a deliberate defect injection could not make it change a single
-    /// answer, because both it and this produce a visible scope for every
-    /// inline list, well formed or not. Gap 06 asks for the reassembly; the
-    /// plan is amended there instead.
-    fn optional_content_name(&self) -> Option<Vec<u8>> {
-        let Some(Token::Name(property)) = self.stack.last() else {
-            return None;
-        };
-        match self.stack.iter().rev().nth(1) {
-            Some(Token::Name(tag)) if tag.as_slice() == b"OC" => Some(property.clone()),
-            _ => None,
+    /// This reassembles 7.8.2's flattened `DictOpen`/`DictClose` tokens. An
+    /// earlier build wrote that scan, deleted it, and recorded the deletion
+    /// here: a deliberate defect injection could not make it change a single
+    /// answer, because the only thing then read from a property list was
+    /// `/OC`, and an inline list can never name a layer — 8.11.3.2 makes an
+    /// `/OC` entry a reference to a group or a membership dictionary, and
+    /// 7.3.10 puts indirect references in the file structure, where a content
+    /// stream cannot write one. Both the scan and the two-token peek that
+    /// replaced it produced a visible scope for every inline list, well
+    /// formed or not, so the scan was dead weight and the note said so.
+    ///
+    /// **That argument stopped holding the moment `/MCID` was read from the
+    /// same list.** 14.7.4.2 puts `/MCID` in the property list itself, not
+    /// behind a reference, and `/P << /MCID 3 >> BDC` is the form nearly
+    /// every tagging producer emits — so without the reassembly a tagged page
+    /// has no marked content this engine can see at all. The 14.9 values
+    /// beside it (`/ActualText`, `/Alt`, `/Lang`, `/E`) are text strings,
+    /// which a content stream can also write inline, and they are read here
+    /// for the same reason.
+    ///
+    /// The old note was right about a second thing, and the scan inherits it:
+    /// a list this cannot read yields **no** properties and a **visible**
+    /// scope. Nothing here can hide content.
+    ///
+    /// It also closes a defect the two-token peek carried. The tag sits
+    /// before the `<<`, and peeking one token below the top of the stack
+    /// finds whatever the dictionary's *last value* happened to be — so
+    /// `/OC << /Type /OCMD >> BDC` reported its tag as `OCMD`, and
+    /// `/Artifact << /Type /Pagination >> BDC` reported `Pagination` rather
+    /// than `Artifact`. The text device excludes artifacts by that tag
+    /// (14.8.2.2), so an artifact written with an inline property list was
+    /// extracted as though it were the author's content. Finding the `<<` is
+    /// what fixes it, and only the reassembly can find the `<<`.
+    fn bdc_operands(&self) -> (Vec<u8>, Properties) {
+        match self.stack.last() {
+            // `/Tag /MC0 BDC`: the list is a name, and the tag is below it.
+            Some(Token::Name(property)) => {
+                let tag = match self.stack.iter().rev().nth(1) {
+                    Some(Token::Name(tag)) => tag.clone(),
+                    _ => Vec::new(),
+                };
+                (tag, Properties::Named(property.clone()))
+            }
+            // `/Tag << … >> BDC`: the tokenizer left the dictionary flat.
+            Some(Token::DictClose) => {
+                let Some(open) = self.inline_dict_start() else {
+                    // A `>>` with no `<<` before it is damage, not a list.
+                    return (Vec::new(), Properties::None);
+                };
+                let tag = match open.checked_sub(1).and_then(|at| self.stack.get(at)) {
+                    Some(Token::Name(tag)) => tag.clone(),
+                    _ => Vec::new(),
+                };
+                let body = self
+                    .stack
+                    .get(open + 1..self.stack.len() - 1)
+                    .unwrap_or_default();
+                (tag, Properties::Inline(read_inline_properties(body)))
+            }
+            // No property list at all, which `BDC` requires. The scope still
+            // opens — 14.6.2's `EMC` will arrive for it either way — and it
+            // is nameless rather than guessed at.
+            _ => (Vec::new(), Properties::None),
         }
+    }
+
+    /// The index of the `<<` matching the `>>` on top of the stack.
+    ///
+    /// Scanned backwards with a depth counter, so a dictionary nested inside
+    /// the list does not end the search early. `None` when the stack holds no
+    /// matching `<<` — which happens both for genuine damage and for a list
+    /// so long that [`Interpreter::run`]'s operand bound dropped its opening
+    /// brace, and both mean "no properties, visible scope".
+    fn inline_dict_start(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        for (at, token) in self
+            .stack
+            .iter()
+            .enumerate()
+            .rev()
+            .take(MAX_INLINE_PROPERTY_TOKENS)
+        {
+            match token {
+                Token::DictClose => depth += 1,
+                Token::DictOpen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Opens a marked-content scope and tells the device whether to paint
     /// what follows.
-    fn open_marked_content(&mut self, tag: &[u8], layer: Option<Layer>) {
+    fn open_marked_content(
+        &mut self,
+        tag: &[u8],
+        layer: Option<Layer>,
+        props: Option<&MarkedProps>,
+    ) {
         if self.marked >= MAX_MARKED_CONTENT_DEPTH {
             self.marked_over_cap = self.marked_over_cap.saturating_add(1);
             return;
@@ -906,9 +1129,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         match layer {
             Some(layer) if !layer.visible => {
                 self.device
-                    .begin_marked_content(tag, false, Some(&layer.label));
+                    .begin_marked_content(tag, false, Some(&layer.label), props);
             }
-            _ => self.device.begin_marked_content(tag, true, None),
+            _ => self.device.begin_marked_content(tag, true, None, props),
         }
     }
 
@@ -995,7 +1218,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         // text still extracts and its state changes still happen.
         let hidden = match self.fonts.xobject_optional_content(name) {
             Some(layer) if !layer.visible => {
-                self.open_marked_content(b"OC", Some(layer));
+                self.open_marked_content(b"OC", Some(layer), None);
                 true
             }
             _ => false,
@@ -2048,6 +2271,201 @@ mod tests {
     // Marked content and optional content (gap 06, 14.6.2 and 8.11.3.2).
     // -----------------------------------------------------------------------
 
+    /// The property lists the interpreter reported, in order.
+    fn props_of(source: &[u8]) -> Vec<Option<MarkedProps>> {
+        run_layers(source).props
+    }
+
+    /// The tags it reported, as strings.
+    fn tags_of(source: &[u8]) -> Vec<String> {
+        run_layers(source)
+            .tags
+            .iter()
+            .map(|tag| String::from_utf8_lossy(tag).into_owned())
+            .collect()
+    }
+
+    /// The common form: `/P << /MCID 3 >> BDC`.
+    ///
+    /// 14.7.4.2 puts `/MCID` in the property list, and 7.8.2 flattens that
+    /// list to tokens — so this is the reassembly working, and without it a
+    /// tagged page has no marked content this engine can see at all.
+    #[test]
+    fn an_inline_property_list_yields_its_mcid() {
+        let props = props_of(b"/P << /MCID 3 >> BDC 0 0 2 2 re f EMC");
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].as_ref().and_then(|p| p.mcid), Some(3));
+        assert_eq!(
+            tags_of(b"/P << /MCID 3 >> BDC EMC"),
+            vec!["P"],
+            "the tag is the name before the `<<`, not the last value inside it"
+        );
+    }
+
+    /// 14.9's four values, inline, beside the `/MCID` and around entries this
+    /// build reads past.
+    ///
+    /// `/BBox` is an array and `/A` a nested dictionary: both are values a
+    /// property list legitimately carries, and a scan that stepped *into*
+    /// either would read their members as top-level keys and find an `/E`
+    /// that is not the abbreviation expansion.
+    #[test]
+    fn an_inline_property_list_yields_the_accessibility_values() {
+        let props = props_of(
+            b"/Span << /Type /Pagination /BBox [0 0 9 9] /MCID 12 \
+                /ActualText (fi) /Alt (a ligature) /Lang (en-GB) /E (etc.) \
+                /A << /E (not this one) >> >> BDC 0 0 2 2 re f EMC",
+        );
+        let props = props[0].clone().expect("a property list");
+        assert_eq!(props.mcid, Some(12));
+        assert_eq!(props.actual_text.as_deref(), Some("fi"));
+        assert_eq!(props.alt.as_deref(), Some("a ligature"));
+        assert_eq!(props.lang.as_deref(), Some("en-GB"));
+        assert_eq!(
+            props.expansion.as_deref(),
+            Some("etc."),
+            "the /E read is the one at the top level, not the one inside /A"
+        );
+    }
+
+    /// 7.9.2.2: the four are *text strings*, so a UTF-16BE one decodes rather
+    /// than arriving as interleaved NULs.
+    #[test]
+    fn an_inline_text_string_is_decoded_by_the_documents_rules() {
+        let props = props_of(b"/Span << /MCID 0 /Alt <FEFF00660069> >> BDC EMC");
+        assert_eq!(
+            props[0].as_ref().and_then(|p| p.alt.clone()).as_deref(),
+            Some("fi")
+        );
+    }
+
+    /// `/P /MC0 BDC`: the same values through the `/Properties` seam.
+    ///
+    /// The two forms must be indistinguishable at the device, because 14.6.2
+    /// gives a consumer no reason to care which one a producer chose.
+    #[test]
+    fn a_named_property_list_yields_the_same_values() {
+        let props = props_of(b"/P /MC0 BDC 0 0 2 2 re f EMC");
+        let props = props[0].clone().expect("a property list");
+        assert_eq!(props.mcid, Some(7));
+        assert_eq!(props.alt.as_deref(), Some("a named list"));
+    }
+
+    /// A name the resources define as *optional content* and not as a
+    /// property list answers the layer question and not this one, and the
+    /// other way round. Neither lookup may stand in for the other.
+    #[test]
+    fn the_two_property_lookups_are_independent() {
+        let d = run_layers(b"/OC /Off BDC EMC /P /Plain BDC EMC");
+        assert_eq!(
+            d.begins[0],
+            (false, Some("Construction lines".to_string())),
+            "/Off is a layer"
+        );
+        assert!(d.props[0].is_none(), "and carries no /MCID");
+        assert_eq!(d.begins[1], (true, None), "/Plain is not a layer");
+        assert!(d.props[1].is_none(), "and is not a property list either");
+    }
+
+    /// Every shape of malformed list: **no `/MCID`, and a visible scope.**
+    ///
+    /// The direction is the one already ruled for `/OC` — a list this build
+    /// cannot read must not be able to hide content, and must not invent an
+    /// identifier either, because an invented one joins content to the wrong
+    /// structure element and reads as a reordering rather than as damage.
+    #[test]
+    fn a_malformed_property_list_yields_no_mcid_and_a_visible_scope() {
+        let cases: &[&[u8]] = &[
+            b"/P << >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID (three) >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID -1 >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID 2.5 >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID [1] >> BDC 0 0 2 2 re f EMC",
+            // Unbalanced: no `<<` for the `>>` to match.
+            b"/P /MCID 3 >> BDC 0 0 2 2 re f EMC",
+            // A bare value run with no key at all.
+            b"/P << 1 2 3 >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID /Three >> BDC 0 0 2 2 re f EMC",
+            b"BDC 0 0 2 2 re f EMC",
+        ];
+        for source in cases {
+            let d = run_layers(source);
+            let what = String::from_utf8_lossy(source);
+            assert_eq!(d.fills, vec![false], "{what} should paint");
+            assert_eq!(d.begins.len(), 1, "{what} should open one scope");
+            assert_eq!(
+                d.props[0].as_ref().and_then(|p| p.mcid),
+                None,
+                "{what} should name no marked sequence"
+            );
+        }
+    }
+
+    /// An `/MCID` nested inside a hidden `/OC` scope.
+    ///
+    /// The two are orthogonal: 8.11.3.2 decides whether the *renderer* paints
+    /// and 14.7.4.2 decides what the *structure tree* claims, so a paragraph
+    /// inside a layer that is switched off is still that paragraph. A build
+    /// that let visibility gate the property list would drop a tagged
+    /// document's alternate-language content out of its own reading order.
+    #[test]
+    fn a_property_list_survives_nesting_inside_a_hidden_layer() {
+        let d = run_layers(
+            b"/OC /Off BDC \
+                /P << /MCID 4 >> BDC 0 0 2 2 re f EMC \
+              EMC \
+              /P << /MCID 5 >> BDC 0 0 3 3 re f EMC",
+        );
+
+        assert_eq!(
+            d.begins,
+            vec![
+                (false, Some("Construction lines".to_string())),
+                (true, None),
+                (true, None)
+            ],
+            "the layer hides, the two paragraphs do not"
+        );
+        assert_eq!(
+            d.props
+                .iter()
+                .map(|p| p.as_ref().and_then(|p| p.mcid))
+                .collect::<Vec<_>>(),
+            vec![None, Some(4), Some(5)],
+            "the hidden scope carries no identifier and the nested one does"
+        );
+        assert_eq!(
+            d.fills,
+            vec![true, false],
+            "and only the painting was suppressed"
+        );
+        assert_eq!(d.ends, 3);
+    }
+
+    /// 14.6.1: `BMC` has no property list at all, so it can carry no `/MCID`.
+    #[test]
+    fn a_bmc_carries_no_properties() {
+        let d = run_layers(b"/Span BMC 0 0 2 2 re f EMC");
+        assert_eq!(d.tags, vec![b"Span".to_vec()]);
+        assert_eq!(d.props, vec![None]);
+    }
+
+    /// An `/Artifact` with an inline property list is an artifact.
+    ///
+    /// The tag lives before the `<<`, and the peek this replaced read the
+    /// dictionary's last *value* instead — so an artifact written this way
+    /// reported its tag as `Pagination`, and the text device, which excludes
+    /// artifacts by tag (14.8.2.2), extracted a running head as though it were
+    /// the author's own content.
+    #[test]
+    fn an_artifact_with_an_inline_list_is_still_tagged_artifact() {
+        assert_eq!(
+            tags_of(b"/Artifact << /Type /Pagination /BBox [0 0 9 9] >> BDC EMC"),
+            vec!["Artifact"]
+        );
+    }
+
     /// A device that keeps the nesting the interpreter reports, so a test can
     /// ask what was in force when something was painted.
     ///
@@ -2066,6 +2484,15 @@ mod tests {
         fills: Vec<bool>,
         /// One entry per glyph: its text, and whether any scope was hiding it.
         glyphs: Vec<(String, bool)>,
+        /// Every `begin`'s tag, in order.
+        ///
+        /// Added with gap 14's milestone 2. The device deliberately ignored
+        /// the tag until then, which is why the peek that read a *value* out
+        /// of an inline property list and called it the tag survived here for
+        /// as long as it did.
+        tags: Vec<Vec<u8>>,
+        /// Every `begin`'s property list, in order.
+        props: Vec<Option<MarkedProps>>,
     }
 
     impl Scopes {
@@ -2079,10 +2506,18 @@ mod tests {
     }
 
     impl Device for Scopes {
-        fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
+        fn begin_marked_content(
+            &mut self,
+            tag: &[u8],
+            visible: bool,
+            hidden_layer: Option<&str>,
+            props: Option<&MarkedProps>,
+        ) {
             self.open.push(!visible);
             self.begins
                 .push((visible, hidden_layer.map(str::to_string)));
+            self.tags.push(tag.to_vec());
+            self.props.push(props.cloned());
         }
         fn end_marked_content(&mut self) {
             self.ends += 1;
@@ -2107,6 +2542,12 @@ mod tests {
     /// Three answers rather than two, because "hidden" and "not a layer" are
     /// different `None`s and a seam that collapsed them would hide every
     /// `/Span`.
+    ///
+    /// It also answers the *second* question the same `/Properties`
+    /// sub-dictionary is asked (14.6.2): `/MC0` is a named property list
+    /// carrying an `/MCID` and an `/Alt`, and `/Plain` deliberately answers
+    /// neither question — which is what says the two lookups are independent
+    /// rather than one lookup asked twice.
     struct Layers;
 
     impl FontSource for Layers {
@@ -2157,6 +2598,17 @@ mod tests {
             (name == b"HiddenFrm" || name == b"HiddenImg").then(|| Layer {
                 visible: false,
                 label: "Construction lines".to_string(),
+            })
+        }
+        fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
+            // Only `/MC0` is a property list. `/Off`, `/On` and `/Plain` reach
+            // here too and answer nothing, which is what makes the two
+            // `/Properties` questions independent rather than one question
+            // asked twice.
+            (name == b"MC0").then(|| MarkedProps {
+                mcid: Some(7),
+                alt: Some("a named list".to_string()),
+                ..MarkedProps::default()
             })
         }
     }
@@ -2363,7 +2815,13 @@ mod tests {
             open: Vec<bool>,
         }
         impl Device for Images {
-            fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, _layer: Option<&str>) {
+            fn begin_marked_content(
+                &mut self,
+                _tag: &[u8],
+                visible: bool,
+                _layer: Option<&str>,
+                _props: Option<&MarkedProps>,
+            ) {
                 self.open.push(!visible);
             }
             fn end_marked_content(&mut self) {

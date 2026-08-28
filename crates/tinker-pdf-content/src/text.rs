@@ -11,7 +11,9 @@
 //! are not the same property, and conflating them makes both wrong. The
 //! engine reports them apart and lets the caller map as it needs.
 
-use crate::device::{Device, Glyph};
+use std::collections::BTreeMap;
+
+use crate::device::{Device, Glyph, MarkedProps};
 use crate::state::GraphicsState;
 
 /// Four corners, in device space (9.4.4).
@@ -64,6 +66,21 @@ pub struct TextChar {
     pub size: f64,
     /// The origin of the glyph, which is where the next one starts from.
     pub origin: (f64, f64),
+    /// The innermost `/MCID` in scope when it was shown (14.7.4.2).
+    ///
+    /// **Innermost, not outermost.** Marked content nests, and 14.7.4.2 makes
+    /// the enclosing sequence the one that owns the content: a `/Span` with
+    /// its own `/MCID` inside a `/P` with another belongs to the span, and
+    /// reporting the paragraph instead puts the span's words in the wrong
+    /// place in reading order while leaving the page's text unchanged — a
+    /// reordering that looks like a layout opinion rather than a bug.
+    ///
+    /// `None` outside every marked sequence, and also inside one whose
+    /// property list carried no `/MCID` — an `/Artifact` scope, a bare `BMC`,
+    /// a `/Span` that only sets `/Lang`. Those characters are not orphans;
+    /// they are content no structure element ever claimed, and
+    /// `Page::structured_text` counts the two apart.
+    pub mcid: Option<u32>,
 }
 
 /// Which way a line runs.
@@ -111,6 +128,22 @@ pub struct TextBlock {
 pub struct TextPage {
     /// The blocks, in reading order.
     pub blocks: Vec<TextBlock>,
+    /// The 14.9 values each marked sequence's property list carried, by
+    /// `/MCID`.
+    ///
+    /// 14.9 lets `/ActualText`, `/Alt`, `/Lang` and `/E` sit on a *property
+    /// list* as well as on a structure element, and a producer that writes
+    /// them there writes nothing about them in the structure tree. Without
+    /// this the two placements would not be equivalent, and a page whose soft
+    /// hyphens are removed by an `/ActualText` on the `BDC` would extract
+    /// them anyway.
+    ///
+    /// A `BTreeMap` because ruling 4 makes iteration order a correctness
+    /// question everywhere in this engine. **First writer wins**: 14.7.4.2
+    /// makes an `/MCID` unique within its content stream, so a repeat is a
+    /// malformation, and letting the later one overwrite would make what a
+    /// page says depend on how far down its own damage sits.
+    pub mcid_props: BTreeMap<u32, MarkedProps>,
     /// What extraction had to tolerate.
     ///
     /// Ruling 2 applies to text as much as to pixels: a page whose font could
@@ -239,14 +272,45 @@ pub struct TextDevice {
     /// text. The interpreter guarantees one `end_marked_content` per accepted
     /// begin, so this cannot go negative and cannot leak past a form XObject.
     artifacts: usize,
-    /// One `depth` entry per open scope: whether it was an artifact.
+    /// One entry per open scope, innermost last.
     ///
-    /// `EMC` names no tag, so closing correctly needs the stack rather than
-    /// the count — a `/Span` opened inside an `/Artifact` and closed first
-    /// would otherwise decrement the artifact count and let the rest of the
-    /// artifact through.
-    scopes: Vec<bool>,
+    /// `EMC` names no tag and carries no property list, so closing correctly
+    /// needs the stack rather than a pair of counts — a `/Span` opened inside
+    /// an `/Artifact` and closed first would otherwise decrement the artifact
+    /// count and let the rest of the artifact through, and the same mistake
+    /// with `/MCID` would attribute the rest of a paragraph to a span that
+    /// had already ended.
+    scopes: Vec<Scope>,
+    /// The `/MCID`s in scope, innermost last (14.7.4.2).
+    ///
+    /// Separate from [`TextDevice::scopes`] rather than searched for in it:
+    /// most scopes carry no `/MCID` at all, and the innermost one that does
+    /// is wanted per glyph. A stack answers that in one lookup; scanning the
+    /// scope stack backwards answers it in as many as the nesting is deep,
+    /// on the hottest path in extraction.
+    mcids: Vec<u32>,
+    /// The 14.9 values seen per `/MCID`, first writer winning.
+    mcid_props: BTreeMap<u32, MarkedProps>,
 }
+
+/// One open marked-content scope.
+struct Scope {
+    /// Whether its tag was `/Artifact` (14.8.2.2).
+    artifact: bool,
+    /// Whether it pushed onto [`TextDevice::mcids`], so `EMC` knows whether
+    /// to pop. A scope with no `/MCID` must not pop its parent's.
+    carried_mcid: bool,
+}
+
+/// How many distinct `/MCID`s one page retains 14.9 values for.
+///
+/// 14.7.4.2 numbers marked sequences within a content stream, so an honest
+/// page's count is its paragraph count. The cap is far above that and exists
+/// only so a stream of nothing but `BDC` cannot turn a bounded page into
+/// unbounded memory; past it the property lists are dropped and the
+/// characters keep their `/MCID`, which loses alternate descriptions and
+/// never loses text.
+const MAX_MCID_PROPS: usize = 1 << 16;
 
 struct PendingLine {
     chars: Vec<TextChar>,
@@ -348,6 +412,7 @@ impl TextDevice {
 
         TextPage {
             blocks,
+            mcid_props: std::mem::take(&mut self.mcid_props),
             warnings: std::mem::take(&mut self.warnings),
         }
     }
@@ -417,9 +482,34 @@ impl Device for TextDevice {
     /// renderer is deliberate and is the reason the tag is passed at all: an
     /// artifact is drawn and not read, and an invisible optional-content layer
     /// is read and not drawn.
-    fn begin_marked_content(&mut self, tag: &[u8], _visible: bool, _hidden_layer: Option<&str>) {
+    fn begin_marked_content(
+        &mut self,
+        tag: &[u8],
+        _visible: bool,
+        _hidden_layer: Option<&str>,
+        props: Option<&MarkedProps>,
+    ) {
         let artifact = tag == b"Artifact";
-        self.scopes.push(artifact);
+        // 14.7.4.2's `/MCID` is recorded even for an artifact scope. A
+        // producer that tags an artifact is writing something malformed, and
+        // dropping the identifier here would make it an *orphan* in the
+        // structured view — a character the structure tree claims and
+        // extraction cannot find — rather than what it is, which is content
+        // 14.8.2.2 excludes. The glyphs are still dropped; only the
+        // bookkeeping is honest about why.
+        let mcid = props.and_then(|p| p.mcid);
+        if let Some(mcid) = mcid {
+            self.mcids.push(mcid);
+            if let Some(props) = props.filter(|p| p.mcid.is_some()) {
+                if self.mcid_props.len() < MAX_MCID_PROPS {
+                    self.mcid_props.entry(mcid).or_insert_with(|| props.clone());
+                }
+            }
+        }
+        self.scopes.push(Scope {
+            artifact,
+            carried_mcid: mcid.is_some(),
+        });
         if artifact {
             // A line may not straddle the boundary: the artifact's glyphs are
             // dropped, and the ones before it must not be joined to the ones
@@ -430,7 +520,13 @@ impl Device for TextDevice {
     }
 
     fn end_marked_content(&mut self) {
-        if let Some(true) = self.scopes.pop() {
+        let Some(scope) = self.scopes.pop() else {
+            return;
+        };
+        if scope.carried_mcid {
+            self.mcids.pop();
+        }
+        if scope.artifact {
             self.flush();
             self.artifacts = self.artifacts.saturating_sub(1);
         }
@@ -545,6 +641,7 @@ impl Device for TextDevice {
                 quad,
                 size,
                 origin,
+                mcid: self.mcids.last().copied(),
             });
         }
     }
@@ -614,7 +711,7 @@ mod tests {
         let mut d = TextDevice::new();
         let state = GraphicsState::new(Matrix::IDENTITY);
         d.show_glyph(&glyph("a", 0.0, 700.0, 10.0), &state);
-        d.begin_marked_content(b"Artifact", true, None);
+        d.begin_marked_content(b"Artifact", true, None, None);
         d.show_glyph(&glyph("X", 20.0, 700.0, 10.0), &state);
         d.end_marked_content();
         d.show_glyph(&glyph("b", 40.0, 700.0, 10.0), &state);
@@ -635,9 +732,9 @@ mod tests {
     fn a_scope_inside_an_artifact_does_not_end_it() {
         let mut d = TextDevice::new();
         let state = GraphicsState::new(Matrix::IDENTITY);
-        d.begin_marked_content(b"Artifact", true, None);
+        d.begin_marked_content(b"Artifact", true, None, None);
         d.show_glyph(&glyph("X", 0.0, 700.0, 10.0), &state);
-        d.begin_marked_content(b"Span", true, None);
+        d.begin_marked_content(b"Span", true, None, None);
         d.show_glyph(&glyph("Y", 10.0, 700.0, 10.0), &state);
         d.end_marked_content();
         d.show_glyph(&glyph("Z", 20.0, 700.0, 10.0), &state);
@@ -659,7 +756,7 @@ mod tests {
     fn an_ordinary_marked_content_scope_extracts_normally() {
         let mut d = TextDevice::new();
         let state = GraphicsState::new(Matrix::IDENTITY);
-        d.begin_marked_content(b"Span", true, None);
+        d.begin_marked_content(b"Span", true, None, None);
         d.show_glyph(&glyph("k", 0.0, 700.0, 10.0), &state);
         d.end_marked_content();
         assert!(d.finish().plain_text().contains('k'));

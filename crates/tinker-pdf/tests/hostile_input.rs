@@ -176,6 +176,17 @@ fn exercise(bytes: Vec<u8>) {
     let _ = doc.outline();
     let _ = doc.page_labels();
     let _ = doc.form_fields();
+    // 14.7: `/K` is a graph with no promise of acyclicity and `/RoleMap` is a
+    // rewriting system the file writes for itself, so the structure walk is
+    // one of the few readers here whose *input shape* is chosen by the
+    // attacker rather than merely corrupted by them.
+    let structure = doc.structure();
+    if let Some(tree) = &structure {
+        let _ = tree.element_count();
+        let _ = tree.content_count();
+        let _ = tree.object_count();
+        let _ = tree.elements().len();
+    }
     let _ = doc.permissions();
     let _ = doc.is_encrypted();
     let _ = doc.auth_level();
@@ -199,6 +210,17 @@ fn exercise(bytes: Vec<u8>) {
         let _ = text.search("e");
         let _ = text.lines();
         let _ = text.blocks.len();
+
+        // The join, over the same `TextPage`. Reached through the tree bound
+        // above rather than through `Page::structured_text` so the walk is
+        // not repeated per page, which on a mutated file claiming a thousand
+        // pages is the difference between a sweep and a timeout.
+        if let Some(tree) = &structure {
+            let joined = tree.text_for_page(index, &text);
+            let _ = joined.plain_text();
+            let _ = joined.orphans;
+            let _ = joined.unmarked;
+        }
 
         // Deliberately coarse: a mutated file may claim a vast page box, and
         // the interesting failures are in the operators rather than in how
@@ -333,6 +355,36 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
 startxref\n999999999\n%%EOF\n",
+        ),
+        (
+            "a structure element that is its own kid",
+            b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /StructParents 0 >>\nendobj\n\
+5 0 obj\n<< /Type /StructTreeRoot /K 6 0 R /RoleMap << /A /B /B /A >> >>\nendobj\n\
+6 0 obj\n<< /S /A /Pg 3 0 R /K [6 0 R 0 6 0 R] >>\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        ),
+        (
+            "a parent tree that points at the structure root",
+            b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /StructParents 0 >>\nendobj\n\
+5 0 obj\n<< /Type /StructTreeRoot /K [<< /S /P /Pg 3 0 R /K 0 >>] /ParentTree 5 0 R >>\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        ),
+        (
+            "an inline property list with no end",
+            b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 62 >>\nstream\n\
+/P << /MCID << /MCID << /MCID 1 >> BDC 0 0 1 1 re f EMC EMC\n\
+endstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         ),
         (
             "nested dictionaries far past any real depth",
