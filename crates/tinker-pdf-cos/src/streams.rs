@@ -236,7 +236,7 @@ impl CosDocument {
         let object = self.get(r)?;
         let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
         let range = self.stream_range(r, stream);
-        Ok(slice_range(&self.buffer, &range))
+        Ok(slice_range(self.buffer.whole(), &range))
     }
 
     /// The stream's bytes, decrypted, with no filter applied.
@@ -356,7 +356,7 @@ impl CosDocument {
     /// The raw bytes, run through the decryptor unless 7.6.2 exempts them.
     pub(crate) fn decrypted_bytes(&self, r: ObjRef, stream: &StreamObj) -> Vec<u8> {
         let range = self.stream_range(r, stream);
-        let raw = slice_range(&self.buffer, &range);
+        let raw = slice_range(self.buffer.whole(), &range);
         if !self.encrypted() || !self.stream_is_encrypted(&stream.dict) {
             return raw.to_vec();
         }
@@ -442,7 +442,7 @@ impl CosDocument {
         }
         let mut sink = WarningSink::new();
         let range = resolve_extent(
-            &self.buffer,
+            self.buffer.whole(),
             stream.data_start,
             stream.len_hint,
             Some(r),

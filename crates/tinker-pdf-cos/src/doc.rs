@@ -40,6 +40,7 @@ use crate::objstm::{self, ObjStm, ObjStmCache};
 use crate::parse::{parse_indirect_at, parse_object_at};
 use crate::repair::ScanIndex;
 use crate::security::{AuthError, AuthLevel};
+use crate::source::{Backing, ByteSource};
 use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
 use crate::warn::{Warning, WarningKind, WarningSink};
 use crate::xref::{self, Revision, XrefBuild, XrefEntry, XrefTable};
@@ -264,7 +265,7 @@ impl DocNames {
 
 /// A PDF file's object layer.
 pub struct CosDocument {
-    pub(crate) buffer: Arc<[u8]>,
+    pub(crate) buffer: Backing,
     pub(crate) names: DocNames,
     xref: XrefTable,
     trailer: Dict,
@@ -318,7 +319,34 @@ impl CosDocument {
     /// degraded content — check [`CosDocument::ladder_level`] and
     /// [`CosDocument::warnings`] to see what had to be repaired.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<CosDocument, OpenError> {
-        let buffer: Arc<[u8]> = bytes.into();
+        CosDocument::open_backing(Backing::whole_buffer(bytes.into()))
+    }
+
+    /// Opens a document whose bytes are fetched from `source` as they are
+    /// needed.
+    ///
+    /// The same engine and the same answers: `source` is where bytes come
+    /// from, never what they mean. A document opened here and the same
+    /// document opened from a buffer produce the same objects, the same
+    /// warnings, the same ladder level and the same pixels, whatever order or
+    /// size the source answered in -- see `docs/design/streaming-open.md`, and
+    /// `ShreddedSource` for the instrument that proves it.
+    ///
+    /// # Errors
+    /// [`OpenError::NoObjects`] as [`CosDocument::open`], and for a source
+    /// that could not supply the bytes the open path needed.
+    pub fn open_source(source: Arc<dyn ByteSource>) -> Result<CosDocument, OpenError> {
+        CosDocument::open_backing(Backing::chunked(source))
+    }
+
+    fn open_backing(backing: Backing) -> Result<CosDocument, OpenError> {
+        // Milestone 1 fetches everything and then runs the path unchanged, so
+        // that the source seam and the discovery order are two changes rather
+        // than one. Milestone 2 replaces this with the head window, the tail
+        // window and the chain walk.
+        let Ok(buffer) = backing.materialise() else {
+            return Err(OpenError::NoObjects);
+        };
         let names = DocNames::new();
         let mut sink = WarningSink::new();
 
@@ -413,7 +441,7 @@ impl CosDocument {
         }
 
         let mut doc = CosDocument {
-            buffer,
+            buffer: backing,
             names,
             xref: table,
             trailer,
@@ -481,6 +509,24 @@ impl CosDocument {
         self.encrypt
             .as_ref()
             .is_none_or(|params| params.encrypt_metadata)
+    }
+
+    /// Whether this document's bytes are fetched from a [`ByteSource`] rather
+    /// than held in one buffer.
+    ///
+    /// An observable rather than a mood: a caller deciding whether an
+    /// operation is about to pull the whole file needs to be able to ask.
+    pub fn is_streamed(&self) -> bool {
+        self.buffer.is_streamed()
+    }
+
+    /// Whether every byte of the document has been fetched.
+    ///
+    /// Always true for a document opened from a buffer. For a streamed one it
+    /// answers whether some whole-file operation -- a repair rescan, a save,
+    /// a signature byte range -- has already pulled everything.
+    pub fn whole_file_fetched(&self) -> bool {
+        self.buffer.whole_fetched()
     }
 
     /// Which rung of the ladder this document opened on.
@@ -556,16 +602,16 @@ impl CosDocument {
     /// with junk before its header has one at a shifted offset and the scan
     /// that found it is cheap.
     pub fn header_version(&self) -> Option<String> {
-        let window = self
-            .buffer
-            .get(..limits::MAX_HEADER_SCAN.min(self.buffer.len()))?;
+        // One head window, which on a streamed document is one chunk and on
+        // a buffer is a copy of its first page. Both the keyword and the
+        // digits after it lie inside it by 7.5.2's own scan limit.
+        let window = self.buffer.window(0..limits::MAX_HEADER_SCAN as u64).ok()?;
         let at = window
             .windows(5)
             .position(|w| w == b"%PDF-")
             .map(|p| p + 5)?;
-        let digits: Vec<u8> = self
-            .buffer
-            .get(at..(at + 8).min(self.buffer.len()))?
+        let digits: Vec<u8> = window
+            .get(at..(at + 8).min(window.len()))?
             .iter()
             .copied()
             .take_while(|b| b.is_ascii_digit() || *b == b'.')
@@ -578,7 +624,7 @@ impl CosDocument {
     /// An incremental update must reproduce them exactly as its prefix, which
     /// is what keeps a signature over the original valid.
     pub fn bytes(&self) -> &[u8] {
-        &self.buffer
+        self.buffer.whole()
     }
 
     /// The highest object number the cross-reference table knows.
@@ -886,7 +932,7 @@ impl CosDocument {
         sink: &mut WarningSink,
     ) -> Option<Object> {
         let mut local = WarningSink::new();
-        let parsed = parse_indirect_at(&self.buffer, offset, &self.names.table, &mut local)?;
+        let parsed = parse_indirect_at(self.buffer.whole(), offset, &self.names.table, &mut local)?;
         if parsed.reference.num != num {
             return None;
         }

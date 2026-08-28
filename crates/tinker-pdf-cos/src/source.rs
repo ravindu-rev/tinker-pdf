@@ -33,9 +33,11 @@
 
 use core::fmt;
 use core::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use crate::store::MutexExt;
+use crate::store::{LockExt, MutexExt};
 
 /// A range a source could not supply.
 ///
@@ -280,6 +282,195 @@ impl<S: ByteSource> ByteSource for ShreddedSource<S> {
     fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
         let end = range.end.min(range.start.saturating_add(1));
         self.inner.read(range.start..end)
+    }
+}
+
+/// How many bytes one cached chunk holds.
+///
+/// Fixed and aligned, so the byte counter measures policy rather than luck:
+/// the same document over the same source fetches the same chunks in the same
+/// order whatever order its objects are read in. One page, which is also
+/// [`crate::limits::MAX_HEADER_SCAN`] -- the head window is exactly one chunk,
+/// and a budget that had to explain a granularity nothing else uses would be a
+/// budget nobody could check.
+pub(crate) const CHUNK: u64 = 4096;
+
+/// Where a document's bytes live: all of them, or a cache over a source.
+///
+/// The whole-buffer arm is today's contract and costs nothing new. The chunked
+/// arm fetches fixed aligned chunks, each fetched once and kept, so repeated
+/// small reads coalesce. Which arm a document has changes which ranges are
+/// fetched and never a value, which is the invariant the determinism suite
+/// runs over a shredded source to prove.
+pub(crate) enum Backing {
+    /// Every byte, in hand.
+    Whole(Arc<[u8]>),
+    /// A chunk cache over a source that may not have them all yet.
+    Chunked(ChunkCache),
+}
+
+/// Fixed-granularity chunks over a [`ByteSource`].
+pub(crate) struct ChunkCache {
+    source: Arc<dyn ByteSource>,
+    len: u64,
+    /// Chunk index to its bytes. Only complete chunks are published: a
+    /// half-filled chunk cached after a miss would answer later reads with the
+    /// bytes that happened to arrive first, which is the miss's answer baked
+    /// in forever.
+    chunks: RwLock<BTreeMap<u64, Arc<[u8]>>>,
+    /// The whole document, once something has needed all of it.
+    whole: OnceLock<Arc<[u8]>>,
+    /// Whether that has happened, readable without materialising it.
+    fetched_whole: AtomicBool,
+}
+
+impl Backing {
+    /// Bytes already in hand.
+    pub(crate) fn whole_buffer(bytes: Arc<[u8]>) -> Backing {
+        Backing::Whole(bytes)
+    }
+
+    /// A chunk cache over `source`.
+    pub(crate) fn chunked(source: Arc<dyn ByteSource>) -> Backing {
+        let len = source.len();
+        Backing::Chunked(ChunkCache {
+            source,
+            len,
+            chunks: RwLock::new(BTreeMap::new()),
+            whole: OnceLock::new(),
+            fetched_whole: AtomicBool::new(false),
+        })
+    }
+
+    /// How many bytes the document has.
+    pub(crate) fn len(&self) -> u64 {
+        match self {
+            Backing::Whole(bytes) => bytes.len() as u64,
+            Backing::Chunked(cache) => cache.len,
+        }
+    }
+
+    /// Whether reads have to be fetched.
+    pub(crate) fn is_streamed(&self) -> bool {
+        matches!(self, Backing::Chunked(_))
+    }
+
+    /// Whether everything has been fetched, which is what a whole-file
+    /// operation on a streamed document has to declare (ruling 10).
+    pub(crate) fn whole_fetched(&self) -> bool {
+        match self {
+            Backing::Whole(_) => true,
+            Backing::Chunked(cache) => cache.fetched_whole.load(Ordering::Acquire),
+        }
+    }
+
+    /// The bytes of `range`, clamped to the document.
+    pub(crate) fn window(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+        match self {
+            Backing::Whole(bytes) => Ok(Arc::from(clamped(bytes, &range))),
+            Backing::Chunked(cache) => cache.window(range),
+        }
+    }
+
+    /// Every byte, fetching whatever is missing.
+    pub(crate) fn materialise(&self) -> Result<Arc<[u8]>, SourceMiss> {
+        match self {
+            Backing::Whole(bytes) => Ok(Arc::clone(bytes)),
+            Backing::Chunked(cache) => cache.materialise(),
+        }
+    }
+
+    /// Every byte as a slice, or nothing when a range is still absent.
+    ///
+    /// The shape `CosDocument::bytes` needs, which cannot return a result
+    /// without changing a signature ruling 12's parity tests compare. A caller
+    /// that needs to tell an empty document from bytes that were never fetched
+    /// asks [`Backing::whole_fetched`].
+    pub(crate) fn whole(&self) -> &[u8] {
+        match self {
+            Backing::Whole(bytes) => bytes,
+            Backing::Chunked(cache) => cache.whole_slice(),
+        }
+    }
+}
+
+impl ChunkCache {
+    /// One aligned chunk, fetched at most once.
+    fn chunk(&self, index: u64) -> Result<Arc<[u8]>, SourceMiss> {
+        if let Some(chunk) = self.chunks.read_lock().get(&index) {
+            return Ok(Arc::clone(chunk));
+        }
+        let start = index.saturating_mul(CHUNK).min(self.len);
+        let end = start.saturating_add(CHUNK).min(self.len);
+
+        // The loop is the whole point of a source being allowed to answer
+        // short: bytes are gathered until the chunk is whole, so a source that
+        // answers one byte at a time yields the same chunk as one that answers
+        // all of it. Nothing is cached until it is complete.
+        let mut bytes = Vec::with_capacity((end - start) as usize);
+        let mut at = start;
+        while at < end {
+            let got = self.source.read(at..end)?;
+            if got.is_empty() {
+                // A conforming source never does this for a non-empty range
+                // inside its length. Treating it as a miss rather than looping
+                // forever is ruling 1: a hostile host is untrusted input too.
+                return Err(SourceMiss::at(at..end));
+            }
+            at = at.saturating_add(got.len() as u64).min(end);
+            bytes.extend_from_slice(&got);
+        }
+        bytes.truncate((end - start) as usize);
+
+        let chunk: Arc<[u8]> = Arc::from(bytes);
+        let mut chunks = self.chunks.write_lock();
+        // Another thread may have fetched the same chunk meanwhile. Both read
+        // the same bytes, so whichever is already there wins and this one is
+        // dropped, exactly as the slot store resolves the same race.
+        Ok(Arc::clone(
+            chunks.entry(index).or_insert_with(|| Arc::clone(&chunk)),
+        ))
+    }
+
+    fn window(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+        let start = range.start.min(self.len);
+        let end = range.end.min(self.len).max(start);
+        if start == end {
+            return Ok(Arc::from(&[][..]));
+        }
+        let first = start / CHUNK;
+        let last = (end - 1) / CHUNK;
+        let mut out = Vec::with_capacity((end - start) as usize);
+        for index in first..=last {
+            let chunk = self.chunk(index)?;
+            let base = index.saturating_mul(CHUNK);
+            let from = start.saturating_sub(base).min(chunk.len() as u64);
+            let to = end.saturating_sub(base).min(chunk.len() as u64);
+            out.extend_from_slice(chunk.get(from as usize..to as usize).unwrap_or(&[]));
+        }
+        Ok(Arc::from(out))
+    }
+
+    fn materialise(&self) -> Result<Arc<[u8]>, SourceMiss> {
+        if let Some(whole) = self.whole.get() {
+            return Ok(Arc::clone(whole));
+        }
+        let all = self.window(0..self.len)?;
+        // The bytes are set before the flag, so a reader that sees the flag
+        // finds them.
+        let _ = self.whole.set(Arc::clone(&all));
+        self.fetched_whole.store(true, Ordering::Release);
+        Ok(self.whole.get().map_or(all, Arc::clone))
+    }
+
+    fn whole_slice(&self) -> &[u8] {
+        if self.materialise().is_err() {
+            // Ruling 2: an absent range degrades to nothing rather than to
+            // wrong bytes. The caller sees an empty document, and
+            // `whole_fetched` says which of the two it is.
+            return &[];
+        }
+        self.whole.get().map_or(&[], |bytes| bytes)
     }
 }
 
