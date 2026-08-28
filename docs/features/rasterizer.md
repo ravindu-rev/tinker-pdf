@@ -90,10 +90,19 @@ under it disagreed on 240 pixels.
 `/Interpolate` (Table 89) the only thing the caller supplies. Above 1:1 the
 file gets what it asked for — `/Interpolate true` smooths four taps
 (`Bilinear`), false keeps hard samples — and below it, the average of every
-sample the pixel covers, weighted by how much of it the pixel covers, with
-exact 2x2 box-filter averaging into a `Pyramid` of halved levels first until
-the residual is within 4:1, so the footprint is at most four samples per axis
-and the cost per pixel is bounded whatever the ratio.
+sample the pixel covers, weighted by how much of it the pixel covers —
+integrated over the destination pixel's **true source rectangle**, which is
+what makes a render at twice the scale, box-filtered down, the same picture.
+
+Past 128:1 that gives way to exact 2x2 box-filter averaging into a `Pyramid` of
+halved levels until the residual is within 4:1, which bounds the cost of the
+one case exact integration does not: the same image drawn many times at
+extreme minification, where the levels are built once and reused. The
+threshold is measured — the worst downscale any draw in the pdfjs corpus asks
+for is 72:1 — and the trade it makes is written up in
+[design/image-edges.md](../design/image-edges.md), because a pyramid is
+quantised to powers of two and therefore *scale-dependent*, which is what the
+`dpi` metamorphic relation had been reporting on strip-built scans.
 
 Hard samples are `Area` over the pixel's own footprint rather than one nearest
 tap, and above 1:1 that footprint is *smaller than a sample*: a pixel inside a

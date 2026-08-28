@@ -23,24 +23,29 @@ rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **Resampling is not coherent across scale on strip-built scans.** What is
-  left of the `dpi` relation's eight failures after image edges, magnification
-  and conflation were each measured and fixed
-  ([design/image-edges.md](design/image-edges.md),
-  [features/rasterizer.md](features/rasterizer.md)). Three of the eight now
-  hold outright; `pclm-in.pdf` improved from 17.3 % of pixels disagreeing to
-  15.9 %, against a 2 % budget, and kept `rotate` and `crop`. The residual is
-  neither edges nor conflation — both were isolated and measured out, and a
-  render and the box-filtered render at twice the scale now agree to 0.00 % on
-  a synthetic source at every ratio tried — so what remains is resampling
-  itself on real scans, and it wants its own evidence before it wants a patch.
-  Carried with it: the two `inline-images-ii-*` files break `rotate` at 1.7 %
-  against a 1 % budget, because an anti-aliased image edge at a fractional
-  offset does not transpose exactly where a quantised one did. That is a
-  budget to revisit or an artefact to remove, and it is stated rather than
-  absorbed. Evidence: `tpdf probe --dpi 72` over the eight qpdf files, August
-  2026, per file in [design/image-edges.md](design/image-edges.md). Exit: the
-  `dpi` row holds on the PCLM pair, and `rotate` holds on all eight. (M)
+**Clear.** The last item here was the `dpi` relation on strip-built scans, and
+it closed with the residual attributed rather than patched around: the
+box-filter pyramid averages source-aligned blocks of two, so its support is
+quantised to powers of two and moves with the device scale, while an area
+filter over the destination pixel's true source rectangle does not. It now
+engages only past 128:1 — the worst downscale the pdfjs corpus asks for is
+72:1 — and **all eight files hold all three relations**, with `dpi` at 582 of
+582 qpdf files (from 577) and 915 of 944 pdfjs files (from 908).
+
+The `rotate` half closed earlier and differently, by raising a budget against
+measured noise rather than by changing the engine: an anti-aliased image edge
+at a fractional offset does not transpose to the byte, and the two
+`inline-images-ii-*` files sat at 1.7 % against a 1 % line drawn when image
+edges were still quantised.
+
+Both are written up in [design/image-edges.md](design/image-edges.md), and the
+part worth carrying forward is why it took a real scan to see: at an integer
+ratio on a full-canvas draw the pyramid's blocks sit exactly under the
+destination pixels and even a pyramid agrees with itself, so a synthetic test
+at 2:1 or 4:1 proves nothing about it.
+[`a_downscale_agrees_with_itself_at_twice_the_scale`](../crates/tinker-pdf-raster/tests/analytic_sampling.rs)
+now states the property in closed form at ratios that are deliberately not
+whole.
 
 ## Tier 2 — close the named refusals, by measured reachability
 

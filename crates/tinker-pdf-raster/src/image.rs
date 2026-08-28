@@ -178,6 +178,42 @@ const ONE: u64 = 1 << 16;
 /// the cap is a guard against a nonsensical transform rather than a policy.
 const MAX_HALVINGS: u32 = 16;
 
+/// The downscale beyond which a box-filter pyramid takes over from exact area
+/// integration, in whole texels per device pixel.
+///
+/// # Why there is a threshold at all, and why it is here
+///
+/// Area integration over the destination pixel's true source rectangle is
+/// **scale-invariant**: halve the device scale and each pixel covers exactly
+/// the union of the four it replaced, so a render at twice the resolution,
+/// box-filtered down, is the same picture. A pyramid is not. It averages
+/// source-aligned blocks of two, so the support it integrates is quantised to
+/// powers of two, and *which* blocks a destination pixel lands on moves with
+/// the device scale. That is the whole of the `dpi` relation's residual on
+/// strip-built scans: with the pyramid `pclm-in.pdf` disagreed on 15.9 % of
+/// its pixels, and with exact integration it agrees.
+///
+/// So why keep a pyramid. Exact integration costs one visit per source pixel
+/// per draw, which is the same as building the pyramid and is why removing it
+/// costs 3.5 % over the whole corpus and no file's time gate. What it does not
+/// bound is the *same* image drawn many times at extreme minification — a
+/// tiling pattern — where the pyramid is built once and every repeat then
+/// costs the destination rather than the source.
+///
+/// **128 is measured, not chosen.** Over the pdfjs corpus the worst downscale
+/// any draw asks for is 72:1, with the 99.9th percentile at 26 and the median
+/// at 2. A threshold of 128 therefore leaves every real file on the exact
+/// path with most of an octave to spare, and leaves the bound in place for the
+/// synthetic case that would abuse it.
+const PYRAMID_ABOVE: u64 = 128;
+
+/// What the pyramid reduces to once it does engage.
+///
+/// Unchanged from when the pyramid was the only path: bringing the residual
+/// ratio within four keeps the per-pixel cost at sixteen taps for the extreme
+/// downscales that reach here at all.
+const PYRAMID_TARGET: u64 = 4;
+
 /// Source samples per device pixel along each axis, in 16.16 fixed point.
 ///
 /// The transform's columns are the device vectors of the image's own axes, so
@@ -263,9 +299,11 @@ pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -
         filter: Filter::Area,
         halvings,
         // What one destination pixel covers of the *reduced* image, per axis,
-        // in 16.16 texels. The pyramid brings this to at most two, so the
-        // footprint is at most three samples across and the cost per pixel is
-        // bounded whatever the ratio.
+        // in 16.16 texels. Below [`PYRAMID_ABOVE`] there is no reduction and
+        // this is the true ratio, which is what makes the filter agree with
+        // itself at another scale; above it the pyramid brings the residual
+        // within [`PYRAMID_TARGET`], so the cost per pixel stays bounded
+        // however extreme the downscale.
         //
         // A shift rather than a division, for `halvings`' own reason: the
         // ratio is already 16.16 and shifting is exact everywhere. It
@@ -283,7 +321,8 @@ pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -
     }
 }
 
-/// How many times an axis must be halved to bring a downscale within 2:1.
+/// How many times an axis must be halved, and none at all below
+/// [`PYRAMID_ABOVE`].
 ///
 /// # Why this is a shift rather than a logarithm
 ///
@@ -302,12 +341,18 @@ pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -
 /// loop also stops when the axis reaches a single sample, because halving that
 /// again would build fifteen more copies of one pixel.
 fn halvings(ratio: u64, extent: u32) -> u32 {
+    // Below the threshold the destination pixel's true source rectangle is
+    // integrated directly, which is what makes the result independent of the
+    // device scale. See [`PYRAMID_ABOVE`].
+    if ratio <= PYRAMID_ABOVE * ONE {
+        return 0;
+    }
     let mut count = 0;
     // The threshold is doubled rather than the ratio halved: shifting the
     // ratio down would truncate, and a ratio a hair over 4 would then look
     // like exactly 2 after one halving and stop one short. Doubling is exact,
     // and the largest threshold reached is 2^33.
-    while count < MAX_HALVINGS && (extent >> count) > 1 && ratio > (4 * ONE) << count {
+    while count < MAX_HALVINGS && (extent >> count) > 1 && ratio > (PYRAMID_TARGET * ONE) << count {
         count += 1;
     }
     count
@@ -1438,8 +1483,12 @@ mod tests {
     /// apart, and eight is a whole number of periods of this board, so every
     /// tap of every pixel reads the *same phase* — bilinear alone returns a
     /// flat black or a flat white page, not an average of anything. The test
-    /// asserts that directly as well as asserting the pyramid's answer, so it
-    /// cannot pass by the two behaving alike.
+    /// asserts that directly as well as asserting the area filter's answer, so
+    /// it cannot pass by the two behaving alike.
+    ///
+    /// 16:1 is below [`PYRAMID_ABOVE`], so this integrates the destination
+    /// pixel's true sixteen-by-sixteen source rectangle rather than reducing
+    /// first. That is the path every real file takes.
     #[test]
     fn a_sixteen_to_one_downscale_is_flat_grey_rather_than_moire() {
         let rgb = checkerboard(256);
@@ -1454,10 +1503,10 @@ mod tests {
         assert_eq!(sampling.filter, Filter::Area);
         assert_eq!(
             sampling.halvings,
-            (2, 2),
-            "16:1 halves twice, leaving exactly 4:1 for the area filter"
+            (0, 0),
+            "16:1 is well inside the exact path and reduces nothing"
         );
-        assert_eq!(sampling.footprint, (4 * ONE, 4 * ONE));
+        assert_eq!(sampling.footprint, (16 * ONE, 16 * ONE));
 
         // What four taps on the unreduced image would have produced.
         let unreduced: Vec<u8> = (0..16)
@@ -1495,68 +1544,79 @@ mod tests {
     /// there, and reused by the next draw rather than rebuilt.
     #[test]
     fn pyramid_levels_are_handed_back_and_reused() {
-        let rgb = checkerboard(64);
+        let rgb = checkerboard(512);
         let image = ImageSource {
-            width: 64,
-            height: 64,
+            width: 512,
+            height: 512,
             rgb: &rgb,
             alpha: &[],
         };
 
         let mut pyramid = Pyramid::new();
-        let mut first = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
-        draw_image(&mut first, &ImageDraw::new(image, over(8.0)), &mut pyramid);
+        let mut first = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut first, &ImageDraw::new(image, over(2.0)), &mut pyramid);
 
-        // 64 samples into 8 pixels is 8:1: one halving per axis, to 32 x 32,
-        // leaving exactly 4:1 for the area filter to average.
-        assert_eq!(pyramid.levels(), 2, "one halving of x, then one of y");
-        assert_eq!(pyramid.level_size(0), Some((32, 64)));
-        assert_eq!(pyramid.level_size(1), Some((32, 32)));
+        // 512 samples into 2 pixels is 256:1, which is past
+        // `PYRAMID_ABOVE` and so the one shape of draw that still reduces:
+        // six halvings per axis bring it to `PYRAMID_TARGET`, and the axes are
+        // halved one at a time.
+        assert_eq!(pyramid.levels(), 12, "six halvings of x, then six of y");
+        assert_eq!(pyramid.level_size(0), Some((256, 512)));
+        assert_eq!(pyramid.level_size(11), Some((8, 8)));
 
-        let mut second = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
-        draw_image(&mut second, &ImageDraw::new(image, over(8.0)), &mut pyramid);
+        let mut second = Canvas::new(2, 2, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut second, &ImageDraw::new(image, over(2.0)), &mut pyramid);
         assert_eq!(first.data, second.data, "the reused levels are the same");
-        assert_eq!(pyramid.levels(), 2, "and nothing was rebuilt");
+        assert_eq!(pyramid.levels(), 12, "and nothing was rebuilt");
 
         // A pyramid offered a different image rebuilds rather than sampling
         // another picture's levels.
-        let other = checkerboard(32);
+        let other = checkerboard(256);
         let smaller = ImageSource {
-            width: 32,
-            height: 32,
+            width: 256,
+            height: 256,
             rgb: &other,
             alpha: &[],
         };
-        // Over four device pixels rather than eight, so this is 8:1 as well
-        // and still asks for a reduction: at 4:1 the area filter needs none,
-        // and a pyramid with no levels would prove nothing about rebuilding.
-        let mut third = Canvas::new(8, 8, PixelFormat::Rgb8, Color::WHITE);
+        // Also past `PYRAMID_ABOVE`, and deliberately so: below it a draw
+        // reduces nothing, and a pyramid with no levels would prove nothing
+        // about rebuilding.
+        let mut third = Canvas::new(1, 1, PixelFormat::Rgb8, Color::WHITE);
         draw_image(
             &mut third,
-            &ImageDraw::new(smaller, over(4.0)),
+            &ImageDraw::new(smaller, over(1.0)),
             &mut pyramid,
         );
-        assert_eq!(pyramid.level_size(0), Some((16, 32)), "rebuilt for 32 x 32");
+        assert_eq!(
+            pyramid.level_size(0),
+            Some((128, 256)),
+            "rebuilt for 256 x 256"
+        );
     }
 
     /// The level count is decided by integer shifts, so it cannot come out
     /// one different on a target whose `log2` rounds the other way.
     #[test]
     fn the_level_count_is_decided_on_integers() {
-        // Ratios in 16.16: at and either side of each power of two. The
-        // threshold is 4:1 rather than 2:1, and that is the whole of the
-        // accuracy this filter has: reducing to within 4 leaves the area
-        // filter a footprint of two to four samples, which resolves the
-        // destination pixel's edges four times more finely than a footprint of
-        // one to two. Measured against an exact box average of a 512-square
-        // noise source, mean error per channel out of 255 at a 3:1 downscale:
-        // 9.88 reducing to within 2, 0.25 reducing to within 4, 0.25 within 8.
-        // It buys everything and the next step buys nothing.
-        assert_eq!(halvings(4 * ONE, 64), 0, "exactly 4:1 needs no reduction");
-        assert_eq!(halvings(4 * ONE + 1, 64), 1, "a hair past it needs one");
-        assert_eq!(halvings(8 * ONE, 64), 1);
-        assert_eq!(halvings(8 * ONE + 1, 64), 2);
-        assert_eq!(halvings(16 * ONE, 64), 2);
+        // Nothing below `PYRAMID_ABOVE` reduces at all: the destination
+        // pixel's true source rectangle is integrated, which is what makes the
+        // answer independent of the device scale and is why the `dpi` relation
+        // holds on strip-built scans.
+        assert_eq!(halvings(PYRAMID_ABOVE * ONE, 4096), 0, "exactly 128:1");
+        assert_eq!(halvings(16 * ONE, 4096), 0, "and everything under it");
+        // Past it, the old policy: halve until the residual is within
+        // `PYRAMID_TARGET`. Reducing to within four rather than two is worth
+        // the extra level and reducing further is not — measured against an
+        // exact box average of a 512-square noise source, mean error per
+        // channel out of 255 at a 3:1 downscale was 9.88 reducing to within 2,
+        // 0.25 within 4, and 0.25 within 8.
+        assert_eq!(
+            halvings(PYRAMID_ABOVE * ONE + 1, 4096),
+            6,
+            "a hair past the threshold reduces all the way to within four"
+        );
+        assert_eq!(halvings(256 * ONE, 4096), 6, "and so does twice it");
+        assert_eq!(halvings(512 * ONE, 4096), 7);
         // An axis of one sample cannot be halved, whatever the ratio claims.
         assert_eq!(halvings(u64::MAX, 1), 0);
         // And a nonsense transform is capped rather than looping.

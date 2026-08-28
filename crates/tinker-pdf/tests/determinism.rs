@@ -2221,9 +2221,18 @@ fn rendering_is_stable_across_targets() {
         // have said on its own — a fingerprint pins the engine against itself,
         // so it reports that an answer changed and never that it was wrong.
         // `tinker-pdf-raster/tests/analytic_sampling.rs` is what says which.
+        //
+        // Re-recorded again when the box-filter pyramid stopped engaging below
+        // 128:1 and the destination pixel's true source rectangle began to be
+        // integrated instead. `pdfcmp` between the two renders of this page:
+        // **0.0833 % of pixels differ at all, worst 1 level of 255, none by
+        // more than twelve** — the minified placement again, and only it. The
+        // same caveat as above applies and the same file answers it, now with
+        // `a_downscale_agrees_with_itself_at_twice_the_scale`, which fails by
+        // eight levels if the pyramid is put back.
         (
             "image",
-            "5ee2846126ede02cb65622d5b909bd806347abb025c8f1fa173df36e727678e1",
+            "33c71f2d05f951f3bf604eab03d9968c6f7245a8f8f86209410ded99670574db",
         ),
         // Added August 2026 with gap 11. Groups, isolation, knockout and an
         // ExtGState soft mask reach no other fixture here at all.

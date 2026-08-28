@@ -8,7 +8,7 @@
         "jpx": 12,
         "mesh-shading": 10
       },
-      "degraded": 365,
+      "degraded": 338,
       "metamorphic": {
         "crop": {
           "compared": 829,
@@ -16,7 +16,7 @@
         },
         "dpi": {
           "compared": 944,
-          "held": 908
+          "held": 915
         },
         "rotate": {
           "compared": 838,
@@ -79,7 +79,7 @@
         },
         "dpi": {
           "compared": 582,
-          "held": 577
+          "held": 582
         },
         "rotate": {
           "compared": 479,

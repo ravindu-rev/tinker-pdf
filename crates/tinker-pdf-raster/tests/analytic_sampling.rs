@@ -37,11 +37,26 @@
 //! reproducing the same wrong answer on every target, which is exactly the
 //! blind spot ruling 13 says a first-party suite has to be built to cover.
 //!
-//! The residual error is the pyramid's, and it is bounded by how coarse the
-//! reduced level is: reducing to within 4:1 rather than 2:1 leaves the average
-//! four times more resolution to place the destination pixel edges in, which
-//! is the difference between 9.88 and 0.25 at a 3:1 downscale. Reducing to
-//! within 8:1 leaves it at 0.25, so 4 is where it stops.
+//! The residual error was the pyramid's, bounded by how coarse the reduced
+//! level is: reducing to within 4:1 rather than 2:1 left the average four
+//! times more resolution to place the destination pixel edges in, which is the
+//! difference between 9.88 and 0.25 at a 3:1 downscale, and reducing to within
+//! 8:1 left it at 0.25.
+//!
+//! # And what the residual turned out to cost
+//!
+//! A quarter of a level is invisible in the mean and is not what the pyramid
+//! was doing wrong. It averages source-aligned blocks of two, so *which* block
+//! a destination pixel lands on moves with the device scale — the filter did
+//! not agree with itself at another resolution. On a page of four hundred
+//! image strips that is 15.9 % of the pixels moving by more than eight levels,
+//! which is what the `dpi` metamorphic relation had been reporting since it
+//! was written.
+//!
+//! So the pyramid now engages only past 128:1, and everything under it
+//! integrates the destination pixel's true source rectangle.
+//! [`a_downscale_agrees_with_itself_at_twice_the_scale`] is the closed form of
+//! that property, and it fails by eight levels with the pyramid put back.
 //!
 //! # The edge, which is the other closed form
 //!
@@ -125,7 +140,8 @@ fn box_average(source: &[u8], width: u32, ratio: f64, x: u32, y: u32) -> f64 {
 /// The edges are excluded, and only the edges: a destination pixel hanging off
 /// the image covers fewer samples, and how a sampler treats that is a separate
 /// question.
-fn error(source: &[u8], size: u32, side: u32) -> (f64, f64) {
+/// The square source drawn over a `side` by `side` canvas.
+fn render(source: &[u8], size: u32, side: u32) -> Canvas {
     let image = ImageSource {
         width: size,
         height: size,
@@ -148,7 +164,11 @@ fn error(source: &[u8], size: u32, side: u32) -> (f64, f64) {
         &ImageDraw::new(image, placement),
         &mut Pyramid::new(),
     );
+    canvas
+}
 
+fn error(source: &[u8], size: u32, side: u32) -> (f64, f64) {
+    let canvas = render(source, size, side);
     let ratio = f64::from(size) / f64::from(side);
     let (mut total, mut worst, mut counted) = (0.0f64, 0.0f64, 0u32);
     for y in 1..side - 1 {
@@ -215,6 +235,79 @@ fn a_power_of_two_downscale_is_the_box_filter_exactly() {
             mean < 1.0 && worst < 2.0,
             "{}:1 is mean {mean:.2}, worst {worst:.2}",
             SIZE / side
+        );
+    }
+}
+
+/// **A downscale agrees with itself at twice the scale.**
+///
+/// This is the closed form behind the `dpi` metamorphic relation, and it is a
+/// property of the *definition* rather than of any implementation: a
+/// destination pixel covers the union of the four that replace it when the
+/// device scale doubles, so averaging those four has to give back the average
+/// over the same source rectangle. Any filter that answers to the definition
+/// agrees with itself at another scale; one that does not, does not.
+///
+/// **The box-filter pyramid does not**, which is what this test exists to
+/// pin. It averages source-aligned blocks of two, so the support it integrates
+/// is quantised to powers of two and *which* blocks a destination pixel lands
+/// on moves with the device scale. That is a small error in the mean — the
+/// table above puts the pyramid's residual at a quarter of a level — and a
+/// large one in the count of pixels that differ at all, which is what the
+/// relation measures. On `pclm-in.pdf`, four hundred image strips over one
+/// scanned page, it moved 15.9 % of the pixels.
+///
+/// The ratios below are deliberately not powers of two: at a power of two the
+/// pyramid has already done all the work and every filter agrees, which is
+/// exactly how the interpolating sampler this file replaced went unnoticed.
+#[test]
+fn a_downscale_agrees_with_itself_at_twice_the_scale() {
+    const SIZE: u32 = 384;
+    let source = noise(SIZE, SIZE);
+    // **Not whole ratios, and that is the test.** A full-canvas draw at an
+    // integer ratio puts the pyramid's power-of-two blocks exactly under the
+    // destination pixels, so even a pyramid agrees with itself there — the
+    // same blind spot that let an interpolating sampler through. 384 over
+    // these three is 7.68, 5.49 and 3.84 to one.
+    for side in [50u32, 70, 100] {
+        let small = render(&source, SIZE, side);
+        let large = render(&source, SIZE, side * 2);
+        let (mut worst, mut moved) = (0u32, 0u32);
+        // The interior only: an edge pixel of the smaller render is partly
+        // covered, and coverage is the other closed form, tested below.
+        for y in 1..side - 1 {
+            for x in 1..side - 1 {
+                for channel in 0..3usize {
+                    let mut sum = 0u32;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let at = ((2 * y + dy) as usize) * large.stride
+                                + ((2 * x + dx) as usize) * 3
+                                + channel;
+                            sum += u32::from(large.data[at]);
+                        }
+                    }
+                    let down = (sum + 2) / 4;
+                    let at = (y as usize) * small.stride + (x as usize) * 3 + channel;
+                    let got = u32::from(small.data[at]);
+                    let gap = down.abs_diff(got);
+                    worst = worst.max(gap);
+                    moved += u32::from(gap > 0);
+                }
+            }
+        }
+        // **One level, and the assertion is that rather than a share.** The
+        // two renders round independently — the doubled one rounds each of
+        // four pixels and this test rounds their average again — so a fifth of
+        // the samples land a level apart whatever the filter does. What cannot
+        // be double rounding is a larger gap, and there is none: the probe's
+        // own `CHANNEL_TOLERANCE` is eight levels, and the pyramid moved
+        // 15.9 % of `pclm-in.pdf` past it.
+        let _ = moved;
+        assert!(
+            worst <= 1,
+            "{:.2}:1 disagrees with itself by {worst} levels",
+            f64::from(SIZE) / f64::from(side)
         );
     }
 }
