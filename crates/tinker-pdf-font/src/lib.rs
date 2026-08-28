@@ -8,6 +8,7 @@ pub mod base14;
 #[cfg(feature = "bundled-fonts")]
 pub mod bundled;
 pub mod cff;
+pub mod cff_subset;
 pub mod cmap;
 pub mod encoding;
 pub mod glyf;
@@ -19,6 +20,7 @@ pub mod type1;
 
 pub use base14::Standard14;
 pub use cff::Cff;
+pub use cff_subset::subset_cff;
 pub use cmap::CMap;
 pub use encoding::{
     base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding,
