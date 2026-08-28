@@ -50,7 +50,7 @@ pub use mdp::{Change, Modification, Modifications, Touched};
 /// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
 pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
-    Verdict as PdfAVerdict,
+    RuleGroup as PdfARuleGroup, StagedRule, Verdict as PdfAVerdict, STAGED as PDFA_STAGED,
 };
 pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
 /// Tagged PDF: the logical structure tree, and the reading-order view over it
@@ -896,7 +896,24 @@ impl Document {
     /// should read both.
     #[must_use]
     pub fn validate_pdfa(&self) -> PdfAVerdict {
-        pdfa::validate(self)
+        pdfa::validate(self, PdfACoverage::IMPLEMENTED)
+    }
+
+    /// [`Document::validate_pdfa`], running only the rule groups in `groups`.
+    ///
+    /// The design doc requires that a syntax-only sweep over the whole veraPDF
+    /// corpus never builds the machinery the other groups need, and a
+    /// requirement nothing can ask for is a requirement nothing can check. This
+    /// is how it is asked for: [`PdfACoverage::SYNTAX`] parses no XMP packet at
+    /// all, and the verdict's own `coverage` reports back exactly which groups
+    /// ran, so a caller cannot read a short sweep as a clean bill of health.
+    ///
+    /// Asking for a group this build has no rules for is not an error and does
+    /// not make the verdict claim it ran — `coverage` is what actually
+    /// happened, never what was requested.
+    #[must_use]
+    pub fn validate_pdfa_with(&self, groups: PdfACoverage) -> PdfAVerdict {
+        pdfa::validate(self, groups)
     }
 
     /// The strictest certification any signature in this document declares

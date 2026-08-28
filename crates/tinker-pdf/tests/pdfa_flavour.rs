@@ -13,6 +13,15 @@
 //! flavour this build reads that disagrees with the directory it sits in is a
 //! disagreement worth printing, and the count of them is asserted.
 //!
+//! *Amended, milestone 2.* Every assertion here now asks for
+//! [`PdfACoverage::METADATA`] rather than for the default groups. The syntax
+//! group has landed and the fixtures below are minimal by construction — no
+//! `/ID`, no binary comment after the header — so a full validation of them
+//! reports file-structure findings that have nothing to do with what this file
+//! measures. Narrowing the request keeps each test about the one thing it is
+//! named for, and `pdfa_syntax.rs` is where those findings are asserted, on
+//! fixtures built to carry them.
+//!
 //! ```sh
 //! cargo test -p tinker-pdf --test pdfa_flavour -- --ignored --nocapture
 //! ```
@@ -20,7 +29,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{Document, FindingKind, Level, Part};
+use tinker_pdf::{Document, FindingKind, Level, Part, PdfACoverage};
 
 // ---- what a claim looks like, without a corpus ----------------------------
 
@@ -98,7 +107,7 @@ fn a_declared_flavour_reads_back_as_itself() {
         ("4", None, (Part::Four, None)),
     ] {
         let document = Document::open(with_metadata(&packet(part, letter))).expect("opens");
-        let verdict = document.validate_pdfa();
+        let verdict = document.validate_pdfa_with(PdfACoverage::METADATA);
         let flavour = verdict
             .flavour
             .unwrap_or_else(|| panic!("part {part} claimed nothing: {:?}", verdict.findings));
@@ -116,7 +125,7 @@ fn a_declared_flavour_reads_back_as_itself() {
 fn a_part_iso_19005_does_not_define_is_a_finding_and_not_an_absence() {
     for declared in ["9", "0", "", "two"] {
         let document = Document::open(with_metadata(&packet(declared, Some("B")))).expect("opens");
-        let verdict = document.validate_pdfa();
+        let verdict = document.validate_pdfa_with(PdfACoverage::METADATA);
         assert_eq!(verdict.flavour, None, "{declared:?}");
         assert!(
             verdict.findings.iter().any(|finding| matches!(
@@ -135,7 +144,7 @@ fn a_part_iso_19005_does_not_define_is_a_finding_and_not_an_absence() {
 fn part_four_has_its_own_two_levels_and_refuses_the_others() {
     for letter in ["E", "F"] {
         let document = Document::open(with_metadata(&packet("4", Some(letter)))).expect("opens");
-        let verdict = document.validate_pdfa();
+        let verdict = document.validate_pdfa_with(PdfACoverage::METADATA);
         assert!(
             verdict.found_nothing(),
             "PDF/A-4{letter} is a flavour: {:?}",
@@ -151,7 +160,7 @@ fn part_four_has_its_own_two_levels_and_refuses_the_others() {
         let document = Document::open(with_metadata(&packet(part, Some(letter)))).expect("opens");
         assert!(
             document
-                .validate_pdfa()
+                .validate_pdfa_with(PdfACoverage::METADATA)
                 .findings
                 .iter()
                 .any(|f| matches!(f.kind, FindingKind::LevelNotInPart { .. })),
@@ -170,7 +179,7 @@ fn pdfuaid_part_is_not_pdfaid_part() {
  pdfuaid:part="1"/></rdf:RDF></x:xmpmeta>"#;
     let verdict = Document::open(with_metadata(ua))
         .expect("opens")
-        .validate_pdfa();
+        .validate_pdfa_with(PdfACoverage::METADATA);
     assert_eq!(
         verdict.flavour, None,
         "a PDF/UA version number claimed a PDF/A part: {:?}",
@@ -184,7 +193,7 @@ fn pdfuaid_part_is_not_pdfaid_part() {
  whatever:part="2" whatever:conformance="B"/></rdf:RDF></x:xmpmeta>"#;
     let verdict = Document::open(with_metadata(bound))
         .expect("opens")
-        .validate_pdfa();
+        .validate_pdfa_with(PdfACoverage::METADATA);
     assert_eq!(
         verdict.flavour.map(|f| f.to_string()).as_deref(),
         Some("PDF/A-2B"),
@@ -196,7 +205,7 @@ fn pdfuaid_part_is_not_pdfaid_part() {
 fn a_missing_level_is_a_finding_where_the_part_requires_one() {
     let two = Document::open(with_metadata(&packet("2", None))).expect("opens");
     assert!(
-        two.validate_pdfa()
+        two.validate_pdfa_with(PdfACoverage::METADATA)
             .findings
             .iter()
             .any(|f| f.kind == FindingKind::LevelMissing),
@@ -206,7 +215,8 @@ fn a_missing_level_is_a_finding_where_the_part_requires_one() {
     // Part 4 without one is a flavour, not a finding.
     let four = Document::open(with_metadata(&packet("4", None))).expect("opens");
     assert!(
-        four.validate_pdfa().found_nothing(),
+        four.validate_pdfa_with(PdfACoverage::METADATA)
+            .found_nothing(),
         "plain PDF/A-4 is correct"
     );
 }
@@ -326,7 +336,7 @@ fn census_of_the_flavours_the_corpus_claims() {
         let Ok(document) = Document::open(bytes) else {
             continue;
         };
-        let verdict = document.validate_pdfa();
+        let verdict = document.validate_pdfa_with(PdfACoverage::METADATA);
 
         for finding in &verdict.findings {
             let label = match &finding.kind {

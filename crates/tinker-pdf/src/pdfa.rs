@@ -40,10 +40,349 @@
 //! validator that cannot say what it did not check is a validator whose empty
 //! answer cannot be read.
 
+use std::cell::Cell;
+
 use tinker_pdf_cos::ObjRef;
 use tinker_pdf_xml::{Event, Source};
 
 use crate::Document;
+
+mod syntax;
+mod xmp;
+
+/// A finding before its clause number is known.
+///
+/// Rules fire while the flavour is still being read — the metadata group is
+/// what finds out which part the file claims, and every other group needs that
+/// answer to number its clauses — so a rule names the *rule* and the clause is
+/// resolved once, at the end. [`ClauseTable`] is that mapping, and it is data
+/// rather than a branch inside each rule, which is what the design doc means
+/// by "the mapping table is data, not duplicated rules".
+pub(crate) struct Raw {
+    /// Which rule fired, as a clause number per part.
+    pub(crate) rule: ClauseTable,
+    /// The object it is about, when there is one (ruling 10).
+    pub(crate) object: Option<ObjRef>,
+    /// What was wrong.
+    pub(crate) kind: FindingKind,
+}
+
+impl Raw {
+    /// A finding about the file rather than about an object inside it.
+    pub(crate) fn file(rule: ClauseTable, kind: FindingKind) -> Raw {
+        Raw {
+            rule,
+            object: None,
+            kind,
+        }
+    }
+
+    fn resolve(self, part: Option<Part>) -> ConformanceFinding {
+        ConformanceFinding {
+            clause: Clause(self.rule.of(part).to_string()),
+            object: self.object,
+            kind: self.kind,
+        }
+    }
+}
+
+/// One rule's clause number in each part that numbers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClauseTable {
+    one: &'static str,
+    two_three: &'static str,
+    four: &'static str,
+}
+
+impl ClauseTable {
+    /// The clause number `part` gives this rule.
+    ///
+    /// A file that claimed no part is numbered as part 1 would number it,
+    /// which is a presentation choice rather than a validation one: the `kind`
+    /// is what a caller matches on, and a finding carrying a plausible clause
+    /// number beats a finding carrying none.
+    fn of(self, part: Option<Part>) -> &'static str {
+        match part {
+            Some(Part::Two | Part::Three) => self.two_three,
+            Some(Part::Four) => self.four,
+            _ => self.one,
+        }
+    }
+}
+
+/// Every rule's clause number, per part.
+///
+/// The same defect is numbered differently by each part — a stream's external
+/// file reference is 6.1.7 in part 1, 6.1.7.1 in parts 2 and 3 and 6.1.6 in
+/// part 4 — so the number is data about the flavour being checked rather than
+/// a property of the check.
+pub(crate) mod clauses {
+    use super::ClauseTable;
+
+    /// The file header (6.1.2 in every part).
+    pub(crate) const FILE_HEADER: ClauseTable = ClauseTable {
+        one: "6.1.2",
+        two_three: "6.1.2",
+        four: "6.1.2",
+    };
+
+    /// The file trailer, which is also where part 4 puts its rule about the
+    /// document information dictionary.
+    pub(crate) const FILE_TRAILER: ClauseTable = ClauseTable {
+        one: "6.1.3",
+        two_three: "6.1.3",
+        four: "6.1.3",
+    };
+
+    /// Encryption. Part 4 renumbers the clause that forbids it.
+    pub(crate) const ENCRYPTION: ClauseTable = ClauseTable {
+        one: "6.1.3",
+        two_three: "6.1.3",
+        four: "6.1.2",
+    };
+
+    /// Stream objects, including the external-file keys.
+    pub(crate) const STREAM_OBJECTS: ClauseTable = ClauseTable {
+        one: "6.1.7",
+        two_three: "6.1.7.1",
+        four: "6.1.6",
+    };
+
+    /// Filters.
+    pub(crate) const FILTERS: ClauseTable = ClauseTable {
+        one: "6.1.10",
+        two_three: "6.1.7.1",
+        four: "6.1.6",
+    };
+
+    /// The permissions dictionary. Part 1 has no rule about it; the number
+    /// there is the nearest file-structure clause and is never reached,
+    /// because the rule does not run for part 1.
+    pub(crate) const PERMISSIONS: ClauseTable = ClauseTable {
+        one: "6.1.12",
+        two_three: "6.1.12",
+        four: "6.1.11",
+    };
+
+    /// The document catalog dictionary, which is part 4's clause for the
+    /// catalog's `/Version`.
+    pub(crate) const CATALOG: ClauseTable = ClauseTable {
+        one: "6.1.12",
+        two_three: "6.1.13",
+        four: "6.1.12",
+    };
+
+    /// Embedded files.
+    pub(crate) const EMBEDDED_FILES: ClauseTable = ClauseTable {
+        one: "6.1.11",
+        two_three: "6.8",
+        four: "6.9",
+    };
+
+    /// Optional content, which part 1 forbids outright.
+    pub(crate) const OPTIONAL_CONTENT: ClauseTable = ClauseTable {
+        one: "6.1.13",
+        two_three: "6.9",
+        four: "6.10",
+    };
+
+    /// Interactive forms, which is where XFA is refused.
+    pub(crate) const INTERACTIVE_FORMS: ClauseTable = ClauseTable {
+        one: "6.9",
+        two_three: "6.4",
+        four: "6.4",
+    };
+
+    /// Actions.
+    pub(crate) const ACTIONS: ClauseTable = ClauseTable {
+        one: "6.6.1",
+        two_three: "6.5.1",
+        four: "6.6.1",
+    };
+
+    /// Trigger events, the additional-actions dictionaries.
+    pub(crate) const TRIGGERS: ClauseTable = ClauseTable {
+        one: "6.6.2",
+        two_three: "6.5.2",
+        four: "6.6.3",
+    };
+
+    /// The metadata stream itself.
+    pub(crate) const METADATA: ClauseTable = ClauseTable {
+        one: "6.7.2",
+        two_three: "6.6.2.1",
+        four: "6.7.2",
+    };
+
+    /// Version and conformance level identification: the `pdfaid` claim.
+    pub(crate) const FLAVOUR_ID: ClauseTable = ClauseTable {
+        one: "6.7.11",
+        two_three: "6.6.4",
+        four: "6.7.3",
+    };
+
+    /// The document information dictionary's agreement with the XMP.
+    pub(crate) const INFO_XMP: ClauseTable = ClauseTable {
+        one: "6.7.3",
+        two_three: "6.1.5",
+        four: "6.1.3",
+    };
+}
+
+/// One rule this build does not run yet, and what it is waiting for.
+///
+/// A staged rule is a **named refusal** rather than a silent pass.
+/// [`Coverage`] says which rule *groups* ran; this says which rules inside a
+/// group that did run are still missing, which is the difference between "we
+/// checked and it was fine" and "we did not check". Milestone 4's ledger
+/// classifies a disagreement against this list, so a ledger row claiming "a
+/// known staged rule" has to name one that is actually here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StagedRule {
+    /// The clause it would cite, as parts 1 to 3 number it.
+    pub clause: &'static str,
+    /// What the rule would check.
+    pub rule: &'static str,
+    /// Why it is not running.
+    pub because: &'static str,
+}
+
+/// Every rule the syntax and metadata groups know they are not running.
+///
+/// This list is deliberately uncomfortable to read. Each entry is a place
+/// where a clean verdict means less than it looks like it means, and the
+/// alternative — leaving them out — is a validator whose silence cannot be
+/// interpreted.
+pub const STAGED: &[StagedRule] = &[
+    StagedRule {
+        clause: "6.1.6",
+        rule: "string objects: hexadecimal strings with an odd digit count or \
+               a non-hexadecimal character",
+        because: "the lexer normalises both away before a rule could see them; \
+                  catching it needs a second pass over the raw bytes of every \
+                  string, which is a lexer change rather than a rule",
+    },
+    StagedRule {
+        clause: "6.1.8",
+        rule: "indirect objects: the EOL markers around `obj`, `endobj`, \
+               `stream` and `endstream`",
+        because: "the same reason — the parser has consumed the whitespace by \
+                  the time an object exists to have a rule applied to it",
+    },
+    StagedRule {
+        clause: "6.1.12",
+        rule: "implementation limits: string length, name length, integer and \
+               real magnitude, dictionary size, nesting depth",
+        because: "the limits differ per part and several of them are `should` \
+                  rather than `shall`; a rule guessed at the wrong side of \
+                  that line reports conforming files as broken",
+    },
+    StagedRule {
+        clause: "6.5.2",
+        rule: "trigger events for part 4",
+        because: "ISO 19005-4 6.6.3 permits some additional-action entries and \
+                  forbids others rather than forbidding the entry, and this \
+                  build has not read that list closely enough to enforce it",
+    },
+    StagedRule {
+        clause: "6.8",
+        rule: "part 2: an embedded file must itself be PDF/A",
+        because: "it needs a recursive validation of the attachment, which is \
+                  a validator calling itself on untrusted bytes and wants its \
+                  own depth bound before it exists",
+    },
+    StagedRule {
+        clause: "6.6.2.3",
+        rule: "XMP properties must belong to a predefined schema or be \
+               described by an extension schema",
+        because: "it needs the predefined-schema property tables from the XMP \
+                  specification as vendored data; guessing them produces false \
+                  positives on conforming files, which is worse than not \
+                  checking. This is the single largest staged rule by corpus \
+                  count and the ledger says so",
+    },
+    StagedRule {
+        clause: "6.2",
+        rule: "graphics: colour spaces, output intents, transparency, \
+               rendering intents",
+        because: "milestone 5 of docs/design/pdfa.md, staged behind \
+                  docs/design/icc.md for the rules that read inside a profile",
+    },
+    StagedRule {
+        clause: "6.3",
+        rule: "fonts: embedding, widths, symbolic flags, Unicode mapping",
+        because: "milestone 5 of docs/design/pdfa.md",
+    },
+];
+
+/// Which machinery a reach is for.
+///
+/// Public because the counter that records reaches is what makes the design
+/// doc's laziness requirement a property rather than a comment, and a private
+/// enum whose variants nothing constructs is a dead-code warning rather than a
+/// guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuleGroup {
+    /// The XMP pull parser.
+    Metadata,
+    /// The COS document, which every group has.
+    Syntax,
+    /// `tinker-pdf-font`.
+    Fonts,
+    /// `tinker-pdf-color`.
+    Colour,
+}
+
+/// The machinery a rule group may reach for, built lazily per group.
+///
+/// The design doc's requirement is that a syntax-only sweep over 2 907 files
+/// "never parses a font program it does not need". That is a property of the
+/// code rather than of a comment, so it is **counted**: every reach past the
+/// COS document goes through [`Machinery::reach`], which records the ask
+/// whether or not it yields anything, and a syntax-only validation of a
+/// document that embeds a font must leave the font and colour counters at
+/// zero.
+///
+/// The counter is not vacuous. The metadata group reaches for the XML parser
+/// on every packet, so the mechanism is exercised on nearly every document in
+/// the corpus, and the unit tests assert both directions: the metadata reach
+/// happens and the font reach does not.
+#[derive(Debug, Default)]
+pub(crate) struct Machinery {
+    groups: Coverage,
+    metadata: Cell<u32>,
+    fonts: Cell<u32>,
+    colour: Cell<u32>,
+}
+
+impl Machinery {
+    fn new(groups: Coverage) -> Machinery {
+        Machinery {
+            groups,
+            ..Machinery::default()
+        }
+    }
+
+    /// Records a reach for `group`'s machinery and says whether it is there.
+    ///
+    /// A rule calls this *before* building anything, so a rule in a group that
+    /// was not asked for costs the ask and nothing else.
+    pub(crate) fn reach(&self, group: RuleGroup) -> bool {
+        let (counter, enabled) = match group {
+            RuleGroup::Metadata => (&self.metadata, self.groups.metadata),
+            RuleGroup::Syntax => return self.groups.syntax,
+            RuleGroup::Fonts => (&self.fonts, self.groups.fonts),
+            RuleGroup::Colour => (&self.colour, self.groups.colour),
+        };
+        counter.set(counter.get().saturating_add(1));
+        enabled
+    }
+
+    /// How many times each group's machinery was reached for.
+    fn reaches(&self) -> (u32, u32, u32) {
+        (self.metadata.get(), self.fonts.get(), self.colour.get())
+    }
+}
 
 /// Which part of ISO 19005 a file claims.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -216,6 +555,102 @@ pub enum FindingKind {
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
     /// nobody can open without a key is not archival.
     Encrypted,
+
+    // ---- the syntax group (milestone 2) ----------------------------------
+    //
+    // Each of these cites the ISO 19005 clause it comes from in
+    // `pdfa/syntax.rs`, beside the reading of that clause it implements.
+    /// No `%PDF-` header anywhere near the front of the file (6.1.2).
+    HeaderMissing,
+    /// The header is present but not at byte zero (6.1.2).
+    HeaderNotAtStart {
+        /// Where it actually starts.
+        at: u64,
+    },
+    /// The header names a version the claimed part does not admit (6.1.2).
+    HeaderVersionNotInPart {
+        /// What the header said.
+        declared: String,
+    },
+    /// No comment line after the header line (6.1.2).
+    HeaderCommentMissing,
+    /// The comment after the header does not begin with four bytes above 127,
+    /// so a transfer program sniffing the file calls it text (6.1.2).
+    HeaderCommentNotBinary,
+    /// The trailer has no `/ID` (6.1.3).
+    FileIdentifierMissing,
+    /// The trailer's `/ID` is not the two strings ISO 32000-1 14.4 defines
+    /// (6.1.3).
+    FileIdentifierMalformed,
+    /// A stream whose data lives in another file (6.1.7).
+    ExternalStream {
+        /// Which of `/F`, `/FFilter`, `/FDecodeParms` was there.
+        key: String,
+    },
+    /// A filter the part forbids by name — `LZWDecode` (6.1.10).
+    FilterForbidden {
+        /// The filter, as the file spelled it.
+        filter: String,
+    },
+    /// A filter outside the set ISO 32000-2 defines, in a part that admits
+    /// only those (6.1.6).
+    FilterNotStandard {
+        /// The filter, as the file spelled it.
+        filter: String,
+    },
+    /// A `/Crypt` filter naming something other than `/Identity` (6.1.10).
+    CryptFilterNotIdentity,
+    /// An action of a type the part forbids (6.6.1 / 6.5.1).
+    ActionForbidden {
+        /// The `/S` value.
+        action: String,
+    },
+    /// A `/Named` action outside the four page-navigation ones (6.6.1).
+    NamedActionForbidden {
+        /// The `/N` value, empty when there was none.
+        name: String,
+    },
+    /// An additional-actions dictionary (6.6.2 / 6.5.2).
+    TriggerEventsForbidden,
+    /// An embedded file in a part that admits none (6.1.11).
+    EmbeddedFileForbidden,
+    /// A file specification without a key its part requires (6.8 / 6.9).
+    EmbeddedFileKeyMissing {
+        /// Which key.
+        key: String,
+    },
+    /// The catalog's `/Perms` carries a key the part does not admit (6.1.12).
+    PermissionsEntryForbidden {
+        /// Which key.
+        key: String,
+    },
+    /// Optional content in a part that forbids it (6.1.13).
+    OptionalContentForbidden,
+    /// An XFA form (6.9 / 6.4).
+    XfaForbidden,
+    /// A catalog asking a reader to render an XFA form (6.9 / 6.4).
+    NeedsRenderingForbidden,
+    /// Part 4: a document information dictionary with no `/PieceInfo` to
+    /// justify it (6.1.3).
+    InfoDictionaryForbidden,
+    /// Part 4: an `/Info` entry other than `/ModDate` (6.1.3).
+    InfoEntryForbidden {
+        /// Which entry.
+        key: String,
+    },
+    /// Part 4: the catalog's `/Version` is not `2.n` (6.1.12).
+    CatalogVersionMalformed {
+        /// What the catalog said.
+        declared: String,
+    },
+
+    // ---- the metadata group (milestone 3) --------------------------------
+    /// An `/Info` entry that the XMP packet does not carry, or carries with a
+    /// different value (6.7.3 in part 1, 6.1.5 in parts 2 and 3).
+    InfoXmpMismatch {
+        /// The `/Info` key, which names its XMP property in the clause table.
+        key: String,
+    },
 }
 
 /// One thing wrong with the file.
@@ -248,6 +683,37 @@ pub struct Coverage {
 }
 
 impl Coverage {
+    /// Every group this build has rules for.
+    ///
+    /// The default `Document::validate_pdfa` request. Not `ALL`: asking for
+    /// a group with no rules and being told it ran is the one answer a
+    /// verdict must never give.
+    pub const IMPLEMENTED: Coverage = Coverage {
+        metadata: true,
+        syntax: true,
+        fonts: false,
+        colour: false,
+    };
+
+    /// The syntax group alone.
+    ///
+    /// The sweep the design doc requires to be cheap: no XMP packet parsed,
+    /// no font program read, nothing but the COS document.
+    pub const SYNTAX: Coverage = Coverage {
+        metadata: false,
+        syntax: true,
+        fonts: false,
+        colour: false,
+    };
+
+    /// The metadata group alone.
+    pub const METADATA: Coverage = Coverage {
+        metadata: true,
+        syntax: false,
+        fonts: false,
+        colour: false,
+    };
+
     /// Whether every group ran, which is the only state in which an empty
     /// finding list means the file conforms.
     #[must_use]
@@ -278,70 +744,83 @@ impl Verdict {
     }
 }
 
-/// Validates `document` against the flavour it claims.
-pub(crate) fn validate(document: &Document) -> Verdict {
-    let mut findings = Vec::new();
-    let flavour = flavour_of(document, &mut findings);
+/// Validates `document` against the flavour it claims, running `groups`.
+///
+/// The flavour is read whatever groups were asked for, because every other
+/// group numbers its clauses by the part and a rule that does not know which
+/// standard it is enforcing is not enforcing one. Only the findings *about the
+/// claim itself* belong to the metadata group.
+pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
+    validate_counting(document, groups).0
+}
 
-    // 6.1.3 in parts 1 to 3, and part 4's equivalent: an encrypted file is not
-    // archival, whatever else is right about it. Checked here rather than in
-    // the syntax group because it needs no machinery and because a file nobody
-    // can open is the one finding worth reporting before any other.
-    if document.is_encrypted() {
-        findings.push(ConformanceFinding {
-            clause: clause_for(flavour, "6.1.3"),
-            object: None,
-            kind: FindingKind::Encrypted,
-        });
+/// [`validate`], also returning what each group's machinery was reached for.
+///
+/// The counts are the design doc's laziness requirement made checkable: a
+/// syntax-only sweep must leave the font and colour counters at zero, and the
+/// unit tests assert it on a document that embeds a font program. Not exposed
+/// on the facade — a caller has no use for it and [`Coverage`] is the answer
+/// to the question they do ask.
+pub(crate) fn validate_counting(
+    document: &Document,
+    groups: Coverage,
+) -> (Verdict, (u32, u32, u32)) {
+    let machinery = Machinery::new(groups);
+    let mut raw: Vec<Raw> = Vec::new();
+
+    let mut claim = Vec::new();
+    let flavour = flavour_of(document, &mut claim);
+    if groups.metadata {
+        raw.append(&mut claim);
     }
 
-    Verdict {
+    // 6.1.3 in parts 1 to 3, 6.1.2 in part 4: an encrypted file is not
+    // archival, whatever else is right about it. Reported before any other
+    // rule because a file nobody can open without a key is the one finding
+    // worth having, and checked here rather than in `syntax` because it needs
+    // no machinery at all.
+    if groups.syntax && document.is_encrypted() {
+        raw.push(Raw::file(clauses::ENCRYPTION, FindingKind::Encrypted));
+    }
+    if groups.syntax {
+        syntax::rules(&document.inner, flavour.map(|f| f.part), &mut raw);
+    }
+    if groups.metadata {
+        xmp::rules(document, &machinery, flavour, &mut raw);
+    }
+
+    let part = flavour.map(|f| f.part);
+    let verdict = Verdict {
         flavour,
-        findings,
+        findings: raw.into_iter().map(|r| r.resolve(part)).collect(),
         coverage: Coverage {
-            metadata: true,
-            // Milestones 2 to 5 of docs/design/pdfa.md.
-            syntax: false,
+            metadata: groups.metadata,
+            syntax: groups.syntax,
+            // Milestone 5 of docs/design/pdfa.md. A group that was asked for
+            // and has no rules must not report itself as having run.
             fonts: false,
             colour: false,
         },
-    }
-}
-
-/// The clause number for a rule, which differs by part.
-///
-/// Parts 1 to 3 number file structure at 6.1; part 4 renumbers. Where this
-/// build does not know a part's number for a rule it uses the parts 1-to-3
-/// one, because a wrong clause number in a finding is a smaller error than a
-/// missing finding — and the `kind` is what a caller matches on.
-fn clause_for(flavour: Option<Flavour>, parts_one_to_three: &str) -> Clause {
-    match flavour.map(|f| f.part) {
-        Some(Part::Four) if parts_one_to_three == "6.1.3" => Clause("6.1.2".to_string()),
-        _ => Clause(parts_one_to_three.to_string()),
-    }
+    };
+    (verdict, machinery.reaches())
 }
 
 /// Reads `pdfaid:part` and `pdfaid:conformance` out of the XMP packet.
-fn flavour_of(document: &Document, findings: &mut Vec<ConformanceFinding>) -> Option<Flavour> {
+fn flavour_of(document: &Document, findings: &mut Vec<Raw>) -> Option<Flavour> {
     let Some(packet) = document.xmp_metadata() else {
-        findings.push(ConformanceFinding {
-            clause: Clause("6.6".to_string()),
-            object: None,
-            kind: FindingKind::MetadataMissing,
-        });
+        findings.push(Raw::file(clauses::METADATA, FindingKind::MetadataMissing));
         return None;
     };
 
     let Some((part_text, level_text)) = pdfaid(&packet) else {
-        findings.push(ConformanceFinding {
-            clause: Clause("6.6".to_string()),
-            object: None,
-            kind: if packet.is_empty() {
+        findings.push(Raw::file(
+            clauses::FLAVOUR_ID,
+            if packet.is_empty() {
                 FindingKind::MetadataMissing
             } else {
                 FindingKind::NoFlavourClaimed
             },
-        });
+        ));
         return None;
     };
 
@@ -351,13 +830,12 @@ fn flavour_of(document: &Document, findings: &mut Vec<ConformanceFinding>) -> Op
         .ok()
         .and_then(Part::from_number)
     else {
-        findings.push(ConformanceFinding {
-            clause: Clause("6.6".to_string()),
-            object: None,
-            kind: FindingKind::PartUnknown {
+        findings.push(Raw::file(
+            clauses::FLAVOUR_ID,
+            FindingKind::PartUnknown {
                 declared: part_text,
             },
-        });
+        ));
         return None;
     };
 
@@ -365,29 +843,23 @@ fn flavour_of(document: &Document, findings: &mut Vec<ConformanceFinding>) -> Op
         Some(text) => match Level::from_letter(&text) {
             Some(level) if part.allows(level) => Some(level),
             Some(_) => {
-                findings.push(ConformanceFinding {
-                    clause: Clause("6.6".to_string()),
-                    object: None,
-                    kind: FindingKind::LevelNotInPart { declared: text },
-                });
+                findings.push(Raw::file(
+                    clauses::FLAVOUR_ID,
+                    FindingKind::LevelNotInPart { declared: text },
+                ));
                 None
             }
             None => {
-                findings.push(ConformanceFinding {
-                    clause: Clause("6.6".to_string()),
-                    object: None,
-                    kind: FindingKind::LevelUnknown { declared: text },
-                });
+                findings.push(Raw::file(
+                    clauses::FLAVOUR_ID,
+                    FindingKind::LevelUnknown { declared: text },
+                ));
                 None
             }
         },
         None if part.level_optional() => None,
         None => {
-            findings.push(ConformanceFinding {
-                clause: Clause("6.6".to_string()),
-                object: None,
-                kind: FindingKind::LevelMissing,
-            });
+            findings.push(Raw::file(clauses::FLAVOUR_ID, FindingKind::LevelMissing));
             None
         }
     };
