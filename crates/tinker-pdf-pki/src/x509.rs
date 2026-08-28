@@ -1753,9 +1753,43 @@ pub(crate) mod tests {
             deep.push(2 * (39 - level));
         }
 
-        // Legal BER, refused DER: the indefinite length, with the
-        // end-of-contents pair this crate never goes looking for.
+        // X.690 §8.1.3.6's indefinite length, one seed per shape the walker
+        // has to tell apart. Reachable only through the passes that set
+        // `allow_indefinite_lengths`; a mutation is very unlikely to produce
+        // a balanced set of terminators on its own, which is the point of
+        // seeding them.
+        //
+        // Well formed, with the terminator where it belongs.
         let indefinite = unhex("30 80 02 01 05 00 00");
+        // Three levels, and a definite INTEGER whose *content* is `00 00 05`
+        // — the pair a search for two bytes would stop at, inside a value.
+        let indefinite_nested = unhex(
+            "30 80
+               30 80
+                 30 80 02 03 00 00 05 00 00
+               00 00
+             00 00",
+        );
+        // The terminator that would close the outermost node is absent, so
+        // the whole thing must be refused rather than read to the end.
+        let unterminated = unhex("30 80 30 80 02 01 05 00 00");
+        // §8.1.3.2: the form on a primitive, where nothing could tell the
+        // terminator from the content.
+        let indefinite_primitive = unhex("30 80 04 80 41 42 00 00 00 00");
+        // §8.1.5: a `0x00` identifier octet whose length octet is not zero,
+        // which is a terminator that is not one.
+        let bad_end_of_contents = unhex("30 80 02 01 05 00 01 FF 00 00");
+        // Forty levels, every one of them terminated: legal BER that nothing
+        // reads, because the depth cap refuses it during the scan rather than
+        // on descent. 160 bytes, which is the point — the form makes nesting
+        // cost two octets a level and the cap is what bounds it. The
+        // deliberately *well formed* twin of `deep-nesting`: a truncated one
+        // would be refused for running out instead, so it could not tell a
+        // missing depth bound from a present one.
+        let mut indefinite_deep = std::iter::repeat_n(0x30u8, 40)
+            .flat_map(|tag| [tag, 0x80])
+            .collect::<Vec<u8>>();
+        indefinite_deep.extend(std::iter::repeat_n(0x00u8, 80));
 
         // A bare `Name`, so the distinguished-name reader and the string
         // decoders are reachable without a whole certificate in front of them.
@@ -1773,6 +1807,11 @@ pub(crate) mod tests {
             ("unrecognised-key-algorithm", unrecognised),
             ("deep-nesting", deep),
             ("indefinite-length", indefinite),
+            ("indefinite-nested", indefinite_nested),
+            ("indefinite-unterminated", unterminated),
+            ("indefinite-primitive", indefinite_primitive),
+            ("indefinite-bad-end-of-contents", bad_end_of_contents),
+            ("indefinite-deep-nesting", indefinite_deep),
             ("name-only", name_only),
         ] {
             std::fs::write(base.join(name), bytes).expect("the corpus directory is there");

@@ -30,9 +30,6 @@
 //! of the same bytes — and two readings of a signed structure is a signature
 //! bypass, not a leniency. So:
 //!
-//! - **indefinite lengths are refused by name** ([`DerError::IndefiniteLength`],
-//!   X.690 §8.1.3.6 and §10.1) rather than guessed at by hunting for the
-//!   end-of-contents pair;
 //! - a long-form length that would fit the short form, or one with a leading
 //!   zero, is [`DerError::NonMinimalLength`] (§10.1);
 //! - `0xFF` as a first length octet is [`DerError::ReservedLength`] (§8.1.3.5);
@@ -41,7 +38,59 @@
 //! - an INTEGER with a redundant leading `0x00` or `0xFF` is
 //!   [`DerError::NonMinimalInteger`] (§8.3.2);
 //! - a BOOLEAN whose content is neither `0x00` nor `0xFF` is
-//!   [`DerError::NonCanonicalBoolean`] (§11.1).
+//!   [`DerError::NonCanonicalBoolean`] (§11.1);
+//! - a constructed OCTET STRING or string type — BER's segmented form — is
+//!   [`DerError::WrongForm`] (§10.2), so a value never has a second spelling
+//!   as a list of its own pieces.
+//!
+//! # The one BER form this walker will read, and what makes it safe
+//!
+//! **Indefinite lengths, and only when the caller asks for them**
+//! ([`Limits::allow_indefinite_lengths`], off by default). X.690 §8.1.3.6
+//! lets a constructed encoding omit its length and run to an end-of-contents
+//! pair instead; §10.1 forbids that in DER, and ISO 32000-1 12.8.3.3.1 calls
+//! a PDF signature's `/Contents` a DER object. **Real producers disagree.**
+//! RFC 5652 §5.1 permits BER for `SignedData`, and four of the eighteen CMS
+//! blobs in the fetched corpora — from Acrobat Distiller 5.0.5, Adobe
+//! LiveCycle Designer ES 8.2 and 10.0, and LibreOffice 7.5, which is two
+//! independent lineages rather than one vendor's quirk — open
+//! `30 80 … A0 80 30 80` and cannot be read at all without it.
+//!
+//! Every part of that is narrowed as far as it will go, because the danger of
+//! reading two encodings of one structure is real and is not answered by
+//! reading them carefully:
+//!
+//! - **Off unless switched on, per parse.** The flag lives on [`Limits`], so
+//!   `Limits::CERTIFICATE` — and therefore every X.509 path, including a
+//!   certificate located inside a BER CMS blob — stays definite-length only.
+//!   [`Limits::CMS`] is the one constant that sets it, and
+//!   [`Limits::allow_indefinite_lengths`] says why.
+//! - **Constructed only** (§8.1.3.2). An indefinite length on a primitive is
+//!   [`DerError::IndefinitePrimitive`]: the terminator would be
+//!   indistinguishable from content.
+//! - **The terminator is found, never assumed.** The content's end is located
+//!   by stepping over the nodes inside it — definite ones skipped by their own
+//!   length, so a `00 00` *inside* a value is never mistaken for the end — and
+//!   a pair that does not arrive before the enclosing value runs out is
+//!   [`DerError::UnterminatedIndefiniteLength`] rather than "the rest of the
+//!   buffer". A `0x00` identifier octet with a non-zero length octet is
+//!   [`DerError::MalformedEndOfContents`] (§8.1.5).
+//! - **The scan is bounded by the same [`Budget`] as everything else**: one
+//!   node charged per step, and the depth ceiling applied to the nesting the
+//!   scan opens. So an input of *n* nested indefinite headers cannot buy the
+//!   quadratic rescan it looks like it should.
+//! - **Nothing that gets digested may use it.** RFC 5652 §5.4 computes the
+//!   signature over the DER of `signedAttrs`, so [`crate::cms`] calls
+//!   [`Tlv::require_definite_lengths`] on that subtree and refuses a BER one
+//!   by name. The bytes a signature is checked against are DER or there is no
+//!   verdict.
+//!
+//! One consequence is worth stating because it is a real behaviour change and
+//! not an implementation detail: **an indefinite length moves the depth
+//! ceiling from descent time to read time.** A definite-length node that is
+//! nested too deeply reads fine and refuses when a caller descends; an
+//! indefinite one cannot even report where it ends without walking what is
+//! inside it, so the whole node is [`DerError::DepthExceeded`].
 //!
 //! # What is deliberately *not* enforced, and why
 //!
@@ -87,6 +136,31 @@ pub struct Limits {
     /// Nodes read across the whole parse. Reaching it is
     /// [`DerError::NodeBudgetExceeded`].
     pub max_nodes: u32,
+    /// Whether X.690 §8.1.3.6's indefinite length is read rather than refused.
+    ///
+    /// **False everywhere except one caller**, and the exception is named here
+    /// so that a reader of any other parse path can stop wondering.
+    /// [`Limits::CMS`] sets it, so [`crate::cms::ContentInfo::parse`] — and
+    /// nothing else in this crate — accepts a BER `SignedData`, which RFC 5652
+    /// §5.1 explicitly permits and which four of the eighteen CMS blobs in the
+    /// fetched corpora actually are. [`Limits::CERTIFICATE`] leaves it false,
+    /// so [`crate::x509::Certificate::parse`] is definite-length only however
+    /// it was reached — including for a certificate located *inside* one of
+    /// those BER blobs, which RFC 5280 §4.1 requires to be DER regardless of
+    /// what encloses it.
+    ///
+    /// It is a field on the ceilings rather than a parameter on the readers
+    /// because the property it controls is a property of one whole parse:
+    /// a structure half-read under one rule and half under the other is
+    /// exactly the parser differential this crate exists to avoid. Every
+    /// existing caller keeps DER-only behaviour by having to say nothing —
+    /// [`Limits::new`] does not set it, and [`Limits::default`] is
+    /// [`Limits::CERTIFICATE`].
+    ///
+    /// Setting it does **not** make BER acceptable everywhere below. What is
+    /// digested is held to DER separately, by
+    /// [`Tlv::require_definite_lengths`]; see this module's header.
+    pub allow_indefinite_lengths: bool,
 }
 
 impl Limits {
@@ -108,6 +182,7 @@ impl Limits {
     pub const CERTIFICATE: Self = Self {
         max_depth: 32,
         max_nodes: 65_536,
+        allow_indefinite_lengths: false,
     };
 
     /// The ceilings a CMS `SignedData` is parsed under
@@ -132,18 +207,46 @@ impl Limits {
     /// nodes; the smallest is 1 022 bytes and 128. A node costs at least two
     /// bytes, so this ceiling is unreachable by anything under half a
     /// megabyte, which is far past any signature blob observed and far short
-    /// of letting a large input buy unbounded decoding.
+    /// of letting a large input buy unbounded decoding. The end-of-contents
+    /// scan spends against the same allowance, which is what keeps a nest of
+    /// indefinite headers from buying a rescan per level; the four BER blobs
+    /// spend between 3 and 6 per cent more than they would if every length
+    /// were definite, because a scan steps *over* a definite subtree rather
+    /// than through it.
+    ///
+    /// **Indefinite lengths on**, and this is the only constant that sets
+    /// them. See [`Limits::allow_indefinite_lengths`].
     pub const CMS: Self = Self {
         max_depth: 64,
         max_nodes: 262_144,
+        allow_indefinite_lengths: true,
     };
 
-    /// Ceilings of the caller's choosing.
+    /// Ceilings of the caller's choosing, definite lengths only.
+    ///
+    /// The BER form is deliberately not a parameter here: a caller that wants
+    /// it says so with [`Limits::allowing_indefinite_lengths`], which is one
+    /// more thing to write and therefore one fewer thing to enable by
+    /// accident.
     #[must_use]
     pub const fn new(max_depth: u32, max_nodes: u32) -> Self {
         Self {
             max_depth,
             max_nodes,
+            allow_indefinite_lengths: false,
+        }
+    }
+
+    /// The same ceilings, with X.690 §8.1.3.6's indefinite length allowed.
+    ///
+    /// Read [`Limits::allow_indefinite_lengths`] before using this. It is the
+    /// whole of the opt-in, and there is no other way to turn the form on.
+    #[must_use]
+    pub const fn allowing_indefinite_lengths(self) -> Self {
+        Self {
+            max_depth: self.max_depth,
+            max_nodes: self.max_nodes,
+            allow_indefinite_lengths: true,
         }
     }
 }
@@ -313,10 +416,35 @@ pub enum DerError {
     Truncated,
     /// A definite length that reaches past the end of the enclosing value.
     LengthOverrun,
-    /// X.690 §8.1.3.6's `0x80`. Legal BER, forbidden in DER (§10.1), and never
-    /// guessed at here — the end-of-contents pair it would need is a second
-    /// way to encode where a value stops.
+    /// X.690 §8.1.3.6's `0x80` where the parse does not allow one — which is
+    /// every parse that did not set [`Limits::allow_indefinite_lengths`].
+    ///
+    /// Also what [`Tlv::require_definite_lengths`] reports, for a subtree that
+    /// *is* allowed to carry the form and must not: the encoding a signature
+    /// was computed over (RFC 5652 §5.4).
     IndefiniteLength,
+    /// An indefinite length on a primitive encoding, which X.690 §8.1.3.2
+    /// permits only for constructed ones.
+    ///
+    /// The rule is not a formality. A primitive's content is arbitrary octets,
+    /// so `00 00` inside it is data; with no length and no nested structure to
+    /// step over, there is nothing that could tell the terminator from the
+    /// value.
+    IndefinitePrimitive { tag: u32 },
+    /// An indefinite length whose end-of-contents pair never arrived before
+    /// the enclosing value ran out.
+    ///
+    /// Refused rather than healed. Taking "the rest of the buffer" as the
+    /// content would let a truncated encoding decide how much of its container
+    /// it owns, which is the same defect as a length that overruns — only
+    /// silent.
+    UnterminatedIndefiniteLength,
+    /// A `0x00` identifier octet followed by something other than a `0x00`
+    /// length octet (§8.1.5).
+    ///
+    /// Universal tag 0 is reserved for the end-of-contents pair, so this is
+    /// not a node with an unusual length: it is a terminator that is not one.
+    MalformedEndOfContents { length_octet: u8 },
     /// A long-form length that the short form encodes, or one with leading
     /// zero octets (§10.1).
     NonMinimalLength,
@@ -421,6 +549,18 @@ impl fmt::Display for DerError {
             Self::IndefiniteLength => {
                 write!(f, "an indefinite length: legal BER, forbidden in DER")
             }
+            Self::IndefinitePrimitive { tag } => write!(
+                f,
+                "an indefinite length on primitive tag {tag}, which X.690 §8.1.3.2 \
+                 allows only for constructed encodings"
+            ),
+            Self::UnterminatedIndefiniteLength => {
+                write!(f, "an indefinite length with no end-of-contents pair")
+            }
+            Self::MalformedEndOfContents { length_octet } => write!(
+                f,
+                "an end-of-contents pair whose length octet is {length_octet:#04X}, not zero"
+            ),
             Self::NonMinimalLength => write!(f, "a length not in its shortest form"),
             Self::ReservedLength => write!(f, "0xFF as a first length octet is reserved"),
             Self::LengthTooLarge => write!(f, "a length wider than this machine's usize"),
@@ -481,7 +621,10 @@ impl std::error::Error for DerError {}
 /// is the offset of the tag octet within *that* buffer however deeply nested
 /// this node is — which is what lets a caller name an exact byte range for
 /// something it will later digest. `raw` is the whole encoding, header
-/// included, so `raw.len() - value.len()` is the header width.
+/// included, so `raw.len() - value.len()` is the header width — **except for
+/// an indefinite-length node**, where `raw` also carries the two-octet
+/// terminator. [`Tlv::raw`] says why, and [`Tlv::is_indefinite`] is how a
+/// caller that needs the header width tells the two apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tlv<'a> {
     class: Class,
@@ -491,6 +634,9 @@ pub struct Tlv<'a> {
     raw: &'a [u8],
     start: usize,
     depth: u32,
+    /// Whether the length octet was X.690 §8.1.3.6's `0x80`, so that `raw`
+    /// ends in an end-of-contents pair that `value` does not include.
+    indefinite: bool,
 }
 
 impl<'a> Tlv<'a> {
@@ -527,10 +673,40 @@ impl<'a> Tlv<'a> {
         self.value
     }
 
-    /// The complete encoding, header included.
+    /// The complete encoding, header included — **and, for an
+    /// indefinite-length node, the end-of-contents pair that closes it**.
+    ///
+    /// The decision is stated rather than left to be found, because anything
+    /// that re-encodes or digests a range depends on it. The terminator is
+    /// *in*, for three reasons that agree:
+    ///
+    /// - X.690 §8.1.5 makes the pair part of the value's encoding, not a
+    ///   sibling of it, so `raw()` is bytes that re-read as this same node and
+    ///   a caller that quotes them quotes something parseable;
+    /// - [`Tlv::range`] is then exactly the span the cursor consumed, which is
+    ///   what `fuzz/fuzz_targets/pki_der.rs` asserts of every node and what
+    ///   lets two adjacent siblings' ranges abut;
+    /// - and the alternative — a `raw` two octets short of `end()` — would
+    ///   make a node's own bytes disagree with its own range, which is the
+    ///   sort of off-by-two that surfaces as a signature that will not verify.
+    ///
+    /// The cost is that `raw().len() - value().len()` is the header width only
+    /// when [`Tlv::is_indefinite`] is false; it is the header plus two when it
+    /// is true.
     #[must_use]
     pub const fn raw(&self) -> &'a [u8] {
         self.raw
+    }
+
+    /// Whether the length was X.690 §8.1.3.6's indefinite form.
+    ///
+    /// Only ever true when the parse allowed it
+    /// ([`Limits::allow_indefinite_lengths`]). A caller reading a structure
+    /// that must be DER asks [`Tlv::require_definite_lengths`] instead, which
+    /// answers for the whole subtree rather than for this node alone.
+    #[must_use]
+    pub const fn is_indefinite(&self) -> bool {
+        self.indefinite
     }
 
     /// Where the tag octet sits in the buffer the outermost cursor was opened
@@ -547,7 +723,7 @@ impl<'a> Tlv<'a> {
     }
 
     /// This node's byte range in the buffer the outermost cursor was opened
-    /// on.
+    /// on: always exactly as wide as [`Tlv::raw`], terminator included.
     #[must_use]
     pub const fn range(&self) -> core::ops::Range<usize> {
         self.start()..self.end()
@@ -580,14 +756,28 @@ impl<'a> Tlv<'a> {
         if depth > budget.limits.max_depth {
             return Err(DerError::DepthExceeded);
         }
-        let header = self.raw.len().saturating_sub(self.value.len());
         Ok(Cursor {
             data: self.value,
-            base: self.start.saturating_add(header),
+            base: self.start.saturating_add(self.header_len()),
             at: 0,
             depth,
             budget,
         })
+    }
+
+    /// How many octets stand between the tag and the first content octet.
+    ///
+    /// Not `raw.len() - value.len()`, which is that plus the terminator for an
+    /// indefinite-length node — and getting it wrong there would put every
+    /// child's [`Tlv::start`] two octets past where it is, so a caller
+    /// quoting a nested range would quote the wrong bytes.
+    const fn header_len(&self) -> usize {
+        let after_value = self.raw.len().saturating_sub(self.value.len());
+        if self.indefinite {
+            after_value.saturating_sub(END_OF_CONTENTS)
+        } else {
+            after_value
+        }
     }
 
     /// The single node inside an `[n] EXPLICIT` wrapper.
@@ -619,7 +809,73 @@ impl<'a> Tlv<'a> {
             raw: self.raw,
             start: self.start,
             depth: self.depth,
+            indefinite: self.indefinite,
         }
+    }
+
+    /// Refuses if this node — or anything encoded anywhere inside it — carries
+    /// X.690 §8.1.3.6's indefinite length.
+    ///
+    /// **What it is for.** RFC 5652 §5.4 computes a signature over the *DER*
+    /// encoding of `signedAttrs`, and a structure with no single encoding has
+    /// no digest to agree about. [`crate::cms`] calls this on that one subtree
+    /// and refuses a BER one by name, so widening the walker to read a BER
+    /// `SignedData` does not widen what a signature is checked against. The
+    /// check has to be separate from the walk because the walk does not
+    /// descend into an attribute value it has no decoder for: an indefinite
+    /// length three levels inside an unrecognised attribute is invisible to
+    /// everything else here.
+    ///
+    /// **A flat sweep rather than a descent.** With definite lengths every
+    /// header says where its node ends, so enumerating a subtree in document
+    /// order is stepping *over* a primitive and *into* a constructed one, and
+    /// needs no stack — nothing to overflow, nothing to allocate, and no depth
+    /// to track, because nothing is ever descended into. The first indefinite
+    /// length ends the sweep, which is exactly why what the sweep proves is
+    /// the absence of one. Each step charges the [`Budget`], so the work is
+    /// bounded by the ceiling the rest of the parse spends against.
+    ///
+    /// # Errors
+    ///
+    /// [`DerError::IndefiniteLength`] for the form itself, at any depth;
+    /// otherwise whatever reading a header refused
+    /// ([`DerError::LengthOverrun`] for a length that leaves this node's own
+    /// bytes, which the enclosing parse would already have refused).
+    pub fn require_definite_lengths(&self, budget: &Budget) -> Result<(), DerError> {
+        if self.indefinite {
+            return Err(DerError::IndefiniteLength);
+        }
+        if !self.constructed {
+            // A primitive's content is octets, not encodings. Sweeping it
+            // would read a digest that happens to begin `30 80` as a nested
+            // structure and refuse a message for what its data looks like.
+            return Ok(());
+        }
+        let end = self.raw.len();
+        let mut at = self.header_len();
+        while at < end {
+            budget.charge()?;
+            let rest = self.raw.get(at..).ok_or(DerError::LengthOverrun)?;
+            let (_class, constructed, _tag, after_tag) = read_tag(rest)?;
+            // Read with the form *allowed*, so that meeting one is refused
+            // here by name rather than refused by the length reader for the
+            // unrelated reason that this parse did not opt in.
+            let (length, after_length) = read_length(rest, after_tag, true)?;
+            let step = match length {
+                Length::Indefinite => return Err(DerError::IndefiniteLength),
+                // Into a constructed node: its children are the octets that
+                // follow its header, and they are the next thing swept.
+                Length::Definite(_) if constructed => after_length,
+                Length::Definite(length) => after_length
+                    .checked_add(length)
+                    .ok_or(DerError::LengthOverrun)?,
+            };
+            at = at.checked_add(step).ok_or(DerError::LengthOverrun)?;
+            if at > end {
+                return Err(DerError::LengthOverrun);
+            }
+        }
+        Ok(())
     }
 
     /// Checks that this node carries the universal tag named, in the form DER
@@ -1212,14 +1468,38 @@ impl<'a, 'b> Cursor<'a, 'b> {
         self.budget.charge()?;
 
         let (class, constructed, tag, after_tag) = read_tag(rest)?;
-        let (length, after_length) = read_length(rest, after_tag)?;
-        let end = after_length
-            .checked_add(length)
-            .ok_or(DerError::LengthOverrun)?;
-        let raw = rest.get(..end).ok_or(DerError::LengthOverrun)?;
-        let value = rest.get(after_length..end).ok_or(DerError::LengthOverrun)?;
+        let (length, after_length) =
+            read_length(rest, after_tag, self.budget.limits.allow_indefinite_lengths)?;
+        let (value, raw, indefinite) = match length {
+            Length::Definite(length) => {
+                let end = after_length
+                    .checked_add(length)
+                    .ok_or(DerError::LengthOverrun)?;
+                let raw = rest.get(..end).ok_or(DerError::LengthOverrun)?;
+                let value = rest.get(after_length..end).ok_or(DerError::LengthOverrun)?;
+                (value, raw, false)
+            }
+            Length::Indefinite => {
+                if !constructed {
+                    // §8.1.3.2. Nothing could tell the terminator from the
+                    // content, so there is no reading to attempt.
+                    return Err(DerError::IndefinitePrimitive { tag });
+                }
+                // `rest` stops at the end of the *enclosing* value, so this
+                // cannot reach past the container that holds it however the
+                // terminator is written or withheld.
+                let content_end =
+                    scan_to_end_of_contents(rest, after_length, self.budget, self.depth)?;
+                let end = content_end.saturating_add(END_OF_CONTENTS);
+                let raw = rest.get(..end).ok_or(DerError::LengthOverrun)?;
+                let value = rest
+                    .get(after_length..content_end)
+                    .ok_or(DerError::LengthOverrun)?;
+                (value, raw, true)
+            }
+        };
 
-        self.at = start.saturating_add(end);
+        self.at = start.saturating_add(raw.len());
         Ok(Tlv {
             class,
             constructed,
@@ -1228,6 +1508,7 @@ impl<'a, 'b> Cursor<'a, 'b> {
             raw,
             start: self.base.saturating_add(start),
             depth: self.depth,
+            indefinite,
         })
     }
 
@@ -1332,16 +1613,45 @@ fn read_tag(data: &[u8]) -> Result<(Class, bool, u32, usize), DerError> {
     Ok((class, constructed, tag, at))
 }
 
+/// How wide X.690 §8.1.5's end-of-contents pair is: an identifier octet of
+/// `0x00` and a length octet of `0x00`.
+///
+/// A pair rather than a sentinel byte, and the reason is worth keeping beside
+/// the number: `0x00` is a legal content octet everywhere, so a terminator is
+/// only recognisable in a position where a tag and a length are what comes
+/// next. That is why finding one means walking the nodes in between rather
+/// than searching for two bytes.
+const END_OF_CONTENTS: usize = 2;
+
+/// What a length octet said (§8.1.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Length {
+    /// §8.1.3.3's definite form: this many content octets follow.
+    Definite(usize),
+    /// §8.1.3.6's `0x80`: the content runs to an end-of-contents pair.
+    Indefinite,
+}
+
 /// Reads a length octet and any long form (§8.1.3), starting at `from`.
 ///
-/// Returns the length and where the content begins.
-fn read_length(data: &[u8], from: usize) -> Result<(usize, usize), DerError> {
+/// Returns the length and where the content begins. `indefinite_allowed` is
+/// [`Limits::allow_indefinite_lengths`] — when it is false, §8.1.3.6's `0x80`
+/// is [`DerError::IndefiniteLength`] here and the caller never learns there
+/// was a structure behind it.
+fn read_length(
+    data: &[u8],
+    from: usize,
+    indefinite_allowed: bool,
+) -> Result<(Length, usize), DerError> {
     let first = *data.get(from).ok_or(DerError::Truncated)?;
     let after_first = from.saturating_add(1);
     if first < 0x80 {
-        return Ok((usize::from(first), after_first));
+        return Ok((Length::Definite(usize::from(first)), after_first));
     }
     if first == 0x80 {
+        if indefinite_allowed {
+            return Ok((Length::Indefinite, after_first));
+        }
         return Err(DerError::IndefiniteLength);
     }
     if first == 0xFF {
@@ -1366,7 +1676,108 @@ fn read_length(data: &[u8], from: usize) -> Result<(usize, usize), DerError> {
         // §10.1 again, from the other side: the short form encodes this.
         return Err(DerError::NonMinimalLength);
     }
-    Ok((length, end))
+    Ok((Length::Definite(length), end))
+}
+
+/// Finds where an indefinite-length node's content stops, by walking what is
+/// inside it (§8.1.5).
+///
+/// `data` starts at the node's own tag octet and stops at the end of the value
+/// that holds it; `from` is the offset of its first content octet; `depth` is
+/// the node's own depth, so its children sit one below. The answer is the
+/// offset of the terminator's first octet, and the two octets at that offset
+/// are guaranteed to be `00 00` — every caller may slice them without a check.
+///
+/// # Why this is a walk and not a search
+///
+/// `00 00` occurs constantly inside real content: an INTEGER, a digest, a
+/// modulus. Searching for the pair would end a structure in the middle of a
+/// certificate's serial number, which is not a parse failure — it is a
+/// *different, well-formed reading* of the same bytes, and that is precisely
+/// the differential this crate refuses to have. So every node in between is
+/// stepped over: a definite one by its own length, without looking inside it
+/// at all, and an indefinite one by opening a level that a later pair closes.
+///
+/// # What bounds it (ruling 1)
+///
+/// - **The buffer.** Every read goes through `get`, and running out is
+///   [`DerError::UnterminatedIndefiniteLength`] — never "the rest is content".
+/// - **The budget.** One node is charged per step, so a scan cannot step over
+///   more nodes than the whole parse is allowed, and *n* nested indefinite
+///   headers cannot buy *n* rescans of the same bytes.
+/// - **The depth ceiling**, applied to the nesting this scan opens, so a
+///   `30 80` repeated to the end of the buffer is [`DerError::DepthExceeded`]
+///   at the same level a descent would have refused.
+/// - **No recursion.** One `usize` for the position, one `u32` for how many
+///   levels are open. There is no stack here to overflow.
+fn scan_to_end_of_contents(
+    data: &[u8],
+    from: usize,
+    budget: &Budget,
+    depth: u32,
+) -> Result<usize, DerError> {
+    let mut at = from;
+    // Levels opened *below* the node being scanned and not yet closed. Zero
+    // means the next terminator is this node's own.
+    let mut open = 0u32;
+    loop {
+        budget.charge()?;
+        // The node about to be stepped over sits here. `children` refuses to
+        // hand out a cursor past the same ceiling, so a structure this scan
+        // accepts is one a caller could have descended into.
+        let here = depth.saturating_add(1).saturating_add(open);
+        if here > budget.limits.max_depth {
+            return Err(DerError::DepthExceeded);
+        }
+        let rest = data
+            .get(at..)
+            .filter(|rest| !rest.is_empty())
+            .ok_or(DerError::UnterminatedIndefiniteLength)?;
+
+        if rest.first() == Some(&0x00) {
+            // §8.1.2 reserves universal tag 0 for the terminator, so a `0x00`
+            // identifier octet is never the start of a node.
+            match rest.get(1) {
+                None => return Err(DerError::UnterminatedIndefiniteLength),
+                Some(0x00) => {}
+                Some(other) => {
+                    return Err(DerError::MalformedEndOfContents {
+                        length_octet: *other,
+                    });
+                }
+            }
+            if open == 0 {
+                return Ok(at);
+            }
+            open = open.saturating_sub(1);
+            at = at.saturating_add(END_OF_CONTENTS);
+            continue;
+        }
+
+        let (_class, constructed, tag, after_tag) = read_tag(rest)?;
+        // Allowed unconditionally: this function only runs for a parse that
+        // opted in, and a nested `0x80` here is the ordinary case.
+        let (length, after_length) = read_length(rest, after_tag, true)?;
+        let step = match length {
+            Length::Definite(length) => {
+                let end = after_length
+                    .checked_add(length)
+                    .ok_or(DerError::LengthOverrun)?;
+                if end > rest.len() {
+                    return Err(DerError::LengthOverrun);
+                }
+                end
+            }
+            Length::Indefinite => {
+                if !constructed {
+                    return Err(DerError::IndefinitePrimitive { tag });
+                }
+                open = open.saturating_add(1);
+                after_length
+            }
+        };
+        at = at.checked_add(step).ok_or(DerError::LengthOverrun)?;
+    }
 }
 
 /// `YYMMDDHHMMSSZ`, with RFC 5280 §4.1.2.5.1's century rule.
@@ -1516,6 +1927,16 @@ pub(crate) mod tests {
         cursor.read()
     }
 
+    /// Ceilings that allow the BER form, so a test says which rule it is
+    /// exercising by which constructor it calls.
+    const BER: Limits = Limits::new(32, 65_536).allowing_indefinite_lengths();
+
+    fn one_ber(data: &[u8]) -> Result<Tlv<'_>, DerError> {
+        let budget = Budget::new(BER);
+        let mut cursor = Cursor::new(data, &budget);
+        cursor.read()
+    }
+
     #[test]
     fn a_short_form_sequence_reads() {
         let data = unhex("30 03 02 01 07");
@@ -1561,12 +1982,265 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_indefinite_length_is_refused_by_name() {
-        // Legal BER: SEQUENCE, indefinite, one INTEGER, end-of-contents. This
-        // crate does not go looking for the terminator.
+    fn an_indefinite_length_is_refused_unless_the_ceilings_allow_it() {
+        // Legal BER: SEQUENCE, indefinite, one INTEGER, end-of-contents.
+        let data = unhex("30 80 02 01 05 00 00");
+        assert_eq!(one(&data), Err(DerError::IndefiniteLength));
         assert_eq!(
-            one(&unhex("30 80 02 01 05 00 00")),
+            Limits::default(),
+            Limits::CERTIFICATE,
+            "off by default is the whole of the guarantee, so it is asserted \
+             rather than assumed"
+        );
+        assert!(!Limits::new(64, 64).allow_indefinite_lengths);
+        assert!(one_ber(&data).is_ok(), "and on when a caller says so");
+    }
+
+    // ---- X.690 §8.1.3.6, read only where a caller asked for it ------------
+
+    #[test]
+    fn a_well_formed_indefinite_sequence_reads_to_its_terminator() {
+        // `30 80 02 01 05 00 00`: SEQUENCE, indefinite, INTEGER 5, EOC.
+        let data = unhex("30 80 02 01 05 00 00");
+        let budget = Budget::new(BER);
+        let mut cursor = Cursor::new(&data, &budget);
+        let sequence = cursor.expect(Tag::Sequence).expect("a SEQUENCE");
+        assert!(sequence.is_indefinite());
+        assert!(
+            cursor.finish().is_ok(),
+            "and the cursor consumed the terminator with it"
+        );
+
+        // **The `raw`/`range` decision, asserted rather than described.** The
+        // encoding runs to the end of the end-of-contents pair, so the range
+        // is seven octets and the content is one node of three.
+        assert_eq!(sequence.range(), 0..7);
+        assert_eq!(sequence.raw(), data.as_slice());
+        assert_eq!(sequence.raw().len(), sequence.end() - sequence.start());
+        assert_eq!(sequence.value(), &unhex("02 01 05")[..]);
+        assert_eq!(
+            sequence.raw().len() - sequence.value().len(),
+            4,
+            "two octets of header and two of terminator, which is why \
+             `raw.len() - value.len()` is not the header width here"
+        );
+
+        // And the child's coordinates are still the outer buffer's — the one
+        // thing the terminator being inside `raw` could plausibly have broken.
+        let mut inner = sequence.children(&budget).expect("constructed");
+        let integer = inner.expect(Tag::Integer).expect("an INTEGER");
+        assert_eq!(integer.range(), 2..5);
+        assert_eq!(&data[integer.range()], integer.raw());
+        assert!(inner.finish().is_ok(), "the terminator is not a sibling");
+    }
+
+    #[test]
+    fn indefinite_lengths_nest_and_each_terminator_closes_its_own_level() {
+        // Three deep: `30 80 { 30 80 { 30 80 { 02 01 07 } } }`, which is the
+        // shape `160F-2019.pdf` writes five levels over.
+        let data = unhex("30 80 30 80 30 80 02 01 07 00 00 00 00 00 00");
+        let budget = Budget::new(BER);
+        let mut cursor = Cursor::new(&data, &budget);
+
+        let outer = cursor.read().expect("the outermost");
+        assert!(cursor.finish().is_ok());
+        assert_eq!(outer.range(), 0..15);
+
+        let mut at = outer;
+        for depth in 1..=2u32 {
+            let mut inner = at.children(&budget).expect("constructed");
+            at = inner.read().expect("another SEQUENCE");
+            assert!(at.is_indefinite());
+            assert_eq!(at.depth(), depth);
+            assert!(
+                inner.finish().is_ok(),
+                "each level's terminator belongs to that level"
+            );
+        }
+        assert_eq!(at.range(), 4..11, "the innermost SEQUENCE and its pair");
+
+        let mut leaf = at.children(&budget).expect("constructed");
+        assert_eq!(
+            leaf.expect(Tag::Integer)
+                .and_then(|t| t.as_integer())
+                .and_then(|i| i.as_u64()),
+            Ok(7)
+        );
+        assert!(leaf.finish().is_ok());
+    }
+
+    #[test]
+    fn an_unterminated_indefinite_length_is_refused_by_name() {
+        // The terminator that would close the SEQUENCE is simply absent.
+        assert_eq!(
+            one_ber(&unhex("30 80 02 01 05")),
+            Err(DerError::UnterminatedIndefiniteLength),
+            "not `the rest of the buffer`, which is the whole point"
+        );
+        // Nor does an inner level's pair count as the outer one's.
+        assert_eq!(
+            one_ber(&unhex("30 80 30 80 02 01 05 00 00")),
+            Err(DerError::UnterminatedIndefiniteLength)
+        );
+        // A lone `0x00` with nothing after it.
+        assert_eq!(
+            one_ber(&unhex("30 80 00")),
+            Err(DerError::UnterminatedIndefiniteLength)
+        );
+        // And the empty case: an indefinite SEQUENCE with nothing at all.
+        assert_eq!(
+            one_ber(&unhex("30 80")),
+            Err(DerError::UnterminatedIndefiniteLength)
+        );
+    }
+
+    #[test]
+    fn an_end_of_contents_pair_with_a_length_is_not_a_terminator() {
+        // §8.1.5 spells it `00 00`. `00 01 …` is a node wearing the reserved
+        // universal tag 0, which is not a node at all.
+        assert_eq!(
+            one_ber(&unhex("30 80 00 01 FF")),
+            Err(DerError::MalformedEndOfContents { length_octet: 0x01 })
+        );
+        assert_eq!(
+            one_ber(&unhex("30 80 02 01 05 00 80 00 00")),
+            Err(DerError::MalformedEndOfContents { length_octet: 0x80 }),
+            "an indefinite length on the terminator itself, refused before it \
+             can open a level nothing closes"
+        );
+    }
+
+    #[test]
+    fn an_indefinite_length_on_a_primitive_is_refused() {
+        // §8.1.3.2 admits the form only for constructed encodings: a
+        // primitive's content is arbitrary octets, so nothing could tell a
+        // terminator from a value.
+        assert_eq!(
+            one_ber(&unhex("04 80 41 42 00 00")),
+            Err(DerError::IndefinitePrimitive { tag: 4 }),
+            "a BER segmented OCTET STRING's own header, refused at the top"
+        );
+        // And nested, where the scan meets it rather than the reader.
+        assert_eq!(
+            one_ber(&unhex("30 80 04 80 41 00 00 00 00")),
+            Err(DerError::IndefinitePrimitive { tag: 4 })
+        );
+        // The constructed form of the same tag is refused later, by
+        // `as_octet_string`, for the different reason that DER §10.2 forbids
+        // segmentation at all — so neither spelling reassembles.
+        let data = unhex("24 80 04 01 41 00 00");
+        let tlv = one_ber(&data).expect("a constructed OCTET STRING reads");
+        assert_eq!(
+            tlv.as_octet_string(),
+            Err(DerError::WrongForm {
+                tag: 4,
+                constructed: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_zero_pair_inside_a_definite_value_is_content_and_not_a_terminator() {
+        // The reason the terminator is *walked to* rather than searched for.
+        // The INTEGER's content is `00 00 05`, which holds the two octets a
+        // search would stop at — and stopping there is not a parse failure, it
+        // is a different well-formed reading of the same bytes.
+        let data = unhex("30 80 02 03 00 00 05 00 00");
+        let budget = Budget::new(BER);
+        let mut cursor = Cursor::new(&data, &budget);
+        let sequence = cursor.read().expect("a SEQUENCE");
+        assert_eq!(sequence.range(), 0..9, "the terminator is the last pair");
+        assert_eq!(sequence.value(), &unhex("02 03 00 00 05")[..]);
+
+        // An OCTET STRING of nothing but zeroes, for the same reason.
+        let data = unhex("30 80 04 04 00 00 00 00 00 00");
+        assert_eq!(one_ber(&data).map(|t| t.range()), Ok(0..10));
+    }
+
+    #[test]
+    fn the_scan_for_a_terminator_is_bounded_by_depth_and_by_budget() {
+        // Sixty-four indefinite headers and no terminator at all: a search
+        // would run to the end of the buffer, and a recursive walk would run
+        // out of stack.
+        let deep = unhex("30 80").repeat(64);
+        let budget = Budget::new(Limits::new(8, 1_000).allowing_indefinite_lengths());
+        let mut cursor = Cursor::new(&deep, &budget);
+        assert_eq!(
+            cursor.read(),
+            Err(DerError::DepthExceeded),
+            "refused at the level a descent would have refused"
+        );
+
+        // The same shape under a node budget too small to reach the cap: the
+        // other ceiling, and the one that bounds a wide scan rather than a
+        // deep one.
+        let budget = Budget::new(Limits::new(1_000, 6).allowing_indefinite_lengths());
+        let mut cursor = Cursor::new(&deep, &budget);
+        assert_eq!(cursor.read(), Err(DerError::NodeBudgetExceeded));
+
+        // A scan charges what it steps over, which is what stops *n* nested
+        // headers from buying *n* free rescans of the same bytes.
+        let nested = unhex("30 80 30 80 30 80 05 00 00 00 00 00 00 00");
+        let budget = Budget::new(BER);
+        let mut cursor = Cursor::new(&nested, &budget);
+        cursor.read().expect("the outermost");
+        assert!(
+            budget.spent() > 1,
+            "one node read, but the scan under it was paid for: {} spent",
+            budget.spent()
+        );
+    }
+
+    #[test]
+    fn an_indefinite_length_cannot_reach_past_the_value_that_holds_it() {
+        // The inner SEQUENCE's terminator is outside the outer one's declared
+        // length, so it is not reachable from inside it. A scan that searched
+        // the whole buffer would find it and produce a node overlapping its
+        // own parent's sibling.
+        let data = unhex("30 04 30 80 05 00 00 00");
+        let budget = Budget::new(BER);
+        let mut cursor = Cursor::new(&data, &budget);
+        let outer = cursor.read().expect("a definite SEQUENCE");
+        assert_eq!(outer.range(), 0..6);
+        let mut inner = outer.children(&budget).expect("constructed");
+        assert_eq!(inner.read(), Err(DerError::UnterminatedIndefiniteLength));
+    }
+
+    #[test]
+    fn require_definite_lengths_sweeps_the_whole_subtree() {
+        let budget = Budget::new(BER);
+
+        // Definite throughout, three levels: nothing to refuse.
+        let data = unhex("30 09 30 07 31 05 04 03 00 00 00");
+        let tlv = one_ber(&data).expect("a SEQUENCE");
+        assert_eq!(tlv.require_definite_lengths(&budget), Ok(()));
+
+        // The node itself.
+        let data = unhex("30 80 05 00 00 00");
+        let tlv = one_ber(&data).expect("an indefinite SEQUENCE");
+        assert_eq!(
+            tlv.require_definite_lengths(&budget),
             Err(DerError::IndefiniteLength)
+        );
+
+        // Three levels down, inside a node nothing here would descend into.
+        let data = unhex("30 0A 30 08 31 06 30 80 05 00 00 00");
+        let tlv = one_ber(&data).expect("a SEQUENCE");
+        assert_eq!(
+            tlv.require_definite_lengths(&budget),
+            Err(DerError::IndefiniteLength),
+            "the sweep is what makes a subtree's encoding knowable without \
+             a decoder for what is in it"
+        );
+
+        // A primitive leaf has no subtree, and answering that must not depend
+        // on reading its content as though it were one.
+        let data = unhex("04 04 30 80 00 00");
+        let tlv = one_ber(&data).expect("an OCTET STRING");
+        assert_eq!(
+            tlv.require_definite_lengths(&budget),
+            Ok(()),
+            "content that looks like an encoding is still content"
         );
     }
 

@@ -21,9 +21,10 @@ following the chain and saying what it all amounts to is milestone 6. Milestone 
 open on a technicality worth naming rather than papering over: its exit criterion asks for a
 committed sidecar of expected certificate values and there is none. What stands in its place
 today is `crates/tinker-pdf/tests/cms_census.rs`, which reads every certificate in the fetched
-corpora through `x509.rs` and asserts that all twenty-nine parse — evidence from other
+corpora through `x509.rs` and asserts that all forty-one parse — evidence from other
 people's software rather than from a transcription, which is the stronger of the two and not
-the one the row asked for.
+the one the row asked for. (Twenty-nine when milestone 3 measured it; the other twelve arrived
+with the four BER blobs, and are held to DER all the same.)
 
 ## What milestone 1 measured, which changed this document
 
@@ -80,6 +81,12 @@ rests on; it is its own milestone, with its own argument about what two readings
 structure would cost, and it was deliberately not done quietly inside a milestone about
 `SignedData`. The number is asserted so it cannot drift unremarked.
 
+> *Answered.* The milestone this paragraph asked for was done; see
+> [What reading BER measured](#what-reading-ber-measured-and-what-it-was-not-allowed-to-widen)
+> below. The measurement above stands as the record of what milestone 3 found; the sentences
+> about nothing verifying those four files, and about the design not saying how it ever
+> would, no longer describe this engine.
+
 **`Signature::contents` reaches twelve of the eighteen.** Milestone 1 takes the CMS bytes from
 the gap the `/ByteRange` spans leave, which is right — the bytes a signature covers are the
 ones the file says it covers. The consequence had not been stated: six signatures have a
@@ -110,6 +117,102 @@ vectors. Zero signers identified by `subjectKeyIdentifier`, zero embedded CRLs, 
 `signingCertificateV2` attributes that this engine can reach — the corpus's only one is inside
 `issue16553.pdf`, which is one of the four refused for BER. Those four code paths are held up
 by fixtures in `cms.rs` and by nothing else, and each says so where it is defined.
+
+> *One of those four has since closed.* Reading BER reached `issue16553.pdf`, so
+> `signingCertificateV2` now has real evidence and the census asserts 1 rather than 0.
+> `subjectKeyIdentifier`, embedded CRLs and the `[1]` certificate choice are still
+> fixture-only — and the list gained a member: **no corpus blob has a BER `signedAttrs`**, so
+> the RFC 5652 §5.4 rule that refuses one is adjudicated by fixtures alone. The injection
+> matrix below is where that was found.
+
+## What reading BER measured, and what it was not allowed to widen
+
+Milestone 3's first finding said this needed its own piece of work with its own argument.
+This is that argument and its measurements. The refused count is now **0 of 18**, and the
+number it dropped from is the one milestone 3 asserted.
+
+**The rule that changed is exactly one bit wide.** `der::Limits` grew
+`allow_indefinite_lengths`, false in `Limits::new`, false in `Limits::CERTIFICATE`, and true
+in `Limits::CMS` and nowhere else. So `ContentInfo::parse` reads X.690 §8.1.3.6's form and
+every other caller of `tinker-pdf-pki` is unchanged — including `Certificate::parse`, which
+runs under `Limits::CERTIFICATE` however it was reached, so the twelve certificates that
+arrive inside a BER message are still held to RFC 5280 §4.1's DER. It is a property of a
+whole parse rather than a parameter on a reader, because a structure half-read under one rule
+and half under the other is the differential the whole exercise is trying not to have.
+
+**What is signed did not widen at all.** RFC 5652 §5.4 digests the DER of `signedAttrs`, so
+`Attributes::parse` sweeps that subtree — the `[0]` node and everything under it, including
+attribute values this crate has no decoder for — and an indefinite length anywhere in it is
+`CmsError::IndefiniteSignedAttributes`. The sweep is separate from the walk because the walk
+locates an unrecognised attribute's values without descending into them, so a BER encoding
+three levels inside one would otherwise be invisible. `unsignedAttrs` is deliberately *not*
+held to the rule: nothing digests it.
+
+**All four blobs write `signedAttrs` with definite lengths.** That is the measurement that
+made this safe to do at all, and it is worth stating as a number rather than a hope: the
+BER in these files is five structural nodes — the `ContentInfo`, its `[0]`, the `SignedData`,
+the `EncapsulatedContentInfo` and the certificate set — and nothing below them. So the §5.4
+rule costs this corpus nothing today, and `cms.rs` holds it up with a fixture rather than
+with the corpus.
+
+**Four more signatures verify, and that is the evidence the scan is right.** The census now
+reports **18 of 18 blobs parsed, 0 refused**, 20 signers, 41 certificates all parsing, and
+**19 signatures verifying over the §5.4 re-encoding — up from 15 — with 0 verifying over the
+stored `[0]` bytes.** Each of the four BER blobs is among the four new ones. A parser that
+found the wrong end-of-contents pair would still produce a structure; it would not produce a
+`signedAttrs` whose digest matches a signature a real signer made with a real key. That is
+the strongest available check on an end-of-contents scan, and it is somebody else's bytes
+against this engine's own RSA (ruling 13).
+
+**One code path stopped being fixture-only.** `issue16553.pdf` carries the corpus's only
+`signingCertificateV2` attribute (RFC 5035 §3), and it was unreachable because that blob was
+one of the four refused. The census assertion for it moves from 0 to 1, which is the first
+real evidence under that decoder.
+
+**One consequence of the encoding, recorded because it is a behaviour change.** An indefinite
+length moves the depth ceiling from descent time to read time. A definite-length node nested
+too deeply reads fine and refuses when a caller descends; an indefinite one cannot say where
+it ends without walking what is inside it, so the whole node is `DepthExceeded`. Forty
+terminated levels fit in 160 octets, and `fuzz/corpus/pki_der/indefinite-deep-nesting` is
+that input.
+
+### The injection matrix
+
+Five defects were reintroduced one at a time and the suite re-run, over **3 205 workspace
+tests plus the corpus census**. House practice
+([verification.md](../verification.md)): a guard that catches nothing when its defect is
+injected is not a guard.
+
+| # | Defect reintroduced | Caught by | Census |
+|---|---------------------|-----------|--------|
+| 1 | `signedAttrs` no longer swept for definite lengths | 3 | **0** |
+| 2 | depth bound dropped from the end-of-contents scan | 2 | 0 |
+| 3 | a missing terminator treated as the end of the buffer | 5 | 0 |
+| 4 | the terminator *searched* for as two bytes instead of walked to | 12 | caught |
+| 5 | the terminator left out of `Tlv::raw`, so a range is two octets short | 5 | caught |
+
+**The matrix found two holes, which is why it is run rather than reasoned about.**
+
+*Injection 2 was caught by one assertion in the first draft*, out of 3 205. The depth bound
+inside the scan was held up by a single unit test, and the only reason it fired at all is
+that the test's input is *unterminated* — remove the bound and it fails for running out of
+buffer instead, which is a different defect wearing the same error. The fix is
+`indefinite-deep-nesting`, a **well-formed** forty-level input that must be `DepthExceeded`
+under twelve levels and must parse under sixty-four; a truncated twin could not tell a
+missing bound from a present one. Two catches now, in two files.
+
+*Injection 1 is caught by nothing in the corpus*, and this one is not fixable by writing a
+better test. No corpus blob has a BER `signedAttrs`, so the §5.4 rule that matters most is
+adjudicated **entirely by fixtures** — the same standing of evidence as
+`subjectKeyIdentifier`, embedded CRLs and the `[1]` certificate choice, and it is named here
+for the same reason those are. The rule is what stops a BER structure from reaching a digest;
+the corpus cannot currently say whether it is enforced.
+
+Injection 4 is the one the whole design turns on: `00 00` occurs constantly inside real
+content — an INTEGER, a digest, a modulus — so searching for the pair rather than walking the
+nodes in between does not fail to parse. It produces a *different, well-formed reading of the
+same bytes*, which is the parser differential a signature bypass is made of. Twelve tests and
+the census catch it, which is the level of coverage that rule deserves.
 
 ## Scope
 
@@ -195,7 +298,9 @@ PDF concepts), satisfying ruling 8's definition, and its one edge — `pki → c
 and signature-verify primitives — is a leaf-to-leaf edge like `font → filters`, which ruling 8
 explicitly permits. The alternative (parsing in the facade) fails ruling 8's spirit in the
 other direction: it would weld protocol parsing to COS types for no gain. The crate exposes:
-a DER walker (definite lengths only — DER forbids indefinite; depth-capped; never panics),
+a DER walker (definite lengths by default; X.690 §8.1.3.6's indefinite length behind an
+opt-in on `Limits` that only `Limits::CMS` sets, because RFC 5652 §5.1 permits BER and a
+fifth of the corpus is; depth-capped; never panics),
 `Certificate` (subject/issuer as compared-by-DER blobs plus decoded fields, SPKI, validity,
 extensions), `SignedData` (digest/signature algorithm identifiers, signed attributes with
 their exact DER for re-digesting, certificates, signer identifier), and chain-shape checking
@@ -352,7 +457,7 @@ whose interop claim is unverified and unstated is worse than one that says so.
 | Risk | Mitigation |
 |------|------------|
 | Hand-rolled RSA/ECDSA verify accepts a forgery (padding laxity, missing range checks) | Verify-only scope; CAVP negative vectors and forged-padding cases as merge gates, mirroring the crate's FIPS 197/RFC 6229 precedent; full-encoding comparison for EMSA-PKCS1-v1_5 rather than a prefix match. The negative vectors carry this alone under ruling 13, which is why every published invalid case is a gate rather than a sample |
-| ASN.1 parser panics or overreads on malformed DER (largest new untrusted surface) | Own leaf crate with dedicated fuzz target from milestone 2's first commit; depth caps and definite-length-only parsing; ruling 1 makes a fuzz crash a release blocker |
+| ASN.1 parser panics or overreads on malformed DER (largest new untrusted surface) | Own leaf crate with dedicated fuzz target from milestone 2's first commit; depth caps; definite-length parsing by default, with the indefinite form opt-in per parse, constructed-only, budget-and-depth-bounded during its end-of-contents scan, and refused outright inside what §5.4 digests; ruling 1 makes a fuzz crash a release blocker |
 | A verdict rendered as a single "valid" boolean misleads hosts into overtrusting | The API has no boolean: coverage, digest, chain, and MDP are separate typed fields, and the docs state the engine proves integrity, not identity — anchors are the host's assertion |
 | Byte-range trickery: ranges that skip more than the `/Contents` gap make a "valid" signature over chosen bytes | Coverage classification is computed from the ranges, never trusted from them; anything but exact-gap bracketing to EOF or a clean revision boundary is `Suspicious` with a typed reason, fixture-pinned |
 | MDP misclassification calls a benign form fill a disallowed change (or the reverse) | Classification reuses the tested `form.rs` field machinery rather than re-deriving object roles; fixtures for each `/P` level in both directions, each fixture's expected verdict written from the clause rather than from a run |

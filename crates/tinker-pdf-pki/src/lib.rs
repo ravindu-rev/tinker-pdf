@@ -23,21 +23,29 @@
 //!
 //! # What it refuses, and where the line is
 //!
-//! **Definite lengths only.** X.509 is DER (RFC 5280 §4.1) and DER admits one
-//! encoding per value, so BER's indefinite length is refused by name
-//! ([`der::DerError::IndefiniteLength`]) rather than guessed at, along with
-//! non-minimal lengths, non-minimal tags, non-minimal INTEGERs and
-//! non-canonical BOOLEANs. A second reading of a signed structure is a
-//! signature bypass, not a leniency, and [`der`]'s header says which rules are
-//! enforced and which two deliberately are not.
+//! **DER by default.** X.509 is DER (RFC 5280 §4.1) and DER admits one
+//! encoding per value, so non-minimal lengths, non-minimal tags, non-minimal
+//! INTEGERs, non-canonical BOOLEANs and BER's segmented string forms are all
+//! refused by name. A second reading of a signed structure is a signature
+//! bypass, not a leniency, and [`der`]'s header says which rules are enforced
+//! and which two deliberately are not.
 //!
-//! **This rule has a measured price, and it is paid in [`cms`].** ISO 32000-1
-//! 12.8.3.3.1 calls a PDF signature's `/Contents` a DER object; four of the
-//! eighteen CMS blobs in the fetched corpora are BER instead, indefinite
-//! lengths from the outermost SEQUENCE down, and this crate refuses all four.
-//! [`cms`]'s header says what reading them would cost and why it is not a
-//! change to make inside a milestone about `SignedData`;
-//! `crates/tinker-pdf/tests/cms_census.rs` keeps the number honest.
+//! **One BER form is read, by one caller, on measured evidence.** RFC 5652
+//! §5.1 permits BER for a `SignedData`, ISO 32000-1 12.8.3.3.1 calls a PDF
+//! signature's `/Contents` DER, and four of the eighteen CMS blobs in the
+//! fetched corpora side with the RFC — indefinite lengths on their outermost
+//! structural nodes, from two independent producer lineages. So
+//! [`der::Limits::allow_indefinite_lengths`] exists, [`der::Limits::CMS`] is
+//! the only constant that sets it, and [`cms::ContentInfo::parse`] is the only
+//! caller that gets it. [`x509::Certificate::parse`] does not, however it was
+//! reached.
+//!
+//! The narrowing that matters is in [`cms`]: what RFC 5652 §5.4 digests is
+//! held to DER by [`der::Tlv::require_definite_lengths`], so a BER
+//! `signedAttrs` is [`cms::CmsError::IndefiniteSignedAttributes`] rather than
+//! a signature that fails to verify for a reason nothing names.
+//! `crates/tinker-pdf/tests/cms_census.rs` keeps every one of those numbers
+//! honest.
 //!
 //! **Depth-capped and budgeted.** [`der::Limits`] bounds nesting and total
 //! nodes; the walker itself does not recurse, so the cap is about bounding
