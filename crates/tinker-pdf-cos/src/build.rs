@@ -1195,7 +1195,55 @@ pub struct PageBuilder {
     /// in. Written at `finish`, because a destination naming a page index
     /// cannot be resolved until every page exists.
     links: Vec<LinkAnnotation>,
+    /// The next marked-content id this page will hand out (14.7.4.2).
+    ///
+    /// Per page, because that is the scope the specification gives them: an
+    /// `/MCID` identifies a sequence *within one content stream*, and a
+    /// document-wide counter would make `/ParentTree` lookups depend on how
+    /// many pages came before.
+    next_mcid: u32,
+    /// Structure elements closed on this page, in the order they closed.
+    tag_roots: Vec<TaggedNode>,
+    /// Structure elements still open, outermost first.
+    tag_stack: Vec<TaggedNode>,
+    /// Where the most recent `BDC` starts in [`Self::content`], and the
+    /// length immediately after it. Together they say whether the open
+    /// sequence has had anything drawn into it. See [`Self::close_marked`].
+    opened: Option<usize>,
+    opened_end: usize,
 }
+
+/// One structure element under construction, and what it claims.
+///
+/// Built by [`PageBuilder::tagged`] rather than described by the caller, which
+/// is what makes the tree correct by construction: there is no way to name a
+/// marked-content id that was never written, and no way to write one no
+/// element claims.
+struct TaggedNode {
+    /// The structure type, which is also the content stream's tag.
+    tag: Vec<u8>,
+    kids: Vec<TaggedKid>,
+}
+
+/// What a structure element holds: marked content on its own page, or a
+/// nested element.
+///
+/// Two variants and never one, for the reason the reader's `StructKid` keeps
+/// them apart: a marked-content id is a span of this page's content stream and
+/// a child element is a subtree, and a writer that flattened them would have
+/// to guess which it meant on the way back.
+enum TaggedKid {
+    Content(u32),
+    Element(TaggedNode),
+}
+
+/// How deep [`PageBuilder::tagged`] will nest before it stops opening
+/// elements and simply draws.
+///
+/// The reader caps its own walk at [`crate::limits::MAX_NEST_DEPTH`], so a
+/// writer that nested past it would produce a file this engine could not read
+/// back — which is the one thing a writer must not do.
+const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize;
 
 impl PageBuilder {
     /// Sets `/CropBox`, as `[x0 y0 x1 y1]` in points from the bottom-left.
@@ -1214,6 +1262,121 @@ impl PageBuilder {
     /// diff against the source document readable.
     pub fn set_crop_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         self.crop_box = Some([x0, y0, x1, y1]);
+    }
+
+    /// Draws inside a tagged marked-content sequence (14.7.4), recording a
+    /// structure element that claims exactly what was drawn.
+    ///
+    /// `tag` is the structure type and the content stream's tag at once —
+    /// `P`, `H1`, `Figure`, `Span`. It is written as a name, so anything
+    /// 7.3.5 requires escaping is escaped rather than refused.
+    ///
+    /// # Why a closure, and why the tree is not described
+    ///
+    /// The alternative was a pair of `begin`/`end` calls and a separate tree
+    /// the caller hands over, naming marked-content ids. That shape lets a
+    /// caller name an id that was never written, and lets an id be written
+    /// that no element claims — the two defects `Document::structure()`
+    /// reports as orphans and unreadable kids. Here neither is expressible:
+    /// the element and the sequence are opened by the same call, so the tree
+    /// is correct by construction and `finish` has nothing to validate.
+    ///
+    /// Nesting works, and reading order survives it. A sequence that resumes
+    /// after a nested one closes gets a **fresh** id, so an element whose text
+    /// continues after its child reads before *and* after the child rather
+    /// than all of it afterwards. An empty resumption is dropped rather than
+    /// written: a marked sequence with nothing in it is a node the reader
+    /// would report and nobody asked for.
+    ///
+    /// Past [`MAX_TAG_DEPTH`] the content is drawn untagged rather than
+    /// refused (ruling 2). The reader caps its own walk at the same depth, so
+    /// an element written below it is one this engine could not read back.
+    pub fn tagged(&mut self, tag: &[u8], draw: impl FnOnce(&mut PageBuilder)) {
+        if self.tag_stack.len() >= MAX_TAG_DEPTH {
+            draw(self);
+            return;
+        }
+
+        // The parent's sequence closes before the child's opens: 14.7.4.2
+        // scopes content to the innermost sequence, and leaving the parent's
+        // open would make the child's content belong to both.
+        let resume = self.tag_stack.last().map(|parent| parent.tag.clone());
+        if resume.is_some() {
+            self.close_marked();
+        }
+
+        let mcid = self.open_marked(tag);
+        self.tag_stack.push(TaggedNode {
+            tag: tag.to_vec(),
+            kids: vec![TaggedKid::Content(mcid)],
+        });
+        draw(self);
+        self.close_marked();
+
+        let node = self.tag_stack.pop().expect("pushed immediately above");
+        // An element that claims nothing at all is dropped. It can only arise
+        // from a `tagged` whose closure drew nothing, and a structure element
+        // with no content and no children is a node the reader would report
+        // and nobody asked for. `/Alt` on an empty `Figure` is the case that
+        // would want one, and this builder cannot write `/Alt` yet.
+        if !node.kids.is_empty() {
+            match self.tag_stack.last_mut() {
+                Some(parent) => parent.kids.push(TaggedKid::Element(node)),
+                None => self.tag_roots.push(node),
+            }
+        }
+
+        // Reopen the parent so anything drawn after this child still belongs
+        // to it. If nothing is, `close_marked` takes the reopening back.
+        if let Some(tag) = resume {
+            let mcid = self.open_marked(&tag);
+            self.tag_stack
+                .last_mut()
+                .expect("resume implies a parent")
+                .kids
+                .push(TaggedKid::Content(mcid));
+        }
+    }
+
+    /// Writes `/Tag <</MCID n>> BDC` and returns the id it handed out.
+    fn open_marked(&mut self, tag: &[u8]) -> u32 {
+        let mcid = self.next_mcid;
+        self.next_mcid += 1;
+        self.opened = Some(self.content.len());
+        crate::write::write_name(&mut self.content, tag);
+        self.content
+            .extend_from_slice(format!(" <</MCID {mcid}>> BDC\n").as_bytes());
+        self.opened_end = self.content.len();
+        mcid
+    }
+
+    /// Writes `EMC`, or unwrites the `BDC` when nothing was drawn since it.
+    ///
+    /// The empty case is not hypothetical: it is what a resumption after the
+    /// last nested child always is. Writing it would leave a marked sequence
+    /// with no content, which `Document::structure` reports as a node, so the
+    /// bytes are taken back and the id handed back with them.
+    ///
+    /// Taking bytes back is safe because [`Self::open_marked`] only appends
+    /// and `opened_end` is the length immediately after it: a content length
+    /// still equal to it means nothing has been written since, and the bytes
+    /// from `opened` onwards are exactly the ones it wrote. Handing the id
+    /// back is safe for the same reason — a nested `tagged` would have moved
+    /// the length, so the id being dropped is always the last one issued.
+    fn close_marked(&mut self) {
+        let Some(at) = self.opened.take() else {
+            self.content.extend_from_slice(b"EMC\n");
+            return;
+        };
+        if self.content.len() != self.opened_end {
+            self.content.extend_from_slice(b"EMC\n");
+            return;
+        }
+        self.content.truncate(at);
+        self.next_mcid -= 1;
+        if let Some(node) = self.tag_stack.last_mut() {
+            node.kids.pop();
+        }
     }
 
     /// Sets `/BleedBox` (14.11.2), in the same coordinates as
@@ -3176,6 +3339,11 @@ impl DocumentBuilder {
             crop_box: None,
             bleed_box: None,
             links: Vec::new(),
+            next_mcid: 0,
+            tag_roots: Vec::new(),
+            tag_stack: Vec::new(),
+            opened: None,
+            opened_end: 0,
         };
         draw(&mut page);
         self.pages.push(page);
@@ -3208,6 +3376,64 @@ impl DocumentBuilder {
         }
         self.outline = entries;
         true
+    }
+
+    /// Writes one page's structure elements and returns the refs a parent
+    /// should list as its kids.
+    ///
+    /// `claims` is indexed by marked-content id and filled with the element
+    /// that opened each one, which is the `/ParentTree` entry 14.7.4.4 asks
+    /// for: the same relation as `/K`, stored the other way round, so a
+    /// consumer holding an id can find its element without walking the tree.
+    /// Both directions are written from the same walk so they cannot disagree.
+    fn write_struct_elements(
+        &mut self,
+        nodes: &[TaggedNode],
+        parent: ObjRef,
+        page: ObjRef,
+        claims: &mut [Option<ObjRef>],
+    ) -> Vec<Object> {
+        let mut out = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let reference = self.allocate();
+            let mut kids = Vec::with_capacity(node.kids.len());
+            for kid in &node.kids {
+                match kid {
+                    TaggedKid::Content(mcid) => {
+                        kids.push(Object::Int(i64::from(*mcid)));
+                        if let Some(slot) = claims.get_mut(*mcid as usize) {
+                            *slot = Some(reference);
+                        }
+                    }
+                    TaggedKid::Element(child) => {
+                        kids.extend(self.write_struct_elements(
+                            std::slice::from_ref(child),
+                            reference,
+                            page,
+                            claims,
+                        ));
+                    }
+                }
+            }
+
+            let mut element = Dict::new();
+            element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
+            element.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(&node.tag)),
+            );
+            element.insert(self.names.intern(b"P"), Object::Ref(parent));
+            // On every element rather than only where it is needed. 14.7.2
+            // Table 323 makes `/Pg` the page a marked-content kid lives on,
+            // and this builder never writes an element whose content is on a
+            // page other than its own — so writing it everywhere is both true
+            // and one less thing for a reader to inherit.
+            element.insert(self.names.intern(b"Pg"), Object::Ref(page));
+            element.insert(self.names.intern(b"K"), Object::Array(kids));
+            self.objects.insert(reference.num, Object::Dict(element));
+            out.push(Object::Ref(reference));
+        }
+        out
     }
 
     /// Serializes the document.
@@ -3260,6 +3486,18 @@ impl DocumentBuilder {
         }
         self.write_embedded_fonts(&used);
         self.write_cid_fonts(&drawn);
+
+        // 14.7.4.4: the `/ParentTree` entry for each page, and the elements
+        // that claim each of its marked-content ids. Filled as the pages are
+        // written and turned into a number tree afterwards, because an
+        // element names its page and its page names its key.
+        let struct_root = if pages.iter().any(|page| !page.tag_roots.is_empty()) {
+            Some(self.allocate())
+        } else {
+            None
+        };
+        let mut parent_tree: Vec<Vec<Object>> = Vec::new();
+        let mut struct_kids: Vec<Object> = Vec::new();
 
         for (page, reference) in pages.iter().zip(page_refs.iter()) {
             let content_ref = self.allocate();
@@ -3335,6 +3573,36 @@ impl DocumentBuilder {
                 dict.insert(self.names.intern(b"Annots"), Object::Array(annots));
             }
 
+            // 14.7.4.4. Written only on a page that has marked content, for
+            // the reason `/CropBox` is written only when there is one: a
+            // `/StructParents` naming an empty `/Nums` entry is a statement
+            // where its absence is not.
+            if let Some(root) = struct_root {
+                if !page.tag_roots.is_empty() {
+                    let key = parent_tree.len() as i64;
+                    let mut claims: Vec<Option<ObjRef>> = vec![None; page.next_mcid as usize];
+                    let kids =
+                        self.write_struct_elements(&page.tag_roots, root, *reference, &mut claims);
+                    parent_tree.push(
+                        claims
+                            .into_iter()
+                            .map(|claim| match claim {
+                                Some(reference) => Object::Ref(reference),
+                                // An id no element claims cannot happen from
+                                // this builder — `tagged` opens both together
+                                // — so a null here is a defect in this writer
+                                // rather than in the caller's document. It is
+                                // written rather than skipped so the array
+                                // stays indexed by id.
+                                None => Object::Null,
+                            })
+                            .collect(),
+                    );
+                    struct_kids.extend(kids);
+                    dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
+                }
+            }
+
             self.objects.insert(reference.num, Object::Dict(dict));
         }
 
@@ -3352,6 +3620,70 @@ impl DocumentBuilder {
         let mut catalog = Dict::new();
         catalog.insert(Name::TYPE, Object::Name(self.names.intern(b"Catalog")));
         catalog.insert(Name::PAGES, Object::Ref(pages_ref));
+
+        // 14.7.2: the structure tree, when any page tagged anything. One
+        // `/Document` element holds every page's roots, which is the shape
+        // ISO 19005 Level A asks for and costs a document with one page
+        // nothing it would not otherwise have.
+        if let Some(root) = struct_root {
+            let document = self.allocate();
+            let mut element = Dict::new();
+            element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
+            element.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(b"Document")),
+            );
+            // 14.7.2 Table 323: a structure element's parent is `/P` and its
+            // children are `/K`. They are not `/Parent` and `/Kids` — those
+            // are the page tree's — and using the page tree's constants here
+            // produced a file every reader accepted and none could use, with
+            // every marked-content id orphaned and no error anywhere.
+            element.insert(self.names.intern(b"P"), Object::Ref(root));
+            element.insert(self.names.intern(b"K"), Object::Array(struct_kids));
+            self.objects.insert(document.num, Object::Dict(element));
+
+            // 7.9.7: a number tree whose root is also its only leaf, which is
+            // what `/Nums` on the root node means. Legal at any size, and a
+            // document this builder produced has one entry per tagged page —
+            // splitting into `/Kids` would buy a lookup nothing here performs.
+            let mut nums = Vec::with_capacity(parent_tree.len() * 2);
+            for (key, claims) in parent_tree.iter().enumerate() {
+                nums.push(Object::Int(key as i64));
+                nums.push(Object::Array(claims.clone()));
+            }
+            let tree_ref = self.allocate();
+            let mut tree = Dict::new();
+            tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
+            self.objects.insert(tree_ref.num, Object::Dict(tree));
+
+            let mut dict = Dict::new();
+            dict.insert(
+                Name::TYPE,
+                Object::Name(self.names.intern(b"StructTreeRoot")),
+            );
+            dict.insert(
+                self.names.intern(b"K"),
+                Object::Array(vec![Object::Ref(document)]),
+            );
+            dict.insert(self.names.intern(b"ParentTree"), Object::Ref(tree_ref));
+            // The key a future incremental update would take next, which is
+            // one past the last used and not the count of pages: an untagged
+            // page takes no key.
+            dict.insert(
+                self.names.intern(b"ParentTreeNextKey"),
+                Object::Int(parent_tree.len() as i64),
+            );
+            self.objects.insert(root.num, Object::Dict(dict));
+            catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));
+
+            // 14.7.1: `/Marked true` is the claim that the tagging is
+            // complete enough to be used, which is what this builder's
+            // construction guarantees — every marked sequence is claimed by
+            // the element that opened it.
+            let mut mark_info = Dict::new();
+            mark_info.insert(self.names.intern(b"Marked"), Object::Bool(true));
+            catalog.insert(self.names.intern(b"MarkInfo"), Object::Dict(mark_info));
+        }
 
         let outline = std::mem::take(&mut self.outline);
         if !outline.is_empty() {

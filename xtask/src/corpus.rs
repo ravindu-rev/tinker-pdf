@@ -644,8 +644,11 @@ mod tests {
     fn a_child_a_version_behind_is_named_rather_than_counted_as_a_regression() {
         let stale = record_version_disagreement(
             Path::new("target/release/tpdf"),
-            &format!("probe {}
-", runner::PROBE_VERSION - 1),
+            &format!(
+                "probe {}
+",
+                runner::PROBE_VERSION - 1
+            ),
         )
         .expect("a version behind is a refusal");
         assert!(stale.contains("writes probe records at version"), "{stale}");
@@ -653,8 +656,11 @@ mod tests {
         assert!(
             record_version_disagreement(
                 Path::new("tpdf"),
-                &format!("probe {}
-", runner::PROBE_VERSION),
+                &format!(
+                    "probe {}
+",
+                    runner::PROBE_VERSION
+                ),
             )
             .is_none(),
             "the version this runner reads is not a disagreement"

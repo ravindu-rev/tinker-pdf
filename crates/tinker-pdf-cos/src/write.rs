@@ -143,7 +143,7 @@ fn write_string(out: &mut Vec<u8>, s: &PdfString) {
 }
 
 /// Writes a name, escaping what 7.3.5 requires.
-fn write_name(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn write_name(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'/');
     for &byte in bytes {
         // Delimiters, whitespace, '#' itself and anything outside the
