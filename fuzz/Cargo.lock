@@ -159,6 +159,7 @@ dependencies = [
  "tinker-pdf-font",
  "tinker-pdf-layout",
  "tinker-pdf-pki",
+ "tinker-pdf-shape",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
 ]
@@ -196,6 +197,13 @@ dependencies = [
  "tinker-pdf-content",
  "tinker-pdf-font",
  "tinker-pdf-raster",
+]
+
+[[package]]
+name = "tinker-pdf-shape"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-font",
 ]
 
 [[package]]
