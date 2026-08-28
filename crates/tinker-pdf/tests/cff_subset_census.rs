@@ -291,6 +291,7 @@ fn census_of_the_corpus_cff_subsets() {
     let mut subsetted: BTreeMap<Shape, u32> = BTreeMap::new();
     let mut declined: BTreeMap<Shape, u32> = BTreeMap::new();
     let mut divergences: Vec<(String, Divergence)> = Vec::new();
+    let mut refused: Vec<(String, Shape, usize)> = Vec::new();
     let mut grew: Vec<(String, usize, usize)> = Vec::new();
     let (mut before_bytes, mut after_bytes) = (0u64, 0u64);
 
@@ -321,6 +322,7 @@ fn census_of_the_corpus_cff_subsets() {
 
             let Some(reduced) = tinker_pdf_font::subset(&face.program, &kept) else {
                 *declined.entry(face.shape).or_insert(0) += 1;
+                refused.push((name.clone(), face.shape, cff.glyph_count()));
                 continue;
             };
             *subsetted.entry(face.shape).or_insert(0) += 1;
@@ -361,15 +363,24 @@ fn census_of_the_corpus_cff_subsets() {
     println!("  {:<24} {total:>6} {ok:>10} {no:>10}", "all");
     println!(
         "\n{before_bytes} bytes of font program became {after_bytes} ({}%)",
-        if before_bytes == 0 {
-            0
-        } else {
-            after_bytes * 100 / before_bytes
-        }
+        after_bytes.saturating_mul(100).checked_div(before_bytes).unwrap_or(0)
     );
+    if !refused.is_empty() {
+        println!("\nfaces the subsetter refused: {}", refused.len());
+        for (name, shape, glyphs) in &refused {
+            println!("  {name}: {} with {glyphs} glyphs", shape.name());
+        }
+    }
     if !grew.is_empty() {
-        println!("\nfaces the subset did not shrink: {}", grew.len());
-        for (name, before, after) in grew.iter().take(20) {
+        // Not a failure. `DocumentBuilder` compares the two sizes and keeps
+        // the face when the rebuild is not smaller, which is what
+        // `SubsetRefusal::SubsetNotSmaller` reports; the number is here
+        // because it is what says that rule earns its place.
+        println!(
+            "\nfaces the rebuild did not shrink, which the writer declines: {}",
+            grew.len()
+        );
+        for (name, before, after) in grew.iter().take(10) {
             println!("  {name}: {before} -> {after}");
         }
     }
@@ -388,17 +399,28 @@ fn census_of_the_corpus_cff_subsets() {
     assert_eq!(carriers, CARRIERS, "files carrying a CFF face");
     assert_eq!(total, FACES, "distinct CFF faces");
     assert_eq!(ok, SUBSETTED, "faces cut down");
-    assert_eq!(no, DECLINED, "faces embedded whole");
+    assert_eq!(no, DECLINED, "faces the subsetter refused");
+    assert_eq!(
+        grew.len(),
+        NOT_SMALLER,
+        "faces the rebuild did not shrink, which the writer declines"
+    );
     assert_eq!(
         faces.get(&Shape::BareCidKeyed).copied().unwrap_or(0),
         CID_KEYED,
         "CID-keyed faces, which is what makes FDArray and FDSelect load-bearing"
     );
+    assert!(
+        after_bytes * 8 < before_bytes,
+        "the surviving subsets were an eighth of the bytes when this was \
+         written: {after_bytes} of {before_bytes}"
+    );
 }
 
 // The numbers this stood at when it was written; see the assertions above.
-const CARRIERS: u32 = 0;
-const FACES: u32 = 0;
-const SUBSETTED: u32 = 0;
-const DECLINED: u32 = 0;
-const CID_KEYED: u32 = 0;
+const CARRIERS: u32 = 297;
+const FACES: u32 = 441;
+const SUBSETTED: u32 = 439;
+const DECLINED: u32 = 2;
+const NOT_SMALLER: usize = 212;
+const CID_KEYED: u32 = 222;
