@@ -471,6 +471,15 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-xml",
             "tinker-pdf-css",
             "tinker-pdf-layout",
+            // Signatures milestone 3. The facade is where a signature verdict
+            // is assembled (milestone 6), so it is the one crate that must be
+            // able to turn a `/Contents` blob into a `SignedData` — and the
+            // edge goes *down* into a leaf, which is the direction ruling 8
+            // allows without argument. What needed the argument was the other
+            // half: `tinker-pdf-pki` still has no PDF vocabulary and still
+            // does not know what a document is, so adding this edge did not
+            // buy the leaf a reason to acquire one.
+            "tinker-pdf-pki",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

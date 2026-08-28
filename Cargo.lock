@@ -550,6 +550,7 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-layout",
+ "tinker-pdf-pki",
  "tinker-pdf-raster",
  "tinker-pdf-render",
  "tinker-pdf-xml",

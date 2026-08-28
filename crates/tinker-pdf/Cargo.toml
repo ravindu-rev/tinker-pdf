@@ -50,6 +50,14 @@ tinker-pdf-xml = { workspace = true }
 # not already allow and the fifth and sixth amendments already argue.
 tinker-pdf-css = { workspace = true }
 tinker-pdf-layout = { workspace = true }
+# Signatures milestone 3: `tests/cms_census.rs` reads the CMS blob out of every
+# signed document in the fetched corpora and parses it, which is the only way
+# to find out what real producers emit rather than what the specification says
+# they should. It is a normal dependency rather than a dev one because the
+# verdict types of milestone 6 land in this crate and will need the same edge —
+# declaring it once, here, with a use behind it today, is what
+# `tinker-pdf-pki/Cargo.toml` says about its own edge to `tinker-pdf-crypto`.
+tinker-pdf-pki = { workspace = true }
 
 [dev-dependencies]
 # The only third-party crate in this workspace's own tree, and it is exempt

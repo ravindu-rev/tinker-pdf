@@ -6,15 +6,24 @@ the signer's certificate, how far the certificate chain gets toward a host-suppl
 anchor, and what changed after signing, classified against `/DocMDP` and `/FieldMDP` rules —
 and `DocumentEditor` can produce a signature of its own on an incremental save, with the
 private key held by a caller-supplied signer callback so key material never enters the engine.
-Milestones 1 and 8 have landed — the two ends of the file, with the cryptography still
-missing from between them. `Document::signatures()` (`crates/tinker-pdf/src/signature.rs`)
-finds every signature, classifies what its `/ByteRange` covers against the file and digests
-the covered spans; `DocumentEditor::save_signed`
-(`crates/tinker-pdf-cos/src/sign.rs`) reserves, lays out, patches and seals, and
-`SignaturePlaceholder` has stopped being a struct with no producer. **Nothing verifies
-anything**: the CMS blob is bytes in and bytes out, and a `Signer` is whatever the host
-supplies. What holds the two halves together is that both call one `digest_spans`, so what is
-signed and what is checked cannot drift.
+Milestones 1, 3 and 8 have landed, and milestone 2's crate with them.
+`Document::signatures()` (`crates/tinker-pdf/src/signature.rs`) finds every signature,
+classifies what its `/ByteRange` covers against the file and digests the covered spans;
+`DocumentEditor::save_signed` (`crates/tinker-pdf-cos/src/sign.rs`) reserves, lays out,
+patches and seals, and `SignaturePlaceholder` has stopped being a struct with no producer;
+and `tinker-pdf-pki` now reads DER, X.509 and CMS `SignedData`, so the blob in the middle is
+structure rather than bytes. What holds the two ends together is that both call one
+`digest_spans`, so what is signed and what is checked cannot drift.
+
+**No verdict is assembled yet.** The parser hands back a signer, a `messageDigest` and the
+exact bytes RFC 5652 §5.4 says to digest; comparing that digest against the document,
+following the chain and saying what it all amounts to is milestone 6. Milestone 2's row stays
+open on a technicality worth naming rather than papering over: its exit criterion asks for a
+committed sidecar of expected certificate values and there is none. What stands in its place
+today is `crates/tinker-pdf/tests/cms_census.rs`, which reads every certificate in the fetched
+corpora through `x509.rs` and asserts that all twenty-nine parse — evidence from other
+people's software rather than from a transcription, which is the stronger of the two and not
+the one the row asked for.
 
 ## What milestone 1 measured, which changed this document
 
@@ -47,6 +56,60 @@ inside one is invisible until the caller authenticates. Two corpus files behave 
 the first reading of one of them looked exactly like a producer merging the signature dictionary
 into the field object. It does not; it was simply unread. `Anchor::MergedField` survives as a
 defensive branch that **no corpus file needs**, held up by a fixture and by that sentence.
+
+## What milestone 3 measured, which changed this document again
+
+The CMS parser landed and was pointed at every blob in the fetched corpora
+(`crates/tinker-pdf/tests/cms_census.rs`). Five things came back that this design had not
+said, and the first is a scope change rather than a detail.
+
+**A fifth of the corpus is BER, and this engine refuses it.** ISO 32000-1 12.8.3.3.1 calls a
+signature's `/Contents` a DER-encoded object. **Four of the eighteen CMS blobs are not**:
+`160F-2019.pdf`, `issue16553.pdf`, `prefilled_f1040.pdf` and the second signature of
+`xfa_filled_imm1344e.pdf` open `30 80 … A0 80 30 80` — indefinite lengths from the outermost
+SEQUENCE down, which is legal BER. **It is not one vendor's quirk**: those documents name
+Acrobat Distiller 5.0.5, Adobe LiveCycle Designer ES 8.2 and 10.0, and LibreOffice 7.5 as
+their producers. (A document's producer is not necessarily its signer's software, but it is
+the evidence the files carry, and it spans two independent lineages either way.)
+`tinker-pdf-pki` refuses all four, by name and on the argument `der.rs`'s header makes: DER
+admits one encoding per value, and a second reading of a signed structure is a signature
+bypass rather than a leniency. **Nothing verifies those four files today, and the design does
+not currently say how it ever will.** Reading them means teaching the walker to reconstitute
+definite lengths from an end-of-contents pair, which changes the rule every parser above it
+rests on; it is its own milestone, with its own argument about what two readings of one
+structure would cost, and it was deliberately not done quietly inside a milestone about
+`SignedData`. The number is asserted so it cannot drift unremarked.
+
+**`Signature::contents` reaches twelve of the eighteen.** Milestone 1 takes the CMS bytes from
+the gap the `/ByteRange` spans leave, which is right — the bytes a signature covers are the
+ones the file says it covers. The consequence had not been stated: six signatures have a
+`/ByteRange` that does not bracket their `/Contents` at all (the same six that classify as
+`Coverage::Suspicious`), so the supported path hands the CMS parser nothing, even though each
+of those documents does carry a readable blob. Milestone 6's verdict will have to say which of
+the two it is reporting on, because "no CMS" and "a CMS the coverage classifier will not vouch
+for" are different answers.
+
+**The certificate parser works on certificates nobody here transcribed.** All 29 X.509
+certificates across the parsed blobs read through `x509.rs` — subject, issuer, validity, SPKI,
+extensions — with zero failures. Milestone 2 was gated on RFC 5280's appendix examples, which
+are hand transcriptions of a specification; this is the first evidence from other people's
+software. One `CertificateChoices [1]` extended certificate turned up inside `bug854315.pdf`'s
+timestamp token, which is the only non-X.509 member in the corpus and the only real reason
+that arm exists.
+
+**RFC 5652 §5.4 is now adjudicated by data rather than by reading.** Fifteen real signatures,
+from six independent producers, verify under this engine's own RSA when the stored `[0]`
+IMPLICIT tag is replaced by a universal `SET OF` tag before digesting — and **not one of them
+verifies without it**. That is the strongest evidence available for the rule most likely to be
+implemented subtly wrong, and it is a `cargo test` assertion rather than a note.
+
+**What the corpus does not contain, so that the gaps are named rather than assumed.** Zero
+ECDSA and zero RSASSA-PSS signatures — every signer is RSASSA-PKCS1-v1_5, which means
+milestone 5's ECDSA path will have no corpus evidence at all and must lean entirely on CAVP
+vectors. Zero signers identified by `subjectKeyIdentifier`, zero embedded CRLs, and zero
+`signingCertificateV2` attributes that this engine can reach — the corpus's only one is inside
+`issue16553.pdf`, which is one of the four refused for BER. Those four code paths are held up
+by fixtures in `cms.rs` and by nothing else, and each says so where it is defined.
 
 ## Scope
 
@@ -259,7 +322,7 @@ whose interop claim is unverified and unstated is worse than one that says so.
 |---|-------------|-------------------------------------|-----------------|
 | 1 **done** | Signature inventory: `/ByteRange`/`/Contents` parsing, range digesting, coverage classification | `Document::signatures()` lists every signature in the fixture corpus with correct coverage; a flipped byte inside a covered range flips the digest verdict in a unit test; fuzzer on the parse path runs crash-free in CI | M |
 | 2 | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the subject/issuer/validity/SPKI values committed in its sidecar, transcribed once from the certificate's own DER and reviewed; RFC 5280's own example certificates parse; dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
-| 3 | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
+| 3 **done** | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
 | 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
 | 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
 | 6 | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |

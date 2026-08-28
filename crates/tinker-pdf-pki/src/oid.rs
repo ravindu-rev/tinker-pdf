@@ -94,6 +94,48 @@ oids! {
     ID_SHA512 = "2.16.840.1.101.3.4.2.3",
         [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
 
+    // ---- CMS content types (RFC 5652 §4, §5.1) ----
+
+    /// `id-data`: an octet string with no further structure, which is what
+    /// every PDF signature encapsulates — emptily, for the detached
+    /// subfilters (ISO 32000-1 12.8.3.3.1).
+    ID_DATA = "1.2.840.113549.1.7.1",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01];
+    /// `id-signedData`: the only `ContentInfo` [`crate::cms`] reads.
+    ID_SIGNED_DATA = "1.2.840.113549.1.7.2",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
+
+    // ---- CMS attribute types (RFC 5652 §11, RFC 5035, RFC 3161) ----
+    //
+    // `AA_` rather than `AT_`: these are members of a `SignedAttributes` or
+    // `UnsignedAttributes` set, which is a different namespace from the
+    // `AT_` types above that name a component of a distinguished name. The
+    // two would otherwise read as one table, and an OID from one is never
+    // valid in the other. The RFCs spell them `id-contentType` and
+    // `id-aa-timeStampToken`; the shared prefix here is what makes the set
+    // legible as a set.
+
+    /// `contentType` (§11.1): the signer's own statement of what they signed,
+    /// which §5.3 requires to equal the `eContentType`.
+    AA_CONTENT_TYPE = "1.2.840.113549.1.9.3",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x03];
+    /// `messageDigest` (§11.2): the digest a PDF verdict compares against its
+    /// own digest of the `/ByteRange` spans.
+    AA_MESSAGE_DIGEST = "1.2.840.113549.1.9.4",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04];
+    /// `signingTime` (§11.3). Signed, and still only a claim: nothing checked
+    /// it against a clock when it was written.
+    AA_SIGNING_TIME = "1.2.840.113549.1.9.5",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x05];
+    /// `id-aa-signingCertificateV2` (RFC 5035 §3): digests of the
+    /// certificates the signer says it used.
+    AA_SIGNING_CERTIFICATE_V2 = "1.2.840.113549.1.9.16.2.47",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x2F];
+    /// `id-aa-timeStampToken` (RFC 3161 Appendix A): an unsigned attribute
+    /// carrying a whole `ContentInfo` of its own.
+    AA_TIMESTAMP_TOKEN = "1.2.840.113549.1.9.16.2.14",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x0E];
+
     // ---- Attribute types in a distinguished name (RFC 5280 §A.1) ----
 
     AT_COMMON_NAME = "2.5.4.3", [0x55, 0x04, 0x03];

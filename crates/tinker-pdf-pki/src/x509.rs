@@ -107,7 +107,11 @@ pub struct AlgorithmIdentifier<'a> {
 }
 
 impl<'a> AlgorithmIdentifier<'a> {
-    fn parse(tlv: &Tlv<'a>, budget: &Budget) -> Result<Self, DerError> {
+    /// Reads one. `pub(crate)` because RFC 5652 §5.1 imports this very type
+    /// from RFC 5280 — a CMS `digestAlgorithm` and a certificate's
+    /// `signatureAlgorithm` are the same structure — so [`crate::cms`] reads
+    /// it with this rather than with a second copy that could disagree.
+    pub(crate) fn parse(tlv: &Tlv<'a>, budget: &Budget) -> Result<Self, DerError> {
         tlv.require(Tag::Sequence)?;
         let mut fields = tlv.children(budget)?;
         let oid = fields.expect(Tag::Oid)?.as_oid()?;
