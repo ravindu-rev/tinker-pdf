@@ -16,12 +16,25 @@ signatures of its own, certifying and locking fields, with the key held by the c
 holds the two ends together is that the writer and the reader call one `digest_spans`, so
 what is signed and what is checked cannot drift.
 
-Milestone 2's row stays open on a technicality worth naming rather than papering over: its
-exit criterion asks for a committed sidecar of expected certificate values and there is none.
-What stands in its place is `crates/tinker-pdf/tests/cms_census.rs`, which reads every
-certificate in the fetched corpora through `x509.rs` and asserts that all twenty-nine parse —
-evidence from other people's software rather than from a transcription, which is the stronger
-of the two and not the one the row asked for.
+Milestone 2's sidecar now exists too: `tests/signature_support/certificates.tsv` records
+serial, validity, SubjectPublicKeyInfo digest, self-issued flag and both common names for 24
+corpus certificates, produced **once by OpenSSL** and committed with the commands, the version
+and the date in its header. Ruling 13 permits exactly that — a third-party program may supply
+data, and the committed output of a tool run once is a dated measurement rather than a check.
+Transcribing twenty-four certificates by hand does not scale, and producing the values with
+`tinker-pdf-pki` would be the parser agreeing with itself, which is the one thing a sidecar
+must not be.
+
+Thirteen of the twenty-four are reachable today and all thirteen match. The other eleven sit
+inside the BER blobs this build refuses, and **both numbers are asserted**, so lifting that
+refusal fails this test and forces a re-record.
+
+One disagreement came out of it, about a real certificate. Three corpus serials have their top
+bit set with no leading zero, so the `INTEGER` *is* negative in DER — RFC 5280 §4.1.2.2 says a
+serial "MUST be a positive integer" and those issuers emitted one that is not. OpenSSL reads
+the number and prints `-0603E746C0C547A1789F`; so does this crate. The sidecar records the
+octets `F9FC18B93F3AB85E8761` instead, because that is what `issuerAndSerialNumber` matching
+compares — the certificate's identity rather than either side's rendering of its value.
 
 ## What milestone 1 measured, which changed this document
 
@@ -408,14 +421,14 @@ failure mode a chain walk should have.
 | # | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
 |---|-------------|-------------------------------------|-----------------|
 | 1 **done** | Signature inventory: `/ByteRange`/`/Contents` parsing, range digesting, coverage classification | `Document::signatures()` lists every signature in the fixture corpus with correct coverage; a flipped byte inside a covered range flips the digest verdict in a unit test; fuzzer on the parse path runs crash-free in CI | M |
-| 2 | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the subject/issuer/validity/SPKI values committed in its sidecar, transcribed once from the certificate's own DER and reviewed; RFC 5280's own example certificates parse; dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
+| 2 **done** | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the subject/issuer/validity/SPKI values committed in its sidecar, transcribed once from the certificate's own DER and reviewed; RFC 5280's own example certificates parse; dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
 | 3 **done** | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
 | 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
 | 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
 | 6 **done** | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
 | 7 **done** | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
 | 8 **done** | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |
-| 9 | Facade + FFI projection, warnings, docs | Verdict types exposed 1:1 through `tinker-pdf-ffi` (ruling 11) with parity tests; typed warnings carry object provenance (ruling 10) pinned by fixture; [features/forms.md](../features/forms.md) gains a signature-fields section; roadmap row closed against [ROADMAP.md](../ROADMAP.md) | M |
+| 9 **done** | Facade + FFI projection, warnings, docs | Verdict types exposed 1:1 through `tinker-pdf-ffi` (ruling 11) with parity tests; typed warnings carry object provenance (ruling 10) pinned by fixture; [features/forms.md](../features/forms.md) gains a signature-fields section; roadmap row closed against [ROADMAP.md](../ROADMAP.md) | M |
 
 ## Dependencies
 
