@@ -117,6 +117,41 @@ pub struct FileKey {
 }
 
 impl FileKey {
+    /// A key some *other* handler derived, with the ciphers to use it under.
+    ///
+    /// The standard handler derives its key from a password and is the only
+    /// thing in this crate that does. ISO 32000-1's public-key handler (7.6.5)
+    /// derives one from a seed a recipient unsealed, by an algorithm that is
+    /// document structure rather than arithmetic — so it lives in the crate
+    /// that owns document structure, and hands the result here.
+    ///
+    /// Everything after the key is identical between the two handlers:
+    /// Algorithm 1's per-object salting, the four crypt methods, and the
+    /// encrypt side an incremental save needs. Duplicating that for the second
+    /// handler would be two implementations of the part where a mistake is
+    /// invisible, so there is one and this is its other door.
+    ///
+    /// `outcome` is the caller's, because only the caller knows what its
+    /// authentication meant. The public-key handler has no notion of an owner
+    /// password, so it says [`AuthOutcome::User`].
+    #[must_use]
+    pub fn from_derived(
+        key: Vec<u8>,
+        revision: i64,
+        stream_method: CryptMethod,
+        string_method: CryptMethod,
+        outcome: AuthOutcome,
+    ) -> FileKey {
+        FileKey {
+            key,
+            outcome,
+            revision,
+            stream_method,
+            string_method,
+            notes: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn outcome(&self) -> AuthOutcome {
         self.outcome

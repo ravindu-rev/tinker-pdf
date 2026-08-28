@@ -130,6 +130,18 @@ Three things are worth carrying forward rather than filing away:
   with negative controls — and the design doc records what it does *not*
   establish as carefully as what it does. It does not run again.
 
+**Public-key encryption has left this list too**, and it is the one item in
+this tier whose evidence is worth naming as a warning rather than a result.
+`/Adobe.PubSec` reads: the envelope is parsed by `tinker-pdf-pki`, the file key
+derived per 7.6.5, and the same decryptor installed that a password produces.
+But **zero of the 4 594 corpus files use it** and no tool available here
+produces one — qpdf, which is installed, has no public-key support. So the
+envelope parsing is held to structures OpenSSL produced, which is real interop,
+and the key derivation on top is held only to a second implementation of the
+same clause by the same author. That catches a transcription slip and cannot
+catch a misreading. [design/pubsec.md](design/pubsec.md) carries it as an open
+risk, and it closes the day a real public-key-encrypted document arrives.
+
 - **Text shaping — a non-goal, overturned.** The docs long stated shaping
   as permanent non-goal, and for *rendering existing PDFs* the reasoning
   holds: the producer positioned every glyph. It fails wherever this
@@ -164,8 +176,6 @@ Three things are worth carrying forward rather than filing away:
   bindings under ruling 11 — the facade shape is already the design. Exit:
   fill-and-save and build-a-document demonstrated from all four. (M–L,
   [design/bindings-write.md](design/bindings-write.md))
-- **Public-key encryption.** The `Adobe.PubSec` handler family is absent;
-  password handlers R2–R6 are complete. (M)
 - **CFF subsetting.** Embedding subsets TrueType only; a CFF face embeds
   whole. Charstring subsetting with subroutine renumbering. (M)
 
