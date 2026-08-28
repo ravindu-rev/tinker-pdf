@@ -19,6 +19,7 @@ tinker-pdf-filters = { path = "../crates/tinker-pdf-filters" }
 tinker-pdf-font = { path = "../crates/tinker-pdf-font" }
 tinker-pdf-content = { path = "../crates/tinker-pdf-content" }
 tinker-pdf-crypto = { path = "../crates/tinker-pdf-crypto" }
+tinker-pdf-pki = { path = "../crates/tinker-pdf-pki" }
 tinker-pdf-zip = { path = "../crates/tinker-pdf-zip" }
 tinker-pdf-xml = { path = "../crates/tinker-pdf-xml" }
 tinker-pdf-css = { path = "../crates/tinker-pdf-css" }
@@ -131,6 +132,12 @@ doc = false
 [[bin]]
 name = "crypt"
 path = "fuzz_targets/crypt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pki_der"
+path = "fuzz_targets/pki_der.rs"
 test = false
 doc = false
 

@@ -156,6 +156,7 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-layout",
+ "tinker-pdf-pki",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
 ]
@@ -170,6 +171,13 @@ dependencies = [
 [[package]]
 name = "tinker-pdf-math"
 version = "0.0.1"
+
+[[package]]
+name = "tinker-pdf-pki"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-crypto",
+]
 
 [[package]]
 name = "tinker-pdf-raster"

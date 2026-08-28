@@ -1,0 +1,25 @@
+[package]
+name = "tinker-pdf-pki"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "ASN.1 DER (X.690) and X.509 certificates (RFC 5280), hand-rolled: a depth-capped walker that never panics on malformed bytes. No PDF types"
+
+[dependencies]
+# SHA-1, for one thing only: RFC 5280 §4.2.1.2's method (1) key identifier is
+# the SHA-1 digest of a certificate's `subjectPublicKey` bits, and chain
+# building needs that number when a certificate carries no
+# `subjectKeyIdentifier` extension of its own. Computing it here rather than
+# making every caller reach for a digest is what keeps the identifier a
+# property of the certificate.
+#
+# This is the fourth leaf-to-leaf edge, written up beside `font -> filters`,
+# `zip -> filters` and `layout -> css` in `xtask`'s ALLOWED. It points
+# sideways rather than upward and cannot cycle, because `tinker-pdf-crypto`
+# depends on nothing at all. Milestones 4 and 5 of `docs/design/signatures.md`
+# widen what is taken across it to RSA and ECDSA verification; the edge is
+# declared once, here, with a use behind it today.
+tinker-pdf-crypto = { workspace = true }
