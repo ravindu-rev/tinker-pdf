@@ -614,6 +614,59 @@ fn the_billion_laughs_face_stops_rather_than_growing() {
     );
 }
 
+/// A ligature carries **its own** advance, not the one its first component had.
+///
+/// This is the regression test for the ordering defect this milestone found in
+/// itself, reduced to the cheapest shape that shows it. `GSUB` type 4 replaces
+/// `f` and `l` with a single `fl`, and it does so by rewriting the first
+/// glyph's index and removing the second — deliberately leaving the position
+/// alone, because `GPOS` may already have moved it. So a shaper that filled in
+/// `hmtx` advances *before* substitution leaves the ligature carrying `f`'s
+/// 362 units instead of `fl`'s 605, and every glyph after it on the line sits
+/// 243 units too far left.
+///
+/// text-rendering-tests GSUB-2 is what actually caught it, at 164 units on an
+/// Ethiopic medial numeral. This says the same thing in three assertions
+/// against a face the corpus already ships, so the next person to reorder
+/// `Shaper::shape` finds out here rather than in a section count.
+///
+/// The cluster is asserted beside the advance because the two are the same
+/// promise: a ligature stands for the text of everything it replaced, and it
+/// keeps the *smallest* of their clusters so that milestone 7 can rebuild
+/// `/ToUnicode` from it.
+#[test]
+fn a_ligature_carries_its_own_advance_and_the_first_components_cluster() {
+    let bytes = font_bytes("TestGPOSOne.ttf");
+    let face = Sfnt::parse(&bytes).expect("a fixture font is a valid sfnt");
+
+    let f = face.glyph_for_char('f').expect("the face has an f");
+    let ligature = face.glyph_for_char('\u{FB02}').expect("the face has an fl");
+    let (narrow, wide) = (
+        face.advance(f).expect("f has an advance"),
+        face.advance(ligature).expect("fl has an advance"),
+    );
+    assert_ne!(
+        narrow, wide,
+        "this face no longer distinguishes the two advances, so the test \
+         cannot tell the two orderings apart any more"
+    );
+
+    let shaper = Shaper::new(&face);
+    let (_, runs) = shaper.shape_text("fl", BaseDirection::LeftToRight);
+    let glyphs: Vec<_> = runs.iter().flat_map(|run| run.glyphs()).copied().collect();
+    assert_eq!(glyphs.len(), 1, "f and l did not ligate: {glyphs:?}");
+    assert_eq!(glyphs[0].glyph, ligature);
+    assert_eq!(
+        glyphs[0].x_advance,
+        i32::from(wide),
+        "the ligature kept the advance of the glyph it was substituted from"
+    );
+    assert_eq!(
+        glyphs[0].cluster, 0,
+        "the ligature does not point at the first byte it stands for"
+    );
+}
+
 #[test]
 fn the_suite_covers_the_sections_it_claims_to() {
     let mut totals: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
