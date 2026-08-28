@@ -76,6 +76,17 @@ pub use tinker_pdf_cos::{
     BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PlacedGlyph,
     Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
+/// Streaming open: where a document's bytes come from when they are not all
+/// in hand (`docs/design/streaming-open.md`).
+///
+/// [`ByteSource`] is the seam a host implements to supply ranges — a mapping,
+/// a file handle, an HTTP server answering range requests. It is on this
+/// facade rather than left in the crate underneath because ruling 11 makes
+/// this the only public surface: a host that cannot name the trait cannot
+/// implement it. [`SliceSource`] is the degenerate case every existing caller
+/// already uses without knowing it, which is why [`Document::open`] keeps its
+/// exact signature.
+pub use tinker_pdf_cos::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss};
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
