@@ -28,6 +28,7 @@ pub mod epub;
 pub mod fonts;
 pub mod mdp;
 mod optional;
+pub mod pdfa;
 pub mod redact;
 mod resources;
 pub mod signature;
@@ -45,6 +46,11 @@ pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefe
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
+/// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
+pub use pdfa::{
+    Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
+    Verdict as PdfAVerdict,
+};
 pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
 pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
@@ -856,6 +862,17 @@ impl Document {
             .iter()
             .map(|signature| verdict::verdict(self, signature, anchors, at))
             .collect()
+    }
+
+    /// What this build makes of the document's PDF/A claim (ISO 19005).
+    ///
+    /// A list of findings rather than a verdict: conformance is the list being
+    /// empty **and** [`PdfACoverage::is_complete`] being true, and until the
+    /// remaining rule groups land it is not. A caller reaching for a boolean
+    /// should read both.
+    #[must_use]
+    pub fn validate_pdfa(&self) -> PdfAVerdict {
+        pdfa::validate(self)
     }
 
     /// The strictest certification any signature in this document declares
