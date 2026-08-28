@@ -363,7 +363,10 @@ fn census_of_the_corpus_cff_subsets() {
     println!("  {:<24} {total:>6} {ok:>10} {no:>10}", "all");
     println!(
         "\n{before_bytes} bytes of font program became {after_bytes} ({}%)",
-        after_bytes.saturating_mul(100).checked_div(before_bytes).unwrap_or(0)
+        after_bytes
+            .saturating_mul(100)
+            .checked_div(before_bytes)
+            .unwrap_or(0)
     );
     if !refused.is_empty() {
         println!("\nfaces the subsetter refused: {}", refused.len());

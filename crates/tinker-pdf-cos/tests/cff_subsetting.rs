@@ -262,7 +262,10 @@ fn compact_cff_program() -> Vec<u8> {
     let mut private = compact_entry(20, &[600]);
     private.extend(compact_entry(21, &[600]));
     let subrs_operand_len = compact_int(private.len() as i32 + 3).len() as i32;
-    private.extend(compact_entry(19, &[private.len() as i32 + subrs_operand_len + 1]));
+    private.extend(compact_entry(
+        19,
+        &[private.len() as i32 + subrs_operand_len + 1],
+    ));
 
     let header = [1u8, 0, 4, 1];
     let names = compact_index(&[b"Fixture".to_vec()]);
@@ -290,8 +293,7 @@ fn compact_cff_program() -> Vec<u8> {
     let mut layout = (0i32, 0i32, 0i32);
     for _ in 0..8 {
         let top_index_len = compact_index(&[top_bytes.clone()]).len();
-        let mut cursor =
-            header.len() + names.len() + top_index_len + strings.len() + gsubrs.len();
+        let mut cursor = header.len() + names.len() + top_index_len + strings.len() + gsubrs.len();
         let charset_at = cursor;
         cursor += charset.len();
         let charstrings_at = cursor;
@@ -312,7 +314,11 @@ fn compact_cff_program() -> Vec<u8> {
     out.extend_from_slice(&top_index);
     out.extend_from_slice(&strings);
     out.extend_from_slice(&gsubrs);
-    assert_eq!(out.len() as i32, layout.0, "the charset lands where it was put");
+    assert_eq!(
+        out.len() as i32,
+        layout.0,
+        "the charset lands where it was put"
+    );
     out.extend_from_slice(&charset);
     assert_eq!(out.len() as i32, layout.1);
     out.extend_from_slice(&charstring_index);
@@ -573,7 +579,10 @@ fn an_opentype_cff_face_is_subsetted_and_tagged() {
     assert_eq!(tagged(&base), b"Fixture");
 
     let (embedded_program, key, subtype) = embedded(&doc, b"F0");
-    assert_eq!(key, b"FontFile3", "9.9 Table 126: CFF outlines are FontFile3");
+    assert_eq!(
+        key, b"FontFile3",
+        "9.9 Table 126: CFF outlines are FontFile3"
+    );
     assert_eq!(subtype.as_deref(), Some(&b"OpenType"[..]));
     assert!(
         embedded_program.len() < program.len(),
@@ -587,7 +596,11 @@ fn an_opentype_cff_face_is_subsetted_and_tagged() {
     let inner = cff_of(&embedded_program);
     let after = tinker_pdf_font::Cff::parse(&inner).expect("it parses");
     assert!(
-        after.outline(2).expect("glyph 2 answers").segments.is_empty(),
+        after
+            .outline(2)
+            .expect("glyph 2 answers")
+            .segments
+            .is_empty(),
         "`B` was not drawn and must draw nothing"
     );
 }
@@ -690,7 +703,11 @@ fn a_face_that_claims_none_of_the_text_is_embedded_whole_and_says_so() {
         program[at..at + 2].copy_from_slice(&(391 + sid as u16).to_be_bytes());
     }
     let cff = tinker_pdf_font::Cff::parse(&program).expect("it still parses");
-    assert_eq!(cff.gid_for_name("A"), None, "no glyph is named `A` any more");
+    assert_eq!(
+        cff.gid_for_name("A"),
+        None,
+        "no glyph is named `A` any more"
+    );
     assert!(
         tinker_pdf_font::glyphs_for(&program, "AC").is_empty(),
         "and nothing resolves the text"
@@ -755,7 +772,11 @@ fn a_composite_font_over_a_cff_face_is_subsetted() {
     let widths = doc.resolve_key(&cid, doc.intern(b"W"));
     let widths = widths.as_array().expect("a /W array");
     let first = doc.resolve(&widths[0]).as_int();
-    assert_eq!(first, Some(4), "the first run starts at the first glyph drawn");
+    assert_eq!(
+        first,
+        Some(4),
+        "the first run starts at the first glyph drawn"
+    );
 }
 
 /// A **CID-keyed** CFF cannot go down the composite path: its charset maps a
@@ -831,8 +852,8 @@ fn a_subset_no_smaller_than_the_face_is_declined_and_named() {
     assert!(!parsed.outline(3).expect("an outline").segments.is_empty());
     // Every letter drawn, so nothing is dropped and the rebuild is pure cost.
     let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let reduced =
-        tinker_pdf_font::subset(&cff, &tinker_pdf_font::glyphs_for(&cff, text)).expect("it rebuilds");
+    let reduced = tinker_pdf_font::subset(&cff, &tinker_pdf_font::glyphs_for(&cff, text))
+        .expect("it rebuilds");
     assert!(
         reduced.len() >= cff.len(),
         "the fixture really is one the rebuild does not shrink: {} vs {}",

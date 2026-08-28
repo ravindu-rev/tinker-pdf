@@ -81,10 +81,10 @@ mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
 pub use build::{
-    jpeg_shape, BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
-    EmbeddedWhole, Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind,
-    OutlineEntry, PageBuilder, PlacedGlyph, Shading, SoftMask, StateMask, SubsetRefusal, Target,
-    TilingPattern, TilingType, TransparencyGroup,
+    jpeg_shape, BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState,
+    FormXObject, Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry,
+    PageBuilder, PlacedGlyph, Shading, SoftMask, StateMask, SubsetRefusal, Target, TilingPattern,
+    TilingType, TransparencyGroup,
 };
 pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};

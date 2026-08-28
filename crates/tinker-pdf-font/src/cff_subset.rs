@@ -92,7 +92,9 @@ fn write_index(items: &[Vec<u8>]) -> Option<Vec<u8>> {
         return Some(vec![0, 0]);
     }
 
-    let total: usize = items.iter().try_fold(0usize, |a, i| a.checked_add(i.len()))?;
+    let total: usize = items
+        .iter()
+        .try_fold(0usize, |a, i| a.checked_add(i.len()))?;
     // Offsets are one-based, so the last one is the total plus one.
     let last = u32::try_from(total.checked_add(1)?).ok()?;
     let off_size: usize = match last {
@@ -166,7 +168,10 @@ fn dict_real(value: f64) -> Vec<u8> {
 
     let mut out = vec![30u8];
     for pair in nibbles.chunks(2) {
-        let (hi, lo) = (pair.first().copied().unwrap_or(0x0F), pair.get(1).copied().unwrap_or(0x0F));
+        let (hi, lo) = (
+            pair.first().copied().unwrap_or(0x0F),
+            pair.get(1).copied().unwrap_or(0x0F),
+        );
         out.push((hi << 4) | lo);
     }
     out
@@ -288,10 +293,7 @@ fn fd_select_span(data: &[u8], at: usize, glyphs: usize) -> Option<usize> {
     let bytes = match *data.get(at)? {
         0 => 1usize.checked_add(glyphs)?,
         3 => {
-            let ranges = usize::from(u16::from_be_bytes([
-                *data.get(at + 1)?,
-                *data.get(at + 2)?,
-            ]));
+            let ranges = usize::from(u16::from_be_bytes([*data.get(at + 1)?, *data.get(at + 2)?]));
             // Three bytes a range, then the sentinel that ends the last one.
             3usize.checked_add(ranges.checked_mul(3)?)?.checked_add(2)?
         }
@@ -920,10 +922,7 @@ pub fn subset_cff(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
             }
             out.extend_from_slice(code.get(at..edit.start)?);
             let (new, applied) = if edit.global {
-                (
-                    *global_map.get(&(ctx, edit.index))?,
-                    new_gsubr_bias,
-                )
+                (*global_map.get(&(ctx, edit.index))?, new_gsubr_bias)
             } else {
                 (
                     *local_map.get(ctx)?.get(&edit.index)?,
@@ -1141,7 +1140,10 @@ pub fn subset_cff(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
     if !font_dicts.is_empty() {
         let mut items: Vec<Vec<u8>> = Vec::with_capacity(font_dicts.len());
         for (ctx, dict) in font_dicts.iter().enumerate() {
-            items.push(write_font_dict(dict, private_at.get(ctx).copied().flatten())?);
+            items.push(write_font_dict(
+                dict,
+                private_at.get(ctx).copied().flatten(),
+            )?);
         }
         out.extend_from_slice(&write_index(&items)?);
     }

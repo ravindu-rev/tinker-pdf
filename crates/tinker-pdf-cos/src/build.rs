@@ -1086,8 +1086,8 @@ impl core::fmt::Display for EmbeddedWhole {
 /// already subsets a producer cut, and rebuilding one of those costs more
 /// bytes than it saves.
 fn subset_smaller_than(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Vec<u8>, SubsetRefusal> {
-    let reduced = tinker_pdf_font::subset(program, glyphs)
-        .ok_or(SubsetRefusal::ProgramNotRebuildable)?;
+    let reduced =
+        tinker_pdf_font::subset(program, glyphs).ok_or(SubsetRefusal::ProgramNotRebuildable)?;
     if reduced.len() >= program.len() {
         return Err(SubsetRefusal::SubsetNotSmaller);
     }

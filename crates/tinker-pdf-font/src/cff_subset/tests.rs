@@ -317,7 +317,10 @@ fn top_of(program: &[u8]) -> Vec<(u16, Vec<f64>)> {
 /// One glyph's charstring bytes.
 fn charstring_of(program: &[u8], glyph: usize) -> Vec<u8> {
     let top = top_of(program);
-    let at = dict_get(&top, 17).and_then(<[f64]>::first).copied().expect("CharStrings") as usize;
+    let at = dict_get(&top, 17)
+        .and_then(<[f64]>::first)
+        .copied()
+        .expect("CharStrings") as usize;
     let (index, _) = Index::parse(program, at).expect("a CharStrings INDEX");
     index.get(glyph).expect("the glyph").to_vec()
 }
@@ -389,7 +392,9 @@ fn plain_font() -> Vec<u8> {
 /// ones the glyphs it kept reach.
 fn subr_font() -> Vec<u8> {
     let count = 8usize;
-    let subrs: Vec<Vec<u8>> = (0..count).map(|i| line_subr(100 + i as i32 * 10, 0)).collect();
+    let subrs: Vec<Vec<u8>> = (0..count)
+        .map(|i| line_subr(100 + i as i32 * 10, 0))
+        .collect();
     let mut charstrings = vec![vec![14u8]];
     for i in 0..count {
         let mut code = t2(0);
@@ -698,7 +703,11 @@ fn the_bias_falls_from_32768_to_1131_when_the_index_shrinks() {
     // Every call in the *original* took the three-byte form, so nothing here
     // could have been left as it was found.
     for &index in &called {
-        assert_eq!(call_local(index, COUNT).len(), 4, "three bytes and the call");
+        assert_eq!(
+            call_local(index, COUNT).len(),
+            4,
+            "three bytes and the call"
+        );
     }
 }
 
@@ -1089,7 +1098,9 @@ fn garbage_is_refused_rather_than_panicked_on() {
 /// call to somewhere else.
 #[test]
 fn a_charstring_number_reads_back_as_itself() {
-    for value in [-32768i32, -1132, -1131, -108, -107, 0, 107, 108, 1131, 32767] {
+    for value in [
+        -32768i32, -1132, -1131, -108, -107, 0, 107, 108, 1131, 32767,
+    ] {
         let bytes = charstring_int(value).expect("in range");
         let mut stems = 0usize;
         let mut stack = Vec::new();

@@ -217,11 +217,7 @@ pub fn subset(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
 }
 
 /// The `OpenType/CFF` route: the `CFF ` table subsetted, the sfnt rebuilt.
-fn subset_opentype_cff(
-    program: &[u8],
-    sfnt: &Sfnt<'_>,
-    glyphs: &BTreeSet<u16>,
-) -> Option<Vec<u8>> {
+fn subset_opentype_cff(program: &[u8], sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
     let cff = crate::cff_subset::subset_cff(sfnt.table(TAG_CFF)?, glyphs)?;
 
     let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
