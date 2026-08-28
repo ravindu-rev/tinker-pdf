@@ -74,11 +74,14 @@ scrutiny, so here is the honest framing:
   provenance in each file's header.
 - **Password comparison is constant-time.**
 
-  Decrypt paths are **not** fuzzed today. A `tinker-pdf-crypto` fuzz target
-  does not exist, and the `cos_document` target reaches the decryptor only for
-  inputs that happen to carry an `/Encrypt` dictionary. The stable hostile-input
-  sweep authenticates with several passwords against every mutated fixture,
-  which exercises the failure paths but is far shallower than a fuzzer.
+  Decrypt paths **are** fuzzed: `crypt` drives the security handler and
+  `crypt_ciphers` the ciphers themselves, both with committed seed corpora.
+  This paragraph said the opposite — "a `tinker-pdf-crypto` fuzz target does
+  not exist" — for as long as the two targets have existed, which is a
+  reminder that a security page is exactly where a stale sentence does the
+  most harm. The `cos_document` target additionally reaches the decryptor for
+  inputs that carry an `/Encrypt` dictionary, and the stable hostile-input
+  sweep authenticates with several passwords against every mutated fixture.
 - **PDF encryption is weak by design in its older revisions** (RC4-40 exists
   because the spec has it, not because it protects anything), and the format's
   permission flags are advisory — a document that says "printing denied" is
