@@ -864,6 +864,60 @@ fn table_b12() -> HuffTable {
     ])
 }
 
+/// A.1's integer decoders and 6.3's refinement states, as one bundle.
+///
+/// 6.5.8.2 is why this is a struct rather than a pile of locals: a symbol
+/// dictionary that aggregates runs 6.4's text region procedure **over its own
+/// decoder**, so every one of these has to survive from the dictionary into
+/// the text region and back out to the next symbol. Handing them over as a
+/// bundle is what makes that sharing hard to get wrong.
+struct ArithContexts {
+    iadh: MqContexts,
+    iadw: MqContexts,
+    iaex: MqContexts,
+    iaai: MqContexts,
+    iadt: MqContexts,
+    iafs: MqContexts,
+    iads: MqContexts,
+    iait: MqContexts,
+    iari: MqContexts,
+    iardw: MqContexts,
+    iardh: MqContexts,
+    iardx: MqContexts,
+    iardy: MqContexts,
+    iaid: MqContexts,
+    refine: MqContexts,
+}
+
+impl ArithContexts {
+    /// `refine_bits` sizes 6.3's context set, which is thousands of states
+    /// and dead weight for the many dictionaries and regions that never
+    /// refine; zero asks for none at all.
+    fn new(code_len: u32, refine_bits: usize) -> ArithContexts {
+        ArithContexts {
+            iadh: MqContexts::new(INT_CONTEXTS),
+            iadw: MqContexts::new(INT_CONTEXTS),
+            iaex: MqContexts::new(INT_CONTEXTS),
+            iaai: MqContexts::new(INT_CONTEXTS),
+            iadt: MqContexts::new(INT_CONTEXTS),
+            iafs: MqContexts::new(INT_CONTEXTS),
+            iads: MqContexts::new(INT_CONTEXTS),
+            iait: MqContexts::new(INT_CONTEXTS),
+            iari: MqContexts::new(INT_CONTEXTS),
+            iardw: MqContexts::new(INT_CONTEXTS),
+            iardh: MqContexts::new(INT_CONTEXTS),
+            iardx: MqContexts::new(INT_CONTEXTS),
+            iardy: MqContexts::new(INT_CONTEXTS),
+            iaid: MqContexts::new(iaid_contexts(code_len)),
+            refine: MqContexts::new(if refine_bits == 0 {
+                0
+            } else {
+                1 << refine_bits
+            }),
+        }
+    }
+}
+
 /// The most symbols one dictionary may export or decode.
 ///
 /// `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit and attacker-controlled, and
@@ -1089,12 +1143,15 @@ fn symbol_dictionary(
     let refagg = flags & 0x0002 != 0;
     let context_used = flags & 0x0100 != 0;
     let template = ((flags >> 10) & 0x0003) as u8;
+    let rtemplate = ((flags >> 12) & 0x0001) as u8;
 
-    if refagg || context_used {
+    if context_used || (refagg && huff) {
         // Named rather than lumped in with "a segment type this build does not
         // decode": these are variants of a segment it *does* decode, and the
-        // difference is what tells a file that needs refinement from one that
-        // needs a lineage nobody has started.
+        // difference is what tells a file that needs one lineage from a file
+        // that needs another. Refinement itself is decoded now; what is
+        // refused here is its Huffman road, which codes each refinement's
+        // length in a field this decoder does not read.
         note(warnings, Warning::Jbig2VariantSkipped);
         return None;
     }
@@ -1119,6 +1176,20 @@ fn symbol_dictionary(
         *slot = (dx, dy);
     }
 
+    // 7.4.3.1.3: and the refinement pair after them, present only for an
+    // aggregating dictionary at template 0. One more offset that has to be
+    // right before the coded data begins.
+    let mut refine_at = NOMINAL_REFINE_AT;
+    if refagg && rtemplate == 0 {
+        for slot in &mut refine_at {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Warning::TruncatedInput);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+
     // 7.4.3.1.4 and 7.4.3.1.5.
     let num_ex = reader.u32()?;
     let num_new = reader.u32()?;
@@ -1129,20 +1200,27 @@ fn symbol_dictionary(
 
     let mut coder = MqDecoder::new(reader.rest());
     let mut generic = MqContexts::new(1 << template_bits(template));
-    // A.1: one context set per procedure, each 512 wide, all of them living as
-    // long as the dictionary does.
-    let mut iadh = MqContexts::new(INT_CONTEXTS);
-    let mut iadw = MqContexts::new(INT_CONTEXTS);
-    let mut iaex = MqContexts::new(INT_CONTEXTS);
-    let mut iaai = MqContexts::new(INT_CONTEXTS);
-    let _ = &mut iaai; // 6.5.8.2's aggregate count; unread until milestone 5.
+    // 6.5.8.2.3: the symbol code is as wide as the *whole* dictionary needs —
+    // imported and new together — and not as wide as the symbols decoded so
+    // far. One bit too few decodes the first aggregate symbol correctly and
+    // every value after it as noise, which is a failure that looks like a
+    // wrong refinement template rather than like a wrong count.
+    let code_len = symbol_code_length(imported.len().checked_add(num_new as usize)?);
+    let refine_layout = refagg.then(|| refine_template(rtemplate, refine_at));
+    let refine_bits = refine_layout.as_ref().map_or(0, RefineTemplate::bits);
+    let mut cx = ArithContexts::new(code_len, refine_bits);
 
-    let mut new_symbols: Vec<Bitmap> = Vec::new();
+    // 6.5: imported and new symbols share one index space, so they share one
+    // vector. `pool[..base]` is what came in and the rest is what this
+    // dictionary decoded, which is also the order 6.5.10 exports in — and it
+    // is the array 6.5.8.2 refines against, which is why it has to be one.
+    let base = imported.len();
+    let mut pool: Vec<Bitmap> = imported.to_vec();
     let mut spent: u64 = 0;
     // 6.5.5: symbols arrive in height classes, each taller than the last.
     let mut height: i64 = 0;
-    while (new_symbols.len() as u32) < num_new {
-        let delta = decode_int(&mut coder, &mut iadh)?;
+    while ((pool.len() - base) as u32) < num_new {
+        let delta = decode_int(&mut coder, &mut cx.iadh)?;
         height = height.checked_add(i64::from(delta))?;
         if height <= 0 || height > i64::from(u32::MAX) {
             note(warnings, Warning::Jbig2SymbolLimitHit);
@@ -1153,13 +1231,13 @@ fn symbol_dictionary(
         let mut width: i64 = 0;
         // The `None` here is OOB — a value the format defines to end the
         // height class — rather than the reader running out of anything.
-        while let Some(delta) = decode_int(&mut coder, &mut iadw) {
+        while let Some(delta) = decode_int(&mut coder, &mut cx.iadw) {
             width = width.checked_add(i64::from(delta))?;
             if width <= 0 || width > i64::from(u32::MAX) {
                 note(warnings, Warning::Jbig2SymbolLimitHit);
                 return None;
             }
-            if (new_symbols.len() as u32) >= num_new {
+            if ((pool.len() - base) as u32) >= num_new {
                 // More symbols than the header promised. The header is what
                 // sized everything downstream, so this is a broken stream
                 // rather than a longer dictionary.
@@ -1176,23 +1254,81 @@ fn symbol_dictionary(
                 note(warnings, Warning::Jbig2RegionTooLarge);
                 return None;
             };
-            // 6.5.8.1: the generic procedure, over the dictionary's own coder
-            // and context set. TPGDON is off for a symbol — 6.5.8.1 says so,
-            // and a symbol is too short for it to pay anyway.
-            decode_generic_into(&mut coder, &mut generic, template, false, &at, &mut symbol);
-            new_symbols.push(symbol);
+
+            if refagg {
+                // 6.5.8.2: the symbol is built out of symbols already known
+                // rather than coded from nothing.
+                let instances = decode_int(&mut coder, &mut cx.iaai)?;
+                if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
+                    note(warnings, Warning::Jbig2SymbolLimitHit);
+                    return None;
+                }
+                if instances == 1 {
+                    // 6.5.8.2.2: a single instance is a plain refinement, and
+                    // its three values come straight off the dictionary's own
+                    // decoders rather than through 6.4's strip loop.
+                    let id = decode_iaid(&mut coder, &mut cx.iaid, code_len) as usize;
+                    let rdx = decode_int(&mut coder, &mut cx.iardx)?;
+                    let rdy = decode_int(&mut coder, &mut cx.iardy)?;
+                    let Some(reference) = pool.get(id) else {
+                        note(warnings, Warning::Jbig2SymbolLimitHit);
+                        return None;
+                    };
+                    let dx = refinement_offset(width, reference.width, rdx);
+                    let dy = refinement_offset(height, reference.height, rdy);
+                    decode_refinement_into(
+                        &mut coder,
+                        &mut cx.refine,
+                        refine_layout.as_ref()?,
+                        false,
+                        reference,
+                        (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
+                        &mut symbol,
+                    );
+                } else {
+                    // 6.5.8.2.1: more than one and the symbol is a text region
+                    // in its own right — one strip tall, top-left cornered,
+                    // OR-composited, over this same decoder.
+                    let params = TextParams {
+                        symbols: &pool,
+                        instances: instances as u32,
+                        strips: 1,
+                        log_strips: 0,
+                        corner: corner::TOPLEFT,
+                        comb_op: 0,
+                        ds_offset: 0,
+                        refine: Some(refine_template(rtemplate, refine_at)),
+                        code_len,
+                    };
+                    text_region_procedure(
+                        &params,
+                        &mut coder,
+                        &mut cx,
+                        &mut None,
+                        ceiling,
+                        &mut symbol,
+                        warnings,
+                    )?;
+                }
+            } else {
+                // 6.5.8.1: the generic procedure, over the dictionary's own
+                // coder and context set. TPGDON is off for a symbol — 6.5.8.1
+                // says so, and a symbol is too short for it to pay anyway.
+                decode_generic_into(&mut coder, &mut generic, template, false, &at, &mut symbol);
+            }
+            pool.push(symbol);
         }
     }
 
-    // 6.5.10: the export flags are run lengths over the imported symbols
-    // followed by the new ones, alternating between runs that are not exported
-    // and runs that are, starting with the former.
-    let total = imported.len().checked_add(new_symbols.len())?;
+    // 6.5.10: the export flags are run lengths over the pool — the imported
+    // symbols followed by the new ones — alternating between runs that are not
+    // exported and runs that are, starting with the former.
+    let total = pool.len();
     let mut exported = Vec::new();
     let mut index = 0usize;
     let mut exporting = false;
     while index < total {
-        let run = decode_int(&mut coder, &mut iaex)?;
+        let run = decode_int(&mut coder, &mut cx.iaex)?;
         if run < 0 {
             return None;
         }
@@ -1203,12 +1339,7 @@ fn symbol_dictionary(
                 if at >= total {
                     break;
                 }
-                let symbol = if at < imported.len() {
-                    imported.get(at)?.clone()
-                } else {
-                    new_symbols.get(at - imported.len())?.clone()
-                };
-                exported.push(symbol);
+                exported.push(pool.get(at)?.clone());
             }
         }
         index = index.checked_add(run)?;
@@ -1382,6 +1513,190 @@ fn table_b13() -> HuffTable {
 /// entry either way, and it ends at the symbol's far edge either way. The corner
 /// decides only whether the other coordinate names the top of the symbol or its
 /// bottom.
+/// The parameters 6.4's procedure runs on, once its caller has worked out
+/// where they come from.
+///
+/// A text region segment reads them from its header; an aggregate symbol
+/// (6.5.8.2.1) has them fixed by the clause instead. Naming them in one place
+/// is what lets the strip loop below be 6.4.5 exactly once.
+struct TextParams<'a> {
+    symbols: &'a [Bitmap],
+    instances: u32,
+    strips: i64,
+    log_strips: u32,
+    corner: u8,
+    comb_op: u8,
+    ds_offset: i32,
+    refine: Option<RefineTemplate<'a>>,
+    code_len: u32,
+}
+
+/// The Huffman road's state: the coordinate tables, the symbol-ID code, and
+/// the bit reader all three share.
+type TextHuffman<'a> = Option<(TextTables, HuffTable, BitReader<'a>)>;
+
+/// **T.88 6.4: the text region decoding procedure**, over a coder, contexts
+/// and output bitmap the caller owns.
+///
+/// Split out of [`text_region`] because 6.5.8.2.1 runs exactly this inside a
+/// symbol dictionary: an aggregate symbol *is* a text region, decoded over the
+/// dictionary's own arithmetic decoder onto a bitmap the size of the symbol.
+/// Sharing the decoder is not an optimisation — the adaptive state a symbol
+/// leaves behind is the state the next one is coded against, so a second
+/// decoder here would decode the first aggregate correctly and then noise.
+fn text_region_procedure(
+    params: &TextParams<'_>,
+    coder: &mut MqDecoder<'_>,
+    cx: &mut ArithContexts,
+    huffman: &mut TextHuffman<'_>,
+    ceiling: usize,
+    region: &mut Bitmap,
+    warnings: &mut Vec<Warning>,
+) -> Option<()> {
+    // The two roads, each closing over its own reader. Everything below asks
+    // these rather than either decoder, so the strip loop is 6.4.5 once.
+    macro_rules! read_dt {
+        () => {
+            match huffman.as_mut() {
+                Some((tables, _, bits)) => tables.dt.value(bits)?,
+                None => decode_int(coder, &mut cx.iadt)?,
+            }
+        };
+    }
+    macro_rules! read_fs {
+        () => {
+            match huffman.as_mut() {
+                Some((tables, _, bits)) => tables.fs.value(bits)?,
+                None => decode_int(coder, &mut cx.iafs)?,
+            }
+        };
+    }
+
+    // 6.4.5 step 1: the first strip coordinate is the negative of what is
+    // coded, which is what lets a region's first strip begin above its origin.
+    let mut strip_t = -i64::from(read_dt!()) * params.strips;
+    let mut first_s: i64 = 0;
+    let mut placed = 0u32;
+
+    while placed < params.instances {
+        let delta = read_dt!();
+        strip_t = strip_t.checked_add(i64::from(delta).checked_mul(params.strips)?)?;
+
+        // A strip's first symbol is placed relative to the previous strip's
+        // first, not to the previous symbol.
+        first_s = first_s.checked_add(i64::from(read_fs!()))?;
+        let mut cur_s = first_s;
+        let mut first = true;
+
+        loop {
+            if !first {
+                // OOB ends the strip. Anything else is the gap to the next
+                // symbol, measured from the far edge of the last one.
+                let gap = match huffman.as_mut() {
+                    Some((tables, _, bits)) => match tables.ds.decode(bits)? {
+                        HuffValue::Value(gap) => gap,
+                        HuffValue::Oob => break,
+                    },
+                    None => match decode_int(coder, &mut cx.iads) {
+                        Some(gap) => gap,
+                        None => break,
+                    },
+                };
+                cur_s = cur_s
+                    .checked_add(i64::from(gap))?
+                    .checked_add(i64::from(params.ds_offset))?;
+            }
+            first = false;
+            if placed >= params.instances {
+                // More instances than the header promised, which is what sized
+                // the work; a longer region is a broken stream.
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+
+            let cur_t = if params.strips == 1 {
+                0
+            } else {
+                match huffman.as_mut() {
+                    // 6.4.5: with Huffman the strip offset is a plain field of
+                    // `log2(SBSTRIPS)` bits, not a table lookup — the only
+                    // coordinate in the region that is read the same way twice.
+                    Some((_, _, bits)) => i64::from(bits.bits(params.log_strips)?),
+                    None => i64::from(decode_int(coder, &mut cx.iait)?),
+                }
+            };
+            let t = strip_t.checked_add(cur_t)?;
+            let id = match huffman.as_mut() {
+                Some((_, codes, bits)) => codes.value(bits)?.max(0) as usize,
+                None => decode_iaid(coder, &mut cx.iaid, params.code_len) as usize,
+            };
+            // A code the dictionary does not define is a damaged stream rather
+            // than a reason to stop: the last symbol stands in, which keeps the
+            // strip's coordinates advancing by a plausible width.
+            let symbol = params.symbols.get(id).or_else(|| params.symbols.last())?;
+
+            // 6.4.11: with SBREFINE an instance may be a refinement of the
+            // symbol rather than the symbol itself, sized by its own deltas.
+            let refined;
+            let symbol = if let Some(template) = params.refine.as_ref() {
+                let ri = decode_int(coder, &mut cx.iari)?;
+                if ri == 0 {
+                    symbol
+                } else {
+                    let rdw = i64::from(decode_int(coder, &mut cx.iardw)?);
+                    let rdh = i64::from(decode_int(coder, &mut cx.iardh)?);
+                    let rdx = decode_int(coder, &mut cx.iardx)?;
+                    let rdy = decode_int(coder, &mut cx.iardy)?;
+                    let width = i64::from(symbol.width).checked_add(rdw)?;
+                    let height = i64::from(symbol.height).checked_add(rdh)?;
+                    if width <= 0 || height <= 0 || width > i64::from(u32::MAX) {
+                        note(warnings, Warning::Jbig2SymbolLimitHit);
+                        return None;
+                    }
+                    if height > i64::from(u32::MAX) {
+                        note(warnings, Warning::Jbig2SymbolLimitHit);
+                        return None;
+                    }
+                    let Some(mut target) = Bitmap::new(width as u32, height as u32, ceiling) else {
+                        note(warnings, Warning::Jbig2RegionTooLarge);
+                        return None;
+                    };
+                    let dx = refinement_offset(width, symbol.width, rdx);
+                    let dy = refinement_offset(height, symbol.height, rdy);
+                    decode_refinement_into(
+                        coder,
+                        &mut cx.refine,
+                        template,
+                        false,
+                        symbol,
+                        (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
+                        &mut target,
+                    );
+                    refined = target;
+                    &refined
+                }
+            } else {
+                symbol
+            };
+
+            let width = i64::from(symbol.width);
+            let height = i64::from(symbol.height);
+            let x = cur_s;
+            let y = if params.corner == corner::TOPLEFT || params.corner == corner::TOPRIGHT {
+                t
+            } else {
+                t.checked_sub(height - 1)?
+            };
+            composite_signed(region, symbol, x, y, params.comb_op);
+
+            cur_s = cur_s.checked_add(width - 1)?;
+            placed += 1;
+        }
+    }
+
+    Some(())
+}
+
 fn text_region(
     segment: &Segment<'_>,
     symbols: &[Bitmap],
@@ -1408,10 +1723,12 @@ fn text_region(
             raw
         }
     };
+    let rtemplate = ((flags >> 15) & 0x0001) as u8;
 
-    if refine || transposed {
-        // Both are scheduled, and the census counted each: refinement thirteen
-        // files, transposed four.
+    if transposed || (refine && huff) {
+        // Transposed is scheduled and was counted at four files. The Huffman
+        // road of refinement is narrower: it codes each refinement's length in
+        // a field this decoder does not read.
         note(warnings, Warning::Jbig2VariantSkipped);
         return None;
     }
@@ -1419,6 +1736,19 @@ fn text_region(
     // 7.4.4.1.2 sits *before* 7.4.4.5, and reading them the other way round
     // makes the instance count the two flag bytes followed by half of itself.
     let selectors = if huff { Some(reader.u16()?) } else { None };
+
+    // 7.4.4.1.3 sits between them: the refinement AT pair, present only for a
+    // refining region at template 0.
+    let mut rat = NOMINAL_REFINE_AT;
+    if refine && rtemplate == 0 {
+        for slot in &mut rat {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Warning::TruncatedInput);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
 
     // 7.4.4.5.
     let instances = reader.u32()?;
@@ -1457,109 +1787,31 @@ fn text_region(
         huffman = Some((tables, symbol_codes, bits));
     }
 
+    let template = refine.then(|| refine_template(rtemplate, rat));
+    let refine_bits = template.as_ref().map_or(0, RefineTemplate::bits);
+
     let mut coder = MqDecoder::new(reader.rest());
-    let mut iadt = MqContexts::new(INT_CONTEXTS);
-    let mut iafs = MqContexts::new(INT_CONTEXTS);
-    let mut iads = MqContexts::new(INT_CONTEXTS);
-    let mut iait = MqContexts::new(INT_CONTEXTS);
-    let mut iaid = MqContexts::new(iaid_contexts(code_len));
-
-    // 6.4.5 step 1: the first strip coordinate is the negative of what is
-    // coded, which is what lets a region's first strip begin above its origin.
-    // The two roads, each closing over its own reader. Everything below asks
-    // these rather than either decoder, so the strip loop is 6.4.5 once.
-    macro_rules! read_dt {
-        () => {
-            match huffman.as_mut() {
-                Some((tables, _, bits)) => tables.dt.value(bits)?,
-                None => decode_int(&mut coder, &mut iadt)?,
-            }
-        };
-    }
-    macro_rules! read_fs {
-        () => {
-            match huffman.as_mut() {
-                Some((tables, _, bits)) => tables.fs.value(bits)?,
-                None => decode_int(&mut coder, &mut iafs)?,
-            }
-        };
-    }
-
-    let mut strip_t = -i64::from(read_dt!()) * strips;
-    let mut first_s: i64 = 0;
-    let mut placed = 0u32;
-
-    while placed < instances {
-        let delta = read_dt!();
-        strip_t = strip_t.checked_add(i64::from(delta).checked_mul(strips)?)?;
-
-        // A strip's first symbol is placed relative to the previous strip's
-        // first, not to the previous symbol.
-        first_s = first_s.checked_add(i64::from(read_fs!()))?;
-        let mut cur_s = first_s;
-        let mut first = true;
-
-        loop {
-            if !first {
-                // OOB ends the strip. Anything else is the gap to the next
-                // symbol, measured from the far edge of the last one.
-                let gap = match huffman.as_mut() {
-                    Some((tables, _, bits)) => match tables.ds.decode(bits)? {
-                        HuffValue::Value(gap) => gap,
-                        HuffValue::Oob => break,
-                    },
-                    None => match decode_int(&mut coder, &mut iads) {
-                        Some(gap) => gap,
-                        None => break,
-                    },
-                };
-                cur_s = cur_s
-                    .checked_add(i64::from(gap))?
-                    .checked_add(i64::from(ds_offset))?;
-            }
-            first = false;
-            if placed >= instances {
-                // More instances than the header promised, which is what sized
-                // the work; a longer region is a broken stream.
-                note(warnings, Warning::Jbig2SymbolLimitHit);
-                return None;
-            }
-
-            let cur_t = if strips == 1 {
-                0
-            } else {
-                match huffman.as_mut() {
-                    // 6.4.5: with Huffman the strip offset is a plain field of
-                    // `log2(SBSTRIPS)` bits, not a table lookup — the only
-                    // coordinate in the region that is read the same way twice.
-                    Some((_, _, bits)) => i64::from(bits.bits(log_strips)?),
-                    None => i64::from(decode_int(&mut coder, &mut iait)?),
-                }
-            };
-            let t = strip_t.checked_add(cur_t)?;
-            let id = match huffman.as_mut() {
-                Some((_, codes, bits)) => codes.value(bits)?.max(0) as usize,
-                None => decode_iaid(&mut coder, &mut iaid, code_len) as usize,
-            };
-            // A code the dictionary does not define is a damaged stream rather
-            // than a reason to stop: the last symbol stands in, which keeps the
-            // strip's coordinates advancing by a plausible width.
-            let symbol = symbols.get(id).or_else(|| symbols.last())?;
-
-            let width = i64::from(symbol.width);
-            let height = i64::from(symbol.height);
-            let x = cur_s;
-            let y = if corner == corner::TOPLEFT || corner == corner::TOPRIGHT {
-                t
-            } else {
-                t.checked_sub(height - 1)?
-            };
-            composite_signed(&mut region, symbol, x, y, comb_op);
-
-            cur_s = cur_s.checked_add(width - 1)?;
-            placed += 1;
-        }
-    }
+    let mut cx = ArithContexts::new(code_len, refine_bits);
+    let params = TextParams {
+        symbols,
+        instances,
+        strips,
+        log_strips,
+        corner,
+        comb_op,
+        ds_offset,
+        refine: template,
+        code_len,
+    };
+    text_region_procedure(
+        &params,
+        &mut coder,
+        &mut cx,
+        &mut huffman,
+        ceiling,
+        &mut region,
+        warnings,
+    )?;
 
     Some((info, region))
 }
@@ -1623,6 +1875,10 @@ fn understood(kind: u8) -> bool {
             | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
             | kind::IMMEDIATE_GENERIC_REGION
             | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+            | kind::IMMEDIATE_REFINEMENT_REGION
+            | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION
+            | kind::INTERMEDIATE_GENERIC_REGION
+            | kind::INTERMEDIATE_REFINEMENT_REGION
             | kind::PAGE_INFORMATION
             | kind::END_OF_PAGE
             | kind::END_OF_STRIPE
@@ -1649,14 +1905,10 @@ fn understood(kind: u8) -> bool {
 fn carries_content(kind: u8) -> bool {
     matches!(
         kind,
-        kind::INTERMEDIATE_GENERIC_REGION
-            | kind::PATTERN_DICTIONARY
+        kind::PATTERN_DICTIONARY
             | kind::INTERMEDIATE_HALFTONE_REGION
             | kind::IMMEDIATE_HALFTONE_REGION
             | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION
-            | kind::INTERMEDIATE_REFINEMENT_REGION
-            | kind::IMMEDIATE_REFINEMENT_REGION
-            | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION
             | kind::TABLES
             | kind::COLOUR_PALETTE
     )
@@ -1762,6 +2014,28 @@ impl Bitmap {
     /// A region whose placement puts it partly off the page is not an error —
     /// a striped page composites regions that overhang by design — so the
     /// clip is silent.
+    /// The rectangle at `(x, y)`, lifted out as its own bitmap.
+    ///
+    /// 6.3.2's reference for a refinement region that refers to no
+    /// intermediate one: whatever the page already holds under the region's
+    /// own box. Anything outside the page reads 0, which is what [`Bitmap::get`]
+    /// already answers, so a region hanging off an edge is ordinary.
+    fn window(&self, x: u32, y: u32, width: u32, height: u32, ceiling: usize) -> Option<Bitmap> {
+        let mut out = Bitmap::new(width, height, ceiling)?;
+        for row in 0..height {
+            for col in 0..width {
+                let (Ok(sx), Ok(sy)) = (
+                    i32::try_from(u64::from(x) + u64::from(col)),
+                    i32::try_from(u64::from(y) + u64::from(row)),
+                ) else {
+                    continue;
+                };
+                out.set(col, row, self.get(sx, sy));
+            }
+        }
+        Some(out)
+    }
+
     fn composite(&mut self, source: &Bitmap, x: u32, y: u32, op: u8) {
         for sy in 0..source.height {
             let Some(dy) = y.checked_add(sy) else { return };
@@ -1861,6 +2135,189 @@ const fn tpgdon_context(template: u8) -> usize {
 /// Every template is written out rather than folded into a loop. A loop over
 /// a table of offsets would be shorter and would make the four layouts look
 /// interchangeable, which is exactly the thing that is not true about them.
+/// The destination layer's fixed positions, 6.3.5.3 template 0.
+///
+/// All are causal — the pixel being decoded is not written yet, so a position
+/// at or after it would read a zero that carries no information and would put
+/// this decoder out of step with any encoder.
+const REFINE_0_HERE: [(i8, i8); 3] = [(0, -1), (1, -1), (-1, 0)];
+
+/// The reference layer's fixed positions for template 0: its whole
+/// three-by-three neighbourhood bar the corner the adaptive pixel occupies.
+const REFINE_0_THERE: [(i8, i8); 8] = [
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (0, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// Template 1's destination positions. It has no adaptive pixels, which is
+/// why 7.4.4.1.3's `SBRAT` is absent whenever `SBRTEMPLATE` is one.
+const REFINE_1_HERE: [(i8, i8); 4] = [(-1, -1), (0, -1), (1, -1), (-1, 0)];
+
+/// Template 1's reference positions.
+const REFINE_1_THERE: [(i8, i8); 6] = [(0, -1), (-1, 0), (0, 0), (1, 0), (0, 1), (1, 1)];
+
+/// 6.3.5.6's TPGRON pseudo-context for each template, **in this file's own
+/// bit order** — see [`refinement_context`] for why that is not the
+/// standard's, and `docs/design/jbig2-symbol-text.md` for how these two
+/// numbers were determined rather than transcribed.
+const TPGRON_0: usize = 0x0010;
+const TPGRON_1: usize = 0x0008;
+
+/// 6.3.5.3's nominal adaptive positions: `at[0]` in the destination layer,
+/// `at[1]` in the reference.
+const NOMINAL_REFINE_AT: [(i8, i8); 2] = [(-1, -1), (-1, -1)];
+
+/// The layout a refinement template names, as data: the destination-layer
+/// positions, the reference-layer positions, and whether two of them are
+/// adaptive.
+struct RefineTemplate<'a> {
+    here: &'a [(i8, i8)],
+    there: &'a [(i8, i8)],
+    at: Option<[(i8, i8); 2]>,
+    /// 6.3.5.6's TPGRON pseudo-context: the slot the typical-prediction
+    /// decision shares the context array with.
+    typical: usize,
+}
+
+impl RefineTemplate<'_> {
+    /// How many context bits the layout forms, which is how many adaptive
+    /// states 6.3 needs.
+    fn bits(&self) -> usize {
+        self.here.len() + self.there.len() + usize::from(self.at.is_some()) * 2
+    }
+}
+
+/// **T.88 6.3.5.3's refinement context.**
+///
+/// Two layers at once: what has already been decoded of the target, and the
+/// reference the target is a refinement *of*, shifted by the offset the caller
+/// decoded. Template 0 forms thirteen bits, two of them adaptive (7.4.3.1.3's
+/// `SDRAT`, 7.4.4.1.3's `SBRAT`); template 1 forms ten and has none.
+///
+/// # The bit order here is not the standard's, and that is sound
+///
+/// A context index is a label for an adaptive state slot and nothing more:
+/// [`MqDecoder::decode_at`] reads and writes `state[cx]`, every slot begins in
+/// the same state, and the A and C registers are global. Relabel every context
+/// through any bijection and each slot is still reached by exactly the same
+/// neighbourhoods in the same order, so the decision sequence is bit-for-bit
+/// unchanged. **Only the set of positions has to be right**, which is what
+/// lets this file hold a refinement decoder verified against Annex H rather
+/// than transcribed from two figures.
+///
+/// The one place that freedom stops is 6.3.5.6's TPGRON pseudo-context, which
+/// is a bare number in the standard's own ordering and does not survive a
+/// relabelling. [`decode_refinement_into`] therefore has no TPGRON, and the
+/// one caller that could set it refuses instead of guessing which slot it
+/// names.
+fn refinement_context(
+    into: &Bitmap,
+    reference: &Bitmap,
+    dx: i32,
+    dy: i32,
+    template: &RefineTemplate<'_>,
+    x: i32,
+    y: i32,
+) -> usize {
+    // The reference is read at the target pixel shifted by the offset the
+    // caller decoded, which is what makes a refinement a *difference* rather
+    // than a second picture.
+    let there = |ox: i8, oy: i8| reference.get(x - dx + i32::from(ox), y - dy + i32::from(oy));
+    let mut value = 0u32;
+    if let Some(at) = template.at {
+        value = into.get(x + i32::from(at[0].0), y + i32::from(at[0].1));
+        value = (value << 1) | there(at[1].0, at[1].1);
+    }
+    for (ox, oy) in template.here {
+        value = (value << 1) | into.get(x + i32::from(*ox), y + i32::from(*oy));
+    }
+    for (ox, oy) in template.there {
+        value = (value << 1) | there(*ox, *oy);
+    }
+    value as usize
+}
+
+/// **Clause 6.3: a generic refinement region**, over a coder the caller owns.
+///
+/// Decodes `into` as a refinement of `reference` shifted by `(dx, dy)`. The
+/// coder and context set are the caller's because 6.5.8.2 runs this inside a
+/// symbol dictionary, where the adaptive state has to survive from one symbol
+/// to the next.
+///
+/// TPGRON (6.3.5.6) is deliberately absent — see [`refinement_context`].
+fn decode_refinement_into(
+    coder: &mut MqDecoder<'_>,
+    contexts: &mut MqContexts,
+    template: &RefineTemplate<'_>,
+    tpgron: bool,
+    reference: &Bitmap,
+    // 6.3.5.3's GRREFERENCEDX/DY, as one value because they are never
+    // meaningful apart.
+    (dx, dy): (i32, i32),
+    into: &mut Bitmap,
+) {
+    let mut ltp = 0u8;
+    for y in 0..into.height {
+        if tpgron {
+            // 6.3.5.6: one decision per row toggling "this row is typical",
+            // which is the refinement analogue of TPGDON and is why refining a
+            // picture that barely changed costs almost nothing.
+            ltp ^= coder.decode_at(contexts, template.typical);
+        }
+        for x in 0..into.width {
+            let (sx, sy) = (x as i32, y as i32);
+            if ltp == 1 {
+                // In a typical row a pixel whose whole reference neighbourhood
+                // agrees is not coded at all: it is that value. Only the
+                // pixels on a boundary cost a decision.
+                let centre = reference.get(sx - dx, sy - dy);
+                let uniform = (-1..=1).all(|oy| {
+                    (-1..=1).all(|ox| reference.get(sx - dx + ox, sy - dy + oy) == centre)
+                });
+                if uniform {
+                    into.set(x, y, centre);
+                    continue;
+                }
+            }
+            let cx = refinement_context(into, reference, dx, dy, template, sx, sy);
+            let pixel = coder.decode_at(contexts, cx);
+            into.set(x, y, u32::from(pixel));
+        }
+    }
+}
+
+/// The layout `SDRTEMPLATE` or `SBRTEMPLATE` selects, with the adaptive pair
+/// the header carried.
+fn refine_template(rtemplate: u8, at: [(i8, i8); 2]) -> RefineTemplate<'static> {
+    if rtemplate == 0 {
+        RefineTemplate {
+            here: &REFINE_0_HERE,
+            there: &REFINE_0_THERE,
+            at: Some(at),
+            typical: TPGRON_0,
+        }
+    } else {
+        RefineTemplate {
+            here: &REFINE_1_HERE,
+            there: &REFINE_1_THERE,
+            at: None,
+            typical: TPGRON_1,
+        }
+    }
+}
+
+/// 6.4.11 and 6.5.8.2.2's reference offset, which is the same arithmetic in
+/// both: the size difference is split evenly and the coded offset added.
+fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
+    (target - i64::from(reference)).div_euclid(2) + i64::from(coded)
+}
+
 fn context(bitmap: &Bitmap, template: u8, at: &[(i8, i8); 4], x: i32, y: i32) -> usize {
     let p = |dx: i32, dy: i32| bitmap.get(x + dx, y + dy);
     let a = |i: usize| bitmap.get(x + i32::from(at[i].0), y + i32::from(at[i].1));
@@ -2110,6 +2567,7 @@ pub fn decode(
         return Err(FilterError::Unsupported(Capability::Jbig2));
     };
     let mut page = Page {
+        intermediate: BTreeMap::new(),
         symbols: BTreeMap::new(),
         seen: BTreeSet::new(),
         refused: BTreeSet::new(),
@@ -2139,11 +2597,19 @@ pub fn decode(
             kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION => {
                 page.draw_generic(segment, max_output, warnings);
             }
+            kind::INTERMEDIATE_GENERIC_REGION => page.keep_generic(segment, max_output, warnings),
+            kind::INTERMEDIATE_REFINEMENT_REGION => {
+                page.draw_refinement(segment, max_output, true, warnings);
+            }
+            kind::IMMEDIATE_REFINEMENT_REGION | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION => {
+                page.draw_refinement(segment, max_output, false, warnings);
+            }
             kind::SYMBOL_DICTIONARY => page.read_symbols(segment, max_output, warnings),
-            kind::INTERMEDIATE_TEXT_REGION
-            | kind::IMMEDIATE_TEXT_REGION
-            | kind::IMMEDIATE_LOSSLESS_TEXT_REGION => {
-                page.draw_text(segment, max_output, warnings);
+            kind::INTERMEDIATE_TEXT_REGION => {
+                page.draw_text(segment, max_output, true, warnings);
+            }
+            kind::IMMEDIATE_TEXT_REGION | kind::IMMEDIATE_LOSSLESS_TEXT_REGION => {
+                page.draw_text(segment, max_output, false, warnings);
             }
             _ => {}
         }
@@ -2157,11 +2623,76 @@ pub fn decode(
     Ok(page.bitmap.bits)
 }
 
+/// **One generic refinement region segment (T.88 7.4.7)**, decoded against a
+/// reference the caller supplies.
+///
+/// The reference is 6.3.2's: with no intermediate region referred to, it is
+/// what the page already holds under this region's own box. A refinement
+/// region improves a picture that is already there rather than drawing a new
+/// one, which is why it is the one region type that reads the page back.
+fn refinement_region(
+    segment: &Segment<'_>,
+    reference: &Bitmap,
+    ceiling: usize,
+    warnings: &mut Vec<Warning>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut reader = Reader::new(segment.data);
+    let Some(info) = RegionInfo::read(&mut reader) else {
+        note(warnings, Warning::TruncatedInput);
+        return None;
+    };
+    // 7.4.7.2. Bit 0 selects the template, bit 1 TPGRON.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Warning::TruncatedInput);
+        return None;
+    };
+    let rtemplate = flags & 0x01;
+    let tpgron = flags & 0x02 != 0;
+    // 7.4.7.3: the adaptive pair, at template 0 only.
+    let mut at = NOMINAL_REFINE_AT;
+    if rtemplate == 0 {
+        for slot in &mut at {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Warning::TruncatedInput);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+    let template = refine_template(rtemplate, at);
+    let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Warning::Jbig2RegionTooLarge);
+        return None;
+    };
+    let mut coder = MqDecoder::new(reader.rest());
+    let mut contexts = MqContexts::new(1 << template.bits());
+    // 6.3.5.3: the region and its reference are the same size and in the same
+    // place, so the offset between them is zero.
+    decode_refinement_into(
+        &mut coder,
+        &mut contexts,
+        &template,
+        tpgron,
+        reference,
+        (0, 0),
+        &mut region,
+    );
+    Some((info, region))
+}
+
 /// The page bitmap regions are composited onto, and what the page
 /// information segment said about it.
 struct Page {
     /// Packed 1-bpp rows, most significant bit first, 1 = black.
     bitmap: Bitmap,
+    /// 7.4.6.1's auxiliary buffers: what each *intermediate* region decoded
+    /// to, by segment number.
+    ///
+    /// An intermediate region is not drawn. It waits for the segment that
+    /// refers to it — in practice a refinement region, which takes it as the
+    /// reference 6.3.2 asks for — and that is the whole reason the two exist
+    /// as separate segment types.
+    intermediate: BTreeMap<u32, Bitmap>,
     /// What each symbol dictionary exported, by its segment number (7.4.3).
     ///
     /// A `BTreeMap` rather than a hash map because a text region's symbol list
@@ -2247,6 +2778,67 @@ impl Page {
         self.regions += 1;
     }
 
+    /// 7.4.7: decodes a generic refinement region and composites it.
+    ///
+    /// Unlike every other region, this one reads the page before it writes
+    /// it: 6.3.2 makes the reference whatever is already under the region's
+    /// box, so the window is lifted out first and the refinement decoded
+    /// against it.
+    fn draw_refinement(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        intermediate: bool,
+        warnings: &mut Vec<Warning>,
+    ) {
+        let Some(box_) = RegionInfo::read(&mut Reader::new(segment.data)) else {
+            note(warnings, Warning::TruncatedInput);
+            return;
+        };
+        // 6.3.2: the reference is a referred-to intermediate region if there
+        // is one, and otherwise whatever the page already holds under this
+        // region's own box.
+        let referred = segment
+            .referred
+            .iter()
+            .find_map(|number| self.intermediate.get(number))
+            .cloned();
+        let reference = match referred {
+            Some(bitmap) => bitmap,
+            None => {
+                let Some(window) =
+                    self.bitmap
+                        .window(box_.x, box_.y, box_.width, box_.height, ceiling)
+                else {
+                    note(warnings, Warning::Jbig2RegionTooLarge);
+                    return;
+                };
+                window
+            }
+        };
+        let Some((info, region)) = refinement_region(segment, &reference, ceiling, warnings) else {
+            note(warnings, Warning::Jbig2SegmentSkipped);
+            return;
+        };
+        if intermediate {
+            // 7.4.6.1: it waits to be referred to rather than being drawn, and
+            // it is not a region for the purpose of the refusal.
+            self.intermediate.insert(segment.number, region);
+            return;
+        }
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
+    }
+
+    /// 7.4.6 for an *intermediate* generic region: decoded and kept, not drawn.
+    fn keep_generic(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+        let Some((_, region)) = generic_region(segment, ceiling, warnings) else {
+            note(warnings, Warning::Jbig2SegmentSkipped);
+            return;
+        };
+        self.intermediate.insert(segment.number, region);
+    }
+
     /// 7.4.3: decodes a symbol dictionary and keeps what it exported.
     ///
     /// Nothing draws yet — a dictionary is not a region and does not count as
@@ -2289,7 +2881,13 @@ impl Page {
     /// Like [`Page::draw_generic`], `regions` moves only when a bitmap actually
     /// arrived, so a file whose only text region refused still reaches the
     /// refusal instead of returning the blank page it was composited onto.
-    fn draw_text(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+    fn draw_text(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        intermediate: bool,
+        warnings: &mut Vec<Warning>,
+    ) {
         let dangling = |number: &u32| {
             !self.symbols.contains_key(number)
                 && (self.refused.contains(number) || !self.seen.contains(number))
@@ -2316,6 +2914,14 @@ impl Page {
             note(warnings, Warning::Jbig2SegmentSkipped);
             return;
         };
+        if intermediate {
+            // 7.4.6.1: an intermediate region is *not* drawn. It waits for the
+            // segment that refers to it — here a refinement region, which takes
+            // it as 6.3.2's reference — and compositing it as well would draw
+            // the picture twice, once unrefined.
+            self.intermediate.insert(segment.number, region);
+            return;
+        }
         self.bitmap.composite(&region, info.x, info.y, info.op);
         self.regions += 1;
     }
@@ -2622,6 +3228,12 @@ mod tests {
 
     const PAGE_1: std::ops::Range<usize> = 13..400;
     const PAGE_2: std::ops::Range<usize> = 400..682;
+
+    /// Page 3, the refinement page. Segment 16 — the dictionary its own
+    /// dictionary refines against — sits inside this range rather than before
+    /// it, because it is declared on page 0 and the annex puts it where it is
+    /// first needed.
+    const PAGE_3: std::ops::Range<usize> = 682..860;
 
     /// **The picture T.88 Annex H.1 publishes for its generic region.**
     ///
@@ -3226,10 +3838,13 @@ mod tests {
     /// like the refusal it replaced.
     #[test]
     fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
-        // SDREFAGG, a consumed retained context, and a custom-table selector
-        // — clause 7.4.13's type 53 segments, which nothing reads yet. SDHUFF
-        // is no longer among them: the Huffman variant decodes.
-        for flags in [0x0002u16, 0x0100, 0x000D] {
+        // SDREFAGG's one remaining road — over Huffman, whose refinement
+        // lengths are a field this decoder does not read — a consumed retained
+        // context, and a custom-table selector, clause 7.4.13's type 53
+        // segments, which nothing reads yet. Neither SDHUFF nor SDREFAGG is
+        // refused on its own any more, and neither is either refinement
+        // template: all of that decodes.
+        for flags in [0x0003u16, 0x0100, 0x000D] {
             let mut data = Vec::new();
             data.extend_from_slice(&flags.to_be_bytes());
             data.extend_from_slice(&[0; 8]); // AT, template 0.
@@ -3566,6 +4181,7 @@ mod tests {
     #[test]
     fn the_page_default_pixel_value_starts_the_page_black() {
         let mut page = Page {
+            intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
@@ -3592,6 +4208,7 @@ mod tests {
     fn a_segment_for_another_page_is_not_composited_onto_this_one() {
         let data = page_info(8, 8, 0);
         let mut page = Page {
+            intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
@@ -4118,5 +4735,173 @@ mod tests {
             };
             let _ = decode(&bytes, &params, 1 << 16, &mut warnings);
         }
+    }
+
+    /// **T.88 Annex H.1's page 3 decodes, and it decodes as text.**
+    ///
+    /// Page 3 is the annex's refinement page, and reaching this picture needs
+    /// every part of clause 6.3 at once: 6.5.8.2.2's single refinement,
+    /// 6.5.8.2.1's aggregate — a symbol that is itself a text region —
+    /// 6.4.11's per-instance refinement inside the region that draws them, and
+    /// both of 6.3.5.3's templates, since the dictionary codes at `SDRTEMPLATE`
+    /// 0 and the region at `SBRTEMPLATE` 1.
+    ///
+    /// The assertion is the whole page rather than a count because the point
+    /// is *legibility*: a refinement template wrong in one position leaves the
+    /// arithmetic decoder in step for a while and then produces noise, and
+    /// noise is what this test exists to tell apart from letters. The third
+    /// glyph's descender is the useful detail — it is two rows below the
+    /// baseline that everything else sits on, so a decoder that had merely
+    /// stayed in step would not have put it there.
+    #[test]
+    fn annex_h_page_3_decodes_its_refined_text() {
+        let params = Jbig2Params {
+            globals: &[],
+            width: 37,
+            height: 8,
+        };
+        let mut warnings = Vec::new();
+        let bits = decode(&ANNEX_H[PAGE_3], &params, 1 << 20, &mut warnings)
+            .expect("page 3 carries a refined text region");
+        assert_eq!(
+            picture(&bits, 37, 8),
+            [
+                ".####....####...####....####....####.",
+                "#....#.......#..#...#.......#..#....#",
+                "#........#####..#...#...#####..#.....",
+                "#.......#....#..#...#..#....#..#.....",
+                "#....#..#....#..####...#....#..#....#",
+                ".####....#####..#.......#####...####.",
+                "................#....................",
+                "................#....................",
+            ]
+        );
+        assert!(warnings.is_empty(), "page 3 warned: {warnings:?}");
+    }
+
+    /// **6.5.8.2's two roads, told apart by what they produce.**
+    ///
+    /// Annex H's page 3 dictionary imports one symbol and decodes two, and the
+    /// two take different roads: `REFAGGNINST = 1` refines the imported letter
+    /// into another letter, and `REFAGGNINST = 2` builds a symbol that is a
+    /// whole text region — two instances placed side by side.
+    ///
+    /// Asserting the bitmaps rather than the count is what makes this evidence.
+    /// The aggregate is the pair of the other two, in order and correctly
+    /// spaced, which is a coincidence no desynchronised decoder produces.
+    #[test]
+    fn annex_h_page_3_refines_one_symbol_and_aggregates_another() {
+        let all = segments(&ANNEX_H[13..], &mut Vec::new());
+        let dictionary = |number: u32| {
+            all.iter()
+                .find(|segment| segment.number == number)
+                .expect("segment")
+        };
+        let imported = symbol_dictionary(dictionary(16), &[], 1 << 20, &mut Vec::new())
+            .expect("the shared dictionary decodes");
+        let mut warnings = Vec::new();
+        let exported = symbol_dictionary(dictionary(17), &imported, 1 << 20, &mut warnings)
+            .expect("the refining dictionary decodes");
+
+        assert_eq!(exported.len(), 3, "one imported symbol and two new ones");
+        // The import, untouched.
+        assert_eq!(
+            bitmap_rows(&exported[0]),
+            [".####.", ".....#", ".#####", "#....#", "#....#", ".#####"]
+        );
+        // 6.5.8.2.2: a refinement of it, at `IARDX` = `IARDY` = 0.
+        assert_eq!(
+            bitmap_rows(&exported[1]),
+            [".####.", "#....#", "#.....", "#.....", "#....#", ".####."]
+        );
+        // 6.5.8.2.1: an aggregate of the two above, which is why it is exactly
+        // twice as wide plus the two columns between them.
+        assert_eq!(
+            bitmap_rows(&exported[2]),
+            [
+                ".####....####.",
+                ".....#..#....#",
+                ".#####..#.....",
+                "#....#..#.....",
+                "#....#..#....#",
+                ".#####...####.",
+            ]
+        );
+        assert!(warnings.is_empty(), "the dictionary warned: {warnings:?}");
+    }
+
+    /// **The refinement context's bit order is a free choice, and this proves
+    /// it** — which is the argument [`refinement_context`] rests on.
+    ///
+    /// A context index only ever names an adaptive state slot: the decoder
+    /// reads and writes `state[cx]`, every slot starts identical, and A and C
+    /// are global. So relabelling every context through a bijection cannot
+    /// change a single decision. Here the same thirteen positions are given to
+    /// the decoder in two different orders over the same coded bytes, and the
+    /// two bitmaps have to be identical.
+    ///
+    /// If this ever fails, the file's own bit order has stopped being a
+    /// bijection — a position repeated or dropped — and the templates below
+    /// are no longer the sets they claim to be.
+    #[test]
+    fn a_relabelled_refinement_template_decodes_identically() {
+        let reference = bitmap_from(&[".####.", ".....#", ".#####", "#....#", "#....#", ".#####"]);
+        // Any bytes will do: the claim is that two orders agree, not that
+        // either decodes anything in particular.
+        let coded: [u8; 24] = [
+            0x4F, 0xE7, 0x8D, 0x68, 0x1B, 0xA5, 0x3C, 0x91, 0x07, 0xF2, 0x40, 0x8E, 0xD3, 0x66,
+            0xAA, 0x19, 0x5C, 0xB0, 0x27, 0xE1, 0x74, 0x9F, 0x38, 0xC6,
+        ];
+        let straight = RefineTemplate {
+            here: &REFINE_0_HERE,
+            there: &REFINE_0_THERE,
+            at: Some(NOMINAL_REFINE_AT),
+            typical: TPGRON_0,
+        };
+        // The same set, read in the opposite order within each layer and with
+        // the layers swapped over — a different index for every neighbourhood.
+        let here: Vec<(i8, i8)> = REFINE_0_HERE.iter().rev().copied().collect();
+        let there: Vec<(i8, i8)> = REFINE_0_THERE.iter().rev().copied().collect();
+        let relabelled = RefineTemplate {
+            here: &here,
+            there: &there,
+            at: Some(NOMINAL_REFINE_AT),
+            typical: TPGRON_0,
+        };
+        assert_eq!(straight.bits(), relabelled.bits());
+
+        let decode_with = |template: &RefineTemplate<'_>| {
+            let mut coder = MqDecoder::new(&coded);
+            let mut contexts = MqContexts::new(1 << template.bits());
+            let mut into = Bitmap::new(6, 6, 1 << 20).expect("bitmap");
+            decode_refinement_into(
+                &mut coder,
+                &mut contexts,
+                template,
+                false,
+                &reference,
+                (0, 0),
+                &mut into,
+            );
+            bitmap_rows(&into)
+        };
+        assert_eq!(decode_with(&straight), decode_with(&relabelled));
+    }
+
+    /// The rows of a bitmap, as `#` and `.`.
+    fn bitmap_rows(bitmap: &Bitmap) -> Vec<String> {
+        (0..bitmap.height)
+            .map(|y| {
+                (0..bitmap.width)
+                    .map(|x| {
+                        if bitmap.get(x as i32, y as i32) == 1 {
+                            '#'
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     }
 }

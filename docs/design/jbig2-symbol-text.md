@@ -122,6 +122,8 @@ regions, and 16 of those are halftone or pattern segments and nothing else.
 | SBHUFF | 15 | 15 |
 | SDREFAGG | 8 | 8 |
 | SBREFINE | 13 | 13 |
+| refinement regions by template (0 / 1) | 37 / 3 | 15 |
+| refinement regions with TPGRON (6.3.5.6) | 5 | 3 |
 | context used / retained | 3 / 2 | 1 |
 
 The scheduling question is not how many segments use a feature but **how many
@@ -213,7 +215,7 @@ injection at the bottom of `jbig2.rs` already does.
 | 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | **Done**, with one exit criterion changed and the change stated: symbols round-trip pixel-for-pixel against an `MqEncoder`-built dictionary over three height classes and all four templates; 6.5.10's export runs select across imported and new symbols; the variants this build declines refuse under `Jbig2VariantSkipped`. Annex H.2's *published symbol bitmaps* are not in this repository — H.1's datastream is, its generic-region picture is, its symbol pictures are not — so the pixel-for-pixel claim is against a fixture this repository builds rather than against the standard. Milestone 4 recovers the standard's own adjudication: the annex's text region composites those symbols into a page, and that page can be compared with what H.1 publishes | M |
 | 4 | Text region, arithmetic (SBREFINE and TRANSPOSED refused by name) | **Done**, with the exit criterion changed and the change stated below: `a_text_region_places_its_symbols_where_6_4_5_computes` places symbols across two strips at the coordinates 6.4.5 computes, through a round trip; `a_text_region_whose_dictionary_refused_is_refused_by_name` holds a region whose referred-to dictionary is absent or refused to refusing **whole**; all four reference corners handled, SBDSOFFSET and multi-strip regions decoded. The annex's own page moves to milestone 6 | M |
 | 6 | Annex B Huffman: standard tables, 6.5.9's collective bitmaps, 7.4.3.1.7's symbol-ID codes | **Done.** `annex_h_codes_the_same_symbols_two_ways` holds the reconstructed tables to the annex's arithmetic twin; 44 to 47 files clean | M |
-| 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | `MqEncoder`-built refinement fixtures decode; `Jbig2RefinementSkipped` reachability test deleted with the closure; injected wrong-template defect caught by a counted assertion | M |
+| 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | **Done**, and with the exit criterion changed twice; both changes stated above. The `MqEncoder` round trip was dropped for Annex H page 3, and Annex H alone was then found insufficient — the corpus's own ground truth is what settles the templates. Landed on: page 3 decodes into its refined text with no warning; all ten corpus refinement variants reproduce the unrefined picture with 0 pixels different; `a_relabelled_refinement_template_decodes_identically` pins the argument the templates rest on. Counted injection below | M |
 
 ### Milestone 6 landed, and what actually adjudicates it
 
@@ -293,51 +295,143 @@ position rules out for the same reason it rules out committing any corpus — or
 fetching a corpus that carries some. Neither is milestone 7's business to
 decide, so the rows land as stated estimates and the gap is named here.
 
-### Milestone 5 was attempted, and what the attempt established
+### Milestone 5 landed, and the route to it is the point
 
 Clause 6.3 was written and run against Annex H page 3, on the reasoning that a
 wrong context template desynchronises the arithmetic decoder, the integer
 decoders after it return nonsense, and the strict count checks then refuse the
-segment — so the experiment could only cost a refusal, never a wrong picture.
-It was worth running, and it narrowed the problem to one artefact.
+segment — so the experiment could only ever cost a refusal, never a wrong
+picture. The first run produced `REFAGGNINST = -12` on the second symbol and
+was recorded here as *blocked on 6.3.5.3's two figures*. **That diagnosis was
+wrong, and the way it was wrong is worth keeping.**
 
-**Everything around clause 6.3 decodes correctly.** Segment 17 is a symbol
-dictionary with `SDREFAGG = 1`, and its first symbol reads:
+**The defect was `SBSYMCODELEN`, not the template.** 6.5.8.2.3 makes the symbol
+code as wide as the whole dictionary needs — `SDNUMINSYMS + SDNUMNEWSYMS`, so
+two bits for Annex H's one imported and two new symbols — and the first
+attempt sized it against the symbols decoded *so far*, which is one bit. One
+extra `IAID` decision per symbol, and everything after the first refinement is
+noise. It presented exactly as a wrong context template would, which is why it
+was misread as one.
 
-```
-height = 6   width = 6   REFAGGNINST = 1
-```
+#### The bit order in 6.3.5.3's figures does not have to be known
 
-All three are right, which proves a chain of things that would each have broken
-it: 7.4.3.1.2's generic AT pixels are read at the right width for template 2,
-7.4.3.1.3's *refinement* AT pair is read only when `SDRTEMPLATE` is zero and at
-the right offset, the height-class loop and its `IADH`/`IADW` decoders are in
-step, and 6.5.8.2's aggregate header — `IAAI`, then the symbol identity, then
-`IARDX` and `IARDY` — is in the order the clause puts it. A mistake anywhere in
-that chain shows up as a nonsense value here, and none did.
+A context index names an adaptive state slot and nothing else: the decoder
+reads and writes `state[cx]`, every slot begins in the same state, and the MQ
+coder's A and C registers are global. **Relabel every context through any
+bijection and the decision sequence is bit-for-bit unchanged** — each slot is
+still reached by exactly the same neighbourhoods in the same order. So the
+order the standard's figures put the pixels in is unobservable, and only the
+*set* of positions has to be right. `a_relabelled_refinement_template_decodes_identically`
+is that argument as a test: the same thirteen positions in two different orders
+over the same bytes, asserted to produce the same bitmap.
 
-**The second symbol then reads `REFAGGNINST = -12`.** The decoder is out of step
-by the end of the first refinement, which places the defect inside
-`decode_refinement_into` and nowhere else — that is, in the **context template**
-itself. So what is missing is not clause 6.3's structure but 6.3.5.3's two
-figures: which thirteen pixels form `GRTEMPLATE 0`'s context and which ten form
-`GRTEMPLATE 1`'s, and in what order.
+The one thing that does not survive the relabelling is 6.3.5.6's TPGRON
+pseudo-context, which is a bare number in the standard's own ordering. It is
+recovered below rather than transcribed.
 
-**The guessed template was not kept.** A template reconstructed from memory
-would be code that refuses today and that a later reader might trust; the module
-already says a wrong JBIG2 decode is worth less than a refusal, and a wrong
-*guess* dressed as an implementation is worth less than an honest gap. What is
-recorded instead is the boundary: hand over 6.3.5.3's two layouts and the rest
-is verified to be waiting for them.
+#### Annex H alone is not enough, and it is instructive that it looks like it is
 
-**And unlike Huffman, there is no substitute.** Milestone 6 landed on the
-strength of Annex H coding the same two symbols twice — segment 2 with
-`SDHUFF`, segment 9 arithmetically — so the standard adjudicated the
-reconstruction pixel for pixel. Nothing in the annex codes one picture with and
-without refinement: page 3 is the only refinement fixture and it has no twin.
-The count checks would catch a desynchronised decoder, but they cannot
-distinguish a template that is right from one that is wrong in a way that stays
-in step, and that is the difference between evidence and a hope.
+Page 3's dictionary refines a single 6 by 6 symbol: thirty-six coded decisions.
+Searching every 10-subset of a 21-position pool against page 3's text region,
+with two acceptance conditions — the counts all check out, and each refinement
+stays within 20 % of its reference, since a refinement is by construction a
+small edit — left **five** candidate templates for `GRTEMPLATE 1`. All five
+decoded page 3 into the same legible line of text.
+
+All five were wrong. They render the third glyph without its descender. Thirty-
+six decisions is simply not enough information to separate them, and the
+agreement between them reads as corroboration when it is nothing of the kind.
+Had any one been picked on that evidence it would have shipped as a decoder
+that is right on one fixture and silently wrong everywhere else — the exact
+failure this module says is worth less than a refusal.
+
+#### The corpus holds the twin the annex does not
+
+The pdf.js fixtures are one 399 by 400 bitmap encoded a dozen ways — four
+generic templates, MMR, TPGDON, custom AT, a symbol dictionary, and eight
+refinement variants — each a lossless encoding of the same picture. **The files
+that do not refine are therefore ground truth for the files that do**, and the
+comparison is between two of this engine's own decodes, so ruling 13 is
+untouched. That is the cross-check this document previously said did not exist;
+it said so having looked only in Annex H.
+
+Against a whole picture the answer is immediate and unique:
+
+| what was unknown | how it was settled |
+| --- | --- |
+| `GRTEMPLATE 0`'s thirteen positions | Annex H page 3's dictionary refines 'a' into a legible 'c'; `bitmap-refine-page.pdf` then reproduces the corpus picture exactly |
+| `GRTEMPLATE 1`'s ten positions | `bitmap-refine-template1.pdf`, 0 pixels different over 159 600 |
+| 6.3.5.6's TPGRON slot, template 0 | searched all 8 192; **exactly one** reproduces `bitmap-refine-tpgron.pdf` |
+| 6.3.5.6's TPGRON slot, template 1 | searched all 1 024; **exactly one** reproduces `bitmap-refine-template1-tpgron.pdf` |
+
+`bitmap-refine-customat.pdf` pins the adaptive pair to the destination and
+reference layers the right way round, and `bitmap-refine-customat-tpgron.pdf`
+is worth naming as a fixture that proves nothing on its own: 8 039 of the 8 192
+slots reproduce it, because its typical rows never fire. A fixture that passes
+under most values of an unknown is not evidence about that unknown, and the
+whole difference between this section and the one it replaced is noticing that.
+
+#### Two defects the refinement work found in code that was already there
+
+- **An intermediate text region was being drawn.** 7.4.6.1 says an intermediate
+  region waits for the segment that refers to it; `Page::draw_text` composited
+  it onto the page anyway. Invisible until a refinement region referred to one,
+  at which point the page carried the picture twice — once unrefined —
+  and `bitmap-symbol-refine.pdf` came out 291 pixels heavy.
+- **Intermediate generic regions were skipped entirely**, so the ordinary
+  `bitmap-refine.pdf` shape — code a region, then refine it — had nothing to
+  refine against.
+
+#### What is still not pinned, stated rather than absorbed
+
+- **6.5.8.2.2's reference offset.** The dictionary road shares
+  `refinement_offset` with 6.4.11, so it splits the size difference before
+  adding `RDX`. Annex H's refinement is of a symbol the same size as its
+  reference, where that term is zero, and no corpus file exercises the
+  dictionary road at a different size. Both readings agree on every fixture
+  in tree, so the fixture cannot choose between them.
+- **Huffman refinement** (`SDHUFF` with `SDREFAGG`, and `SBHUFF` with
+  `SBREFINE`) is refused by name: 6.4.11 codes each refinement's size as
+  `BMSIZE` and byte-aligns before the arithmetic sub-stream, and the deltas
+  around it come through tables B.14 and B.15, which this file does not carry.
+  **11 segments in 10 corpus files ask for it** — measured, not assumed; an
+  earlier draft of this bullet said none did, which was an assertion rather
+  than a count. That is more reachability than JPX or mesh shadings had when
+  they were scheduled, so it is a roadmap item and not a footnote.
+
+  What makes it tractable, and what does not: the refinement decoder it needs
+  already exists and is verified, so the work is the Huffman envelope around
+  it. But B.14 and B.15 would have to be reconstructed, Annex H does not
+  exercise them, and the lesson of this document is that a reconstruction
+  wants a picture coded both ways to adjudicate it. The corpus has one —
+  `bitmap-symbol-texthuffrefine.pdf` and its family against the same 399 by
+  400 bitmap — so the method is the one used here, applied to a much larger
+  search space.
+
+#### Counted injection, and what it says about where the evidence lives
+
+Each row is one fact perturbed and the whole JBIG2 suite re-run, counting
+assertions that fail. `filters` is `cargo test -p tinker-pdf-filters jbig2`;
+`corpus` is `jbig2_refinement.rs`, which is `#[ignore]` and runs from
+[`corpus.yml`](../../.github/workflows/corpus.yml).
+
+| perturbation | filters | corpus | total |
+| --- | ---: | ---: | ---: |
+| template 0, one reference position moved | 3 | 2 | 5 |
+| template 0, one destination position moved | 3 | 2 | 5 |
+| template 1, one reference position moved | 2 | 2 | 4 |
+| 6.3.5.6's TPGRON slot, template 0, off by one | **0** | 2 | 2 |
+| 6.3.5.6's TPGRON slot, template 1, off by one | **0** | 2 | 2 |
+| `SBSYMCODELEN` sized against the symbols so far | 3 | 0 | 3 |
+| an intermediate text region composited after all | **0** | 2 | 2 |
+
+**Three of the seven are caught by nothing in this repository except the corpus
+gate**, and the zeros are the useful part of the table. Annex H carries no
+refinement region segment at all, so it cannot exercise TPGRON, and it carries
+no intermediate region, so it cannot notice one being drawn. That is why
+`corpus.yml` runs those assertions explicitly rather than leaving them to a
+`--ignored` nobody passes: without that step three of these facts would be held
+by a comment.
 
 ### Milestone 5 has an anchor, and it is better than the round trip
 
@@ -356,14 +450,21 @@ decoder's own reading. That is the same correction milestones 3 and 4 each had
 to make after the fact; this one is available before the code rather than
 after it.
 
-**What blocks the milestone is the two context templates themselves.**
-6.3.5.3's figures decide which thirteen pixels and which ten form the context,
-and a template wrong by one pixel does not fail — the arithmetic decoder
-desynchronises and returns *a picture*. That is precisely the failure mode this
-module's refusals exist to prevent, and it is why the module's own header says
-a wrong JBIG2 decode is worth less than a refusal. The templates are
-transcribed from the figures or the milestone does not land; it refuses by
-name, under `Jbig2VariantSkipped`, until they are.
+**This paragraph used to say the milestone was blocked on 6.3.5.3's two
+figures**, on the grounds that a template wrong by one pixel does not fail —
+the arithmetic decoder desynchronises and returns *a picture* — which is
+precisely the failure this module's refusals exist to prevent. The first half
+of that is right and worth keeping. The conclusion drawn from it was not: the
+figures were never obtained and were never needed.
+
+Two things unblocked it, both recorded above. A context index labels an
+adaptive state slot, so the *order* in those figures is unobservable and only
+the set of positions is a fact about the format; and the corpus codes one
+picture with refinement and without it, which adjudicates the set far more
+sharply than Annex H's thirty-six decisions can. What the old paragraph got
+right is why the second of those is not optional: five templates passed the
+Annex H test and were all wrong, so "it decodes and looks like a picture" is
+exactly as weak as this paragraph always said it was.
 
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
 | 7 | Bounds and fuzz hardening | `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES`, `MAX_JBIG2_TEXT_INSTANCES` rows in `bounds_ledger.rs`, each measured against a real `jbig2enc`/OCRmyPDF output and none refusing it; a recorded fuzz session over the extended seeds with zero crashes | S |

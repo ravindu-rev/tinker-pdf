@@ -72,6 +72,32 @@ and all four reference corners. What a dictionary exports is keyed by segment
 number, and a region's symbols are the concatenation of its referred-to
 dictionaries' exports *in reference order* (7.4.3).
 
+**Refinement (6.3) decodes too**, in all three of the shapes T.88 gives it:
+6.5.8.2.2's single refinement and 6.5.8.2.1's aggregate inside a symbol
+dictionary — where an aggregate symbol is itself a text region — 6.4.11's
+per-instance refinement inside a text region, and the generic refinement region
+segments of 7.4.7 (types 40, 42 and 43). Both of 6.3.5.3's context templates
+are implemented, with 7.4.7.3's adaptive pair and 6.3.5.6's typical prediction.
+With them come 7.4.6.1's intermediate regions, which are decoded and kept
+rather than drawn: a refinement region's reference is either one of those or,
+failing that, whatever the page already holds under the region's own box
+(6.3.2).
+
+The refinement templates are **derived rather than transcribed**, and the
+reason that is sound is worth stating where a reader will meet it. A context
+index only labels an adaptive state slot — the decoder reads and writes
+`state[cx]`, every slot starts identical, and the arithmetic coder's registers
+are global — so relabelling every context through a bijection cannot change a
+single decision, and the bit order in 6.3.5.3's figures is unobservable. Only
+the *set* of positions is a fact about the format, and that set is held to the
+pdf.js corpus, which codes one 399 by 400 picture a dozen ways: the encodings
+that do not refine are ground truth for the ten that do, and all ten reproduce
+it with **0 pixels different**
+([`jbig2_refinement.rs`](../../crates/tinker-pdf/tests/jbig2_refinement.rs)).
+6.3.5.6's TPGRON slot does not survive the relabelling, so it was recovered the
+same way — one value in 8 192 reproduces the fixture, and one in 1 024 for the
+narrower template.
+
 That last rule is why a region whose referred-to dictionary is **absent or
 refused is refused whole** rather than drawn from what did arrive: the
 numbering is shared, so a missing dictionary does not cost its own symbols, it
@@ -80,10 +106,13 @@ place — a page that looks like text and says something else. T.88 Annex H.1's
 own page 2 is that case, its arithmetic text region referring to page 1's
 Huffman dictionary.
 
-Measured over the corpus's 102 JBIG2-bearing files in August 2026, counting
+Measured over the corpus's 103 JBIG2-bearing files in August 2026, counting
 files whose render reports any JBIG2 warning: **65 before this lineage landed,
-52 after the arithmetic variant, and 49 after the Huffman one**, and none
-gained one. Annex B's tables are reconstructed rather than transcribed, and
+52 after the arithmetic variant, 49 after the Huffman one, and 35 after
+refinement**, and none gained one. The 35 that remain break down as 16 halftone,
+10 Huffman refinement, 4 transposed text regions, 4 custom-table or
+unknown-size cases and one retained context — so no single refusal is most of
+them, and each is named in the table below with its own count. Annex B's tables are reconstructed rather than transcribed, and
 what holds them to the standard is Annex H coding the same two symbols twice —
 once with `SDHUFF`, once through the MQ coder — which decode byte-identically
 ([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
@@ -161,7 +190,7 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| JBIG2 refinement and aggregate coding (SDREFAGG, SBREFINE, segment types 40/42/43), transposed text regions, and custom code tables (type 53) | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF and SBHUFF left this row**: Annex B decodes, held to the standard by Annex H coding the same two symbols both ways. Measured: 25 corpus files still reach this, from 29 | [ROADMAP](../ROADMAP.md) |
+| JBIG2 transposed text regions, custom code tables (type 53), and refinement over the Huffman road (`SDHUFF` with `SDREFAGG`, `SBHUFF` with `SBREFINE`) | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF, SBHUFF, SDREFAGG, SBREFINE and segment types 40/42/43 have all left this row.** What is left is Huffman refinement (**11 segments in 10 files** — 6.4.11's `BMSIZE` envelope and tables B.14/B.15, neither of which this file carries), transposed text regions (4 files), and type 53 custom tables | [ROADMAP](../ROADMAP.md) |
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | [ROADMAP](../ROADMAP.md) |
 | JBIG2 halftone regions and pattern dictionaries (6.6, 6.7; types 16, 20, 22, 23) | `Warning::Jbig2SegmentSkipped` | A third lineage; 16 corpus files carry it and nothing else | [ROADMAP](../ROADMAP.md) |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |

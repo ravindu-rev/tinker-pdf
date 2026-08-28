@@ -43,6 +43,19 @@ jobs:
       - name: Fetch the pinned corpora
         run: cargo run --release -p xtask -- corpus-fetch
 
+      # The corpus is not only a never-crash bar. Some of it is *ground truth*:
+      # the pdf.js JBIG2 fixtures code one picture a dozen ways, so the
+      # encodings that do not refine adjudicate the ones that do, and clause
+      # 6.3's two context templates and 6.3.5.6's TPGRON slot are held to
+      # nothing else in this repository. Those assertions are `#[ignore]` so
+      # that `cargo test` stays independent of fetched data — which means this
+      # is the only place they run, and without this step they would be
+      # documentation rather than a gate.
+      - name: Hold the fixtures the corpus adjudicates
+        run: |
+          cargo test --release -p tinker-pdf --test jbig2_refinement \
+            -- --ignored --nocapture
+
       # `--check` compares against the committed bar and fails on a regression.
       # It refuses outright if the run is incomplete, so a fetch that quietly
       # returned three corpora out of four cannot be read as an improvement.

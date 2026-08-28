@@ -94,6 +94,19 @@ struct Tally {
     sbhuff: u32,
     /// Text regions that refine their symbols (bit 1).
     sbrefine: u32,
+    /// Refining symbol dictionaries at refinement template 1 (bit 12), whose
+    /// pixel set Annex H does not pin — see `refinement_context`.
+    sdrtemplate1: u32,
+    /// Refining text regions at refinement template 1 (bit 15).
+    sbrtemplate1: u32,
+    /// Segments that want refinement over the Huffman road: `SDHUFF` with
+    /// `SDREFAGG`, or `SBHUFF` with `SBREFINE`. Refused by name, so the count
+    /// is what decides whether that refusal is worth closing.
+    huffman_refinement: u32,
+    /// Generic refinement region segments (types 40, 42, 43) by template
+    /// (7.4.7.2 bit 0), and how many of them set TPGRON (bit 1).
+    grtemplate: [u32; 2],
+    tpgron: u32,
     /// Text regions by REFCORNER (bits 4-5): which corner of a symbol its
     /// coordinate names, and therefore where the symbol is put.
     corners: [u32; 4],
@@ -129,6 +142,13 @@ impl Tally {
         self.context_retained += other.context_retained;
         self.sbhuff += other.sbhuff;
         self.sbrefine += other.sbrefine;
+        self.sdrtemplate1 += other.sdrtemplate1;
+        self.sbrtemplate1 += other.sbrtemplate1;
+        for (slot, count) in self.grtemplate.iter_mut().zip(other.grtemplate) {
+            *slot += count;
+        }
+        self.tpgron += other.tpgron;
+        self.huffman_refinement += other.huffman_refinement;
         for (slot, count) in self.corners.iter_mut().zip(other.corners) {
             *slot += count;
         }
@@ -213,6 +233,12 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     let refagg = flags & 0x0002 != 0;
                     let template = (flags >> 10) & 0x0003;
                     let rtemplate = (flags >> 12) & 0x0001;
+                    if refagg && rtemplate == 1 {
+                        tally.sdrtemplate1 += 1;
+                    }
+                    if refagg && huff {
+                        tally.huffman_refinement += 1;
+                    }
                     let mut ok = Some(());
                     if !huff {
                         ok = data.skip(if template == 0 { 8 } else { 2 });
@@ -240,6 +266,12 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     }
                     if flags & 0x0002 != 0 {
                         tally.sbrefine += 1;
+                        if (flags >> 15) & 1 == 1 {
+                            tally.sbrtemplate1 += 1;
+                        }
+                        if flags & 0x0001 != 0 {
+                            tally.huffman_refinement += 1;
+                        }
                     }
                     tally.corners[((flags >> 4) & 3) as usize] += 1;
                     if flags & 0x0040 != 0 {
@@ -264,6 +296,17 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     }
                     if (flags >> 2) & 3 != 0 {
                         tally.striped += 1;
+                    }
+                }
+            }
+            kind::INTERMEDIATE_REFINEMENT_REGION
+            | kind::IMMEDIATE_REFINEMENT_REGION
+            | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION => {
+                // 7.4.7.2's one flags byte, after the seventeen of region info.
+                if let Some(flags) = data.skip(17).and_then(|()| data.u8()) {
+                    tally.grtemplate[usize::from(flags & 0x01)] += 1;
+                    if flags & 0x02 != 0 {
+                        tally.tpgron += 1;
                     }
                 }
             }
@@ -527,6 +570,25 @@ fn census_of_the_corpus_jbig2() {
         "SBHUFF   (Huffman text region) {:>6}   in {:>3} files",
         total.sbhuff,
         files_with(|t| t.sbhuff)
+    );
+    println!(
+        "  at refinement template 1     {:>6}   in {:>3} files",
+        total.sdrtemplate1 + total.sbrtemplate1,
+        files_with(|t| t.sdrtemplate1 + t.sbrtemplate1)
+    );
+    println!(
+        "refinement over Huffman        {:>6}   in {:>3} files",
+        total.huffman_refinement,
+        files_with(|t| t.huffman_refinement)
+    );
+    println!(
+        "refinement regions, template 0 {:>6}   template 1 {:>6}",
+        total.grtemplate[0], total.grtemplate[1]
+    );
+    println!(
+        "  of those, TPGRON set         {:>6}   in {:>3} files",
+        total.tpgron,
+        files_with(|t| t.tpgron)
     );
     println!(
         "SDREFAGG (refine/aggregate)    {:>6}   in {:>3} files",

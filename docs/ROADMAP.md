@@ -44,22 +44,50 @@ thousands of documents nobody here authored.
 
 ## Tier 2 — close the named refusals, by measured reachability
 
-Each of these is refused by name today (ruling 2 — the placeholder-plus-
-warning contract), with corpus reachability measured.
+Every item that stood here when the tier was written has landed and left under
+this file's own rule, the last of them JBIG2 refinement coding (clause 6.3): `SDREFAGG`,
+`SBREFINE` and segment types 40, 42 and 43 all decode, with both of 6.3.5.3's
+context templates and 6.3.5.6's typical prediction. The evidence is the pdf.js
+corpus coding one 399 by 400 picture a dozen ways — the encodings that do not
+refine are ground truth for the ten that do, and all ten reproduce it with **0
+pixels different**, checked by
+[`jbig2_refinement.rs`](../crates/tinker-pdf/tests/jbig2_refinement.rs).
+T.88 Annex H's page 3 decodes into its own refined text with no warning.
 
-- **JBIG2 refinement coding (clause 6.3).** The symbol/text lineage is
-  otherwise **done**: arithmetic and Huffman symbol dictionaries and text
-  regions decode, held to the standard by Annex H coding the same two symbols
-  both ways. What is left is refinement — `SDREFAGG`, `SBREFINE` and segment
-  types 40/42/43 — measured at **13 of the corpus's 102 JBIG2-bearing files**,
-  and it is blocked on one artefact rather than on effort. Clause 6.3 was
-  written and run: everything around it is verified correct (the refinement AT
-  offset, the aggregate header, `IARDX`/`IARDY`), and the decoder goes out of
-  step inside the context template alone, which is 6.3.5.3's two figures.
-  Unlike Annex B's tables, nothing in Annex H codes one picture with and
-  without refinement, so there is no cross-check to reconstruct against. Exit:
-  supply 6.3.5.3's layouts; Annex H page 3 then decodes.
-  (M, [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
+The route there is written up in
+[design/jbig2-symbol-text.md](design/jbig2-symbol-text.md) and is worth reading
+before the next item of this shape is scheduled: 6.3.5.3's figures were never
+obtained, and did not need to be. A context index only labels an adaptive state
+slot, so the standard's bit order is unobservable and only the *set* of
+positions is a fact about the format. What that argument does not buy is the
+right to guess the set: five candidate templates agreed with each other on
+Annex H's thirty-six-decision fixture and were all wrong, and only a whole
+picture coded both ways told them apart.
+
+Closing it put one item back, by this file's own rule that an item enters with
+evidence attached:
+
+- **JBIG2 refinement over the Huffman road** (`SDHUFF` with `SDREFAGG`,
+  `SBHUFF` with `SBREFINE`). Refused by name today under
+  `Jbig2VariantSkipped`, and measured at **11 segments in 10 of the corpus's
+  103 JBIG2-bearing files** by
+  [`jbig2_census.rs`](../crates/tinker-pdf/tests/jbig2_census.rs) — more than
+  JPX (19 of 4 525) or mesh shadings (10) had when those were scheduled, so
+  ruling 3 asks for it. The refinement decoder itself is done and verified;
+  what is missing is 6.4.11's `BMSIZE` envelope and byte alignment, and
+  Annex B's tables **B.14 and B.15**, which this build does not carry and
+  which Annex H does not exercise. Exit: the corpus's ten files render
+  without a JBIG2 warning, and `jbig2_refinement.rs` gains their rows at 0
+  pixels different. (S–M,
+  [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
+
+An earlier draft of this section said nothing in the corpus asked for that,
+which was an assertion where a count belonged; the census now counts it.
+
+Refusals still standing in this lineage that are *not* roadmap items: halftone
+regions and pattern dictionaries (16 corpus files — a third lineage,
+[features/filters.md](features/filters.md)), transposed text regions (4), and
+type 53 custom tables.
 
 ## Tier 3 — capabilities absent today
 
