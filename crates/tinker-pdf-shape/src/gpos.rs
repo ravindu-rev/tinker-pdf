@@ -338,10 +338,25 @@ fn pair_format2(
 /// fixture the thing that adjudicates and because a leaf that hands back the
 /// advances its caller supplied is the more conservative of the two — a
 /// consumer can shorten a run it was told the joins of, and cannot lengthen
-/// one that was shortened for it. **It is recorded here because milestone 4
-/// has to revisit it**: an Arabic face designed for the advance reading sets
-/// a visibly wider word under this one, and the text-rendering-tests corpus
-/// that milestone is graded on will say which is wanted.
+/// one that was shortened for it.
+///
+/// ## Milestone 2 looked, and text-rendering-tests does not reach it
+///
+/// *Checked rather than assumed, and the answer is "not yet".* Milestone 2
+/// vendored the corpus's CMAP, GSUB and GPOS sections and **none of them
+/// contains a `GPOS` type 3 lookup at all**. The section called `GPOS-3` is a
+/// trap for exactly this question: it is *Mark-to-Base Attachment for Ethiopic
+/// Diacritics*, a type 4 lookup, and the numbering of the sections has nothing
+/// to do with the numbering of the lookup types.
+///
+/// Scanning every face in the corpus rather than only the ones this milestone
+/// runs, cursive attachment appears in three, and all three belong to later
+/// milestones: `TestShapeAran.ttf` (section `SHARAN-1`, Arabic, milestone 4)
+/// and `NotoSansKannada-Regular.ttf` with `TestShapeKndaV3.ttf` (the `SHKNDA`
+/// sections, milestone 5). So the two readings are still both live, the aots
+/// fixture is still the only thing adjudicating, and **`SHARAN-1` is the case
+/// that will settle it** — named here so the next person does not have to
+/// rediscover which fixture to look at.
 fn cursive<'a>(
     runner: &mut Runner<'a, '_>,
     buffer: &mut Buffer,

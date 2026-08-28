@@ -27,6 +27,8 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-layout/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-font/data/liberation` | [liberationfonts/liberation-fonts](https://github.com/liberationfonts/liberation-fonts), release `2.1.5` (2021-10-01) | `OFL-1.1` |
 | `crates/tinker-pdf-shape/data/aots` | [adobe-type-tools/aots](https://github.com/adobe-type-tools/aots) at `d256691` (2025-11-29), fonts via [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz) `test/shape/data/aots/fonts` at `e0d7060` (2021-08-12) | `Apache-2.0` |
+| `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
+| `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -348,9 +350,72 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-These are test inputs and reach no built artefact: `tinker-pdf-shape`'s
-manifest excludes `data/` from the published crate, because a published crate
-carries its tests and nobody who downloads it runs them.
+These are test inputs and reach no built artefact. They **do** ship with the
+published crate: `exclude = ["data/"]` was in the manifest until the release
+pipeline's `a_crate_that_vendors_data_publishes_it` refused it, and the manifest
+now records at length why — the corpus is the evidence the crate is right, and a
+`cargo test` run by whoever downloaded it should reach the same cases it reaches
+here.
+
+### `crates/tinker-pdf-shape/data/ucd`
+
+The Unicode Character Database again, at the files [UAX #9](https://www.unicode.org/reports/tr9/)'s
+bidirectional algorithm and [UAX #24](https://www.unicode.org/reports/tr24/)'s
+script property need. It is a **second** tree rather than a share of
+`tinker-pdf-layout`'s because ruling 8 keeps the two crates leaves: neither
+depends on the other, and a build script cannot read across a crate boundary.
+The cost of the duplication is version skew, which
+`tests/ucd_version.rs` asserts away by comparing the two trees' headers — the
+mitigation `docs/design/shaping.md`'s risk table names.
+
+| File | What it is |
+| --- | --- |
+| `extracted/DerivedBidiClass.txt`, here as `DerivedBidiClass.txt` | The `Bidi_Class` property, which **is** UAX #9. Its `@missing` lines are applied, unlike `LineBreak.txt`'s block defaults one crate over; `build.rs` says why the two differ |
+| `BidiBrackets.txt` | `Bidi_Paired_Bracket` and `Bidi_Paired_Bracket_Type`, which rule N0 is written in terms of |
+| `BidiMirroring.txt` | `Bidi_Mirroring_Glyph`, rule L4 |
+| `Scripts.txt` | UAX #24's `Script`, which itemization splits a paragraph on |
+| `PropertyValueAliases.txt` | Each script's ISO 15924 code, which an OpenType script tag is derived from, and the long-to-short `Bidi_Class` names the `@missing` lines use |
+| `BidiTest.txt` | **A conformance oracle.** Every combination of `Bidi_Class` values up to length four: 490 846 data lines, 770 241 resolutions |
+| `BidiCharacterTest.txt` | **The other one.** 91 707 cases of real code points, and the only one of the two that reaches bracket pairs |
+
+The last two are 15 MB between them and are not compiled into anything. They
+are here for the reason `LineBreakTest.txt` is here one crate over, and gap
+20's finding holds a fifth time: **a skipped oracle exits 0 and reads exactly
+like a pass.** They compress to a small fraction of that in a published crate,
+which is what `crates.io`'s ceiling is measured against.
+
+`LICENSE.txt` is upstream's own, byte for byte the same file
+`crates/tinker-pdf-layout/data/ucd` carries — asserted, so that one tree cannot
+end up describing terms the other was not given under. The Unicode License v3
+is `Unicode-3.0` in SPDX terms, which `deny.toml` already permits; its text is
+reproduced above.
+
+### `crates/tinker-pdf-shape/data/text-rendering-tests`
+
+Unicode's own **text-rendering-tests**: real fonts, real strings, and the
+glyphs and positions a correct implementation must produce, written into each
+fixture as SVG. `docs/design/shaping.md` names it as the second of the two
+conformance bars for `tinker-pdf-shape`, beside aots, and ruling 13 is what
+makes it admissible — the expected output is inside the fixture, put there by
+the people who publish the tests.
+
+| File | What it is |
+| --- | --- |
+| `testcases/CMAP-{1,2,3,4}.html`, `GSUB-{1,2,3}.html`, `GPOS-{1,2,3,4,5}.html` | The twelve sections milestone 2 is graded on, **verbatim** — parsed by `tests/text_rendering.rs` rather than distilled first, so nothing stands between what upstream wrote and what the test asserts |
+| `fonts/*.ttf`, `fonts/*.otf` | The ten faces those sections name |
+| `LICENSE` | Upstream's own |
+
+Only those twelve sections are vendored. The AAT (`MORX`, `MORT`), variable
+(`GVAR`, `CVAR`, `AVAR`, `HVAR`), outline (`CFF`, `GLYF`, `SFNT`) and shaping
+(`SHARAN`, `SHBALI`, `SHKNDA`, `SHLANA`) sections are not: `morx` is a stated
+non-goal, the variable ones are deferred under ruling 3, the outline ones test
+a rasterizer this crate is not, and the shaping ones arrive with milestones 4
+and 5 — which is when their fonts do.
+
+Upstream's README states that *"the contents of this repository are governed by
+the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is
+the Unicode License v3, the same `Unicode-3.0` the UCD carries and `deny.toml`
+already allows. Its text is reproduced above.
 
 ## Test fixtures
 
