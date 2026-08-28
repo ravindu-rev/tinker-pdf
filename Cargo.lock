@@ -623,6 +623,13 @@ name = "tinker-pdf-math"
 version = "0.0.1"
 
 [[package]]
+name = "tinker-pdf-pki"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-crypto",
+]
+
+[[package]]
 name = "tinker-pdf-raster"
 version = "0.0.1"
 dependencies = [

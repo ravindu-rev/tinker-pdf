@@ -360,6 +360,57 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// types, independently fuzzable. A tree of plain structs is plain parameters,
 /// and `layout` is the twenty-fourth fuzz target precisely because it can be
 /// driven with no file of any kind in front of it.
+///
+/// **`pki` is the seventh amendment, and it is the fourth leaf-to-leaf edge.**
+/// `tinker-pdf-pki` holds ASN.1 DER, X.509 and — from milestone 3 —
+/// CMS, and it takes `tinker-pdf-crypto`. Two questions have to be answered
+/// separately: why the crate exists at all rather than being part of `crypto`,
+/// and why the edge between them is safe.
+///
+/// **Why it is not inside `tinker-pdf-crypto`, which is where a signature
+/// feature would obviously put it.** The two fail differently, and the way a
+/// thing fails is what decides how it has to be reviewed. `crypto` is
+/// *arithmetic*: its failure mode is a wrong number, and a wrong number is
+/// caught completely by published vectors — FIPS 197, RFC 6229, FIPS 180-4 are
+/// already merge gates there. ASN.1 is *untrusted-input structure walking*:
+/// its failure mode is a panic or a read past the end of a buffer on bytes an
+/// attacker chose, which no known-answer vector detects and which ruling 1's
+/// per-format fuzzers exist for. Merging them would put the largest new attack
+/// surface in the tree inside the one crate whose review story is "small,
+/// vector-gated arithmetic", and — the concrete cost — would leave DER
+/// reachable by a fuzzer only through `crypto`'s API, so a malformed
+/// certificate could be fuzzed only by first constructing a plausible
+/// `HandlerParams` around it. Apart, it is the twenty-fifth fuzz target and
+/// `fuzz/fuzz_targets/pki_der.rs` points straight at raw DER, which
+/// `docs/design/signatures.md:75-92` argues for and its risk table names as the
+/// mitigation for the largest risk it records.
+///
+/// **It is a leaf on ruling 8's definition, which is about public APIs.** X.509
+/// and CMS are not PDF concepts: bytes and plain parameters in, values out, no
+/// COS types, no `/ByteRange`, no signature dictionary. Everything PDF about a
+/// signature — which bytes a `/ByteRange` covers, what `/DocMDP` permits, what
+/// a verdict says — lives in the facade, the same split that keeps `zip`
+/// ignorant of what an archive entry is *for*.
+///
+/// **The edge itself.** The three properties that made `font -> filters`,
+/// `zip -> filters` and `layout -> css` acceptable hold unchanged. It points
+/// sideways from one leaf to another rather than upward, so the layering is not
+/// inverted. It cannot cycle, because `tinker-pdf-crypto` depends on nothing at
+/// all — the same sentence that carried the first two amendments, and it is
+/// still the whole of the cycle argument. And a sibling workspace crate is not
+/// a third-party dependency, so ruling 3 and CONTRIBUTING rule 1 are untouched.
+///
+/// What is taken across it *today* is one function: SHA-1, for RFC 5280
+/// §4.2.1.2's method (1) key identifier, which is the SHA-1 of a certificate's
+/// `subjectPublicKey` bits and which chain building needs when a certificate
+/// carries no `subjectKeyIdentifier` of its own. That is deliberately a real
+/// use rather than a placeholder, because this file's own history records the
+/// failure in the other direction — an edge in a manifest that nothing needs —
+/// and because RFC 5280's Appendix C.1 certificate states the identifier its
+/// own key produces, so the edge arrives with a published vector behind it.
+/// Milestones 4 and 5 of the design widen what crosses to RSA and ECDSA
+/// verification; the edge is declared once, here, and does not move when they
+/// land.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -367,6 +418,11 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-filters", &[]),
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &["tinker-pdf-filters"]),
+    // The eleventh crate here and the fourth leaf-to-leaf edge: ASN.1 is
+    // structure walking on hostile bytes, `crypto` is vector-gated arithmetic,
+    // and they are reviewed and fuzzed differently. See the seventh amendment
+    // above.
+    ("tinker-pdf-pki", &["tinker-pdf-crypto"]),
     ("tinker-pdf-zip", &["tinker-pdf-filters"]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),

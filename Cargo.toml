@@ -16,6 +16,7 @@ members = [
   "crates/tinker-pdf-css",
   "crates/tinker-pdf-layout",
   "crates/tinker-pdf-crypto",
+  "crates/tinker-pdf-pki",
   "crates/tinker-pdf-font",
   "crates/tinker-pdf-color",
   "crates/tinker-pdf-math",
@@ -67,6 +68,7 @@ tinker-pdf-xml = { path = "crates/tinker-pdf-xml", version = "0.0.1" }
 tinker-pdf-css = { path = "crates/tinker-pdf-css", version = "0.0.1" }
 tinker-pdf-layout = { path = "crates/tinker-pdf-layout", version = "0.0.1" }
 tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto", version = "0.0.1" }
+tinker-pdf-pki = { path = "crates/tinker-pdf-pki", version = "0.0.1" }
 tinker-pdf-font = { path = "crates/tinker-pdf-font", version = "0.0.1", default-features = false }
 tinker-pdf-color = { path = "crates/tinker-pdf-color", version = "0.0.1" }
 tinker-pdf-math = { path = "crates/tinker-pdf-math", version = "0.0.1" }
