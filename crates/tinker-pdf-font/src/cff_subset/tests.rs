@@ -602,36 +602,51 @@ fn the_bias_falls_from_1131_to_107_when_the_index_shrinks() {
 
 /// The second bias step, at 33 900, and a subset that lands between the two.
 ///
-/// 34 000 subroutines bias by 32 768; the 1 300 this keeps bias by 1 131. Both
-/// numbers are wrong under the other bias, so an operand computed with either
-/// the old bias or the smallest one draws the wrong lines — and every one of
-/// the 1 300 subroutines draws a line of its own so that it shows.
+/// 34 000 subroutines bias by 32 768; the 1 300 this keeps bias by 1 131.
 ///
-/// The kept subroutines start at 20 000 rather than at zero, and that is not
-/// decoration. A subset whose survivors are a **prefix** of the original
-/// numbering renumbers them onto themselves, so a subsetter that ignored the
-/// new position entirely would pass — the injection matrix found exactly that
-/// hole in the first draft of this test, where the kept range began at zero
-/// and reintroducing "use the original subroutine index" changed nothing here.
+/// Three things about the kept set are deliberate, and each of them closes a
+/// way this test could have passed while the renumbering was wrong.
+///
+/// **It does not start at zero.** A subset whose survivors are a *prefix* of
+/// the original numbering renumbers them onto themselves, so a subsetter that
+/// ignored the new position entirely would pass. The injection matrix found
+/// exactly that: with the range starting at zero, reintroducing "use the
+/// original subroutine index" changed nothing here.
+///
+/// **It is not contiguous.** Every third subroutine is kept, so the map is
+/// `20000 + 3k -> k` and no survivor keeps its number. A contiguous range
+/// renumbers by a constant, which a subsetter that subtracted a fixed offset
+/// would also get right.
+///
+/// **Every operand form appears on the new side and none on the old.** Under
+/// the old bias each call is `3k - 12768`, which only the three-byte form
+/// holds; under the new one it is `k - 1131`, which runs from -1131 through
+/// -108 (the two-byte negative form), -107 through 107 (the one-byte form)
+/// and 108 upward (the two-byte positive form). So the rewriter cannot be
+/// patching bytes in place — it has to re-encode — and the assertion below is
+/// the whole charstring written out from those rules rather than read back
+/// from what the subsetter produced.
 #[test]
 fn the_bias_falls_from_32768_to_1131_when_the_index_shrinks() {
     const COUNT: usize = 34_000;
     const KEPT: usize = 1300;
     const FIRST: usize = 20_000;
+    const STRIDE: usize = 3;
     assert_eq!(bias(COUNT), 32768);
     assert_eq!(bias(KEPT), 1131);
 
+    let called: Vec<usize> = (0..KEPT).map(|k| FIRST + k * STRIDE).collect();
     let mut subrs: Vec<Vec<u8>> = vec![vec![11u8]; COUNT];
-    for (i, subr) in subrs.iter_mut().enumerate().skip(FIRST).take(KEPT) {
+    for (k, &index) in called.iter().enumerate() {
         // A different line per subroutine, so calling the wrong one shows.
-        *subr = line_subr(1 + (i as i32 % 97), 1 + (i as i32 % 31));
+        subrs[index] = line_subr(1 + (k as i32 % 97), 1 + (k as i32 % 31));
     }
 
     let mut drawn = t2(0);
     drawn.extend(t2(0));
     drawn.push(21); // rmoveto
-    for i in FIRST..FIRST + KEPT {
-        drawn.extend(call_local(i, COUNT));
+    for &index in &called {
+        drawn.extend(call_local(index, COUNT));
     }
     drawn.push(14);
 
@@ -657,6 +672,34 @@ fn the_bias_falls_from_32768_to_1131_when_the_index_shrinks() {
         subset.len() < program.len() / 2,
         "the 32 700 unreached subroutines are gone"
     );
+
+    // The closed form: what the charstring must be, written out from the
+    // renumbering rule rather than read back from the subsetter.
+    let mut expected = t2(0);
+    expected.extend(t2(0));
+    expected.push(21);
+    for k in 0..KEPT {
+        expected.extend(t2(k as i32 - 1131));
+        expected.push(10);
+    }
+    expected.push(14);
+    assert_eq!(
+        charstring_of(&subset, 1),
+        expected,
+        "the operand of every call is its new index less the new bias"
+    );
+
+    // And the four operand forms really are all present, so the equality above
+    // is not one encoding repeated 1 300 times.
+    assert_eq!(t2(0 - 1131), vec![254, 255], "the two-byte negative form");
+    assert_eq!(t2(1023 - 1131), vec![251, 0], "its far end");
+    assert_eq!(t2(1024 - 1131), vec![32], "the one-byte form");
+    assert_eq!(t2(1239 - 1131), vec![247, 0], "the two-byte positive form");
+    // Every call in the *original* took the three-byte form, so nothing here
+    // could have been left as it was found.
+    for &index in &called {
+        assert_eq!(call_local(index, COUNT).len(), 4, "three bytes and the call");
+    }
 }
 
 /// A CID-keyed font: `FDSelect` decides which Private DICT a glyph's
