@@ -6,17 +6,53 @@ the signer's certificate, how far the certificate chain gets toward a host-suppl
 anchor, and what changed after signing, classified against `/DocMDP` and `/FieldMDP` rules —
 and `DocumentEditor` can produce a signature of its own on an incremental save, with the
 private key held by a caller-supplied signer callback so key material never enters the engine.
-Today none of this exists: `SignaturePlaceholder` in `crates/tinker-pdf-cos/src/write.rs`
-(line 948) is a dead struct with no producer or consumer, and `FieldKind::Signature`
-(`crates/tinker-pdf-cos/src/form.rs`) classifies `/FT /Sig` fields without acting on them.
+Milestone 1 has landed: `Document::signatures()` (`crates/tinker-pdf/src/signature.rs`) finds
+every signature, classifies what its `/ByteRange` covers against the file, and digests the
+covered spans. Nothing verifies anything yet. `SignaturePlaceholder` in
+`crates/tinker-pdf-cos/src/write.rs` is still a dead struct with no producer or consumer, and
+the CMS blob is still an opaque byte string.
+
+## What milestone 1 measured, which changed this document
+
+Three things the corpus said that this design had not.
+
+**A signature is not always the `/V` of a field.** 12.7.4.5 says it is, and a reader that
+believes only that finds 13 of the 18 signatures in the fetched corpora. The other five are
+reachable only through the catalog's `/Perms` (12.8.4): three files carry a `/UR3` usage-rights
+signature and no signature field at all, and one has a `/FT /Sig` annotation in a document with
+no `/AcroForm`. So the inventory walks both roots and every entry records which one found it —
+a usage-rights signature grants a reader capabilities and makes no claim about the document's
+content, and reporting the two the same way would say that it does.
+
+**Producers disagree about whether `/Contents`' angle brackets are inside the gap.** Seven of
+the nine well-formed signed files put `<` and `>` inside the two `/ByteRange` spans' gap; one
+puts them outside, so the signature covers its own delimiters. Both are read, and the second is
+named by a warning, because the difference is two bytes and two bytes inside or outside a
+digest is a different digest.
+
+**The `%%EOF` end-of-line marker straddles the revision boundary.** `Revision::byte_range` stops
+just past `%%EOF`; a signer who included 7.5.5's trailing EOL covers one byte more.
+`prefilled_f1040.pdf` covers to 299 340 where its revision ends at 299 339, and without a
+tolerance of exactly those EOL bytes an ordinary sign-then-fill document reads as suspicious.
+It was the only `Coverage::Revision` in the corpus, so the tolerance is the difference between
+that classification being exercised by real data and not at all.
+
+One trap, recorded because it produced a wrong reading before it produced a right one: an
+encrypted document's object streams do not decompress until the file key exists, so a signature
+inside one is invisible until the caller authenticates. Two corpus files behave that way, and
+the first reading of one of them looked exactly like a producer merging the signature dictionary
+into the field object. It does not; it was simply unread. `Anchor::MergedField` survives as a
+defensive branch that **no corpus file needs**, held up by a fixture and by that sentence.
 
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,
   `/Contents`, `/SubFilter`, `/M`, `/Reason` — from every populated `FieldKind::Signature`
-  field. Digest the named ranges over the *stored* bytes (the `stream_raw_encrypted` forensic
-  tier and the raw file buffer, per [opening](../features/opening.md)), and classify coverage:
-  whole file minus the `/Contents` gap, or a prefix with later revisions on top.
+  field **and from the catalog's `/Perms`**, which is the only route to five of the eighteen
+  (see the measurement above). Digest the named ranges over the *stored* bytes (the
+  `stream_raw_encrypted` forensic tier and the raw file buffer, per
+  [opening](../features/opening.md)), and classify coverage: whole file minus the `/Contents`
+  gap, or a prefix with later revisions on top. **Done.**
 - **Read: CMS and X.509 parsing.** DER (X.690) walker; CMS `SignedData` (RFC 5652) including
   signed attributes and `messageDigest`; X.509 certificates (RFC 5280). `SubFilter`s
   `adbe.pkcs7.detached` and `adbe.pkcs7.sha1` (ISO 32000-1 12.8.3.3) plus
@@ -61,12 +97,16 @@ Today none of this exists: `SignaturePlaceholder` in `crates/tinker-pdf-cos/src/
 ## Design
 
 **What already exists, and is load-bearing.** Three seams built earlier were built for this.
-First: `incremental_update` (`crates/tinker-pdf-cos/src/write.rs`, line 560) appends after the
+First: `incremental_update` (`crates/tinker-pdf-cos/src/write.rs`) appends after the
 original bytes, adding a newline only when the base lacks one, and the test
 `an_incremental_save_keeps_the_original_bytes` (`crates/tinker-pdf-cos/src/edit.rs`) asserts
 `starts_with(original)` — "the signable prefix must survive an edit" is already a committed
-assertion, so the byte-identical prefix a signature needs is not new work. Second: each
-`Revision` (`crates/tinker-pdf-cos/src/xref.rs`, line 167) carries the byte range a signature
+assertion, so the byte-identical prefix a signature needs is not new work. A second, older
+assertion of the same invariant sits in `write.rs` as
+`an_incremental_update_preserves_the_original_bytes_exactly`, whose doc comment already reads
+"The invariant phase 10's signing depends on"; milestone 1's revision-coverage fixture is now
+a third, and the only one that checks what the *reader* makes of the result. Second: each
+`Revision` (`crates/tinker-pdf-cos/src/xref.rs`) carries the byte range a signature
 covers, recorded at open per 7.5.6 — MDP analysis is a consumer of existing data, not new
 parsing. Third: `tinker-pdf-crypto` already holds SHA-256/384/512 and the published-vector
 merge gate, and its `EntropySource` trait is the precedent for hosts supplying what the

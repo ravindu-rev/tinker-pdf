@@ -56,6 +56,16 @@ jobs:
           cargo test --release -p tinker-pdf --test jbig2_refinement \
             -- --ignored --nocapture
 
+      # The signature census asserts counts rather than pixels: 18 signatures
+      # across 17 files, of which 5 are reachable only through the catalog's
+      # `/Perms`. Those numbers are recorded against the corpora
+      # `corpus/corpora.lock` pins, and a reader that stopped finding one of
+      # them would otherwise pass every test in the tree.
+      - name: Hold the signature census
+        run: |
+          cargo test --release -p tinker-pdf --test signatures \
+            -- --ignored --nocapture
+
       # `--check` compares against the committed bar and fails on a regression.
       # It refuses outright if the run is incomplete, so a fetch that quietly
       # returned three corpora out of four cannot be read as an improvement.

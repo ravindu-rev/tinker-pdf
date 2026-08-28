@@ -16,15 +16,18 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **24 cargo-fuzz targets**
+Ruling 1 makes a fuzz crash a release blocker. **25 cargo-fuzz targets**
 cover every input format: `ascii_filters`, `ccitt`, `cff`, `cmap`,
 `content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
 `crypt_ciphers`, `css`, `form_script`, `inflate`, `jbig2`, `jpeg`, `jpx`,
-`layout`, `lzw`, `png`, `render_page`, `sfnt`, `truetype`, `type1`, `xml`,
-`zip_archive` — each landing in the same PR as its parser. Short runs on
+`layout`, `lzw`, `png`, `render_page`, `sfnt`, `signatures`, `truetype`,
+`type1`, `xml`, `zip_archive` — each landing in the same PR as its parser. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
 longer. Six of the corpora are written by an `#[ignore]`d test in the crate
 that owns the fixtures, so the seeds and the fixtures cannot drift.
+
+`signatures` is the newest and has had no session yet, so it counts toward
+the target list and not toward the executions below.
 
 Every target has had a real session: **186 159 981 recorded executions**,
 two crashes — one a real lexer defect (fixed, both inputs committed as

@@ -29,6 +29,7 @@ pub mod fonts;
 mod optional;
 pub mod redact;
 mod resources;
+pub mod signature;
 pub mod xps;
 
 use std::sync::Arc;
@@ -40,6 +41,10 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 /// zero, and what it refuses by name.
 pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefect, PageOrigin};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
+/// Digital signatures, read (12.8), behind [`Document::signatures`].
+pub use signature::{
+    Anchor, Coverage, CoverageDefect, DigestAlgorithm, Signature, SignatureWarning, SubFilter,
+};
 pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
@@ -49,7 +54,7 @@ pub use tinker_pdf_content::{
 /// broke without carrying every instance of them.
 pub use tinker_pdf_cos::{kind_counts, tier_counts, Defect, DefectKind, Tier};
 pub use tinker_pdf_cos::{
-    Action, Attachment, AuthError, AuthLevel, DestKind, Destination, DocumentScript, Field,
+    Action, Attachment, AuthError, AuthLevel, Date, DestKind, Destination, DocumentScript, Field,
     FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
     ScriptSummary, Trapped, Warning, WarningKind,
 };
@@ -780,6 +785,21 @@ impl Document {
     #[must_use]
     pub fn form_fields(&self) -> Vec<Field> {
         tinker_pdf_cos::fields(&self.inner)
+    }
+
+    /// The document's digital signatures (12.8), in field order.
+    ///
+    /// One entry per signature field that carries a `/V`; a signature field
+    /// with no value is a place for a signature rather than a signature, and
+    /// [`Document::form_fields`] already lists it.
+    ///
+    /// Nothing here is verified. Each entry says what the file claims and what
+    /// checking that claim against the file established — in particular
+    /// [`Signature::coverage`], which is the difference between a signature
+    /// over this document and a signature over some of it.
+    #[must_use]
+    pub fn signatures(&self) -> Vec<Signature> {
+        signature::signatures(self)
     }
 
     /// What the form's calculations depend on, in the order they run

@@ -118,6 +118,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "signatures"
+path = "fuzz_targets/signatures.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "sfnt"
 path = "fuzz_targets/sfnt.rs"
 test = false
