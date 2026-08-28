@@ -2617,7 +2617,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
-    fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
+    /// The property list is ignored here on purpose. 14.7.4.2's `/MCID` ties
+    /// content to the structure tree, and a rasterizer paints the same pixels
+    /// whether or not a paragraph knows its own number; the text device is
+    /// the one that keeps it.
+    fn begin_marked_content(
+        &mut self,
+        _tag: &[u8],
+        visible: bool,
+        hidden_layer: Option<&str>,
+        _props: Option<&tinker_pdf_content::MarkedProps>,
+    ) {
         self.marked_content.push(!visible);
         if !visible {
             self.hidden_depth = self.hidden_depth.saturating_add(1);

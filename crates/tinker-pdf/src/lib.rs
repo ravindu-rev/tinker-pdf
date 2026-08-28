@@ -32,6 +32,7 @@ pub mod pdfa;
 pub mod redact;
 mod resources;
 pub mod signature;
+pub mod structure;
 pub mod verdict;
 pub mod xps;
 
@@ -52,8 +53,14 @@ pub use pdfa::{
     Verdict as PdfAVerdict,
 };
 pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
+/// Tagged PDF: the logical structure tree, and the reading-order view over it
+/// (14.7, 14.8).
+pub use structure::{
+    StructElement, StructKid, StructureTree, StructureWarning, StructuredNode, StructuredText,
+    TextSource,
+};
 pub use tinker_pdf_content::{
-    Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
+    MarkedProps, Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///
@@ -753,6 +760,23 @@ impl Document {
         self.pages().into_iter().nth(index as usize)
     }
 
+    /// The document's logical structure tree (14.7.2).
+    ///
+    /// `None` when the catalog has no `/StructTreeRoot`, which is what most
+    /// documents are. **Nothing is inferred for them**: 14.7 describes
+    /// structure a producer writes down, and a tree guessed from geometry
+    /// would be this engine's opinion about reading order presented as the
+    /// file's own statement of it.
+    ///
+    /// Bound on every call rather than cached. A structure tree is read by
+    /// callers that want one, which is a small fraction of them, and a cache
+    /// on a `Clone` handle over a shared object store is a lifetime question
+    /// this does not need to answer to be correct.
+    #[must_use]
+    pub fn structure(&self) -> Option<StructureTree> {
+        structure::bind(&self.inner)
+    }
+
     /// The document's information dictionary.
     #[must_use]
     pub fn metadata(&self) -> Metadata {
@@ -1123,6 +1147,25 @@ impl Page {
             device.warn(TextWarning::UnknownFont { name });
         }
         device.finish()
+    }
+
+    /// The page's text in **structure order**, joined with the document's
+    /// structure tree (14.7.4, 14.8).
+    ///
+    /// `None` when the document has no structure tree, which is the same
+    /// answer [`Document::structure`] gives and for the same reason.
+    ///
+    /// This is a *second view* over the extraction [`Page::text`] already
+    /// produces, not a second extractor: the same [`TextPage`] is built, and
+    /// [`TextPage::plain_text`] on it is unchanged by a byte. What differs is
+    /// the order the characters come back in, that `/ActualText` replaces what
+    /// it encloses (14.9.4), that `/Alt` and `/E` surface, and that content
+    /// the structure tree does not claim is **counted** rather than appended —
+    /// see [`StructuredText::orphans`].
+    #[must_use]
+    pub fn structured_text(&self) -> Option<StructuredText> {
+        let tree = structure::bind(&self.doc)?;
+        Some(tree.text_for_page(self.index(), &self.text()))
     }
 }
 

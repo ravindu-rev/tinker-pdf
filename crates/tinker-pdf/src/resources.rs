@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tinker_pdf_color::{ColorSpace, Function};
-use tinker_pdf_content::{Device, FontSource, Layer, Matrix, PathSegment, Rgb};
+use tinker_pdf_content::{Device, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb};
 use tinker_pdf_cos::{
-    font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
+    decode_text_string, font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name,
+    ObjRef, Object,
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, CcittParams, Jbig2Params, JpegColor,
@@ -1218,6 +1219,51 @@ impl FontSource for PageResources {
         let entry = dict.get(self.doc.intern(b"OC"))?.clone();
         let label = String::from_utf8_lossy(name).into_owned();
         Some(self.optional.layer_of(&self.doc, &entry, &label))
+    }
+
+    fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
+        // 14.6.2: `/P /MC0 BDC` names an entry in the same /Properties
+        // sub-dictionary `optional_content` reads. This is the COS half of
+        // the seam — the interpreter never sees a dictionary — and it is the
+        // reason the inline and named forms arrive at a device
+        // indistinguishable from each other.
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"Properties"));
+        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
+        let resolved = self.doc.resolve(&entry);
+        let dict = resolved.as_dict()?;
+
+        // 14.7.4.2: a non-negative integer. Read through `resolve_key`
+        // because 7.3.10 lets any value in a *file* dictionary be indirect —
+        // which is exactly the difference between this form and the inline
+        // one, where it cannot be.
+        let mcid = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"MCID"))
+            .as_int()
+            .and_then(|n| u32::try_from(n).ok());
+
+        let text = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_string()
+                .map(|s| decode_text_string(&s.bytes))
+        };
+
+        let props = MarkedProps {
+            mcid,
+            actual_text: text(b"ActualText"),
+            alt: text(b"Alt"),
+            lang: text(b"Lang"),
+            expansion: text(b"E"),
+        };
+        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
+        // private dictionary: every one of them reaches here and says nothing
+        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
+        // interpreter's own filter and this one cannot disagree.
+        (!props.is_empty()).then_some(props)
     }
 }
 
