@@ -43,25 +43,37 @@
 //!
 //! # What this module refuses, and what each refusal costs
 //!
-//! **BER's indefinite length, and this is the expensive one.** [`crate::der`]
-//! refuses `0x80` as a length octet by name, for the reason its header gives:
-//! DER admits one encoding per value, and a second reading of a signed
-//! structure is a signature bypass rather than a leniency. ISO 32000-1
-//! 12.8.3.3.1 calls a PDF signature's `/Contents` a DER-encoded object, and
-//! **four of the eighteen CMS blobs in the fetched corpora are not**: they
-//! open `30 80 … A0 80 30 80`, indefinite lengths all the way down, which is
-//! legal BER. It is not one vendor's quirk — the four documents name Acrobat
-//! Distiller 5.0.5, Adobe LiveCycle Designer ES 8.2 and 10.0, and **LibreOffice
-//! 7.5** as their producers, which is the strongest reason to record the cost
-//! rather than treat it as a corner. (The producer is the document's, not
-//! necessarily the signer's; it is the evidence the files carry.) Those four are
-//! refused as [`CmsError::Der`] carrying [`DerError::IndefiniteLength`], and
-//! `crates/tinker-pdf/tests/cms_census.rs` counts them so the cost is a
-//! measured number rather than an impression. Reading them means teaching the
-//! walker to reconstitute definite lengths from an end-of-contents pair, which
-//! is a second reading of every structure above it — a change to the rule
-//! [`crate::der`] is built on, not an addition to this module, and not
-//! something to do quietly inside a milestone about `SignedData`.
+//! **An indefinite length inside `signedAttrs`, and only there.** This module
+//! is the one caller in the crate that reads BER, and the reason is measured:
+//! RFC 5652 §5.1 permits BER for a `SignedData`, ISO 32000-1 12.8.3.3.1 calls
+//! a PDF signature's `/Contents` DER, and **four of the eighteen CMS blobs in
+//! the fetched corpora side with the RFC** — they open `30 80 … A0 80 30 80`,
+//! naming Acrobat Distiller 5.0.5, Adobe LiveCycle Designer ES 8.2 and 10.0,
+//! and **LibreOffice 7.5** as their producers, which is two independent
+//! lineages rather than one vendor's quirk. (The producer is the document's,
+//! not necessarily the signer's; it is the evidence the files carry.) So
+//! [`ContentInfo::parse`] runs under [`Limits::CMS`], which sets
+//! [`Limits::allow_indefinite_lengths`], and those four parse.
+//!
+//! What does **not** widen with it is the encoding a signature is checked
+//! against. §5.4 digests the *DER* of the attribute set, so
+//! reading a `signedAttrs` holds it — the `[0]` node and its whole subtree,
+//! attribute values this crate has no decoder for included — to definite
+//! lengths through [`Tlv::require_definite_lengths`], and a BER one
+//! is [`CmsError::IndefiniteSignedAttributes`] rather than a signature that
+//! quietly fails to verify. All four corpus blobs write their `signedAttrs`
+//! with definite lengths, so the rule costs the corpus nothing today and is
+//! the thing that would have to give first if it ever did.
+//!
+//! Two narrower things stay refused, and neither is an oversight.
+//! **`unsignedAttrs` is not held to the rule** — nothing digests it, so
+//! narrowing it would refuse a legal message for no property. And **a
+//! segmented OCTET STRING is still [`DerError::WrongForm`]**: BER's
+//! constructed string form is a second spelling of a *value* rather than of a
+//! *length*, reassembling one would mean allocating and copying content on a
+//! parse path that borrows, and no corpus blob emits one. `eContent` in an
+//! `adbe.pkcs7.sha1` message is where that would first bite, and
+//! `crates/tinker-pdf/tests/cms_census.rs` counts what actually arrives.
 //!
 //! **A `contentType` that is not `id-signedData`.** The `[0]` content is then
 //! not a `SignedData` at all, and reading it as one would be reading a
@@ -139,8 +151,7 @@ use crate::x509::AlgorithmIdentifier;
 /// checked, and "malformed" is not an explanation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CmsError {
-    /// The encoding itself. [`DerError::IndefiniteLength`] arrives here more
-    /// often than everything else together; see this module's header.
+    /// The encoding itself.
     Der(DerError),
     /// Bytes after the `ContentInfo` SEQUENCE.
     TrailingBytes,
@@ -156,6 +167,18 @@ pub enum CmsError {
     UnknownSignatureAlgorithm { oid: String },
     /// A `SET SIZE (1..MAX) OF Attribute` with nothing in it (§5.3).
     EmptyAttributes,
+    /// An indefinite length inside `signedAttrs` — the one place in a
+    /// `SignedData` where BER is refused however the rest was encoded.
+    ///
+    /// §5.4 computes the signature over the **DER** encoding of the attribute
+    /// set. A set with two possible encodings has no digest for a verifier and
+    /// a signer to agree about, and the failure would be silent: every field
+    /// parses, the certificate is fine, the arithmetic is fine, and the
+    /// signature simply does not verify. So this is refused at parse time,
+    /// with its own name, rather than left to become a verdict nobody can
+    /// explain. `unsignedAttrs` carries no such rule and is not held to it —
+    /// nothing digests one.
+    IndefiniteSignedAttributes,
     /// Two instances of an attribute the specification admits once.
     DuplicateAttribute { oid: String },
     /// An attribute whose `attrValues` set does not hold exactly the one value
@@ -196,6 +219,11 @@ impl core::fmt::Display for CmsError {
             Self::UnknownDigestAlgorithm { oid } => write!(f, "digest algorithm {oid}"),
             Self::UnknownSignatureAlgorithm { oid } => write!(f, "signature algorithm {oid}"),
             Self::EmptyAttributes => write!(f, "an attribute set with no attributes"),
+            Self::IndefiniteSignedAttributes => write!(
+                f,
+                "an indefinite length inside signedAttrs, which RFC 5652 §5.4 \
+                 requires to be DER because the signature is over its encoding"
+            ),
             Self::DuplicateAttribute { oid } => {
                 write!(f, "two {oid} attributes where one is allowed")
             }
@@ -356,9 +384,38 @@ pub struct Attributes<'a> {
     attributes: Vec<Attribute<'a>>,
 }
 
+/// Which of §5.3's two attribute sets is being read.
+///
+/// The distinction is not cosmetic: one of them is what §5.4 digests, and the
+/// encoding rules that apply to it do not apply to the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// `signedAttrs [0]`. Held to DER, whatever encloses it.
+    Signed,
+    /// `unsignedAttrs [1]`. Nothing digests it, so nothing here narrows it.
+    Unsigned,
+}
+
 impl<'a> Attributes<'a> {
     /// Reads a `[0]`- or `[1]`-tagged `SET SIZE (1..MAX) OF Attribute`.
-    fn parse(tagged: &Tlv<'a>, budget: &Budget) -> Result<Self, CmsError> {
+    fn parse(tagged: &Tlv<'a>, budget: &Budget, role: Role) -> Result<Self, CmsError> {
+        if role == Role::Signed {
+            // §5.4's rule, enforced where the bytes are rather than where they
+            // are digested — a refusal at digest time would have to be
+            // reported as a signature that did not verify, which is the one
+            // message that would send a reader looking in the wrong place.
+            //
+            // The whole subtree, not the `[0]` node's own length: the walk
+            // below reads an attribute's *values* without descending into
+            // them, so an indefinite length inside an attribute this crate has
+            // no decoder for is invisible to everything except this sweep.
+            tagged
+                .require_definite_lengths(budget)
+                .map_err(|error| match error {
+                    DerError::IndefiniteLength => CmsError::IndefiniteSignedAttributes,
+                    other => CmsError::Der(other),
+                })?;
+        }
         let mut members = tagged.children(budget)?;
         let mut attributes = Vec::new();
         while !members.is_empty() {
@@ -724,13 +781,13 @@ impl<'a> SignerInfo<'a> {
 
         let digest_algorithm = AlgorithmIdentifier::parse(&fields.read()?, budget)?;
         let signed_attrs = match fields.context_optional(0)? {
-            Some(tagged) => Some(Attributes::parse(&tagged, budget)?),
+            Some(tagged) => Some(Attributes::parse(&tagged, budget, Role::Signed)?),
             None => None,
         };
         let signature_algorithm = AlgorithmIdentifier::parse(&fields.read()?, budget)?;
         let signature = fields.expect(Tag::OctetString)?.as_octet_string()?;
         let unsigned_attrs = match fields.context_optional(1)? {
-            Some(tagged) => Some(Attributes::parse(&tagged, budget)?),
+            Some(tagged) => Some(Attributes::parse(&tagged, budget, Role::Unsigned)?),
             None => None,
         };
         fields.finish()?;
@@ -1302,6 +1359,18 @@ mod tests {
         parts.concat()
     }
 
+    /// Tag, X.690 §8.1.3.6's indefinite length, value, end-of-contents pair.
+    ///
+    /// The other half of the writer, and the only way to build the shape four
+    /// real producers emit. Nesting one of these inside another is exactly
+    /// what `160F-2019.pdf` does five levels over.
+    fn indefinite(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag, 0x80];
+        out.extend_from_slice(value);
+        out.extend_from_slice(&[0x00, 0x00]);
+        out
+    }
+
     fn seq(parts: &[Vec<u8>]) -> Vec<u8> {
         tlv(0x30, &cat(parts))
     }
@@ -1348,6 +1417,15 @@ mod tests {
         seq(&[oid_of(kind), set(values)])
     }
 
+    /// `smimeCapabilities` (1.2.840.113549.1.9.15).
+    ///
+    /// Written out here rather than added to [`crate::oid`], because that
+    /// module's rule is that a name with no decoder behind it reads like
+    /// support — and having no decoder is exactly why this attribute is the
+    /// right one to hide an indefinite length inside.
+    const SMIME_CAPABILITIES: Oid<'static> =
+        Oid::from_content(&[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x0F]);
+
     /// `CN=<name>`, the smallest well-formed distinguished name.
     fn common_name(text: &str) -> Vec<u8> {
         seq(&[set(&[seq(&[
@@ -1377,6 +1455,17 @@ mod tests {
         digest_algorithm: Oid<'static>,
         signature_algorithm: Oid<'static>,
         signer_version: u64,
+        /// Write the five structural nodes the corpus's BER blobs write with
+        /// indefinite lengths: the `ContentInfo`, its `[0]`, the `SignedData`,
+        /// the `EncapsulatedContentInfo` and the certificate set.
+        ber_scaffolding: bool,
+        /// Write the `signedAttrs` `[0]` node itself with an indefinite
+        /// length. RFC 5652 §5.4 forbids it; this builds one anyway.
+        ber_signed_attrs: bool,
+        /// Add an attribute this crate has no decoder for, whose value nests
+        /// an indefinite length two levels down — the case a walk that does
+        /// not descend into unrecognised values cannot see.
+        ber_inside_an_attribute_value: bool,
     }
 
     impl Default for Build {
@@ -1396,15 +1485,47 @@ mod tests {
                 digest_algorithm: oid::ID_SHA256,
                 signature_algorithm: oid::RSA_ENCRYPTION,
                 signer_version: 1,
+                ber_scaffolding: false,
+                ber_signed_attrs: false,
+                ber_inside_an_attribute_value: false,
             }
         }
     }
 
     impl Build {
         fn build(&self) -> Vec<u8> {
+            // The scaffolding writer: definite by default, and the five nodes
+            // the corpus writes indefinitely when asked.
+            let ber = self.ber_scaffolding;
+            let scaffold_seq = |parts: &[Vec<u8>]| {
+                if ber {
+                    indefinite(0x30, &cat(parts))
+                } else {
+                    seq(parts)
+                }
+            };
+            let scaffold_context = |n: u8, value: &[u8]| {
+                if ber {
+                    indefinite(0xA0 | n, value)
+                } else {
+                    context(n, true, value)
+                }
+            };
+
             let mut encap = vec![oid_of(oid::ID_DATA)];
             if let Some(content) = &self.e_content {
                 encap.push(context(0, true, &octets(content)));
+            }
+
+            let mut attributes = self.signed_attrs.clone();
+            if self.ber_inside_an_attribute_value {
+                // `smimeCapabilities` stands in for "an attribute with no
+                // decoder here": the parser reads its `SET OF` values as
+                // located nodes and never looks inside one.
+                let hidden = seq(&[indefinite(0x30, &seq(&[null()]))]);
+                attributes
+                    .get_or_insert_with(Vec::new)
+                    .push(attribute(SMIME_CAPABILITIES, &[hidden]));
             }
 
             let mut signer = vec![
@@ -1412,8 +1533,13 @@ mod tests {
                 self.sid.clone(),
                 algorithm(self.digest_algorithm),
             ];
-            if let Some(attributes) = &self.signed_attrs {
-                signer.push(context(0, true, &cat(attributes)));
+            if let Some(attributes) = &attributes {
+                let body = cat(attributes);
+                signer.push(if self.ber_signed_attrs {
+                    indefinite(0xA0, &body)
+                } else {
+                    context(0, true, &body)
+                });
             }
             signer.push(algorithm(self.signature_algorithm));
             signer.push(octets(&[0xCD; 8]));
@@ -1424,17 +1550,20 @@ mod tests {
             let mut body = vec![
                 int(1),
                 set(&[algorithm(self.digest_algorithm)]),
-                seq(&encap),
+                scaffold_seq(&encap),
             ];
             if !self.certificates.is_empty() {
-                body.push(context(0, true, &cat(&self.certificates)));
+                body.push(scaffold_context(0, &cat(&self.certificates)));
             }
             if !self.crls.is_empty() {
                 body.push(context(1, true, &cat(&self.crls)));
             }
             body.push(set(&[seq(&signer)]));
 
-            seq(&[oid_of(self.content_type), context(0, true, &seq(&body))])
+            scaffold_seq(&[
+                oid_of(self.content_type),
+                scaffold_context(0, &scaffold_seq(&body)),
+            ])
         }
     }
 
@@ -1733,20 +1862,185 @@ mod tests {
         }
     }
 
-    /// The refusal that costs this crate four of the eighteen real blobs in
-    /// the fetched corpora. See this module's header.
+    // ---- BER, which four real producers emit and this module reads --------
+
+    /// The shape the four corpus blobs open with, read to the same values the
+    /// definite-length fixture reads to.
+    ///
+    /// The point is not that it parses. It is that the *same* structure in the
+    /// *other* encoding produces the same answers, so nothing above this
+    /// module has to know which one arrived.
     #[test]
-    fn a_ber_indefinite_length_content_info_is_refused_by_name() {
-        // Exactly how those four open: `30 80` for the ContentInfo, then the
-        // `id-signedData` OID, then `A0 80 30 80` for the content and the
-        // SignedData.
-        let der = unhex(
-            "30 80 06 09 2A 86 48 86 F7 0D 01 07 02 A0 80 30 80
-             02 01 01 31 00 00 00 00 00 00 00 00",
+    fn a_ber_signed_data_reads_back_the_same_values_as_its_der_twin() {
+        let der = fixture();
+        let ber = Build {
+            ber_scaffolding: true,
+            ..Build::default()
+        }
+        .build();
+        assert_eq!(
+            &ber[..15],
+            &unhex("30 80 06 09 2A 86 48 86 F7 0D 01 07 02 A0 80")[..],
+            "the exact fifteen octets all four corpus blobs open with: an \
+             indefinite SEQUENCE, `id-signedData`, an indefinite `[0]`"
         );
+        assert_ne!(ber, der, "and the two encodings really are different bytes");
+
+        let from_ber = ContentInfo::parse(&ber).expect("BER SignedData parses");
+        let from_der = ContentInfo::parse(&der).expect("its DER twin parses");
+
+        let (left, right) = (from_ber.signed_data(), from_der.signed_data());
+        assert_eq!(left.version(), right.version());
+        assert_eq!(
+            left.encap_content_info().content_type(),
+            right.encap_content_info().content_type()
+        );
+        assert!(left.encap_content_info().is_detached());
+        assert_eq!(
+            left.x509_certificates().collect::<Vec<_>>(),
+            right.x509_certificates().collect::<Vec<_>>(),
+            "a certificate located inside a BER message is the same DER"
+        );
+
+        let (a, b) = (&left.signer_infos()[0], &right.signer_infos()[0]);
+        assert_eq!(a.message_digest(), b.message_digest());
+        assert_eq!(a.signing_time(), b.signing_time());
+        assert_eq!(a.signature(), b.signature());
+        assert_eq!(
+            a.signed_attrs_to_digest(),
+            b.signed_attrs_to_digest(),
+            "**the assertion that matters**: the bytes §5.4 digests do not \
+             depend on how the message around them was encoded"
+        );
+    }
+
+    /// The opt-in is an opt-in: the same bytes, refused under DER ceilings.
+    #[test]
+    fn the_same_ber_message_is_refused_under_certificate_limits() {
+        let ber = Build {
+            ber_scaffolding: true,
+            ..Build::default()
+        }
+        .build();
+        assert_eq!(
+            ContentInfo::parse_with(&ber, Limits::CERTIFICATE),
+            Err(CmsError::Der(DerError::IndefiniteLength)),
+            "`Limits::CMS` is the only constant that turns the form on"
+        );
+        // A compile-time check, so a constant that changed would fail the
+        // build rather than one test.
+        const {
+            assert!(
+                !Limits::CERTIFICATE.allow_indefinite_lengths,
+                "an X.509 path stays DER-only however it was reached"
+            );
+            assert!(Limits::CMS.allow_indefinite_lengths);
+        }
+    }
+
+    /// RFC 5652 §5.4, refused by its own name rather than by the walker's.
+    #[test]
+    fn an_indefinite_length_signed_attributes_set_is_refused_by_name() {
+        let der = Build {
+            ber_signed_attrs: true,
+            ..Build::default()
+        }
+        .build();
         assert_eq!(
             ContentInfo::parse(&der),
-            Err(CmsError::Der(DerError::IndefiniteLength))
+            Err(CmsError::IndefiniteSignedAttributes),
+            "a signature is computed over the DER of the attribute set, so a \
+             set with two encodings has no digest to agree about"
+        );
+        // And with the rest of the message in BER too, so the refusal is about
+        // the attributes rather than about the envelope.
+        let both = Build {
+            ber_scaffolding: true,
+            ber_signed_attrs: true,
+            ..Build::default()
+        }
+        .build();
+        assert_eq!(
+            ContentInfo::parse(&both),
+            Err(CmsError::IndefiniteSignedAttributes)
+        );
+    }
+
+    /// The case a walk that does not descend into unrecognised values cannot
+    /// see, which is why the check is a sweep of its own.
+    #[test]
+    fn an_indefinite_length_hidden_in_an_unread_attribute_value_is_refused() {
+        let der = Build {
+            ber_inside_an_attribute_value: true,
+            ..Build::default()
+        }
+        .build();
+        assert_eq!(
+            ContentInfo::parse(&der),
+            Err(CmsError::IndefiniteSignedAttributes),
+            "two levels inside an attribute this crate has no decoder for is \
+             still inside what §5.4 digests"
+        );
+
+        // The same attribute with definite lengths parses, so what the test
+        // above caught is the encoding and not the attribute.
+        let harmless = Build {
+            signed_attrs: Some(vec![
+                attribute(oid::AA_CONTENT_TYPE, &[oid_of(oid::ID_DATA)]),
+                attribute(oid::AA_MESSAGE_DIGEST, &[octets(&[0xAB; 32])]),
+                attribute(SMIME_CAPABILITIES, &[seq(&[seq(&[null()])])]),
+            ]),
+            ..Build::default()
+        }
+        .build();
+        let info = ContentInfo::parse(&harmless).expect("parses");
+        assert_eq!(
+            info.signed_data().signer_infos()[0]
+                .signed_attrs()
+                .expect("there are some")
+                .all()
+                .len(),
+            3
+        );
+    }
+
+    /// `unsignedAttrs` is deliberately *not* held to §5.4's rule, because
+    /// nothing digests it.
+    #[test]
+    fn an_indefinite_length_in_unsigned_attributes_is_read_rather_than_refused() {
+        let der = Build {
+            ber_scaffolding: true,
+            unsigned_attrs: Some(vec![attribute(
+                SMIME_CAPABILITIES,
+                &[seq(&[indefinite(0x30, &seq(&[null()]))])],
+            )]),
+            ..Build::default()
+        }
+        .build();
+        let info = ContentInfo::parse(&der).expect("parses");
+        let signer = &info.signed_data().signer_infos()[0];
+        assert_eq!(
+            signer.unsigned_attrs().map(|a| a.all().len()),
+            Some(1),
+            "narrowing this would refuse a legal message for no property"
+        );
+        assert!(signer.signed_attrs_to_digest().is_some());
+    }
+
+    /// A `SignedData` whose terminator never arrives is refused by name, not
+    /// read to the end of the buffer.
+    #[test]
+    fn an_unterminated_ber_message_is_refused_rather_than_read_to_the_end() {
+        let mut ber = Build {
+            ber_scaffolding: true,
+            ..Build::default()
+        }
+        .build();
+        // Drop the outermost end-of-contents pair.
+        ber.truncate(ber.len().saturating_sub(2));
+        assert_eq!(
+            ContentInfo::parse(&ber),
+            Err(CmsError::Der(DerError::UnterminatedIndefiniteLength))
         );
     }
 
@@ -2131,7 +2425,7 @@ mod tests {
     /// reason those files record: a hand-laid corpus that no longer reaches
     /// what it was chosen for looks exactly like one that does.
     ///
-    /// Nine seeds, each for a region a mutation is unlikely to reach on its
+    /// Ten seeds, each for a region a mutation is unlikely to reach on its
     /// own.
     #[test]
     #[ignore = "writes into fuzz/corpus/, which is committed"]
@@ -2141,7 +2435,7 @@ mod tests {
         std::fs::create_dir_all(&base).expect("the corpus directory is creatable");
 
         let token = fixture();
-        let seeds: [(&str, Vec<u8>); 9] = [
+        let seeds: [(&str, Vec<u8>); 10] = [
             // The everyday shape: detached, signed attributes, one certificate.
             ("detached-signed-attrs", fixture()),
             // The other half of §5.4: no signed attributes at all.
@@ -2215,15 +2509,31 @@ mod tests {
                 }
                 .build(),
             ),
-            // Legal BER, refused DER — and four of the eighteen real blobs in
-            // the fetched corpora. The seed exists so the refusal is on the
-            // path an ordinary input takes.
+            // BER, which four of the eighteen real blobs in the fetched
+            // corpora are: the five structural nodes written with indefinite
+            // lengths, everything below them definite. A mutation will not
+            // find a balanced set of terminators on its own.
             (
                 "ber-indefinite-length",
-                unhex(
-                    "30 80 06 09 2A 86 48 86 F7 0D 01 07 02 A0 80 30 80
-                     02 01 01 31 00 00 00 00 00 00 00 00",
-                ),
+                Build {
+                    ber_scaffolding: true,
+                    ..Build::default()
+                }
+                .build(),
+            ),
+            // The one BER shape this module refuses: RFC 5652 §5.4 digests the
+            // DER of `signedAttrs`, so an indefinite length inside it — here,
+            // two levels down in an attribute nothing decodes — is
+            // `IndefiniteSignedAttributes`. The seed keeps that refusal on the
+            // path an ordinary input takes.
+            (
+                "ber-indefinite-signed-attrs",
+                Build {
+                    ber_scaffolding: true,
+                    ber_inside_an_attribute_value: true,
+                    ..Build::default()
+                }
+                .build(),
             ),
             // A `SignedData` with no signers: legal, and proving nothing.
             (

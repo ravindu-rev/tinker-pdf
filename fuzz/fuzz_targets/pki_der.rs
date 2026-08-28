@@ -25,6 +25,12 @@
 //! 3. **The walker again under a one-level depth cap**, so `DepthExceeded` is
 //!    reached on ordinary inputs rather than only on adversarially deep ones.
 //!    Without this the cap is a branch nothing takes.
+//! 4. **The walker with X.690 §8.1.3.6's indefinite length allowed**, which is
+//!    the mode `Limits::CMS` runs in and which no other pass here reaches.
+//!    It is a whole second reading of the same bytes — an end-of-contents
+//!    scan, a terminator that may be missing or forged, and a `raw` that is
+//!    two octets wider than its header plus its value — so the passes above
+//!    would leave all of it unfuzzed.
 //!
 //! ## What is asserted beyond "it did not panic"
 //!
@@ -32,10 +38,20 @@
 //! nothing per node and check the invariants the *callers* of this crate are
 //! entitled to rely on:
 //!
-//! - **A node's `raw` is its header plus its value**, and `range()` is exactly
-//!   as wide. `Certificate::tbs_range` is what milestone 4 will digest, so a
-//!   range that is one byte wrong is a signature that never verifies and a
-//!   defect that looks like bad crypto.
+//! - **A node's `raw` is its header plus its value** — plus, for an
+//!   indefinite-length one, the two-octet terminator — and `range()` is
+//!   exactly as wide either way. `Certificate::tbs_range` is what milestone 4
+//!   will digest, so a range that is one byte wrong is a signature that never
+//!   verifies and a defect that looks like bad crypto.
+//! - **An indefinite-length node really ends in `00 00`**, is constructed, and
+//!   leaves room for a header. The scan that found the terminator is the one
+//!   piece of arithmetic here that can be off by two, and this is where being
+//!   off by two shows up.
+//! - **What `require_definite_lengths` accepts really is definite
+//!   throughout.** Where it says yes, no node in the subtree may report
+//!   `is_indefinite`, checked by walking the subtree a second way. That method
+//!   is what stands between a BER `signedAttrs` and a digest nobody can
+//!   explain, so "it returned `Ok`" is not enough to know about it.
 //! - **A node's range lies inside its parent's**, and after the header. A
 //!   child that claimed to start before its parent would let a caller quote a
 //!   byte range covering bytes the structure does not contain.
@@ -112,6 +128,39 @@ fn walk(data: &[u8], limits: Limits) {
         );
         assert_eq!(cursor.offset(), node.end(), "the cursor overran the node");
         assert!(node.depth() <= limits.max_depth, "past the depth cap");
+        if node.is_indefinite() {
+            assert!(
+                limits.allow_indefinite_lengths,
+                "an indefinite length read by a parse that did not allow one"
+            );
+            assert!(
+                node.is_constructed(),
+                "X.690 §8.1.3.2 admits the form only for constructed encodings"
+            );
+            // Two octets of header at least, then the value, then the pair.
+            assert!(
+                node.raw().len() >= node.value().len() + 4,
+                "no room for both a header and a terminator"
+            );
+            assert_eq!(
+                node.raw().get(node.raw().len() - 2..),
+                Some(&[0x00, 0x00][..]),
+                "an indefinite-length node that does not end in its terminator"
+            );
+        }
+        // Where the sweep says a subtree is definite, no node in it may say
+        // otherwise — the property `cms.rs` refuses a BER `signedAttrs` on.
+        if node.require_definite_lengths(&budget).is_ok() {
+            assert!(!node.is_indefinite());
+            if let Ok(mut inner) = node.children(&budget) {
+                while let Ok(child) = inner.read() {
+                    assert!(
+                        !child.is_indefinite(),
+                        "a subtree called definite holds an indefinite node"
+                    );
+                }
+            }
+        }
         if let Some(parent) = parent {
             assert!(
                 node.start() >= parent.start() && node.end() <= parent.end(),
@@ -138,6 +187,14 @@ fuzz_target!(|data: &[u8]| {
     // One level of nesting allowed, so `DepthExceeded` is on the path an
     // ordinary certificate takes rather than only an adversarial one.
     walk(data, Limits::new(1, 4_096));
+    // The BER reading, which is a different walker: an end-of-contents scan
+    // in front of every constructed node, and a `raw` two octets wider than
+    // the header and value that make it up.
+    walk(data, WALK.allowing_indefinite_lengths());
+    // And shallow, so the scan's own depth ceiling is on an ordinary path
+    // rather than only a deep one — it refuses a node the definite-length
+    // reader would have handed back and refused only on descent.
+    walk(data, Limits::new(2, 4_096).allowing_indefinite_lengths());
 
     if let Ok(certificate) = Certificate::parse(data) {
         let range = certificate.tbs_range();

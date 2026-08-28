@@ -20,19 +20,28 @@
 //! DER *is* the whole input and a mutation anywhere in it is a different tag,
 //! length or depth, which is the dimension worth exploring.
 //!
-//! 1. **The parser under `Limits::CMS`**, with every accessor tried on every
-//!    signer, every attribute and every certificate reference it hands back.
-//!    The refusal paths are as much of the surface as the acceptance paths:
-//!    an algorithm OID with nothing behind it, an attribute with two values, a
-//!    `SET SIZE (1..MAX)` with none.
-//! 2. **The parser under a two-level depth cap**, so `DepthExceeded` is on the
+//! 1. **The parser as `ContentInfo::parse` runs it** — `Limits::CMS`, which
+//!    allows X.690 §8.1.3.6's indefinite length, because that is what a PDF's
+//!    `/Contents` is actually read under and four of the eighteen corpus blobs
+//!    need it. Every accessor is tried on every signer, every attribute and
+//!    every certificate reference it hands back. The refusal paths are as much
+//!    of the surface as the acceptance paths: an algorithm OID with nothing
+//!    behind it, an attribute with two values, a `SET SIZE (1..MAX)` with
+//!    none, a BER `signedAttrs`.
+//! 2. **The same parser with the BER form off**, which is what every other
+//!    caller of this crate gets. Two readings of one input is the differential
+//!    worth hunting for, and running both here is the only place a fuzzer can
+//!    reach it.
+//! 3. **The parser under a two-level depth cap**, so `DepthExceeded` is on the
 //!    path an ordinary input takes rather than only an adversarial one.
 //!    Without this the cap is a branch nothing takes.
-//! 3. **Every X.509 certificate the message located**, through
+//! 4. **Every X.509 certificate the message located**, through
 //!    `Certificate::parse`. This is how a certificate reaches this engine in
 //!    practice — inside a CMS blob inside a PDF — and reaching it through the
 //!    set means the *offsets* the CMS walker computed are what the certificate
-//!    parser is handed.
+//!    parser is handed. `Certificate::parse` uses `Limits::CERTIFICATE`, so a
+//!    certificate found inside a BER message is still held to RFC 5280 §4.1's
+//!    DER — which this target exercises and nothing else does.
 //!
 //! ## What is asserted beyond "it did not panic"
 //!
@@ -54,6 +63,13 @@
 //! **A message's own fields agree with the accessors that ask about them.**
 //! `x509_certificates()` never yields more than `certificates()` holds;
 //! `signed_attrs_to_digest()` is `Some` exactly when `signed_attrs()` is.
+//!
+//! **What is digested is DER, whatever the message around it was.** A stored
+//! `signedAttrs` that parsed must be definite-length throughout — the whole
+//! subtree, by `require_definite_lengths` — and the `SET OF` the re-encoding
+//! reads back as must itself be definite. That is the one property widening
+//! the walker to BER could have quietly broken, and it is checked on every
+//! input that produces a signer with signed attributes.
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
@@ -63,7 +79,18 @@ use tinker_pdf_pki::der::{Budget, Cursor, Limits, Tag};
 use tinker_pdf_pki::x509::Certificate;
 
 /// Deep enough for a timestamp token, shallow enough to run fast.
-const WALK: Limits = Limits::new(40, 16_384);
+///
+/// The BER form is on, because `ContentInfo::parse` runs under `Limits::CMS`
+/// and a target that left it off would be fuzzing a mode no caller uses.
+const WALK: Limits = Limits::new(40, 16_384).allowing_indefinite_lengths();
+
+/// Ceilings for the assertions rather than for the parse.
+///
+/// A check that shares the pass's budget would report a spent allowance as a
+/// broken invariant, and a fuzz target that can fail for running second is
+/// worse than no target. A subtree of the input holds fewer nodes than the
+/// input has bytes, so this is unreachable by anything the harness feeds.
+const CHECK: Limits = Limits::new(64, 1 << 20).allowing_indefinite_lengths();
 
 /// Whether `slice` is a subslice of `data`, by address.
 fn inside(data: &[u8], slice: &[u8]) -> bool {
@@ -156,6 +183,29 @@ fn read_every_way(data: &[u8], limits: Limits) {
                 let _ = id.digest();
             }
         }
+        // RFC 5652 §5.4: whatever the envelope was encoded as, what a
+        // signature is computed over has to be DER, all the way down.
+        if let Some(attributes) = signer.signed_attrs() {
+            // Ceilings of this check's own, wide enough that a `Budget`
+            // already spent by the pass above cannot make the answer look
+            // like a refusal. The BER form is *allowed* here, so meeting one
+            // is refused by name rather than by the reader's mode.
+            let budget = Budget::new(CHECK);
+            let mut cursor = Cursor::new(attributes.stored_der(), &budget);
+            let stored = cursor
+                .read()
+                .expect("the set parsed once, so its own bytes parse again");
+            assert!(
+                !stored.is_indefinite(),
+                "a BER signedAttrs must have been refused by name"
+            );
+            assert_eq!(
+                stored.require_definite_lengths(&budget),
+                Ok(()),
+                "an indefinite length survived inside what §5.4 digests"
+            );
+        }
+
         for attributes in [signer.signed_attrs(), signer.unsigned_attrs()]
             .into_iter()
             .flatten()
@@ -203,13 +253,18 @@ fn read_every_way(data: &[u8], limits: Limits) {
                 // And the result is a `SET OF` that fills itself exactly,
                 // which is what makes it digestible rather than merely
                 // different.
-                let budget = Budget::new(limits);
+                let budget = Budget::new(CHECK);
                 let mut cursor = Cursor::new(&digested, &budget);
                 let node = cursor
                     .expect(Tag::Set)
                     .expect("the re-encoding is a universal SET");
                 assert!(cursor.finish().is_ok(), "with nothing after it");
                 assert_eq!(node.raw().len(), digested.len());
+                assert!(
+                    !node.is_indefinite(),
+                    "a re-encoding whose own length is indefinite is not DER, \
+                     and §5.4 asks for DER"
+                );
             }
             (left, right) => panic!(
                 "signed attributes and their re-encoding disagree about existing: \
@@ -237,11 +292,17 @@ fn read_every_way(data: &[u8], limits: Limits) {
 
 fuzz_target!(|data: &[u8]| {
     read_every_way(data, WALK);
+    // The same input with the BER form off — the reading every other caller of
+    // this crate gets, and the half of the differential the pass above cannot
+    // see on its own.
+    read_every_way(data, Limits::new(40, 16_384));
     // Two levels of nesting allowed, which is past a `ContentInfo` and into
     // its `[0]` and no further, so `DepthExceeded` is on the path an ordinary
-    // input takes.
-    read_every_way(data, Limits::new(2, 16_384));
+    // input takes. With the form on, because an indefinite length reaches the
+    // ceiling during the end-of-contents scan rather than on descent, which is
+    // a different code path to the same refusal.
+    read_every_way(data, Limits::new(2, 16_384).allowing_indefinite_lengths());
     // And a node budget too small for anything real, so the other ceiling is
-    // reached as well.
-    read_every_way(data, Limits::new(40, 8));
+    // reached as well — including by the scan, which spends against it.
+    read_every_way(data, Limits::new(40, 8).allowing_indefinite_lengths());
 });

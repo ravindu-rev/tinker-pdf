@@ -32,12 +32,22 @@
 //!
 //! # What the second pass measures that no fixture can
 //!
-//! **What is refused, and what that costs.** Four of the eighteen blobs are
-//! BER rather than DER — indefinite lengths from the outermost SEQUENCE down —
-//! which `tinker-pdf-pki` refuses by name and by design. That is a number
-//! rather than an impression, and it is asserted here so that widening or
-//! narrowing the rule shows up as a failing test rather than as a quietly
-//! different result.
+//! **How much of the corpus is BER, and whether reading it changed anything.**
+//! Four of the eighteen blobs open `30 80 … A0 80 30 80`: indefinite lengths
+//! on the outermost structural nodes, which RFC 5652 §5.1 permits and ISO
+//! 32000-1 12.8.3.3.1 does not. `tinker-pdf-pki` refused all four until
+//! `Limits::CMS` gained `allow_indefinite_lengths`; it now reads them, and the
+//! two numbers that matter are asserted here rather than described. Every
+//! blob parses, and **every one of the four BER blobs' signatures verifies
+//! over the §5.4 re-encoding using this engine's own RSA** — which is the
+//! evidence that the walker found the right bytes, not merely bytes it liked.
+//! The count of BER blobs is pinned too, so a producer's encoding is a
+//! measured fact rather than an impression.
+//!
+//! **What stays refused inside them.** §5.4 digests the DER of `signedAttrs`,
+//! and all four write theirs with definite lengths — so the rule that a BER
+//! `signedAttrs` is refused by name costs this corpus nothing, which is a
+//! measurement and not a guess. `cms.rs` holds it up with a fixture.
 //!
 //! **Whether the certificate parser works on real certificates.** Milestone 2
 //! was gated on RFC 5280's appendix examples, which are hand transcriptions of
@@ -178,10 +188,25 @@ fn without_padding(contents: &[u8]) -> &[u8] {
 
 // ---- what the blobs turned out to be --------------------------------------
 
+/// Whether the outermost node's length octet is X.690 §8.1.3.6's `0x80`.
+///
+/// A byte look rather than a parse. `census_one` checks the crate's own
+/// `Tlv::is_indefinite` against it on every blob, so the two readings hold
+/// each other up instead of the parser vouching for itself.
+fn opens_with_an_indefinite_length(blob: &[u8]) -> bool {
+    blob.first() == Some(&0x30) && blob.get(1) == Some(&0x80)
+}
+
 #[derive(Default)]
 struct Tally {
     blobs: usize,
     parsed: usize,
+    /// Blobs whose outermost SEQUENCE is indefinite-length — BER, which
+    /// RFC 5652 §5.1 permits and ISO 32000-1 12.8.3.3.1 does not.
+    ber_blobs: Vec<String>,
+    /// And how many of those blobs' signatures verified over the §5.4
+    /// re-encoding, which is what says the walker located the right bytes.
+    ber_verified: usize,
     refused: BTreeMap<String, usize>,
     detached: usize,
     encapsulating: usize,
@@ -228,6 +253,7 @@ fn refusal_name(error: &CmsError) -> String {
         CmsError::UnknownDigestAlgorithm { .. } => "UnknownDigestAlgorithm".to_string(),
         CmsError::UnknownSignatureAlgorithm { .. } => "UnknownSignatureAlgorithm".to_string(),
         CmsError::EmptyAttributes => "EmptyAttributes".to_string(),
+        CmsError::IndefiniteSignedAttributes => "IndefiniteSignedAttributes".to_string(),
         CmsError::DuplicateAttribute { .. } => "DuplicateAttribute".to_string(),
         CmsError::AttributeValueCount { .. } => "AttributeValueCount".to_string(),
         CmsError::BadAttribute { .. } => "BadAttribute".to_string(),
@@ -260,6 +286,21 @@ fn census_one(name: &str, blob: &[u8], tally: &mut Tally, nested: bool, verbose:
     } else {
         tally.nested_tokens_parsed += 1;
     }
+
+    // Which encoding arrived, asked of the parser and of the bytes, so that
+    // neither answer stands alone.
+    let budget = Budget::new(Limits::CMS);
+    let mut outermost = Cursor::new(blob, &budget);
+    let ber = outermost.read().is_ok_and(|node| node.is_indefinite());
+    assert_eq!(
+        ber,
+        opens_with_an_indefinite_length(blob),
+        "{name}: the walker and the bytes disagree about the length form"
+    );
+    if ber && !nested {
+        tally.ber_blobs.push(name.to_string());
+    }
+
     let signed = info.signed_data();
 
     let encap = signed.encap_content_info();
@@ -422,6 +463,9 @@ fn census_one(name: &str, blob: &[u8], tally: &mut Tally, nested: bool, verbose:
                             .is_ok();
                         if with_set_tag {
                             tally.verified += 1;
+                            if ber {
+                                tally.ber_verified += 1;
+                            }
                         } else {
                             tally.not_verified.push(name.to_string());
                         }
@@ -615,6 +659,19 @@ fn census_of_the_corpus_cms_blobs() {
     );
     table("refusals, by kind:", &all.refused);
     println!(
+        "length form: {} definite throughout, {} opening with X.690 §8.1.3.6's \
+         indefinite length",
+        all.blobs - all.ber_blobs.len(),
+        all.ber_blobs.len()
+    );
+    for name in &all.ber_blobs {
+        println!("      BER  {name}");
+    }
+    println!(
+        "  of those, {} verified over the §5.4 re-encoding",
+        all.ber_verified
+    );
+    println!(
         "encapsulated content: {} detached, {} carrying content",
         all.detached, all.encapsulating
     );
@@ -712,30 +769,52 @@ fn census_of_the_corpus_cms_blobs() {
          `Signature::contents` is empty: {signatures_with_no_bytes:?}"
     );
     assert_eq!(supported.blobs, 12, "blobs the supported path handed over");
-    assert_eq!(supported.parsed, 9, "and parsed");
+    assert_eq!(
+        supported.parsed, 12,
+        "and parsed — all of them, since `Limits::CMS` reads BER"
+    );
+    assert!(
+        supported.refused.is_empty(),
+        "nothing on the supported path is refused any more: {:?}",
+        supported.refused
+    );
 
     // Pass 2. Eighteen blobs — one per signature, which is the agreement
     // between an independent byte scan and the reader's own field walk that
     // makes either number worth anything.
     assert_eq!(all.blobs, 18, "every `/Contents <…>` in the same files");
-    assert_eq!(all.parsed, 14);
-    assert_eq!(
-        all.refused.get("Der(IndefiniteLength)").copied(),
-        Some(4),
-        "blobs refused for BER's indefinite length — the measured price of \
-         `der.rs`'s definite-lengths-only rule, and the largest single fact \
-         this census establishes"
-    );
-    assert_eq!(
-        all.blobs - all.parsed,
-        4,
-        "and nothing is refused for any other reason"
+    assert_eq!(all.parsed, 18, "and every one of them parses");
+    assert!(
+        all.refused.is_empty(),
+        "nothing in the corpus is refused: {:?}",
+        all.refused
     );
 
-    assert_eq!(all.detached, 13, "detached SignedData, tokens included");
+    // The BER four, named rather than counted, because which files they are is
+    // the fact a re-pinned corpus would move.
+    assert_eq!(
+        all.ber_blobs,
+        vec![
+            "pdfjs/test/pdfs/160F-2019.pdf [0]".to_string(),
+            "pdfjs/test/pdfs/issue16553.pdf [0]".to_string(),
+            "pdfjs/test/pdfs/prefilled_f1040.pdf [0]".to_string(),
+            "pdfjs/test/pdfs/xfa_filled_imm1344e.pdf [1]".to_string(),
+        ],
+        "the blobs whose outermost SEQUENCE carries X.690 §8.1.3.6's \
+         indefinite length — 4 of 18, from Acrobat Distiller 5.0.5, Adobe \
+         LiveCycle Designer ES 8.2 and 10.0, and LibreOffice 7.5"
+    );
+    assert_eq!(
+        all.ber_verified, 4,
+        "**and each of the four verifies over the §5.4 re-encoding**, which is \
+         what says the end-of-contents scan located the signer's bytes rather \
+         than bytes that merely parsed"
+    );
+
+    assert_eq!(all.detached, 17, "detached SignedData, tokens included");
     assert_eq!(all.encapsulating, 3);
     assert_eq!(
-        all.signers, 16,
+        all.signers, 20,
         "one per blob, plus one per timestamp token"
     );
     assert_eq!(
@@ -743,22 +822,22 @@ fn census_of_the_corpus_cms_blobs() {
         "no corpus blob identifies its signer by key identifier, which is why \
          that arm is held up by a fixture in `cms.rs` alone"
     );
-    assert_eq!(all.issuer_and_serial, 16);
+    assert_eq!(all.issuer_and_serial, 20);
     assert_eq!(
         all.without_signed_attrs, 1,
         "`bug854315.pdf`'s outer signer has none at all, so §5.4's other half \
          is exercised by real data as well as by a fixture"
     );
-    assert_eq!(all.with_signed_attrs, 15);
+    assert_eq!(all.with_signed_attrs, 19);
     assert_eq!(
-        all.with_message_digest, 15,
+        all.with_message_digest, 19,
         "§5.3 requires one where there are any"
     );
     assert_eq!(
-        all.with_signing_certificate_v2, 0,
-        "the corpus's only signingCertificateV2 is inside `issue16553.pdf`, \
-         which is one of the four refused for BER — so that decoder is held up \
-         by a fixture and by nothing else"
+        all.with_signing_certificate_v2, 1,
+        "`issue16553.pdf`'s — reachable only because that blob is one of the \
+         four BER ones, so reading the form is what put real evidence under \
+         the RFC 5035 decoder that had none"
     );
     assert_eq!(all.timestamp_tokens, 2);
     assert_eq!(
@@ -784,8 +863,13 @@ fn census_of_the_corpus_cms_blobs() {
          here rather than tolerated: {:?}",
         all.certificate_failures
     );
-    assert_eq!(all.certificates_seen, 29, "X.509 certificates offered");
-    assert_eq!(all.certificates_parsed, 29, "and all of them parsed");
+    assert_eq!(all.certificates_seen, 41, "X.509 certificates offered");
+    assert_eq!(
+        all.certificates_parsed, 41,
+        "and all of them parsed — under `Limits::CERTIFICATE`, which does not \
+         allow the indefinite length, so the twelve that arrived inside a BER \
+         message were still held to RFC 5280 §4.1's DER"
+    );
 
     // The three assertions this file exists for.
     assert!(
@@ -795,7 +879,7 @@ fn census_of_the_corpus_cms_blobs() {
         all.not_verified
     );
     assert_eq!(
-        all.verified, 15,
+        all.verified, 19,
         "real signatures, from six independent producers, verified over the \
          §5.4 re-encoding using this engine's own RSA"
     );
