@@ -1314,11 +1314,14 @@ mod tests {
     }
 
     /// With the flag, no crate step carries a "cannot be proved" note; without
-    /// it, ten do.
+    /// it, eleven do.
     ///
-    /// The ten is the measurement the flag exists for: five of the fifteen
+    /// The eleven is the measurement the flag exists for: five of the sixteen
     /// crates have no internal dependencies and could always be dry-run, and
-    /// the other ten never had been.
+    /// the other eleven never had been. The number is the count of crates with
+    /// an internal edge and moves whenever one is added — `tinker-pdf-shape`
+    /// took it from ten to eleven, and the five with none are still `math`,
+    /// `filters`, `crypto`, `xml` and `css`.
     #[test]
     fn the_flag_is_what_makes_the_non_leaf_crates_provable() {
         let notes = |local: bool| -> usize {
@@ -1332,7 +1335,7 @@ mod tests {
                 .filter(|step| step.stage == Stage::Crates && step.registry_note.is_some())
                 .count()
         };
-        assert_eq!(notes(false), 10, "the crates a plain dry run cannot reach");
+        assert_eq!(notes(false), 11, "the crates a plain dry run cannot reach");
         assert_eq!(notes(true), 0, "and none of them once it can");
     }
 

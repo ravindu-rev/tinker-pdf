@@ -360,6 +360,44 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// types, independently fuzzable. A tree of plain structs is plain parameters,
 /// and `layout` is the twenty-fourth fuzz target precisely because it can be
 /// driven with no file of any kind in front of it.
+///
+/// **`shape -> font` is the seventh amendment, and the fourth leaf-to-leaf
+/// edge.** `docs/design/shaping.md` makes the argument in two halves, and the
+/// interesting half is the one about a table that is *not* taken.
+///
+/// The edge itself is small and obvious. `tinker_pdf_font::Sfnt` already
+/// parses the table directory, and `tinker-pdf-shape` needs exactly that —
+/// the twelve-byte header and `table(tag)` — to find `GDEF`, `GSUB` and
+/// `GPOS`. A second reader of those twelve bytes in this workspace would be a
+/// second place for the same bug to live, and the design says so: *"one sfnt
+/// parser in the tree rather than two"*.
+///
+/// **What is not taken is the parsing of the layout tables themselves**, and
+/// that is the decision worth recording. The obvious move was to add `GSUB`
+/// and `GPOS` to `tinker-pdf-font` beside `cmap` and `hmtx`, and it was
+/// refused on the font crate's charter: that crate holds *the tables metrics
+/// need*, and a lookup is not a metric. Nothing in `tinker-pdf-content`,
+/// `tinker-pdf-render` or the facade asks a font what its ligatures are —
+/// they ask how wide a glyph is and what its outline looks like — so putting
+/// substitution rules there would widen a crate every layer above depends on,
+/// for one caller. It would also put the lookup fuzz target in the wrong
+/// crate: `fuzz_targets/shape.rs` drives the code it exercises directly,
+/// which it could not if that code lived behind `tinker-pdf-font`'s API.
+///
+/// The three properties that made the earlier leaf-to-leaf edges acceptable
+/// hold here, and the third of them is what makes the direction safe. It
+/// points **sideways to a leaf** rather than upward, so the layering is not
+/// inverted. It **cannot cycle**: `tinker-pdf-font` depends on
+/// `tinker-pdf-filters`, `tinker-pdf-filters` on nothing, and neither has any
+/// reason to know that shaping exists — an edge into a subtree with no path
+/// back is a tree, whatever else it is. And a sibling workspace crate is not a
+/// third-party dependency, so ruling 3 and CONTRIBUTING rule 1 are untouched:
+/// setting Arabic adds no crate from outside this repository.
+///
+/// It is a leaf on ruling 8's definition rather than on any list: face table
+/// bytes and glyph indices in, glyph indices and six integers out. There is no
+/// PDF vocabulary in its API and no CSS vocabulary either — the consumers in
+/// milestones 6 to 8 convert at their own boundaries.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -378,6 +416,11 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // which gap 31's plan predicted and milestone 7 answered: nothing here is
     // transcendental. See the sixth amendment above.
     ("tinker-pdf-layout", &["tinker-pdf-css"]),
+    // The eleventh, and the fourth leaf-to-leaf edge. It takes the sfnt table
+    // directory and nothing else; the OpenType Layout tables are parsed here
+    // rather than in `font` because that crate's charter is the tables
+    // metrics need. See the seventh amendment above.
+    ("tinker-pdf-shape", &["tinker-pdf-font"]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
