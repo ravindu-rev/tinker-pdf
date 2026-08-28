@@ -16,92 +16,132 @@ here alone. Scheduling within a tier follows corpus hit-rate evidence
 
 ## Tier 1 — prove correctness
 
-These come before any new feature. The suite is 2 952 tests proving the
+These come before any new feature. The suite is 2 963 tests proving the
 engine agrees with itself, and ruling 13 says that is the only kind of proof
 this repository will have. That raises the bar on what those tests must be
 rather than lowering it: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored.
 
-- **Image edges are quantised to whole device pixels.** A destination pixel is
-  painted in full or not at all, by whether the image's device rectangle
-  contains its centre, so an image placed at a fractional offset has a jagged
-  edge — and abutting strips, which is how every PCLM scan is built, tile
-  differently at different scales. It is what remains of the `dpi` relation's
-  eight failures once minification stopped interpolating
-  ([features/rasterizer.md](features/rasterizer.md)): the two PCLM files
-  disagree on 17.3 % of their pixels (was 23.4 %), the six inline-image files
-  on 3.2–4.4 % (was 4.4–5.4 %), against a 2 % budget, and no text-only or
-  vector-only file in 4 525 fails at all. The fix is partial coverage at the
-  edge, and it is **not free**: source-over compositing of two half-covered
-  draws is not the average of them, so seams that tile exactly today would
-  gain a line of background — the conflation artefact every renderer in this
-  imaging model has. That trade is the work, and it wants a design note rather
-  than a patch. Evidence: 8 of 582 files compared, August 2026, named per file
-  in `corpus/report.json`. Exit: an analytic test pins a half-covered image
-  edge against its area; qpdf's `dpi` row holds on the PCLM pair. (M)
+**Clear.** The last item here was the `dpi` relation on strip-built scans, and
+it closed with the residual attributed rather than patched around: the
+box-filter pyramid averages source-aligned blocks of two, so its support is
+quantised to powers of two and moves with the device scale, while an area
+filter over the destination pixel's true source rectangle does not. It now
+engages only past 128:1 — the worst downscale the pdfjs corpus asks for is
+72:1 — and **all eight files hold all three relations**, with `dpi` at 582 of
+582 qpdf files (from 577) and 915 of 944 pdfjs files (from 908).
+
+The `rotate` half closed earlier and differently, by raising a budget against
+measured noise rather than by changing the engine: an anti-aliased image edge
+at a fractional offset does not transpose to the byte, and the two
+`inline-images-ii-*` files sat at 1.7 % against a 1 % line drawn when image
+edges were still quantised.
+
+Both are written up in [design/image-edges.md](design/image-edges.md), and the
+part worth carrying forward is why it took a real scan to see: at an integer
+ratio on a full-canvas draw the pyramid's blocks sit exactly under the
+destination pixels and even a pyramid agrees with itself, so a synthetic test
+at 2:1 or 4:1 proves nothing about it.
+[`a_downscale_agrees_with_itself_at_twice_the_scale`](../crates/tinker-pdf-raster/tests/analytic_sampling.rs)
+now states the property in closed form at ratios that are deliberately not
+whole.
 
 ## Tier 2 — close the named refusals, by measured reachability
 
-Each of these is refused by name today (ruling 2 — the placeholder-plus-
-warning contract), with corpus reachability measured.
+Every item that stood here when the tier was written has landed and left under
+this file's own rule, the last of them JBIG2 refinement coding (clause 6.3): `SDREFAGG`,
+`SBREFINE` and segment types 40, 42 and 43 all decode, with both of 6.3.5.3's
+context templates and 6.3.5.6's typical prediction. The evidence is the pdf.js
+corpus coding one 399 by 400 picture a dozen ways — the encodings that do not
+refine are ground truth for the ten that do, and all ten reproduce it with **0
+pixels different**, checked by
+[`jbig2_refinement.rs`](../crates/tinker-pdf/tests/jbig2_refinement.rs).
+T.88 Annex H's page 3 decodes into its own refined text with no warning.
 
-- **JBIG2 symbol dictionary and text region.** The highest-reachability
-  refusal in the engine: 103 files in the pdf.js corpus alone — more than
-  JPX (19) or mesh shadings (10) had when they were built. It is what OCR
-  pipelines emit, so most JBIG2 in circulation is this. The MQ coder is
-  already shared and in its own module; the generic-region lineage is
-  done. Exit: the symbol/text refusal rows leave
-  [features/filters.md](features/filters.md); corpus hit-rate for the
-  capability goes to ~zero. (L,
-  [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-- **Form XObject `/Resources`.** A form's own resource dictionary is
-  consulted nowhere — tiling patterns' are, forms' are not (recorded in
-  [features/rendering.md](features/rendering.md)); it is already the reason
-  one of the 19 JPX corpus files never reaches the decoder. Exit: a form
-  resolving its own resources renders; the JPX unreached file decodes. (M)
-- **Transparency group colour spaces and page-level `/Group`.** The engine
-  composites in RGB throughout and does not read a page-level `/Group`
-  (11.4.7), so a group declared in CMYK or Lab blends in the wrong space.
-  Exit: group colour space honoured in compositing, pinned by fixtures
-  that differ only in the group's space. (M–L, folded into
-  [design/icc.md](design/icc.md))
-- **The JPX refusal list.** RGN, POC, PPM, PPT, CRG, five of Table A.19's
-  six code-block styles, out-of-order tile-parts — every entry reachable
-  and named, measured 4 refusals of 19 corpus files. Ruling 13 costs this
-  item its cheapest source of fixtures: a codestream exercising a new
-  partition can no longer be produced by asking an encoder for one, so each
-  is hand-authored and transcribed, the discipline JBIG2 took from T.88's
-  Annex H. Exit: refusal rows retire one by one as corpus files demand
-  them. (M–L)
-- **Full ICC colour.** ICC and CIE spaces are approximated by component
-  count today, stated on the type. An own CMM — profile parsing,
-  transforms, rendering intents — is the capability. Exit: ICC profiles
-  drive conversion; known-answer tables computed from the specification's
-  own equations hold for matrix/TRC profiles. (L,
-  [design/icc.md](design/icc.md))
-- **Incremental update with encryption.** An incremental save of an
-  encrypted document needs the original file key plumbed to the
-  incremental writer; today the combination is refused. Exit: fill a form
-  in an encrypted file, save incrementally, and the saved file decrypts and
-  passes the strict validator. (M)
+The route there is written up in
+[design/jbig2-symbol-text.md](design/jbig2-symbol-text.md) and is worth reading
+before the next item of this shape is scheduled: 6.3.5.3's figures were never
+obtained, and did not need to be. A context index only labels an adaptive state
+slot, so the standard's bit order is unobservable and only the *set* of
+positions is a fact about the format. What that argument does not buy is the
+right to guess the set: five candidate templates agreed with each other on
+Annex H's thirty-six-decision fixture and were all wrong, and only a whole
+picture coded both ways told them apart.
+
+Closing it put one item back — refinement over the Huffman road, measured at
+11 segments in 10 files — and that item has since closed too: 6.4.11's
+envelope, tables B.14 and B.15, and 6.5.8.2 over Huffman all decode, held by
+15 corpus files at 0 pixels different in
+[`jbig2_refinement.rs`](../crates/tinker-pdf/tests/jbig2_refinement.rs).
+**The symbol lineage is now complete**: arithmetic and Huffman, with and
+without refinement, in either combination.
+
+Two things are worth carrying forward rather than filing away, both written up
+in [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md):
+
+- **A reconstruction is only as good as the line a fixture exercises.** B.14
+  and B.15 are reconstructed, both files that reach them code every delta as
+  zero, and counted injection shows that changing any other line in either
+  table breaks nothing. A non-zero delta is therefore refused rather than
+  decoded through the unverified part — the guard lifts when a fixture
+  exercises the rest.
+- **Three separate defects in this lineage all presented as a wrong context
+  template**, and all three were found by a picture rather than by reasoning.
+  A decoder with internal state a header cannot check wants a fixture that
+  renders a whole page.
+
+Refusals still standing in this lineage, each a named refusal rather than a
+scheduled item — their reachability is below what ruling 3 has scheduled
+before: halftone regions and pattern dictionaries (16 corpus files — a third
+lineage, [features/filters.md](features/filters.md)), transposed text regions
+(4), and type 53 custom code tables (6, five of which are refining Huffman
+regions).
 
 ## Tier 3 — capabilities absent today
 
 Ordered by leverage, not size.
 
-- **Digital signatures.** Nothing verifies or produces one. Reading:
-  `/ByteRange` + CMS/PKCS#7 verification (12.8), X.509 parsing, RSA and
-  ECDSA verify — hand-rolled, verify-only, under the same rules as the
-  rest of the crypto. Writing: sign on incremental update — the
-  byte-identical prefix a signature needs already exists and is tested.
-  `/DocMDP` and modification detection follow. Ruling 13 costs this item
-  its continuous interop check: nothing in CI may ask another program
-  whether a signature is acceptable, so a signature everything in-tree
-  accepts may still be rejected by real validators, and the design doc says
-  so. Exit: verify a corpus of signed documents; the published CAVP and RFC
-  test vectors gate the primitives; interop is a dated, recorded, one-time
-  measurement outside CI. (XL, [design/signatures.md](design/signatures.md))
+**Digital signatures have left this list.** All nine milestones of
+[design/signatures.md](design/signatures.md) are green: signatures are found,
+their coverage classified, their CMS and certificates parsed, their digests
+and signatures verified against 504 published CAVP and RFC vectors, their
+chains walked to caller-supplied anchors, their `/DocMDP` and `/FieldMDP`
+honoured, and `DocumentEditor` produces and certifies signatures of its own
+with the key held by the caller. The surface is projected through the C ABI
+and the .NET binding; [features/signatures.md](features/signatures.md) carries
+the refusal table.
+
+Three things are worth carrying forward rather than filing away:
+
+- **The corpus adjudicated more than the specification did.** RFC 5652 §5.4's
+  re-encoding — the one rule most likely to be implemented subtly wrong — is
+  settled by 19 real signatures from six producers, all of which verify with
+  the substitution and none without. And a fifth of signed documents are BER
+  rather than the DER ISO 32000 asks for, from two independent producer
+  lineages, which no reading of the clause would have predicted.
+- **Four documents carry a signature that verifies over bytes they no longer
+  have.** veraPDF's permission fixtures share one CMS blob across three files
+  of different sizes. Finding them is the feature working, and it is why
+  coverage, document digest and signature verification are three answers
+  rather than one.
+- **What ruling 13 costs here was paid once and written down.** The interop
+  measurement ran on 28 August 2026 against OpenSSL 3.5.5, in both directions,
+  with negative controls — and the design doc records what it does *not*
+  establish as carefully as what it does. It does not run again.
+
+**Public-key encryption has left this list too**, and it is the one item in
+this tier whose evidence is worth naming as a warning rather than a result.
+`/Adobe.PubSec` reads: the envelope is parsed by `tinker-pdf-pki`, the file key
+derived per 7.6.5, and the same decryptor installed that a password produces.
+But **zero of the 4 594 corpus files use it** and no tool available here
+produces one — qpdf, which is installed, has no public-key support. So the
+envelope parsing is held to structures OpenSSL produced, which is real interop,
+and the key derivation on top is held only to a second implementation of the
+same clause by the same author. That catches a transcription slip and cannot
+catch a misreading. [design/pubsec.md](design/pubsec.md) carries it as an open
+risk, and it closes the day a real public-key-encrypted document arrives.
+
 - **Text shaping — a non-goal, overturned.** The docs long stated shaping
   as permanent non-goal, and for *rendering existing PDFs* the reasoning
   holds: the producer positioned every glyph. It fails wherever this
@@ -136,8 +176,6 @@ Ordered by leverage, not size.
   bindings under ruling 11 — the facade shape is already the design. Exit:
   fill-and-save and build-a-document demonstrated from all four. (M–L,
   [design/bindings-write.md](design/bindings-write.md))
-- **Public-key encryption.** The `Adobe.PubSec` handler family is absent;
-  password handlers R2–R6 are complete. (M)
 - **CFF subsetting.** Embedding subsets TrueType only; a CFF face embeds
   whole. Charstring subsetting with subroutine renumbering. (M)
 

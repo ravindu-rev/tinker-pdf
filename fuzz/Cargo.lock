@@ -93,6 +93,7 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-layout",
+ "tinker-pdf-pki",
  "tinker-pdf-raster",
  "tinker-pdf-render",
  "tinker-pdf-xml",
@@ -149,6 +150,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "tinker-pdf",
+ "tinker-pdf-color",
  "tinker-pdf-content",
  "tinker-pdf-cos",
  "tinker-pdf-crypto",
@@ -156,6 +158,8 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-layout",
+ "tinker-pdf-pki",
+ "tinker-pdf-shape",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
 ]
@@ -172,6 +176,13 @@ name = "tinker-pdf-math"
 version = "0.0.1"
 
 [[package]]
+name = "tinker-pdf-pki"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-crypto",
+]
+
+[[package]]
 name = "tinker-pdf-raster"
 version = "0.0.1"
 dependencies = [
@@ -186,6 +197,13 @@ dependencies = [
  "tinker-pdf-content",
  "tinker-pdf-font",
  "tinker-pdf-raster",
+]
+
+[[package]]
+name = "tinker-pdf-shape"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-font",
 ]
 
 [[package]]

@@ -15,6 +15,18 @@ document.SetFonts(File.ReadAllBytes(@"C:\Windows\Fonts\arial.ttf"));
 
 using var bitmap = document.Render(0, scale: 2.0);
 ReadOnlySpan<byte> pixels = bitmap.Pixels;   // zero-copy, valid while alive
+
+// Signatures, read (12.8). There is no "is it valid": reading a signature is
+// four independent questions and any one can hold while another does not.
+using var signatures = document.ReadSignatures();
+using var anchors = new TrustAnchors();      // empty -> Chain.NoAnchors, honestly
+using var verdicts = document.VerifySignatures(anchors);
+for (uint i = 0; i < signatures.Count; i++)
+{
+    Console.WriteLine($"{signatures.FieldName(i)}: {signatures.CoverageOf(i)}, " +
+                      $"{verdicts.DocumentDigestOf(i)}, {verdicts.SignatureCheckOf(i)}, " +
+                      $"{verdicts.ChainOf(i)}");
+}
 ```
 
 The P/Invoke declarations in `TinkerPdf.cs` are written out rather than

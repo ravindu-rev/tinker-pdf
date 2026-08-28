@@ -14,7 +14,7 @@
 //! `MAX_GROUP_DEPTH` never had.
 
 use crate::jpx::codestream::parse;
-use crate::jpx::tier1::{decode_code_block, initial_contexts, MAX_PASSES};
+use crate::jpx::tier1::{decode_code_block, initial_contexts, CodingStyle, MAX_PASSES};
 use crate::jpx::tier2::Orientation;
 use crate::jpx::{Refusal, MAX_JPX_CODE_BLOCKS, MAX_JPX_SAMPLES, MAX_JPX_WORK};
 
@@ -102,7 +102,7 @@ fn the_work_charge_is_the_whole_block_before_any_of_it() {
             height,
             passes,
             Orientation::Ll,
-            false,
+            CodingStyle::default(),
             &mut contexts,
             &mut exact,
         )
@@ -119,7 +119,7 @@ fn the_work_charge_is_the_whole_block_before_any_of_it() {
             height,
             passes,
             Orientation::Ll,
-            false,
+            CodingStyle::default(),
             &mut contexts,
             &mut short,
         ),
@@ -177,7 +177,7 @@ fn a_stream_inside_every_per_item_cap_is_refused_by_the_total() {
             height,
             MAX_PASSES,
             Orientation::Hh,
-            false,
+            CodingStyle::default(),
             &mut contexts,
             &mut work,
         ),

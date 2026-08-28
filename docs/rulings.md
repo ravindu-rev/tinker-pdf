@@ -77,11 +77,12 @@ living in one feature's head.
    A leaf is defined, not enumerated: any crate that takes bytes and plain
    parameters and returns bytes and values is a leaf, whatever any list
    says — the list drifted twice before the definition was made the rule.
-   As of August 2026 there are ten: `filters`, `crypto`, `font`, `color`,
-   `raster`, `math`, `zip`, `xml`, `css`, `layout`. Three leaf-to-leaf edges
-   exist (`font → filters`, `zip → filters`, `layout → css`), and a
-   leaf-to-leaf edge does not weaken this ruling, which is about public APIs
-   rather than about edges. `tinker-pdf-layout` is the one leaf whose input
+   As of August 2026 there are twelve: `filters`, `crypto`, `font`, `color`,
+   `raster`, `math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`. Five
+   leaf-to-leaf edges exist (`font → filters`, `zip → filters`,
+   `layout → css`, `pki → crypto`, `shape → font`), and a leaf-to-leaf edge
+   does not weaken this ruling, which is about public APIs rather than about
+   edges. `tinker-pdf-layout` is the one leaf whose input
    is not bytes — a caller hands it a tree of plain structs — so it is a
    leaf on the definition rather than on the shape, and its fuzz target
    drives a structured generator with no parser in front of it. Format

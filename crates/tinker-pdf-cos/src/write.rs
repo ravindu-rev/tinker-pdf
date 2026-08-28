@@ -356,41 +356,93 @@ impl StreamCipher {
         iv
     }
 
-    pub(crate) fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
+    fn seal_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
         tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &self.iv_for(num, 0), data)
     }
+}
 
+/// What a writer needs of an encryption scheme, whichever one it is.
+///
+/// Two implement it and they exist for opposite reasons. [`StreamCipher`] is a
+/// *fresh* R6 key a full save invents, and it is the only scheme this engine
+/// writes when it gets to choose. [`InheritedCipher`] reproduces the
+/// encryption of a file that already exists, because an incremental update
+/// appends into one whose `/Encrypt` still stands and does not get to choose
+/// at all — it must speak RC4 to an RC4 file (7.6.2).
+pub trait ObjectCipher {
+    /// Encrypts a stream belonging to object `num`.
+    fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8>;
     /// A copy of `object` with every string inside it encrypted.
-    pub(crate) fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
-        let mut counter = 1u32;
-        self.walk(object, num, &mut counter)
+    fn encrypt_strings(&self, object: &Object, num: u32) -> Object;
+}
+
+impl ObjectCipher for StreamCipher {
+    fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
+        self.seal_stream(data, num)
     }
 
-    fn walk(&self, object: &Object, num: u32, counter: &mut u32) -> Object {
-        match object {
-            Object::String(s) => {
-                let iv = self.iv_for(num, *counter);
-                *counter = counter.saturating_add(1);
-                let bytes = tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &iv, &s.bytes);
-                // Hex, because ciphertext is arbitrary bytes and a literal
-                // string would need every one of them escaped.
-                Object::String(PdfString::hex(bytes))
-            }
-            Object::Array(items) => Object::Array(
-                items
-                    .iter()
-                    .map(|item| self.walk(item, num, counter))
-                    .collect(),
-            ),
-            Object::Dict(dict) => {
-                let mut out = Dict::with_capacity(dict.len());
-                for (key, value) in dict.iter() {
-                    out.insert(*key, self.walk(value, num, counter));
-                }
-                Object::Dict(out)
-            }
-            other => other.clone(),
+    fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
+        let mut counter = 1u32;
+        walk_strings(object, &mut counter, &mut |bytes, nonce| {
+            tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &self.iv_for(num, nonce), bytes)
+        })
+    }
+}
+
+/// The encryption of the file an incremental update is appending to.
+pub struct InheritedCipher<'a> {
+    /// The key the document authenticated with, and the methods it names.
+    pub key: &'a tinker_pdf_crypto::FileKey,
+}
+
+impl ObjectCipher for InheritedCipher<'_> {
+    fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
+        // Generation zero: `write_entry` writes every object as `num 0 obj`,
+        // and 7.6.2's per-object key is salted with the generation it is
+        // written under.
+        self.key.encrypt_stream(num, 0, data)
+    }
+
+    fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
+        let mut counter = 1u32;
+        walk_strings(object, &mut counter, &mut |bytes, nonce| {
+            self.key.encrypt_string(num, 0, nonce, bytes)
+        })
+    }
+}
+
+/// Rebuilds `object` with every string in it passed through `seal`.
+///
+/// Shared by both ciphers so the *traversal* cannot differ between them — only
+/// the arithmetic does. `counter` distinguishes several strings inside one
+/// object, which would otherwise share an initialisation vector.
+fn walk_strings(
+    object: &Object,
+    counter: &mut u32,
+    seal: &mut dyn FnMut(&[u8], u32) -> Vec<u8>,
+) -> Object {
+    match object {
+        Object::String(s) => {
+            let nonce = *counter;
+            *counter = counter.saturating_add(1);
+            // Hex, because ciphertext is arbitrary bytes and a literal string
+            // would need every one of them escaped.
+            Object::String(PdfString::hex(seal(&s.bytes, nonce)))
         }
+        Object::Array(items) => Object::Array(
+            items
+                .iter()
+                .map(|item| walk_strings(item, counter, seal))
+                .collect(),
+        ),
+        Object::Dict(dict) => {
+            let mut out = Dict::with_capacity(dict.len());
+            for (key, value) in dict.iter() {
+                out.insert(*key, walk_strings(value, counter, seal));
+            }
+            Object::Dict(out)
+        }
+        other => other.clone(),
     }
 }
 
@@ -498,7 +550,7 @@ fn write_entry(
     entry: &Written,
     names: &NameTable,
     compress: bool,
-    crypt: Option<&StreamCipher>,
+    crypt: Option<&dyn ObjectCipher>,
 ) {
     out.extend_from_slice(
         format!(
@@ -564,7 +616,56 @@ pub fn incremental_update(
     previous_startxref: u64,
     names: &NameTable,
     compress: bool,
+    crypt: Option<&dyn ObjectCipher>,
 ) -> Vec<u8> {
+    incremental_update_reserving(
+        original,
+        changed,
+        trailer,
+        previous_startxref,
+        &UpdatePlan {
+            names,
+            compress,
+            crypt,
+            reserved: None,
+        },
+    )
+    .0
+}
+
+/// How an incremental update is to be written, beyond what it is written over.
+///
+/// A struct rather than four more parameters: the function had reached the
+/// seven the lint allows, and the four that vary together are exactly these.
+pub(crate) struct UpdatePlan<'a> {
+    pub(crate) names: &'a NameTable,
+    pub(crate) compress: bool,
+    pub(crate) crypt: Option<&'a dyn ObjectCipher>,
+    /// One object serialised by the caller, appended verbatim.
+    pub(crate) reserved: Option<(u32, &'a crate::sign::Reserved)>,
+}
+
+/// [`incremental_update`], optionally appending one object whose bytes the
+/// caller has already serialised.
+///
+/// The object is the signature dictionary (12.8.1), and it is written this way
+/// for two reasons that are both about *where* rather than *what*. It has to
+/// be patched after the file is finished, so its two reserved fields need
+/// absolute offsets, and no writer that formats a dictionary can report where
+/// inside its output a particular value landed. And 7.6.2 exempts a signature
+/// dictionary's `/Contents` from encryption, so it must not go through
+/// `crypt` — writing it by hand makes that a decision rather than an omission.
+///
+/// Returns the file and, when an object was appended, where its two reserved
+/// fields ended up.
+pub(crate) fn incremental_update_reserving(
+    original: &[u8],
+    changed: &ObjectSet,
+    trailer: &Dict,
+    previous_startxref: u64,
+    plan: &UpdatePlan<'_>,
+) -> (Vec<u8>, Option<SignaturePlaceholder>) {
+    let (names, compress, crypt, reserved) = (plan.names, plan.compress, plan.crypt, plan.reserved);
     let mut out = original.to_vec();
 
     // 7.5.6: an update begins on a new line so the appended section cannot be
@@ -576,10 +677,29 @@ pub fn incremental_update(
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(changed.entries.len());
     for (num, object) in &changed.entries {
         offsets.push((*num, out.len() as u64));
-        // An incremental update inherits the original file's encryption,
-        // which this build cannot reproduce without its key — so it refuses
-        // rather than appending plaintext into a ciphertext file.
-        write_entry(&mut out, *num, object, names, compress, None);
+        // 7.6.2: an update inherits the original file's encryption, so the
+        // appended objects are sealed with *that* file's key and methods — not
+        // with a scheme of this writer's choosing. Appending plaintext under a
+        // trailer that still carries `/Encrypt` produces a file every
+        // conforming reader decrypts into garbage.
+        write_entry(&mut out, *num, object, names, compress, crypt);
+    }
+
+    // The signature object, if there is one: written verbatim, uncompressed
+    // and unencrypted, with its reserved fields' offsets carried out.
+    let mut placeholder = None;
+    if let Some((num, reserved)) = reserved {
+        offsets.push((num, out.len() as u64));
+        out.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        let body_at = out.len();
+        out.extend_from_slice(&reserved.bytes);
+        out.extend_from_slice(b"\nendobj\n");
+        placeholder = Some(SignaturePlaceholder {
+            contents_at: body_at + reserved.contents_at,
+            contents_len: reserved.contents_len,
+            byte_range_at: body_at + reserved.byte_range_at,
+            byte_range_len: reserved.byte_range_len,
+        });
     }
 
     let xref_at = out.len() as u64;
@@ -599,7 +719,14 @@ pub fn incremental_update(
         .and_then(Object::as_int)
         .and_then(|v| u32::try_from(v).ok())
         .unwrap_or(0);
-    let size = changed.max_number().saturating_add(1).max(existing);
+    let size = changed
+        .max_number()
+        .saturating_add(1)
+        .max(existing)
+        // The signature object is not in `changed` — it was serialised by the
+        // caller — so its number has to be counted here or a reader would be
+        // required to ignore the one object the file exists to carry.
+        .max(reserved.map_or(0, |(num, _)| num.saturating_add(1)));
     trailer.insert(Name::SIZE, Object::Int(i64::from(size)));
     // 7.5.5 Table 15: /Prev names the previous cross-reference *section*. A
     // document with none — one the repair scanner rebuilt — gets no /Prev at
@@ -617,7 +744,7 @@ pub fn incremental_update(
     write_dict(&mut out, &trailer, names, 0);
     out.extend_from_slice(format!("\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
 
-    out
+    (out, placeholder)
 }
 
 /// The trailer with the `/ID` 7.5.5 Table 15 asks for.
@@ -761,7 +888,9 @@ pub fn rewrite(
         .encryption
         .as_ref()
         .and_then(|e| build_encryption(e, names));
-    let crypt = encryption.as_ref().map(|(_, cipher)| cipher);
+    let crypt: Option<&dyn ObjectCipher> = encryption
+        .as_ref()
+        .map(|(_, cipher)| cipher as &dyn ObjectCipher);
 
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(objects.entries.len());
 
@@ -1297,6 +1426,7 @@ mod tests {
             base.last_startxref(),
             &table,
             false,
+            None,
         );
 
         assert!(
@@ -1333,7 +1463,7 @@ mod tests {
         let mut trailer = Dict::new();
         trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
 
-        let updated = incremental_update(&original[..], &changed, &trailer, 0, &table, false);
+        let updated = incremental_update(&original[..], &changed, &trailer, 0, &table, false, None);
         let text = String::from_utf8_lossy(&updated);
         assert!(!text.contains("/Prev"), "no section to name: {text}");
     }

@@ -49,3 +49,14 @@ crates/tinker-pdf-font/data/** -text linguist-vendored
 # still a modification. `linguist-vendored` keeps four megabytes of Unicode
 # out of the diff a reviewer reads and out of the language statistics.
 crates/tinker-pdf-layout/data/** -text linguist-vendored
+
+# Adobe's aots conformance corpus (design/shaping.md milestone 1,
+# THIRDPARTY.md). `-text` for the two reasons above and one that is sharper
+# here: a `.otf` is a table directory whose entries carry byte offsets and
+# lengths, so a single rewritten line ending moves every table after it and
+# the face stops parsing. Nothing in this tree names `*.otf` binary, and
+# `text=auto` decides by looking for a NUL in the first 8 KB — which these
+# happen to have and which is not a property worth relying on.
+# `linguist-vendored` keeps a megabyte of test faces out of the diff a
+# reviewer reads and out of the language statistics.
+crates/tinker-pdf-shape/data/** -text linguist-vendored

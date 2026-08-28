@@ -36,8 +36,8 @@ use std::sync::Arc;
 use surface_support::whole_surface_document;
 use tinker_pdf_cos::dest::DestKind;
 use tinker_pdf_cos::{
-    CosDocument, Defect, DocumentBuilder, DocumentEditor, Encryption, LadderLevel, OutlineEntry,
-    Target, WriteMode, WriteOptions,
+    CosDocument, Defect, Dict, DocumentBuilder, DocumentEditor, Encryption, LadderLevel, Object,
+    OutlineEntry, PdfString, Target, WriteMode, WriteOptions,
 };
 
 // ---- the documents under test ----------------------------------------------
@@ -1458,4 +1458,199 @@ fn a_rewrite_of_a_linearized_file_makes_no_claim_about_annex_f() {
         "and the rewrite does not"
     );
     clean(plain);
+}
+
+/// **An incremental save of an encrypted document decrypts.**
+///
+/// The roadmap's exit criterion for the combination, and it was a real defect
+/// rather than a missing feature: the incremental writer took no cipher and
+/// passed `None` to `write_entry`, so it appended **plaintext** under a trailer
+/// that still carried `/Encrypt`. Nothing failed, nothing warned, and every
+/// conforming reader would AES-decrypt those clear bytes into garbage. No test
+/// anywhere combined `WriteMode::Incremental` with an encrypted document, which
+/// is why it survived.
+///
+/// The three assertions are the three things that were wrong: the original
+/// bytes survive (that is what an incremental save *is*), the appended object
+/// comes back through the reader's own decryption, and the file still validates
+/// strictly.
+#[test]
+fn an_incremental_save_of_an_encrypted_document_decrypts() {
+    let sealed = encrypted();
+    let doc = Arc::new(CosDocument::open(sealed.clone()).expect("it opens"));
+    assert!(
+        doc.authenticate("open-me").is_ok(),
+        "it really is encrypted"
+    );
+
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let marker = b"the appended string";
+    let added = editor.allocate();
+    let mut dict = Dict::new();
+    dict.insert(
+        doc.intern(b"Marker"),
+        Object::String(PdfString::literal(marker.to_vec())),
+    );
+    editor.put(added, Object::Dict(dict));
+
+    let updated = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+
+    assert!(
+        updated.starts_with(&sealed),
+        "an incremental save must leave the original bytes untouched"
+    );
+
+    let reopened = CosDocument::open(updated).expect("the update opens");
+    assert!(
+        reopened.authenticate("open-me").is_ok(),
+        "the update must still be the same encrypted document"
+    );
+
+    let back = reopened
+        .get(added)
+        .expect("the appended object did not come back");
+    let Object::Dict(back) = back.as_ref() else {
+        panic!("the appended object came back as {back:?}");
+    };
+    let Some(Object::String(text)) = back.get(reopened.intern(b"Marker")).cloned() else {
+        panic!("the appended string did not come back");
+    };
+    assert_eq!(
+        text.bytes, marker,
+        "the string did not survive the round trip through the file's own key"
+    );
+
+    let defects = tinker_pdf_cos::validate(&reopened);
+    assert!(
+        defects.is_empty(),
+        "found {:?}",
+        defects.iter().map(Defect::to_string).collect::<Vec<_>>()
+    );
+}
+
+/// The injection for the rule above: the same save with the cipher taken away
+/// leaves the marker readable in the file's bytes.
+///
+/// This is what the defect looked like from outside, and it is the assertion
+/// that would have caught it. It reads the *bytes*, not the object model,
+/// because the engine's own reader decrypts on the way out and would show the
+/// marker either way — which is exactly why nothing noticed.
+#[test]
+fn an_encrypted_incremental_save_leaves_no_plaintext_in_the_file() {
+    let sealed = encrypted();
+    let doc = Arc::new(CosDocument::open(sealed).expect("it opens"));
+    assert!(doc.authenticate("open-me").is_ok());
+
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let marker: &[u8] = b"plaintext-marker-that-must-not-appear";
+    let slot = editor.allocate();
+    let mut dict = Dict::new();
+    dict.insert(
+        doc.intern(b"Marker"),
+        Object::String(PdfString::literal(marker.to_vec())),
+    );
+    editor.put(slot, Object::Dict(dict));
+
+    let updated = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+
+    assert!(
+        !updated.windows(marker.len()).any(|w| w == marker),
+        "the appended string is sitting in the clear inside an encrypted file"
+    );
+}
+
+/// The roadmap's exit criterion, in its own words: **fill a form in an
+/// encrypted file, save incrementally, and the saved file decrypts and passes
+/// the strict validator.**
+///
+/// Kept as its own test rather than folded into the one above because the two
+/// prove different things. That one proves the writer seals what it appends;
+/// this one proves the whole path a caller actually takes — authenticate, fill,
+/// save without disturbing a byte of the original — comes out the other side as
+/// a document, not just as ciphertext.
+#[test]
+fn a_form_filled_in_an_encrypted_file_saves_incrementally_and_validates() {
+    const FORM: &[u8] = b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R]
+   /NeedAppearances true /DA (/Helv 0 Tf 0 g)
+   /DR << /Font << /Helv 5 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R] >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+10 0 obj
+<< /FT /Tx /T (name) /Rect [10 150 190 170] /Subtype /Widget /Type /Annot >>
+endobj
+trailer
+<< /Size 11 /Root 1 0 R >>
+%%EOF
+";
+
+    let mut entropy = [0u8; 48];
+    for (index, byte) in entropy.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(7).wrapping_add(11);
+    }
+    let plain = Arc::new(CosDocument::open(FORM.to_vec()).expect("the form opens"));
+    let sealed = DocumentEditor::new(plain).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: false,
+        encryption: Some(Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy,
+        }),
+        ..WriteOptions::default()
+    });
+
+    let doc = Arc::new(CosDocument::open(sealed.clone()).expect("the sealed form opens"));
+    assert!(
+        doc.authenticate("open-me").is_ok(),
+        "it really is encrypted"
+    );
+
+    let value = "Ada Lovelace";
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    assert!(
+        editor.set_field_value("name", value),
+        "the field was not filled"
+    );
+    let updated = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+
+    assert!(
+        updated.starts_with(&sealed),
+        "an incremental save must leave the original bytes untouched"
+    );
+    assert!(
+        !updated.windows(value.len()).any(|w| w == value.as_bytes()),
+        "the filled value is sitting in the clear inside an encrypted file"
+    );
+
+    let reopened = CosDocument::open(updated).expect("the update opens");
+    assert!(
+        reopened.authenticate("open-me").is_ok(),
+        "the update must still be the same encrypted document"
+    );
+    let defects = tinker_pdf_cos::validate(&reopened);
+    assert!(
+        defects.is_empty(),
+        "found {:?}",
+        defects.iter().map(Defect::to_string).collect::<Vec<_>>()
+    );
 }

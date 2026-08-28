@@ -17,8 +17,21 @@ convert as 8.6.4 says; `/Indexed` reads its palette over any base space
 (8.6.6.3); `/Separation` and `/DeviceN` run their real tint transforms into
 the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
-0..1 and clamping them there renders the whole space black. ICC and CIE
-spaces are `ColorSpace::Approximated` — read by component count, which is the
+0..1 and clamping them there renders the whole space black. An `ICCBased` space is converted
+through **its own profile** (ICC.1): the header and tag table are read, the
+three `XYZ` columns and three tone curves compile once into fixed-point
+tables, and each colour is a lookup plus an integer matrix multiply, so
+nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
+profiles are the same with one curve. A printer profile carries a multi-dimensional lookup table
+instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
+interpolated grid between them — and those are read too, in the v2 shape that
+is 99.3 % of them. Measured against the corpus's 2 750 real
+profiles: **2 744 compile, 99.8 %** — and 449 of the 4 525 files name an
+`ICCBased` space that paints through one, which the corpus report counts as
+`iccbased`. The six that do not compile are named: 3 a data space with no
+transform here, 2 a connection space this build cannot reach, and 1 v4's
+`mAB ` table. Those and the CIE spaces (CalRGB, CalGray)
+are `ColorSpace::Approximated` — read by component count, which is the
 alternate-space reading 8.6.5.5 permits, and the approximation is stated on
 the type rather than hidden. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
@@ -69,9 +82,40 @@ does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
 distinguishable from a blank one.
 
+**Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
+pasted in from another document resolves its names in the dictionary it brought
+rather than in the page's. Both seams change scope together — the interpreter
+resolves fonts, colours and ExtGState, the device resolves images, shadings and
+patterns — because they are asked about the same form, by the same name, at the
+same moment. A form that omits the key falls back to the invoking scope, which
+is what its producer is relying on. An annotation's appearance stream gets the
+same treatment by a different route: it is reached by reference rather than by
+name, so `Page::render` announces it instead of the interpreter, and until it
+did an appearance's images resolved against the page while its text resolved
+against the appearance.
+
 **Transparency.** `/Group /S /Transparency` on a form XObject composites as
 a unit (11.6.6), with isolation (11.4.4), knockout (11.4.5) and backdrop
-removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. ExtGState
+removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. `/CS` is read and
+**honoured** — on a form's group and on the **page's own** group (11.4.7),
+which reaches no `Do` and so is read off the page dictionary.
+
+A group composites in the space it declared: its buffer holds that space's
+components, and conversion happens at the group's boundaries rather than per
+element. `/DeviceCMYK` gets a `CmykA8` buffer, and because 11.3.5's separable
+formulas are written for additive components, a subtractive channel enters and
+leaves them complemented — only the blend function, since 11.3.6's weighting
+averages colour values in the group's own space. The four non-separable modes
+(11.3.5.3) reason about hue and luminosity, which ink quantities do not have,
+so on a CMYK buffer their operands convert to light, blend, and convert back.
+A page-level group decides the format of the page canvas itself and is
+converted for the caller at the end, which is 11.4.7's own last step; a page is
+never handed back in CMYK, because a `Bitmap` says how many components it has
+and nothing about what they mean.
+
+`/Lab` is the one still composited in RGB and reported by name: its components
+are not in the unit interval at all. Measured over the 4 525 corpus files,
+August 2026: **35 declare a `/DeviceCMYK` group and none declares `/Lab`**. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
 (fully masked, the default that does not invert every drop shadow), and
@@ -156,9 +200,8 @@ helpers `Page::render` composes.
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
-| Transparency-group colour spaces; page-level `/Group` | none — composites in RGB silently | A group declared in CMYK or Lab blends in the wrong space (11.4.7) | [ROADMAP](../ROADMAP.md) |
-| A form XObject's own `/Resources` | none — recorded non-goal; inherited resources only | The reason one corpus JPX file is never asked for | [ROADMAP](../ROADMAP.md) |
-| Exact ICC/CIE colour | `ColorSpace::Approximated`, stated on the type | Component count decides the reading, the 8.6.5.5 fallback | [ROADMAP](../ROADMAP.md) |
+| Blending a group declared in `/Lab` | `RenderWarning::UnsupportedGroupSpace` | Its components are not in the unit interval, so 11.3.5's formulas have nothing to say about them; the group composites in RGB and is **named**. Grey, RGB and CMYK groups all composite in their own space now | [ROADMAP](../ROADMAP.md) |
+| An ICC profile this build cannot make a transform of | `ColorSpace::Approximated`, stated on the type | The `A2B*` lookup tables, a connection space other than XYZ, or a data space with no transform here — 143 of the corpus's 2 750 profiles. All three fall back to 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read. CalRGB and CalGray are still approximated | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 
@@ -185,5 +228,5 @@ helpers `Page::render` composes.
   stable.
 - Corpus, as of August 2026: 4 525 files, 4 484 rendered every page, zero
   crashes.
-- The workspace stands at 2 952 passed / 0 failed / 8 ignored
+- The workspace stands at 2 963 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md).

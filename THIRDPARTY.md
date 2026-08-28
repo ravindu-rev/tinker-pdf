@@ -26,6 +26,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-font/data/cmap-resources` | [adobe-type-tools/cmap-resources](https://github.com/adobe-type-tools/cmap-resources) at `f5cf3bc` (2023-11-15) | `BSD-3-Clause` |
 | `crates/tinker-pdf-layout/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-font/data/liberation` | [liberationfonts/liberation-fonts](https://github.com/liberationfonts/liberation-fonts), release `2.1.5` (2021-10-01) | `OFL-1.1` |
+| `crates/tinker-pdf-shape/data/aots` | [adobe-type-tools/aots](https://github.com/adobe-type-tools/aots) at `d256691` (2025-11-29), fonts via [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz) `test/shape/data/aots/fonts` at `e0d7060` (2021-08-12) | `Apache-2.0` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -88,9 +89,9 @@ have; the other two are Symbol and ZapfDingbats, and see below.
 
 They are here because of a measurement rather than an argument.
 `corpus/ratchet-fonts.json` is the same 4 525 corpus files rendered with a
-face supplied, against `corpus/ratchet.json` without one, and **52 % of all
-reported degradation was the absence of a face** — 1 045 files down to 506,
-and in qpdf's corpus 530 down to 130. A conforming file that names Helvetica
+face supplied, against `corpus/ratchet.json` without one, and **65 % of all
+reported degradation was the absence of a face** — 973 files down to 343,
+and in qpdf's corpus 530 down to 110. A conforming file that names Helvetica
 and embeds nothing is one this engine could not draw, which makes the absence
 a conformance gap rather than only a policy
 ([features/fonts.md](docs/features/fonts.md)).
@@ -292,11 +293,83 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 ```
 
+### `crates/tinker-pdf-shape/data/aots`
+
+Adobe's **annotated OpenType specification** test suite: the specification with
+a test case attached to almost every clause of `GSUB`, `GPOS` and `GDEF` — a
+tiny font exercising one lookup type in one format, a sequence of glyph indices
+to feed it, and the glyphs or positions a correct implementation must produce.
+`docs/design/shaping.md` names it as one of the two conformance bars for
+`tinker-pdf-shape`, and ruling 13 is what makes it admissible: the expected
+output is **inside the fixture**, written by the people who wrote the
+specification, so nothing outside this repository is being asked whether the
+answer is right.
+
+| File | What it is |
+| --- | --- |
+| `cases.txt` | 275 cases distilled from `src/opentype.xml`: the `inputs`, `outputs`, `xdeltas` and `ydeltas` of every `<aots:gsub-test>`, `<aots:gpos-test>` and `<aots:context-test>`, carried over verbatim |
+| `fonts/*.otf` | 185 compiled test faces, one or more per case |
+| `LICENSE.md` | Upstream's own, kept beside the data |
+
+**The fonts came the long way round, and it is worth being plain about it.**
+aots ships its faces as XML and compiles them with a Java toolchain — Saxon,
+plus a compiler generated from that XML by an XSLT stylesheet — which was not
+available where this was vendored, so they could not be built from source here.
+The `.otf` files are the compiled aots fixtures as redistributed by the
+HarfBuzz project, under the same Apache-2.0 licence they carry upstream. They
+are *bytes*, which ruling 13 keeps admissible with provenance recorded; **no
+expected output was taken from HarfBuzz**, and every number `tests/aots.rs`
+asserts against comes from Adobe's XML. The risk that leaves — that a font
+differs from what aots's own compiler would emit — is named in that test file
+rather than absorbed, and it is bounded by the two halves having independent
+origins: a mismatch shows up as a failure rather than as agreement.
+
+`cases.txt` is the committed output of a script run once against
+`src/opentype.xml`, which ruling 13 calls a dated measurement rather than a
+check. The XML itself is 2.9 MB of specification prose around the numbers and
+is not vendored; the distillation keeps the numbers and the case identifiers.
+
+Apache-2.0 was already on `deny.toml`'s allowlist, so nothing there moved. Its
+notice, from `LICENSE.md` beside the data:
+
+```text
+Copyright 2000-2016 Adobe Systems Incorporated. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use these files except in compliance with the License.
+You may obtain a copy of the License at
+
+ http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+These are test inputs and reach no built artefact: `tinker-pdf-shape`'s
+manifest excludes `data/` from the published crate, because a published crate
+carries its tests and nobody who downloads it runs them.
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see
 [`testdata/README.md`](testdata/README.md). They are inputs to tests and are
 not redistributed in any built artefact.
+
+`crates/tinker-pdf-crypto/tests/data/cavp/` holds NIST CAVP known-answer
+vectors for RSA and ECDSA signature verification, from the DSS test-vector
+archives at csrc.nist.gov. NIST publications are works of the United States
+Government and carry no copyright, so there is no licence to reproduce. Each
+file's own header comment records the archive it came from, the date it was
+fetched, the SHA-256 of that archive, and — for the two ECDSA files — which
+curve groups were dropped and why. They are `cargo test` inputs, compiled in
+only under `#[cfg(test)]`, and are not in any built artefact.
+
+These sit under `tests/data/` rather than `crates/<crate>/data/` because they
+are neither vendored *into* the engine nor redistributed by it; `cargo xtask
+vendor`'s allowlist governs the latter, and this is the former.
 
 ## What is deliberately not here
 

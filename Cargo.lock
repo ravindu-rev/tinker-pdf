@@ -550,6 +550,7 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-layout",
+ "tinker-pdf-pki",
  "tinker-pdf-raster",
  "tinker-pdf-render",
  "tinker-pdf-xml",
@@ -580,6 +581,7 @@ dependencies = [
  "tinker-pdf-crypto",
  "tinker-pdf-filters",
  "tinker-pdf-font",
+ "tinker-pdf-pki",
 ]
 
 [[package]]
@@ -623,6 +625,13 @@ name = "tinker-pdf-math"
 version = "0.0.1"
 
 [[package]]
+name = "tinker-pdf-pki"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-crypto",
+]
+
+[[package]]
 name = "tinker-pdf-raster"
 version = "0.0.1"
 dependencies = [
@@ -637,6 +646,13 @@ dependencies = [
  "tinker-pdf-content",
  "tinker-pdf-font",
  "tinker-pdf-raster",
+]
+
+[[package]]
+name = "tinker-pdf-shape"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-font",
 ]
 
 [[package]]

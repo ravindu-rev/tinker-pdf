@@ -187,6 +187,14 @@ fn exercise(bytes: Vec<u8>) {
         let _ = tree.object_count();
         let _ = tree.elements().len();
     }
+    // The signature reader indexes the raw file buffer with offsets the
+    // document supplies, which is the shape ruling 1 exists for. Digesting
+    // each one exercises the span arithmetic as well as the parse.
+    for signature in doc.signatures() {
+        let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha256);
+        let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha1);
+        let _ = signature.covers_whole_file();
+    }
     let _ = doc.permissions();
     let _ = doc.is_encrypted();
     let _ = doc.auth_level();

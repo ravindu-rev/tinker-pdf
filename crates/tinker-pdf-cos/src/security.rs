@@ -34,8 +34,13 @@ pub enum AuthLevel {
 pub enum AuthError {
     /// The document is not encrypted, so there is nothing to authenticate.
     NotEncrypted,
-    /// `/Filter` names a handler this engine does not implement — public-key
-    /// security, or a vendor's own.
+    /// `/Filter` names a handler this engine does not implement — a vendor's
+    /// own, or `/Adobe.PubSec` reached through the *password* door.
+    ///
+    /// The public-key handler is implemented ([`crate::pubsec`]) and needs a
+    /// key rather than a password, so a caller that offered a password to one
+    /// gets this and not `WrongPassword`: no password was ever going to work,
+    /// and saying "wrong password" would send them looking for a better one.
     UnsupportedHandler,
     /// Neither the user nor the owner password matched.
     WrongPassword,
@@ -47,6 +52,15 @@ pub struct StandardDecryptor {
 }
 
 impl StandardDecryptor {
+    /// Wraps a key some handler derived.
+    ///
+    /// The public-key handler (7.6.5) reaches the same ciphers by a different
+    /// route to the key, and there is one implementation of everything after
+    /// the key on purpose — see [`tinker_pdf_crypto::handler::FileKey::from_derived`].
+    pub(crate) fn from_key(key: FileKey) -> StandardDecryptor {
+        StandardDecryptor { key }
+    }
+
     /// How far the password that produced this decryptor got.
     #[must_use]
     pub fn auth_level(&self) -> AuthLevel {
@@ -70,7 +84,7 @@ impl Decryptor for StandardDecryptor {
 }
 
 /// Resolves `/StmF` or `/StrF` through `/CF` into a concrete method (7.6.5).
-fn method_for(params: &EncryptParams, filter_name: Option<&[u8]>) -> CryptMethod {
+pub(crate) fn method_for(params: &EncryptParams, filter_name: Option<&[u8]>) -> CryptMethod {
     // 7.6.5 Table 24: both default to /Identity, and /Identity is never
     // looked up in /CF.
     let Some(name) = filter_name else {
@@ -132,6 +146,15 @@ fn to_handler_params(params: &EncryptParams) -> HandlerParams {
 pub struct Authenticated {
     /// The decryptor to install on the document.
     pub decryptor: Arc<dyn Decryptor>,
+    /// The file key itself, kept so the writer can reproduce this document's
+    /// encryption when it appends to it.
+    ///
+    /// Reading needs only the `Decryptor` trait, and for eleven revisions that
+    /// is all this carried. An incremental update is the one operation that
+    /// has to *encrypt* — it appends into a file whose `/Encrypt` still
+    /// stands — and it cannot ask a trait object for the key it was built
+    /// from.
+    pub key: FileKey,
     /// Which password matched.
     pub level: AuthLevel,
     /// Leniency the handler applied, for the document's warning list.
@@ -154,10 +177,11 @@ pub fn authenticate(params: &EncryptParams, password: &str) -> Result<Authentica
     let key = handler::authenticate(&hp, password.as_bytes()).ok_or(AuthError::WrongPassword)?;
 
     let notes = key.notes().to_vec();
-    let decryptor = StandardDecryptor { key };
+    let decryptor = StandardDecryptor { key: key.clone() };
     let level = decryptor.auth_level();
     Ok(Authenticated {
         decryptor: Arc::new(decryptor),
+        key,
         level,
         notes,
     })

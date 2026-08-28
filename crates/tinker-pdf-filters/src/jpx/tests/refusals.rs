@@ -81,16 +81,14 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
     );
 
     // "any code-block style bit in COD/COC Table A.19 this build does not
-    // implement" — five of the six. The sixth, segmentation symbols, is
-    // implemented on purpose, because checking them is the only free
-    // integrity check the format offers.
-    for bit in [
-        cb_style::BYPASS,
-        cb_style::RESET,
-        cb_style::TERMALL,
-        cb_style::VERTICALLY_CAUSAL,
-        cb_style::PREDICTABLE,
-    ] {
+    // implement" — two of the six now, and the list shrank rather than the
+    // claim weakening. RESET, VERTICALLY_CAUSAL and PREDICTABLE are decisions
+    // about context state and are decoded; SEGMENTATION_SYMBOLS always was,
+    // because checking it is the only free integrity check the format offers.
+    // What is left is the pair that moves where a coding pass's *bytes* start,
+    // which needs a length per pass out of the packet header rather than
+    // anything tier-1 can do alone.
+    for bit in [cb_style::BYPASS, cb_style::TERMALL] {
         assert_eq!(
             refuse(&stream(
                 &Spec {

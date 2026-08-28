@@ -29,6 +29,7 @@ use core::ops::Range;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use tinker_pdf_crypto::handler::FileKey;
 use tinker_pdf_crypto::Permissions;
 use tinker_pdf_filters::FilterError;
 
@@ -152,6 +153,7 @@ pub(crate) struct DocNames {
     pub eff: Name,
     pub encrypt_metadata: Name,
     pub sub_filter: Name,
+    pub recipients: Name,
     pub crop_box: Name,
     pub rotate: Name,
     info_keys: [Name; 6],
@@ -207,6 +209,7 @@ impl DocNames {
             eff: n(b"EFF"),
             encrypt_metadata: n(b"EncryptMetadata"),
             sub_filter: n(b"SubFilter"),
+            recipients: n(b"Recipients"),
             crop_box: n(b"CropBox"),
             rotate: n(b"Rotate"),
             info_keys: [
@@ -288,6 +291,11 @@ struct Security {
     decryptor: Arc<dyn Decryptor>,
     has_decryptor: bool,
     auth_level: AuthLevel,
+    /// The authenticated file key, for the one caller that has to *encrypt*:
+    /// an incremental update appends into a file whose `/Encrypt` still
+    /// stands, so it has to reproduce that file's encryption rather than
+    /// invent its own.
+    key: Option<FileKey>,
 }
 
 impl fmt::Debug for CosDocument {
@@ -419,6 +427,7 @@ impl CosDocument {
                 decryptor: Arc::new(IdentityDecryptor),
                 has_decryptor: false,
                 auth_level: AuthLevel::None,
+                key: None,
             }),
             encrypt: None,
             ladder,
@@ -500,10 +509,29 @@ impl CosDocument {
     /// their containing object loads. `Arc`s already handed out keep the
     /// values they were given.
     pub fn set_decryptor(&self, decryptor: Arc<dyn Decryptor>) {
+        self.install_security(decryptor, None);
+    }
+
+    /// [`CosDocument::set_decryptor`], also keeping the key it was built from.
+    pub fn set_decryptor_with_key(&self, decryptor: Arc<dyn Decryptor>, key: FileKey) {
+        self.install_security(decryptor, Some(key));
+    }
+
+    /// The authenticated file key, if this document has one.
+    ///
+    /// Cloned out rather than borrowed, because the lock is not the caller's
+    /// to hold across a whole save.
+    #[must_use]
+    pub fn file_key(&self) -> Option<FileKey> {
+        self.security.read_lock().key.clone()
+    }
+
+    fn install_security(&self, decryptor: Arc<dyn Decryptor>, key: Option<FileKey>) {
         {
             let mut security = self.security.write_lock();
             security.decryptor = decryptor;
             security.has_decryptor = true;
+            security.key = key;
         }
         // Everything already loaded was read as plaintext out of ciphertext.
         // Both caches are dropped so the next read goes back to the buffer;
@@ -639,7 +667,30 @@ impl CosDocument {
             }
         }
 
-        self.set_decryptor(auth.decryptor);
+        self.set_decryptor_with_key(auth.decryptor, auth.key);
+        self.security.write_lock().auth_level = auth.level;
+        Ok(auth.level)
+    }
+
+    /// Opens a `/Adobe.PubSec` document with the caller's key (7.6.5).
+    ///
+    /// The public-key sibling of [`CosDocument::authenticate`]: same
+    /// installation, different route to the file key. It does not check
+    /// `/Filter` first, because a document whose `/Filter` says `Standard`
+    /// simply has no `/Recipients` and is refused for that.
+    ///
+    /// # Errors
+    /// [`crate::pubsec::PubSecError`].
+    pub fn authenticate_with_recipient(
+        &self,
+        recipient: &dyn crate::pubsec::Recipient,
+    ) -> Result<AuthLevel, crate::pubsec::PubSecError> {
+        let params = self
+            .encrypt
+            .clone()
+            .ok_or(crate::pubsec::PubSecError::NoRecipients)?;
+        let auth = crate::pubsec::authenticate(&params, recipient)?;
+        self.set_decryptor_with_key(auth.decryptor, auth.key);
         self.security.write_lock().auth_level = auth.level;
         Ok(auth.level)
     }

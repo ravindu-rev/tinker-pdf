@@ -39,29 +39,49 @@ that is a very interesting report.
 ## The hand-rolled crypto, stated plainly
 
 This project implements MD5, RC4, SHA-2 and AES-CBC itself, along with the PDF
-standard security handler, because the project's design mandate is that no
-third-party crate implements engine functionality. That is an unusual choice
-and it deserves an unusual amount of scrutiny, so here is the honest framing:
+standard security handler and — for signature verification — big-integer
+modular arithmetic, RSASSA-PKCS1-v1_5 and ECDSA over P-256 and P-384, because
+the project's design mandate is that no third-party crate implements engine
+functionality. That is an unusual choice and it deserves an unusual amount of
+scrutiny, so here is the honest framing:
 
-- **Scope is document decryption and encryption-on-save.** No TLS, no key
-  exchange, no long-term secret storage, no protocol implementation.
+- **Scope is document decryption, encryption-on-save, and signature
+  verification.** No TLS, no key exchange, no long-term secret storage, no
+  protocol implementation.
+- **No private-key operation exists.** The signature code verifies and cannot
+  sign: no key generation, no signing, no PKCS#8 or PKCS#12 parsing. That is
+  what lets `bignum` skip constant-time discipline — every value it handles is
+  published in the document being checked — and it is a boundary a future
+  signing feature would have to cross deliberately, not drift across.
 - **Correctness is checked against published vectors** — RFC 1321 for MD5,
   RFC 6229 for RC4, worked examples for SHA-2, and known-answer tests for AES.
 
   Stated precisely, because the previous wording here claimed more than was
-  true: the full NIST CAVP suites are **not** wired in, and there is no
-  CBC-AES-256 vector even though that is the mode the fixtures use. AES-256 in
-  CBC is exercised end to end by decrypting a mutool-written R6 fixture and by
-  an independent Python reimplementation of Algorithm 2.B in the test suite,
-  which is real evidence and is not the same thing as CAVP. Wiring the suites
-  is tracked in [`docs/features/encryption.md`](docs/features/encryption.md).
+  true: for the *cipher and hash* primitives the full NIST CAVP suites are
+  **not** wired in, and there is no CBC-AES-256 vector even though that is the
+  mode the fixtures use. AES-256 in CBC is exercised end to end by decrypting a
+  mutool-written R6 fixture and by an independent Python reimplementation of
+  Algorithm 2.B in the test suite, which is real evidence and is not the same
+  thing as CAVP. Wiring the suites is tracked in
+  [`docs/features/encryption.md`](docs/features/encryption.md).
+
+  The *signature* primitives are the exception, and they are gated on CAVP
+  itself: 360 `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits crossed
+  with SHA-1/256/384/512, 60 valid and 300 that must be refused, 150 of those
+  being forged paddings), 120 `SigVer` vectors and 24 `PKV` points for ECDSA,
+  and RFC 6979's sixteen appendix A.2 signatures. The vector files are
+  committed under `crates/tinker-pdf-crypto/tests/data/cavp/` with their
+  provenance in each file's header.
 - **Password comparison is constant-time.**
 
-  Decrypt paths are **not** fuzzed today. A `tinker-pdf-crypto` fuzz target
-  does not exist, and the `cos_document` target reaches the decryptor only for
-  inputs that happen to carry an `/Encrypt` dictionary. The stable hostile-input
-  sweep authenticates with several passwords against every mutated fixture,
-  which exercises the failure paths but is far shallower than a fuzzer.
+  Decrypt paths **are** fuzzed: `crypt` drives the security handler and
+  `crypt_ciphers` the ciphers themselves, both with committed seed corpora.
+  This paragraph said the opposite — "a `tinker-pdf-crypto` fuzz target does
+  not exist" — for as long as the two targets have existed, which is a
+  reminder that a security page is exactly where a stale sentence does the
+  most harm. The `cos_document` target additionally reaches the decryptor for
+  inputs that carry an `/Encrypt` dictionary, and the stable hostile-input
+  sweep authenticates with several passwords against every mutated fixture.
 - **PDF encryption is weak by design in its older revisions** (RC4-40 exists
   because the spec has it, not because it protects anything), and the format's
   permission flags are advisory — a document that says "printing denied" is

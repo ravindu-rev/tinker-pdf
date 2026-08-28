@@ -360,6 +360,117 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// types, independently fuzzable. A tree of plain structs is plain parameters,
 /// and `layout` is the twenty-fourth fuzz target precisely because it can be
 /// driven with no file of any kind in front of it.
+///
+/// **`pki` is the seventh amendment, and it is the fourth leaf-to-leaf edge.**
+/// `tinker-pdf-pki` holds ASN.1 DER, X.509 and — from milestone 3 —
+/// CMS, and it takes `tinker-pdf-crypto`. Two questions have to be answered
+/// separately: why the crate exists at all rather than being part of `crypto`,
+/// and why the edge between them is safe.
+///
+/// **Why it is not inside `tinker-pdf-crypto`, which is where a signature
+/// feature would obviously put it.** The two fail differently, and the way a
+/// thing fails is what decides how it has to be reviewed. `crypto` is
+/// *arithmetic*: its failure mode is a wrong number, and a wrong number is
+/// caught completely by published vectors — FIPS 197, RFC 6229, FIPS 180-4 are
+/// already merge gates there. ASN.1 is *untrusted-input structure walking*:
+/// its failure mode is a panic or a read past the end of a buffer on bytes an
+/// attacker chose, which no known-answer vector detects and which ruling 1's
+/// per-format fuzzers exist for. Merging them would put the largest new attack
+/// surface in the tree inside the one crate whose review story is "small,
+/// vector-gated arithmetic", and — the concrete cost — would leave DER
+/// reachable by a fuzzer only through `crypto`'s API, so a malformed
+/// certificate could be fuzzed only by first constructing a plausible
+/// `HandlerParams` around it. Apart, it is the twenty-fifth fuzz target and
+/// `fuzz/fuzz_targets/pki_der.rs` points straight at raw DER, which
+/// `docs/design/signatures.md:75-92` argues for and its risk table names as the
+/// mitigation for the largest risk it records.
+///
+/// **It is a leaf on ruling 8's definition, which is about public APIs.** X.509
+/// and CMS are not PDF concepts: bytes and plain parameters in, values out, no
+/// COS types, no `/ByteRange`, no signature dictionary. Everything PDF about a
+/// signature — which bytes a `/ByteRange` covers, what `/DocMDP` permits, what
+/// a verdict says — lives in the facade, the same split that keeps `zip`
+/// ignorant of what an archive entry is *for*.
+///
+/// **The edge itself.** The three properties that made `font -> filters`,
+/// `zip -> filters` and `layout -> css` acceptable hold unchanged. It points
+/// sideways from one leaf to another rather than upward, so the layering is not
+/// inverted. It cannot cycle, because `tinker-pdf-crypto` depends on nothing at
+/// all — the same sentence that carried the first two amendments, and it is
+/// still the whole of the cycle argument. And a sibling workspace crate is not
+/// a third-party dependency, so ruling 3 and CONTRIBUTING rule 1 are untouched.
+///
+/// What is taken across it *today* is one function: SHA-1, for RFC 5280
+/// §4.2.1.2's method (1) key identifier, which is the SHA-1 of a certificate's
+/// `subjectPublicKey` bits and which chain building needs when a certificate
+/// carries no `subjectKeyIdentifier` of its own. That is deliberately a real
+/// use rather than a placeholder, because this file's own history records the
+/// failure in the other direction — an edge in a manifest that nothing needs —
+/// and because RFC 5280's Appendix C.1 certificate states the identifier its
+/// own key produces, so the edge arrives with a published vector behind it.
+/// Milestones 4 and 5 of the design widen what crosses to RSA and ECDSA
+/// verification; the edge is declared once, here, and does not move when they
+/// land.
+///
+/// **`shape -> font` is the eighth amendment, and the fifth leaf-to-leaf
+/// edge.** `docs/design/shaping.md` makes the argument in two halves, and the
+/// interesting half is the one about a table that is *not* taken.
+///
+/// The edge itself is small and obvious. `tinker_pdf_font::Sfnt` already
+/// parses the table directory, and `tinker-pdf-shape` needs exactly that —
+/// the twelve-byte header and `table(tag)` — to find `GDEF`, `GSUB` and
+/// `GPOS`. A second reader of those twelve bytes in this workspace would be a
+/// second place for the same bug to live, and the design says so: *"one sfnt
+/// parser in the tree rather than two"*.
+///
+/// **What is not taken is the parsing of the layout tables themselves**, and
+/// that is the decision worth recording. The obvious move was to add `GSUB`
+/// and `GPOS` to `tinker-pdf-font` beside `cmap` and `hmtx`, and it was
+/// refused on the font crate's charter: that crate holds *the tables metrics
+/// need*, and a lookup is not a metric. Nothing in `tinker-pdf-content`,
+/// `tinker-pdf-render` or the facade asks a font what its ligatures are —
+/// they ask how wide a glyph is and what its outline looks like — so putting
+/// substitution rules there would widen a crate every layer above depends on,
+/// for one caller. It would also put the lookup fuzz target in the wrong
+/// crate: `fuzz_targets/shape.rs` drives the code it exercises directly,
+/// which it could not if that code lived behind `tinker-pdf-font`'s API.
+///
+/// The three properties that made the earlier leaf-to-leaf edges acceptable
+/// hold here, and the third of them is what makes the direction safe. It
+/// points **sideways to a leaf** rather than upward, so the layering is not
+/// inverted. It **cannot cycle**: `tinker-pdf-font` depends on
+/// `tinker-pdf-filters`, `tinker-pdf-filters` on nothing, and neither has any
+/// reason to know that shaping exists — an edge into a subtree with no path
+/// back is a tree, whatever else it is. And a sibling workspace crate is not a
+/// third-party dependency, so ruling 3 and CONTRIBUTING rule 1 are untouched:
+/// setting Arabic adds no crate from outside this repository.
+///
+/// It is a leaf on ruling 8's definition rather than on any list: face table
+/// bytes and glyph indices in, glyph indices and six integers out. There is no
+/// PDF vocabulary in its API and no CSS vocabulary either — the consumers in
+/// milestones 6 to 8 convert at their own boundaries.
+/// **`cos -> pki` is the ninth amendment, and it is not a leaf-to-leaf edge
+/// at all** — it is the same shape as `cos -> font`, which this file already
+/// argues for, applied to a second leaf.
+///
+/// ISO 32000-1 7.6.5's public-key security handler derives its file key from a
+/// seed sealed inside a CMS `EnvelopedData` in `/Recipients`. Two facts decide
+/// where that lives. A security handler is `tinker-pdf-cos`'s charter: it owns
+/// `/Encrypt`, `security.rs`, and the decryptor a document installs. And an
+/// `EnvelopedData` is DER, which is `tinker-pdf-pki`'s, for the reasons the
+/// seventh amendment gives about how structure-walking and arithmetic fail
+/// differently.
+///
+/// The alternative was putting the handler in the facade, which already
+/// depends on both. It was rejected on what it would have cost: installing a
+/// decryptor is `CosDocument`'s own operation, so a facade-level handler needs
+/// `set_decryptor_with_key` to become public — and a public "install this
+/// decryptor" on an opened document is a hole with no floor under it, offered
+/// so that a dependency edge could be avoided. An edge is cheaper than a
+/// footgun.
+///
+/// It points downward from a non-leaf to a leaf and cannot cycle, because
+/// `pki` depends only on `crypto` and `crypto` on nothing.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -367,6 +478,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-filters", &[]),
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &["tinker-pdf-filters"]),
+    // The fourth leaf-to-leaf edge: ASN.1 is structure walking on hostile
+    // bytes, `crypto` is vector-gated arithmetic, and they are reviewed and
+    // fuzzed differently. See the seventh amendment above.
+    ("tinker-pdf-pki", &["tinker-pdf-crypto"]),
     ("tinker-pdf-zip", &["tinker-pdf-filters"]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
@@ -378,12 +493,24 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // which gap 31's plan predicted and milestone 7 answered: nothing here is
     // transcendental. See the sixth amendment above.
     ("tinker-pdf-layout", &["tinker-pdf-css"]),
+    // The eleventh, and the fourth leaf-to-leaf edge. It takes the sfnt table
+    // directory and nothing else; the OpenType Layout tables are parsed here
+    // rather than in `font` because that crate's charter is the tables
+    // metrics need. See the eighth amendment above.
+    ("tinker-pdf-shape", &["tinker-pdf-font"]),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.
     (
         "tinker-pdf-cos",
-        &["tinker-pdf-filters", "tinker-pdf-crypto", "tinker-pdf-font"],
+        &[
+            "tinker-pdf-filters",
+            "tinker-pdf-crypto",
+            "tinker-pdf-font",
+            // The public-key security handler's envelope is DER. See the
+            // ninth amendment above.
+            "tinker-pdf-pki",
+        ],
     ),
     // Content interpretation emits to a `Device`; it never rasterizes.
     (
@@ -415,6 +542,15 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-xml",
             "tinker-pdf-css",
             "tinker-pdf-layout",
+            // Signatures milestone 3. The facade is where a signature verdict
+            // is assembled (milestone 6), so it is the one crate that must be
+            // able to turn a `/Contents` blob into a `SignedData` — and the
+            // edge goes *down* into a leaf, which is the direction ruling 8
+            // allows without argument. What needed the argument was the other
+            // half: `tinker-pdf-pki` still has no PDF vocabulary and still
+            // does not know what a document is, so adding this edge did not
+            // buy the leaf a reason to acquire one.
+            "tinker-pdf-pki",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

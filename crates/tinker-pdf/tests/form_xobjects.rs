@@ -193,3 +193,51 @@ fn a_degenerate_bounding_box_does_not_panic() {
         assert!(!bitmap.data.is_empty(), "for {bbox}");
     }
 }
+
+/// **A form resolves names against its own `/Resources`.**
+///
+/// 8.10.1: a form written beside one document and pasted into another brings
+/// the only dictionary its names resolve in. Until this held, a form's
+/// `/Resources` were consulted nowhere — a tiling pattern's were, a form's were
+/// not — so a form naming an image or a colour space the page had never heard
+/// of drew a placeholder.
+///
+/// The fixture is the shape that made it visible in the corpus: the page
+/// defines `/Sp` as one separation and the form defines the *same name* as a
+/// different one, so a build that resolved against the page paints the page's
+/// colour and one that ignores resources entirely paints nothing. Only reading
+/// the form's own dictionary gives the third answer.
+#[test]
+fn a_form_resolves_names_against_its_own_resources() {
+    // The page's `/Sp` is a separation that paints nothing at full tint; the
+    // form's `/Sp` is one that paints full black. Same name, same operand.
+    let page = "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /XObject << /Fm0 5 0 R >>\n\
+                 /ColorSpace << /Sp [/Separation /All /DeviceGray 8 0 R] >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 11 >>\nstream\nq /Fm0 Do Q\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 40 40]\n\
+   /Resources << /ColorSpace << /Sp [/Separation /All /DeviceGray 9 0 R] >> >>\n\
+   /Length 34 >>\nstream\n/Sp cs 1 scn 0 0 40 40 re f\nendstream\nendobj\n\
+8 0 obj\n<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [1] /N 1 >>\nendobj\n\
+9 0 obj\n<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>\nendobj\n\
+trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n";
+
+    let doc = Document::open(page.as_bytes().to_vec()).expect("it opens");
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::at_dpi(72.0));
+
+    let (x, y) = (bitmap.width / 2, bitmap.height / 2);
+    let at = (y as usize) * bitmap.stride + (x as usize) * 3;
+    let got = bitmap.data[at];
+    assert_eq!(
+        got, 0,
+        "a full tint of the *form's* separation is black; the page's would be \
+         white ({got}), and no resources at all would leave the page unpainted"
+    );
+}

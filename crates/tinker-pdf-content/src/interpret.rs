@@ -8,6 +8,8 @@
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode};
 use crate::tokenizer::{Token, Tokenizer};
+use core::mem;
+use std::sync::Arc;
 use tinker_pdf_cos::decode_text_string;
 
 /// Everything the interpreter needs from a page's resources.
@@ -55,6 +57,63 @@ pub struct Group {
     /// `/K`: each element composites against the group's *initial* backdrop
     /// rather than against the elements before it (11.4.5).
     pub knockout: bool,
+    /// `/CS`: the space the group's contents are composited in (11.6.6).
+    ///
+    /// `None` where the group declares no space, which 11.6.6 permits — the
+    /// group then inherits the space it is composited into.
+    pub space: Option<GroupSpace>,
+}
+
+/// Which of 11.6.6's blending spaces a group's `/CS` names.
+///
+/// The *shape* of the space rather than the space itself, and deliberately so.
+/// A blend formula in 11.3.5 acts on component values, so what a compositor
+/// needs from `/CS` is how many components there are and whether they are
+/// subtractive — not the palette, the tint transform or the profile that
+/// decides what those components *mean*. Keeping it to that also keeps
+/// [`Group`] `Copy`, which every save and restore of the graphics state relies
+/// on.
+///
+/// Exact conversion between these — which is what makes a CMYK group blend
+/// like one rather than merely be named as one — is `docs/design/icc.md`'s
+/// stage 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupSpace {
+    /// One component, additive.
+    Gray,
+    /// Three components, additive.
+    Rgb,
+    /// Four components, subtractive.
+    Cmyk,
+    /// CIE L*a*b*, whose components are not in `0..1` at all.
+    Lab,
+}
+
+impl GroupSpace {
+    /// Whether compositing this group in RGB is the same arithmetic as
+    /// compositing it in its own space.
+    ///
+    /// True for grey and RGB, and the grey case is worth stating rather than
+    /// assuming: a separable blend applied per channel to `R = G = B` produces
+    /// `R' = G' = B'` equal to the same blend applied to the single grey
+    /// channel, because each channel's formula is the same function of the
+    /// same two numbers. Subtractive components are a different formula, and
+    /// `/Lab`'s are not even in the unit interval.
+    #[must_use]
+    pub fn blends_as_rgb(self) -> bool {
+        matches!(self, GroupSpace::Gray | GroupSpace::Rgb)
+    }
+
+    /// What to call it in a warning.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            GroupSpace::Gray => "DeviceGray",
+            GroupSpace::Rgb => "DeviceRGB",
+            GroupSpace::Cmyk => "DeviceCMYK",
+            GroupSpace::Lab => "Lab",
+        }
+    }
 }
 
 /// An ExtGState `/SMask` (11.6.5.1).
@@ -64,6 +123,29 @@ pub enum SoftMask {
     None,
     /// A group to render and read back as a mask.
     Group(Box<MaskGroup>),
+}
+
+/// Whichever resource dictionary is in force: the caller's, or a form's own.
+///
+/// A borrow while the page's own resources are in force, which is every
+/// content stream and most of every other one; owned only while a form that
+/// brought its own is running.
+enum Scope<'d, F> {
+    /// The caller's, borrowed for the whole run.
+    Borrowed(&'d F),
+    /// A form's own, shared with whatever cached it.
+    Owned(Arc<F>),
+}
+
+impl<F> core::ops::Deref for Scope<'_, F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        match self {
+            Scope::Borrowed(fonts) => fonts,
+            Scope::Owned(fonts) => fonts,
+        }
+    }
 }
 
 /// The `/SMask` dictionary's group, resolved (11.6.5.2).
@@ -145,6 +227,30 @@ pub trait FontSource {
     /// A form XObject, when the interpreter should recurse into one.
     /// Returning `None` skips it.
     fn form(&self, name: &[u8]) -> Option<Form> {
+        let _ = name;
+        None
+    }
+
+    /// The resources a form XObject brings with it, if it has its own.
+    ///
+    /// 8.10.1: a form's `/Resources` names what its content stream may refer
+    /// to, and a form written beside one document and pasted into another
+    /// brings the only dictionary its names resolve in. Returning `None` keeps
+    /// the invoking scope, which is what a form that omits the key relies on
+    /// and what every reader does.
+    ///
+    /// The device is asked the same question at the same moment, by name,
+    /// through [`Device::begin_form`] — the two seams resolve the same form
+    /// independently rather than passing a resource object between them, which
+    /// is what keeps a crate that must not know what a resource dictionary is
+    /// from having to hold one.
+    /// Shared rather than owned, and cached by the implementor: a page that
+    /// invokes one form a thousand times must not build its resources a
+    /// thousand times. Two corpus files stalled outright when it did.
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
         let _ = name;
         None
     }
@@ -398,7 +504,7 @@ pub fn interpret<D: Device, F: FontSource>(
 ) {
     let mut interp = Interpreter {
         device,
-        fonts,
+        fonts: Scope::Borrowed(fonts),
         stack: Vec::new(),
         gs: GraphicsState::new(initial),
         saved: Vec::new(),
@@ -420,7 +526,7 @@ pub fn interpret<D: Device, F: FontSource>(
 
 struct Interpreter<'d, D: Device, F: FontSource> {
     device: &'d mut D,
-    fonts: &'d F,
+    fonts: Scope<'d, F>,
     stack: Vec<Token>,
     gs: GraphicsState,
     saved: Vec<GraphicsState>,
@@ -1247,9 +1353,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             return;
         }
         let id = self.fonts.font_id(name);
-        if !self.device.begin_form(id) {
+        // 8.10.1: a form may bring its own resources, and the device is asked
+        // for the same form by the same name so that both seams change scope
+        // together.
+        let nested = self.fonts.form_scope(name);
+        if !self.device.begin_form(id, name) {
             return;
         }
+        let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
 
         // 8.10.2: a form's /Matrix maps its space into the current one, and
         // its content runs with the surrounding state saved.
@@ -1315,6 +1426,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.path = saved_path;
         self.text_matrix = saved_text;
         self.line_matrix = saved_line;
+        if let Some(outer) = outer {
+            self.fonts = outer;
+        }
         self.device.end_form(id);
     }
 
@@ -1820,6 +1934,7 @@ mod tests {
             group: Some(Group {
                 isolated: true,
                 knockout: false,
+                space: None,
             }),
         };
         interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
@@ -1828,7 +1943,8 @@ mod tests {
             device.begins,
             vec![Group {
                 isolated: true,
-                knockout: false
+                knockout: false,
+                space: None,
             }],
             "the group's own attributes reach the device"
         );

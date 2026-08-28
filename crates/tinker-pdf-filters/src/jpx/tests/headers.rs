@@ -1,6 +1,7 @@
 //! Milestone 1: the container (Annex I) and the codestream headers (Annex A).
 
 use super::writer::{boxed, segment, tile_part, Spec, SIGNATURE};
+use crate::jpx::codestream::cb_style;
 use crate::jpx::codestream::{marker, refuse_marker, Progression, QuantStyle};
 use crate::jpx::{boxes, codestream, jpx_decode, JpxColour, Refusal};
 use crate::Limits;
@@ -586,7 +587,11 @@ fn cod_reads_the_five_progression_orders_and_refuses_a_sixth() {
 /// they are not here.
 #[test]
 fn the_unsupported_code_block_styles_are_refused_one_by_one() {
-    for bit in [0x01u8, 0x02, 0x04, 0x08, 0x10] {
+    // BYPASS and TERMALL, and only those two. Both move where a coding pass's
+    // *bytes* start rather than how its decisions are read, so both need a
+    // length per pass out of the packet header (B.10.7's multiple codeword
+    // segments) rather than anything tier-1 can do alone.
+    for bit in [cb_style::BYPASS, cb_style::TERMALL] {
         let spec = Spec {
             cb_style: bit,
             ..Spec::default()
@@ -596,6 +601,25 @@ fn the_unsupported_code_block_styles_are_refused_one_by_one() {
             "code-block style bit {bit:#04X} was not refused"
         );
     }
+
+    // The three that are now decoded are *accepted* here, which is the half of
+    // this test that would otherwise quietly stop meaning anything: a build
+    // that refused them again would pass a test that only checked refusals.
+    for bit in [
+        cb_style::RESET,
+        cb_style::VERTICALLY_CAUSAL,
+        cb_style::PREDICTABLE,
+    ] {
+        let spec = Spec {
+            cb_style: bit,
+            ..Spec::default()
+        };
+        assert!(
+            parse(&spec.codestream(&[])).is_ok(),
+            "code-block style bit {bit:#04X} is implemented and must be accepted"
+        );
+    }
+
     // And a bit the table does not define at all.
     let spec = Spec {
         cb_style: 0x40,

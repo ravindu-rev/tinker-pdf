@@ -26,10 +26,13 @@ mod annots;
 pub mod cbz;
 pub mod epub;
 pub mod fonts;
+pub mod mdp;
 mod optional;
 pub mod redact;
 mod resources;
+pub mod signature;
 pub mod structure;
+pub mod verdict;
 pub mod xps;
 
 use std::sync::Arc;
@@ -41,6 +44,9 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 /// zero, and what it refuses by name.
 pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefect, PageOrigin};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
+/// Digital signatures, read (12.8), behind [`Document::signatures`].
+pub use mdp::{Change, Modification, Modifications, Touched};
+pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
 /// Tagged PDF: the logical structure tree, and the reading-order view over it
 /// (14.7, 14.8).
 pub use structure::{
@@ -56,7 +62,7 @@ pub use tinker_pdf_content::{
 /// broke without carrying every instance of them.
 pub use tinker_pdf_cos::{kind_counts, tier_counts, Defect, DefectKind, Tier};
 pub use tinker_pdf_cos::{
-    Action, Attachment, AuthError, AuthLevel, DestKind, Destination, DocumentScript, Field,
+    Action, Attachment, AuthError, AuthLevel, Date, DestKind, Destination, DocumentScript, Field,
     FieldKind, FieldScripts, FieldValue, LadderLevel, Link, Metadata, OutlineItem, Script,
     ScriptSummary, Trapped, Warning, WarningKind,
 };
@@ -69,6 +75,17 @@ pub use tinker_pdf_cos::{
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
 /// caller of [`DocumentEditor::recalculate`] handles.
 pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
+/// Signing on an incremental save (12.8.1), behind
+/// [`DocumentEditor::save_signed`].
+///
+/// The key never crosses this boundary: a [`Signer`] receives a digest and
+/// returns finished CMS bytes. [`DigestAlgorithm`] is shared with the reading
+/// side on purpose — one definition of what a `/ByteRange` covers, so what is
+/// signed and what is checked cannot drift apart.
+pub use tinker_pdf_cos::{
+    Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
+    SigningTarget,
+};
 /// The object model behind [`Document::cos`].
 ///
 /// The escape hatch is only an escape hatch if the types it hands back can be
@@ -104,9 +121,15 @@ pub use tinker_pdf_cos::{
     DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
     PageBuilder, SkippedWidget, Target, WidgetDefect, WriteMode, WriteOptions,
 };
+pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
+/// Signature verdicts (12.8), behind [`Document::verify_signatures`].
+pub use verdict::{
+    Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription, TrustAnchors, Unchecked,
+    Verdict, Weakness,
+};
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};
 
@@ -806,6 +829,69 @@ impl Document {
         tinker_pdf_cos::fields(&self.inner)
     }
 
+    /// Opens a public-key-encrypted document with the caller's key (7.6.5).
+    ///
+    /// `/Adobe.PubSec` seals the file key to certificates rather than to a
+    /// password, so there is nothing to type: the caller implements
+    /// [`Recipient`], is handed the sealed key and the identifier saying whose
+    /// it is, and does the one private-key operation this engine refuses to be
+    /// able to do. Returning `None` from it means "not addressed to me".
+    ///
+    /// # Errors
+    /// [`PubSecError`], which tells "this document is somebody else's" apart
+    /// from every other way it can fail.
+    pub fn authenticate_with_recipient(
+        &self,
+        recipient: &dyn Recipient,
+    ) -> Result<AuthLevel, PubSecError> {
+        self.inner.authenticate_with_recipient(recipient)
+    }
+
+    /// The document's digital signatures (12.8), in field order.
+    ///
+    /// One entry per signature field that carries a `/V`; a signature field
+    /// with no value is a place for a signature rather than a signature, and
+    /// [`Document::form_fields`] already lists it.
+    ///
+    /// Nothing here is verified. Each entry says what the file claims and what
+    /// checking that claim against the file established — in particular
+    /// [`Signature::coverage`], which is the difference between a signature
+    /// over this document and a signature over some of it.
+    #[must_use]
+    pub fn signatures(&self) -> Vec<Signature> {
+        signature::signatures(self)
+    }
+
+    /// What every signature in this document turns out to prove (12.8).
+    ///
+    /// One [`Verdict`] per signature, in the order [`Document::signatures`]
+    /// returns them. `anchors` are the certificates the *caller* trusts —
+    /// with none, the chain result is [`Chain::NoAnchors`], which is honest:
+    /// without something trusted to reach, a chain proves that a key signed
+    /// something and not whose key it was.
+    ///
+    /// `at` is the instant to judge certificate validity at, in seconds since
+    /// the Unix epoch. `None` reports the windows and judges nothing, which is
+    /// the default because ruling 4 bans a clock from this engine and because
+    /// "expired" is a claim about now.
+    #[must_use]
+    pub fn verify_signatures(&self, anchors: &TrustAnchors, at: Option<i64>) -> Vec<Verdict> {
+        self.signatures()
+            .iter()
+            .map(|signature| verdict::verdict(self, signature, anchors, at))
+            .collect()
+    }
+
+    /// The strictest certification any signature in this document declares
+    /// (12.8.2.2), or `None` when none of them certifies it.
+    ///
+    /// A shortcut past `signatures()` for the common question "is this
+    /// document certified, and how tightly".
+    #[must_use]
+    pub fn certification(&self) -> Option<Certification> {
+        mdp::strictest(self)
+    }
+
     /// What the form's calculations depend on, in the order they run
     /// (12.7.2, table 218).
     ///
@@ -929,8 +1015,6 @@ impl Page {
         // smaller surface, which crops instead of scaling.
         let applied = tinker_pdf_render::page_scale(w, h, scale);
 
-        let canvas = tinker_pdf_render::page_canvas(w, h, applied, options.format);
-
         // Ruling 2: the caller gets a whole page rather than a fragment, and
         // is told the resolution is not the one they asked for.
         let scaled_down = applied < scale;
@@ -943,9 +1027,26 @@ impl Page {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
 
+        // 11.4.7: the page itself may declare a transparency group, and its
+        // `/CS` is the space the *whole page* composites in. Nothing invokes
+        // it, so it is read here rather than reaching the device through a
+        // `Do` — and, unlike a form's group, it decides the format of the page
+        // canvas itself rather than of a buffer over it. The bitmap is
+        // converted back for the caller at the end; 11.4.7 says the page group
+        // is composited and then converted to the output device's space, which
+        // is exactly those two steps.
+        let page_space = resources.page_group_space(&self.inner);
+        let canvas_format = page_space
+            .and_then(tinker_pdf_render::group_format)
+            .unwrap_or(options.format);
+        let canvas = tinker_pdf_render::page_canvas_in(w, h, applied, canvas_format);
+
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
+        }
+        if let Some(space) = page_space {
+            renderer.note_page_group_space(space);
         }
         interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
         if options.annotations {
@@ -980,6 +1081,15 @@ impl Page {
                 applied,
             });
         }
+
+        // Back to something a caller can read. A page group composited over
+        // ink comes back as light, which is 11.4.7's own last step.
+        let wanted = tinker_pdf_render::page_format(options.format);
+        let canvas = if canvas.format == wanted {
+            canvas
+        } else {
+            canvas.extract((0, 0), canvas.width, canvas.height, wanted)
+        };
 
         Bitmap {
             width: canvas.width,

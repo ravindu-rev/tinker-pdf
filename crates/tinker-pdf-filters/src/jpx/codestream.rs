@@ -186,11 +186,25 @@ pub(crate) mod cb_style {
     pub const PREDICTABLE: u8 = 0x10;
     /// Segmentation symbols at the end of each cleanup pass (D.5).
     pub const SEGMENTATION_SYMBOLS: u8 = 0x20;
-    /// The five this build refuses.
-    pub const UNSUPPORTED: u8 = BYPASS | RESET | TERMALL | VERTICALLY_CAUSAL | PREDICTABLE;
+    /// The two this build refuses, and they are refused together for one
+    /// reason: both change where a coding pass's *bytes* are, not how its
+    /// decisions are read. `TERMALL` restarts the arithmetic coder at every
+    /// pass and `BYPASS` codes some passes as raw bits, so a decoder needs a
+    /// length per pass rather than one per code-block — which is a packet
+    /// header change (B.10.7's multiple codeword segments), not a tier-1 one.
+    /// The other three are decisions about context state and are implemented.
+    pub const UNSUPPORTED: u8 = BYPASS | TERMALL;
     /// Every bit Table A.19 defines. A `Scod` byte with anything outside
     /// this is a codestream using a table this build has not read.
-    pub const DEFINED: u8 = UNSUPPORTED | SEGMENTATION_SYMBOLS;
+    ///
+    /// Enumerated rather than derived from [`UNSUPPORTED`]. It was
+    /// `UNSUPPORTED | SEGMENTATION_SYMBOLS`, which was the same set only while
+    /// this build refused five of the six — so implementing three of them
+    /// dropped them out of *defined* as well, and a codestream setting nothing
+    /// but `RESET` was refused for using a bit the table does not define. The
+    /// two sets answer different questions and now say so separately.
+    pub const DEFINED: u8 =
+        BYPASS | RESET | TERMALL | VERTICALLY_CAUSAL | PREDICTABLE | SEGMENTATION_SYMBOLS;
 }
 
 /// One component's geometry from SIZ (A.5.1).
@@ -301,6 +315,19 @@ impl CodingStyle {
     /// the format offers. `Refusal::SegmentationSymbol` is what it fires.
     pub(crate) const fn segmentation_symbols(&self) -> bool {
         self.cb_style & cb_style::SEGMENTATION_SYMBOLS != 0
+    }
+
+    /// A.6.1 Table A.19 bit 1: the context states return to Table D.7's at
+    /// every coding pass boundary rather than only at the code-block's start.
+    pub(crate) const fn reset_contexts(&self) -> bool {
+        self.cb_style & cb_style::RESET != 0
+    }
+
+    /// Table A.19 bit 3: context formation treats the stripe below the one
+    /// being coded as insignificant, so a stripe depends on nothing beneath
+    /// it.
+    pub(crate) const fn vertically_causal(&self) -> bool {
+        self.cb_style & cb_style::VERTICALLY_CAUSAL != 0
     }
 
     /// `(PPx, PPy)` at resolution `r`.

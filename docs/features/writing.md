@@ -50,6 +50,19 @@ set's own maximum never clobbers the file's. An incremental update to a
 linearized file de-linearizes it by nature — the parameter dictionary goes
 stale — which is documented, not errored.
 
+An update to an **encrypted** document is sealed with that document's own key
+(7.6.2). It has to be: the appended objects sit under a trailer whose
+`/Encrypt` still stands, so they must speak whatever the original file speaks —
+RC4, AES-128 or AES-256, with the per-object key derivation of Algorithm 1
+where the revision calls for it — and not a scheme this writer would rather
+use. The key is the one authentication produced, carried on the document for
+this single purpose; a document that was never authenticated has none and
+writes in the clear as before, which is correct because it was never encrypted.
+Initialisation vectors are derived from the file key and the object's identity
+rather than drawn from a random source, so the same edit writes the same bytes
+on every target (ruling 4) and `wasm32-unknown-unknown` needs no RNG. `/ID[0]`
+survives the revision, as 14.4 requires.
+
 **Compression.** `WriteOptions::compress` deflates streams through the
 project's own encoder and records `/FlateDecode`. Two hard rules: a stream
 that already declares a `/Filter` is handed through untouched — that is a
@@ -136,7 +149,6 @@ Some(Encryption { .. })` or `linearize: true` on a `Rewrite`
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Encrypting an incremental update | no typed variant: the incremental writer takes no cipher, so the combination cannot be requested | an update inherits the base file's encryption, which needs the original file key plumbed through | [ROADMAP](../ROADMAP.md) Tier 2 |
 | Linearizing an incremental update | none — `linearize` is quietly dropped, documented on the field | an update appends to whatever layout the original had; claiming `/Linearized` over it would be a lie a reader believes | 7.5.6, Annex F |
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
 | `object_streams` under `linearize` | none — ignored when linearization succeeds | packing page one's objects into a container with everything else is the opposite of the layout's point | 7.5.7 |
@@ -152,6 +164,17 @@ invariants by name: `an_incremental_update_preserves_the_original_bytes_exactly`
 twenty bytes), `a_stream_that_already_declares_a_filter_is_handed_through_untouched`
 (both directions, so it cannot pass on a writer that stopped compressing),
 and object-stream round-trips through the engine's own reader.
+
+The encrypted incremental update carries two of its own in
+`crates/tinker-pdf-cos/tests/strict_validator.rs`, and they are a pair on
+purpose: one asserts the appended string comes back through the reader, the
+other asserts it is **not** sitting in the file's bytes in the clear. Only the
+second would have caught what was there before — the writer passed no cipher at
+all, so it appended plaintext under a standing `/Encrypt`, and the engine's own
+reader decrypted it back either way. Taking the cipher away again fails exactly
+those two of the file's eighty-four. The round trip of every method against its
+own decryption is one level down, in
+`crates/tinker-pdf-crypto/src/handler.rs`.
 
 `crates/tinker-pdf-cos/tests/linearized.rs` checks byte offsets against the
 bytes — a file can open perfectly with page one scattered through the

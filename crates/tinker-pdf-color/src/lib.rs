@@ -18,6 +18,7 @@
 use tinker_pdf_math as math;
 
 pub mod function;
+pub mod icc;
 
 pub use function::Function;
 
@@ -49,10 +50,27 @@ pub enum ColorSpace {
         /// The tint transform.
         tint: Box<Function>,
     },
+    /// An ICC space whose profile was read, with the transform it compiled to.
+    ///
+    /// The profile's own rendering rather than 8.6.5.5's alternate-space
+    /// approximation. `Arc` because a transform carries three 4 096-entry
+    /// tables and a page may name the same space at every one of a thousand
+    /// `cs` operators; compiling it once per resource dictionary and sharing it
+    /// is the difference between reading a profile and reading it repeatedly.
+    Icc {
+        /// The compiled transform.
+        transform: std::sync::Arc<icc::Transform>,
+        /// How many components the space takes, which is `/N` and is what
+        /// every caller that sizes a buffer asks for.
+        components: usize,
+    },
     /// A CIE-based or ICC space, approximated by its component count.
     ///
     /// 8.6.5.5 lets a reader use the alternate space, and that is what this
-    /// is: the shape of the data without the profile's exact rendering.
+    /// is: the shape of the data without the profile's exact rendering. Still
+    /// the answer for a CIE space, and for a profile [`icc::Profile::parse`]
+    /// refused — a profile that cannot be read leaves the page exactly as it
+    /// was before profiles were read at all.
     Approximated {
         /// How many components.
         components: usize,
@@ -90,6 +108,7 @@ impl ColorSpace {
             ColorSpace::DeviceCmyk => 4,
             ColorSpace::Indexed { .. } => 1,
             ColorSpace::Separation { components, .. } => *components,
+            ColorSpace::Icc { components, .. } => *components,
             ColorSpace::Approximated { components } => *components,
             ColorSpace::Lab { .. } => 3,
             // 8.7.3.2: an uncoloured pattern's operands are counted in the
@@ -107,6 +126,10 @@ impl ColorSpace {
             // Black in every device space, which for CMYK means all zeros
             // except the black ink.
             ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            // 8.6.8: an ICCBased space's initial colour is all zeros, whatever
+            // the profile makes of them — which for a subtractive profile is
+            // white rather than black, and is what the clause says.
+            ColorSpace::Icc { components, .. } => vec![0.0; *components],
             // 8.6.5.4: black is L=0 with no chroma, and zero is inside every
             // legal /Range, so the generic all-zeros answer is right here for
             // a different reason than it is elsewhere.
@@ -167,6 +190,9 @@ impl ColorSpace {
                 let b = raw(2).clamp(range[2], range[3]);
                 lab_to_rgb(l, a, b)
             }
+            // The profile's own transform, which is what this whole module
+            // exists to make possible.
+            ColorSpace::Icc { transform, .. } => transform.apply(components),
             ColorSpace::Approximated { components: n } => match n {
                 1 => ColorSpace::DeviceGray.to_rgb(components),
                 4 => ColorSpace::DeviceCmyk.to_rgb(components),
@@ -192,13 +218,38 @@ fn byte(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// XYZ at D50 to linear sRGB, Bradford-adapted.
+///
+/// ICC.1 puts the profile connection space at D50 and sRGB is defined at D65,
+/// so the chromatic adaptation is part of this relation rather than a step
+/// beside it.
+///
+/// One constant with two callers: `/Lab` conversion (8.6.5.4) reaches the
+/// connection space through its own arithmetic and an ICC transform reaches it
+/// through a profile's columns, but from there both are doing the same thing.
+/// It was written out twice before an ICC transform existed to want it, and the
+/// two copies had already drifted in the fourth decimal.
+pub(crate) const XYZ_D50_TO_SRGB: [[f64; 3]; 3] = [
+    [3.134_136, -1.617_036, -0.490_662],
+    [-0.978_755, 1.916_143, 0.033_454],
+    [0.071_95, -0.228_988, 1.405_386],
+];
+
+/// [`XYZ_D50_TO_SRGB`], applied.
+pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
+    let row = |r: usize| {
+        XYZ_D50_TO_SRGB[r][0] * x + XYZ_D50_TO_SRGB[r][1] * y + XYZ_D50_TO_SRGB[r][2] * z
+    };
+    [row(0), row(1), row(2)]
+}
+
 /// CIE L*a*b* to sRGB, through XYZ (8.6.5.4).
 ///
 /// The white point is D50, which is what PDF's `/WhitePoint` defaults to and
 /// what almost every file that uses Lab declares. A document with a different
 /// one is converted slightly wrongly rather than not at all — visibly closer
 /// than the alternative, which was rendering the whole space black.
-fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     // D50, normalized so Y is 1.
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
@@ -221,10 +272,7 @@ fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     let y = WHITE[1] * finv(fy);
     let z = WHITE[2] * finv(fz);
 
-    // XYZ (D50) to linear sRGB, Bradford-adapted.
-    let r = 3.134_136 * x - 1.617_036 * y - 0.490_662 * z;
-    let g = -0.978_755 * x + 1.916_143 * y + 0.033_454 * z;
-    let bl = 0.071_95 * x - 0.228_988 * y + 1.405_386 * z;
+    let [r, g, bl] = xyz_d50_to_linear_srgb(x, y, z);
 
     let encode = |v: f64| -> u8 {
         let v = v.clamp(0.0, 1.0);

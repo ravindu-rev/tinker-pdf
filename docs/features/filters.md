@@ -51,19 +51,76 @@ MSB-first, rows byte-padded — exactly the shape `/BitsPerComponent 1`
 describes, so `/ImageMask`, `/Decode` and `/ColorSpace` compose with a fax
 the way they do with any other image.
 
-**JBIG2** (JBIG2Decode, 7.4.7; T.88): the generic-region lineage. The MQ
-arithmetic coder (T.88 Annex E) lives in its own module, `mq.rs`, shared with
-the JPEG 2000 tier-1 coder — T.88 Annex E and T.800 Annex C are the same coder
-— with `MqContexts::set_state` covering the one place the two callers differ
-(T.88 E.3.6 against T.800 Table D.7). Around it: clause 7 segment headers, the
-embedded organisation of D.3 with `/JBIG2Globals` read first, generic regions
-under templates 0–3 with AT pixels and typical prediction (TPGDON, 6.2.5.7),
-and MMR (6.2.6) through the same T.6 decoder a fax uses. Polarity is returned
-in JBIG2's own sense (1 = black, 6.2.2); the inversion belongs at the PDF
-boundary beside `/ImageMask` and `/Decode`. A file whose page composited no
-region — the symbol-dictionary lineage, see below — is refused rather than
-returned as a blank white page that reads as a successful decode of a blank
-scan.
+**JBIG2** (JBIG2Decode, 7.4.7; T.88): the generic-region and symbol lineages.
+The MQ arithmetic coder (T.88 Annex E) lives in its own module, `mq.rs`, shared
+with the JPEG 2000 tier-1 coder — T.88 Annex E and T.800 Annex C are the same
+coder — with `MqContexts::set_state` covering the one place the two callers
+differ (T.88 E.3.6 against T.800 Table D.7). Around it: clause 7 segment
+headers with their referred-to lists, the embedded organisation of D.3 with
+`/JBIG2Globals` read first, generic regions under templates 0–3 with AT pixels
+and typical prediction (TPGDON, 6.2.5.7), and MMR (6.2.6) through the same T.6
+decoder a fax uses.
+
+**Symbol dictionaries (6.5) and text regions (6.4) decode, arithmetically**:
+Annex A's integer procedures and A.3's symbol-index procedure over the shared
+coder; 6.5's height classes with one coder and one adaptive context set carried
+across every symbol in a dictionary, as 6.5.8.1 requires; 6.5.10's export runs
+selecting across imported and new symbols; and 6.4.5's strip decoding — the
+strip coordinate accumulating, the out-of-band value ending a strip, gaps
+measured from the previous symbol's far edge, `SBDSOFFSET`, multi-strip regions
+and all four reference corners. What a dictionary exports is keyed by segment
+number, and a region's symbols are the concatenation of its referred-to
+dictionaries' exports *in reference order* (7.4.3).
+
+**Refinement (6.3) decodes too**, in all three of the shapes T.88 gives it:
+6.5.8.2.2's single refinement and 6.5.8.2.1's aggregate inside a symbol
+dictionary — where an aggregate symbol is itself a text region — 6.4.11's
+per-instance refinement inside a text region, and the generic refinement region
+segments of 7.4.7 (types 40, 42 and 43). Both of 6.3.5.3's context templates
+are implemented, with 7.4.7.3's adaptive pair and 6.3.5.6's typical prediction.
+With them come 7.4.6.1's intermediate regions, which are decoded and kept
+rather than drawn: a refinement region's reference is either one of those or,
+failing that, whatever the page already holds under the region's own box
+(6.3.2).
+
+The refinement templates are **derived rather than transcribed**, and the
+reason that is sound is worth stating where a reader will meet it. A context
+index only labels an adaptive state slot — the decoder reads and writes
+`state[cx]`, every slot starts identical, and the arithmetic coder's registers
+are global — so relabelling every context through a bijection cannot change a
+single decision, and the bit order in 6.3.5.3's figures is unobservable. Only
+the *set* of positions is a fact about the format, and that set is held to the
+pdf.js corpus, which codes one 399 by 400 picture a dozen ways: the encodings
+that do not refine are ground truth for the ten that do, and all ten reproduce
+it with **0 pixels different**
+([`jbig2_refinement.rs`](../../crates/tinker-pdf/tests/jbig2_refinement.rs)).
+6.3.5.6's TPGRON slot does not survive the relabelling, so it was recovered the
+same way — one value in 8 192 reproduces the fixture, and one in 1 024 for the
+narrower template.
+
+That last rule is why a region whose referred-to dictionary is **absent or
+refused is refused whole** rather than drawn from what did arrive: the
+numbering is shared, so a missing dictionary does not cost its own symbols, it
+renumbers all of them and every instance draws a different symbol at the right
+place — a page that looks like text and says something else. T.88 Annex H.1's
+own page 2 is that case, its arithmetic text region referring to page 1's
+Huffman dictionary.
+
+Measured over the corpus's 103 JBIG2-bearing files in August 2026, counting
+files whose render reports any JBIG2 warning: **65 before this lineage landed,
+52 after the arithmetic variant, 49 after the Huffman one, and 35 after
+refinement, and 30 once the Huffman road followed it**, and none gained one. Those that remain are named in the table
+below with their own counts: the halftone lineage is the largest single one,
+and the rest are custom code tables, transposed regions, a retained context,
+and the half of Huffman refinement that goes through a symbol dictionary. Annex B's tables are reconstructed rather than transcribed, and
+what holds them to the standard is Annex H coding the same two symbols twice —
+once with `SDHUFF`, once through the MQ coder — which decode byte-identically
+([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
+
+Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
+belongs at the PDF boundary beside `/ImageMask` and `/Decode`. A file whose
+page composited no region at all is refused rather than returned as a blank
+white page that reads as a successful decode of a blank scan.
 
 **JPEG 2000** (JPXDecode, 7.4.9; T.800): the JP2/JPX box container of Annex I
 and bare J2K codestreams, Annex A marker segments with COC and QCC overriding
@@ -71,17 +128,26 @@ per component, Annex B tier-2 — tag trees, packet headers, precincts and all
 five progression orders (B.12) — Annex D tier-1 on the shared MQ coder,
 Annex E dequantisation, both Annex F inverse wavelets (the reversible 5/3 and
 the irreversible 9/7 in fixed point) and the Annex G and I colour pipeline,
-palettes and `cdef` included. An opacity channel is carried out separately in
+palettes and `cdef` included. Four of Table A.19's six code-block styles
+decode: segmentation symbols (D.5's integrity check), `RESET`'s return to
+Table D.7's states at every pass boundary, `VERTICALLY_CAUSAL`'s stripe that
+depends on nothing beneath it, and `PREDICTABLE`, which constrains an encoder
+and leaves a decoder's reading unchanged. An opacity channel is carried out separately in
 `JpxOpacity` because what it is *for* is `/SMaskInData`'s rule (8.9.5.4) and
 that decision stays outside the crate. The decoder's stance is that a wrong
 JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
 coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists. Measured against the
-corpus's nineteen JPX files as of August 2026: 14 decode, 4 refuse by name,
-and 1 is never asked for (a form-resources non-goal recorded in
-[rendering](rendering.md) and the [ROADMAP](../ROADMAP.md), not a codec
-limit).
+corpus's nineteen readable JPX files as of August 2026: **16 decode and 3
+refuse by name**, and **none of the three is a code-block style**. One is a
+budget (`jpx-budget-spent`, a ruling 1 hardening limit rather than a
+capability gap) and two are veraPDF fixtures that are deliberately
+non-conformant. It was 15 and 4: the file that moved is `jp2k-resetprob.pdf`,
+whose only unusual bit is `RESET`. The fifteenth had been a case of its own —
+never asked for at all, because its image sits two form XObjects deep and a
+form's own `/Resources` were consulted nowhere; that one decodes now too
+([rendering](rendering.md)).
 
 **Container codecs, not `/Filter` names.** No PDF stream is a PNG file, but
 the archive formats need one, so the crate also exports a PNG decoder
@@ -124,11 +190,14 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| JBIG2 symbol dictionary + text region (T.88 6.4, 6.5) | `FilterError::Unsupported(Capability::Jbig2)`, reason in `Warning::Jbig2SegmentSkipped` | The common OCR-pipeline output; a page with no composited region draws the placeholder rather than a blank page reported as success | [ROADMAP](../ROADMAP.md) |
+| JBIG2 transposed text regions, custom code tables (type 53), and refinement over the Huffman road (`SDHUFF` with `SDREFAGG`, `SBHUFF` with `SBREFINE`) | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF, SBHUFF, SDREFAGG, SBREFINE and segment types 40/42/43 have all left this row.** What is left is transposed text regions (4 files) and type 53 custom code tables (21 segments in 6 files, and 5 of the 8 refining Huffman text regions select one). **The whole symbol lineage decodes otherwise** — arithmetic and Huffman, with and without refinement, in either combination. One caveat is carried honestly rather than hidden: tables **B.14 and B.15** are reconstructed and only their one-bit code for zero is exercised by any fixture, so a non-zero refinement delta is refused rather than decoded through the unverified part | [ROADMAP](../ROADMAP.md) |
+| JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | [ROADMAP](../ROADMAP.md) |
+| JBIG2 halftone regions and pattern dictionaries (6.6, 6.7; types 16, 20, 22, 23) | `Warning::Jbig2SegmentSkipped` | A third lineage; 16 corpus files carry it and nothing else | [ROADMAP](../ROADMAP.md) |
+| JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPX markers RGN, POC, PPM, PPT, CRG (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it | [ROADMAP](../ROADMAP.md) |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
-| JPX coding features: five of Table A.19's six code-block styles, unmappable `colr`, unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan | [ROADMAP](../ROADMAP.md) |
+| JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | T.800 allows 38 bits; the sample path carries 16, so this is refused rather than truncated | [ROADMAP](../ROADMAP.md) |
 | JPX tile-parts out of order | `Warning::JpxStructureInvalid` | Decoding them would need buffering the whole codestream speculatively | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |
@@ -173,6 +242,6 @@ wants the reason to survive it.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 2 952 passed / 0 failed / 8 ignored
+  workspace stands at 2 963 passed / 0 failed / 8 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md) for
   the full harness.

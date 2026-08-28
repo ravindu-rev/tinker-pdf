@@ -155,7 +155,7 @@ let bytes = editor.save(&WriteOptions::default());
 | Keystroke and validate actions; document-level and catalog scripts | surfaced (`FieldScripts`, `DocumentScript`) and never run — nothing is attempted, so nothing errors | events need an interactive host; a document-level script is arbitrary program text with no field to write | [ROADMAP](../ROADMAP.md) Tier 4 |
 | A format action's display string reaching `/V` | none offered — `formatted_value` returns the string and writes nothing | 12.7.3.3 keeps value and appearance apart | [ROADMAP](../ROADMAP.md) Tier 4 |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
-| Signature verification and signing | `FieldKind::Signature` recognises the field; nothing reads or checks `/V` (12.8) | verify-only cryptography is its own capability, designed separately | [ROADMAP](../ROADMAP.md) Tier 3 |
+| Signature verification and signing | `Document::signatures()` reads the dictionary, classifies what `/ByteRange` covers and digests it; nothing **verifies** the CMS blob or the certificate chain yet | verify-only cryptography is its own capability, designed separately — the inventory is milestone 1 of it | [ROADMAP](../ROADMAP.md) Tier 3, [design](../design/signatures.md) |
 | XFA | not read anywhere | removed in ISO 32000-2; a stated permanent non-goal | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -186,5 +186,5 @@ it drives the lexer, parser and evaluator with arbitrary text against a
 live `Host` and asserts two properties — no panic (ruling 1), and that a
 run never spends more budget than it was given, which is how a bounded
 interpreter is kept bounded rather than believed bounded. All of it rides
-in the workspace suite: 2 952 passed, 0 failed, 8 ignored (Windows x86_64,
+in the workspace suite: 2 963 passed, 0 failed, 8 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).

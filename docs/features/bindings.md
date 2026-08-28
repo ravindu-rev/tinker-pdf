@@ -16,15 +16,48 @@ matching `tpdf_*_free` releases; nothing crosses the boundary as a
 caller-freed buffer, and a pointer into a handle's storage borrows it until
 the handle is freed. Every call returns a `TpdfStatus` (`Ok`, `BadArgument`,
 `NotAPdf`, `NeedsPassword`, `WrongPassword`, `NoSuchPage`, `NotEncrypted`,
-`UnsupportedHandler`) and `tpdf_last_error_message` carries the detail.
-Eighteen functions: `tpdf_version`, `tpdf_last_error_message`,
-`tpdf_document_open` / `_free` / `_page_count` / `_is_encrypted` /
-`_authenticate` (returning a `TpdfAuthLevel` of `None`, `User` or `Owner`) /
-`_may_print` / `_set_fonts`, `tpdf_page_size` / `_text` / `_render`,
-`tpdf_string_free`, and `tpdf_bitmap_width` / `_height` / `_stride` /
-`_data` / `_free`. `#![forbid(unsafe_code)]` does not apply here — this is
-the one crate whose job is the boundary — and `#![warn(missing_docs)]`
-does.
+`UnsupportedHandler`, `NoSuchSignature`) and `tpdf_last_error_message`
+carries the detail. Those numbers *are* the ABI — a C caller compares them
+against literals and the .NET binding against an `int` — so 0–7 are frozen
+and `NoSuchSignature` was **appended** at 8 rather than inserted; a unit
+test pins all nine one by one, and another pins every discriminant of the
+six signature enums, because those are transcribed by hand into
+`bindings/dotnet/TinkerPdf.cs`.
+
+**Forty-eight functions.** Eighteen open and render: `tpdf_version`,
+`tpdf_last_error_message`, `tpdf_document_open` / `_free` / `_page_count` /
+`_is_encrypted` / `_authenticate` (returning a `TpdfAuthLevel` of `None`,
+`User` or `Owner`) / `_may_print` / `_set_fonts`, `tpdf_page_size` /
+`_text` / `_render`, `tpdf_string_free`, and `tpdf_bitmap_width` /
+`_height` / `_stride` / `_data` / `_free`.
+
+Thirty read signatures (12.8). Reading only: the signing side is not
+projected and is not coming here, because a `Signer` is a host callback
+and callbacks across this boundary are `design/bindings-write.md`'s to own.
+`tpdf_document_signatures` hands back an opaque `TpdfSignatures` on the
+`TpdfBitmap` pattern — the engine's own copy, so it outlives the document
+— with `tpdf_signatures_count` / `_free` and, per index,
+`tpdf_signature_field_name` / `_sub_filter` / `_reason` / `_location` /
+`_name` (strings freed with `tpdf_string_free`, and **null on `Ok` means
+the dictionary has no such entry**, which is why a wrong index is
+`NoSuchSignature` and not a null), `_coverage` (`TpdfCoverage`:
+`WholeFile`, `Revision`, `Suspicious`), `_covers_whole_file`,
+`_is_usage_rights`, `_certification_level` (1–3, **0 for none**),
+`_span_count` and `_span`. Trust anchors arrive one at a time —
+`tpdf_trust_anchors_new` / `_add` / `_count` / `_free` — rather than as an
+array of pointers and lengths, because `_add` refuses bytes that are not a
+certificate *at the moment they are offered* and an array could only report
+that as one aggregate failure. `tpdf_document_verify_signatures` takes
+those anchors, a `judge_validity` flag and an `i64` instant — two arguments
+because the facade's `Option<i64>` has no C spelling — and returns
+`TpdfVerdicts` (`_count` / `_free`) with `tpdf_verdict_cms_state`,
+`_document_digest`, `_signature_check`, `_chain`, `_signer_subject`,
+`_signer_issuer`, `_signer_validity`, `_weakness_count` and `_weakness`.
+There is no `is_valid` and there will not be one: the four questions are
+four `#[repr(C)]` enums, and `NotChecked` is not `Differs`.
+
+`#![forbid(unsafe_code)]` does not apply here — this is the one crate whose
+job is the boundary — and `#![warn(missing_docs)]` does.
 
 **Python** (`bindings/python`, PyO3 directly over the facade — not through
 the C ABI, which would add a second error translation for nothing).
@@ -57,9 +90,15 @@ off is the switch for a host that renders no CJK.
 in a `SafeHandle`, so a document or bitmap is released exactly once even if
 an exception unwinds past it. `Document.Open(bytes)`, `PageCount`,
 `PageText(i)`, `Render(i, scale)` with `bitmap.Pixels` as a
-`ReadOnlySpan<byte>` valid while the bitmap lives, `SetFonts(bytes)`. The
-P/Invoke declarations are written out, so the binding builds with nothing
-but the .NET SDK. A NuGet package carries `runtimes/<rid>/native/`;
+`ReadOnlySpan<byte>` valid while the bitmap lives, `SetFonts(bytes)`,
+`ReadSignatures()` and `VerifySignatures(anchors, at)` — the last taking a
+`TrustAnchors` it will not default for you and a `long?` instant whose
+`null` is the flag the C ABI spells separately. The P/Invoke declarations
+are written out, so the binding builds with nothing but the .NET SDK; one
+of them, `tpdf_verdict_signer_validity`, is declared `ref` rather than
+`out` because it returns a flag rather than a status and writes nothing
+when the flag is 0, and an `out` would leave the caller reading stack
+rubbish the compiler believed assigned. A NuGet package carries `runtimes/<rid>/native/`;
 `cargo xtask nuget-stage` maps the host to its RID with a unit test, because
 a package built with the wrong RID restores, compiles and throws
 `DllNotFoundException` on first use, and `dotnet pack` on an empty
@@ -149,6 +188,17 @@ using var document = Document.Open(File.ReadAllBytes("file.pdf"));
 document.SetFonts(File.ReadAllBytes(@"C:\Windows\Fonts\arial.ttf"));
 using var bitmap = document.Render(0, scale: 2.0);
 ReadOnlySpan<byte> pixels = bitmap.Pixels;
+
+using var signatures = document.ReadSignatures();
+using var anchors = new TrustAnchors();      // empty: the host trusts nothing
+anchors.Add(File.ReadAllBytes("root.der"));  // or says what it does
+using var verdicts = document.VerifySignatures(anchors);
+for (uint i = 0; i < signatures.Count; i++)
+{
+    // Four answers, never one boolean.
+    _ = (signatures.CoverageOf(i), verdicts.DocumentDigestOf(i),
+         verdicts.SignatureCheckOf(i), verdicts.ChainOf(i));
+}
 ```
 
 ```c
@@ -158,6 +208,21 @@ if (tpdf_document_open(bytes, len, &doc) == 0 /* TpdfStatus::Ok */) {
     tpdf_page_render(doc, 0, 2.0, 2 /* TpdfPixelFormat::Rgb8 */, &bm);
     /* tpdf_bitmap_width(bm), tpdf_bitmap_stride(bm), tpdf_bitmap_data(bm, ...) */
     tpdf_bitmap_free(bm);
+
+    TpdfSignatures *sigs = NULL;
+    TpdfTrustAnchors *anchors = tpdf_trust_anchors_new();
+    TpdfVerdicts *verdicts = NULL;
+    tpdf_document_signatures(doc, &sigs);
+    tpdf_document_verify_signatures(doc, anchors, 0 /* judge validity */, 0, &verdicts);
+    for (uint32_t i = 0; i < tpdf_signatures_count(sigs); i++) {
+        char *reason = NULL;             /* NULL on Ok means /Reason is absent */
+        tpdf_signature_reason(sigs, i, &reason);
+        tpdf_string_free(reason);
+    }
+    tpdf_verdicts_free(verdicts);
+    tpdf_trust_anchors_free(anchors);
+    tpdf_signatures_free(sigs);
+
     tpdf_document_free(doc);
 }
 ```
@@ -176,8 +241,12 @@ packaging commands.
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Editing, forms, creation, saving | not present on any binding — the surface is open, page count, encryption/auth, permissions, page size, text, render, `set_fonts` | the write surface has not been projected; the facade shape is already the design | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
-| Outline, links, metadata, attachments, XMP, warnings | not projected | same — read surface beyond rendering and text is owed | [ROADMAP.md](../ROADMAP.md) |
+| Editing, forms, creation, saving | not present on any binding — the surface is open, page count, encryption/auth, permissions, page size, text, render, `set_fonts`, and (C ABI and .NET only) signature reading | the write surface has not been projected; the facade shape is already the design | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
+| Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback, and callbacks across the C ABI are an explicit non-goal of the write design, which owns them | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
+| The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
+| A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter`, its lenient-read warnings, and `Signature::modifications` | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum, and none is named by the milestone | [signatures](../design/signatures.md) |
+| Signatures in Python and JavaScript | not projected | those bindings sit on the facade directly rather than on the C ABI, so each is its own transcription and neither has been written | [ROADMAP.md](../ROADMAP.md) |
+| Outline, links, metadata, attachments, XMP, warnings | not projected | the read surface beyond rendering, text and signatures is owed | [ROADMAP.md](../ROADMAP.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
@@ -191,7 +260,24 @@ packaging commands.
   null and nonsense arguments are refused rather than dereferenced, a page
   past the end is reported, the version string is readable, and a supplied
   face reaches the C ABI (with the no-regular-face and null-document
-  refusals). The crate type-checks in CI on every commit (the bindings
+  refusals).
+- The signature surface is pinned by an **equality with the facade**, which
+  is what makes it a projection rather than a second implementation: a
+  fixture signed twice through `DocumentEditor::save_signed` with a stub
+  signer — in the test, so it runs without the fetched corpus — is read
+  through the C ABI and through `Document::signatures` /
+  `verify_signatures`, and every field name, sub-filter, `/Reason`,
+  `/Location`, `/Name`, coverage, span, CMS state, digest, signature check,
+  chain, signer subject/issuer, validity window and weakness must agree.
+  Signed twice because the second signature is what leaves the first
+  covering only a revision, which is the one shape that gives a verdict a
+  weakness to carry. Alongside it: a null document, a null handle on every
+  accessor, an index past the last signature (`NoSuchSignature`, and a span
+  or weakness index past the end as `BadArgument`, because the two are
+  different mistakes), an unsigned document answering "none" rather than
+  failing, an anchor that is not a certificate refused and not kept, the
+  instant ignored unless the flag says otherwise, and signatures outliving
+  the document they came from. The crate type-checks in CI on every commit (the bindings
   and fuzz crates are outside the workspace, so CI checks them explicitly —
   four fuzz targets once failed to compile for months because nothing did).
 - Smoke tests run against an *installed* artifact, never the source tree:

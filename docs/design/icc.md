@@ -72,6 +72,50 @@ change, and stage 2 slots into the seam stage 1 builds (an ICCBased group
 `/CS` becomes just another space the boundary conversion handles). So:
 groups first, CMM second.
 
+### What the corpus carries, measured before any of this was built
+
+Ruling 3 wants a capability scheduled by what real documents need. The census in
+`crates/tinker-pdf/tests/icc_census.rs` reads the header and tag table of every
+ICC profile in the four corpora — bytes only, sharing no code with the colour
+crate, so it cannot agree with a parser that is wrong.
+
+**2 313 of 4 605 files carry a profile**, 2 750 profiles in all. That is half
+the corpus, and a far higher reachability than anything else in this tier: JPX
+had 19 files and JBIG2 103.
+
+| | profiles |
+| --- | ---: |
+| matrix/TRC — three `XYZ` columns and three tone curves | **2 287** |
+| grey — a single `kTRC` and a white point, no matrix | 323 |
+| needing a LUT (`A2B*` / `B2A*`) | **140** |
+
+| | files |
+| --- | ---: |
+| every profile matrix/TRC | 1 932 |
+| carrying any LUT profile | 131 |
+
+**Two different numbers, and the difference matters.** 2 313 files carry a
+profile *stream*; only **449 name an `ICCBased` colour space** that paints
+anything. The gap is `/OutputIntent`: a PDF/A file declares the space it was
+prepared for whether or not any content is painted through it, which is why
+366 of the 449 and the great bulk of the 2 313 are veraPDF's. So "half the
+corpus carries a profile" is true and is not the reachability figure — the one
+that measures what this capability changes on a page is 449 files, 9.9 %,
+which is still the highest of any capability the corpus report tracks.
+
+So **matrix/TRC and grey together are 95 % of the profiles**, and the LUT
+machinery this document sizes at L on its own is the remaining 5 %. That splits
+the stage cleanly and puts the LUT milestone after the wiring rather than before
+it: a build that transforms matrix and grey profiles and refuses LUT ones by
+name is right about nineteen profiles in twenty.
+
+Two more numbers the milestones need. The device classes are `mntr` 2 428,
+`prtr` 316, `scnr` 5; the data spaces are RGB 2 286, GRAY 323, CMYK 138, Lab 2.
+And the versions are **v2 2 739, v4 9, v5 2** — so v2 is not a legacy case to
+tolerate, it is the case, and v4's structural additions are worth exactly nine
+files. The largest profile in the corpus is **718 672 bytes**, which is the
+figure the profile-size bound in `bounds_ledger.rs` has to clear.
+
 ### Stage 1: transparency-group colour spaces
 
 **Plumbing.** `tinker_pdf_content::Group` (interpret.rs:50) gains
@@ -106,21 +150,51 @@ three points: painting a source colour into a group whose space differs
 (source components → group space), initialising a non-isolated group's
 backdrop (parent space → group space, 11.4.4), and `close_group`
 compositing the finished buffer onto the parent (group space → parent
-space). In stage 1 the device relations already in `ColorSpace::to_rgb`
-supply the forward direction and their stated inverses (RGB→CMYK with
-`k = min(1-r, 1-g, 1-b)` undercolour removal) supply the backward one,
-named on the type as approximations; stage 2 replaces both ends with
-profile transforms without moving the call sites. Soft-mask luminosity
-(11.6.5.2) reads the group's own space, which fixes `/BC` handling for
-CMYK mask groups for free.
+space). In stage 1 the device relations of 8.6.4.4 supply the forward
+direction and their inverse — RGB→CMYK with `k = min(1-r, 1-g, 1-b)`
+undercolour removal — supplies the backward one; stage 2 replaces both ends
+with profile transforms without moving the call sites.
 
-**Proof.** New fixtures in `crates/tinker-pdf/tests/determinism.rs`, in
-pairs that differ only in the group's `/CS` — the same two colours
-multiplied inside an RGB group and inside a CMYK group, an isolated and a
-non-isolated variant, and one page-level `/Group` file. Each pair's two
-fingerprints are committed and asserted *unequal*, which is the injection
-test built into the fixture: revert to compositing in RGB and the pair
-renders identical, so the suite goes red.
+**That inverse is exact, not an approximation, and this paragraph used to say
+otherwise.** Maximum undercolour removal makes each channel's intermediate
+error smaller than half a level, so RGB→CMYK→RGB is the identity for all
+sixteen million colours — swept exhaustively as 32 896 `(v, max)` pairs, since
+`K` is fixed by the maximum and each channel is then independent. What *is*
+approximate is the other direction: a CMYK value that did not come from the
+inverse — a rich black — comes back as its pure-K equivalent. Nothing in this
+engine authors CMYK components (`resolve_color` flattens every source colour to
+sRGB at the resource seam), so every value in a group buffer originated from
+the inverse and round-trips. The day components cross that seam, this is the
+paragraph to revisit. Soft-mask luminosity (11.6.5.2) reads the group's
+own space — but **not for free, and not where this doc expected**. `to_mask`
+reads through `Canvas::pixel`, which already applies the group's own relation,
+so the space arrives on its own. The real defect was the *weighting*:
+11.6.5.2's luminosity is 11.3.5.3's `Lum`, and the code reached for
+`Color::luma`'s Rec.601 coefficients instead of the clause's 0.3/0.59/0.11 —
+the very pair `blend.rs` records as "the difference between matching a
+reference renderer and not". They differ by a level on a saturated colour and
+not at all on a grey, which is why no fixture had noticed. The `/BC` default
+needed nothing: `Rgb::BLACK` is right in every space, Lab included, because
+`L = 0` converts to RGB(0,0,0) like every other black.
+
+**Proof.** Pairs that differ only in the group's `/CS`, asserted *unequal*.
+
+**Not `Multiply`, which is what this paragraph first proposed.** Writing the
+ink split as `k = 1 - max(r,g,b)` makes the complemented components exactly
+`(R/max, G/max, B/max, max)`, so a separable blend `f` recombines to
+`R' = f(R1/max1, R2/max2) * f(max1, max2)`. For a product the two `max` terms
+cancel and the answer is `R1 * R2` — RGB's answer. A multiplied pair renders
+*identically* in both spaces and would have passed on a build that ignored
+`/CS` altogether. Measured differences, in levels of 255: Normal and Multiply
+0 when opaque, Darken 8.5, Lighten 29, Screen 36, Difference and Exclusion 255;
+every mode differs under partial alpha.
+
+So `Difference` carries the pair, and the invariance is kept as a *second*
+test rather than discarded: an opaque `Multiply` must agree in both spaces
+within a level. That is the assertion that catches a complement applied on one
+side of the blend and not the other — and it earned its place, because
+removing the complement leaves the `Difference` pair passing and fails only the
+invariance one.
 
 ### Stage 2: the CMM
 
@@ -202,12 +276,67 @@ and maximum CLUT grid volume, measured against real embedded profiles.
 | --- | --- | --- | --- |
 | 1 | `Group.space` resolved: form `/Group /CS` and page-level `/Group` read | Unit tests in resources.rs resolve `/CS` on both; a page-group fixture renders through `open_group` (asserted via its committed fingerprint changing when the page `/Group` is removed from the fixture) | S |
 | 2 | Group-space compositing: `CmykA8` buffers, complemented separable blends, `convert` at the three boundaries | The fixture pairs' fingerprints are committed and asserted unequal; injection (composite in RGB regardless) turns the suite red; `Lab` group `/CS` yields the typed warning | M |
-| 3 | `icc::Profile::parse`: header, tag table, `curv`/`para`/`wtpt`/`chad`/matrix tags, typed refusals | `icc_profile` fuzz target in the same PR runs clean on its seed corpus; malformed-profile tests hit each refusal variant; two bounds rows added to `bounds_ledger.rs` | M |
-| 4 | `Transform` for matrix/TRC profiles: compiled tables, s15.16 matrix, integer eval | `cargo xtask libm` passes with the new code in place; round-trip tests (sRGB profile → PCS → sRGB identity within 1/255); fixed known-answer tests for a committed test profile | M |
-| 5 | LUT profiles: `mft1`, `mft2`, `mAB `, `mBA `, integer CLUT interpolation | Known-answer tests against hand-computed CLUT lookups; fuzz corpus extended with LUT profiles, still clean | L |
-| 6 | `ColorSpace::Icc` wired: `ICCBased` arm, fallback warning, `iccbased` probe tag, rendering intents | New ICCBased fingerprints committed; a refused profile produces the ruling-10 warning in `Bitmap.warnings` (asserted); `corpus/report.json` shows the `iccbased` count after a nightly run | M |
-| 7 | Known-answer tables for matrix/TRC profiles | Every row's expected value is hand-computed from a named ICC.1 clause and carries that citation; the tables hold bit-exactly, not within a budget; injecting a wrong matrix coefficient or a wrong curve exponent is caught by a counted assertion | S |
+| 3 | `icc::Profile::parse` | **Done.** Header, tag table, `curv`/`para`/`XYZ` tags, ten typed refusals each reachable by a test; `icc_profile` fuzz target landed with it. Two changes from the plan: `chad` is not read (a matrix profile's columns are already adapted, so applying it again would adapt twice), and the two `bounds_ledger.rs` rows are **not** added — see the note below | M |
+| 4 | `Transform` for matrix/TRC profiles | **Done.** Compiled 4 096-entry tables, an s15.16 matrix that is the profile's columns already multiplied by XYZ-to-sRGB, integer evaluation; `cargo xtask libm` passes. The sRGB round trip holds within one level, and grey profiles ride the same path with one curve | M |
+| 5 | LUT profiles | **Done** for v2 mft1 and mft2, which a second census found to be 415 of the corpus 418 A2B tags — 409 mft2, 6 mft1, and 408 of them four channels to three. v4 mAB is three tags and refused by name. The grid is multilinear over its axes in integers, and both the v2 legacy Lab encoding and XYZ are read | L |
+| 6 | `ColorSpace::Icc` wired | **Done**, except rendering intents, which stay parsed and discarded. No ICCBased fingerprint was committed and none was needed: no existing fixture names an `ICCBased` space, so nothing moved, and the facade tests assert pixels directly. The fallback is asserted rather than warned — see the note below | M |
+| 7 | Known-answer tables | **Done**, in the form the arithmetic allows: the fixed-point encodings are pinned bit pattern by bit pattern, a linear curve's compiled ramp is pinned entry by entry across all 4 096, and two injections are counted (2 and 3 of 3 012) | S |
 | 8 | Corpus movement | `corpus/report.json` shows the `iccbased` count; the metamorphic rows of [render-verification](render-verification.md) still hold over the files carrying profiles, so the new conversion path did not break resolution or rotation coherence | S |
+
+### Rendering intents, measured and declined
+
+Scope bullet three and milestone 6 both ask for intents: `/Intent` on the
+`ICCBased` stream, the `ri` operator, and ExtGState `/RenderingIntent`. Ruling
+3 says a capability is built when the corpus asks for it, so the corpus was
+asked:
+
+| | files |
+| --- | ---: |
+| ExtGState `/RenderingIntent` | **0** |
+| the `ri` operator | 5 |
+| `/Intent` anywhere | 50, overwhelmingly 8.9.5.1's on an image |
+
+Nothing sets an ExtGState intent, and an intent only changes an answer at all
+for a LUT profile carrying more than one `A2B*` table. So what the corpus
+actually asks for is that the **default** be right, and 8.6.5.8 makes that
+`RelativeColorimetric` — which is `A2B1`, which is what the parser reaches for
+first. Selecting a non-default intent is left unbuilt and said so here, rather
+than built for five files that may not even exercise it.
+
+The wrinkle if it is ever wanted: an intent is graphics state and a transform
+is compiled per colour space, so a space would need one compiled transform per
+intent rather than one. That is the reason it is not a two-line change, and it
+is worth knowing before someone estimates it at two lines.
+
+### Three departures from the plan above, and why
+
+**No `RenderWarning` for a refused profile.** Milestone 6 asked for one under
+ruling 10. It is the wrong instrument here, and the census says why: 143 of
+2 750 profiles are refused, overwhelmingly because they need the `A2B*` tables,
+and they sit in 131 files that are otherwise fine. A warning fires per page and
+would appear on documents whose colours are *unchanged from what this engine has
+always produced* — the component-count reading is not a degradation from
+anything, it is the status quo the profile could have improved on. Ruling 10
+wants leniency reported so that "it opened" and "it opened cleanly" stay
+distinguishable; a profile that could not be read makes no page less correct
+than it was yesterday. The refusal is a typed `IccError` the caller matches on,
+and the corpus number is the report.
+
+**No `bounds_ledger.rs` rows.** `MAX_ICC_TAGS` and `MAX_ICC_BYTES` exist and
+fire, but the ledger's contract is heavier than a constant: each row publishes
+its figure in a markdown table in the constant's own doc, names a test that
+fires it without a clock, and clears three yardsticks. `MAX_ICC_BYTES` clears
+the corpus's largest profile (718 672 bytes) by a factor of nearly three, which
+is the measurement that matters and is recorded above; the ledger rows are a
+separate piece of work with its own discipline, and claiming them here without
+doing it would be the dressing-up milestone 7 of the JBIG2 plan was corrected
+for.
+
+**`chad` is not read.** The plan lists it. A matrix profile's `rXYZ`/`gXYZ`/
+`bXYZ` columns are already relative to the D50 connection space — that is what
+makes them addable — so applying the chromatic-adaptation tag on top would
+adapt a second time and shift every colour. It is read by profiles that need to
+recover the *unadapted* primaries, which nothing here does.
 
 ## Dependencies
 

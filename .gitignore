@@ -58,3 +58,6 @@ bindings/js/demo/node_modules/
 bindings/js/demo/package-lock.json
 # Playwright MCP scratch, and the screenshots a manual demo run leaves behind.
 .playwright-mcp/
+
+# Claude Code scratch: agent worktrees and tool results.
+.claude/

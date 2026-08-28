@@ -880,10 +880,26 @@ const DPI_BUDGET: f64 = 0.02;
 /// percent on 90 of them, and 0.29% at the ninetieth percentile, with one file
 /// at 14%.
 ///
-/// One percent sits above the noise and far below anything structural: a
+/// One percent sat above that noise and far below anything structural: a
 /// rotation applied to the geometry and not to the clip, or to the text and not
 /// to the images, moves whole regions rather than the rims of glyphs.
-const ROTATE_BUDGET: f64 = 0.01;
+///
+/// **Raised to two percent in August 2026, and the reason is that the noise it
+/// was measured against has changed.** Every figure above was taken when an
+/// image edge was quantised to whole device pixels: images alone did not
+/// anti-alias, so they alone transposed exactly, and the 0.29% was glyph rims
+/// and nothing else. Image edges are soft now
+/// (`docs/design/image-edges.md`), and a soft edge at a fractional offset does
+/// not transpose to the byte any more than a glyph's does — on long straight
+/// edges there is simply more of it. Two qpdf files sit at 1.7%: hundreds of
+/// separately placed, quarter-turned scans, measured at exactly 1.0% with hard
+/// edges and 1.7% with soft ones, which is the whole of the difference.
+///
+/// Two percent keeps the structural distance the original figure was chosen
+/// for — a misapplied rotation moves whole regions, tens of percent, and the
+/// one file at 14% is still caught — and it is the same figure `DPI_BUDGET`
+/// already carries for the same class of reason.
+const ROTATE_BUDGET: f64 = 0.02;
 
 /// How long a file may already have taken before its relations are skipped.
 ///
@@ -1272,7 +1288,7 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 3;
+const PROBE_VERSION: u32 = 4;
 
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
@@ -1520,6 +1536,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::UnsupportedPattern { .. } => "UnsupportedPattern".to_string(),
         W::HiddenOptionalContent { .. } => "HiddenOptionalContent".to_string(),
         W::GroupBudgetSpent { .. } => "GroupBudgetSpent".to_string(),
+        W::UnsupportedGroupSpace { space } => format!("UnsupportedGroupSpace({space})"),
         W::Cancelled => "Cancelled".to_string(),
     }
 }
@@ -1595,6 +1612,24 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
                     }
                 }
             }
+            b"ColorSpace" | b"CS" => {
+                // An `ICCBased` space names its profile in the second element
+                // of an array (8.6.5.5). Counted because it is the highest
+                // reachability in the engine — half the corpus's files carry a
+                // profile — so the number is worth watching rather than
+                // inferring from a warning that no longer fires.
+                if names_iccbased(cos, value, depth) {
+                    found.insert("iccbased");
+                }
+            }
+            b"ByteRange" => {
+                // 12.8.1: only a signature dictionary has one. Counted here
+                // rather than inferred from a warning, because reading a
+                // signature produces no warning when it succeeds — and the
+                // number is what says whether the reader is still finding
+                // them all.
+                found.insert("signature");
+            }
             b"ShadingType" => {
                 // 8.7.4.5.5-8: types 4 to 7 are the mesh shadings, which is
                 // exactly gap 10's scope. 1 to 3 are built.
@@ -1605,6 +1640,46 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
             _ => {}
         }
         scan_capabilities(cos, value, depth + 1, found);
+    }
+}
+
+/// Whether a `/ColorSpace` value names an `ICCBased` space.
+///
+/// The value may be the array itself, a reference to one, or a dictionary of
+/// named spaces each of which is one — which is why this walks rather than
+/// pattern-matching a single shape.
+fn names_iccbased(cos: &CosDocument, value: &Object, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let resolved;
+    let value = match value {
+        Object::Ref(reference) => match cos.get(*reference) {
+            Ok(object) => {
+                resolved = object;
+                &*resolved
+            }
+            Err(_) => return false,
+        },
+        other => other,
+    };
+    match value {
+        Object::Array(items) => {
+            let first = items
+                .first()
+                .and_then(Object::as_name)
+                .and_then(|n| cos.name_bytes(n).map(|b| b.to_vec()));
+            if first.as_deref() == Some(b"ICCBased") {
+                return true;
+            }
+            items
+                .iter()
+                .any(|item| names_iccbased(cos, item, depth + 1))
+        }
+        Object::Dict(dict) => dict
+            .iter()
+            .any(|(_, entry)| names_iccbased(cos, entry, depth + 1)),
+        _ => false,
     }
 }
 

@@ -8,7 +8,7 @@
 //! here is asserted as a *number* against a control render that differs in one
 //! key rather than as "it drew something".
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
 fn render(bytes: Vec<u8>) -> tinker_pdf::Bitmap {
     Document::open(bytes)
@@ -1013,4 +1013,339 @@ fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
         bitmap.data.iter().any(|&b| b != bitmap.data[0]),
         "something was drawn"
     );
+}
+
+// ---- the group's own colour space (11.6.6, 11.4.7) --------------------------
+
+/// A page whose single form XObject is a transparency group declaring `cs` as
+/// its `/Group /CS`, plus an optional page-level `/Group` in `page_cs`.
+fn group_in_space(cs: Option<&str>, page_cs: Option<&str>) -> Vec<u8> {
+    let group = match cs {
+        Some(cs) => format!("/Group << /S /Transparency /CS {cs} >>"),
+        None => "/Group << /S /Transparency >>".to_string(),
+    };
+    let page_group = match page_cs {
+        Some(cs) => format!("/Group << /S /Transparency /CS {cs} >>"),
+        None => String::new(),
+    };
+    let form = "0 0 1 rg 10 10 40 40 re f";
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+             2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+             3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60] \
+             {page_group} /Resources << /XObject << /Fm 5 0 R >> >> \
+             /Contents 4 0 R >> endobj\n\
+             4 0 obj << /Length 8 >> stream\n/Fm Do\nendstream endobj\n\
+             5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 60 60] \
+             {group} /Length {} >> stream\n{form}\nendstream endobj\n",
+            form.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b"trailer << /Root 1 0 R /Size 6 >>\n%%EOF\n");
+    out
+}
+
+fn group_space_warnings(bytes: Vec<u8>) -> Vec<String> {
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&RenderOptions::at_dpi(72.0));
+    bitmap
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            RenderWarning::UnsupportedGroupSpace { space } => Some(space.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A group declared in a space this build does not blend in says so**, and a
+/// group declared in one it does says nothing.
+///
+/// The pair is the assertion. A test that only checked the CMYK case would
+/// pass on a build that warned about every group, which would be a worse
+/// engine reporting a problem it does not have — and one that only checked the
+/// RGB case would pass on a build that never warned at all, which is the
+/// behaviour this replaces.
+///
+/// Grey is on the quiet side deliberately: 11.3.5's separable formulas applied
+/// per channel to `R = G = B` are the same arithmetic as applied to one grey
+/// channel, so reporting it would be reporting an approximation that is not
+/// one.
+#[test]
+fn a_group_space_this_build_cannot_blend_in_is_named_and_one_it_can_is_not() {
+    for quiet in [None, Some("/DeviceRGB"), Some("/DeviceGray")] {
+        assert!(
+            group_space_warnings(group_in_space(quiet, None)).is_empty(),
+            "{quiet:?} blends as RGB and must not be reported"
+        );
+    }
+
+    assert!(
+        group_space_warnings(group_in_space(Some("/DeviceCMYK"), None)).is_empty(),
+        "a CMYK form group composites in CMYK now, so there is nothing to report"
+    );
+    assert_eq!(
+        group_space_warnings(group_in_space(
+            Some("[/Lab << /WhitePoint [0.9505 1 1.089] >>]"),
+            None
+        )),
+        vec!["Lab".to_string()],
+        "Lab's components are not in the unit interval, so it still composites in RGB \n         and still says so"
+    );
+}
+
+/// A page whose own `/Group` declares `cs`, painting `backdrop` then `source`
+/// under `/BM /Difference`.
+///
+/// The page group, not a form's: 11.4.7 puts it on the page object, nothing
+/// invokes it, and it decides the space the *whole page* composites in.
+fn page_group_difference(cs: Option<&str>, backdrop: &str, source: &str) -> Vec<u8> {
+    let group = match cs {
+        Some(cs) => format!("/Group << /S /Transparency /CS {cs} >>"),
+        None => String::new(),
+    };
+    let content = format!("{backdrop} 0 0 60 60 re f\n/GS1 gs\n{source} 0 0 60 60 re f");
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+             2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+             3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60] {group} \
+             /Resources << /ExtGState << /GS1 << /BM /Difference >> >> >> \
+             /Contents 4 0 R >> endobj\n\
+             4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n",
+            content.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b"trailer << /Root 1 0 R /Size 5 >>\n%%EOF\n");
+    out
+}
+
+/// **A page-level `/Group /CS` decides the space the page composites in**
+/// (11.4.7), which nothing in this engine did before.
+///
+/// It reaches no `Do`, so a build that handled only form groups would render
+/// this identically to a page with no group at all — and look exactly like a
+/// build that handled it. The assertion is the pair: the same content under a
+/// CMYK page group and an RGB one must differ, and `Difference` is the mode
+/// that makes the difference visible rather than one that cancels (see
+/// `a_cmyk_group_blends_over_ink_and_an_rgb_group_over_light`).
+///
+/// The bitmap still comes back in RGB. 11.4.7's last step is that the page
+/// group is composited and *then* converted for the output device, and that is
+/// what the caller receives.
+#[test]
+fn a_page_level_group_decides_the_space_the_page_composites_in() {
+    let rgb = at(
+        &render(page_group_difference(
+            Some("/DeviceRGB"),
+            "1 1 1 rg",
+            "0 0 0 rg",
+        )),
+        30.0,
+        30.0,
+    );
+    let cmyk = at(
+        &render(page_group_difference(
+            Some("/DeviceCMYK"),
+            "1 1 1 rg",
+            "0 0 0 rg",
+        )),
+        30.0,
+        30.0,
+    );
+    let none = at(
+        &render(page_group_difference(None, "1 1 1 rg", "0 0 0 rg")),
+        30.0,
+        30.0,
+    );
+
+    assert_eq!(
+        rgb,
+        (255, 255, 255),
+        "white differenced with black, in light"
+    );
+    assert_eq!(cmyk, (0, 0, 0), "the same over ink");
+    assert_eq!(none, rgb, "no page group composites as the caller asked");
+    assert_ne!(
+        rgb, cmyk,
+        "the page's own /Group /CS did not reach the blend"
+    );
+}
+
+/// A space the page group asks for and this build cannot give it a buffer of
+/// is still reported, once.
+///
+/// `/Lab` is the only one left: its components are not in the unit interval, so
+/// 11.3.5's formulas have nothing to say about them. A scanned page can open
+/// hundreds of groups and a warning list is read by a person, so the report is
+/// per space rather than per group.
+#[test]
+fn a_space_the_page_group_cannot_have_is_reported_once() {
+    let lab = "[/Lab << /WhitePoint [0.9505 1 1.089] >>]";
+    assert_eq!(
+        group_space_warnings(group_in_space(Some(lab), Some(lab))),
+        vec!["Lab".to_string()],
+        "one line for a page group and a form group asking for the same space"
+    );
+    assert!(
+        group_space_warnings(group_in_space(Some("/DeviceCMYK"), Some("/DeviceCMYK"))).is_empty(),
+        "CMYK is honoured in both positions now"
+    );
+}
+
+/// A page whose form XObject is an isolated group in `cs`, painting `backdrop`
+/// and then `source` under `blend` at `alpha`.
+///
+/// Isolated throughout, so nothing outside the group takes part and the only
+/// difference between two calls is the space its two paints met in.
+fn blended_in_space(cs: &str, blend: &str, alpha: &str, backdrop: &str, source: &str) -> Vec<u8> {
+    let form = format!("{backdrop} 0 0 60 60 re f\n/GS1 gs\n{source} 0 0 60 60 re f");
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+             2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+             3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60] \
+             /Resources << /XObject << /Fm 5 0 R >> \
+             /ExtGState << /GS1 << /BM {blend} /ca {alpha} >> >> >> \
+             /Contents 4 0 R >> endobj\n\
+             4 0 obj << /Length 8 >> stream\n/Fm Do\nendstream endobj\n\
+             5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 60 60] \
+             /Group << /S /Transparency /I true /CS {cs} >> \
+             /Resources << /ExtGState << /GS1 << /BM {blend} /ca {alpha} >> >> >> \
+             /Length {} >> stream\n{form}\nendstream endobj\n",
+            form.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b"trailer << /Root 1 0 R /Size 6 >>\n%%EOF\n");
+    out
+}
+
+/// The middle of the page, which every fixture above paints solid.
+fn centre(bytes: Vec<u8>) -> (u8, u8, u8) {
+    at(&render(bytes), 30.0, 30.0)
+}
+
+/// **A group composites in the space it declared**, and the proof is a pair
+/// that differs in nothing else.
+///
+/// `Difference` is the mode, and the choice is not arbitrary — it is the one
+/// the design doc got wrong. Writing `k = 1 - max(r,g,b)` for the ink split
+/// makes the complemented components exactly `(R/max, G/max, B/max, max)`, so
+/// recombining after a separable blend `f` gives
+/// `R' = f(R1/max1, R2/max2) * f(max1, max2)`. For `Multiply`, where `f` is a
+/// product, that collapses to `R1 * R2` — **identical** to blending in RGB. The
+/// design doc proposed exactly that fixture, and it would have passed on a
+/// build that ignored `/CS` entirely.
+///
+/// `Difference` does not collapse: white under black is white in RGB and black
+/// in CMYK, 255 levels apart, because the ink channel differences where the
+/// light channels do not.
+#[test]
+fn a_cmyk_group_blends_over_ink_and_an_rgb_group_over_light() {
+    let rgb = centre(blended_in_space(
+        "/DeviceRGB",
+        "/Difference",
+        "1",
+        "1 1 1 rg",
+        "0 0 0 rg",
+    ));
+    let cmyk = centre(blended_in_space(
+        "/DeviceCMYK",
+        "/Difference",
+        "1",
+        "1 1 1 rg",
+        "0 0 0 rg",
+    ));
+
+    assert_eq!(rgb, (255, 255, 255), "|1 - 0| is 1: white, in light");
+    assert_eq!(cmyk, (0, 0, 0), "|0 - 1| is 1 of black ink: black");
+    assert_ne!(
+        rgb, cmyk,
+        "the group's /CS did not reach the blend, which is the whole feature"
+    );
+}
+
+/// **Opaque `Multiply` is invariant**, and that is a property rather than a
+/// disappointment.
+///
+/// It is the algebra above run forwards: the two `max` terms cancel exactly.
+/// So this pair is the control that says the CMYK path produces a *different*
+/// answer only where the space genuinely differs, rather than noise — and it
+/// is the assertion that catches a complement applied on one side of the blend
+/// and not the other, which no unequal-pair fixture could.
+#[test]
+fn an_opaque_multiply_is_the_same_in_either_space() {
+    let rgb = centre(blended_in_space(
+        "/DeviceRGB",
+        "/Multiply",
+        "1",
+        "0.8 0.4 0.2 rg",
+        "0.3 0.6 0.9 rg",
+    ));
+    let cmyk = centre(blended_in_space(
+        "/DeviceCMYK",
+        "/Multiply",
+        "1",
+        "0.8 0.4 0.2 rg",
+        "0.3 0.6 0.9 rg",
+    ));
+    for (a, b) in [(rgb.0, cmyk.0), (rgb.1, cmyk.1), (rgb.2, cmyk.2)] {
+        assert!(
+            a.abs_diff(b) <= 1,
+            "opaque Multiply must agree in both spaces: {rgb:?} against {cmyk:?}"
+        );
+    }
+}
+
+/// **A `/Lab` group is still composited in RGB**, and a build that quietly
+/// started blending over its components would be blending numbers that are not
+/// in the unit interval.
+#[test]
+fn a_lab_group_still_composites_in_rgb_and_says_so() {
+    let lab = centre(blended_in_space(
+        "[/Lab << /WhitePoint [0.9505 1 1.089] >>]",
+        "/Difference",
+        "1",
+        "1 1 1 rg",
+        "0 0 0 rg",
+    ));
+    let rgb = centre(blended_in_space(
+        "/DeviceRGB",
+        "/Difference",
+        "1",
+        "1 1 1 rg",
+        "0 0 0 rg",
+    ));
+    assert_eq!(lab, rgb, "a Lab group falls back to RGB compositing");
+}
+
+/// **A page cannot come back in CMYK**, however it is asked for.
+///
+/// `CmykA8` exists so a group can composite over ink; it is not a shape a
+/// `Bitmap` is handed back in, because `Bitmap` says how many components it
+/// has and nothing about what they mean. A consumer reading three bytes as
+/// red, green and blue — this repository's own `examples/render.rs` writes a
+/// PPM exactly that way — would emit cyan, magenta and yellow under those
+/// names and produce a picture that looks almost right.
+#[test]
+fn a_page_asked_for_in_cmyk_comes_back_in_rgb() {
+    let doc = Document::open(group_in_space(Some("/DeviceCMYK"), None)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&RenderOptions {
+        format: tinker_pdf::PixelFormat::CmykA8,
+        ..RenderOptions::default()
+    });
+    assert_eq!(bitmap.format, tinker_pdf::PixelFormat::Rgba8);
+    assert_eq!(bitmap.components(), 4);
 }

@@ -455,7 +455,11 @@ fn hash(text: &str) -> u64 {
 
 /// The record format's version. A record announcing anything else is refused
 /// rather than half-read.
-const PROBE_VERSION: u32 = 3;
+///
+/// Version 4 adds the `signature` capability: reading a signature produces no
+/// warning when it succeeds, so a count is the only thing that can say whether
+/// the reader is still finding them all.
+pub const PROBE_VERSION: u32 = 4;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -630,7 +634,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 3\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+    const GOOD: &str = "probe 4\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
                         cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
                         strict semantics 2\nstrict kind annot-rect-unordered 2\n\
                         warn render:UnreadableFont 2\nms 40\ndone\n";
@@ -694,22 +698,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 3\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 4\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 3", "probe 7")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 4", "probe 7")).is_none());
         // And the version the strict pass replaced: a record without that
         // pass means something else by the same keys.
-        assert!(parse_record(&GOOD.replace("probe 3", "probe 1")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 3\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 4", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 4\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 3\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 4\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -722,7 +726,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 3\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 4\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -731,7 +735,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 3\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 4\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),
@@ -745,7 +749,7 @@ mod tests {
     #[test]
     fn a_metamorphic_verdict_reads_its_three_states() {
         let text = concat!(
-            "probe 3\n",
+            "probe 4\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
@@ -783,7 +787,7 @@ mod tests {
     #[test]
     fn an_unknown_metamorphic_verdict_is_not_a_hold() {
         let text = concat!(
-            "probe 3\n",
+            "probe 4\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",

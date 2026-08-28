@@ -32,17 +32,42 @@ use crate::optional::OptionalContent;
 /// one costs the extraction attempt once rather than on every occurrence.
 type OutlineCache = HashMap<(u64, u32), Option<Arc<Outline>>>;
 
+/// Compiled ICC transforms, by the profile stream's object number and
+/// generation.
+///
+/// The `None` is cached as deliberately as the `Some`: a profile that will
+/// not parse must be refused once rather than re-read at every `cs`.
+type IccCache = HashMap<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transform>>>;
+
 /// Everything one page's rendering needs from its resources.
 pub struct PageResources {
     doc: Arc<CosDocument>,
     fonts: HashMap<Vec<u8>, Arc<cos_font::Font>>,
     font_ids: HashMap<Vec<u8>, u64>,
     /// The embedded font program of each font, by the id the interpreter uses.
-    programs: HashMap<u64, Arc<Vec<u8>>>,
+    ///
+    /// **Decoded on first use, not at construction.** A font program is an
+    /// inflate of a stream that is routinely a megabyte, and since a form
+    /// XObject's own `/Resources` became a scope of their own there is one of
+    /// these per form rather than one per page — a document of nine hundred
+    /// objects went from 537 ms to 24.7 s doing it eagerly, and one corpus
+    /// file stopped making progress at all. Most scopes are opened to resolve
+    /// an image or a pattern and never ask for a glyph.
+    ///
+    /// `None` is cached as firmly as a hit: a font with no embedded program
+    /// must not be looked up again on every glyph.
+    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
     /// Which glyph a code selects, per font, resolved lazily.
     resources: Option<Dict>,
     /// Decoded images, kept because a page may draw one many times.
     images: Mutex<HashMap<Vec<u8>, Option<Arc<DecodedImage>>>>,
+    /// Compiled ICC transforms, by the profile stream's object number.
+    ///
+    /// A transform is three 4 096-entry tables, and a page may name the same
+    /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
+    /// is cached too: a profile that would not parse must be refused once
+    /// rather than re-read and re-refused a thousand times.
+    icc: Mutex<IccCache>,
     /// Outlines already extracted, keyed by font and code.
     outlines: RwLock<OutlineCache>,
     /// Resource names that named no font this build could resolve, and — when
@@ -53,6 +78,19 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
+    /// Nested scopes already built, by the form's own object number.
+    ///
+    /// A page may invoke one form a thousand times — a stamp, a rule, a
+    /// letterhead — and building its resources is not cheap: every font in the
+    /// dictionary is parsed and the optional-content configuration is bound
+    /// again. Two pdf.js corpus files stopped making progress at all when this
+    /// was rebuilt per invocation, which is what put the cache here.
+    ///
+    /// Keyed by the XObject's reference rather than by the resource name,
+    /// because two names can reach one form and a name means nothing outside
+    /// the dictionary it was looked up in. `None` is cached too: "this form
+    /// brought no resources" is an answer worth not recomputing.
+    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
     /// The host's substitute faces, kept so a resource dictionary *inside*
     /// this one can be read with the same configuration.
     ///
@@ -191,6 +229,28 @@ fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
     out
 }
 
+/// 11.6.6's `/CS`, reduced to the blending space a compositor needs.
+///
+/// By component count, plus `/Lab` named separately because its components are
+/// not in `0..1` and no count would say so. An `ICCBased` space reaches here as
+/// `ColorSpace::Approximated`, which is 8.6.5.5's alternate-space reading and
+/// carries exactly the count this needs; what the profile would have said about
+/// the *meaning* of those components is `docs/design/icc.md`'s.
+fn group_space(space: tinker_pdf_color::ColorSpace) -> tinker_pdf_content::GroupSpace {
+    use tinker_pdf_content::GroupSpace;
+    if matches!(space, tinker_pdf_color::ColorSpace::Lab { .. }) {
+        return GroupSpace::Lab;
+    }
+    match space.components() {
+        1 => GroupSpace::Gray,
+        4 => GroupSpace::Cmyk,
+        // Three, or anything a group has no business declaring, reads as RGB —
+        // which is what this build composites in, so an unexpected count is
+        // the case that needs no warning rather than the one that does.
+        _ => GroupSpace::Rgb,
+    }
+}
+
 impl PageResources {
     /// The font resource names that could not be resolved.
     #[must_use]
@@ -219,7 +279,6 @@ impl PageResources {
     ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
-        let mut programs = HashMap::new();
         let mut resources = None;
 
         if let Some(dict) = page.resources.as_ref() {
@@ -228,11 +287,6 @@ impl PageResources {
                 if let Some(bytes) = doc.name_bytes(name) {
                     let key = bytes.to_vec();
                     let id = u64::from(name.id());
-                    if let Some(program) =
-                        program_for(doc, &key, dict, &font, provider.map(|p| &**p))
-                    {
-                        programs.insert(id, program);
-                    }
                     font_ids.insert(key.clone(), id);
                     fonts.insert(key, font);
                 }
@@ -243,15 +297,82 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs,
+            programs: Mutex::new(HashMap::new()),
+            form_scopes: Mutex::new(HashMap::new()),
             resources,
             images: Mutex::new(HashMap::new()),
+            icc: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
             provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
+    }
+
+    /// The compiled transform for an `ICCBased` profile stream, or `None`
+    /// where the profile cannot be made into one.
+    ///
+    /// `None` covers three different things, and deliberately does not
+    /// distinguish them here: a stream that will not decode, a profile
+    /// `Profile::parse` refuses by name, and a profile whose model has no
+    /// closed form yet — the `A2B*` lookup tables, which are 140 of the
+    /// corpus's 2 750. All three land on 8.6.5.5's alternate-space reading,
+    /// which is what the caller was doing before profiles were read at all, so
+    /// none of them costs a page anything it had.
+    fn icc_transform(
+        &self,
+        reference: tinker_pdf_cos::ObjRef,
+    ) -> Option<Arc<tinker_pdf_color::icc::Transform>> {
+        let key = (reference.num, reference.gen);
+        if let Ok(cache) = self.icc.lock() {
+            if let Some(found) = cache.get(&key) {
+                return found.clone();
+            }
+        }
+        let compiled = self
+            .doc
+            .stream_decoded(reference)
+            .ok()
+            .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
+            .as_ref()
+            .and_then(tinker_pdf_color::icc::Transform::compile)
+            .map(Arc::new);
+        if let Ok(mut cache) = self.icc.lock() {
+            cache.insert(key, compiled.clone());
+        }
+        compiled
+    }
+
+    /// The page's own transparency group space (11.4.7), if it declares one.
+    ///
+    /// A page-level `/Group` is not a form's: nothing invokes it, so there is
+    /// no `Do` for the interpreter to notice and no `Group` value to carry.
+    /// 11.4.7 makes it the space the *page* composites in, which is why it is
+    /// read here and asked for by `Page::render` rather than arriving through
+    /// the content stream like every other group.
+    #[must_use]
+    pub fn page_group_space(
+        &self,
+        page: &cos_pages::Page,
+    ) -> Option<tinker_pdf_content::GroupSpace> {
+        let object = self.doc.get(page.reference).ok()?;
+        let dict = object.as_dict()?;
+        let group = self.doc.resolve_key(dict, self.doc.intern(b"Group"));
+        let group = group.as_dict()?;
+        // 11.6.6: the subtype is checked rather than the key's presence, for
+        // the reason `form_from` checks it — 8.10.3's `/S /Reference` group is
+        // a different thing wearing the same key.
+        let subtype = self
+            .doc
+            .resolve_key(group, self.doc.intern(b"S"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Transparency" {
+            return None;
+        }
+        let cs = group.get(self.doc.intern(b"CS")).cloned()?;
+        self.parse_space(&cs, 0).map(group_space)
     }
 
     /// Reads a resource dictionary that is not a page's.
@@ -267,16 +388,11 @@ impl PageResources {
     ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
-        let mut programs = HashMap::new();
 
         for (name, font) in cos_font::from_resources(doc, &dict) {
             if let Some(bytes) = doc.name_bytes(name) {
                 let key = bytes.to_vec();
                 let id = u64::from(name.id());
-                if let Some(program) = program_for(doc, &key, &dict, &font, provider.map(|p| &**p))
-                {
-                    programs.insert(id, program);
-                }
                 font_ids.insert(key.clone(), id);
                 fonts.insert(key, font);
             }
@@ -286,9 +402,11 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs,
+            programs: Mutex::new(HashMap::new()),
+            form_scopes: Mutex::new(HashMap::new()),
             resources: Some(dict),
             images: Mutex::new(HashMap::new()),
+            icc: Mutex::new(HashMap::new()),
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
@@ -394,6 +512,53 @@ impl PageResources {
         }))
     }
 
+    /// The `/Resources` a form XObject brings with it (8.10.1).
+    ///
+    /// A form written beside one document and pasted into another carries the
+    /// only dictionary its names resolve in — which is why a stamp annotation
+    /// whose appearance invokes a second form can name an image the page has
+    /// never heard of. A form that omits the key resolves against the invoking
+    /// scope, which is what its producer is relying on.
+    ///
+    /// The `provider` is carried into the nested scope for the reason the
+    /// tiling path carries it: without it a form would be the one place in a
+    /// document where a `FontProvider` the caller installed does not apply.
+    fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+        let (dict, reference) = self.xobject(name)?;
+        let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
+        if let Ok(cache) = self.form_scopes.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return hit.clone();
+            }
+        }
+        let built = self.build_form_resources(&dict);
+        if let Ok(mut cache) = self.form_scopes.lock() {
+            cache.insert(key, built.clone());
+        }
+        built
+    }
+
+    fn build_form_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
+        let subtype = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Form" {
+            return None;
+        }
+        let own = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Resources"))
+            .as_dict()
+            .cloned()?;
+        Some(Arc::new(PageResources::from_dict(
+            &self.doc,
+            own,
+            self.provider.as_ref(),
+        )))
+    }
+
     fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_ref()?;
         let value = self.doc.resolve_key(resources, self.doc.intern(b"XObject"));
@@ -448,16 +613,31 @@ impl PageResources {
 
         match family.as_ref() {
             b"ICCBased" => {
-                // 8.6.5.5: a reader may use the alternate space, and the
-                // component count is what the data's shape actually is.
+                let reference = items.get(1).and_then(Object::as_objref);
                 let stream = items.get(1).map(|o| self.doc.resolve(o))?;
                 let n = stream
                     .as_dict()
                     .and_then(|d| d.get_int(self.doc.intern(b"N")))
                     .unwrap_or(3);
-                Some(ColorSpace::Approximated {
-                    components: n.clamp(1, 4) as usize,
-                })
+                let components = n.clamp(1, 4) as usize;
+
+                // The profile itself, if it can be read. Cached by object
+                // number: a page naming the same space at a thousand `cs`
+                // operators compiles it once.
+                if let Some(reference) = reference {
+                    if let Some(transform) = self.icc_transform(reference) {
+                        return Some(ColorSpace::Icc {
+                            transform,
+                            components,
+                        });
+                    }
+                }
+
+                // 8.6.5.5: a reader may use the alternate space, and the
+                // component count is what the data's shape actually is. This
+                // is where a profile that would not parse lands, which is
+                // exactly where it landed before profiles were read.
+                Some(ColorSpace::Approximated { components })
             }
             b"Indexed" | b"I" => {
                 let base = self.parse_space(items.get(1)?, depth + 1)?;
@@ -857,6 +1037,10 @@ impl FontSource for PageResources {
         Some((content, matrix))
     }
 
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+        self.form_resources(name)
+    }
+
     fn form(&self, name: &[u8]) -> Option<tinker_pdf_content::Form> {
         let (dict, reference) = self.xobject(name)?;
         let subtype = self
@@ -1084,6 +1268,10 @@ impl FontSource for PageResources {
 }
 
 impl GlyphSource for PageResources {
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+        self.form_resources(name)
+    }
+
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         if let Ok(cache) = self.outlines.read() {
             if let Some(hit) = cache.get(&(font_id, code)) {
@@ -1357,6 +1545,17 @@ impl PageResources {
                         .resolve_key(group, self.doc.intern(b"K"))
                         .as_bool()
                         .unwrap_or(false),
+                    // 11.6.6: `/CS` names the space the group's contents are
+                    // composited in. Resolved through the same seam every
+                    // other colour space goes through — the `/BC` backdrop of
+                    // a luminosity soft mask already read this key, and read
+                    // it this way — then reduced to the shape a compositor
+                    // needs.
+                    space: group
+                        .get(self.doc.intern(b"CS"))
+                        .cloned()
+                        .and_then(|cs| self.parse_space(&cs, 0))
+                        .map(group_space),
                 })
             });
 
@@ -1516,9 +1715,32 @@ impl PageResources {
         }
     }
 
+    /// The embedded font program behind a font id, decoded once.
+    fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
+        if let Ok(cache) = self.programs.lock() {
+            if let Some(hit) = cache.get(&font_id) {
+                return hit.clone();
+            }
+        }
+        let name = self
+            .font_ids
+            .iter()
+            .find(|(_, id)| **id == font_id)
+            .map(|(name, _)| name.clone());
+        let built = name.as_ref().and_then(|name| {
+            let font = self.fonts.get(name)?;
+            let resources = self.resources.as_ref()?;
+            program_for(&self.doc, name, resources, font, self.provider.as_deref())
+        });
+        if let Ok(mut cache) = self.programs.lock() {
+            cache.insert(font_id, built.clone());
+        }
+        built
+    }
+
     /// Pulls one glyph's outline out of an embedded font program.
     fn extract_outline(&self, font_id: u64, code: u32) -> Option<Outline> {
-        let program = self.programs.get(&font_id)?;
+        let program = self.program(font_id)?;
 
         // The font's own character mapping decides which glyph a code means.
         let name = self
@@ -1530,7 +1752,7 @@ impl PageResources {
         let text = font.text_of(code);
         let ch = text.chars().next();
 
-        if let Some(sfnt) = Sfnt::parse(program) {
+        if let Some(sfnt) = Sfnt::parse(&program) {
             // An OpenType font may carry its outlines in a `CFF ` table
             // instead of `glyf` — that is what the `OTTO` tag means. The sfnt
             // parser accepts `OTTO`, so such a font took this branch, found
@@ -1581,7 +1803,7 @@ impl PageResources {
             return Some(scale(&outline, 1.0 / units));
         }
 
-        if let Some(cff) = Cff::parse(program) {
+        if let Some(cff) = Cff::parse(&program) {
             return self.cff_outline(&cff, font, &name, code);
         }
 
@@ -1589,7 +1811,7 @@ impl PageResources {
         // reached the two parsers above, both declined them correctly, and the
         // glyph was silently absent — an embedded Type 1 font drew nothing and
         // said nothing about why.
-        if let Some(type1) = Type1::parse(program) {
+        if let Some(type1) = Type1::parse(&program) {
             // Type 1 addresses glyphs by *name*: through the encoding the PDF
             // font dictionary specifies, or through the font's own built-in
             // one. The index is not a glyph id.
