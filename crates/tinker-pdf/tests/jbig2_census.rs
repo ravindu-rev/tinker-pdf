@@ -103,6 +103,12 @@ struct Tally {
     /// `SDREFAGG`, or `SBHUFF` with `SBREFINE`. Refused by name, so the count
     /// is what decides whether that refusal is worth closing.
     huffman_refinement: u32,
+    /// 7.4.4.1.2's refinement table selectors on a Huffman refining text
+    /// region: `SBHUFFRDW`, `RDH`, `RDX`, `RDY` (0 = B.14, 1 = B.15,
+    /// 3 = custom) and `SBHUFFRSIZE` (0 = B.1, 1 = custom). Which of these
+    /// appear is what decides which of Annex B has to exist.
+    refine_selectors: [[u32; 4]; 4],
+    rsize_selector: [u32; 2],
     /// Generic refinement region segments (types 40, 42, 43) by template
     /// (7.4.7.2 bit 0), and how many of them set TPGRON (bit 1).
     grtemplate: [u32; 2],
@@ -149,6 +155,14 @@ impl Tally {
         }
         self.tpgron += other.tpgron;
         self.huffman_refinement += other.huffman_refinement;
+        for (row, other_row) in self.refine_selectors.iter_mut().zip(other.refine_selectors) {
+            for (slot, count) in row.iter_mut().zip(other_row) {
+                *slot += count;
+            }
+        }
+        for (slot, count) in self.rsize_selector.iter_mut().zip(other.rsize_selector) {
+            *slot += count;
+        }
         for (slot, count) in self.corners.iter_mut().zip(other.corners) {
             *slot += count;
         }
@@ -284,7 +298,22 @@ fn census_stream(bytes: &[u8], tally: &mut Tally) {
                     // pixels, then the instance count.
                     let mut ok = Some(());
                     if flags & 0x0001 != 0 {
-                        ok = data.skip(2);
+                        // 7.4.4.1.2's selectors, and for a refining region the
+                        // four refinement tables plus the size table are the
+                        // part that decides what Annex B must carry.
+                        match data.u16() {
+                            Some(selectors) => {
+                                if flags & 0x0002 != 0 {
+                                    for (index, shift) in [6u32, 8, 10, 12].iter().enumerate() {
+                                        let value = ((selectors >> shift) & 0x0003) as usize;
+                                        tally.refine_selectors[index][value] += 1;
+                                    }
+                                    let rsize = ((selectors >> 14) & 0x0001) as usize;
+                                    tally.rsize_selector[rsize] += 1;
+                                }
+                            }
+                            None => ok = None,
+                        }
                     }
                     if ok.is_some() && flags & 0x0002 != 0 && (flags >> 15) & 1 == 0 {
                         ok = data.skip(4);
@@ -580,6 +609,19 @@ fn census_of_the_corpus_jbig2() {
         "refinement over Huffman        {:>6}   in {:>3} files",
         total.huffman_refinement,
         files_with(|t| t.huffman_refinement)
+    );
+    for (name, row) in ["SBHUFFRDW", "SBHUFFRDH", "SBHUFFRDX", "SBHUFFRDY"]
+        .iter()
+        .zip(total.refine_selectors)
+    {
+        println!(
+            "  {name:<10} B.14 {:>3}  B.15 {:>3}  reserved {:>3}  custom {:>3}",
+            row[0], row[1], row[2], row[3]
+        );
+    }
+    println!(
+        "  SBHUFFRSIZE  B.1 {:>3}  custom {:>3}",
+        total.rsize_selector[0], total.rsize_selector[1]
     );
     println!(
         "refinement regions, template 0 {:>6}   template 1 {:>6}",

@@ -39,7 +39,7 @@ const GROUND_TRUTH: &str = "bitmap-template1.pdf";
 /// the two templates, the two roads a reference arrives by, typical prediction
 /// on each template, a non-nominal adaptive pair, and refinement reached
 /// through a symbol dictionary rather than a region.
-const VARIANTS: [(&str, &str); 10] = [
+const VARIANTS: [(&str, &str); 12] = [
     (
         "bitmap-refine.pdf",
         "template 0, over an intermediate region",
@@ -73,6 +73,14 @@ const VARIANTS: [(&str, &str); 10] = [
     (
         "bitmap-symbol-refine.pdf",
         "6.4.11: a text region refining its own symbols",
+    ),
+    (
+        "bitmap-symbol-texthuffrefine.pdf",
+        "6.4.11 over Huffman, with the deltas through table B.14",
+    ),
+    (
+        "bitmap-symbol-texthuffrefineB15.pdf",
+        "the same, through B.15 — the two tables the selector chooses between",
     ),
 ];
 

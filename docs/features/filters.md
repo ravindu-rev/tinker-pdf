@@ -109,10 +109,11 @@ Huffman dictionary.
 Measured over the corpus's 103 JBIG2-bearing files in August 2026, counting
 files whose render reports any JBIG2 warning: **65 before this lineage landed,
 52 after the arithmetic variant, 49 after the Huffman one, and 35 after
-refinement**, and none gained one. The 35 that remain break down as 16 halftone,
-10 Huffman refinement, 4 transposed text regions, 4 custom-table or
-unknown-size cases and one retained context — so no single refusal is most of
-them, and each is named in the table below with its own count. Annex B's tables are reconstructed rather than transcribed, and
+refinement, and 33 once 6.4.11's Huffman envelope and tables B.14 and B.15
+followed**, and none gained one. Those that remain are named in the table
+below with their own counts: the halftone lineage is the largest single one,
+and the rest are custom code tables, transposed regions, a retained context,
+and the half of Huffman refinement that goes through a symbol dictionary. Annex B's tables are reconstructed rather than transcribed, and
 what holds them to the standard is Annex H coding the same two symbols twice —
 once with `SDHUFF`, once through the MQ coder — which decode byte-identically
 ([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
@@ -190,7 +191,7 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| JBIG2 transposed text regions, custom code tables (type 53), and refinement over the Huffman road (`SDHUFF` with `SDREFAGG`, `SBHUFF` with `SBREFINE`) | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF, SBHUFF, SDREFAGG, SBREFINE and segment types 40/42/43 have all left this row.** What is left is Huffman refinement (**11 segments in 10 files** — 6.4.11's `BMSIZE` envelope and tables B.14/B.15, neither of which this file carries), transposed text regions (4 files), and type 53 custom tables | [ROADMAP](../ROADMAP.md) |
+| JBIG2 transposed text regions, custom code tables (type 53), and refinement over the Huffman road (`SDHUFF` with `SDREFAGG`, `SBHUFF` with `SBREFINE`) | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF, SBHUFF, SDREFAGG, SBREFINE and segment types 40/42/43 have all left this row.** What is left is refinement over Huffman **through a symbol dictionary** (`SDHUFF` with `SDREFAGG`, 3 files) — written, and refused because one of its three fixtures renders wrongly for a reason that traces into 6.5.9's collective path rather than into the refinement — transposed text regions (4 files), and type 53 custom tables (5 of the refining Huffman regions select one). The text region's own Huffman refinement decodes; its tables **B.14 and B.15** are reconstructed and only their zero entry is exercised by any fixture, so a non-zero refinement delta is refused rather than decoded through the unverified part | [ROADMAP](../ROADMAP.md) |
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | [ROADMAP](../ROADMAP.md) |
 | JBIG2 halftone regions and pattern dictionaries (6.6, 6.7; types 16, 20, 22, 23) | `Warning::Jbig2SegmentSkipped` | A third lineage; 16 corpus files carry it and nothing else | [ROADMAP](../ROADMAP.md) |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |

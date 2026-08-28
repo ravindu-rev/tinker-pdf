@@ -499,6 +499,14 @@ impl<'a> BitReader<'a> {
     const fn byte_position(&self) -> usize {
         self.at.div_ceil(8)
     }
+
+    /// Continue reading at `byte`, which 6.4.11 needs after a refinement:
+    /// its arithmetic sub-stream is `BMSIZE` bytes that the bit reader must
+    /// step over rather than decode.
+    fn seek_byte(&mut self, byte: usize) -> Option<()> {
+        self.at = byte.checked_mul(8)?;
+        (byte <= self.bytes.len()).then_some(())
+    }
 }
 
 /// What one line of an Annex B table says.
@@ -1367,7 +1375,18 @@ fn symbol_dictionary(
 const MAX_JBIG2_TEXT_INSTANCES: u32 = 1 << 22;
 
 /// The tables a Huffman text region reads its coordinates through (7.4.4.1.2).
+struct RefineTables {
+    rdw: HuffTable,
+    rdh: HuffTable,
+    rdx: HuffTable,
+    rdy: HuffTable,
+    rsize: HuffTable,
+}
+
 struct TextTables {
+    /// 7.4.4.1.2's four refinement tables and its size table, present only for
+    /// a region that refines.
+    refine: Option<RefineTables>,
     fs: HuffTable,
     ds: HuffTable,
     dt: HuffTable,
@@ -1376,7 +1395,7 @@ struct TextTables {
 impl TextTables {
     /// Picks them from the selector field, refusing the custom-table settings
     /// clause 7.4.13 defines and nothing here reads yet.
-    fn select(selectors: u16, warnings: &mut Vec<Warning>) -> Option<TextTables> {
+    fn select(selectors: u16, refine: bool, warnings: &mut Vec<Warning>) -> Option<TextTables> {
         let refuse = |warnings: &mut Vec<Warning>| {
             note(warnings, Warning::Jbig2VariantSkipped);
             None
@@ -1398,7 +1417,36 @@ impl TextTables {
             2 => table_b13(),
             _ => return refuse(warnings),
         };
-        Some(TextTables { fs, ds, dt })
+        // 7.4.4.1.2's bits 6 to 14. Only a refining region reads them, and a
+        // selector of 3 is clause 7.4.13's custom table — a separate refusal,
+        // and the reason three of the corpus's eight Huffman refining regions
+        // stay refused after this one lands.
+        let refine = if refine {
+            let table = |shift: u32| match (selectors >> shift) & 0x0003 {
+                0 => Some(table_b14()),
+                1 => Some(table_b15()),
+                _ => None,
+            };
+            let (Some(rdw), Some(rdh), Some(rdx), Some(rdy)) =
+                (table(6), table(8), table(10), table(12))
+            else {
+                return refuse(warnings);
+            };
+            let rsize = match (selectors >> 14) & 0x0001 {
+                0 => table_b1(),
+                _ => return refuse(warnings),
+            };
+            Some(RefineTables {
+                rdw,
+                rdh,
+                rdx,
+                rdy,
+                rsize,
+            })
+        } else {
+            None
+        };
+        Some(TextTables { refine, fs, ds, dt })
     }
 }
 
@@ -1472,6 +1520,63 @@ fn symbol_id_codes(bits: &mut BitReader<'_>, symbols: usize) -> Option<HuffTable
 mod corner {
     pub const TOPLEFT: u8 = 1;
     pub const TOPRIGHT: u8 = 3;
+}
+
+/// **Table B.14**, the narrow table for a refinement's size and position
+/// deltas (`SBHUFFRDW` and its three siblings).
+///
+/// Five values and nothing else: a refinement that moves a symbol by more than
+/// two pixels in any direction is coded through B.15 instead.
+///
+/// # Only its first line is evidence; the rest is reconstruction
+///
+/// Like every table here it is reconstructed rather than transcribed, and
+/// unlike B.1 to B.13 **almost none of it is adjudicated by anything**. The
+/// two corpus files that reach it code every delta as zero, so the only line
+/// any fixture exercises is the one-bit code for 0. Counted injection says so
+/// plainly: changing a prefix length, a range low or a range length anywhere
+/// else in this table breaks no test in the tree.
+///
+/// What that buys is still worth having, because the zero line being one bit
+/// makes "is this delta zero" a single-bit question that no error elsewhere
+/// in the table can affect. So [`text_region_procedure`] reads the four
+/// deltas and **refuses the segment if any is non-zero**, which turns an
+/// unverified reconstruction into a refusal rather than into a picture. The
+/// guard lifts when a fixture exercises the other lines.
+///
+/// The one internal check that does hold: the code is complete — the five
+/// prefix lengths sum to exactly 1 under Kraft — so no bit pattern is left
+/// unassigned or claimed twice.
+fn table_b14() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(3, 0, -2),
+        HuffLine::normal(3, 0, -1),
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(3, 0, 1),
+        HuffLine::normal(3, 0, 2),
+    ])
+}
+
+/// **Table B.15**, the wide table for the same four deltas.
+///
+/// Symmetric about zero, each step out doubling the range it covers and
+/// costing one more bit, with a lower range and an upper range at the ends.
+/// Complete under Kraft, and — like [`table_b14`], and for the same reason —
+/// exercised by no fixture beyond its one-bit code for zero.
+fn table_b15() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(3, 1, -2),
+        HuffLine::normal(3, 1, 1),
+        HuffLine::normal(4, 2, -6),
+        HuffLine::normal(4, 2, 3),
+        HuffLine::normal(5, 3, -14),
+        HuffLine::normal(5, 3, 7),
+        HuffLine::normal(6, 4, -30),
+        HuffLine::normal(6, 4, 15),
+        HuffLine::lower(6, -31),
+        HuffLine::normal(6, 32, 31),
+    ])
 }
 
 /// Table B.13, a strip's vertical coordinate at the coarsest resolution.
@@ -1639,16 +1744,65 @@ fn text_region_procedure(
             // symbol rather than the symbol itself, sized by its own deltas.
             let refined;
             let symbol = if let Some(template) = params.refine.as_ref() {
-                let ri = decode_int(coder, &mut cx.iari)?;
+                // The bytes the Huffman road's refinements live in, taken
+                // before the reader is borrowed again below.
+                let source = huffman.as_ref().map(|(_, _, bits)| bits.bytes);
+                let ri = match huffman.as_mut() {
+                    // 6.4.11: over Huffman "is this instance refined" is one
+                    // plain bit rather than a table lookup — the only field in
+                    // the region read that way.
+                    Some((_, _, bits)) => i32::try_from(bits.bit()?).ok()?,
+                    None => decode_int(coder, &mut cx.iari)?,
+                };
                 if ri == 0 {
                     symbol
                 } else {
-                    let rdw = i64::from(decode_int(coder, &mut cx.iardw)?);
-                    let rdh = i64::from(decode_int(coder, &mut cx.iardh)?);
-                    let rdx = decode_int(coder, &mut cx.iardx)?;
-                    let rdy = decode_int(coder, &mut cx.iardy)?;
-                    let width = i64::from(symbol.width).checked_add(rdw)?;
-                    let height = i64::from(symbol.height).checked_add(rdh)?;
+                    // Where a Huffman refinement's arithmetic sub-stream
+                    // begins and ends, once its size has been read.
+                    let mut window = None;
+                    let (rdw, rdh, rdx, rdy) = match huffman.as_mut() {
+                        Some((tables, _, bits)) => {
+                            let Some(tables) = tables.refine.as_ref() else {
+                                note(warnings, Warning::Jbig2VariantSkipped);
+                                return None;
+                            };
+                            let rdw = tables.rdw.value(bits)?;
+                            let rdh = tables.rdh.value(bits)?;
+                            let rdx = tables.rdx.value(bits)?;
+                            let rdy = tables.rdy.value(bits)?;
+                            // 6.4.11: the refinement is arithmetic even here.
+                            // `BMSIZE` is coded ahead of it and the sub-stream
+                            // is byte-aligned, precisely so a decoder can step
+                            // over one without decoding it.
+                            if (rdw, rdh, rdx, rdy) != (0, 0, 0, 0) {
+                                // Only the zero entry of B.14 and B.15 is
+                                // exercised by anything in this repository,
+                                // and it is the one-bit code both tables open
+                                // with — so "is this delta zero" is decided by
+                                // a single bit and is sound whatever the rest
+                                // of the reconstruction says. The rest is not
+                                // sound, and counted injection proves it:
+                                // changing a prefix length, a range low or a
+                                // range length in either table breaks no test
+                                // in the tree. Refused rather than guessed.
+                                note(warnings, Warning::Jbig2VariantSkipped);
+                                return None;
+                            }
+                            let size = usize::try_from(tables.rsize.value(bits)?).ok()?;
+                            bits.align();
+                            let start = bits.byte_position();
+                            window = Some((start, start.checked_add(size)?));
+                            (rdw, rdh, rdx, rdy)
+                        }
+                        None => (
+                            decode_int(coder, &mut cx.iardw)?,
+                            decode_int(coder, &mut cx.iardh)?,
+                            decode_int(coder, &mut cx.iardx)?,
+                            decode_int(coder, &mut cx.iardy)?,
+                        ),
+                    };
+                    let width = i64::from(symbol.width).checked_add(i64::from(rdw))?;
+                    let height = i64::from(symbol.height).checked_add(i64::from(rdh))?;
                     if width <= 0 || height <= 0 || width > i64::from(u32::MAX) {
                         note(warnings, Warning::Jbig2SymbolLimitHit);
                         return None;
@@ -1663,15 +1817,42 @@ fn text_region_procedure(
                     };
                     let dx = refinement_offset(width, symbol.width, rdx);
                     let dy = refinement_offset(height, symbol.height, rdy);
-                    decode_refinement_into(
-                        coder,
-                        &mut cx.refine,
-                        template,
-                        false,
-                        symbol,
-                        (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
-                        &mut target,
-                    );
+                    let offset = (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?);
+                    match window {
+                        Some((start, end)) => {
+                            // A fresh coder and a fresh context set, because
+                            // the sub-stream is self-contained: nothing before
+                            // it was coded against the same states, and the
+                            // reader resumes after it rather than inside it.
+                            let Some(bytes) = source.and_then(|all| all.get(start..end)) else {
+                                note(warnings, Warning::TruncatedInput);
+                                return None;
+                            };
+                            let mut sub = MqDecoder::new(bytes);
+                            let mut contexts = MqContexts::new(1 << template.bits());
+                            decode_refinement_into(
+                                &mut sub,
+                                &mut contexts,
+                                template,
+                                false,
+                                symbol,
+                                offset,
+                                &mut target,
+                            );
+                            if let Some((_, _, bits)) = huffman.as_mut() {
+                                bits.seek_byte(end)?;
+                            }
+                        }
+                        None => decode_refinement_into(
+                            coder,
+                            &mut cx.refine,
+                            template,
+                            false,
+                            symbol,
+                            offset,
+                            &mut target,
+                        ),
+                    }
                     refined = target;
                     &refined
                 }
@@ -1725,10 +1906,11 @@ fn text_region(
     };
     let rtemplate = ((flags >> 15) & 0x0001) as u8;
 
-    if transposed || (refine && huff) {
-        // Transposed is scheduled and was counted at four files. The Huffman
-        // road of refinement is narrower: it codes each refinement's length in
-        // a field this decoder does not read.
+    if transposed {
+        // Scheduled, and counted at four files. Refinement over Huffman is no
+        // longer refused here — 6.4.11's envelope is read below — but it is
+        // still refused for a *dictionary* that aggregates, in
+        // `symbol_dictionary`, for a reason recorded there.
         note(warnings, Warning::Jbig2VariantSkipped);
         return None;
     }
@@ -1778,7 +1960,7 @@ fn text_region(
     // then carries the symbol-ID code lengths of 7.4.3.1.7 before its data.
     let mut huffman = None;
     if let Some(selectors) = selectors {
-        let tables = TextTables::select(selectors, warnings)?;
+        let tables = TextTables::select(selectors, refine, warnings)?;
         let mut bits = BitReader::new(reader.rest());
         let Some(symbol_codes) = symbol_id_codes(&mut bits, symbols.len()) else {
             note(warnings, Warning::TruncatedInput);

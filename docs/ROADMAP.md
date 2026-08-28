@@ -67,18 +67,27 @@ picture coded both ways told them apart.
 Closing it put one item back, by this file's own rule that an item enters with
 evidence attached:
 
-- **JBIG2 refinement over the Huffman road** (`SDHUFF` with `SDREFAGG`,
-  `SBHUFF` with `SBREFINE`). Refused by name today under
-  `Jbig2VariantSkipped`, and measured at **11 segments in 10 of the corpus's
-  103 JBIG2-bearing files** by
-  [`jbig2_census.rs`](../crates/tinker-pdf/tests/jbig2_census.rs) — more than
-  JPX (19 of 4 525) or mesh shadings (10) had when those were scheduled, so
-  ruling 3 asks for it. The refinement decoder itself is done and verified;
-  what is missing is 6.4.11's `BMSIZE` envelope and byte alignment, and
-  Annex B's tables **B.14 and B.15**, which this build does not carry and
-  which Annex H does not exercise. Exit: the corpus's ten files render
-  without a JBIG2 warning, and `jbig2_refinement.rs` gains their rows at 0
-  pixels different. (S–M,
+- **JBIG2's Huffman symbol dictionary, twice over.** 6.4.11's Huffman
+  refinement envelope and tables **B.14 and B.15** have landed and are held by
+  two corpus files at 0 pixels different, so what is left of the ten-file
+  refusal splits into two named things:
+
+  **A defect, found by building the other half.**
+  `bitmap-symbol-symhuffrefine-textrefine.pdf` has a Huffman dictionary whose
+  6.5.9 collective path exports two symbols of identical width inside one
+  height class and one symbol with no ink, which is not a picture any encoder
+  meant. It was invisible while the file refused for another reason. Exit:
+  that dictionary's symbols match the ones the same picture's other encodings
+  carry.
+
+  **Then the refagg road follows for free.** `SDHUFF` with `SDREFAGG` is
+  written and decodes two of its three fixtures exactly; it is refused only
+  because the third inherits the defect above and would render wrongly rather
+  than refuse. Exit: all three `symhuff*` files render without a JBIG2 warning
+  and join [`jbig2_refinement.rs`](../crates/tinker-pdf/tests/jbig2_refinement.rs).
+
+  Also here, and independent: **custom code tables** (clause 7.4.13, type 53),
+  which five of the eight refining Huffman text regions select. (S–M,
   [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
 
 An earlier draft of this section said nothing in the corpus asked for that,

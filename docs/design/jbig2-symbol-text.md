@@ -390,23 +390,59 @@ whole difference between this section and the one it replaced is noticing that.
   reference, where that term is zero, and no corpus file exercises the
   dictionary road at a different size. Both readings agree on every fixture
   in tree, so the fixture cannot choose between them.
-- **Huffman refinement** (`SDHUFF` with `SDREFAGG`, and `SBHUFF` with
-  `SBREFINE`) is refused by name: 6.4.11 codes each refinement's size as
-  `BMSIZE` and byte-aligns before the arithmetic sub-stream, and the deltas
-  around it come through tables B.14 and B.15, which this file does not carry.
-  **11 segments in 10 corpus files ask for it** — measured, not assumed; an
-  earlier draft of this bullet said none did, which was an assertion rather
-  than a count. That is more reachability than JPX or mesh shadings had when
-  they were scheduled, so it is a roadmap item and not a footnote.
+- **Huffman refinement, half built.** 6.4.11's envelope — `RI` as one plain
+  bit, the four deltas through a selected table, `BMSIZE`, byte alignment, and
+  an arithmetic sub-stream the bit reader steps over — is **done for text
+  regions**, and with it tables **B.14 and B.15**.
+  `bitmap-symbol-texthuffrefine.pdf` selects B.14 and
+  `bitmap-symbol-texthuffrefineB15.pdf` selects B.15, and both reproduce the
+  unrefined picture with 0 pixels different.
 
-  What makes it tractable, and what does not: the refinement decoder it needs
-  already exists and is verified, so the work is the Huffman envelope around
-  it. But B.14 and B.15 would have to be reconstructed, Annex H does not
-  exercise them, and the lesson of this document is that a reconstruction
-  wants a picture coded both ways to adjudicate it. The corpus has one —
-  `bitmap-symbol-texthuffrefine.pdf` and its family against the same 399 by
-  400 bitmap — so the method is the one used here, applied to a much larger
-  search space.
+  **But that adjudicates the envelope, not the tables**, and it took counted
+  injection to notice. Both files code every delta as zero, so the only line
+  either table exercises is its one-bit code for 0: changing a prefix length,
+  a range low or a range length anywhere else in either table breaks nothing
+  in the tree. This is the same trap as the five refinement templates that
+  agreed with each other, met a second time and caught by a different tool —
+  a fixture that passes under most values of an unknown says nothing about
+  that unknown.
+
+  So the reconstruction is not trusted past its evidence. The zero line being
+  one bit makes "is this delta zero" a single-bit question no error elsewhere
+  can affect, and `text_region_procedure` **refuses the segment if any delta
+  is non-zero**. That costs nothing measurable — no corpus file has one — and
+  it turns an unverified table into a refusal rather than a picture.
+
+  **The dictionary road (`SDHUFF` with `SDREFAGG`) stays refused**, and the
+  reason is a finding rather than an absence of effort. It was written, and it
+  decodes two of its three corpus fixtures exactly —
+  `bitmap-symbol-symhuffrefineone.pdf` through 6.5.8.2.2 and
+  `bitmap-symbol-symhuffrefineseveral.pdf` through 6.5.8.2.1, whose aggregate
+  composes two instances into one symbol. The third,
+  `bitmap-symbol-symhuffrefine-textrefine.pdf`, produces **a wrong picture with
+  no warning**, which is the one outcome this module refuses to ship.
+
+  Where it goes wrong is not in the refinement. Every `RI` in that file is
+  zero, so its aggregates are pure compositions, and their ink counts prove
+  them exact: 1808 + 1000 = 2808, and 3141 + 116 + 421 = 3678. Reference
+  offsets are zero and no sub-stream offset within ±2 bytes decodes better.
+  What is wrong is upstream, in the **non-refagg Huffman collective path**
+  (6.5.9) that this file's *first* dictionary uses, and which was previously
+  masked because the file refused whole. That dictionary exports two symbols
+  both 30 by 30 in one height class — 6.5.5 accumulates `SYMWIDTH`, so two
+  symbols in a class cannot share a width unless a delta was zero — and a
+  59 by 60 symbol with **no ink at all**, which the refining dictionary then
+  refines into something dense. Everything downstream inherits it.
+
+  So the refusal is precise: the refagg road is not what is broken, and
+  un-refusing it would ship a wrong picture drawn out of a dictionary this
+  file has not verified. Exit: find what 6.5.9 does with that first dictionary,
+  then the three `symhuff*` files follow with the code already written.
+
+- **Custom code tables (clause 7.4.13, type 53)** are the other half of the
+  Huffman refinement files: five of the eight refining Huffman text regions
+  select a custom table for their deltas or their size, and are refused for
+  that rather than for the refinement.
 
 #### Counted injection, and what it says about where the evidence lives
 
@@ -424,9 +460,22 @@ assertions that fail. `filters` is `cargo test -p tinker-pdf-filters jbig2`;
 | 6.3.5.6's TPGRON slot, template 1, off by one | **0** | 2 | 2 |
 | `SBSYMCODELEN` sized against the symbols so far | 3 | 0 | 3 |
 | an intermediate text region composited after all | **0** | 2 | 2 |
+| 6.4.11: `RI` read through a table rather than as one bit | 0 | 2 | 2 |
+| 6.4.11: the reader does not step over `BMSIZE` | 0 | 2 | 2 |
+| 6.4.11: the sub-stream is not byte-aligned | **0** | **0** | **0** |
+| B.14 or B.15, any line but the one-bit code for zero | **0** | **0** | **0** |
 
-**Three of the seven are caught by nothing in this repository except the corpus
-gate**, and the zeros are the useful part of the table. Annex H carries no
+**The last two rows are caught by nothing at all**, and they are the most
+useful lines in the table: they are what turned a claim that the corpus
+adjudicated B.14 and B.15 into the narrower and true claim that it adjudicates
+6.4.11's envelope. Both fixtures happen to sit on a byte boundary and code
+every delta as zero, so neither the alignment nor any table line past the zero
+code is exercised. The refusal of non-zero deltas above exists because of these
+two rows; the alignment is left in because it is what the clause says and
+nothing depends on a guess about it.
+
+**Three more are caught by nothing except the corpus gate**, and those zeros
+matter too. Annex H carries no
 refinement region segment at all, so it cannot exercise TPGRON, and it carries
 no intermediate region, so it cannot notice one being drawn. That is why
 `corpus.yml` runs those assertions explicitly rather than leaving them to a
