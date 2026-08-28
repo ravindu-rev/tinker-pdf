@@ -298,6 +298,19 @@ authorization of the copyright holder.
 [`testdata/README.md`](testdata/README.md). They are inputs to tests and are
 not redistributed in any built artefact.
 
+`crates/tinker-pdf-crypto/tests/data/cavp/` holds NIST CAVP known-answer
+vectors for RSA and ECDSA signature verification, from the DSS test-vector
+archives at csrc.nist.gov. NIST publications are works of the United States
+Government and carry no copyright, so there is no licence to reproduce. Each
+file's own header comment records the archive it came from, the date it was
+fetched, the SHA-256 of that archive, and — for the two ECDSA files — which
+curve groups were dropped and why. They are `cargo test` inputs, compiled in
+only under `#[cfg(test)]`, and are not in any built artefact.
+
+These sit under `tests/data/` rather than `crates/<crate>/data/` because they
+are neither vendored *into* the engine nor redistributed by it; `cargo xtask
+vendor`'s allowlist governs the latter, and this is the former.
+
 ## What is deliberately not here
 
 No typefaces beyond the twelve above. Symbol and ZapfDingbats — the two of the
