@@ -123,9 +123,17 @@ pub use tinker_pdf_cos::{
 /// [`DestKind`] — the **reader's** own, already on this facade — rather than a
 /// second vocabulary for one concept, which is what makes a write followed by
 /// a read an equality rather than a translation.
+///
+/// `EmbeddedWhole` and `SubsetRefusal` arrive with CFF subsetting and are the
+/// return type of `DocumentBuilder::finish_reporting`, so without them on this
+/// facade the method is callable and its answer is unnameable. They exist
+/// because ruling 10 makes "the face went in whole" a reported fact rather
+/// than an absence: a producer-made subset that this subsetter cannot beat is
+/// a different event from a format it declines, and the caller is told which.
 pub use tinker_pdf_cos::{
-    DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
-    PageBuilder, SkippedWidget, Target, WidgetDefect, WriteMode, WriteOptions,
+    DocumentBuilder, DocumentEditor, EmbeddedWhole, Encryption, FillError, FillRejection,
+    ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect,
+    WriteMode, WriteOptions,
 };
 pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;

@@ -147,6 +147,36 @@ pub struct FileResult {
     /// of can be a function of the corpus rather than of the machine. Zero
     /// from a child that did not say.
     pub cost: Cost,
+    /// What the structure tree walk found, or `None` where the document has
+    /// no `/StructTreeRoot` this engine could read.
+    ///
+    /// `None` and "no tree" are the same answer here and deliberately so: the
+    /// child says `tagged tree no` in that case, and a record that mentions
+    /// the key not at all is refused earlier, by the version check.
+    pub tagged: Option<Tagged>,
+}
+
+/// What one document's structure tree yielded (ISO 32000-1 14.7).
+///
+/// Counts rather than rates, for the reason [`Cost`] holds counts: a rate
+/// computed per file and averaged is not the rate over the corpus, and the
+/// bar in `corpus/ratchet.json` is over the corpus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tagged {
+    /// Structure elements reached by the `/K` walk.
+    pub elements: u64,
+    /// Marked-content kids — `/MCID` integers and `/MCR` dictionaries.
+    pub content: u64,
+    /// `/OBJR` kids: annotations and XObjects a structure element claims.
+    pub objects: u64,
+    /// Characters a structure element claimed, over the pages the child
+    /// rendered.
+    pub matched: u64,
+    /// Characters carrying an `/MCID` no element on their page claimed.
+    pub orphans: u64,
+    /// Characters carrying no `/MCID` at all, inside a document that has a
+    /// structure tree.
+    pub unmarked: u64,
 }
 
 /// A document's size, in the three dimensions that bound work on it.
@@ -266,6 +296,10 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         metamorphic: BTreeMap::new(),
         bundled_faces: false,
         cost: Cost::default(),
+        // A child that wrote no record did not look at a structure tree, and
+        // `None` is the same answer as "there was none". They aggregate the
+        // same way, and the file is already counted as failed.
+        tagged: None,
     };
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
@@ -459,7 +493,7 @@ fn hash(text: &str) -> u64 {
 /// Version 4 adds the `signature` capability: reading a signature produces no
 /// warning when it succeeds, so a count is the only thing that can say whether
 /// the reader is still finding them all.
-pub const PROBE_VERSION: u32 = 4;
+pub const PROBE_VERSION: u32 = 5;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -486,6 +520,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut metamorphic: BTreeMap<String, MetaVerdict> = BTreeMap::new();
     let mut cost = Cost::default();
     let mut bundled_faces = false;
+    let mut tagged: Option<Tagged> = None;
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -528,6 +563,46 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                         "pixels" => cost.pixels = value,
                         _ => {}
                     }
+                }
+            }
+            "tagged" => {
+                let (what, rest) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
+                match what.trim() {
+                    // `tree no` leaves `tagged` at `None`, which is what a
+                    // document with no structure tree means.
+                    "tree" => {
+                        let mut fields = rest.split_whitespace();
+                        if fields.next() == Some("yes") {
+                            let slot = tagged.get_or_insert_with(Tagged::default);
+                            while let (Some(field), Some(value)) = (fields.next(), fields.next()) {
+                                let value = value.parse().unwrap_or(0);
+                                match field {
+                                    "elements" => slot.elements = value,
+                                    "content" => slot.content = value,
+                                    "objects" => slot.objects = value,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    // Only ever printed by a child that already printed
+                    // `tree yes`, so a `chars` line with no tree before it is
+                    // a child bug and is dropped rather than inventing a tree.
+                    "chars" => {
+                        if let Some(slot) = tagged.as_mut() {
+                            let mut fields = rest.split_whitespace();
+                            while let (Some(field), Some(value)) = (fields.next(), fields.next()) {
+                                let value = value.parse().unwrap_or(0);
+                                match field {
+                                    "matched" => slot.matched = value,
+                                    "orphans" => slot.orphans = value,
+                                    "unmarked" => slot.unmarked = value,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             "cap" => {
@@ -627,6 +702,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         metamorphic,
         bundled_faces,
         cost,
+        tagged,
     })
 }
 
@@ -634,10 +710,82 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 4\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+    const GOOD: &str = "probe 5\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
                         cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
                         strict semantics 2\nstrict kind annot-rect-unordered 2\n\
                         warn render:UnreadableFont 2\nms 40\ndone\n";
+
+    /// A record built line by line, so a test's expectations are readable as
+    /// the child's own output rather than as one escaped string.
+    fn record(lines: &[&str]) -> String {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// The structure counts arrive on two lines because they are measured at
+    /// two different times -- the tree once per document, the join once per
+    /// page -- and a child that printed the first and died before the second
+    /// must not have its zero read as a measurement.
+    #[test]
+    fn the_structure_counts_read_off_both_lines() {
+        let text = record(&[
+            "probe 5",
+            "opened yes",
+            "pages 1",
+            "tagged tree yes elements 12 content 5 objects 2",
+            "rendered 1",
+            "tagged chars matched 40 orphans 1 unmarked 7",
+            "ms 5",
+            "done",
+        ]);
+        let tagged = parse_record(&text)
+            .expect("complete")
+            .tagged
+            .expect("a tree");
+        assert_eq!(tagged.elements, 12);
+        assert_eq!(tagged.content, 5);
+        assert_eq!(tagged.objects, 2);
+        assert_eq!(tagged.matched, 40);
+        assert_eq!(tagged.orphans, 1);
+        assert_eq!(tagged.unmarked, 7);
+    }
+
+    /// `tree no` is a measurement -- this engine looked and found no structure
+    /// tree -- and it reads as `None`, which is the same value a corpus of
+    /// untagged files produces. The distinction that matters is against a
+    /// child too old to look at all, and the version check refuses that record
+    /// entirely rather than letting it aggregate as untagged.
+    #[test]
+    fn a_document_with_no_structure_tree_reads_as_none() {
+        let text = record(&[
+            "probe 5",
+            "opened yes",
+            "pages 1",
+            "tagged tree no",
+            "rendered 1",
+            "ms 5",
+            "done",
+        ]);
+        assert!(parse_record(&text).expect("complete").tagged.is_none());
+    }
+
+    /// A `chars` line with no `tree yes` before it is a child bug. Reading it
+    /// would invent a structure tree with zero elements and forty matched
+    /// characters, which no document can have.
+    #[test]
+    fn a_char_count_without_a_tree_invents_nothing() {
+        let text = record(&[
+            "probe 5",
+            "opened yes",
+            "pages 1",
+            "tagged chars matched 40 orphans 0 unmarked 0",
+            "rendered 1",
+            "ms 5",
+            "done",
+        ]);
+        assert!(parse_record(&text).expect("complete").tagged.is_none());
+    }
 
     #[test]
     fn a_complete_record_reads() {
@@ -698,22 +846,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 4\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 5\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 4", "probe 7")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 5", "probe 7")).is_none());
         // And the version the strict pass replaced: a record without that
         // pass means something else by the same keys.
-        assert!(parse_record(&GOOD.replace("probe 4", "probe 1")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 4\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 5", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 5\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 4\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 5\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -726,7 +874,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 4\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 5\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -735,7 +883,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 4\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 5\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),
@@ -749,7 +897,7 @@ mod tests {
     #[test]
     fn a_metamorphic_verdict_reads_its_three_states() {
         let text = concat!(
-            "probe 4\n",
+            "probe 5\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
@@ -787,7 +935,7 @@ mod tests {
     #[test]
     fn an_unknown_metamorphic_verdict_is_not_a_hold() {
         let text = concat!(
-            "probe 4\n",
+            "probe 5\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
