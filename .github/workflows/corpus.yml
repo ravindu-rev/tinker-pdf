@@ -65,6 +65,10 @@ jobs:
         run: |
           cargo test --release -p tinker-pdf --test signatures \
             -- --ignored --nocapture
+          cargo test --release -p tinker-pdf --test cms_census \
+            -- --ignored --nocapture
+          cargo test --release -p tinker-pdf --test verdicts \
+            -- --ignored --nocapture
 
       # `--check` compares against the committed bar and fails on a regression.
       # It refuses outright if the run is incomplete, so a fetch that quietly

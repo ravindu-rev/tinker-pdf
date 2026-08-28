@@ -6,24 +6,22 @@ the signer's certificate, how far the certificate chain gets toward a host-suppl
 anchor, and what changed after signing, classified against `/DocMDP` and `/FieldMDP` rules —
 and `DocumentEditor` can produce a signature of its own on an incremental save, with the
 private key held by a caller-supplied signer callback so key material never enters the engine.
-Milestones 1, 3 and 8 have landed, and milestone 2's crate with them.
-`Document::signatures()` (`crates/tinker-pdf/src/signature.rs`) finds every signature,
-classifies what its `/ByteRange` covers against the file and digests the covered spans;
-`DocumentEditor::save_signed` (`crates/tinker-pdf-cos/src/sign.rs`) reserves, lays out,
-patches and seals, and `SignaturePlaceholder` has stopped being a struct with no producer;
-and `tinker-pdf-pki` now reads DER, X.509 and CMS `SignedData`, so the blob in the middle is
-structure rather than bytes. What holds the two ends together is that both call one
-`digest_spans`, so what is signed and what is checked cannot drift.
+**All of that now happens.** Milestones 1 and 3 through 8 have landed, with milestone 2's
+crate under them. `Document::signatures()` finds every signature and classifies what its
+`/ByteRange` covers; `tinker-pdf-pki` reads DER, X.509 and CMS `SignedData`;
+`tinker-pdf-crypto` verifies RSA and ECDSA against 504 published vectors;
+`Document::verify_signatures()` assembles the four answers; `Signature::modifications()`
+measures later revisions against `/DocMDP`; and `DocumentEditor::save_signed` produces
+signatures of its own, certifying and locking fields, with the key held by the caller. What
+holds the two ends together is that the writer and the reader call one `digest_spans`, so
+what is signed and what is checked cannot drift.
 
-**No verdict is assembled yet.** The parser hands back a signer, a `messageDigest` and the
-exact bytes RFC 5652 §5.4 says to digest; comparing that digest against the document,
-following the chain and saying what it all amounts to is milestone 6. Milestone 2's row stays
-open on a technicality worth naming rather than papering over: its exit criterion asks for a
-committed sidecar of expected certificate values and there is none. What stands in its place
-today is `crates/tinker-pdf/tests/cms_census.rs`, which reads every certificate in the fetched
-corpora through `x509.rs` and asserts that all twenty-nine parse — evidence from other
-people's software rather than from a transcription, which is the stronger of the two and not
-the one the row asked for.
+Milestone 2's row stays open on a technicality worth naming rather than papering over: its
+exit criterion asks for a committed sidecar of expected certificate values and there is none.
+What stands in its place is `crates/tinker-pdf/tests/cms_census.rs`, which reads every
+certificate in the fetched corpora through `x509.rs` and asserts that all twenty-nine parse —
+evidence from other people's software rather than from a transcription, which is the stronger
+of the two and not the one the row asked for.
 
 ## What milestone 1 measured, which changed this document
 
@@ -315,6 +313,56 @@ written into this document when the capability lands — the same class of evide
 committed JPEG 2000 reference decodes: a measurement, not a check. It does not run again, it
 does not gate a merge, and it goes stale. Nothing here hides that, because a signing feature
 whose interop claim is unverified and unstated is worse than one that says so.
+
+### The interop measurement, run once on 28 August 2026
+
+**Tool:** OpenSSL 3.5.5 (27 Jan 2026), on `x86_64-pc-windows-msvc`. Run by hand, outside CI,
+from a scratch directory. Nothing below runs again and no job depends on it.
+
+A throwaway key and self-signed certificate were generated
+(`openssl req -x509 -newkey rsa:2048 -days 3650 -nodes`), and
+`testdata/simple-text.pdf` was signed by `DocumentEditor::save_signed` with an 8 192-byte
+reservation and a placeholder blob. The `/ByteRange` this engine wrote covers 2 172 of the
+resulting 18 558 bytes as `[0 1899 18285 273]`. Those covered bytes were handed to
+`openssl cms -sign -binary -md sha256`, and the 1 435-byte detached `SignedData` OpenSSL
+produced was patched into the reservation, leaving the file the same length.
+
+**Direction A — does an outside program accept a signature in a file this engine wrote?**
+A script re-read the finished PDF independently, taking `/ByteRange` and `/Contents` from the
+bytes with no engine code involved, and:
+
+```sh
+openssl cms -verify -binary -inform DER -in blob.der -content covered.bin -CAfile cert.pem
+# CMS Verification successful
+```
+
+**Direction B — does this engine accept a blob it did not make?** The same file, read through
+`Document::verify_signatures` with the certificate as the only anchor:
+
+```text
+coverage       WholeFile
+cms            Read { signers: 1 }
+documentdigest Matches
+signature      Verified
+chain          AnchoredTo { anchor: "CN=One-time signer,O=tinker-pdf interop,C=GB", links: 0 }
+TRUSTED        true
+```
+
+**Negative controls**, because "successful" and "did not look" are indistinguishable without
+them. One bit flipped at offset 100 of the covered bytes:
+`CMS_SignerInfo_verify_content:verification failure`. The same blob with no `-CAfile`:
+`certificate verify error … self-signed certificate`. Both refused.
+
+**What this establishes and what it does not.** It establishes that the `/ByteRange` this
+writer computes is the range an independent implementation digests, that the reservation and
+the patch produce a structurally valid CMS carrier, and that this engine's §5.4 re-encoding,
+RSA verification, X.509 parsing and chain walk agree with OpenSSL on a blob OpenSSL made.
+
+It does not establish that **Acrobat, or any PDF viewer, would show a green tick** — no PDF
+validator was involved, only a CMS one, and the certificate was self-signed and trusted only
+because it was named as the anchor. It is one file, one algorithm (RSA-2048 with SHA-256),
+one day. The risk `verification.md` names remains: reader, writer, fixtures and reviewer
+still share one author's reading of the specification.
 
 ## What milestone 6 measured, and the finding it produced
 
