@@ -581,6 +581,7 @@ dependencies = [
  "tinker-pdf-crypto",
  "tinker-pdf-filters",
  "tinker-pdf-font",
+ "tinker-pdf-pki",
 ]
 
 [[package]]

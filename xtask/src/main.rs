@@ -449,6 +449,28 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// bytes and glyph indices in, glyph indices and six integers out. There is no
 /// PDF vocabulary in its API and no CSS vocabulary either — the consumers in
 /// milestones 6 to 8 convert at their own boundaries.
+/// **`cos -> pki` is the ninth amendment, and it is not a leaf-to-leaf edge
+/// at all** — it is the same shape as `cos -> font`, which this file already
+/// argues for, applied to a second leaf.
+///
+/// ISO 32000-1 7.6.5's public-key security handler derives its file key from a
+/// seed sealed inside a CMS `EnvelopedData` in `/Recipients`. Two facts decide
+/// where that lives. A security handler is `tinker-pdf-cos`'s charter: it owns
+/// `/Encrypt`, `security.rs`, and the decryptor a document installs. And an
+/// `EnvelopedData` is DER, which is `tinker-pdf-pki`'s, for the reasons the
+/// seventh amendment gives about how structure-walking and arithmetic fail
+/// differently.
+///
+/// The alternative was putting the handler in the facade, which already
+/// depends on both. It was rejected on what it would have cost: installing a
+/// decryptor is `CosDocument`'s own operation, so a facade-level handler needs
+/// `set_decryptor_with_key` to become public — and a public "install this
+/// decryptor" on an opened document is a hole with no floor under it, offered
+/// so that a dependency edge could be avoided. An edge is cheaper than a
+/// footgun.
+///
+/// It points downward from a non-leaf to a leaf and cannot cycle, because
+/// `pki` depends only on `crypto` and `crypto` on nothing.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -481,7 +503,14 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // File syntax and the object model.
     (
         "tinker-pdf-cos",
-        &["tinker-pdf-filters", "tinker-pdf-crypto", "tinker-pdf-font"],
+        &[
+            "tinker-pdf-filters",
+            "tinker-pdf-crypto",
+            "tinker-pdf-font",
+            // The public-key security handler's envelope is DER. See the
+            // ninth amendment above.
+            "tinker-pdf-pki",
+        ],
     ),
     // Content interpretation emits to a `Device`; it never rasterizes.
     (

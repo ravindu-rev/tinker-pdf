@@ -28,9 +28,11 @@ pub mod epub;
 pub mod fonts;
 pub mod mdp;
 mod optional;
+pub mod pdfa;
 pub mod redact;
 mod resources;
 pub mod signature;
+pub mod structure;
 pub mod verdict;
 pub mod xps;
 
@@ -45,9 +47,20 @@ pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefe
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
+/// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
+pub use pdfa::{
+    Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
+    Verdict as PdfAVerdict,
+};
 pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
+/// Tagged PDF: the logical structure tree, and the reading-order view over it
+/// (14.7, 14.8).
+pub use structure::{
+    StructElement, StructKid, StructureTree, StructureWarning, StructuredNode, StructuredText,
+    TextSource,
+};
 pub use tinker_pdf_content::{
-    Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
+    MarkedProps, Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///
@@ -114,6 +127,7 @@ pub use tinker_pdf_cos::{
     DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
     PageBuilder, SkippedWidget, Target, WidgetDefect, WriteMode, WriteOptions,
 };
+pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
@@ -746,6 +760,23 @@ impl Document {
         self.pages().into_iter().nth(index as usize)
     }
 
+    /// The document's logical structure tree (14.7.2).
+    ///
+    /// `None` when the catalog has no `/StructTreeRoot`, which is what most
+    /// documents are. **Nothing is inferred for them**: 14.7 describes
+    /// structure a producer writes down, and a tree guessed from geometry
+    /// would be this engine's opinion about reading order presented as the
+    /// file's own statement of it.
+    ///
+    /// Bound on every call rather than cached. A structure tree is read by
+    /// callers that want one, which is a small fraction of them, and a cache
+    /// on a `Clone` handle over a shared object store is a lifetime question
+    /// this does not need to answer to be correct.
+    #[must_use]
+    pub fn structure(&self) -> Option<StructureTree> {
+        structure::bind(&self.inner)
+    }
+
     /// The document's information dictionary.
     #[must_use]
     pub fn metadata(&self) -> Metadata {
@@ -804,6 +835,24 @@ impl Document {
         tinker_pdf_cos::fields(&self.inner)
     }
 
+    /// Opens a public-key-encrypted document with the caller's key (7.6.5).
+    ///
+    /// `/Adobe.PubSec` seals the file key to certificates rather than to a
+    /// password, so there is nothing to type: the caller implements
+    /// [`Recipient`], is handed the sealed key and the identifier saying whose
+    /// it is, and does the one private-key operation this engine refuses to be
+    /// able to do. Returning `None` from it means "not addressed to me".
+    ///
+    /// # Errors
+    /// [`PubSecError`], which tells "this document is somebody else's" apart
+    /// from every other way it can fail.
+    pub fn authenticate_with_recipient(
+        &self,
+        recipient: &dyn Recipient,
+    ) -> Result<AuthLevel, PubSecError> {
+        self.inner.authenticate_with_recipient(recipient)
+    }
+
     /// The document's digital signatures (12.8), in field order.
     ///
     /// One entry per signature field that carries a `/V`; a signature field
@@ -837,6 +886,17 @@ impl Document {
             .iter()
             .map(|signature| verdict::verdict(self, signature, anchors, at))
             .collect()
+    }
+
+    /// What this build makes of the document's PDF/A claim (ISO 19005).
+    ///
+    /// A list of findings rather than a verdict: conformance is the list being
+    /// empty **and** [`PdfACoverage::is_complete`] being true, and until the
+    /// remaining rule groups land it is not. A caller reaching for a boolean
+    /// should read both.
+    #[must_use]
+    pub fn validate_pdfa(&self) -> PdfAVerdict {
+        pdfa::validate(self)
     }
 
     /// The strictest certification any signature in this document declares
@@ -1087,6 +1147,25 @@ impl Page {
             device.warn(TextWarning::UnknownFont { name });
         }
         device.finish()
+    }
+
+    /// The page's text in **structure order**, joined with the document's
+    /// structure tree (14.7.4, 14.8).
+    ///
+    /// `None` when the document has no structure tree, which is the same
+    /// answer [`Document::structure`] gives and for the same reason.
+    ///
+    /// This is a *second view* over the extraction [`Page::text`] already
+    /// produces, not a second extractor: the same [`TextPage`] is built, and
+    /// [`TextPage::plain_text`] on it is unchanged by a byte. What differs is
+    /// the order the characters come back in, that `/ActualText` replaces what
+    /// it encloses (14.9.4), that `/Alt` and `/E` surface, and that content
+    /// the structure tree does not claim is **counted** rather than appended —
+    /// see [`StructuredText::orphans`].
+    #[must_use]
+    pub fn structured_text(&self) -> Option<StructuredText> {
+        let tree = structure::bind(&self.doc)?;
+        Some(tree.text_for_page(self.index(), &self.text()))
     }
 }
 

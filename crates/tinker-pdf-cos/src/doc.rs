@@ -153,6 +153,7 @@ pub(crate) struct DocNames {
     pub eff: Name,
     pub encrypt_metadata: Name,
     pub sub_filter: Name,
+    pub recipients: Name,
     pub crop_box: Name,
     pub rotate: Name,
     info_keys: [Name; 6],
@@ -208,6 +209,7 @@ impl DocNames {
             eff: n(b"EFF"),
             encrypt_metadata: n(b"EncryptMetadata"),
             sub_filter: n(b"SubFilter"),
+            recipients: n(b"Recipients"),
             crop_box: n(b"CropBox"),
             rotate: n(b"Rotate"),
             info_keys: [
@@ -665,6 +667,29 @@ impl CosDocument {
             }
         }
 
+        self.set_decryptor_with_key(auth.decryptor, auth.key);
+        self.security.write_lock().auth_level = auth.level;
+        Ok(auth.level)
+    }
+
+    /// Opens a `/Adobe.PubSec` document with the caller's key (7.6.5).
+    ///
+    /// The public-key sibling of [`CosDocument::authenticate`]: same
+    /// installation, different route to the file key. It does not check
+    /// `/Filter` first, because a document whose `/Filter` says `Standard`
+    /// simply has no `/Recipients` and is refused for that.
+    ///
+    /// # Errors
+    /// [`crate::pubsec::PubSecError`].
+    pub fn authenticate_with_recipient(
+        &self,
+        recipient: &dyn crate::pubsec::Recipient,
+    ) -> Result<AuthLevel, crate::pubsec::PubSecError> {
+        let params = self
+            .encrypt
+            .clone()
+            .ok_or(crate::pubsec::PubSecError::NoRecipients)?;
+        let auth = crate::pubsec::authenticate(&params, recipient)?;
         self.set_decryptor_with_key(auth.decryptor, auth.key);
         self.security.write_lock().auth_level = auth.level;
         Ok(auth.level)

@@ -101,6 +101,10 @@ oids! {
     /// subfilters (ISO 32000-1 12.8.3.3.1).
     ID_DATA = "1.2.840.113549.1.7.1",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01];
+    /// `id-envelopedData`: what a PDF's public-key security handler puts in
+    /// `/Recipients` (ISO 32000-1 7.6.5), read by [`crate::enveloped`].
+    ID_ENVELOPED_DATA = "1.2.840.113549.1.7.3",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x03];
     /// `id-signedData`: the only `ContentInfo` [`crate::cms`] reads.
     ID_SIGNED_DATA = "1.2.840.113549.1.7.2",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];

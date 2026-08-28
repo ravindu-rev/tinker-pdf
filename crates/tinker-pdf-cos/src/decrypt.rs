@@ -59,6 +59,13 @@ pub struct CryptFilterParams {
     /// `/Length`, in bytes or bits depending on the producer — 7.6.5 is
     /// ambiguous and both spellings occur, so the raw number is passed on.
     pub length: Option<i64>,
+    /// `/Recipients`: this filter's own CMS envelopes, when the public-key
+    /// handler puts them per-filter rather than on `/Encrypt` (7.6.5).
+    ///
+    /// Kept as the **stored bytes**, because 7.6.5's key derivation digests
+    /// each envelope in full and in file order — a re-serialised one would be
+    /// a different digest and therefore a different file key.
+    pub recipients: Vec<Vec<u8>>,
 }
 
 /// Everything `/Encrypt` and `/ID` say, flattened to values a crate with no
@@ -106,6 +113,11 @@ pub struct EncryptParams {
     /// The first element of the trailer's `/ID` array, which every key
     /// derivation before revision 6 mixes in (7.6.3.3).
     pub id_first: Option<Vec<u8>>,
+    /// `/Recipients` on the `/Encrypt` dictionary itself, which is where the
+    /// public-key handler puts them before `/V 4` (7.6.5).
+    ///
+    /// Stored bytes, for the reason [`CryptFilterParams::recipients`] gives.
+    pub recipients: Vec<Vec<u8>>,
 }
 
 /// Pulls the scalars out of an already-resolved `/Encrypt` dictionary.
@@ -121,6 +133,23 @@ pub(crate) fn extract(
     names: &crate::doc::DocNames,
 ) -> EncryptParams {
     let bytes = |d: &Dict, key: Name| d.get_string(key).map(|s| s.bytes.clone());
+    // 7.6.5's `/Recipients` is an array of byte strings, each a CMS envelope.
+    // Their **order matters**: the key derivation digests them in the order the
+    // file lists them, so a reader that sorted or deduplicated them would
+    // compute a different key and simply fail to open the document.
+    let strings = |d: &Dict, key: Name| -> Vec<Vec<u8>> {
+        d.get_array(key)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Object::String(s) => Some(s.bytes.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let name_bytes = |d: &Dict, key: Name| -> Option<Vec<u8>> {
         match d.get(key) {
             // /Filter and /StmF are names; a few producers write them as
@@ -146,6 +175,7 @@ pub(crate) fn extract(
                 cfm: name_bytes(entry, names.cfm),
                 auth_event: name_bytes(entry, names.auth_event),
                 length: entry.get_int(Name::LENGTH),
+                recipients: strings(entry, names.recipients),
             });
         }
     }
@@ -173,6 +203,7 @@ pub(crate) fn extract(
         stm_f: name_bytes(encrypt, names.stm_f),
         str_f: name_bytes(encrypt, names.str_f),
         eff: name_bytes(encrypt, names.eff),
+        recipients: strings(encrypt, names.recipients),
         crypt_filters,
         id_first,
     }
