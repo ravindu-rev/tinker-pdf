@@ -237,11 +237,48 @@ to hand them over, and none of them should carry 4.2 MB of ours. `FontProvider`
 remains the seam either way. Provenance and the OFL text are in
 [THIRDPARTY.md](../../THIRDPARTY.md).
 
+## Shaping, and what it is allowed to claim
+
+`crates/tinker-pdf-shape` is the eleventh leaf: face bytes and text in,
+positioned glyph runs out, in integer font design units, with no PDF or CSS
+vocabulary on its API. Nothing in `tinker-pdf-render` calls it and nothing ever
+will — see the row above. Its design and its eight milestones are
+[design/shaping.md](../design/shaping.md).
+
+Landed so far:
+
+- **OpenType Layout.** `GDEF`, `GSUB` types 1–8 and `GPOS` types 1–9,
+  coverage and class definitions, extension and chaining-context lookups.
+- **The default shaper.** `cmap` through `tinker_pdf_font::Sfnt`, plus `cmap`
+  format 14 read here because a variation selector is consumed by a shaper and
+  never reaches a renderer; script itemization; `locl`/`ccmp`/`rlig`/`liga`/
+  `clig`/`calt`, then `kern`/`dist`/`curs`/`mark`/`mkmk`; a cluster on every
+  glyph that is a byte offset into the caller's own text.
+- **UAX #9.** Level resolution per paragraph, bracket pairs, mirroring, and
+  L1/L2 per *line*, as a function the caller applies after breaking — because
+  only the caller knows where a line ends.
+
+**What no shaping engine here adjudicates.** Ruling 13 rules out running
+another shaper and diffing, so the claim for a script is exactly as strong as
+the fixture behind it, and the scripts divide in three:
+
+| Script | What is behind it |
+|---|---|
+| Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
+| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
+| Arabic *shaping*, and every Indic and Southeast Asian script | **nothing yet.** Joining forms, `rlig` and cursive attachment are milestone 4; the Universal Shaping Engine is milestone 5. Text in these scripts today is mapped, ligated by whatever `liga` the face carries, and positioned — which is deterministic and plausible and *unverified*, which is the failure mode this table exists to name |
+
+Two capabilities are refused rather than absent, and both are in
+`tinker-pdf-font` rather than here: a `cmap` of format 13, and a Macintosh
+`cmap` read in a non-Roman encoding. The corpus has a section for each
+(`CMAP-4`, `CMAP-3`) and `crates/tinker-pdf-shape/tests/text_rendering.rs`
+declines them by name with the fix each one wants.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
-| Shaping: GSUB/GPOS, kerning, bidi — advances are per-character from `/Widths`/`/W` | none — layout uses the file's own advances; nothing is dropped, so nothing warns | Long a stated non-goal, since overturned: the roadmap stages a shaping leaf crate | [ROADMAP](../ROADMAP.md) |
+| Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | CFF subsetting on write | `tinker_pdf_font::subset` answers `None`; the whole face is embedded | A CFF subset needs its charstring INDEX rebuilt, and a broken subset renders *almost* right | [ROADMAP](../ROADMAP.md) |
 | Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
