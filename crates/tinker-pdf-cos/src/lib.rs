@@ -63,6 +63,7 @@ pub mod parse;
 pub mod png_embed;
 pub mod script;
 pub mod security;
+pub mod sign;
 pub mod text_string;
 pub mod trees;
 pub mod validate;
@@ -109,6 +110,9 @@ pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use script::{Budget, Host, ScriptError};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
+pub use sign::{
+    digest_spans, DigestAlgorithm, SignError, SignRefused, Signer, SigningRequest, SigningTarget,
+};
 pub use text_string::{decode_text_string, parse_date, Date};
 pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};

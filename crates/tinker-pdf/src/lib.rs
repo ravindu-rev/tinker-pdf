@@ -42,9 +42,7 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefect, PageOrigin};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
-pub use signature::{
-    Anchor, Coverage, CoverageDefect, DigestAlgorithm, Signature, SignatureWarning, SubFilter,
-};
+pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
 pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };
@@ -75,6 +73,16 @@ pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
 pub use tinker_pdf_cos::{
     CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
     XrefTable,
+};
+/// Signing on an incremental save (12.8.1), behind
+/// [`DocumentEditor::save_signed`].
+///
+/// The key never crosses this boundary: a [`Signer`] receives a digest and
+/// returns finished CMS bytes. [`DigestAlgorithm`] is shared with the reading
+/// side on purpose — one definition of what a `/ByteRange` covers, so what is
+/// signed and what is checked cannot drift apart.
+pub use tinker_pdf_cos::{
+    DigestAlgorithm, SignError, SignRefused, Signer, SigningRequest, SigningTarget,
 };
 /// Writing: creation, editing and saving.
 ///

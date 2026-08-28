@@ -62,42 +62,10 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
+use tinker_pdf_cos::sign::{digest_spans, DigestAlgorithm};
 use tinker_pdf_cos::{CosDocument, Date, Dict, FieldKind, Name, ObjRef, Object};
-use tinker_pdf_crypto::{sha1, sha2};
 
 use crate::Document;
-
-/// Which digest reduced a signature's covered bytes.
-///
-/// The set is what the corpus asks for: of the seventeen CMS blobs in the
-/// fetched corpora, twelve sign with SHA-1, eleven with SHA-256 and one each
-/// with SHA-384 and SHA-512. A CMS blob naming anything else is a typed
-/// refusal rather than a guess.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DigestAlgorithm {
-    /// SHA-1 (FIPS 180-4). Accepted because real documents use it, and
-    /// reported as weak wherever a verdict is formed.
-    Sha1,
-    /// SHA-256.
-    Sha256,
-    /// SHA-384.
-    Sha384,
-    /// SHA-512.
-    Sha512,
-}
-
-impl DigestAlgorithm {
-    /// How many bytes the digest occupies.
-    #[must_use]
-    pub fn length(self) -> usize {
-        match self {
-            DigestAlgorithm::Sha1 => 20,
-            DigestAlgorithm::Sha256 => 32,
-            DigestAlgorithm::Sha384 => 48,
-            DigestAlgorithm::Sha512 => 64,
-        }
-    }
-}
 
 /// How a signature dictionary was reached, which is part of what it means.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -342,61 +310,6 @@ impl Signature {
     pub fn is_usage_rights(&self) -> bool {
         matches!(&self.anchor, Anchor::Permissions(key) if key == "UR" || key == "UR3")
     }
-}
-
-/// The digest of `spans` of `bytes`, or `None` if any span falls outside them.
-///
-/// Split out from [`Signature::digest`] so the byte arithmetic has a test that
-/// does not need a document.
-#[must_use]
-pub fn digest_spans(
-    bytes: &[u8],
-    spans: &[Range<u64>],
-    algorithm: DigestAlgorithm,
-) -> Option<Vec<u8>> {
-    if spans.is_empty() {
-        return None;
-    }
-    // Collect first: a hasher fed a partial document before the range that
-    // does not fit is discovered would still return a digest, and a digest
-    // over less than the signature covers is worse than no digest.
-    let mut pieces: Vec<&[u8]> = Vec::with_capacity(spans.len());
-    for span in spans {
-        let start = usize::try_from(span.start).ok()?;
-        let end = usize::try_from(span.end).ok()?;
-        pieces.push(bytes.get(start..end)?);
-    }
-
-    Some(match algorithm {
-        DigestAlgorithm::Sha1 => {
-            let mut hasher = sha1::Sha1::new();
-            for piece in pieces {
-                hasher.update(piece);
-            }
-            hasher.finish().to_vec()
-        }
-        DigestAlgorithm::Sha256 => {
-            let mut hasher = sha2::Sha256::new();
-            for piece in pieces {
-                hasher.update(piece);
-            }
-            hasher.finish().to_vec()
-        }
-        DigestAlgorithm::Sha384 => {
-            let mut hasher = sha2::Sha512::new_384();
-            for piece in pieces {
-                hasher.update(piece);
-            }
-            hasher.finish()[..48].to_vec()
-        }
-        DigestAlgorithm::Sha512 => {
-            let mut hasher = sha2::Sha512::new();
-            for piece in pieces {
-                hasher.update(piece);
-            }
-            hasher.finish().to_vec()
-        }
-    })
 }
 
 /// One signature dictionary and how it was reached, before it is read.
@@ -865,20 +778,6 @@ fn classify(cos: &CosDocument, bytes: &[u8], spans: &[Range<u64>], gap: Gap) -> 
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_digest_over_two_spans_is_the_digest_of_their_concatenation() {
-        let bytes = b"abcdefghij".to_vec();
-        let split = digest_spans(&bytes, &[0..3, 7..10], DigestAlgorithm::Sha256).unwrap();
-        let one = 0u64..6;
-        let whole = digest_spans(
-            b"abchij",
-            std::slice::from_ref(&one),
-            DigestAlgorithm::Sha256,
-        )
-        .unwrap();
-        assert_eq!(split, whole, "the gap must contribute nothing");
-    }
-
     /// The property milestone 1 exists to establish: a byte inside the covered
     /// range changes the digest, and a byte inside the gap does not.
     #[test]
@@ -899,31 +798,6 @@ mod tests {
         in_gap[5] ^= 0x01;
         let after_gap = digest_spans(&in_gap, &spans, DigestAlgorithm::Sha256).unwrap();
         assert_eq!(before, after_gap, "the gap is outside the signature");
-    }
-
-    #[test]
-    fn a_span_past_the_end_digests_to_nothing_rather_than_to_a_prefix() {
-        let bytes = b"short".to_vec();
-        assert_eq!(
-            digest_spans(&bytes, &[0..3, 4..99], DigestAlgorithm::Sha256),
-            None,
-            "a partial digest would look like an answer"
-        );
-    }
-
-    #[test]
-    fn every_algorithm_produces_its_declared_length() {
-        let bytes = b"whatever".to_vec();
-        for algorithm in [
-            DigestAlgorithm::Sha1,
-            DigestAlgorithm::Sha256,
-            DigestAlgorithm::Sha384,
-            DigestAlgorithm::Sha512,
-        ] {
-            let whole = 0u64..8;
-            let digest = digest_spans(&bytes, std::slice::from_ref(&whole), algorithm).unwrap();
-            assert_eq!(digest.len(), algorithm.length(), "{algorithm:?}");
-        }
     }
 
     #[test]

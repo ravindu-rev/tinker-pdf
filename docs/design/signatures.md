@@ -6,11 +6,15 @@ the signer's certificate, how far the certificate chain gets toward a host-suppl
 anchor, and what changed after signing, classified against `/DocMDP` and `/FieldMDP` rules —
 and `DocumentEditor` can produce a signature of its own on an incremental save, with the
 private key held by a caller-supplied signer callback so key material never enters the engine.
-Milestone 1 has landed: `Document::signatures()` (`crates/tinker-pdf/src/signature.rs`) finds
-every signature, classifies what its `/ByteRange` covers against the file, and digests the
-covered spans. Nothing verifies anything yet. `SignaturePlaceholder` in
-`crates/tinker-pdf-cos/src/write.rs` is still a dead struct with no producer or consumer, and
-the CMS blob is still an opaque byte string.
+Milestones 1 and 8 have landed — the two ends of the file, with the cryptography still
+missing from between them. `Document::signatures()` (`crates/tinker-pdf/src/signature.rs`)
+finds every signature, classifies what its `/ByteRange` covers against the file and digests
+the covered spans; `DocumentEditor::save_signed`
+(`crates/tinker-pdf-cos/src/sign.rs`) reserves, lays out, patches and seals, and
+`SignaturePlaceholder` has stopped being a struct with no producer. **Nothing verifies
+anything**: the CMS blob is bytes in and bytes out, and a `Signer` is whatever the host
+supplies. What holds the two halves together is that both call one `digest_spans`, so what is
+signed and what is checked cannot drift.
 
 ## What milestone 1 measured, which changed this document
 
@@ -67,10 +71,11 @@ defensive branch that **no corpus file needs**, held up by a fixture and by that
   plus later revisions from `CosDocument::revisions()` yields the set of objects the later
   revisions touched; classify them against the `/DocMDP` `/P` level and `/FieldMDP` field
   lists, producing a typed answer, not a boolean.
-- **Write: sign on incremental save.** `DocumentEditor::save` in `WriteMode::Incremental`
-  grows the seam plan 09 sketched: reserve `/Contents` and `/ByteRange` (revive
+- **Write: sign on incremental save.** Reserve `/Contents` and `/ByteRange` (revive
   `SignaturePlaceholder` as the producer's record), patch `/ByteRange` after layout, hand the
   range digest to a caller-supplied `Signer`, hex-patch the returned CMS into the gap.
+  **Done**, as `DocumentEditor::save_signed` rather than as an option on `save` — see the
+  design section for why.
 - **Trust model.** The engine verifies chain *shape* — signatures along the chain, validity
   windows, basicConstraints, keyUsage — up to anchors the host supplies as DER bytes, the
   same inversion as `FontProvider` (`crates/tinker-pdf/src/fonts.rs`): the engine computes,
@@ -162,15 +167,39 @@ field, annotation, or other, reusing `FieldKind` classification from `form.rs`. 
 (12.8.2.4) narrows to the named fields under its `/Action`. The output is
 `Unmodified | PermittedChanges(list) | DisallowedChanges(list)` with object provenance.
 
-**Signing.** `WriteOptions` grows a signing request: the field to sign (or a new invisible
-one), the signature dictionary values, a gap size, and a `Signer`. The trait is two calls:
-`digest_alg()` naming the digest, and `sign(&[u8]) -> Result<Vec<u8>, SignRefused>` taking
-the byte-range digest and returning DER CMS. `incremental_update` gains the reserve-and-patch
-step plan 09 specified — `0`-filled hex gap, fixed-width space-padded `/ByteRange` slots
-patched after layout, `SignaturePlaceholder` finally earning its fields as the internal
-record of where to patch. A CMS larger than the gap is a typed refusal, not a truncation.
-Output stays deterministic given the signer's bytes: same inputs, same file, byte-identical
-(the determinism contract, ruling 4, extended to written bytes as plan 09 already treats it).
+**Signing. Done** — `DocumentEditor::save_signed`, `crates/tinker-pdf-cos/src/sign.rs`. The
+`Signer` trait is the two calls this section specified, `SignaturePlaceholder` finally earns
+its four fields, and a CMS larger than the reservation is `SignError::ReserveTooSmall` rather
+than a truncation. Three things came out differently from the sketch above, and each is a
+correction rather than a shortcut.
+
+**The request is a parameter, not a `WriteOptions` field.** A `&dyn Signer` needs a lifetime,
+and giving `WriteOptions` one would change the type in every existing caller and in
+`tinker_parity.rs`, which pins public signatures under ruling 12 — for a field that is
+meaningless on every write mode but one. So `save_signed(&WriteOptions, &SigningRequest)`
+sits beside `save`, and a rewrite asked to sign is `SignError::NotIncremental` rather than a
+silently ignored option.
+
+**The signature object is serialised by hand and appended outside the object set.** Two
+independent reasons force it. `write_dict` cannot report *where* inside its output a value
+landed, and the reservation is patched by offset — searching the finished file for a run of
+zeros would find the first plausible match rather than the right one. And 7.6.2 exempts a
+signature dictionary's `/Contents` from encryption, so it must not go through the inherited
+cipher; writing it by hand makes skipping the cipher a decision rather than an omission.
+`write::UpdatePlan` carries it, and `/Size` counts it explicitly, because an object nothing
+else knows about is one a conforming reader would be required to ignore.
+
+**`/M` is a parameter.** Ruling 4 bans a clock from this engine's output, and here that is
+not only a determinism rule: a signing time the engine invented is a claim it is not entitled
+to make.
+
+One defect is recorded rather than quietly fixed, because it was invisible in exactly the way
+this repository keeps finding things invisible. Adding the field and setting `/SigFlags` were
+two passes, and both read the catalog from `self.doc` rather than through the editor's own
+overlay — so the second discarded the first. The file that came out started with the original
+bytes, passed the strict structural validator, and carried a signature dictionary **no field
+pointed at**. Every structural check in the tree was green; only reading the signature back
+found it. `DocumentEditor::acroform` now reads through the overlay and one update does both.
 
 **Verification, and the one place ruling 13 costs the most.** The primitives are gated by
 published test vectors, which is data and the strongest evidence available: NIST CAVP RSA and
@@ -197,14 +226,14 @@ whose interop claim is unverified and unstated is worse than one that says so.
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
 |---|-------------|-------------------------------------|-----------------|
-| 1 | Signature inventory: `/ByteRange`/`/Contents` parsing, range digesting, coverage classification | `Document::signatures()` lists every signature in the fixture corpus with correct coverage; a flipped byte inside a covered range flips the digest verdict in a unit test; fuzzer on the parse path runs crash-free in CI | M |
+| 1 **done** | Signature inventory: `/ByteRange`/`/Contents` parsing, range digesting, coverage classification | `Document::signatures()` lists every signature in the fixture corpus with correct coverage; a flipped byte inside a covered range flips the digest verdict in a unit test; fuzzer on the parse path runs crash-free in CI | M |
 | 2 | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the subject/issuer/validity/SPKI values committed in its sidecar, transcribed once from the certificate's own DER and reviewed; RFC 5280's own example certificates parse; dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
 | 3 | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
 | 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
 | 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
 | 6 | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
 | 7 | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
-| 8 | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |
+| 8 **done** | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |
 | 9 | Facade + FFI projection, warnings, docs | Verdict types exposed 1:1 through `tinker-pdf-ffi` (ruling 11) with parity tests; typed warnings carry object provenance (ruling 10) pinned by fixture; [features/forms.md](../features/forms.md) gains a signature-fields section; roadmap row closed against [ROADMAP.md](../ROADMAP.md) | M |
 
 ## Dependencies
