@@ -170,6 +170,158 @@ fn cff_program(charstrings: Option<Vec<Vec<u8>>>) -> Vec<u8> {
     out
 }
 
+/// Wraps `items` as a CFF INDEX with the **narrowest** offsets that reach the
+/// end of the data, which is what a producer writes.
+fn compact_index(items: &[Vec<u8>]) -> Vec<u8> {
+    if items.is_empty() {
+        return vec![0, 0];
+    }
+    let total: usize = items.iter().map(Vec::len).sum();
+    let off_size = match total + 1 {
+        0..=0xFF => 1usize,
+        0x100..=0xFFFF => 2,
+        0x1_0000..=0xFF_FFFF => 3,
+        _ => 4,
+    };
+    let mut out = (items.len() as u16).to_be_bytes().to_vec();
+    out.push(off_size as u8);
+    let mut offset = 1u32;
+    out.extend_from_slice(&offset.to_be_bytes()[4 - off_size..]);
+    for item in items {
+        offset += item.len() as u32;
+        out.extend_from_slice(&offset.to_be_bytes()[4 - off_size..]);
+    }
+    for item in items {
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+/// A DICT integer in the narrowest form (CFF specification, Table 3).
+fn compact_int(value: i32) -> Vec<u8> {
+    match value {
+        -107..=107 => vec![(value + 139) as u8],
+        108..=1131 => {
+            let v = value - 108;
+            vec![(247 + (v >> 8)) as u8, (v & 0xFF) as u8]
+        }
+        -1131..=-108 => {
+            let v = -value - 108;
+            vec![(251 + (v >> 8)) as u8, (v & 0xFF) as u8]
+        }
+        -32768..=32767 => {
+            let bytes = (value as i16).to_be_bytes();
+            vec![28, bytes[0], bytes[1]]
+        }
+        _ => {
+            let bytes = value.to_be_bytes();
+            vec![29, bytes[0], bytes[1], bytes[2], bytes[3]]
+        }
+    }
+}
+
+/// One DICT entry with compact operands.
+fn compact_entry(op: u16, operands: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in operands {
+        out.extend(compact_int(*value));
+    }
+    if op > 0xFF {
+        out.push(12);
+        out.push((op & 0xFF) as u8);
+    } else {
+        out.push(op as u8);
+    }
+    out
+}
+
+/// The same twenty-seven glyphs, written the way a producer writes them:
+/// narrowest INDEX offsets, narrowest DICT operands.
+///
+/// The offsets a compact Top DICT holds change its own length, which changes
+/// where they point — so the layout is iterated to a fixed point rather than
+/// measured once. That is precisely the loop the subsetter refuses to run: it
+/// writes every offset at a fixed five bytes so one measuring pass settles the
+/// layout, and paying a few bytes for that is what makes a face like this one
+/// come out no smaller than it went in.
+fn compact_cff_program() -> Vec<u8> {
+    let subrs: Vec<Vec<u8>> = (0..GLYPHS - 1)
+        .map(|i| box_subr(200 + i as i32 * 10))
+        .collect();
+    let mut charstrings = vec![vec![14u8]];
+    for i in 0..GLYPHS - 1 {
+        let mut code = t2(0);
+        code.extend(t2(0));
+        code.push(21); // rmoveto
+        code.extend(t2(i as i32 - bias(subrs.len())));
+        code.push(10); // callsubr
+        code.push(14); // endchar
+        charstrings.push(code);
+    }
+
+    let mut private = compact_entry(20, &[600]);
+    private.extend(compact_entry(21, &[600]));
+    let subrs_operand_len = compact_int(private.len() as i32 + 3).len() as i32;
+    private.extend(compact_entry(19, &[private.len() as i32 + subrs_operand_len + 1]));
+
+    let header = [1u8, 0, 4, 1];
+    let names = compact_index(&[b"Fixture".to_vec()]);
+    let strings = compact_index(&[]);
+    let gsubrs = compact_index(&[]);
+    let charstring_index = compact_index(&charstrings);
+    let subr_index = compact_index(&subrs);
+
+    let mut charset = vec![0u8];
+    for sid in 0..(charstrings.len() as u16 - 1) {
+        charset.extend_from_slice(&(34 + sid).to_be_bytes());
+    }
+
+    let top = |charset_at: i32, charstrings_at: i32, private_at: i32| {
+        let mut out = compact_entry(15, &[charset_at]);
+        out.extend(compact_entry(16, &[0]));
+        out.extend(compact_entry(17, &[charstrings_at]));
+        out.extend(compact_entry(18, &[private.len() as i32, private_at]));
+        out
+    };
+
+    // Widening an offset lengthens the DICT, which moves the offset. Four
+    // rounds is far more than the one step this ever takes.
+    let mut top_bytes = top(0, 0, 0);
+    let mut layout = (0i32, 0i32, 0i32);
+    for _ in 0..8 {
+        let top_index_len = compact_index(&[top_bytes.clone()]).len();
+        let mut cursor =
+            header.len() + names.len() + top_index_len + strings.len() + gsubrs.len();
+        let charset_at = cursor;
+        cursor += charset.len();
+        let charstrings_at = cursor;
+        cursor += charstring_index.len();
+        let private_at = cursor;
+        layout = (charset_at as i32, charstrings_at as i32, private_at as i32);
+        let next = top(layout.0, layout.1, layout.2);
+        if next.len() == top_bytes.len() {
+            top_bytes = next;
+            break;
+        }
+        top_bytes = next;
+    }
+
+    let top_index = compact_index(&[top_bytes]);
+    let mut out = header.to_vec();
+    out.extend_from_slice(&names);
+    out.extend_from_slice(&top_index);
+    out.extend_from_slice(&strings);
+    out.extend_from_slice(&gsubrs);
+    assert_eq!(out.len() as i32, layout.0, "the charset lands where it was put");
+    out.extend_from_slice(&charset);
+    assert_eq!(out.len() as i32, layout.1);
+    out.extend_from_slice(&charstring_index);
+    assert_eq!(out.len() as i32, layout.2);
+    out.extend_from_slice(&private);
+    out.extend_from_slice(&subr_index);
+    out
+}
+
 /// Wraps a CFF program in an `OTTO` sfnt with the tables a font dictionary's
 /// widths and glyph lookups come out of.
 fn otto(cff: &[u8]) -> Vec<u8> {
@@ -660,4 +812,45 @@ fn subsetting_turned_off_reports_nothing() {
     let doc = CosDocument::open(bytes).expect("the document opens");
     let (embedded_program, _, _) = embedded(&doc, b"F0");
     assert_eq!(embedded_program, cff);
+}
+
+/// A face a producer already cut down has almost nothing left to remove, and
+/// the rebuild costs more than it saves: a `.notdef`-shaped charstring in
+/// every dropped slot, an offset for it, and DICT operands written at a fixed
+/// width. Two hundred and twelve of the fetched corpora's four hundred and
+/// forty-one CFF faces are that shape.
+///
+/// The whole face is then both smaller *and* the one the producer tested, so
+/// the writer keeps it — and says which of the two refusals this was.
+#[test]
+fn a_subset_no_smaller_than_the_face_is_declined_and_named() {
+    let cff = compact_cff_program();
+    let parsed = tinker_pdf_font::Cff::parse(&cff).expect("the compact fixture parses");
+    assert_eq!(parsed.glyph_count(), GLYPHS);
+    assert_eq!(parsed.gid_for_name("A"), Some(1));
+    assert!(!parsed.outline(3).expect("an outline").segments.is_empty());
+    // Every letter drawn, so nothing is dropped and the rebuild is pure cost.
+    let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let reduced =
+        tinker_pdf_font::subset(&cff, &tinker_pdf_font::glyphs_for(&cff, text)).expect("it rebuilds");
+    assert!(
+        reduced.len() >= cff.len(),
+        "the fixture really is one the rebuild does not shrink: {} vs {}",
+        reduced.len(),
+        cff.len()
+    );
+
+    let (bytes, warnings) = simple_document(&cff, text);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].reason, SubsetRefusal::SubsetNotSmaller);
+    assert_eq!(warnings[0].resource, b"F0");
+
+    let doc = CosDocument::open(bytes).expect("the document opens");
+    let (embedded_program, _, _) = embedded(&doc, b"F0");
+    assert_eq!(embedded_program, cff, "the face went in as it was");
+    assert_eq!(
+        name_of(&doc, &page_font(&doc, b"F0"), b"BaseFont").as_deref(),
+        Some(&b"Fixture"[..]),
+        "and carries no subset tag, because there is no subset"
+    );
 }

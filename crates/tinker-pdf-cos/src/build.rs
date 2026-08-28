@@ -1023,6 +1023,14 @@ pub enum SubsetRefusal {
     /// guessing (see `tinker_pdf_font::cff_subset` for that list); or bytes
     /// that are neither.
     ProgramNotRebuildable,
+    /// The subset came out no smaller than the face. A program a producer had
+    /// already cut down to thirty glyphs has almost nothing left to remove,
+    /// and what a rebuild costs — a `.notdef`-shaped charstring in every
+    /// dropped slot, an offset for it, and DICT operands written at a fixed
+    /// width so the offsets in them cannot move — can exceed what it saves.
+    /// The whole face is then both smaller *and* the one the producer tested,
+    /// so it is the one that goes in.
+    SubsetNotSmaller,
 }
 
 impl core::fmt::Display for SubsetRefusal {
@@ -1030,6 +1038,7 @@ impl core::fmt::Display for SubsetRefusal {
         f.write_str(match self {
             SubsetRefusal::NoGlyphResolved => "the font claims none of the text drawn with it",
             SubsetRefusal::ProgramNotRebuildable => "the font program cannot be rebuilt",
+            SubsetRefusal::SubsetNotSmaller => "the subset is no smaller than the face",
         })
     }
 }
@@ -1064,6 +1073,25 @@ impl core::fmt::Display for EmbeddedWhole {
             self.reason
         )
     }
+}
+
+/// Cuts a program down to `glyphs`, and keeps the result only if it is
+/// smaller than the face it came from.
+///
+/// The size comparison is the writer's decision and not the subsetter's:
+/// `tinker_pdf_font::subset` answers "what does this face look like with those
+/// glyphs kept", which is a question about fonts, and whether the answer is
+/// worth writing into a file is a question about documents. Two hundred and
+/// twelve of the fetched corpora's four hundred and forty-one CFF faces are
+/// already subsets a producer cut, and rebuilding one of those costs more
+/// bytes than it saves.
+fn subset_smaller_than(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Vec<u8>, SubsetRefusal> {
+    let reduced = tinker_pdf_font::subset(program, glyphs)
+        .ok_or(SubsetRefusal::ProgramNotRebuildable)?;
+    if reduced.len() >= program.len() {
+        return Err(SubsetRefusal::SubsetNotSmaller);
+    }
+    Ok(reduced)
 }
 
 /// A `/ToUnicode` CMap for the glyphs a document drew (9.10.3).
@@ -2492,14 +2520,14 @@ impl DocumentBuilder {
                     });
                     (font.program.clone(), false)
                 } else {
-                    match tinker_pdf_font::subset(&font.program, &glyphs) {
-                        Some(reduced) => (reduced, true),
-                        None => {
+                    match subset_smaller_than(&font.program, &glyphs) {
+                        Ok(reduced) => (reduced, true),
+                        Err(reason) => {
                             self.embedded_whole.push(EmbeddedWhole {
                                 resource: font.resource.clone(),
                                 base_font: font.base_font.clone(),
                                 bytes: font.program.len(),
-                                reason: SubsetRefusal::ProgramNotRebuildable,
+                                reason,
                             });
                             (font.program.clone(), false)
                         }
@@ -2656,15 +2684,15 @@ impl DocumentBuilder {
             ids.insert(0);
 
             let (program, subsetted) = if self.subset_fonts {
-                match tinker_pdf_font::subset(&font.program, &ids) {
-                    Some(reduced) => (reduced, true),
-                    None => {
+                match subset_smaller_than(&font.program, &ids) {
+                    Ok(reduced) => (reduced, true),
+                    Err(reason) => {
                         // Ruling 10, for `write_embedded_fonts`'s reason.
                         self.embedded_whole.push(EmbeddedWhole {
                             resource: font.resource.clone(),
                             base_font: font.base_font.clone(),
                             bytes: font.program.len(),
-                            reason: SubsetRefusal::ProgramNotRebuildable,
+                            reason,
                         });
                         (font.program.clone(), false)
                     }
