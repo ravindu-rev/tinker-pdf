@@ -29,10 +29,9 @@ operations that still need every byte.
   (`tinker_parity.rs` compares it, ruling 12).
 - Incremental discovery: header window, `startxref` tail window, xref chain
   walked section-by-section — never the whole file for an undamaged one.
-- The linearized fast path: promote the hint-table reader living in
-  `linearize.rs`'s test module (`BitReader`, `read_page_offsets`,
-  `read_shared_objects`) into a production `linearize::hints` module, and
-  use it so page one costs only head-of-file reads.
+- The linearized fast path: read the hint tables with
+  `validate::hints`, the production decoder that already exists, so page one
+  costs only head-of-file reads. **Amended August 2026** — see milestone 3.
 - The lazy store re-keyed on ranges: `CosDocument`'s loads fetch bounded
   windows instead of indexing one whole buffer.
 - Honest degradation: every whole-file dependency (repair rescan, container
@@ -180,15 +179,37 @@ against `SliceSource`.
 |---|---|---|---|
 | 1 | `ByteSource`, `SliceSource`, `CountingSource`, `ShreddedSource`; `Backing` behind `CosDocument` | Full workspace suite green with `SliceSource`; `determinism.rs` fingerprints byte-identical over `ShreddedSource`; no public-signature change flagged by `tinker_parity.rs` | M |
 | 2 | Incremental tail-first discovery (generic path) | New `streaming_open.rs` test: a multi-megabyte committed fixture opens and reads one mid-file object with `CountingSource` total under a committed byte budget (ratchet-style number, `--check`ed like `corpus/ratchet.json`) | M |
-| 3 | `linearize::hints` promoted from `linearize.rs` tests to production | Existing round-trip tests re-pointed at the production module; the reader parses the hint tables of every already-linearized file in the fetched qpdf corpus — files this project did not write — and the count parsed is asserted so a shrinking set cannot read as a passing one | S |
+| 3 | One hint-table reader: `validate::hints`, re-pointed and widened | Existing round-trip tests re-pointed at the production module and the test-only reader in `linearize.rs` deleted; the reader parses the hint tables of every already-linearized file in the fetched qpdf corpus — files this project did not write — and the count parsed is asserted so a shrinking set cannot read as a passing one | S |
 | 4 | Linearized fast path + `Document::open_streaming` + page-one render | Test renders page one of (a) a writer-linearized fixture and (b) a linearized file from the fetched qpdf corpus, asserting via `CountingSource` that **zero read ranges intersect the tail** past `/E` and total bytes stay under budget; `/L` mismatch provably falls back to the generic path | L |
 | 5 | Honest degradation + wasm host loop | Damaged fixture on a streamed source reaches `LadderLevel::Rescan` with `WholeFileFetched` warned; `hostile_input.rs` sweep runs over `ShreddedSource` with zero panics; `bindings/js` demo feeds ranges and draws page one, checked in the existing wasm CI job shape | M |
+
+## Amendment, August 2026: milestone 3 is one reader, not a promotion
+
+The row above said the hint-table reader was test-only, living in
+`linearize.rs`'s test module, and had to be promoted into a production
+`linearize::hints`. That was stale when it was written. A production decoder
+already existed at `crates/tinker-pdf-cos/src/validate/hints.rs` — bounds
+checked before each field is consumed, `width > 32` refused, entry counts
+guarded — already consumed from `validate.rs` and already run against
+qpdf-corpus files this project did not write. Promoting a third reader into
+existence would have left the tree with three readers for one format.
+
+So milestone 3 is reuse and re-point. `validate::hints` becomes crate-visible,
+the test-only reader in `linearize.rs` is deleted, and the round-trip tests
+that drove it drive the production decoder instead. Making one reader carry
+both jobs is what surfaced the disagreement between them: Table F.4 item 5,
+the fractional-position numerator, is written once per shared object
+*reference* and the production decoder read one per *page*. Both readings
+agree on every linearized file in the qpdf corpus, because all of them state
+item 12 as zero bits — which is exactly why a second reader could disagree
+for as long as it existed without a file noticing, and why the discriminating
+case is now a hand-packed table in the decoder's own tests.
 
 ## Dependencies
 
 - The Annex F writer and its tests — `linearize.rs`,
-  `tests/linearized.rs` — all landed; milestone 3 is a move, not an
-  implementation.
+  `tests/linearized.rs` — all landed; milestone 3 is a deletion and a
+  re-point, not an implementation.
 - The determinism suite and its fingerprints
   ([verification.md](../verification.md)) as the arrival-independence bar.
 - The qpdf corpus (637 files, fetched via `xtask corpus-fetch`) as the
