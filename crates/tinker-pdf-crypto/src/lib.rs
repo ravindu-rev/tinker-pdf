@@ -1,4 +1,5 @@
-//! Hand-rolled cryptography for PDF's standard security handler.
+//! Hand-rolled cryptography for PDF's standard security handler, and the
+//! arithmetic that checks a signature.
 //!
 //! A leaf crate: bytes and plain scalars in, bytes and values out, no PDF or
 //! COS types anywhere in its surface (ruling 8). That is what lets it be
@@ -8,25 +9,41 @@
 //!
 //! # On trusting this
 //!
-//! Implementing MD5, RC4, SHA-2 and AES by hand is unusual and deserves the
-//! scrutiny it invites. The honest framing, also recorded in `SECURITY.md`:
-//! the scope is document decryption and encryption-on-save, not a protocol;
+//! Implementing MD5, RC4, SHA-2, AES and now RSA and ECDSA verification by
+//! hand is unusual and deserves the scrutiny it invites. The honest framing,
+//! also recorded in `SECURITY.md`: the scope is document decryption,
+//! encryption-on-save and signature *verification*, not a protocol;
 //! correctness is gated on published vectors (FIPS 197, FIPS 180-4, RFC 6229,
-//! RFC 1321) as merge requirements rather than aspirations; password
-//! comparison is constant-time. PDF's own older revisions are weak by design —
-//! RC4 at 40 bits protects nothing — and its permission flags are advisory:
-//! a document saying "printing denied" is asking, not enforcing. Nothing here
-//! changes that, and no caller should treat PDF permissions as a security
-//! boundary.
+//! RFC 1321, and NIST CAVP for the two signature schemes) as merge
+//! requirements rather than aspirations; password comparison is constant-time.
+//! PDF's own older revisions are weak by design — RC4 at 40 bits protects
+//! nothing — and its permission flags are advisory: a document saying
+//! "printing denied" is asking, not enforcing. Nothing here changes that, and
+//! no caller should treat PDF permissions as a security boundary.
+//!
+//! # No private keys, ever
+//!
+//! [`rsa`] and [`ecdsa`] verify and do nothing else. There is no signing, no
+//! key generation and no key-file parsing, which is what lets [`bignum`] skip
+//! the constant-time obligations a private-key implementation could not skip:
+//! every value those two modules touch is published in the document being
+//! checked. A signing feature would not extend this code, it would replace it.
+
+#![forbid(unsafe_code)]
 
 pub mod aes;
+pub mod bignum;
+pub mod ecdsa;
 pub mod handler;
 pub mod md5;
 pub mod rc4;
+pub mod rsa;
 pub mod sha1;
 pub mod sha2;
 
+pub use ecdsa::{Curve, EcPublicKey, EcdsaRefusal};
 pub use handler::{authenticate, AuthOutcome, CryptMethod, FileKey, HandlerNote, HandlerParams};
+pub use rsa::{DigestAlgorithm, RsaPublicKey, RsaRefusal};
 
 /// A document's permission flags (7.6.4.2, Table 22).
 ///
