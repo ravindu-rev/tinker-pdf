@@ -110,6 +110,34 @@ impl Limits {
         max_nodes: 65_536,
     };
 
+    /// The ceilings a CMS `SignedData` is parsed under
+    /// ([`crate::cms::ContentInfo::parse`]).
+    ///
+    /// Both numbers are wider than [`Limits::CERTIFICATE`]'s, and both are
+    /// measured against the eighteen CMS blobs the fetched corpora carry
+    /// rather than chosen for roundness.
+    ///
+    /// **Depth 64.** A `SignedData` is already four levels deeper than a
+    /// certificate before it reaches one — `ContentInfo`, `[0]`, `SignedData`,
+    /// the certificate set — and an RFC 3161 timestamp token nests *another
+    /// whole `ContentInfo`* inside an unsigned attribute inside a
+    /// `SignerInfo`. The two corpus blobs that carry a token measure 25 levels
+    /// deep; the deepest without one is 17. Thirty-two would hold today's
+    /// worst case with seven levels to spare, which is not enough room for a
+    /// token that itself carries a token — a real thing in a long-term
+    /// validation profile — so the cap is set where a second nesting still
+    /// fits and a hundredth does not.
+    ///
+    /// **262 144 nodes.** The largest corpus blob is 33 627 bytes and 2 967
+    /// nodes; the smallest is 1 022 bytes and 128. A node costs at least two
+    /// bytes, so this ceiling is unreachable by anything under half a
+    /// megabyte, which is far past any signature blob observed and far short
+    /// of letting a large input buy unbounded decoding.
+    pub const CMS: Self = Self {
+        max_depth: 64,
+        max_nodes: 262_144,
+    };
+
     /// Ceilings of the caller's choosing.
     #[must_use]
     pub const fn new(max_depth: u32, max_nodes: u32) -> Self {

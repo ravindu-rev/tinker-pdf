@@ -155,6 +155,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "pki_cms"
+path = "fuzz_targets/pki_cms.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "crypt_ciphers"
 path = "fuzz_targets/crypt_ciphers.rs"
 test = false

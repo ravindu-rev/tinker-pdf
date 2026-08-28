@@ -1,4 +1,4 @@
-//! ASN.1 DER and X.509, for the structure side of a PDF signature.
+//! ASN.1 DER, X.509 and CMS, for the structure side of a PDF signature.
 //!
 //! A leaf crate: bytes and plain scalars in, values out, no PDF or COS types
 //! anywhere in its surface (ruling 8). A certificate is not a PDF concept and
@@ -31,6 +31,14 @@
 //! signature bypass, not a leniency, and [`der`]'s header says which rules are
 //! enforced and which two deliberately are not.
 //!
+//! **This rule has a measured price, and it is paid in [`cms`].** ISO 32000-1
+//! 12.8.3.3.1 calls a PDF signature's `/Contents` a DER object; four of the
+//! eighteen CMS blobs in the fetched corpora are BER instead, indefinite
+//! lengths from the outermost SEQUENCE down, and this crate refuses all four.
+//! [`cms`]'s header says what reading them would cost and why it is not a
+//! change to make inside a milestone about `SignedData`;
+//! `crates/tinker-pdf/tests/cms_census.rs` keeps the number honest.
+//!
 //! **Depth-capped and budgeted.** [`der::Limits`] bounds nesting and total
 //! nodes; the walker itself does not recurse, so the cap is about bounding
 //! work rather than about the stack, and the reasoning for each number is on
@@ -56,13 +64,29 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cms;
 pub mod der;
 pub mod name;
 pub mod oid;
 pub mod x509;
 
+pub use cms::{
+    Attributes, CertificateChoice, CmsError, ContentInfo, DigestAlgorithm, EncapsulatedContent,
+    EssCertId, RevocationChoice, SignatureAlgorithm, SignedData, SignerIdentifier, SignerInfo,
+    SigningCertificateV2,
+};
 pub use der::{BitString, Budget, Class, Cursor, DerError, Int, Limits, Oid, Tag, TimeFault, Tlv};
 pub use name::{Attribute, AttributeText, Name, Rdn};
+
+/// RFC 5652 §5.3's `Attribute`, re-exported under a distinguishing name.
+///
+/// The flat name is taken by [`name::Attribute`], which is RFC 5280 §4.1.2.4's
+/// `AttributeTypeAndValue` — a different structure in a different namespace
+/// that happens to be called the same thing by a different specification.
+/// Renaming either at the module level would be renaming a specification's own
+/// term, so the collision is resolved here, where it exists, and
+/// [`cms::Attribute`] keeps the name RFC 5652 gives it.
+pub use cms::Attribute as CmsAttribute;
 pub use x509::{
     AlgorithmIdentifier, AuthorityKeyIdentifier, BasicConstraints, Certificate, ExtendedKeyUsage,
     Extension, ExtensionFault, Extensions, KeyFault, KeyUsage, PublicKey, SubjectPublicKeyInfo,
