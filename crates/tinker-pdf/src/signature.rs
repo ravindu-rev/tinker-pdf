@@ -62,7 +62,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use tinker_pdf_cos::sign::{digest_spans, DigestAlgorithm};
+use tinker_pdf_cos::sign::{digest_spans, Certification, DigestAlgorithm, FieldLock};
 use tinker_pdf_cos::{CosDocument, Date, Dict, FieldKind, Name, ObjRef, Object};
 
 use crate::Document;
@@ -276,6 +276,17 @@ pub struct Signature {
     pub name: Option<String>,
     /// `/ContactInfo`.
     pub contact: Option<String>,
+    /// `/Reference` with `/TransformMethod /DocMDP` (12.8.2.2): this signature
+    /// certifies the document and says what later revisions may change.
+    ///
+    /// `None` for an ordinary approval signature, which restricts nothing —
+    /// and also for a `/DocMDP` whose `/P` is a value 12.8.2.2 does not
+    /// define, which is a document saying something meaningless rather than
+    /// something strict.
+    pub certification: Option<Certification>,
+    /// `/Reference` with `/TransformMethod /FieldMDP` (12.8.2.4): the form
+    /// fields this signature locks against later change.
+    pub field_lock: Option<FieldLock>,
     /// What was read leniently, or not at all.
     pub warnings: Vec<SignatureWarning>,
 }
@@ -302,6 +313,18 @@ impl Signature {
     #[must_use]
     pub fn covers_whole_file(&self) -> bool {
         self.coverage == Coverage::WholeFile
+    }
+
+    /// What revisions after this signature changed, and whether its own
+    /// `/DocMDP` and `/FieldMDP` permit it (12.8.2).
+    ///
+    /// Empty for a signature covering the whole file, because nothing came
+    /// after it, and empty for one whose coverage did not hold up, because
+    /// there is then no trustworthy prefix to compare against — the coverage
+    /// is what says which.
+    #[must_use]
+    pub fn modifications(&self, document: &Document) -> crate::mdp::Modifications {
+        crate::mdp::modifications(document, self)
     }
 
     /// Whether this is a usage-rights signature (12.8.4), which grants a
@@ -353,6 +376,12 @@ struct Keys {
     contact: Name,
     value: Name,
     perms: Name,
+    reference: Name,
+    transform_method: Name,
+    transform_params: Name,
+    permissions: Name,
+    action: Name,
+    fields: Name,
 }
 
 impl Keys {
@@ -367,6 +396,12 @@ impl Keys {
             contact: cos.intern(b"ContactInfo"),
             value: cos.intern(b"V"),
             perms: cos.intern(b"Perms"),
+            reference: cos.intern(b"Reference"),
+            transform_method: cos.intern(b"TransformMethod"),
+            transform_params: cos.intern(b"TransformParams"),
+            permissions: cos.intern(b"P"),
+            action: cos.intern(b"Action"),
+            fields: cos.intern(b"Fields"),
         }
     }
 }
@@ -508,6 +543,8 @@ fn read(cos: &CosDocument, keys: &Keys, candidate: Candidate) -> Signature {
         Err(defect) => Coverage::Suspicious(defect),
     };
 
+    let (certification, field_lock) = transforms(cos, sig, keys);
+
     let sub_filter_bytes = sig
         .get_name(keys.sub_filter)
         .and_then(|name| cos.name_bytes(name));
@@ -543,7 +580,85 @@ fn read(cos: &CosDocument, keys: &Keys, candidate: Candidate) -> Signature {
         location: text_of(cos, sig, keys.location),
         name: text_of(cos, sig, keys.signer),
         contact: text_of(cos, sig, keys.contact),
+        certification,
+        field_lock,
         warnings,
+    }
+}
+
+/// 12.8.2: the `/Reference` array's transforms, which is where a signature
+/// stops being a claim about bytes and becomes a claim about what may change.
+///
+/// Both methods are read from the same array in one pass, because a signature
+/// may carry both and reading it twice would be two chances to disagree about
+/// what it said.
+fn transforms(
+    cos: &CosDocument,
+    sig: &Dict,
+    keys: &Keys,
+) -> (Option<Certification>, Option<FieldLock>) {
+    let array = cos.resolve_key(sig, keys.reference);
+    let Some(entries) = array.as_array() else {
+        return (None, None);
+    };
+    let (mut certification, mut lock) = (None, None);
+    for entry in entries {
+        let resolved = cos.resolve(entry);
+        let Some(reference) = resolved.as_dict() else {
+            continue;
+        };
+        let Some(method) = reference
+            .get_name(keys.transform_method)
+            .and_then(|name| cos.name_bytes(name))
+        else {
+            continue;
+        };
+        let params = cos.resolve_key(reference, keys.transform_params);
+        let Some(params) = params.as_dict() else {
+            continue;
+        };
+        match method.as_ref() {
+            b"DocMDP" => {
+                certification = params
+                    .get_int(keys.permissions)
+                    .and_then(Certification::from_level);
+            }
+            b"FieldMDP" => lock = field_lock(cos, params, keys),
+            _ => {}
+        }
+    }
+    (certification, lock)
+}
+
+/// 12.8.2.4 Table 257's `/Action` and `/Fields`.
+fn field_lock(cos: &CosDocument, params: &Dict, keys: &Keys) -> Option<FieldLock> {
+    let action = params
+        .get_name(keys.action)
+        .and_then(|name| cos.name_bytes(name))?;
+    let named = || -> Vec<String> {
+        let fields = cos.resolve_key(params, keys.fields);
+        fields
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        cos.resolve(item)
+                            .as_string()
+                            .map(|text| tinker_pdf_cos::decode_text_string(&text.bytes))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    match action.as_ref() {
+        b"All" => Some(FieldLock::All),
+        b"Include" => Some(FieldLock::Include(named())),
+        b"Exclude" => Some(FieldLock::Exclude(named())),
+        // An `/Action` outside the three 12.8.2.4 defines locks nothing, which
+        // is the reading that does not invent a restriction the file did not
+        // ask for.
+        _ => None,
     }
 }
 

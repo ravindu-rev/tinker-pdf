@@ -33,6 +33,7 @@ use std::ops::Range;
 
 use tinker_pdf_crypto::{sha1, sha2};
 
+use crate::object::ObjRef;
 use crate::text_string::Date;
 
 /// Which digest reduces a signature's covered bytes.
@@ -164,6 +165,71 @@ pub trait Signer {
     fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused>;
 }
 
+/// What a certifying signature permits afterwards (12.8.2.2, `/DocMDP` `/P`).
+///
+/// A named enum rather than the integer the file carries, because `/P 0` and
+/// `/P 4` are writable and mean nothing, and because "level 2" says less at a
+/// call site than what level 2 allows.
+///
+/// Only one signature in a document may certify it, and it must be the first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Certification {
+    /// `/P 1`: no change at all is permitted after signing.
+    NoChanges,
+    /// `/P 2`: filling in form fields and adding signatures.
+    FormFillAndSigning,
+    /// `/P 3`: and creating, deleting or modifying annotations.
+    FormFillSigningAndAnnotations,
+}
+
+impl Certification {
+    /// The `/P` value.
+    #[must_use]
+    pub fn level(self) -> u8 {
+        match self {
+            Certification::NoChanges => 1,
+            Certification::FormFillAndSigning => 2,
+            Certification::FormFillSigningAndAnnotations => 3,
+        }
+    }
+
+    /// The certification `/P` names, or `None` for a value 12.8.2.2 does not
+    /// define — which is a document saying something meaningless rather than
+    /// something strict, and is reported as such rather than rounded to 1.
+    #[must_use]
+    pub fn from_level(level: i64) -> Option<Certification> {
+        match level {
+            1 => Some(Certification::NoChanges),
+            2 => Some(Certification::FormFillAndSigning),
+            3 => Some(Certification::FormFillSigningAndAnnotations),
+            _ => None,
+        }
+    }
+}
+
+/// Which form fields a signature locks (12.8.2.4, `/FieldMDP`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldLock {
+    /// `/Action /All` — every field in the document.
+    All,
+    /// `/Action /Include` — only the named fields.
+    Include(Vec<String>),
+    /// `/Action /Exclude` — every field except the named ones.
+    Exclude(Vec<String>),
+}
+
+impl FieldLock {
+    /// Whether `field`, named as 12.7.3.2 qualifies it, is locked.
+    #[must_use]
+    pub fn locks(&self, field: &str) -> bool {
+        match self {
+            FieldLock::All => true,
+            FieldLock::Include(names) => names.iter().any(|name| name == field),
+            FieldLock::Exclude(names) => !names.iter().any(|name| name == field),
+        }
+    }
+}
+
 /// Where the signature goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SigningTarget {
@@ -211,6 +277,15 @@ pub struct SigningRequest<'a> {
     pub contact: Option<String>,
     /// `/M`, the signing time. Supplied, never read from a clock.
     pub signed_at: Option<Date>,
+    /// Certify the document (12.8.2.2) rather than merely sign it.
+    ///
+    /// A certifying signature says what later revisions are allowed to change.
+    /// Only the first signature in a document may certify it, and setting this
+    /// also writes the catalog's `/Perms /DocMDP`, which is what makes the
+    /// claim discoverable without walking every field.
+    pub certification: Option<Certification>,
+    /// Lock form fields against later change (12.8.2.4).
+    pub field_lock: Option<FieldLock>,
 }
 
 impl<'a> SigningRequest<'a> {
@@ -227,6 +302,8 @@ impl<'a> SigningRequest<'a> {
             name: None,
             contact: None,
             signed_at: None,
+            certification: None,
+            field_lock: None,
         }
     }
 }
@@ -375,9 +452,76 @@ fn name(out: &mut Vec<u8>, text: &str) {
     }
 }
 
+/// 12.8.2.2 Table 254: the signature reference dictionaries that turn a
+/// signature into a claim about what may change after it.
+///
+/// `/Data` names the object the transform applies to, which for both `DocMDP`
+/// and `FieldMDP` is the document catalog. A document with no catalog gets no
+/// `/Reference` at all: a transform that names nothing constrains nothing, and
+/// writing one anyway would be a claim with no subject.
+///
+/// `/V /1.2` is the transform-parameters version both methods take. It is not
+/// a document version — it says which revision of the *transform* the
+/// parameters are written for.
+fn references(out: &mut Vec<u8>, request: &SigningRequest<'_>, catalog: Option<ObjRef>) {
+    let Some(catalog) = catalog else {
+        return;
+    };
+    if request.certification.is_none() && request.field_lock.is_none() {
+        return;
+    }
+
+    out.extend_from_slice(b" /Reference [");
+    if let Some(certification) = request.certification {
+        out.extend_from_slice(
+            format!(
+                " << /Type /SigRef /TransformMethod /DocMDP /TransformParams \
+                 << /Type /TransformParams /P {} /V /1.2 >> /Data {} {} R >>",
+                certification.level(),
+                catalog.num,
+                catalog.gen
+            )
+            .as_bytes(),
+        );
+    }
+    if let Some(lock) = &request.field_lock {
+        out.extend_from_slice(
+            b" << /Type /SigRef /TransformMethod /FieldMDP /TransformParams \
+              << /Type /TransformParams /V /1.2 /Action ",
+        );
+        match lock {
+            FieldLock::All => out.extend_from_slice(b"/All"),
+            FieldLock::Include(fields) => {
+                out.extend_from_slice(b"/Include /Fields [");
+                for field in fields {
+                    out.push(b' ');
+                    literal(out, field);
+                }
+                out.extend_from_slice(b" ]");
+            }
+            FieldLock::Exclude(fields) => {
+                out.extend_from_slice(b"/Exclude /Fields [");
+                for field in fields {
+                    out.push(b' ');
+                    literal(out, field);
+                }
+                out.extend_from_slice(b" ]");
+            }
+        }
+        out.extend_from_slice(format!(" >> /Data {} {} R >>", catalog.num, catalog.gen).as_bytes());
+    }
+    out.extend_from_slice(b" ]");
+}
+
 impl Reserved {
     /// The dictionary for `request`, with both fields reserved.
-    pub(crate) fn build(request: &SigningRequest<'_>) -> Reserved {
+    ///
+    /// `catalog` is the document catalog's reference, which 12.8.2.2 Table 254
+    /// requires as a signature reference dictionary's `/Data` — the object the
+    /// transform applies to. A document with no catalog gets no `/Reference`,
+    /// because a transform that names nothing constrains nothing and writing
+    /// one would be a claim with no subject.
+    pub(crate) fn build(request: &SigningRequest<'_>, catalog: Option<ObjRef>) -> Reserved {
         let mut bytes = Vec::with_capacity(request.reserve * 2 + 512);
         bytes.extend_from_slice(b"<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter ");
         name(&mut bytes, &request.sub_filter);
@@ -397,6 +541,7 @@ impl Reserved {
             bytes.extend_from_slice(b" /M ");
             literal(&mut bytes, &pdf_date(date));
         }
+        references(&mut bytes, request, catalog);
 
         bytes.extend_from_slice(b" /ByteRange ");
         let byte_range_at = bytes.len();
@@ -562,7 +707,7 @@ mod tests {
         request.reserve = 8;
         request.reason = Some("a (parenthesised) reason".into());
 
-        let reserved = Reserved::build(&request);
+        let reserved = Reserved::build(&request, None);
         assert_eq!(
             &reserved.bytes
                 [reserved.byte_range_at..reserved.byte_range_at + reserved.byte_range_len],

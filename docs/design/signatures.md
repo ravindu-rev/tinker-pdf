@@ -70,7 +70,9 @@ defensive branch that **no corpus file needs**, held up by a fixture and by that
 - **Read: modification detection (12.8.2.2, 12.8.2.4).** A signature covering revision *N*
   plus later revisions from `CosDocument::revisions()` yields the set of objects the later
   revisions touched; classify them against the `/DocMDP` `/P` level and `/FieldMDP` field
-  lists, producing a typed answer, not a boolean.
+  lists, producing a typed answer, not a boolean. **Done.** The writer grew `/DocMDP` and
+  `/FieldMDP` with it, because no corpus file carries a `/DocMDP` reference at all — without a
+  writer there would be nothing to read.
 - **Write: sign on incremental save.** Reserve `/Contents` and `/ByteRange` (revive
   `SignaturePlaceholder` as the producer's record), patch `/ByteRange` after layout, hand the
   range digest to a caller-supplied `Signer`, hex-patch the returned CMS into the gap.
@@ -158,14 +160,43 @@ and the host renders it, exactly as `Bitmap.warnings` consumers do under ruling 
 unparseable or unsupported becomes a typed verdict variant with provenance (rulings 2, 10),
 never an `Err`, never a panic (ruling 1) — a signed file must still open, render, and extract.
 
-**MDP over revisions.** For a signature covering `Revision` *k*: reparse the document
-prefix `&bytes[..revisions()[k].byte_range.end]` as its own `CosDocument` (the machinery
-already accepts arbitrary buffers), then diff object numbers written by revisions after *k*
-against the prefix. `/DocMDP` `/P` (12.8.2.2): level 1 permits nothing; 2 permits form fill
-and signing; 3 adds annotations — classify each touched object as form-field value, signature
-field, annotation, or other, reusing `FieldKind` classification from `form.rs`. `/FieldMDP`
-(12.8.2.4) narrows to the named fields under its `/Action`. The output is
-`Unmodified | PermittedChanges(list) | DisallowedChanges(list)` with object provenance.
+**MDP over revisions. Done** — `crates/tinker-pdf/src/mdp.rs`, `Signature::modifications`.
+The prefix is reparsed as its own `CosDocument`, as sketched, but what is diffed is **not**
+object values: it is **cross-reference entries**. Comparing values has two faults that only
+show up on real documents. An encrypted document's strings and streams come back decrypted
+from the authenticated original and encrypted from a freshly opened prefix, so every object
+compares unequal and the analysis reports a wholly rewritten document whenever it is merely
+encrypted. And it means parsing every object of both documents to answer a question about
+which bytes were written. 7.5.6 says an update writes a new entry for exactly the objects it
+changed, so a differing entry *is* a changed object — no key needed, and one parse of each
+object that actually moved. `/DocMDP` `/P` (12.8.2.2): level 1 permits nothing; 2 permits form fill
+and signing; 3 adds annotations. `/FieldMDP` (12.8.2.4) narrows to the named fields under its
+`/Action`, and overrides the level: a locked field may not change however permissive `/P` is.
+The output is a list with each entry classified and marked `permitted`, rather than the
+three-variant enum sketched here — the two shapes carry the same information and a list with
+a flag has no variant that discards the list.
+
+**Two things object granularity forced, both recorded rather than smoothed over.**
+
+A cross-reference table's finest grain is an object, and two containers every document has are
+rewritten by operations 12.8.2.2 *permits*. Adding a signature appends its widget to a page's
+`/Annots`, and where that array is direct in the page dictionary — the common shape — the page
+object changes; filling a field rewrites `/AcroForm`, and where that is direct in the catalog,
+the catalog changes. Classified strictly, every legitimate fill and every legitimate
+countersignature reports itself as a violation, which is a check nobody can use. So an altered
+page or catalog whose change is *confined* to those keys is classified as plumbing, proved by
+comparing the two dictionaries key by key. What that cannot see is inside the allowed key: an
+annotation removed and one added look identical to it, and
+`emptying_the_annotation_list_is_not_caught_and_this_is_the_limit` asserts exactly that, so the
+day it stops being true is a failing test rather than an unnoticed improvement.
+
+The key-by-key comparison hit a trap worth naming, because it is a trap for anything that
+compares two documents. `Object::Name` holds an interned symbol valid only against the table
+that issued it, so `/Type /Page` in one document and `/Type /Page` in another are unequal by
+`PartialEq` whenever the two tables interned in different orders. The comparison is by name
+*bytes*. One property falls out of it and is kept deliberately: a stream is answered "not the
+same" without being read, and in an encrypted document unchanged strings compare unequal too —
+so encryption makes this analysis stricter and never looser.
 
 **Signing. Done** — `DocumentEditor::save_signed`, `crates/tinker-pdf-cos/src/sign.rs`. The
 `Signer` trait is the two calls this section specified, `SignaturePlaceholder` finally earns
@@ -232,7 +263,7 @@ whose interop claim is unverified and unstated is worse than one that says so.
 | 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
 | 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
 | 6 | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
-| 7 | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
+| 7 **done** | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
 | 8 **done** | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |
 | 9 | Facade + FFI projection, warnings, docs | Verdict types exposed 1:1 through `tinker-pdf-ffi` (ruling 11) with parity tests; typed warnings carry object provenance (ruling 10) pinned by fixture; [features/forms.md](../features/forms.md) gains a signature-fields section; roadmap row closed against [ROADMAP.md](../ROADMAP.md) | M |
 

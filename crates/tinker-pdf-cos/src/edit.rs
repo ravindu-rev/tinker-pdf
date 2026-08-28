@@ -1678,7 +1678,11 @@ impl DocumentEditor {
         let trailer = self.doc.trailer().clone();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
-        let reserved = crate::sign::Reserved::build(request);
+        let catalog = self.doc.trailer().get_ref(Name::ROOT);
+        if request.certification.is_some() {
+            self.certify(signature_ref);
+        }
+        let reserved = crate::sign::Reserved::build(request, catalog);
         let (mut out, placeholder) = write::incremental_update_reserving(
             self.doc.bytes(),
             &set,
@@ -1694,6 +1698,36 @@ impl DocumentEditor {
         let placeholder = placeholder.ok_or(SignError::RangeDoesNotFit)?;
         crate::sign::seal(&mut out, &placeholder, request.signer)?;
         Ok(out)
+    }
+
+    /// 12.8.4: the catalog's `/Perms /DocMDP` names the certifying signature,
+    /// which is what lets a reader find the document's certification without
+    /// walking every field looking for a `/Reference`.
+    fn certify(&mut self, signature: ObjRef) {
+        let Some(root) = self.doc.trailer().get_ref(Name::ROOT) else {
+            return;
+        };
+        let Some(Object::Dict(mut catalog)) = self.get(root) else {
+            return;
+        };
+        let perms_key = self.intern(b"Perms");
+        let docmdp = self.intern(b"DocMDP");
+        let mut perms = match catalog.get(perms_key).cloned() {
+            Some(Object::Dict(dict)) => dict,
+            Some(Object::Ref(perms_ref)) => match self.get(perms_ref) {
+                Some(Object::Dict(dict)) => {
+                    let mut dict = dict;
+                    dict.insert(docmdp, Object::Ref(signature));
+                    self.put(perms_ref, Object::Dict(dict));
+                    return;
+                }
+                _ => Dict::new(),
+            },
+            _ => Dict::new(),
+        };
+        perms.insert(docmdp, Object::Ref(signature));
+        catalog.insert(perms_key, Object::Dict(perms));
+        self.put(root, Object::Dict(catalog));
     }
 
     /// Points an existing empty signature field at `signature`.

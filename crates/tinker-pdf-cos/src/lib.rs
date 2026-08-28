@@ -111,7 +111,8 @@ pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use script::{Budget, Host, ScriptError};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
-    digest_spans, DigestAlgorithm, SignError, SignRefused, Signer, SigningRequest, SigningTarget,
+    digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,
+    SigningRequest, SigningTarget,
 };
 pub use text_string::{decode_text_string, parse_date, Date};
 pub use trees::{name_tree, name_tree_lookup, number_tree};

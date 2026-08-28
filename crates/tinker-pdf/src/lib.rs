@@ -26,6 +26,7 @@ mod annots;
 pub mod cbz;
 pub mod epub;
 pub mod fonts;
+pub mod mdp;
 mod optional;
 pub mod redact;
 mod resources;
@@ -42,6 +43,7 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefect, PageOrigin};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
+pub use mdp::{Change, Modification, Modifications, Touched};
 pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
 pub use tinker_pdf_content::{
     Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
@@ -65,15 +67,6 @@ pub use tinker_pdf_cos::{
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
 /// caller of [`DocumentEditor::recalculate`] handles.
 pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
-/// The object model behind [`Document::cos`].
-///
-/// The escape hatch is only an escape hatch if the types it hands back can be
-/// named without depending on the crate underneath, so they are re-exported
-/// here rather than left for a caller to find.
-pub use tinker_pdf_cos::{
-    CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
-    XrefTable,
-};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///
@@ -82,7 +75,17 @@ pub use tinker_pdf_cos::{
 /// side on purpose — one definition of what a `/ByteRange` covers, so what is
 /// signed and what is checked cannot drift apart.
 pub use tinker_pdf_cos::{
-    DigestAlgorithm, SignError, SignRefused, Signer, SigningRequest, SigningTarget,
+    Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
+    SigningTarget,
+};
+/// The object model behind [`Document::cos`].
+///
+/// The escape hatch is only an escape hatch if the types it hands back can be
+/// named without depending on the crate underneath, so they are re-exported
+/// here rather than left for a caller to find.
+pub use tinker_pdf_cos::{
+    CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
+    XrefTable,
 };
 /// Writing: creation, editing and saving.
 ///
@@ -808,6 +811,16 @@ impl Document {
     #[must_use]
     pub fn signatures(&self) -> Vec<Signature> {
         signature::signatures(self)
+    }
+
+    /// The strictest certification any signature in this document declares
+    /// (12.8.2.2), or `None` when none of them certifies it.
+    ///
+    /// A shortcut past `signatures()` for the common question "is this
+    /// document certified, and how tightly".
+    #[must_use]
+    pub fn certification(&self) -> Option<Certification> {
+        mdp::strictest(self)
     }
 
     /// What the form's calculations depend on, in the order they run
