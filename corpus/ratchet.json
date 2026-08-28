@@ -6,7 +6,8 @@
         "iccbased": 80,
         "jbig2": 103,
         "jpx": 12,
-        "mesh-shading": 10
+        "mesh-shading": 10,
+        "signature": 9
       },
       "degraded": 338,
       "metamorphic": {
@@ -38,7 +39,8 @@
     {
       "capabilities": {
         "iccbased": 366,
-        "jpx": 7
+        "jpx": 7,
+        "signature": 6
       },
       "degraded": 55,
       "metamorphic": {
@@ -69,7 +71,8 @@
     },
     {
       "capabilities": {
-        "iccbased": 3
+        "iccbased": 3,
+        "signature": 2
       },
       "degraded": 530,
       "metamorphic": {

@@ -276,6 +276,76 @@ fn a_signature_survived_by_an_incremental_update_covers_a_revision() {
     );
 }
 
+/// Writes the `signatures` fuzz target's seed corpus.
+///
+/// The seeds are written by the test that owns the fixture builder, which is
+/// this repository's convention (`verification.md`) and the reason for it:
+/// a seed corpus assembled somewhere else drifts from the fixtures it was
+/// derived from, silently, and a fuzzer starting from stale seeds explores the
+/// shape a parser used to have.
+///
+/// Each seed is a whole document, because that is what the target takes. They
+/// are chosen for the branches they reach rather than for being realistic:
+/// every one of them is a *shape* the coverage classifier has an arm for.
+#[test]
+#[ignore = "writes into fuzz/corpus/, which is committed"]
+fn write_the_fuzz_seeds() {
+    let base =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/signatures");
+    std::fs::create_dir_all(&base).expect("the corpus directory");
+
+    let whole = signed_document("308201020000", true, Shape::Separate);
+    let short = signed_document("308201020000", false, Shape::Separate);
+    let merged = signed_document("30820102", true, Shape::Merged);
+
+    // A `/ByteRange` whose numbers are arithmetically fine and point at
+    // something that is not a hexadecimal string: the `GapIsNotContents` arm,
+    // which three corpus files reach and no other seed here does.
+    let mut misdirected = whole.clone();
+    if let Some(at) = find(&misdirected, b"[00000000") {
+        misdirected[at..at + 45].copy_from_slice(b"[0000000000 0000000009 0000000030 0000000004]");
+    }
+
+    // Two spans that overlap, which no producer emits and a reader must not
+    // read as coverage.
+    let mut overlapping = whole.clone();
+    if let Some(at) = find(&overlapping, b"[00000000") {
+        overlapping[at..at + 45].copy_from_slice(b"[0000000000 0000000100 0000000050 0000000004]");
+    }
+
+    for (name, bytes) in [
+        ("whole-file", &whole),
+        ("ends-mid-file", &short),
+        ("merged-field", &merged),
+        ("gap-is-not-contents", &misdirected),
+        ("overlapping-spans", &overlapping),
+    ] {
+        std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+    }
+
+    // The seeds must be what they claim, or they are five copies of one path.
+    for (bytes, expected) in [
+        (&whole, "WholeFile"),
+        (&short, "EndsMidFile"),
+        (&misdirected, "GapIsNotContents"),
+        (&overlapping, "SpansOverlap"),
+    ] {
+        let document = Document::open(bytes.clone()).expect("the seed opens");
+        let signatures = document.signatures();
+        assert_eq!(signatures.len(), 1, "{expected}");
+        assert!(
+            format!("{:?}", signatures[0].coverage).contains(expected),
+            "the {expected} seed reaches {:?} instead",
+            signatures[0].coverage
+        );
+    }
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len())
+        .position(|window| window == needle)
+}
+
 // ---- the corpus census ----------------------------------------------------
 
 fn corpus_root() -> Option<PathBuf> {

@@ -1288,7 +1288,7 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 3;
+const PROBE_VERSION: u32 = 4;
 
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
@@ -1621,6 +1621,14 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
                 if names_iccbased(cos, value, depth) {
                     found.insert("iccbased");
                 }
+            }
+            b"ByteRange" => {
+                // 12.8.1: only a signature dictionary has one. Counted here
+                // rather than inferred from a warning, because reading a
+                // signature produces no warning when it succeeds — and the
+                // number is what says whether the reader is still finding
+                // them all.
+                found.insert("signature");
             }
             b"ShadingType" => {
                 // 8.7.4.5.5-8: types 4 to 7 are the mesh shadings, which is

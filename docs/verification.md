@@ -24,8 +24,10 @@ cover every input format: `ascii_filters`, `ccitt`, `cff`, `cmap`,
 `signatures`, `truetype`, `type1`, `xml`, `zip_archive` — each landing in the
 same PR as its parser. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
-longer. Six of the corpora are written by an `#[ignore]`d test in the crate
-that owns the fixtures, so the seeds and the fixtures cannot drift.
+longer. Eight of the corpora are written by an `#[ignore]`d test in the crate
+that owns the fixtures, so the seeds and the fixtures cannot drift: `crypt`,
+`crypt_ciphers`, `png`, `cff`, `zip_archive`, `render_page`, `pki_der` and
+`signatures`.
 
 This sentence read 24 and omitted `icc_profile` until the signature work
 counted them, so the number was wrong in the direction that flatters — which
