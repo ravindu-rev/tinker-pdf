@@ -258,9 +258,7 @@ impl StructureTree {
     /// How many marked-content references the tree holds (14.7.4.2).
     #[must_use]
     pub fn content_count(&self) -> usize {
-        count(&self.kids, &|kid| {
-            matches!(kid, StructKid::Content { .. })
-        })
+        count(&self.kids, &|kid| matches!(kid, StructKid::Content { .. }))
     }
 
     /// How many `/OBJR` object references the tree holds (14.7.4.3).
@@ -762,6 +760,16 @@ impl Walk<'_> {
     /// with a visited set so `/Foo → /Bar → /Foo` reports itself rather than
     /// running the budget out silently. An unmapped name resolves to itself,
     /// which is what makes a custom type a type rather than an error.
+    ///
+    /// **`/P /P` is not a cycle.** An entry mapping a name to itself is what a
+    /// producer writes when it emits a role map covering every type it uses
+    /// and some of those types are already standard, and it is the single most
+    /// common entry in the wild: the first census over the fetched corpora
+    /// reported 63 role-map loops, and treating the identity entry as a
+    /// termination rather than as a cycle took that to the handful of files
+    /// that have a real one. A warning that fires on the ordinary case is
+    /// noise, and ruling 10's warnings are only actionable while they stay
+    /// rare.
     fn resolve_role(&mut self, raw: &[u8]) -> String {
         let mut current = raw.to_vec();
         let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
@@ -770,6 +778,9 @@ impl Walk<'_> {
             let Some(next) = self.role_map.get(&current) else {
                 break;
             };
+            if *next == current {
+                break;
+            }
             if !seen.insert(next.clone()) {
                 let role = String::from_utf8_lossy(raw).into_owned();
                 self.warn(StructureWarning::RoleMapLoop { role });
@@ -1015,9 +1026,9 @@ impl Join<'_> {
         // Only for an element this page actually holds. Without the test, a
         // `Figure` on page 40 has its description reported on page 1.
         let here = element.page == Some(self.index)
-            || element.kids.iter().any(|kid| {
-                matches!(kid, StructKid::Content { page, .. } if *page == Some(self.index))
-            });
+            || element.kids.iter().any(
+                |kid| matches!(kid, StructKid::Content { page, .. } if *page == Some(self.index)),
+            );
         if !here {
             return;
         }
@@ -1257,6 +1268,31 @@ trailer\n<< /Size 400 /Root 1 0 R >>\n%%EOF\n"
         assert!(
             !elements[0].standard_type.is_empty(),
             "a loop must not cost the element its type"
+        );
+    }
+
+    /// `/P /P` is the commonest entry a real role map holds, and it is not a
+    /// cycle.
+    ///
+    /// A producer emitting a role map that covers every type it uses writes
+    /// one of these for every type that is already standard. Reporting them
+    /// as loops made the first corpus census say 63 when the real number is a
+    /// handful, and a warning that fires on the ordinary case is noise rather
+    /// than provenance.
+    #[test]
+    fn an_identity_role_map_entry_is_not_a_loop() {
+        let tree = tree(
+            "/K 10 0 R /RoleMap << /P /P /Span /Span /Chapitre /Sect >>",
+            "10 0 obj\n<< /S /P /K [11 0 R] >>\nendobj\n\
+             11 0 obj\n<< /S /Chapitre >>\nendobj\n",
+        );
+
+        assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+        let elements = tree.elements();
+        assert_eq!(elements[0].standard_type, "P");
+        assert_eq!(
+            elements[1].standard_type, "Sect",
+            "and a real mapping in the same map still applies"
         );
     }
 

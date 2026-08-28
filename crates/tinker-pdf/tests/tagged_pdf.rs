@@ -45,9 +45,7 @@ fn page(bytes: Vec<u8>) -> tinker_pdf::Page {
 
 /// One marked sequence per line, at descending baselines.
 fn marked(mcid: u32, y: u32, text: &str) -> String {
-    format!(
-        "/P << /MCID {mcid} >> BDC BT /F0 12 Tf 5 {y} Td ({text}) Tj ET EMC\n"
-    )
+    format!("/P << /MCID {mcid} >> BDC BT /F0 12 Tf 5 {y} Td ({text}) Tj ET EMC\n")
 }
 
 /// **The milestone's first exit criterion.** Content-stream order and
@@ -199,8 +197,8 @@ fn actual_text_on_a_property_list_replaces_its_own_sequence() {
 /// it — which is exactly the content a reader most needs the description of.
 #[test]
 fn a_figures_alt_text_surfaces_with_no_glyphs_behind_it() {
-    let content = "/Figure << /MCID 0 >> BDC 10 10 30 30 re f EMC\n".to_string()
-        + &marked(1, 20, "caption");
+    let content =
+        "/Figure << /MCID 0 >> BDC 10 10 30 30 re f EMC\n".to_string() + &marked(1, 20, "caption");
     let page = page(build(
         "",
         "/K 10 0 R",
@@ -394,8 +392,7 @@ fn a_bare_bmc_leaves_its_characters_unmarked() {
 #[test]
 fn an_untagged_document_reports_no_structure_rather_than_an_empty_one() {
     let bytes = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/simple-text.pdf"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/simple-text.pdf"),
     )
     .expect("the fixture is committed");
     let doc = Document::open(bytes).expect("it opens");

@@ -36,7 +36,7 @@
 //! this engine's answers against upstream's pass/fail annotations is milestone
 //! 5 and is deliberately not done here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{Document, StructureWarning};
@@ -110,6 +110,15 @@ struct Row {
     marked: bool,
     suspects: bool,
     elements: usize,
+    /// How many *distinct* indirect objects those elements came from.
+    ///
+    /// The `/K` walk's visited set is scoped to the path from the root
+    /// (the discipline `trees.rs` uses), so a subtree named from two places is
+    /// read twice — which is right for a file that legitimately shares one and
+    /// is also how a hostile file inflates its own element count. This is the
+    /// number that tells the two apart, and a corpus where it tracks
+    /// `elements` closely is a corpus of trees rather than of graphs.
+    distinct: usize,
     content: usize,
     objects: usize,
     matched: usize,
@@ -161,6 +170,12 @@ fn census_of(path: &Path) -> Row {
     row.marked = tree.marked;
     row.suspects = tree.suspects;
     row.elements = tree.element_count();
+    row.distinct = tree
+        .elements()
+        .iter()
+        .filter_map(|element| element.reference)
+        .collect::<BTreeSet<_>>()
+        .len();
     row.content = tree.content_count();
     row.objects = tree.object_count();
     for warning in &tree.warnings {
@@ -220,6 +235,7 @@ fn the_fetched_corpora_yield_structure_trees() {
     let mut ua_with_tree = 0usize;
     let mut ua_marked = 0usize;
     let (mut elements, mut content, mut objects) = (0usize, 0usize, 0usize);
+    let mut distinct = 0usize;
     let (mut matched, mut orphans, mut unmarked) = (0usize, 0usize, 0usize);
     let mut warnings: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut biggest: (usize, String) = (0, String::new());
@@ -260,6 +276,7 @@ fn the_fetched_corpora_yield_structure_trees() {
             suspects += 1;
         }
         elements += row.elements;
+        distinct += row.distinct;
         content += row.content;
         objects += row.objects;
         matched += row.matched;
@@ -293,6 +310,7 @@ fn the_fetched_corpora_yield_structure_trees() {
     println!("  of those, with a tree  {ua_with_tree}");
     println!("  of those, marked       {ua_marked}");
     println!("struct elements          {elements}");
+    println!("  distinct objects       {distinct}");
     println!("struct content items     {content}");
     println!("struct object refs       {objects}");
     println!("chars matched            {matched}");
