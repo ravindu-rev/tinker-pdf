@@ -606,15 +606,23 @@ fn the_bias_falls_from_1131_to_107_when_the_index_shrinks() {
 /// numbers are wrong under the other bias, so an operand computed with either
 /// the old bias or the smallest one draws the wrong lines — and every one of
 /// the 1 300 subroutines draws a line of its own so that it shows.
+///
+/// The kept subroutines start at 20 000 rather than at zero, and that is not
+/// decoration. A subset whose survivors are a **prefix** of the original
+/// numbering renumbers them onto themselves, so a subsetter that ignored the
+/// new position entirely would pass — the injection matrix found exactly that
+/// hole in the first draft of this test, where the kept range began at zero
+/// and reintroducing "use the original subroutine index" changed nothing here.
 #[test]
 fn the_bias_falls_from_32768_to_1131_when_the_index_shrinks() {
     const COUNT: usize = 34_000;
     const KEPT: usize = 1300;
+    const FIRST: usize = 20_000;
     assert_eq!(bias(COUNT), 32768);
     assert_eq!(bias(KEPT), 1131);
 
     let mut subrs: Vec<Vec<u8>> = vec![vec![11u8]; COUNT];
-    for (i, subr) in subrs.iter_mut().enumerate().take(KEPT) {
+    for (i, subr) in subrs.iter_mut().enumerate().skip(FIRST).take(KEPT) {
         // A different line per subroutine, so calling the wrong one shows.
         *subr = line_subr(1 + (i as i32 % 97), 1 + (i as i32 % 31));
     }
@@ -622,7 +630,7 @@ fn the_bias_falls_from_32768_to_1131_when_the_index_shrinks() {
     let mut drawn = t2(0);
     drawn.extend(t2(0));
     drawn.push(21); // rmoveto
-    for i in 0..KEPT {
+    for i in FIRST..FIRST + KEPT {
         drawn.extend(call_local(i, COUNT));
     }
     drawn.push(14);
