@@ -25,9 +25,11 @@ Transcribing twenty-four certificates by hand does not scale, and producing the 
 `tinker-pdf-pki` would be the parser agreeing with itself, which is the one thing a sidecar
 must not be.
 
-Thirteen of the twenty-four are reachable today and all thirteen match. The other eleven sit
-inside the BER blobs this build refuses, and **both numbers are asserted**, so lifting that
-refusal fails this test and forces a re-record.
+Fifteen of the twenty-four are reachable and all fifteen match. **Both numbers are asserted**,
+and the mechanism has already earned itself: it was thirteen until BER indefinite lengths were
+read, and the test failed the moment that refusal lifted. The nine still out of reach sit in
+blobs whose `/ByteRange` does not bracket their `/Contents` — readable by a scanner that
+ignores the coverage classifier, which is exactly what this build declines to be.
 
 One disagreement came out of it, about a real certificate. Three corpus serials have their top
 bit set with no leading zero, so the `INTEGER` *is* negative in DER — RFC 5280 §4.1.2.2 says a

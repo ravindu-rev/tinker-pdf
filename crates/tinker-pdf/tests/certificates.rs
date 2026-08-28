@@ -217,20 +217,25 @@ fn every_recorded_certificate_reads_back_as_recorded() {
     if !missing.is_empty() {
         println!("recorded but not found in this corpus: {missing:#?}");
     }
-    // The sidecar records 24 and this build reaches 13. The gap is not corpus
-    // drift: eleven of the certificates live inside CMS blobs encoded with BER
-    // indefinite lengths, which `tinker-pdf-pki` refuses by name, so nothing
-    // here can get at them. The sidecar was made by a scanner that reads the
-    // DER directly and does not care how the blob around it is encoded.
+    // The sidecar records 24 and this build reaches 15. The gap is not corpus
+    // drift, and it has already moved once: it was 13 until BER indefinite
+    // lengths were read, which put two more blobs' certificates in reach. That
+    // re-record is what this pair of assertions exists to force, and it
+    // worked — the test failed the moment the refusal lifted.
     //
-    // Both numbers are asserted, so the day the BER refusal lifts this test
-    // fails and has to be re-recorded — which is the point. A sidecar that
-    // silently matched nothing would be worse than none, and one that quietly
-    // matched fewer than it used to would be worse still.
+    // The nine still out of reach sit in blobs whose `/ByteRange` does not
+    // bracket their `/Contents`, so `Signature::cms()` hands back nothing.
+    // They are readable by a scanner that ignores the coverage classifier, and
+    // the sidecar was built by exactly such a scanner — but reading a CMS the
+    // classifier will not vouch for is the thing milestone 1 exists to refuse,
+    // so this test declines to do it too.
+    //
+    // A sidecar that silently matched nothing would be worse than none, and
+    // one that quietly matched fewer than it used to would be worse still.
     assert_eq!(
-        checked, 13,
+        checked, 15,
         "certificates checked against the sidecar; the rest sit inside blobs \
-         this build refuses"
+         whose coverage does not hold up"
     );
-    assert_eq!(missing.len(), 11, "recorded but unreachable: {missing:#?}");
+    assert_eq!(missing.len(), 9, "recorded but unreachable: {missing:#?}");
 }

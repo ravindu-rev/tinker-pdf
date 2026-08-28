@@ -41,15 +41,16 @@ tinker-pdf-math ────→ tinker-pdf-color ──┐
 tinker-pdf-filters ─┬─→ tinker-pdf-font ─┤                               ↓
                     ├─→ tinker-pdf-zip ──┼───────────────────────────────┤
 tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-content ─→ tinker-pdf-render ─→ tinker-pdf ─→ tinker-pdf-ffi
-              └─────→ tinker-pdf-pki      (no consumer yet: milestone 3 of design/signatures.md)
+              └─────→ tinker-pdf-pki ──────────────────────────────────────────────────→ tinker-pdf
+tinker-pdf-font ────→ tinker-pdf-shape    (no consumer yet: milestone 6 of design/shaping.md)
 tinker-pdf-xml ───────────────────────────────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-css ─────→ tinker-pdf-layout ──────────────────────────────────────────────→ tinker-pdf
 
 tools: pdfcmp (no engine deps) · tpdf (depends on facade)
 ```
 
-**Eleven leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
-`math`, `zip`, `xml`, `css`, `layout`, `pki` — are bytes-in/values-out with zero
+**Twelve leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
+`math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape` — are bytes-in/values-out with zero
 PDF types (ruling 8 defines a leaf; the definition binds, not the list).
 This is the property that makes each one independently fuzzable: a fuzz
 target hands `tinker-pdf-font` a byte slice and expects a value or a
@@ -57,12 +58,15 @@ structured error, with no COS machinery in the corpus or the crash triage.
 It also means a leaf is tested against its own spec (DEFLATE against
 RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
 
-Four leaf-to-leaf edges exist, each pointing from a higher layer down:
+Five leaf-to-leaf edges exist, each pointing from a higher layer down:
 `font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
-and CRC-32), `layout → css` (computed styles in, boxes out), and
+and CRC-32), `layout → css` (computed styles in, boxes out),
 `pki → crypto` (RFC 5280's key identifier is a SHA-1, and DER stays out of
 the cipher crate because the two fail differently — a wrong number caught by
-published vectors, against a panic or an overread on untrusted structure).
+published vectors, against a panic or an overread on untrusted structure), and
+`shape → font` (`Sfnt` parses the table directory, and the OpenType Layout
+tables are read in `shape` because `font`'s charter is the tables *metrics*
+need — a lookup is not a metric).
 
 One more edge points down *out* of a non-leaf and is listed here because it
 used to be counted among the four above, which it never was: `cos → font`,
@@ -98,7 +102,8 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script` |
 | `tinker-pdf-filters` | stream filters + image codecs | 21 800 | [filters](features/filters.md) | `ascii_filters`, `ccitt`, `inflate`, `jbig2`, `jpeg`, `jpx`, `lzw`, `png` |
 | `tinker-pdf-crypto` | ciphers, hashes, security handlers, RSA/ECDSA verify | 6 000 | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
-| `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280) | 4 800 | [design/signatures.md](design/signatures.md) | `pki_der` |
+| `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | 6 000 | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
+| `tinker-pdf-shape` | OpenType Layout: GDEF, GSUB, GPOS | 4 950 | [design/shaping.md](design/shaping.md) | `shape` |
 | `tinker-pdf-font` | font and CMap parsing, subsetting | 8 400 | [fonts](features/fonts.md) | `cff`, `cmap`, `sfnt`, `truetype`, `type1` |
 | `tinker-pdf-content` | interpreter + `Device` seam, text device | 4 500 | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
 | `tinker-pdf-raster` | deterministic AA rasterizer | 5 900 | [rasterizer](features/rasterizer.md) | — (driven via `render_page`) |

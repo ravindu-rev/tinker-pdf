@@ -102,18 +102,34 @@ regions).
 
 Ordered by leverage, not size.
 
-- **Digital signatures.** Nothing verifies or produces one. Reading:
-  `/ByteRange` + CMS/PKCS#7 verification (12.8), X.509 parsing, RSA and
-  ECDSA verify — hand-rolled, verify-only, under the same rules as the
-  rest of the crypto. Writing: sign on incremental update — the
-  byte-identical prefix a signature needs already exists and is tested.
-  `/DocMDP` and modification detection follow. Ruling 13 costs this item
-  its continuous interop check: nothing in CI may ask another program
-  whether a signature is acceptable, so a signature everything in-tree
-  accepts may still be rejected by real validators, and the design doc says
-  so. Exit: verify a corpus of signed documents; the published CAVP and RFC
-  test vectors gate the primitives; interop is a dated, recorded, one-time
-  measurement outside CI. (XL, [design/signatures.md](design/signatures.md))
+**Digital signatures have left this list.** All nine milestones of
+[design/signatures.md](design/signatures.md) are green: signatures are found,
+their coverage classified, their CMS and certificates parsed, their digests
+and signatures verified against 504 published CAVP and RFC vectors, their
+chains walked to caller-supplied anchors, their `/DocMDP` and `/FieldMDP`
+honoured, and `DocumentEditor` produces and certifies signatures of its own
+with the key held by the caller. The surface is projected through the C ABI
+and the .NET binding; [features/signatures.md](features/signatures.md) carries
+the refusal table.
+
+Three things are worth carrying forward rather than filing away:
+
+- **The corpus adjudicated more than the specification did.** RFC 5652 §5.4's
+  re-encoding — the one rule most likely to be implemented subtly wrong — is
+  settled by 19 real signatures from six producers, all of which verify with
+  the substitution and none without. And a fifth of signed documents are BER
+  rather than the DER ISO 32000 asks for, from two independent producer
+  lineages, which no reading of the clause would have predicted.
+- **Four documents carry a signature that verifies over bytes they no longer
+  have.** veraPDF's permission fixtures share one CMS blob across three files
+  of different sizes. Finding them is the feature working, and it is why
+  coverage, document digest and signature verification are three answers
+  rather than one.
+- **What ruling 13 costs here was paid once and written down.** The interop
+  measurement ran on 28 August 2026 against OpenSSL 3.5.5, in both directions,
+  with negative controls — and the design doc records what it does *not*
+  establish as carefully as what it does. It does not run again.
+
 - **Text shaping — a non-goal, overturned.** The docs long stated shaping
   as permanent non-goal, and for *rendering existing PDFs* the reasoning
   holds: the producer positioned every glyph. It fails wherever this

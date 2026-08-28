@@ -211,7 +211,7 @@ fn every_corpus_signature_gets_a_verdict() {
     // Recorded against the corpora `corpus/corpora.lock` pins. Every number
     // below was checked by hand against the files when it was written.
     assert_eq!(tally.signatures, 18, "signatures found");
-    assert_eq!(tally.cms_read, 9, "blobs that parsed");
+    assert_eq!(tally.cms_read, 12, "blobs that parsed");
     assert_eq!(
         tally.cms_absent, 6,
         "blobs the coverage classifier would not vouch for: a `/ByteRange` \
@@ -220,12 +220,12 @@ fn every_corpus_signature_gets_a_verdict() {
          verdict about the wrong data"
     );
     assert_eq!(
-        tally.cms_unreadable, 3,
-        "BER indefinite lengths, which `tinker-pdf-pki` refuses by name"
+        tally.cms_unreadable, 0,
+        "every blob the coverage classifier vouches for now parses; this was          3 until BER indefinite lengths were read, and those three files came          from two independent producer lineages"
     );
 
     assert_eq!(
-        tally.signature_verified, 8,
+        tally.signature_verified, 11,
         "signatures that verify against the key in their own certificate"
     );
     assert_eq!(
@@ -253,7 +253,7 @@ fn every_corpus_signature_gets_a_verdict() {
         tally.digest_differs, 4,
         "veraPDF's permission fixtures share signatures between documents"
     );
-    assert_eq!(tally.digest_matches, 4, "documents that still hash right");
+    assert_eq!(tally.digest_matches, 7, "documents that still hash right");
 
     assert_eq!(
         tally.no_anchors, tally.cms_read,

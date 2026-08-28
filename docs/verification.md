@@ -16,26 +16,28 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **27 cargo-fuzz targets**
+Ruling 1 makes a fuzz crash a release blocker. **29 cargo-fuzz targets**
 cover every input format: `ascii_filters`, `ccitt`, `cff`, `cmap`,
 `content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
 `crypt_ciphers`, `css`, `form_script`, `icc_profile`, `inflate`, `jbig2`,
-`jpeg`, `jpx`, `layout`, `lzw`, `pki_der`, `png`, `render_page`, `sfnt`,
-`signatures`, `truetype`, `type1`, `xml`, `zip_archive` — each landing in the
-same PR as its parser. Short runs on
+`jpeg`, `jpx`, `layout`, `lzw`, `pki_cms`, `pki_der`, `png`, `render_page`,
+`sfnt`, `shape`, `signatures`, `truetype`, `type1`, `xml`, `zip_archive` —
+each landing in the same PR as its parser. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
-longer. Eight of the corpora are written by an `#[ignore]`d test in the crate
-that owns the fixtures, so the seeds and the fixtures cannot drift: `crypt`,
-`crypt_ciphers`, `png`, `cff`, `zip_archive`, `render_page`, `pki_der` and
-`signatures`.
+longer. Eleven of the corpora are written by an `#[ignore]`d test in the
+crate that owns the fixtures, so the seeds and the fixtures cannot drift:
+`crypt`, `crypt_ciphers`, `png`, `cff`, `jbig2`, `zip_archive`,
+`render_page`, `pki_der`, `pki_cms`, `shape` and `signatures`.
 
 This sentence read 24 and omitted `icc_profile` until the signature work
 counted them, so the number was wrong in the direction that flatters — which
 is the direction worth checking. The fuzz job reads its matrix off the
 directory precisely so that a target nobody runs cannot exist; nothing was
-checking this paragraph against that directory. `pki_der` and `signatures`
-are the newest and have had no session yet, so they count toward the target
-list and not toward the executions below.
+checking this paragraph against that directory. The four newest — `pki_der`,
+`pki_cms`, `shape` and `signatures` — have had no libFuzzer session yet, so
+they count toward the target list and not toward the executions below. Each
+has a committed seed corpus replayed on stable by an ordinary test, which is
+weaker than a session and is not counted as one.
 
 Every target has had a real session: **186 159 981 recorded executions**,
 two crashes — one a real lexer defect (fixed, both inputs committed as

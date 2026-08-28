@@ -46,10 +46,18 @@ where a signature covers the bytes as stored.
 `messageDigest`, `signingTime`, ESS `signingCertificateV2`, and RFC 3161
 timestamp tokens — surfaced, never evaluated. RFC 5652 §5.4's re-encoding (the
 stored `[0] IMPLICIT` tag replaced by `SET OF` before digesting) lives in one
-function and is **adjudicated by data**: 15 real signatures from six producers
+function and is **adjudicated by data**: 19 real signatures from six producers
 verify with the substitution and not one verifies without it.
 
-All 29 X.509 certificates in the corpus parse.
+`SignedData` is read as BER, which RFC 5652 §5.1 permits and a fifth of the
+corpus's signed documents need — Acrobat Distiller, Adobe LiveCycle and
+LibreOffice all emit indefinite lengths. The scan **walks** to the
+end-of-contents pair rather than searching for `00 00`, because those two
+bytes occur constantly inside real content and searching for them produces a
+different well-formed reading of the same bytes. `signedAttrs` is held to DER
+regardless, because that is what gets digested.
+
+All 41 X.509 certificates in the corpus parse.
 
 **The verdict.** `Document::verify_signatures(&anchors, at)` returns one
 `Verdict` per signature: the coverage, whether the CMS could be read, whether
@@ -116,6 +124,7 @@ certify.
 | ECDSA in a verdict | `Unchecked::UnsupportedAlgorithm` | implemented in `tinker-pdf-crypto` and gated on 120 CAVP vectors, but **zero corpus signatures use it**, and wiring an unexercised path into a verdict is worst here | [ROADMAP](../ROADMAP.md) |
 | RSASSA-PSS | `SignatureAlgorithm::RsaPss`, named and not decoded | its parameters live in a structure this build does not read, so a caller meeting one knows what it is and knows nothing here has checked it | RFC 8017 |
 | `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
+| An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 | A signature with no signed attributes | `Unchecked::NoSignedAttributes` | the signature is then over the content directly, and guessing at what that content is would be a verdict about the wrong bytes | RFC 5652 §5.4 |
 | Visible signature appearance generation | none — a signed field keeps whatever appearance the caller set | drawing seals is not signature work | [forms](forms.md) |
 | The public-key **security handler** (`/Adobe.PubSec`, 7.6.5) | `AuthError::UnsupportedHandler` | related ASN.1, different feature — and zero corpus files ask for it | [encryption](encryption.md) |
@@ -140,11 +149,21 @@ exponentiation invisibly and would have surfaced as a *valid signature
 reported invalid*, intermittently. All 360 CAVP vectors passed before the fix.
 
 **The corpus adjudicates the parts it can.** Over the 18 signatures:
-9 CMS blobs parse, 8 signatures verify against the key in their own
-certificate, **0 fail**, 4 document digests match and **4 differ**. The four
+**12 CMS blobs parse, 11 signatures verify** against the key in their own
+certificate, **0 fail**, 7 document digests match and **4 differ**. The four
 that differ are veraPDF's permission fixtures, and the cause is in the bytes:
 three of them, of different sizes, carry the byte-identical CMS blob. A
 signature cannot cover three documents.
+
+The six remaining are the ones whose `/ByteRange` does not bracket their
+`/Contents`. They carry a readable blob and this build declines to hand it to
+a parser, because reading a CMS the coverage classifier will not vouch for is
+a verdict about the wrong bytes.
+
+All 41 certificates across those blobs parse, and 15 of them are held to
+values OpenSSL produced once and this repository committed
+(`tests/signature_support/certificates.tsv`) — serial octets, validity window,
+SubjectPublicKeyInfo digest and both common names.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest
