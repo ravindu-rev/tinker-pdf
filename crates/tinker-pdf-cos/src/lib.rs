@@ -61,6 +61,7 @@ pub mod outline;
 pub mod pages;
 pub mod parse;
 pub mod png_embed;
+pub mod pubsec;
 pub mod script;
 pub mod security;
 pub mod sign;
@@ -108,6 +109,7 @@ pub use outline::{
 pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
+pub use pubsec::{PubSecError, Recipient};
 pub use script::{Budget, Host, ScriptError};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{

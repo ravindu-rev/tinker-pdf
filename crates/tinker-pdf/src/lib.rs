@@ -114,6 +114,7 @@ pub use tinker_pdf_cos::{
     DocumentBuilder, DocumentEditor, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
     PageBuilder, SkippedWidget, Target, WidgetDefect, WriteMode, WriteOptions,
 };
+pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
@@ -802,6 +803,24 @@ impl Document {
     #[must_use]
     pub fn form_fields(&self) -> Vec<Field> {
         tinker_pdf_cos::fields(&self.inner)
+    }
+
+    /// Opens a public-key-encrypted document with the caller's key (7.6.5).
+    ///
+    /// `/Adobe.PubSec` seals the file key to certificates rather than to a
+    /// password, so there is nothing to type: the caller implements
+    /// [`Recipient`], is handed the sealed key and the identifier saying whose
+    /// it is, and does the one private-key operation this engine refuses to be
+    /// able to do. Returning `None` from it means "not addressed to me".
+    ///
+    /// # Errors
+    /// [`PubSecError`], which tells "this document is somebody else's" apart
+    /// from every other way it can fail.
+    pub fn authenticate_with_recipient(
+        &self,
+        recipient: &dyn Recipient,
+    ) -> Result<AuthLevel, PubSecError> {
+        self.inner.authenticate_with_recipient(recipient)
     }
 
     /// The document's digital signatures (12.8), in field order.

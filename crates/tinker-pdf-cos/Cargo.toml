@@ -19,6 +19,12 @@ cmap-predefined = ["tinker-pdf-font/cmap-predefined"]
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-crypto = { workspace = true }
 tinker-pdf-font = { workspace = true }
+# The public-key security handler (7.6.5) reads a CMS `EnvelopedData` out of
+# `/Recipients` to find the seed its file key is derived from. That is a
+# security handler, which is this crate's charter, and the envelope is DER,
+# which is `tinker-pdf-pki`'s — the same split as `cos -> font`, where reading
+# a font *dictionary* is object-model work that needs the leaf's parser.
+tinker-pdf-pki = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
