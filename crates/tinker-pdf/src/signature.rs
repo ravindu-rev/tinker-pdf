@@ -315,6 +315,37 @@ impl Signature {
         self.coverage == Coverage::WholeFile
     }
 
+    /// [`Signature::contents`] with the reservation's trailing fill removed,
+    /// which is what a CMS parser must be handed.
+    ///
+    /// A signer reserves space before the file is laid out and cannot shrink
+    /// it afterwards, so `/Contents` is the blob followed by zero fill
+    /// (12.8.1). A DER parser reading the whole reservation refuses it as
+    /// trailing bytes — correctly, which is why the trimming happens here
+    /// rather than by loosening the parser.
+    ///
+    /// **Only zeros are trimmed.** If the bytes after the outer structure's
+    /// declared length are anything else they are not fill, and the whole
+    /// reservation is returned so the parser refuses it. Trimming whatever
+    /// follows would be a second reading of a signed structure, which is the
+    /// shape of a signature bypass.
+    ///
+    /// Falls back to the whole of `contents` when no outer structure can be
+    /// read, because then there is no declared length to trust.
+    #[must_use]
+    pub fn cms(&self) -> &[u8] {
+        let budget = tinker_pdf_pki::Budget::new(tinker_pdf_pki::Limits::CMS);
+        let mut cursor = tinker_pdf_pki::Cursor::new(&self.contents, &budget);
+        let Ok(outer) = cursor.read() else {
+            return &self.contents;
+        };
+        let declared = outer.raw().len();
+        match self.contents.get(declared..) {
+            Some(rest) if rest.iter().all(|byte| *byte == 0) => &self.contents[..declared],
+            _ => &self.contents,
+        }
+    }
+
     /// What revisions after this signature changed, and whether its own
     /// `/DocMDP` and `/FieldMDP` permit it (12.8.2).
     ///

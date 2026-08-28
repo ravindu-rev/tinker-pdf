@@ -31,6 +31,7 @@ mod optional;
 pub mod redact;
 mod resources;
 pub mod signature;
+pub mod verdict;
 pub mod xps;
 
 use std::sync::Arc;
@@ -116,6 +117,11 @@ pub use tinker_pdf_cos::{
 pub use tinker_pdf_crypto::Permissions;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
+/// Signature verdicts (12.8), behind [`Document::verify_signatures`].
+pub use verdict::{
+    Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription, TrustAnchors, Unchecked,
+    Verdict, Weakness,
+};
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};
 
@@ -811,6 +817,26 @@ impl Document {
     #[must_use]
     pub fn signatures(&self) -> Vec<Signature> {
         signature::signatures(self)
+    }
+
+    /// What every signature in this document turns out to prove (12.8).
+    ///
+    /// One [`Verdict`] per signature, in the order [`Document::signatures`]
+    /// returns them. `anchors` are the certificates the *caller* trusts —
+    /// with none, the chain result is [`Chain::NoAnchors`], which is honest:
+    /// without something trusted to reach, a chain proves that a key signed
+    /// something and not whose key it was.
+    ///
+    /// `at` is the instant to judge certificate validity at, in seconds since
+    /// the Unix epoch. `None` reports the windows and judges nothing, which is
+    /// the default because ruling 4 bans a clock from this engine and because
+    /// "expired" is a claim about now.
+    #[must_use]
+    pub fn verify_signatures(&self, anchors: &TrustAnchors, at: Option<i64>) -> Vec<Verdict> {
+        self.signatures()
+            .iter()
+            .map(|signature| verdict::verdict(self, signature, anchors, at))
+            .collect()
     }
 
     /// The strictest certification any signature in this document declares

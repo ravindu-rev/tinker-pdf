@@ -316,6 +316,45 @@ committed JPEG 2000 reference decodes: a measurement, not a check. It does not r
 does not gate a merge, and it goes stale. Nothing here hides that, because a signing feature
 whose interop claim is unverified and unstated is worse than one that says so.
 
+## What milestone 6 measured, and the finding it produced
+
+`Document::verify_signatures` asks four questions and answers each separately.
+Over the eighteen corpus signatures, with no anchors supplied: **9 blobs parse,
+8 signatures verify against the key in their own certificate, 0 fail, 4
+document digests match — and 4 differ.**
+
+The four that differ are veraPDF's `6.1.12 Permissions` and `6.1.11
+Permissions` fixtures, and the cause is visible in the bytes rather than
+inferred. Three of them — of 6 706, 7 207 and 11 516 bytes — carry the
+**byte-identical** CMS blob. One signature cannot cover three different
+documents, so the suite copied a signature between files, which it had no
+reason not to do: those fixtures test a permissions rule and say nothing about
+signature validity.
+
+Each of the four reports a **verified signature over a changed document**. That
+is the combination a single boolean cannot express, and it is why questions 2
+and 3 are asked separately rather than multiplied together. The same shape is
+pinned by a fixture: flipping one byte inside `digitally-signed.pdf`'s covered
+range turns its digest to `Differs` and leaves its signature `Verified`.
+
+Two defects found on the way, both of the kind that produce a plausible wrong
+answer rather than a crash:
+
+**`/Contents` is the reservation, not the blob.** A signer reserves space
+before layout and cannot shrink it, so the stored string is DER followed by
+zero fill, and a DER parser refuses the whole of it as trailing bytes —
+correctly. Every CMS blob in the corpus read as unreadable until
+`Signature::cms()` trimmed the fill. It trims **only zeros**: bytes after the
+declared length that are anything else are not fill, and trimming whatever
+follows a signed structure would be a second reading of it.
+
+**A certificate's `signatureAlgorithm` is a signature OID, not a digest OID.**
+Resolving `sha256WithRSAEncryption` through the digest table returns nothing
+for every certificate ever issued, and every chain in the corpus read
+`Chain::Broken`. Worth recording because of how it failed: the walk did not
+crash and did not accept — it reported a path that is not a path, which is the
+failure mode a chain walk should have.
+
 ## Milestones
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
@@ -325,7 +364,7 @@ whose interop claim is unverified and unstated is worse than one that says so.
 | 3 **done** | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
 | 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
 | 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
-| 6 | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
+| 6 **done** | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
 | 7 **done** | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
 | 8 **done** | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |
 | 9 | Facade + FFI projection, warnings, docs | Verdict types exposed 1:1 through `tinker-pdf-ffi` (ruling 11) with parity tests; typed warnings carry object provenance (ruling 10) pinned by fixture; [features/forms.md](../features/forms.md) gains a signature-fields section; roadmap row closed against [ROADMAP.md](../ROADMAP.md) | M |
