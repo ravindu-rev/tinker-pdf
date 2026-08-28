@@ -64,39 +64,34 @@ right to guess the set: five candidate templates agreed with each other on
 Annex H's thirty-six-decision fixture and were all wrong, and only a whole
 picture coded both ways told them apart.
 
-Closing it put one item back, by this file's own rule that an item enters with
-evidence attached:
+Closing it put one item back — refinement over the Huffman road, measured at
+11 segments in 10 files — and that item has since closed too: 6.4.11's
+envelope, tables B.14 and B.15, and 6.5.8.2 over Huffman all decode, held by
+15 corpus files at 0 pixels different in
+[`jbig2_refinement.rs`](../crates/tinker-pdf/tests/jbig2_refinement.rs).
+**The symbol lineage is now complete**: arithmetic and Huffman, with and
+without refinement, in either combination.
 
-- **JBIG2's Huffman symbol dictionary, twice over.** 6.4.11's Huffman
-  refinement envelope and tables **B.14 and B.15** have landed and are held by
-  two corpus files at 0 pixels different, so what is left of the ten-file
-  refusal splits into two named things:
+Two things are worth carrying forward rather than filing away, both written up
+in [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md):
 
-  **A defect, found by building the other half.**
-  `bitmap-symbol-symhuffrefine-textrefine.pdf` has a Huffman dictionary whose
-  6.5.9 collective path exports two symbols of identical width inside one
-  height class and one symbol with no ink, which is not a picture any encoder
-  meant. It was invisible while the file refused for another reason. Exit:
-  that dictionary's symbols match the ones the same picture's other encodings
-  carry.
+- **A reconstruction is only as good as the line a fixture exercises.** B.14
+  and B.15 are reconstructed, both files that reach them code every delta as
+  zero, and counted injection shows that changing any other line in either
+  table breaks nothing. A non-zero delta is therefore refused rather than
+  decoded through the unverified part — the guard lifts when a fixture
+  exercises the rest.
+- **Three separate defects in this lineage all presented as a wrong context
+  template**, and all three were found by a picture rather than by reasoning.
+  A decoder with internal state a header cannot check wants a fixture that
+  renders a whole page.
 
-  **Then the refagg road follows for free.** `SDHUFF` with `SDREFAGG` is
-  written and decodes two of its three fixtures exactly; it is refused only
-  because the third inherits the defect above and would render wrongly rather
-  than refuse. Exit: all three `symhuff*` files render without a JBIG2 warning
-  and join [`jbig2_refinement.rs`](../crates/tinker-pdf/tests/jbig2_refinement.rs).
-
-  Also here, and independent: **custom code tables** (clause 7.4.13, type 53),
-  which five of the eight refining Huffman text regions select. (S–M,
-  [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md))
-
-An earlier draft of this section said nothing in the corpus asked for that,
-which was an assertion where a count belonged; the census now counts it.
-
-Refusals still standing in this lineage that are *not* roadmap items: halftone
-regions and pattern dictionaries (16 corpus files — a third lineage,
-[features/filters.md](features/filters.md)), transposed text regions (4), and
-type 53 custom tables.
+Refusals still standing in this lineage, each a named refusal rather than a
+scheduled item — their reachability is below what ruling 3 has scheduled
+before: halftone regions and pattern dictionaries (16 corpus files — a third
+lineage, [features/filters.md](features/filters.md)), transposed text regions
+(4), and type 53 custom code tables (6, five of which are refining Huffman
+regions).
 
 ## Tier 3 — capabilities absent today
 

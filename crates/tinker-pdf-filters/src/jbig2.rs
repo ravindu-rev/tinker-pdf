@@ -894,14 +894,10 @@ struct ArithContexts {
     iardx: MqContexts,
     iardy: MqContexts,
     iaid: MqContexts,
-    refine: MqContexts,
 }
 
 impl ArithContexts {
-    /// `refine_bits` sizes 6.3's context set, which is thousands of states
-    /// and dead weight for the many dictionaries and regions that never
-    /// refine; zero asks for none at all.
-    fn new(code_len: u32, refine_bits: usize) -> ArithContexts {
+    fn new(code_len: u32) -> ArithContexts {
         ArithContexts {
             iadh: MqContexts::new(INT_CONTEXTS),
             iadw: MqContexts::new(INT_CONTEXTS),
@@ -917,11 +913,6 @@ impl ArithContexts {
             iardx: MqContexts::new(INT_CONTEXTS),
             iardy: MqContexts::new(INT_CONTEXTS),
             iaid: MqContexts::new(iaid_contexts(code_len)),
-            refine: MqContexts::new(if refine_bits == 0 {
-                0
-            } else {
-                1 << refine_bits
-            }),
         }
     }
 }
@@ -981,6 +972,27 @@ fn symbol_dictionary_huffman(
         return None;
     }
     let sizes = table_b1();
+    let refagg = flags & 0x0002 != 0;
+    let rtemplate = ((flags >> 12) & 0x0001) as u8;
+    // 6.5.8.2.2's own tables when the dictionary aggregates. Unlike a text
+    // region's, these are fixed by the clause rather than selected: the
+    // reference offsets come through B.15 and the count through B.1.
+    let offsets = table_b15();
+
+    // 7.4.3.1.3: the refinement AT pair sits between the flags and the two
+    // counts. 7.4.3.1.2's generic AT does not exist on this road — a Huffman
+    // dictionary codes no generic region — so this is the first thing read.
+    let mut refine_at = NOMINAL_REFINE_AT;
+    if refagg && rtemplate == 0 {
+        for slot in &mut refine_at {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Warning::TruncatedInput);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+    let template = refine_template(rtemplate, refine_at);
 
     let num_ex = reader.u32()?;
     let num_new = reader.u32()?;
@@ -989,13 +1001,29 @@ fn symbol_dictionary_huffman(
         return None;
     }
 
+    // 6.5.8.2.3, and `max(1)` because this road reads the symbol's identity as
+    // a plain field of that many bits: a zero-width field would read nothing
+    // and leave every reference pointing at symbol zero.
+    let code_len = symbol_code_length(imported.len().checked_add(num_new as usize)?).max(1);
+
     let rest = reader.rest();
     let mut bits = BitReader::new(rest);
-    let mut new_symbols: Vec<Bitmap> = Vec::new();
+    // 6.5: imported and new share one index space, as on the arithmetic road,
+    // because 6.5.8.2 refines against both.
+    let base = imported.len();
+    let mut pool: Vec<Bitmap> = imported.to_vec();
+    // **One set of 6.3 states for the whole dictionary.** 6.5.8.1 says a
+    // dictionary carries its adaptive states from one symbol to the next, and
+    // that is as true of refinement as of the generic procedure — the coder
+    // restarts at each byte-aligned sub-stream because the stream does, but
+    // the statistics do not. Resetting these decodes the first refined symbol
+    // correctly and every one after it as noise, which reads exactly like a
+    // wrong context template and is why it took a corpus picture to find.
+    let mut refine_contexts = MqContexts::new(if refagg { 1 << template.bits() } else { 0 });
     let mut spent: u64 = 0;
     let mut height: i64 = 0;
 
-    while (new_symbols.len() as u32) < num_new {
+    while ((pool.len() - base) as u32) < num_new {
         height = height.checked_add(i64::from(dh.value(&mut bits)?))?;
         if height <= 0 || height > i64::from(u32::MAX) {
             note(warnings, Warning::Jbig2SymbolLimitHit);
@@ -1014,7 +1042,7 @@ fn symbol_dictionary_huffman(
                 note(warnings, Warning::Jbig2SymbolLimitHit);
                 return None;
             }
-            if (new_symbols.len() + widths.len()) as u64 >= u64::from(num_new) {
+            if ((pool.len() - base) + widths.len()) as u64 >= u64::from(num_new) {
                 note(warnings, Warning::Jbig2SymbolLimitHit);
                 return None;
             }
@@ -1024,7 +1052,130 @@ fn symbol_dictionary_huffman(
                 note(warnings, Warning::Jbig2SymbolLimitHit);
                 return None;
             }
-            widths.push(width as u32);
+            if !refagg {
+                widths.push(width as u32);
+                continue;
+            }
+
+            // 6.5.8.2 over Huffman: the symbol is refined one at a time rather
+            // than sliced out of a collective bitmap, so this height class
+            // never reaches 6.5.9's shared read below.
+            let instances = sizes.value(&mut bits)?;
+            if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
+                note(warnings, Warning::Jbig2SymbolLimitHit);
+                return None;
+            }
+            let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
+                note(warnings, Warning::Jbig2RegionTooLarge);
+                return None;
+            };
+
+            if instances == 1 {
+                // 6.5.8.2.2: one instance, and the three values it needs come
+                // straight off this reader — the identity as a plain field of
+                // `SBSYMCODELEN` bits, the offsets through B.15.
+                let id = bits.bits(code_len)? as usize;
+                let rdx = offsets.value(&mut bits)?;
+                let rdy = offsets.value(&mut bits)?;
+                if (rdx, rdy) != (0, 0) {
+                    // B.15's non-zero lines are reconstruction that nothing in
+                    // this repository exercises — see `table_b14` — so they are
+                    // refused here for the same reason a text region refuses
+                    // them. The one-bit code for zero is what is verified, and
+                    // it is all this reads.
+                    note(warnings, Warning::Jbig2VariantSkipped);
+                    return None;
+                }
+                let bmsize = sizes.value(&mut bits)?;
+                if bmsize < 0 {
+                    return None;
+                }
+                bits.align();
+                let start = bits.byte_position();
+                let end = start.checked_add(bmsize as usize)?;
+                let Some(bytes) = rest.get(start..end) else {
+                    note(warnings, Warning::TruncatedInput);
+                    return None;
+                };
+                let Some(reference) = pool.get(id) else {
+                    note(warnings, Warning::Jbig2SymbolLimitHit);
+                    return None;
+                };
+                let dx = refinement_offset(width, reference.width, rdx);
+                let dy = refinement_offset(height, reference.height, rdy);
+                let mut coder = MqDecoder::new(bytes);
+                decode_refinement_into(
+                    &mut coder,
+                    &mut refine_contexts,
+                    &template,
+                    false,
+                    reference,
+                    (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
+                    &mut symbol,
+                );
+                bits.seek_byte(end)?;
+            } else {
+                // 6.5.8.2.1: more than one instance and the symbol is a text
+                // region in its own right, read over this same bit reader.
+                // The tables are fixed by the clause rather than selected,
+                // which is why none of them comes from the segment header.
+                let Some(codes) = flat_code(code_len, pool.len().max(1)) else {
+                    note(warnings, Warning::Jbig2SymbolLimitHit);
+                    return None;
+                };
+                let tables = TextTables {
+                    refine: Some(RefineTables {
+                        rdw: table_b15(),
+                        rdh: table_b15(),
+                        rdx: table_b15(),
+                        rdy: table_b15(),
+                        rsize: table_b1(),
+                    }),
+                    fs: table_b6(),
+                    ds: table_b8(),
+                    dt: table_b11(),
+                };
+                let params = TextParams {
+                    symbols: &pool,
+                    instances: instances as u32,
+                    strips: 1,
+                    log_strips: 0,
+                    corner: corner::TOPLEFT,
+                    comb_op: 0,
+                    ds_offset: 0,
+                    refine: Some(refine_template(rtemplate, refine_at)),
+                    code_len,
+                };
+                let mut inner = Some((
+                    tables,
+                    codes,
+                    BitReader {
+                        bytes: rest,
+                        at: bits.at,
+                    },
+                ));
+                // The arithmetic decoder and its contexts are unreachable on
+                // this road — every read below goes through the tables — so
+                // they are empty rather than meaningful.
+                let mut coder = MqDecoder::new(&[]);
+                let mut cx = ArithContexts::new(code_len);
+                let drawn = text_region_procedure(
+                    &params,
+                    &mut Arith {
+                        coder: &mut coder,
+                        ints: &mut cx,
+                        refine: &mut refine_contexts,
+                    },
+                    &mut inner,
+                    ceiling,
+                    &mut symbol,
+                    warnings,
+                );
+                let (_, _, reader) = inner?;
+                bits.at = reader.at;
+                drawn?;
+            }
+            pool.push(symbol);
         }
         if widths.is_empty() {
             continue;
@@ -1079,13 +1230,13 @@ fn symbol_dictionary_huffman(
                 }
             }
             x = x.checked_add(w)?;
-            new_symbols.push(symbol);
+            pool.push(symbol);
         }
     }
 
     // 6.5.10's export runs, over Table B.1, exactly as the arithmetic variant
     // reads them over IAEX.
-    let total = imported.len().checked_add(new_symbols.len())?;
+    let total = pool.len();
     let mut exported = Vec::new();
     let mut index = 0usize;
     let mut exporting = false;
@@ -1107,12 +1258,7 @@ fn symbol_dictionary_huffman(
                 if at >= total {
                     break;
                 }
-                let symbol = if at < imported.len() {
-                    imported.get(at)?.clone()
-                } else {
-                    new_symbols.get(at - imported.len())?.clone()
-                };
-                exported.push(symbol);
+                exported.push(pool.get(at)?.clone());
             }
         }
         index = index.checked_add(run)?;
@@ -1153,7 +1299,7 @@ fn symbol_dictionary(
     let template = ((flags >> 10) & 0x0003) as u8;
     let rtemplate = ((flags >> 12) & 0x0001) as u8;
 
-    if context_used || (refagg && huff) {
+    if context_used {
         // Named rather than lumped in with "a segment type this build does not
         // decode": these are variants of a segment it *does* decode, and the
         // difference is what tells a file that needs one lineage from a file
@@ -1216,7 +1362,8 @@ fn symbol_dictionary(
     let code_len = symbol_code_length(imported.len().checked_add(num_new as usize)?);
     let refine_layout = refagg.then(|| refine_template(rtemplate, refine_at));
     let refine_bits = refine_layout.as_ref().map_or(0, RefineTemplate::bits);
-    let mut cx = ArithContexts::new(code_len, refine_bits);
+    let mut cx = ArithContexts::new(code_len);
+    let mut refine_contexts = MqContexts::new(refine_states(refine_bits));
 
     // 6.5: imported and new symbols share one index space, so they share one
     // vector. `pool[..base]` is what came in and the rest is what this
@@ -1286,7 +1433,7 @@ fn symbol_dictionary(
                     let dy = refinement_offset(height, reference.height, rdy);
                     decode_refinement_into(
                         &mut coder,
-                        &mut cx.refine,
+                        &mut refine_contexts,
                         refine_layout.as_ref()?,
                         false,
                         reference,
@@ -1310,8 +1457,11 @@ fn symbol_dictionary(
                     };
                     text_region_procedure(
                         &params,
-                        &mut coder,
-                        &mut cx,
+                        &mut Arith {
+                            coder: &mut coder,
+                            ints: &mut cx,
+                            refine: &mut refine_contexts,
+                        },
                         &mut None,
                         ceiling,
                         &mut symbol,
@@ -1522,6 +1672,26 @@ mod corner {
     pub const TOPRIGHT: u8 = 3;
 }
 
+/// A fixed-width code of `width` bits over `count` values.
+///
+/// 6.5.8.2.1's symbol identities are a plain field rather than a table, and
+/// B.3's canonical assignment turns equal prefix lengths into exactly the
+/// consecutive codes 0, 1, 2, ... — so a flat table *is* that field, and the
+/// aggregate can go through the same 6.4 procedure everything else uses
+/// instead of a second reader with its own conventions.
+fn flat_code(width: u32, count: usize) -> Option<HuffTable> {
+    let width = u8::try_from(width).ok()?;
+    let span = 1usize.checked_shl(u32::from(width))?;
+    if count > span {
+        return None;
+    }
+    Some(HuffTable::new(
+        (0..span)
+            .map(|value| HuffLine::normal(width, 0, i32::try_from(value).unwrap_or(0)))
+            .collect(),
+    ))
+}
+
 /// **Table B.14**, the narrow table for a refinement's size and position
 /// deltas (`SBHUFFRDW` and its three siblings).
 ///
@@ -1636,6 +1806,20 @@ struct TextParams<'a> {
     code_len: u32,
 }
 
+/// The arithmetic side of 6.4: the coder, A.1's integer states, and 6.3's.
+///
+/// Three parameters that are never meaningful apart — and 6.5.8's dictionary
+/// hands all three to the text region procedure so an aggregate symbol shares
+/// them, which is the whole reason they travel together.
+struct Arith<'a, 'd> {
+    coder: &'a mut MqDecoder<'d>,
+    ints: &'a mut ArithContexts,
+    /// 6.3's adaptive states. Separate from `ints` because 6.4.11's Huffman
+    /// road restarts the *coder* at each byte-aligned sub-stream without
+    /// restarting these.
+    refine: &'a mut MqContexts,
+}
+
 /// The Huffman road's state: the coordinate tables, the symbol-ID code, and
 /// the bit reader all three share.
 type TextHuffman<'a> = Option<(TextTables, HuffTable, BitReader<'a>)>;
@@ -1651,8 +1835,7 @@ type TextHuffman<'a> = Option<(TextTables, HuffTable, BitReader<'a>)>;
 /// decoder here would decode the first aggregate correctly and then noise.
 fn text_region_procedure(
     params: &TextParams<'_>,
-    coder: &mut MqDecoder<'_>,
-    cx: &mut ArithContexts,
+    arith: &mut Arith<'_, '_>,
     huffman: &mut TextHuffman<'_>,
     ceiling: usize,
     region: &mut Bitmap,
@@ -1664,7 +1847,7 @@ fn text_region_procedure(
         () => {
             match huffman.as_mut() {
                 Some((tables, _, bits)) => tables.dt.value(bits)?,
-                None => decode_int(coder, &mut cx.iadt)?,
+                None => decode_int(arith.coder, &mut arith.ints.iadt)?,
             }
         };
     }
@@ -1672,7 +1855,7 @@ fn text_region_procedure(
         () => {
             match huffman.as_mut() {
                 Some((tables, _, bits)) => tables.fs.value(bits)?,
-                None => decode_int(coder, &mut cx.iafs)?,
+                None => decode_int(arith.coder, &mut arith.ints.iafs)?,
             }
         };
     }
@@ -1702,7 +1885,7 @@ fn text_region_procedure(
                         HuffValue::Value(gap) => gap,
                         HuffValue::Oob => break,
                     },
-                    None => match decode_int(coder, &mut cx.iads) {
+                    None => match decode_int(arith.coder, &mut arith.ints.iads) {
                         Some(gap) => gap,
                         None => break,
                     },
@@ -1727,13 +1910,13 @@ fn text_region_procedure(
                     // `log2(SBSTRIPS)` bits, not a table lookup — the only
                     // coordinate in the region that is read the same way twice.
                     Some((_, _, bits)) => i64::from(bits.bits(params.log_strips)?),
-                    None => i64::from(decode_int(coder, &mut cx.iait)?),
+                    None => i64::from(decode_int(arith.coder, &mut arith.ints.iait)?),
                 }
             };
             let t = strip_t.checked_add(cur_t)?;
             let id = match huffman.as_mut() {
                 Some((_, codes, bits)) => codes.value(bits)?.max(0) as usize,
-                None => decode_iaid(coder, &mut cx.iaid, params.code_len) as usize,
+                None => decode_iaid(arith.coder, &mut arith.ints.iaid, params.code_len) as usize,
             };
             // A code the dictionary does not define is a damaged stream rather
             // than a reason to stop: the last symbol stands in, which keeps the
@@ -1752,7 +1935,7 @@ fn text_region_procedure(
                     // plain bit rather than a table lookup — the only field in
                     // the region read that way.
                     Some((_, _, bits)) => i32::try_from(bits.bit()?).ok()?,
-                    None => decode_int(coder, &mut cx.iari)?,
+                    None => decode_int(arith.coder, &mut arith.ints.iari)?,
                 };
                 if ri == 0 {
                     symbol
@@ -1795,10 +1978,10 @@ fn text_region_procedure(
                             (rdw, rdh, rdx, rdy)
                         }
                         None => (
-                            decode_int(coder, &mut cx.iardw)?,
-                            decode_int(coder, &mut cx.iardh)?,
-                            decode_int(coder, &mut cx.iardx)?,
-                            decode_int(coder, &mut cx.iardy)?,
+                            decode_int(arith.coder, &mut arith.ints.iardw)?,
+                            decode_int(arith.coder, &mut arith.ints.iardh)?,
+                            decode_int(arith.coder, &mut arith.ints.iardx)?,
+                            decode_int(arith.coder, &mut arith.ints.iardy)?,
                         ),
                     };
                     let width = i64::from(symbol.width).checked_add(i64::from(rdw))?;
@@ -1829,10 +2012,9 @@ fn text_region_procedure(
                                 return None;
                             };
                             let mut sub = MqDecoder::new(bytes);
-                            let mut contexts = MqContexts::new(1 << template.bits());
                             decode_refinement_into(
                                 &mut sub,
-                                &mut contexts,
+                                arith.refine,
                                 template,
                                 false,
                                 symbol,
@@ -1844,8 +2026,8 @@ fn text_region_procedure(
                             }
                         }
                         None => decode_refinement_into(
-                            coder,
-                            &mut cx.refine,
+                            arith.coder,
+                            arith.refine,
                             template,
                             false,
                             symbol,
@@ -1973,7 +2155,8 @@ fn text_region(
     let refine_bits = template.as_ref().map_or(0, RefineTemplate::bits);
 
     let mut coder = MqDecoder::new(reader.rest());
-    let mut cx = ArithContexts::new(code_len, refine_bits);
+    let mut cx = ArithContexts::new(code_len);
+    let mut refine_contexts = MqContexts::new(refine_states(refine_bits));
     let params = TextParams {
         symbols,
         instances,
@@ -1987,8 +2170,11 @@ fn text_region(
     };
     text_region_procedure(
         &params,
-        &mut coder,
-        &mut cx,
+        &mut Arith {
+            coder: &mut coder,
+            ints: &mut cx,
+            refine: &mut refine_contexts,
+        },
         &mut huffman,
         ceiling,
         &mut region,
@@ -2471,6 +2657,17 @@ fn decode_refinement_into(
             let pixel = coder.decode_at(contexts, cx);
             into.set(x, y, u32::from(pixel));
         }
+    }
+}
+
+/// How many adaptive states a refinement of that width needs, and none at all
+/// for the many dictionaries and regions that never refine — 6.3's set is
+/// thousands of states and allocating it unread is pure weight.
+const fn refine_states(bits: usize) -> usize {
+    if bits == 0 {
+        0
+    } else {
+        1 << bits
     }
 }
 
@@ -4020,13 +4217,13 @@ mod tests {
     /// like the refusal it replaced.
     #[test]
     fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
-        // SDREFAGG's one remaining road — over Huffman, whose refinement
-        // lengths are a field this decoder does not read — a consumed retained
-        // context, and a custom-table selector, clause 7.4.13's type 53
-        // segments, which nothing reads yet. Neither SDHUFF nor SDREFAGG is
-        // refused on its own any more, and neither is either refinement
-        // template: all of that decodes.
-        for flags in [0x0003u16, 0x0100, 0x000D] {
+        // A consumed retained context, and a custom-table selector — clause
+        // 7.4.13's type 53 segments, which nothing reads yet. What has left
+        // this list is the whole of the symbol lineage: SDHUFF, SDREFAGG,
+        // both refinement templates, and SDHUFF together with SDREFAGG all
+        // decode now, so a dictionary is refused only for the two variants
+        // above.
+        for flags in [0x0100u16, 0x000D] {
             let mut data = Vec::new();
             data.extend_from_slice(&flags.to_be_bytes());
             data.extend_from_slice(&[0; 8]); // AT, template 0.

@@ -413,31 +413,45 @@ whole difference between this section and the one it replaced is noticing that.
   is non-zero**. That costs nothing measurable — no corpus file has one — and
   it turns an unverified table into a refusal rather than a picture.
 
-  **The dictionary road (`SDHUFF` with `SDREFAGG`) stays refused**, and the
-  reason is a finding rather than an absence of effort. It was written, and it
-  decodes two of its three corpus fixtures exactly —
-  `bitmap-symbol-symhuffrefineone.pdf` through 6.5.8.2.2 and
-  `bitmap-symbol-symhuffrefineseveral.pdf` through 6.5.8.2.1, whose aggregate
-  composes two instances into one symbol. The third,
-  `bitmap-symbol-symhuffrefine-textrefine.pdf`, produces **a wrong picture with
-  no warning**, which is the one outcome this module refuses to ship.
+  **The dictionary road (`SDHUFF` with `SDREFAGG`) decodes too**, through both
+  6.5.8.2.2's single refinement and 6.5.8.2.1's aggregate, and all three
+  `symhuff*` corpus files reproduce the picture with 0 pixels different.
 
-  Where it goes wrong is not in the refinement. Every `RI` in that file is
-  zero, so its aggregates are pure compositions, and their ink counts prove
-  them exact: 1808 + 1000 = 2808, and 3141 + 116 + 421 = 3678. Reference
-  offsets are zero and no sub-stream offset within ±2 bytes decodes better.
-  What is wrong is upstream, in the **non-refagg Huffman collective path**
-  (6.5.9) that this file's *first* dictionary uses, and which was previously
-  masked because the file refused whole. That dictionary exports two symbols
-  both 30 by 30 in one height class — 6.5.5 accumulates `SYMWIDTH`, so two
-  symbols in a class cannot share a width unless a delta was zero — and a
-  59 by 60 symbol with **no ink at all**, which the refining dictionary then
-  refines into something dense. Everything downstream inherits it.
+  #### The entry this replaces was wrong, and how it was wrong is the point
 
-  So the refusal is precise: the refagg road is not what is broken, and
-  un-refusing it would ship a wrong picture drawn out of a dictionary this
-  file has not verified. Exit: find what 6.5.9 does with that first dictionary,
-  then the three `symhuff*` files follow with the code already written.
+  It said the blocker was a defect in 6.5.9's Huffman collective path, on two
+  observations. Both were misreadings:
+
+  - *"Two symbols of identical width inside one height class."* 6.5.5
+    accumulates `SYMWIDTH` by a delta that may be **zero**, so two symbols of
+    the same width in one class is ordinary — and the arithmetic encoding of
+    the same picture, which has always decoded at 0 pixels different, exports
+    two identical 30 by 30 symbols itself. The observation was true and meant
+    nothing.
+  - *"A symbol with no ink at all."* Deliberate. That class's collective bitmap
+    really is blank across its right-hand 59 columns, because the symbol exists
+    **to be refined into content** — which is precisely what the fixture is
+    testing.
+
+  The actual defect was in the refinement road after all, and it was one line:
+  **6.3's adaptive states were reset for every symbol.** 6.5.8.1 says a
+  dictionary carries one set of states from one symbol to the next, and that is
+  as true of refinement as of the generic procedure — the *coder* restarts at
+  each byte-aligned sub-stream because the stream does, but the statistics do
+  not. Resetting them decodes the first refined symbol correctly and every one
+  after it as noise.
+
+  #### Three bugs, one symptom
+
+  That is the third distinct defect in this lineage to present as *"the
+  refinement context template must be wrong"*: first `SBSYMCODELEN` sized
+  against the symbols decoded so far, then the five candidate templates that
+  agreed with each other on a thirty-six-decision fixture, and now these reset
+  states. **The symptom is not diagnostic.** A desynchronised arithmetic
+  decoder produces noise whatever pushed it out of step, and every one of the
+  three was found by a picture rather than by reasoning about the template —
+  which is the argument for keeping a fixture that renders a whole page
+  wherever a decoder has an internal state a header cannot check.
 
 - **Custom code tables (clause 7.4.13, type 53)** are the other half of the
   Huffman refinement files: five of the eight refining Huffman text regions
@@ -464,8 +478,17 @@ assertions that fail. `filters` is `cargo test -p tinker-pdf-filters jbig2`;
 | 6.4.11: the reader does not step over `BMSIZE` | 0 | 2 | 2 |
 | 6.4.11: the sub-stream is not byte-aligned | **0** | **0** | **0** |
 | B.14 or B.15, any line but the one-bit code for zero | **0** | **0** | **0** |
+| 6.5.8.1: 6.3's states reset per symbol, Huffman dictionary | 0 | 2 | 2 |
+| the same, arithmetic dictionary | **0** | **0** | **0** |
 
-**The last two rows are caught by nothing at all**, and they are the most
+The arithmetic row's zeros are the same shape of gap as the two below it, and
+worth naming: Annex H's refining dictionary decodes one symbol through
+6.5.8.2.2 and one through 6.5.8.2.1, so the *first* refinement is the only one
+that road ever takes on its own — a reset it cannot notice, because there is
+nothing yet to carry. The rule is held on the Huffman road instead, by a file
+that refines four symbols in a row.
+
+**Three rows are caught by nothing at all**, and they are the most
 useful lines in the table: they are what turned a claim that the corpus
 adjudicated B.14 and B.15 into the narrower and true claim that it adjudicates
 6.4.11's envelope. Both fixtures happen to sit on a byte boundary and code
