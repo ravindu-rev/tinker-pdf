@@ -611,7 +611,7 @@ const MAX_DELTA: i32 = 1;
 ///
 /// # What the shortfall is, now that three of it have been closed
 ///
-/// Three things moved these numbers from 223 to 258, and the largest was the
+/// Four things moved these numbers from 223 to 261, and the largest was the
 /// one nobody had named:
 ///
 /// - **The halant no longer moves the reordering insertion point.** A pre-base
@@ -627,6 +627,10 @@ const MAX_DELTA: i32 = 1;
 ///   that can be moved once the character is `U+1B3E` (`Left`) and `U+1B35`
 ///   (`Right`). Five cases, which is worth recording: it was named as the
 ///   single largest cause and it was not.
+/// - **Two pre-base characters in one syllable stay reversed.** That was an
+///   open guess with "no case in the vendored corpus has two" beside it;
+///   `SHLANA-6/2` and `SHLANA-6/4` have two, and expect the reversal. Keeping
+///   their typed order was tried and costs three cases.
 ///
 /// # What is left, and which section each shortfall accounts for
 ///
@@ -664,11 +668,11 @@ const PASSING: &[(&str, usize)] = &[
     ("SHLANA-3", 12),
     ("SHLANA-4", 2),
     ("SHLANA-5", 13),
-    ("SHLANA-6", 5),
+    ("SHLANA-6", 7),
     ("SHLANA-7", 16),
     ("SHLANA-8", 11),
     ("SHLANA-9", 6),
-    ("SHLANA-10", 34),
+    ("SHLANA-10", 35),
 ];
 
 /// The sections that must pass **whole**, so that milestone 5's partial state
@@ -850,7 +854,7 @@ fn every_section_this_crate_claims_is_whole() {
         })
         .count();
     assert_eq!(
-        whole, 3,
+        whole, 4,
         "the number of Brahmic sections that pass outright moved. \
          `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );

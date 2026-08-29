@@ -352,7 +352,7 @@ the fixture behind it, and the scripts divide in five:
 | Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
 | Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
-| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **258 are reproduced and 75 are not**. Three of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall |
+| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **261 are reproduced and 72 are not**. Four of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall |
 | Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
 
 Three things milestone 5 **closed**, and the largest of them was not on the
@@ -371,6 +371,14 @@ list of what was wrong:
   `UnicodeData.txt` field 5 fully expanded at build time. Five cases — worth
   recording, because it was named as the single largest cause and it was the
   smallest of the three.
+
+A fourth thing was recorded as an open guess and the corpus turned out to
+settle it. Two pre-base characters in one syllable come out in the **reverse**
+of the order they were typed; the note here said no fixture had two, and Tai
+Tham `SHLANA-6/2` and `SHLANA-6/4` each have `U+1A55 CONSONANT SIGN MEDIAL RA`
+beside a pre-base vowel. Keeping their order was tried and costs three cases
+across two sections, so the reversal stands on evidence rather than on a
+default.
 
 Four things it does **not** do, each named so they are a backlog and not a
 mystery:

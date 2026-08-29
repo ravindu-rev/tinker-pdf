@@ -231,15 +231,25 @@ pub(crate) fn syllables(text: &[char]) -> Vec<u16> {
 /// a different move from a pre-base vowel's, and USE has a separate step for
 /// it. Nothing here implements that step, and no fixture reaches one.
 ///
-/// The advancing insertion point is still a guess and is still recorded as
-/// one: USE says where a pre-base character goes and does not say what two of
-/// them do relative to each other, and no case in the vendored corpus has two.
+/// # Two pre-base characters come out reversed, and that is adjudicated now
+///
+/// The insertion point does **not** advance after a move, so the second
+/// pre-base member of a syllable ends up in front of the first. That stood
+/// here as a guess, on the grounds that USE says where a pre-base character
+/// goes and does not say what two of them do relative to each other, and that
+/// no case in the vendored corpus had two.
+///
+/// The second half of that was wrong. Tai Tham `SHLANA-6/2` and `SHLANA-6/4`
+/// each have a syllable holding both `U+1A55 CONSONANT SIGN MEDIAL RA` and a
+/// pre-base vowel — two `Left` characters in one cluster — and both expect the
+/// vowel first, which is the reverse of the order they are typed in. Advancing
+/// the insertion point was tried and costs those two cases and one of
+/// `SHLANA-10`'s; not advancing it is what the fixtures say.
 pub(crate) fn reorder(categories: &[Category]) -> Option<Vec<usize>> {
     if !categories.contains(&Category::PreBase) {
         return None;
     }
     let mut order: Vec<usize> = (0..categories.len()).collect();
-    let mut insert = 0usize;
     let mut moved = false;
     for (at, category) in categories.iter().enumerate() {
         // `at` indexes the *original* sequence, and `order` says where each
@@ -248,10 +258,11 @@ pub(crate) fn reorder(categories: &[Category]) -> Option<Vec<usize>> {
         let Some(from) = order.iter().position(|which| *which == at) else {
             continue;
         };
-        if *category == Category::PreBase && insert < from {
+        // The insertion point is the front of the syllable and stays there,
+        // which is what reverses a pair of pre-base characters.
+        if *category == Category::PreBase && from > 0 {
             let lifted = order.remove(from);
-            order.insert(insert, lifted);
-            insert = insert.saturating_add(1);
+            order.insert(0, lifted);
             moved = true;
         }
     }
@@ -321,12 +332,17 @@ mod tests {
         assert_eq!(reorder(&cats), Some(vec![3, 0, 1, 2]));
     }
 
-    /// Two pre-base characters in one syllable keep the order they were typed
-    /// in, which is the guess [`reorder`] records as one.
+    /// Two pre-base characters in one syllable come out in the **reverse** of
+    /// the order they were typed in.
+    ///
+    /// Tai Tham `SHLANA-6/2` and `SHLANA-6/4` are where that is adjudicated:
+    /// each holds `U+1A55 CONSONANT SIGN MEDIAL RA` and a pre-base vowel in
+    /// one syllable, and each expects the vowel drawn first. The opposite rule
+    /// was tried and costs three cases across two sections.
     #[test]
-    fn two_pre_base_characters_keep_their_order() {
+    fn two_pre_base_characters_come_out_reversed() {
         let cats = [Category::Base, Category::PreBase, Category::PreBase];
-        assert_eq!(reorder(&cats), Some(vec![1, 2, 0]));
+        assert_eq!(reorder(&cats), Some(vec![2, 1, 0]));
     }
 
     #[test]
