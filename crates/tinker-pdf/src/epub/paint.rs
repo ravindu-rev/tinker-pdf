@@ -1212,6 +1212,15 @@ fn draw_run(
 /// would mean moving boxes layout placed. What this closes is the case
 /// fallback creates — one run, one style, several faces — which is the case
 /// `docs/features/fonts.md` named.
+///
+/// **And a standard-14 segment is still drawn a character at a time in
+/// logical order**, because [`draw_coded`] addresses codes rather than glyphs
+/// and there is no sfnt in this process to shape or reorder against. A
+/// right-to-left run that falls partly to the standard 14 therefore has its
+/// segments in visual order and that segment's letters in logical order.
+/// It was that way before this: the segments were in logical order too, so
+/// what changes is that half of the answer is now right rather than none of
+/// it. Named rather than implied.
 fn right_to_left(text: &str) -> bool {
     Paragraph::new(text, BaseDirection::Auto)
         .base_level()
