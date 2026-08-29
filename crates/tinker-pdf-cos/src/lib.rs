@@ -103,9 +103,9 @@ pub use edit::{
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{
-    acro_form, calculation_order, catalog_scripts, document_scripts, field_value, fields,
-    script_summary, DocumentScript, Field, FieldKind, FieldScripts, FieldValue, Script,
-    ScriptSummary,
+    acro_form, calculation_order, catalog_scripts, catalog_scripts_within, document_scripts,
+    document_scripts_within, field_value, fields, fields_within, script_summary, DocumentScript,
+    Field, FieldKind, FieldScripts, FieldValue, Script, ScriptBudget, ScriptSummary,
 };
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};

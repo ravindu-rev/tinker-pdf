@@ -157,8 +157,27 @@ substitutes for another: **depth** (parse nesting capped at 32, which also
 bounds the evaluator's stack), **work** (every statement and expression
 node charges a step — 20 000 per script, 200 000 per pass, so a document
 cannot multiply per-script caps by carrying more scripts), and **size**
-(64 KiB per script, 4 MiB of source per document, 16 384 tokens, 8 192-byte
-strings, 1 024-entry arrays, 256 variables, 4 096 calculating fields).
+(64 KiB per script, 4 MiB of source per read of the document, 16 384 tokens,
+8 192-byte strings, 1 024-entry arrays, 256 variables, 4 096 calculating
+fields).
+
+**The 4 MiB is one total, not three.** A document keeps its scripts in three
+places — the field tree's `/AA`, `/Names /JavaScript` and the catalog's
+`/AA` — and each walk used to start from the full total, so a file that
+filled all three surfaced twelve mebibytes. `ScriptBudget` is that total as a
+value the caller carries: `fields_within`, `document_scripts_within` and
+`catalog_scripts_within` spend one between them, in that order (the order is
+fixed because which scripts come back as source and which as
+`Script::Oversize` depends on it, and determinism is a contract — ruling 4).
+`script_summary` — the one call that reads every script a document has —
+threads one. The bare `fields`, `document_scripts` and `catalog_scripts` are
+each **one read of one surface** and each start from the full total; a caller
+that reads more than one and wants the document's answer threads a budget.
+The alternative, a budget living inside `CosDocument`, was rejected because
+it would make reading a document mutate it and the same document read twice
+answer differently. One thing the shape of the defect says out loud: the
+catalog could never have tripled the total on its own, because 12.6.3
+Table 200 defines five triggers and 64 KiB each is a 320 KiB ceiling.
 
 **Which scripts run is a policy, and it is a type.** `ScriptPolicy` names
 the six trigger classes a document's scripts arrive under — `Calculate`
@@ -200,7 +219,9 @@ and `scripts` (a `FieldScripts` of the four `/AA` sources, each a
 `Script::Source` or `Script::Oversize`). `calculation_order()`,
 `document_scripts()` and `catalog_scripts()` surface `/CO` and the
 document's own scripts; `script_summary()` counts everything for a caller
-that has to warn before filling — reading a script runs nothing.
+that has to warn before filling — reading a script runs nothing. Each of the
+three has a `_within` sibling taking a `ScriptBudget`, for a caller reading
+more than one surface under one total.
 
 Mutation goes through `Document::editor()`, a `DocumentEditor`:
 `fill_field`, `set_field_values`, `set_field_value`, `set_checkbox`,
@@ -235,7 +256,7 @@ let bytes = editor.save(&WriteOptions::default());
 | `app.*` and `console.*` | inert stubs; assigning a stub's result to a field is `ScriptError::NotStorable` | a stub's result must never become a field value | — |
 | A name or member outside the subset | `ScriptError::UnknownName` / `ScriptError::UnknownMember` | a calculation that guesses is a form that lies | — |
 | A script that does not terminate cheaply, or outgrows the size caps | `ScriptError::OutOfSteps` / `TooDeep` / `TooManyTokens` / `StringTooLong` / `ArrayTooLong` / `TooManyVars` | three independent bounds — depth, work, size — because none substitutes for another | — |
-| Script source past 64 KiB, or past the document's 4 MiB total | `Script::Oversize(len)`; running it is `ScriptError::TooLong` | truncated source means something different from what the file says (ruling 10) | — |
+| Script source past 64 KiB, or past what one read of the document has left of its 4 MiB `ScriptBudget` | `Script::Oversize(len)`; running it is `ScriptError::TooLong` | truncated source means something different from what the file says (ruling 10) | — |
 | More than 4 096 calculating fields in one pass | `CalcError::TooManyFields` | refused rather than truncated, for the same reason a failing script refuses the pass | — |
 | A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
@@ -285,6 +306,13 @@ makes it a round trip rather than a restatement — and over a non-identity
 bare CFF, the CID whose code a `cidchar` took, and the registry CMap whose
 table a `cmap-predefined`-off build left out. Its module header carries the
 nine reintroduced defects and how many assertions each one fired.
+
+`crates/tinker-pdf-cos/tests/form_script_budget.rs` (4 tests) builds a
+document that crowds all three surfaces and asserts the four mebibytes are
+spent once between them, that the eight name-tree entries and five catalog
+triggers past the line come back named, and that each bare entry point is
+still one read of its own. Its header records what the catalog cannot hold
+and why.
 
 `form_script` is one of the 24 fuzz targets, with a committed seed corpus:
 it drives the lexer, parser and evaluator with arbitrary text against a
