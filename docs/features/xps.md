@@ -111,21 +111,38 @@ the page synthesis.
 | Page-level defects | `XpsPageDefect::{SourceUnresolved, DocumentUnresolved, Unreadable, ContentUnreadable, SizeUnusable, MediaTypeMismatch, PageBoxUnusable}` | the page becomes a placeholder that keeps its number | — |
 | Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | — |
 
-**Corpus caveat, stated**: every committed package was written by one of
-two Microsoft serialisers on one machine. No non-Windows producer was found
-(none installed could emit XPS), so the corpus is a single vendor's idea of
-the format, and the doc says so ([ROADMAP.md](../ROADMAP.md) Tier 4).
+**What the corpus is**: thirteen committed packages from **three serialisers
+and two vendors** — six WPF `.xps`, two XPSOM `.oxps`, and five written by
+Ghostscript 10.07.1's `xpswrite` device over PDFs this repository's own
+`DocumentBuilder` wrote. The third producer shares no code, no vendor and no
+lineage with the first two, and it earned its place: fifteen of the thirty
+things recorded in `crates/tinker-pdf/tests/xps/README.md` came from it, and
+three of them contradict something the eight Microsoft files had made look like
+a rule — `[Content_Types].xml` is not always last, colours come in three
+spellings and not two, and abbreviated geometry does too. One of its packages,
+`gs-images.xps`, is refused at two elements by the table above and is the
+fixture the TIFF row should start from: its image parts are `image/tiff`,
+reached through `{ColorConvertedBitmap …}` naming an ICC profile part.
 
 ## Verified
 
-- **Eight genuine packages** in `crates/tinker-pdf/tests/xps/` — six WPF
-  `.xps` (`System.Windows.Xps.Packaging`, .NET Framework 4.8) and two
-  XPSOM `.oxps` (`XpsServices.dll` 10.0.26100) — obtained *before* any
-  reader existed so the reader could be measured against files it did not
-  write. All eight render with nothing owed. `INVENTORY.tsv` is recomputed
-  through `tinker-pdf-zip` on every `cargo test`, so .NET's ZIP reader and
-  this one must agree about all 52 rows. Thirteen things real files did
-  that ECMA-388 does not say are recorded in that README.
+- **Thirteen genuine packages** in `crates/tinker-pdf/tests/xps/` — six WPF
+  `.xps` (`System.Windows.Xps.Packaging`, .NET Framework 4.8), two XPSOM
+  `.oxps` (`XpsServices.dll` 10.0.26100) and five from Ghostscript 10.07.1's
+  `xpswrite` device. The first eight were obtained *before* any reader existed
+  so the reader could be measured against files it did not write; the five came
+  later, from a second vendor, over source PDFs `DocumentBuilder` wrote.
+  Twelve render with nothing owed and the thirteenth is refused at exactly two
+  elements, by name. `INVENTORY.tsv` is recomputed through `tinker-pdf-zip` on
+  every `cargo test`, so .NET's ZIP reader and this one must agree about all 82
+  rows. **Thirty** things real files did that ECMA-388 does not say are
+  recorded in that README.
+- **The Ghostscript half regenerates byte for byte**, which nothing else in this
+  repository's fixture corpora does: `xpswrite` stamps a fixed ZIP timestamp,
+  stores every entry, and derives its one relationship `Id` from the content, so
+  a deterministic writer on the way in gives an auditable corpus on the way out.
+  `tests/xps_corpus_source.rs` holds the input half of that with a test that
+  runs on every `cargo test`.
 - `tests/xps.rs`, `xps_spine.rs` (a package whose storage, name and markup
   orders differ), `xps_opc.rs`, `xps_markup.rs`, `xps_glyphs.rs`
   (de-obfuscation asserted byte-for-byte), `xps_images.rs`,
@@ -144,8 +161,11 @@ the format, and the doc says so ([ROADMAP.md](../ROADMAP.md) Tier 4).
   which reach for `tinker-pdf-zip` and nothing above it: not the XML parser
   this reader parses with, not the image decoders that give a picture its pixel
   count, not `geometry`'s reader of 11.2.3, and not 18.1's scale and flip,
-  written out from the clause. All eight packages conserve every fact and the
-  census is recorded in `tests/xps/CONSERVATION.tsv`. It replaces
+  written out from the clause. Twelve of the thirteen packages conserve every
+  fact and the census is recorded in `tests/xps/CONSERVATION.tsv`; the
+  thirteenth, `gs-images.xps`, states two pictures this build refuses at the
+  element, so its divergence is pinned by a test of its own rather than
+  censused. It replaces
   `xps_mutool.rs`, which compared a second reader's device trace of the package
   against its trace of the document. **What left with that oracle is that two
   independent programs read one package and agree**, and no assertion here

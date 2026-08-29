@@ -34,6 +34,29 @@
 //! with the figure written down in `tests/xps/CONSERVATION.tsv` so a change
 //! that moves it has to say so in the same commit.
 //!
+//! # What the third producer did to all of that
+//!
+//! Tier 4 added five Ghostscript packages, and they moved the sweep in three
+//! ways worth naming here rather than leaving in a diff.
+//!
+//! **The scale.** The eight Microsoft packages state at most six facts each.
+//! `gs-gradients.xps` states 1 115, `gs-rasterised-text.xps` 715 and
+//! `gs-embedded-font.xps` 590, because `xpswrite` decomposes gradients and text
+//! into one filled path per device unit. The comparator had never been run over
+//! a page with more than three marks on it.
+//!
+//! **The defect it found, in this file's own scanner.** 11.2.3's fill-rule
+//! prefix is `"F" wsp* ("0"|"1")`, and `data_bounds` stripped `F0` and `F1`
+//! only — which is the whole of what WPF and the object model write, because
+//! neither writes an `F` at all. Ghostscript writes `F 1`, the scanner met an
+//! unknown command, and two of `gs-paths.xps`'s six marks censused as having no
+//! bounds. The engine had it right; the independent walk did not. Corrected
+//! against the clause, and it is exactly the class of hole a second producer
+//! exists to find.
+//!
+//! **The one package the sweep cannot cover**, which is named below in a test
+//! of its own rather than dropped from a list.
+//!
 //! # The injections that were counted before the oracle left
 //!
 //! Ruling 13's order is that nothing is deleted before the check replacing it
@@ -1131,12 +1154,19 @@ fn every_committed_package_conserves_the_figure_the_record_states() {
         measured, recorded,
         "tests/xps/CONSERVATION.tsv is out of date"
     );
-    assert_eq!(recorded.len(), 8, "the committed corpus is eight packages");
+    assert_eq!(recorded.len(), 12, "the sweep covers twelve packages");
 }
 
-/// The committed corpus, which is the list of packages rather than the record
-/// of what they measured.
+/// The packages the sweep covers, which is the list rather than the record of
+/// what they measured.
+///
+/// **Twelve of the thirteen committed packages**, and the thirteenth is named
+/// below rather than left out quietly.
 const COMMITTED: &[&str] = &[
+    "gs-embedded-font.xps",
+    "gs-gradients.xps",
+    "gs-paths.xps",
+    "gs-rasterised-text.xps",
     "wpf-gradients.xps",
     "wpf-image-and-text.xps",
     "wpf-jpeg-image.xps",
@@ -1146,6 +1176,83 @@ const COMMITTED: &[&str] = &[
     "xpsom-gradients.oxps",
     "xpsom-image-and-text.oxps",
 ];
+
+/// **The one package the sweep above cannot cover, and why — asserted.**
+///
+/// `gs-images.xps` states two pictures its document does not carry, and both
+/// sides are right. Ghostscript writes every image as a **TIFF** part named
+/// through a `{ColorConvertedBitmap …}` wrapper carrying an ICC profile, and
+/// this build refuses that wrapper by name (`ImageProfileUnsupported`) because
+/// the syntax has nowhere to put an sRGB fallback — so ruling 2's grey
+/// placeholder is what reaches the page, and a census of *what the markup
+/// states* can never equal a census of *what a refusal drew*.
+///
+/// The alternative was to widen the markup walk until the two agreed, which
+/// would have made the harness agree with the engine about a picture neither of
+/// them drew. So the exclusion is a test instead: the divergence is pinned to
+/// its exact shape, and the day this build learns to read a TIFF, **this test
+/// fails** and the package joins the sweep in the same commit.
+#[test]
+fn the_one_package_the_sweep_excludes_diverges_only_by_its_refusal() {
+    let bytes = corpus("gs-images.xps");
+    let markup = markup_census(&bytes);
+    let verdict = conservation(&bytes);
+
+    // One page, one mark stated: the white background. The two `<Path>`
+    // elements whose fill is an `ImageBrush` state a source the markup walk
+    // cannot resolve to a part, because `{ColorConvertedBitmap /…/0.tif
+    // /…/Profile_0.icc}` is a wrapper and not a reference.
+    assert_eq!(markup.pages.len(), 1);
+    assert_eq!(markup.solids(), 1, "the page's white background");
+    assert_eq!(markup.images(), 0, "no picture the markup walk can address");
+
+    assert!(
+        !verdict.holds(),
+        "this is the package that does not conserve"
+    );
+    assert_eq!(
+        verdict.divergences.len(),
+        1,
+        "one divergence and no others: {:?}",
+        verdict.divergences
+    );
+    assert!(
+        matches!(
+            verdict.divergences[0],
+            Divergence::MarkCount {
+                page: 0,
+                markup: 1,
+                document: 3
+            }
+        ),
+        "the document carries the background and two grey placeholders: {:?}",
+        verdict.divergences
+    );
+
+    // And the refusal is named, once, at the element — not swallowed, and not
+    // repeated per picture.
+    let document = Document::open(bytes).expect("gs-images.xps opens");
+    let report = document.archive().expect("a report");
+    let refusals: Vec<&tinker_pdf::ArchiveWarning> = report
+        .warnings()
+        .iter()
+        .filter(|w| {
+            matches!(
+                w,
+                tinker_pdf::ArchiveWarning::XpsElement {
+                    defect: tinker_pdf::XpsElementDefect::ImageProfileUnsupported,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "one deduplicated element refusal: {:?}",
+        report.warnings()
+    );
+}
 
 /// **The two dialects of one document conserve the same census.**
 ///

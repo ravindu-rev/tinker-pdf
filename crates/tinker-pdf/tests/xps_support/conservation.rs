@@ -564,8 +564,20 @@ fn data_bounds(data: &str) -> Rect {
 
     let mut rest = data.trim();
     // 11.2.3 allows an optional fill-rule prefix, which states no geometry.
-    if let Some(tail) = rest.strip_prefix("F0").or_else(|| rest.strip_prefix("F1")) {
-        rest = tail.trim_start();
+    //
+    // The grammar is `"F" wsp* ("0" | "1")` — **whitespace between the letter
+    // and the digit** — and this read `F0` and `F1` only, which is the whole of
+    // what the two Microsoft serialisers write. Ghostscript writes `F 1`, so
+    // the scanner met the `F` as a command it did not know, ran out of operands
+    // and answered no bounds at all: two of `gs-paths.xps`'s six marks were
+    // present in the document, absent from the markup census, and reported as a
+    // conservation failure the engine had nothing to do with. Corrected here,
+    // against the clause rather than against the file.
+    if let Some(tail) = rest.strip_prefix('F') {
+        let tail = tail.trim_start();
+        if let Some(digit) = tail.strip_prefix('0').or_else(|| tail.strip_prefix('1')) {
+            rest = digit.trim_start();
+        }
     }
 
     let bytes = rest.as_bytes();

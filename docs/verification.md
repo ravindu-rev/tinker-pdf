@@ -372,9 +372,14 @@ ECMA-388 18.1 puts it?** Both sides state the same census — page sizes, painte
 elements with their colours, gradient geometry and stops, image pixel counts and
 rectangles, tiling copies, glyph runs with their origins, sizes, text and the
 advances `Indices` overrides — and the comparator reports a typed divergence for
-each thing that differs. All eight packages conserve every fact, and the counts
-are recorded in `tests/xps/CONSERVATION.tsv`, which a change that moves them has
-to re-measure.
+each thing that differs. Twelve of the thirteen committed packages conserve
+every fact, and the counts are recorded in `tests/xps/CONSERVATION.tsv`, which a
+change that moves them has to re-measure. The thirteenth is `gs-images.xps`,
+whose two pictures this build refuses at the element by name: the markup states
+them and the document carries ruling 2's placeholder instead, both sides are
+right, and no census can make them equal — so the exclusion is a test of its own
+that pins the divergence and fails the day a TIFF decoder arrives, rather than a
+package quietly missing from a list.
 
 What makes it worth anything is the same thing the strict validator's value
 rests on: **what the markup side is not allowed to use.** It reaches for
