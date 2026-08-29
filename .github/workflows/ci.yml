@@ -361,6 +361,22 @@ jobs:
             pdfa.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # Shaping's *rendered* fingerprint, as distinct from the shaper's own.
+      # `tinker-pdf-shape`'s fingerprints pin glyph ids and positions; this
+      # one pins the pixels an Arabic book paginates to, which is the whole
+      # path — itemization, joining, fallback, the painter's pen — rather
+      # than the shaper alone. It was recorded on one machine, so until this
+      # step ran it was a cross-target claim with one target behind it.
+      - name: Paginate an Arabic book on wasm32-wasip1 and compare its pixels
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test epub_shaped \
+            --target wasm32-wasip1 2>&1 | tee epub.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub.log
+          grep -q 'the_shaped_page_renders_to_the_bytes_it_always_did \.\.\. ok' \
+            epub.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       - name: Shape on wasm32-wasip1 and compare against the fingerprints
         run: |
           set -o pipefail
