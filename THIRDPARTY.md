@@ -374,6 +374,7 @@ mitigation `docs/design/shaping.md`'s risk table names.
 | `BidiBrackets.txt` | `Bidi_Paired_Bracket` and `Bidi_Paired_Bracket_Type`, which rule N0 is written in terms of |
 | `BidiMirroring.txt` | `Bidi_Mirroring_Glyph`, rule L4 |
 | `Scripts.txt` | UAX #24's `Script`, which itemization splits a paragraph on |
+| `extracted/DerivedJoiningType.txt`, here as `DerivedJoiningType.txt` | `Joining_Type`, which the Arabic cursive-joining state machine is written in. The derived file rather than `ArabicShaping.txt` because it lists the 386 `Transparent` ranges outright instead of leaving them to be re-derived from `General_Category`; `build.rs` says so at length |
 | `PropertyValueAliases.txt` | Each script's ISO 15924 code, which an OpenType script tag is derived from, and the long-to-short `Bidi_Class` names the `@missing` lines use |
 | `BidiTest.txt` | **A conformance oracle.** Every combination of `Bidi_Class` values up to length four: 490 846 data lines, 770 241 resolutions |
 | `BidiCharacterTest.txt` | **The other one.** 91 707 cases of real code points, and the only one of the two that reaches bracket pairs |

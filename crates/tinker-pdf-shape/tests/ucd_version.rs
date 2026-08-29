@@ -195,6 +195,7 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "BidiMirroring.txt",
             "BidiTest.txt",
             "DerivedBidiClass.txt",
+            "DerivedJoiningType.txt",
             "LICENSE.txt",
             "PropertyValueAliases.txt",
             "Scripts.txt",

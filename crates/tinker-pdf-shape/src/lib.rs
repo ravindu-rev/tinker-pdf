@@ -329,6 +329,35 @@ impl<'a> LayoutTable<'a> {
     /// different behavior there.
     #[must_use]
     pub fn lookups_for(&self, script: Tag, language: Option<Tag>, features: &[Tag]) -> Vec<u16> {
+        let wanted: Vec<(Tag, u32)> = features.iter().map(|tag| (*tag, !0)).collect();
+        self.lookups_for_masked(script, language, &wanted)
+            .into_iter()
+            .map(|(lookup, _)| lookup)
+            .collect()
+    }
+
+    /// The same, with each requested feature carrying the mask of the glyphs
+    /// it is turned on at.
+    ///
+    /// # Two features naming one lookup
+    ///
+    /// The masks are **or-ed**, not concatenated: a lookup `liga` and `clig`
+    /// share runs once, over the union of the glyphs either feature reaches.
+    /// That is the same deduplication [`LayoutTable::lookups_for`] documents,
+    /// carried through the extra field — running the shared lookup twice with
+    /// two masks would ligate the ligature, which is the bug the dedup exists
+    /// to stop.
+    ///
+    /// The language system's required feature is included with
+    /// [`Buffer::GLOBAL`], because "required" is a statement about the run and
+    /// not about a position in it.
+    #[must_use]
+    pub fn lookups_for_masked(
+        &self,
+        script: Tag,
+        language: Option<Tag>,
+        features: &[(Tag, u32)],
+    ) -> Vec<(u16, u32)> {
         let scripts = self.scripts();
         let Some(script) = scripts
             .find(script)
@@ -340,9 +369,9 @@ impl<'a> LayoutTable<'a> {
             return Vec::new();
         };
         let list = self.features();
-        let mut wanted: Vec<u16> = Vec::new();
+        let mut wanted: Vec<(u16, u32)> = Vec::new();
         if let Some(required) = lang.required_feature() {
-            wanted.push(required);
+            wanted.push((required, Buffer::GLOBAL));
         }
         for n in 0..lang.len() {
             let Some(index) = lang.feature(n) else {
@@ -351,24 +380,32 @@ impl<'a> LayoutTable<'a> {
             let Some(tag) = list.tag(usize::from(index)) else {
                 continue;
             };
-            if features.contains(&tag) {
-                wanted.push(index);
+            for (wanted_tag, mask) in features {
+                if *wanted_tag == tag {
+                    wanted.push((index, *mask));
+                }
             }
         }
-        let mut lookups: Vec<u16> = Vec::new();
-        for index in wanted {
+        let mut lookups: Vec<(u16, u32)> = Vec::new();
+        for (index, mask) in wanted {
             let Some(feature) = list.get(usize::from(index)) else {
                 continue;
             };
             for n in 0..feature.len() {
                 if let Some(lookup) = feature.lookup(n) {
-                    lookups.push(lookup);
+                    lookups.push((lookup, mask));
                 }
             }
         }
         lookups.sort_unstable();
-        lookups.dedup();
-        lookups
+        let mut merged: Vec<(u16, u32)> = Vec::new();
+        for (lookup, mask) in lookups {
+            match merged.last_mut() {
+                Some(last) if last.0 == lookup => last.1 |= mask,
+                _ => merged.push((lookup, mask)),
+            }
+        }
+        merged
     }
 }
 
@@ -460,6 +497,27 @@ impl<'a> Layout<'a> {
     /// choice — a face's second lookup is written expecting the first to have
     /// finished.
     pub fn substitute(&self, buffer: &mut Buffer, lookups: &[u16], limits: Limits) -> Vec<Warning> {
+        let every: Vec<(u16, u32)> = lookups.iter().map(|index| (*index, !0)).collect();
+        self.substitute_masked(buffer, &every, limits)
+    }
+
+    /// The same, with each lookup restricted to the glyphs its own feature
+    /// was turned on at.
+    ///
+    /// The pairs come from [`LayoutTable::lookups_for_masked`] and the masks
+    /// are matched against the ones [`Buffer::set_mask`] wrote. A lookup whose
+    /// mask is `!0` is unrestricted, which is what [`Layout::substitute`]
+    /// passes and what every caller that has never heard of a mask gets.
+    ///
+    /// This exists because Arabic needs it: `init`, `medi`, `fina` and `isol`
+    /// are one substitution each in most faces and the *position* is the whole
+    /// of what tells them apart.
+    pub fn substitute_masked(
+        &self,
+        buffer: &mut Buffer,
+        lookups: &[(u16, u32)],
+        limits: Limits,
+    ) -> Vec<Warning> {
         let Some(gsub) = self.gsub else {
             return Vec::new();
         };
@@ -492,6 +550,19 @@ impl<'a> Layout<'a> {
         &self,
         buffer: &mut Buffer,
         lookups: &[u16],
+        limits: Limits,
+        marks: MarkWidths,
+    ) -> Vec<Warning> {
+        let every: Vec<(u16, u32)> = lookups.iter().map(|index| (*index, !0)).collect();
+        self.position_masked(buffer, &every, limits, marks)
+    }
+
+    /// The same, with each lookup restricted to the glyphs its own feature
+    /// was turned on at. See [`Layout::substitute_masked`].
+    pub fn position_masked(
+        &self,
+        buffer: &mut Buffer,
+        lookups: &[(u16, u32)],
         limits: Limits,
         marks: MarkWidths,
     ) -> Vec<Warning> {

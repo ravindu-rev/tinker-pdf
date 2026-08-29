@@ -68,6 +68,7 @@ fn main() {
         "BidiMirroring.txt",
         "Scripts.txt",
         "PropertyValueAliases.txt",
+        "DerivedJoiningType.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -80,6 +81,7 @@ fn main() {
     brackets(&data, &mut out);
     mirroring(&data, &mut out);
     scripts(&data, &mut out);
+    joining(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -349,6 +351,46 @@ fn scripts(data: &Path, out: &mut String) {
          pub const fn iso15924(script: Script) -> [u8; 4] {{\n    \
          match script {{\n{arms}    }}\n}}",
     );
+}
+
+/// The `Joining_Type` property, which Arabic cursive joining is written in.
+///
+/// # Why the derived file and not `ArabicShaping.txt`
+///
+/// The two carry the same property and state it differently.
+/// `ArabicShaping.txt` lists the joining letters and leaves `Transparent`
+/// implicit — *"those not explicitly listed and of General Category Mn, Me or
+/// Cf have joining type T"* — so reading it means having `General_Category`,
+/// which this crate does not vendor and does not otherwise need.
+/// `extracted/DerivedJoiningType.txt` has already done that derivation and
+/// lists all 386 `T` ranges outright, so the whole property is a table lookup
+/// and there is no second rule for a transcription error to live in.
+///
+/// The `@missing` line is `Non_Joining`, unconditionally, so a code point the
+/// file does not list is `U` and the table is sparse. That is unlike
+/// `DerivedBidiClass.txt` one function up, whose `@missing` lines are
+/// per-block and *are* applied; the difference is in the files and is why
+/// both are read by hand rather than by one shared rule.
+///
+/// The `Joining_Group` property is deliberately not read. It is needed for
+/// exactly one thing — Syriac's Alaph, which selects the `fin2`, `fin3` and
+/// `med2` features rather than `fina` — and no fixture in either vendored
+/// corpus contains a Syriac face, so implementing it would be adding
+/// unadjudicated behavior. `docs/features/fonts.md` lists Syriac by name for
+/// that reason.
+fn joining(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, values) in rows(&data.join("DerivedJoiningType.txt")) {
+        for code in first..=last {
+            map.insert(code, values[0].clone());
+        }
+    }
+    assert!(
+        !map.is_empty(),
+        "DerivedJoiningType.txt yielded no rows; the joining table would be \
+         empty and every Arabic letter would shape as isolated"
+    );
+    emit(out, "JOINING", "JoiningType", &ranges(&map));
 }
 
 /// A UCD long name as a Rust variant name: `Caucasian_Albanian` becomes

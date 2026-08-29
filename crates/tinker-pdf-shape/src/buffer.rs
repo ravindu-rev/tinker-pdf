@@ -112,6 +112,8 @@ pub(crate) struct Props {
     /// ligature, and the component numbering of the marks hanging off the
     /// inner one has to be renumbered into the outer one's.
     pub(crate) num_comps: u16,
+    /// Which features may touch this glyph. See [`Buffer::set_mask`].
+    pub(crate) mask: u32,
     /// The glyph this one hangs off, as a signed distance in buffer
     /// positions, or `None` for a glyph that stands on its own.
     ///
@@ -128,10 +130,12 @@ pub(crate) struct Props {
 }
 
 impl Props {
-    /// The state a glyph starts in: nothing known, one component, unattached.
+    /// The state a glyph starts in: nothing known, one component, unattached,
+    /// and reachable by every feature the whole run asked for.
     fn new() -> Self {
         Self {
             num_comps: 1,
+            mask: Buffer::GLOBAL,
             ..Self::default()
         }
     }
@@ -153,6 +157,15 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// The mask bit every glyph carries, and that a feature the whole run
+    /// asked for is registered under.
+    ///
+    /// A caller that never sets a mask gets this on every glyph, so a lookup
+    /// list built with no per-glyph features behaves exactly as it did before
+    /// masks existed. That is what keeps `tests/aots.rs` — 275 cases that know
+    /// nothing about Arabic — meaning the same thing it meant.
+    pub const GLOBAL: u32 = 1;
+
     /// An empty buffer, set left to right.
     #[must_use]
     pub fn new() -> Self {
@@ -219,6 +232,29 @@ impl Buffer {
     /// [`Props`] vector in step.
     pub fn glyph_mut(&mut self, at: usize) -> Option<&mut ShapedGlyph> {
         self.glyphs.get_mut(at)
+    }
+
+    /// Which features may touch the glyph at `at`.
+    ///
+    /// A bit per feature that is not on everywhere. [`Buffer::GLOBAL`] must be
+    /// part of whatever is set, or the glyph becomes invisible to every
+    /// feature the run asked for as a whole.
+    ///
+    /// The reason this exists is that `init`, `medi`, `fina` and `isol` are
+    /// one lookup each in most Arabic faces — a single substitution covering
+    /// every letter — and the *position* is the whole of what distinguishes
+    /// them. A shaper that ran the `init` lookup over the buffer would give
+    /// every letter of a word its initial form. So the run decides, once,
+    /// which form each glyph is in, and a lookup that came only from `init`
+    /// is applied only where that bit is set.
+    ///
+    /// The mask travels with the glyph through substitution: a ligature keeps
+    /// the first component's, a decomposition gives every output the input's.
+    /// That is the same rule the cluster follows, and for the same reason.
+    pub fn set_mask(&mut self, at: usize, mask: u32) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.mask = mask;
+        }
     }
 
     /// Which way the run is set.

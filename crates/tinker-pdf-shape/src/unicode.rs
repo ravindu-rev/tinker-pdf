@@ -109,6 +109,37 @@ pub enum BracketKind {
     Close,
 }
 
+/// A character's `Joining_Type`: which side of it a cursive script joins on.
+///
+/// The names are the UCD's own one-letter abbreviations rather than the long
+/// forms, because the Arabic joining state machine in [`crate::shape`] is a
+/// table indexed by them and a translation layer between the property and the
+/// table would be a place for a transcription error to hide — the same reason
+/// [`BidiClass`] is spelled `AL` and not `Arabic_Letter`.
+///
+/// `Join_Causing` (`C`) is not a separate column of that table: the standard's
+/// own state machine treats a join-causing character exactly as it treats a
+/// dual-joining one, which is what makes `U+0640 ARABIC TATWEEL` and
+/// `U+200D ZERO WIDTH JOINER` keep a word connected through them.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum JoiningType {
+    /// Join_Causing: tatweel, and `ZWJ`.
+    C,
+    /// Dual_Joining: joins on both sides. Most Arabic letters.
+    D,
+    /// Left_Joining: joins only on its left. Five characters, all Mongolian.
+    L,
+    /// Right_Joining: joins only on its right. Alef, dal, waw and their kin.
+    R,
+    /// Transparent: a combining mark, which the state machine steps over
+    /// without changing state.
+    T,
+    /// Non_Joining: everything else, including `ZWNJ`. The `@missing` value,
+    /// so it is what a character the table does not list gets.
+    U,
+}
+
 /// UAX #24's `Script`, at Unicode 17.0's 175 values.
 ///
 /// `Katakana_Or_Hiragana` is deliberately absent: it is a union value that
@@ -477,10 +508,7 @@ impl Script {
     }
 
     /// The OpenType script tag a face is asked for when a run is in this
-    /// script — **by the registry's default rule, which has exceptions this
-    /// crate does not yet carry.**
-    ///
-    /// # What this derivation is
+    /// script, by the registry's default rule.
     ///
     /// The OpenType script tags are a Microsoft registry, not a Unicode
     /// property, and the registry's own default is the ISO 15924 code in lower
@@ -488,26 +516,12 @@ impl Script {
     /// `latn`. That is what this returns, straight from the vendored alias
     /// file, so no list of tags is written out here to fall out of date.
     ///
-    /// # What it is not, stated rather than discovered later
-    ///
-    /// The registry departs from that rule in a bounded set of cases, and this
-    /// crate does not have them:
-    ///
-    /// - the Indic **version 2** tags — `dev2`, `bng2`, `gur2`, `gjr2`,
-    ///   `ory2`, `tml2`, `tel2`, `knd2`, `mlm2`, `mym2` — which a modern face
-    ///   uses in preference to the v1 tag of the same script;
-    /// - the scripts whose tag is shorter than four letters and space-padded,
-    ///   such as N'Ko and Lao;
-    /// - Hiragana and Katakana, which share one tag rather than having one
-    ///   each.
-    ///
-    /// Every one of those belongs to a script `docs/design/shaping.md`
-    /// schedules for **milestone 4 or 5**, where the text-rendering-tests
-    /// sections for that script are the grade. Until then the consequence is
-    /// bounded and in the safe direction: a tag the face does not declare
-    /// falls back to `DFLT` in [`crate::LayoutTable::lookups_for`], so the run
-    /// gets fewer features rather than the wrong ones — the same output a face
-    /// with no layout tables produces.
+    /// **This is not the tag to ask a face for.** The registry departs from
+    /// the default rule in a bounded set of cases, and a shaper has to try
+    /// several tags in order and take the first the face declares. That is
+    /// [`Script::opentype_tags`], and it is what [`crate::shape::Shaper`]
+    /// calls; this is kept because it is the rule the others are exceptions
+    /// to, and because two of the tests below are written against it.
     #[must_use]
     pub const fn opentype_tag(self) -> crate::Tag {
         let mut code = self.iso15924();
@@ -517,6 +531,73 @@ impl Script {
             at += 1;
         }
         crate::Tag::new(&code)
+    }
+
+    /// Every OpenType script tag this script may be declared under, **most
+    /// preferred first**.
+    ///
+    /// A shaper asks the face for each in turn and uses the first one it
+    /// declares, falling back to `DFLT`. The order is the registry's own and
+    /// the reason it matters is Indic: a face that declares `knd2` was written
+    /// for the reformed Kannada model and a face that declares only `knda` was
+    /// written for the old one, and asking for the wrong one gets a face's
+    /// features in the wrong order rather than not at all.
+    ///
+    /// # The exceptions, and where each comes from
+    ///
+    /// Everything not named here is [`Script::opentype_tag`]. The registry's
+    /// departures from that rule are three shapes:
+    ///
+    /// - **The ten Indic version-2 tags.** `bng2`, `dev2`, `gjr2`, `gur2`,
+    ///   `knd2`, `mlm2`, `mym2`, `ory2`, `taml`→`tml2`, `telu`→`tel2`. Each is
+    ///   listed *before* the v1 tag of the same script, because that is the
+    ///   preference the registry states. Sinhala deliberately has no v2 tag,
+    ///   and is therefore not here.
+    /// - **Tags shorter than four letters, space-padded.** N'Ko is `nko `
+    ///   where its ISO code is `Nkoo`, Lao is `lao ` where its code is `Laoo`,
+    ///   and Yi is `yi  ` where its code is `Yiii`. Lower-casing the ISO code
+    ///   gets all three wrong, and a face declaring `nko ` would have been
+    ///   asked for `nkoo` and given `DFLT`.
+    /// - **Two scripts to one tag.** Hiragana and Katakana are both `kana`;
+    ///   the registry has no `hira`.
+    ///
+    /// # What this list is not
+    ///
+    /// It is not the whole registry. The registry also carries tags for things
+    /// that are not UAX #24 scripts at all — `math`, `DFLT`, and the private
+    /// `Harf`/`HARF` and `Buzz`/`BUZZ` tags one implementation uses to detect
+    /// itself — and none of those can be reached from a `Script`, so none is
+    /// here. `knd3`, which one text-rendering-tests face declares, is likewise
+    /// not in the registry; see `tests/text_rendering.rs` for what that face
+    /// is for.
+    #[must_use]
+    pub fn opentype_tags(self) -> Vec<crate::Tag> {
+        use crate::Tag;
+        let exceptions: &[Tag] = match self {
+            // The ten version-2 Indic tags, newest first.
+            Script::Bengali => &[Tag::new(b"bng2"), Tag::new(b"beng")],
+            Script::Devanagari => &[Tag::new(b"dev2"), Tag::new(b"deva")],
+            Script::Gujarati => &[Tag::new(b"gjr2"), Tag::new(b"gujr")],
+            Script::Gurmukhi => &[Tag::new(b"gur2"), Tag::new(b"guru")],
+            Script::Kannada => &[Tag::new(b"knd2"), Tag::new(b"knda")],
+            Script::Malayalam => &[Tag::new(b"mlm2"), Tag::new(b"mlym")],
+            Script::Myanmar => &[Tag::new(b"mym2"), Tag::new(b"mymr")],
+            Script::Oriya => &[Tag::new(b"ory2"), Tag::new(b"orya")],
+            Script::Tamil => &[Tag::new(b"tml2"), Tag::new(b"taml")],
+            Script::Telugu => &[Tag::new(b"tel2"), Tag::new(b"telu")],
+            // The space-padded three.
+            Script::Nko => &[Tag::new(b"nko ")],
+            Script::Lao => &[Tag::new(b"lao ")],
+            Script::Yi => &[Tag::new(b"yi  ")],
+            // The two that share one.
+            Script::Hiragana | Script::Katakana => &[Tag::new(b"kana")],
+            // Everything else is the default rule and nothing else. The
+            // default is deliberately **not** appended to the lists above:
+            // no face declares `nkoo`, and asking for a tag the registry
+            // does not have would be this crate inventing one.
+            _ => return vec![self.opentype_tag()],
+        };
+        exceptions.to_vec()
     }
 }
 
@@ -611,6 +692,17 @@ pub fn script(c: char) -> Script {
     lookup(SCRIPT, c as u32, Script::Unknown)
 }
 
+/// A character's `Joining_Type`, which Arabic cursive joining is written in.
+///
+/// `U` — Non_Joining — for everything the vendored file does not list, which
+/// is its own `@missing` line and therefore every character outside the
+/// cursive scripts. See `build.rs` for why the derived file is read rather
+/// than `ArabicShaping.txt`.
+#[must_use]
+pub fn joining_type(c: char) -> JoiningType {
+    lookup(JOINING, c as u32, JoiningType::U)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{bidi_class, bracket, mirrored, script, BidiClass, BracketKind, Script};
@@ -665,10 +757,56 @@ mod tests {
         assert_eq!(Script::Ethiopic.iso15924(), *b"Ethi");
         assert_eq!(Script::Ethiopic.opentype_tag(), crate::Tag::new(b"ethi"));
         assert_eq!(Script::Latin.opentype_tag(), crate::Tag::new(b"latn"));
-        // The derivation this crate does not yet have, asserted as the thing
-        // it currently does so that milestone 4 has to change a test rather
-        // than discover a surprise: N'Ko's registry tag is `nko `.
+        // The default rule still says `nkoo`, and the registry still says
+        // `nko `. Milestone 3 asserted the first as the thing this crate did;
+        // milestone 4 keeps that assertion and adds the second, so the two
+        // stay visibly different rather than one quietly becoming the other.
         assert_eq!(Script::Nko.opentype_tag(), crate::Tag::new(b"nkoo"));
+        assert_eq!(Script::Nko.opentype_tags(), vec![crate::Tag::new(b"nko ")]);
+    }
+
+    /// The registry's exceptions, each asserted against the rule it is an
+    /// exception to, so that a list transcribed into the wrong column fails.
+    #[test]
+    fn the_registry_departs_from_the_default_rule_in_exactly_these_places() {
+        use crate::Tag;
+        // The ten Indic v2 tags: preferred first, v1 second, and the v1 is the
+        // default rule's own answer.
+        for (script, v2) in [
+            (Script::Bengali, b"bng2"),
+            (Script::Devanagari, b"dev2"),
+            (Script::Gujarati, b"gjr2"),
+            (Script::Gurmukhi, b"gur2"),
+            (Script::Kannada, b"knd2"),
+            (Script::Malayalam, b"mlm2"),
+            (Script::Myanmar, b"mym2"),
+            (Script::Oriya, b"ory2"),
+            (Script::Tamil, b"tml2"),
+            (Script::Telugu, b"tel2"),
+        ] {
+            let tags = script.opentype_tags();
+            assert_eq!(tags.len(), 2, "{script:?}");
+            assert_eq!(tags[0], Tag::new(v2), "{script:?}");
+            assert_eq!(tags[1], script.opentype_tag(), "{script:?}");
+        }
+        // Sinhala is the Indic script the registry gave no v2 tag, and it is
+        // absent from the list above rather than absent by accident.
+        assert_eq!(Script::Sinhala.opentype_tags(), vec![Tag::new(b"sinh")]);
+        // The space-padded three, none of which the default rule reaches.
+        for (script, tag) in [
+            (Script::Nko, b"nko "),
+            (Script::Lao, b"lao "),
+            (Script::Yi, b"yi  "),
+        ] {
+            assert_eq!(script.opentype_tags(), vec![Tag::new(tag)], "{script:?}");
+            assert_ne!(script.opentype_tag(), Tag::new(tag), "{script:?}");
+        }
+        // Two scripts, one tag, and the registry has no `hira` at all.
+        assert_eq!(Script::Hiragana.opentype_tags(), vec![Tag::new(b"kana")]);
+        assert_eq!(Script::Katakana.opentype_tags(), vec![Tag::new(b"kana")]);
+        assert_ne!(Script::Hiragana.opentype_tag(), Tag::new(b"kana"));
+        // And the rule itself, for a script that is not an exception.
+        assert_eq!(Script::Arabic.opentype_tags(), vec![Tag::new(b"arab")]);
     }
 
     /// A code point Unicode has not assigned to a script is `Unknown`, and a
