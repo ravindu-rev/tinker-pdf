@@ -216,5 +216,5 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take.
   Two of the 24 targets.
-- The whole workspace: `cargo test --workspace` is 3 020 passed, 0 failed,
+- The whole workspace: `cargo test --workspace` is 3 024 passed, 0 failed,
   9 ignored across 123 suites (Windows x86_64, as of August 2026).
