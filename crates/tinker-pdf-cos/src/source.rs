@@ -380,6 +380,17 @@ impl Backing {
         }
     }
 
+    /// This backing as bytes a windowed reader can walk.
+    ///
+    /// The whole-buffer arm borrows rather than copies, which is what keeps a
+    /// document opened from bytes at exactly the cost it always had.
+    pub(crate) fn view(&self) -> Bytes<'_> {
+        match self {
+            Backing::Whole(bytes) => Bytes::Whole(bytes),
+            Backing::Chunked(_) => Bytes::Streamed(self),
+        }
+    }
+
     /// Every byte as a slice, or nothing when a range is still absent.
     ///
     /// The shape `CosDocument::bytes` needs, which cannot return a result
@@ -471,6 +482,88 @@ impl ChunkCache {
             return &[];
         }
         self.whole.get().map_or(&[], |bytes| bytes)
+    }
+}
+
+/// Where the walker's bytes come from.
+///
+/// One walker, two suppliers. The whole-buffer arm hands back the whole
+/// buffer for every window, so a document opened from bytes takes exactly the
+/// path it always took at exactly the cost it always had; the streamed arm
+/// fetches a window per section and grows it until the section parses. A
+/// second walk written for streaming would be a second reading of 7.5.4 and
+/// 7.5.8, and the two would disagree in private.
+pub(crate) enum Bytes<'a> {
+    /// Every byte, in hand.
+    Whole(&'a [u8]),
+    /// A chunk cache, which pays for what the walk asks for.
+    Streamed(&'a Backing),
+}
+
+/// Bytes covering part of a document, and the offset they start at.
+pub(crate) struct Window<'a> {
+    base: u64,
+    held: Held<'a>,
+}
+
+enum Held<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Arc<[u8]>),
+}
+
+impl Window<'_> {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match &self.held {
+            Held::Borrowed(bytes) => bytes,
+            Held::Owned(bytes) => bytes,
+        }
+    }
+
+    /// A document offset as an offset into this window, when it lies inside.
+    pub(crate) fn local(&self, at: u64) -> Option<u64> {
+        let local = at.checked_sub(self.base)?;
+        (local <= self.bytes().len() as u64).then_some(local)
+    }
+
+    /// A window offset back as a document offset.
+    pub(crate) fn abs(&self, local: u64) -> u64 {
+        self.base.saturating_add(local)
+    }
+
+    /// The document offset just past the last byte this window holds.
+    pub(crate) fn end(&self) -> u64 {
+        self.base.saturating_add(self.bytes().len() as u64)
+    }
+}
+
+impl Bytes<'_> {
+    pub(crate) fn len(&self) -> u64 {
+        match self {
+            Bytes::Whole(buf) => buf.len() as u64,
+            Bytes::Streamed(backing) => backing.len(),
+        }
+    }
+
+    /// A window of at least `want` bytes from `at`, or `None` when the bytes
+    /// are not available.
+    ///
+    /// The whole-buffer arm ignores `want` and hands back everything, which is
+    /// what keeps that path free of any new cost or any new behaviour.
+    pub(crate) fn window(&self, at: u64, want: u64) -> Option<Window<'_>> {
+        match self {
+            Bytes::Whole(buf) => Some(Window {
+                base: 0,
+                held: Held::Borrowed(buf),
+            }),
+            Bytes::Streamed(backing) => {
+                let end = at.saturating_add(want).min(backing.len());
+                let bytes = backing.window(at..end).ok()?;
+                Some(Window {
+                    base: at,
+                    held: Held::Owned(bytes),
+                })
+            }
+        }
     }
 }
 

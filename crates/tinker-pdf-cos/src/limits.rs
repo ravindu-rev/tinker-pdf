@@ -76,6 +76,23 @@ pub const STARTXREF_SCAN: usize = 1024;
 /// and dropping to a full rescan. Trailing junk after `%%EOF` is routine.
 pub const STARTXREF_SCAN_MAX: usize = 64 * 1024;
 
+/// Bytes fetched for one indirect object before the window doubles.
+///
+/// Only a streamed document pays this. The window grows until the object
+/// demonstrably ends inside it, because a window that cut an object short
+/// would parse to a different value than the same bytes in one buffer, and
+/// ruling 4 does not allow the two to differ.
+pub const OBJECT_WINDOW: u64 = 4096;
+
+/// Bytes fetched for one cross-reference section before the window doubles.
+///
+/// Only a streamed document pays this: a document opened from a buffer hands
+/// the walker the whole buffer for every window, so the constant is what a
+/// *fetch* costs rather than what a section may be. It doubles until the
+/// section parses, and doubling is free in fetched bytes because the chunk
+/// cache already holds what the shorter attempt read.
+pub const XREF_SECTION_WINDOW: u64 = 8192;
+
 /// Bytes at the start of the buffer searched for the `%PDF-` header (7.5.2).
 /// A header found past byte 0 means every stored offset is short by exactly
 /// that much, which is the most common corruption in the wild.

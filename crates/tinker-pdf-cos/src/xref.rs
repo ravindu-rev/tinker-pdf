@@ -23,6 +23,7 @@ use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::parse::{parse_indirect_at, parse_object_at};
 use crate::repair::{find_from, rfind_from};
+use crate::source::{Bytes, Window};
 use crate::streams::{build_chain, resolve_extent, slice_range};
 use crate::warn::{WarningKind, WarningSink};
 
@@ -242,37 +243,47 @@ pub(crate) fn header_shift(buf: &[u8], sink: &mut WarningSink) -> u64 {
 ///
 /// The last kilobyte first, then the last 64 KB: trailing junk after `%%EOF`
 /// is routine, and a `startxref` further back than that is not worth trusting
-/// over a full rescan.
-pub(crate) fn startxref(buf: &[u8], sink: &mut WarningSink) -> Option<u64> {
-    for window in [limits::STARTXREF_SCAN, limits::STARTXREF_SCAN_MAX] {
-        let from = buf.len().saturating_sub(window);
-        let Some(at) = rfind_from(buf, b"startxref", from) else {
+/// over a full rescan. On a streamed source those are two tail windows and
+/// nothing else -- the ladder is the same ladder, read from the end.
+pub(crate) fn startxref(bytes: &Bytes<'_>, sink: &mut WarningSink) -> Option<u64> {
+    let len = bytes.len();
+    for scan in [limits::STARTXREF_SCAN, limits::STARTXREF_SCAN_MAX] {
+        let tail_at = len.saturating_sub(scan as u64);
+        let Some(window) = bytes.window(tail_at, len.saturating_sub(tail_at)) else {
+            continue;
+        };
+        let from = usize::try_from(window.local(tail_at)?)
+            .unwrap_or(usize::MAX)
+            .min(window.bytes().len());
+        let Some(at) = rfind_from(window.bytes(), b"startxref", from) else {
             continue;
         };
         let mut scratch = WarningSink::new();
-        let mut lexer = Lexer::at(buf, (at + b"startxref".len()) as u64);
+        let mut lexer = Lexer::at(window.bytes(), (at + b"startxref".len()) as u64);
         if let TokenKind::Int(value) = lexer.next_token(&mut scratch).kind {
             if let Ok(offset) = u64::try_from(value) {
                 return Some(offset);
             }
         }
-        sink.warn(at as u64, WarningKind::StartxrefUnusable);
+        sink.warn(window.abs(at as u64), WarningKind::StartxrefUnusable);
         return None;
     }
-    sink.warn(buf.len() as u64, WarningKind::StartxrefMissing);
+    sink.warn(len, WarningKind::StartxrefMissing);
     None
 }
 
 /// Walks the cross-reference chain from `start`, newest section first.
 pub(crate) fn build(
-    buf: &[u8],
+    bytes: Bytes<'_>,
     start: u64,
     shift: u64,
     names: &DocNames,
     sink: &mut WarningSink,
 ) -> XrefBuild {
+    let len = bytes.len();
     let mut walker = Walker {
-        buf,
+        bytes,
+        len,
         shift,
         names,
         table: XrefTable::new(),
@@ -296,11 +307,20 @@ pub(crate) fn build(
 }
 
 struct Walker<'a> {
-    buf: &'a [u8],
+    bytes: Bytes<'a>,
+    len: u64,
     shift: u64,
     names: &'a DocNames,
     table: XrefTable,
     revisions: Vec<Revision>,
+}
+
+/// One subsection header: the first object number, and how many entries
+/// follow it (7.5.4).
+#[derive(Clone, Copy)]
+struct Subsection {
+    first: u64,
+    count: u64,
 }
 
 struct Section {
@@ -309,9 +329,25 @@ struct Section {
     end: u64,
 }
 
+/// What one attempt at reading a section out of one window found.
+enum Attempt {
+    /// The window ran out before the section did. Grow and try again; on a
+    /// whole buffer this cannot happen, because the window is the document.
+    Short,
+    /// A table, with the entries it named and the trailer it published.
+    ///
+    /// Entries are carried rather than inserted as they are read: an attempt
+    /// that turns out to be short is abandoned whole, so a torn window can
+    /// never leave half a subsection in the merged table.
+    Read {
+        entries: Vec<(u32, XrefEntry)>,
+        section: Section,
+    },
+}
+
 impl Walker<'_> {
     fn candidates(&self, raw: u64) -> Vec<u64> {
-        offset_candidates(self.buf.len() as u64, raw, self.shift)
+        offset_candidates(self.len, raw, self.shift)
     }
 
     fn walk(&mut self, start: u64, sink: &mut WarningSink) -> usize {
@@ -384,82 +420,156 @@ impl Walker<'_> {
 
     /// A classic table (7.5.4).
     ///
+    /// The window doubles until the trailer parses, which is what a structure
+    /// whose size is not known until it is read costs on a streamed source.
+    /// Re-reading from the section start is free in *fetched* bytes: the chunk
+    /// cache already holds every chunk the shorter attempt pulled, so the
+    /// doubling costs arithmetic and no transport.
+    fn classic_section(&mut self, at: u64, sink: &mut WarningSink) -> Option<Section> {
+        let mut want = limits::XREF_SECTION_WINDOW;
+        loop {
+            let window = self.bytes.window(at, want)?;
+            let reaches_end = window.end() >= self.len;
+            let mut scratch = WarningSink::new();
+            match self.try_classic(&window, at, reaches_end, &mut scratch)? {
+                Attempt::Read { entries, section } => {
+                    for (num, entry) in entries {
+                        self.table.insert_new(num, entry);
+                    }
+                    sink.extend(scratch.take());
+                    return Some(section);
+                }
+                // The attempt is abandoned whole, diagnostics and all: they
+                // describe a window rather than a document.
+                Attempt::Short => want = want.saturating_mul(2),
+            }
+        }
+    }
+
+    /// One attempt at a classic table inside `window`.
+    ///
     /// Entries are read as tokens rather than at a fixed stride, so the 19-
     /// and 21-byte entries that wrong end-of-line discipline produces
     /// resynchronize on the grammar instead of shearing the table.
-    fn classic_section(&mut self, at: u64, sink: &mut WarningSink) -> Option<Section> {
+    fn try_classic(
+        &self,
+        window: &Window<'_>,
+        at: u64,
+        reaches_end: bool,
+        sink: &mut WarningSink,
+    ) -> Option<Attempt> {
         let mut scratch = WarningSink::new();
-        let mut lexer = Lexer::at(self.buf, at);
+        let start = window.local(at)?;
+        let mut lexer = Lexer::at(window.bytes(), start);
         if lexer.next_token(&mut scratch).kind != TokenKind::Keyword(Keyword::Xref) {
             return None;
         }
 
+        let mut entries = Vec::new();
         let mut trailer = Dict::new();
-        let mut end = self.buf.len() as u64;
+        let mut end = self.len;
         loop {
             let save = lexer.offset();
             let token = lexer.next_token(&mut scratch);
             match token.kind {
                 TokenKind::Keyword(Keyword::Trailer) => {
-                    let parsed = parse_object_at(self.buf, token.end, &self.names.table, sink);
+                    let parsed =
+                        parse_object_at(window.bytes(), token.end, &self.names.table, sink);
                     if let Object::Dict(dict) = parsed.object {
                         trailer = dict;
                     }
-                    end = self.revision_end(parsed.end_offset);
+                    end = self.revision_end_from(window.abs(parsed.end_offset));
                     break;
                 }
                 TokenKind::Eof => {
-                    sink.warn(save, WarningKind::XrefTrailerMissing);
+                    // On a streamed source this is far more often the window
+                    // ending than the file ending, and the two are different
+                    // facts: one is fetched, the other is warned about.
+                    if !reaches_end {
+                        return Some(Attempt::Short);
+                    }
+                    sink.warn(window.abs(save), WarningKind::XrefTrailerMissing);
                     break;
                 }
                 TokenKind::Int(first) => {
                     let TokenKind::Int(count) = lexer.next_token(&mut scratch).kind else {
-                        sink.warn(save, WarningKind::XrefSubsectionMalformed);
+                        sink.warn(window.abs(save), WarningKind::XrefSubsectionMalformed);
                         break;
                     };
                     let (Ok(first), Ok(count)) = (u64::try_from(first), u64::try_from(count))
                     else {
-                        sink.warn(save, WarningKind::XrefSubsectionMalformed);
+                        sink.warn(window.abs(save), WarningKind::XrefSubsectionMalformed);
                         break;
                     };
-                    if !self.subsection(&mut lexer, first, count, sink) {
-                        break;
+                    match self.subsection(
+                        window,
+                        &mut lexer,
+                        Subsection { first, count },
+                        reaches_end,
+                        &mut entries,
+                        sink,
+                    ) {
+                        Some(true) => {}
+                        Some(false) => break,
+                        None => return Some(Attempt::Short),
                     }
                 }
                 _ => {
-                    sink.warn(save, WarningKind::XrefSubsectionMalformed);
+                    sink.warn(window.abs(save), WarningKind::XrefSubsectionMalformed);
                     break;
                 }
             }
         }
-        Some(Section { trailer, end })
+        Some(Attempt::Read {
+            entries,
+            section: Section { trailer, end },
+        })
     }
 
-    /// Reads `count` entries. Returns false when the table sheared badly
-    /// enough that the remaining subsections cannot be trusted either.
+    /// Reads `count` entries into `entries`.
+    ///
+    /// `Some(false)` when the table sheared badly enough that the remaining
+    /// subsections cannot be trusted either, and `None` when the *window* ran
+    /// out rather than the table -- two different facts, and conflating them
+    /// is how a streamed read would silently drop the entries it had not
+    /// fetched yet.
     fn subsection(
-        &mut self,
+        &self,
+        window: &Window<'_>,
         lexer: &mut Lexer<'_>,
-        first: u64,
-        count: u64,
+        run: Subsection,
+        reaches_end: bool,
+        entries: &mut Vec<(u32, XrefEntry)>,
         sink: &mut WarningSink,
-    ) -> bool {
+    ) -> Option<bool> {
+        let Subsection { first, count } = run;
         let mut scratch = WarningSink::new();
         for i in 0..count {
             let save = lexer.offset();
-            let TokenKind::Int(field1) = lexer.next_token(&mut scratch).kind else {
+            let field1 = lexer.next_token(&mut scratch);
+            let TokenKind::Int(field1) = field1.kind else {
+                if field1.kind == TokenKind::Eof && !reaches_end {
+                    return None;
+                }
                 lexer.seek(save);
-                sink.warn(save, WarningKind::XrefEntryMalformed);
-                return false;
+                sink.warn(window.abs(save), WarningKind::XrefEntryMalformed);
+                return Some(false);
             };
-            let TokenKind::Int(field2) = lexer.next_token(&mut scratch).kind else {
+            let field2 = lexer.next_token(&mut scratch);
+            let TokenKind::Int(field2) = field2.kind else {
+                if field2.kind == TokenKind::Eof && !reaches_end {
+                    return None;
+                }
                 lexer.seek(save);
-                sink.warn(save, WarningKind::XrefEntryMalformed);
-                return false;
+                sink.warn(window.abs(save), WarningKind::XrefEntryMalformed);
+                return Some(false);
             };
             let marker = lexer.next_token(&mut scratch);
-            let kind = self
-                .buf
+            if marker.kind == TokenKind::Eof && !reaches_end {
+                return None;
+            }
+            let kind = window
+                .bytes()
                 .get(usize::try_from(marker.start).unwrap_or(usize::MAX));
             let entry = match kind {
                 Some(b'n') if marker.end == marker.start + 1 => XrefEntry::Offset {
@@ -474,21 +584,38 @@ impl Walker<'_> {
                     // No type marker: this is not an entry. Give the token
                     // back so a `trailer` keyword is still seen.
                     lexer.seek(marker.start);
-                    sink.warn(marker.start, WarningKind::XrefEntryMalformed);
-                    return true;
+                    sink.warn(window.abs(marker.start), WarningKind::XrefEntryMalformed);
+                    return Some(true);
                 }
             };
             if let Ok(num) = u32::try_from(first.saturating_add(i)) {
-                self.table.insert_new(num, entry);
+                entries.push((num, entry));
             }
         }
-        true
+        Some(true)
     }
 
     /// A cross-reference stream (7.5.8). Never decrypted (7.6.2).
+    ///
+    /// Two windows rather than one, which is the shape 7.5.8 asks for: the
+    /// dictionary is parsed out of a window at the section, and then its own
+    /// `/Length` says how much to fetch for the data. A reader that guessed
+    /// one window for both would either fetch far too much or fail on a table
+    /// bigger than its guess.
     fn xref_stream_section(&mut self, at: u64, sink: &mut WarningSink) -> Option<Section> {
+        let mut want = limits::XREF_SECTION_WINDOW;
+        let (window, parsed) = loop {
+            let window = self.bytes.window(at, want)?;
+            let reaches_end = window.end() >= self.len;
+            let local = window.local(at)?;
+            let mut scratch = WarningSink::new();
+            match parse_indirect_at(window.bytes(), local, &self.names.table, &mut scratch) {
+                Some(parsed) => break (window, parsed),
+                None if reaches_end => return None,
+                None => want = want.saturating_mul(2),
+            }
+        };
         let mut scratch = WarningSink::new();
-        let parsed = parse_indirect_at(self.buf, at, &self.names.table, &mut scratch)?;
         let Object::Stream(stream) = parsed.object else {
             return None;
         };
@@ -497,14 +624,24 @@ impl Walker<'_> {
         }
         sink.extend(scratch.take());
 
-        let range = resolve_extent(
-            self.buf,
-            stream.data_start,
+        // 7.3.8.2: the extent is the declared length when `endstream` follows
+        // it, so the window has to hold the keyword as well as the data.
+        let slack = limits::MAX_STREAM_EOL_SKIP as u64 + b"endstream".len() as u64;
+        let data_start = window.abs(stream.data_start);
+        let want_data = match stream.len_hint {
+            Some(declared) => declared.saturating_add(slack),
+            None => limits::XREF_SECTION_WINDOW,
+        };
+        let data = self.bytes.window(data_start, want_data)?;
+        let local_start = data.local(data_start)?;
+        let local_range = resolve_extent(
+            data.bytes(),
+            local_start,
             stream.len_hint,
             Some(parsed.reference),
             sink,
         );
-        let raw = slice_range(self.buf, &range);
+        let raw = slice_range(data.bytes(), &local_range);
         // An indirect value inside a cross-reference stream's own dictionary
         // cannot be resolved: the table that would find it is this one.
         let mut resolve = |o: &Object| match o {
@@ -512,7 +649,7 @@ impl Walker<'_> {
             other => other.clone(),
         };
         let chain = build_chain(&stream.dict, self.names, &mut resolve, at, sink);
-        let data = match filters::apply_chain(
+        let decoded = match filters::apply_chain(
             raw,
             &chain,
             &filters::Limits::new(limits::MAX_DECODED_STREAM),
@@ -529,10 +666,14 @@ impl Walker<'_> {
             }
         };
 
-        self.apply_xref_stream(&stream.dict, &data, at, sink);
+        // The data window is released before the table is applied: it borrows
+        // the walker, and applying entries needs it back.
+        let data_end = data.abs(local_range.end);
+        drop(data);
+        self.apply_xref_stream(&stream.dict, &decoded, at, sink);
         Some(Section {
             trailer: stream.dict,
-            end: self.revision_end(range.end),
+            end: self.revision_end_from(data_end),
         })
     }
 
@@ -605,13 +746,35 @@ impl Walker<'_> {
         }
     }
 
-    fn revision_end(&self, from: u64) -> u64 {
-        let from = usize::try_from(from)
+    /// Where this revision ends: just past the `%%EOF` that follows `from`.
+    ///
+    /// On a streamed source the search window doubles until the marker is
+    /// found or the document runs out, which costs no transport it has not
+    /// already paid for -- the chunk cache holds what the shorter search read.
+    fn revision_end_from(&self, from: u64) -> u64 {
+        let mut want = limits::XREF_SECTION_WINDOW;
+        loop {
+            let Some(window) = self.bytes.window(from, want) else {
+                return self.len;
+            };
+            let reaches_end = window.end() >= self.len;
+            if let Some(found) = self.revision_end(&window, from, reaches_end) {
+                return found;
+            }
+            want = want.saturating_mul(2);
+        }
+    }
+
+    /// The `%%EOF` after `from` inside `window`, or `None` when the window
+    /// ended first and there are more bytes to fetch.
+    fn revision_end(&self, window: &Window<'_>, from: u64, reaches_end: bool) -> Option<u64> {
+        let local = usize::try_from(window.local(from)?)
             .unwrap_or(usize::MAX)
-            .min(self.buf.len());
-        match find_from(self.buf, b"%%EOF", from) {
-            Some(at) => (at + b"%%EOF".len()) as u64,
-            None => self.buf.len() as u64,
+            .min(window.bytes().len());
+        match find_from(window.bytes(), b"%%EOF", local) {
+            Some(at) => Some(window.abs((at + b"%%EOF".len()) as u64)),
+            None if reaches_end => Some(self.len),
+            None => None,
         }
     }
 }
@@ -706,7 +869,7 @@ mod tests {
     fn build_at(buf: &[u8], start: u64) -> (XrefBuild, Vec<WarningKind>) {
         let names = DocNames::new();
         let mut sink = WarningSink::new();
-        let built = build(buf, start, 0, &names, &mut sink);
+        let built = build(Bytes::Whole(buf), start, 0, &names, &mut sink);
         let kinds = sink.warnings().iter().map(|w| w.kind).collect();
         (built, kinds)
     }
@@ -935,13 +1098,22 @@ mod tests {
     #[test]
     fn startxref_reads_the_last_one() {
         let mut sink = WarningSink::new();
-        assert_eq!(startxref(b"startxref\n12\n%%EOF\n", &mut sink), Some(12));
         assert_eq!(
-            startxref(b"startxref\n12\n%%EOF\nstartxref\n40\n%%EOF\n", &mut sink),
+            startxref(&Bytes::Whole(b"startxref\n12\n%%EOF\n"), &mut sink),
+            Some(12)
+        );
+        assert_eq!(
+            startxref(
+                &Bytes::Whole(b"startxref\n12\n%%EOF\nstartxref\n40\n%%EOF\n"),
+                &mut sink
+            ),
             Some(40)
         );
         assert!(sink.is_empty());
-        assert_eq!(startxref(b"no marker at all", &mut sink), None);
+        assert_eq!(
+            startxref(&Bytes::Whole(b"no marker at all"), &mut sink),
+            None
+        );
         assert_eq!(
             sink.warnings().iter().map(|w| w.kind).collect::<Vec<_>>(),
             [WarningKind::StartxrefMissing]
@@ -953,13 +1125,16 @@ mod tests {
         let mut buf = b"startxref\n7\n%%EOF\n".to_vec();
         buf.extend(std::iter::repeat_n(b'z', 2000));
         let mut sink = WarningSink::new();
-        assert_eq!(startxref(&buf, &mut sink), Some(7));
+        assert_eq!(startxref(&Bytes::Whole(&buf), &mut sink), Some(7));
     }
 
     #[test]
     fn a_negative_startxref_is_unusable() {
         let mut sink = WarningSink::new();
-        assert_eq!(startxref(b"startxref\n-4\n%%EOF\n", &mut sink), None);
+        assert_eq!(
+            startxref(&Bytes::Whole(b"startxref\n-4\n%%EOF\n"), &mut sink),
+            None
+        );
         assert_eq!(
             sink.warnings().iter().map(|w| w.kind).collect::<Vec<_>>(),
             [WarningKind::StartxrefUnusable]

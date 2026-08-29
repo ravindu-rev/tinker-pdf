@@ -356,7 +356,21 @@ impl CosDocument {
     /// The raw bytes, run through the decryptor unless 7.6.2 exempts them.
     pub(crate) fn decrypted_bytes(&self, r: ObjRef, stream: &StreamObj) -> Vec<u8> {
         let range = self.stream_range(r, stream);
-        let raw = slice_range(self.buffer.whole(), &range);
+        // One window over the extent rather than the whole document: this is
+        // the read a page render spends most of its bytes on, and it is the
+        // one the byte budgets measure.
+        let view = self.buffer.view();
+        let want = range.end.saturating_sub(range.start);
+        let Some(window) = view.window(range.start, want) else {
+            // Ruling 2: bytes that could not be fetched decode to nothing
+            // rather than to the wrong thing.
+            return Vec::new();
+        };
+        let local = match window.local(range.start) {
+            Some(start) => start..start.saturating_add(want),
+            None => return Vec::new(),
+        };
+        let raw = slice_range(window.bytes(), &local);
         if !self.encrypted() || !self.stream_is_encrypted(&stream.dict) {
             return raw.to_vec();
         }
@@ -432,6 +446,55 @@ impl CosDocument {
         }
     }
 
+    /// The stream's data extent, out of a window that grows until the extent
+    /// ends inside it (7.3.8.2).
+    ///
+    /// The recovery path is why the growth is needed: when `/Length` is wrong
+    /// the extent is whatever `endstream` says, and a window that ended first
+    /// would report the window's end as the stream's -- silently truncating
+    /// the data and warning about a length nobody wrote. A document opened
+    /// from a buffer gets the whole buffer and takes one pass.
+    fn windowed_extent(&self, r: ObjRef, stream: &StreamObj, sink: &mut WarningSink) -> Range<u64> {
+        let view = self.buffer.view();
+        let slack = limits::MAX_STREAM_EOL_SKIP as u64 + b"endstream".len() as u64;
+        let mut want = match stream.len_hint {
+            Some(declared) => declared.saturating_add(slack),
+            None => limits::OBJECT_WINDOW,
+        };
+        loop {
+            let Some(window) = view.window(stream.data_start, want) else {
+                return stream.data_start..stream.data_start;
+            };
+            let reaches_end = window.end() >= self.buffer.len();
+            let Some(local_start) = window.local(stream.data_start) else {
+                return stream.data_start..stream.data_start;
+            };
+            let mut scratch = WarningSink::new();
+            let local = resolve_extent(
+                window.bytes(),
+                local_start,
+                stream.len_hint,
+                Some(r),
+                &mut scratch,
+            );
+            if !reaches_end && local.end >= window.bytes().len() as u64 {
+                want = want.saturating_mul(2);
+                continue;
+            }
+            sink.extend(
+                scratch
+                    .take()
+                    .into_iter()
+                    .map(|mut warning| {
+                        warning.offset = window.abs(warning.offset);
+                        warning
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            return window.abs(local.start)..window.abs(local.end);
+        }
+    }
+
     /// The stream's data extent, computed once per object and remembered.
     ///
     /// Recovery scans the buffer and warns, and neither should happen twice
@@ -441,13 +504,7 @@ impl CosDocument {
             return range.clone();
         }
         let mut sink = WarningSink::new();
-        let range = resolve_extent(
-            self.buffer.whole(),
-            stream.data_start,
-            stream.len_hint,
-            Some(r),
-            &mut sink,
-        );
+        let range = self.windowed_extent(r, stream, &mut sink);
         let mut cache = self.stream_ranges.write_lock();
         // Another thread may have computed the same extent meanwhile; its
         // warnings are already recorded, so this one's are dropped.

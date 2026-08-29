@@ -37,10 +37,10 @@ use crate::decrypt::{self, Decryptor, EncryptParams, IdentityDecryptor};
 use crate::limits;
 use crate::name::{Name, NameTable};
 use crate::objstm::{self, ObjStm, ObjStmCache};
-use crate::parse::{parse_indirect_at, parse_object_at};
+use crate::parse::{parse_indirect_at, parse_object_at, ParsedIndirect};
 use crate::repair::ScanIndex;
 use crate::security::{AuthError, AuthLevel};
-use crate::source::{Backing, ByteSource};
+use crate::source::{Backing, ByteSource, Bytes};
 use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
 use crate::warn::{Warning, WarningKind, WarningSink};
 use crate::xref::{self, Revision, XrefBuild, XrefEntry, XrefTable};
@@ -340,20 +340,35 @@ impl CosDocument {
     }
 
     fn open_backing(backing: Backing) -> Result<CosDocument, OpenError> {
-        // Milestone 1 fetches everything and then runs the path unchanged, so
-        // that the source seam and the discovery order are two changes rather
-        // than one. Milestone 2 replaces this with the head window, the tail
-        // window and the chain walk.
-        let Ok(buffer) = backing.materialise() else {
-            return Err(OpenError::NoObjects);
-        };
         let names = DocNames::new();
         let mut sink = WarningSink::new();
+        let streamed = backing.is_streamed();
 
-        // 7.5.2: bytes before %PDF- shift every offset the file stores.
-        let shift = xref::header_shift(&buffer, &mut sink);
-        let built = match xref::startxref(&buffer, &mut sink) {
-            Some(start) => xref::build(&buffer, start, shift, &names, &mut sink),
+        // 7.5.2: bytes before %PDF- shift every offset the file stores. One
+        // head window covers the scan limit the clause sets, which on a
+        // streamed source is exactly one chunk.
+        let Ok(head) = backing.window(0..limits::MAX_HEADER_SCAN as u64) else {
+            return Err(OpenError::NoObjects);
+        };
+        let shift = xref::header_shift(&head, &mut sink);
+        drop(head);
+
+        // The walk reads windows: the tail for `startxref` (7.5.5), then each
+        // section of the `/Prev` chain (7.5.4, 7.5.6, 7.5.8) as its own. A
+        // document already in hand hands the walker the whole buffer for every
+        // window, so it takes the path it always took at the cost it always
+        // had.
+        let held = if streamed {
+            None
+        } else {
+            backing.materialise().ok()
+        };
+        let view = match &held {
+            Some(buffer) => Bytes::Whole(buffer),
+            None => backing.view(),
+        };
+        let built = match xref::startxref(&view, &mut sink) {
+            Some(start) => xref::build(view, start, shift, &names, &mut sink),
             None => XrefBuild::default(),
         };
 
@@ -366,10 +381,24 @@ impl CosDocument {
         let usable = built.sections > 0 && !table.is_empty() && root_locatable(&table, &trailer);
         let mut failures = Vec::new();
         let mut offset_entries = 0usize;
-        if usable {
-            let validation = validate(&buffer, &mut table, shift);
-            failures = validation.failures;
-            offset_entries = validation.offsets;
+        match (&held, usable) {
+            (Some(buffer), true) => {
+                let validation = validate(buffer, &mut table, shift);
+                failures = validation.failures;
+                offset_entries = validation.offsets;
+            }
+            // Deferred on a streamed source, and only there. The eager pass
+            // probes every type-1 offset against its `N G obj` header, which
+            // means reading a byte near every object in the file -- the one
+            // open-time step that touches everywhere, and the one thing a
+            // streaming open cannot afford. Nothing is lost from safety:
+            // `parse_at` re-checks the header of every object at load, so an
+            // entry that lies is still caught, at first use rather than at
+            // open. What is lost is that `ladder_level` starts out provisional,
+            // which `CosDocument::complete_validation` is how a caller gets
+            // back the eager answer.
+            (None, _) => {}
+            (Some(_), false) => {}
         }
 
         // Level 3 when the tables never worked, or when so many entries lie
@@ -381,6 +410,12 @@ impl CosDocument {
         if rescan {
             ladder = LadderLevel::Rescan;
             sink.warn(0, WarningKind::DocumentRescanned);
+            // One forward pass over everything, which is the point of it. A
+            // streamed document therefore fetches the whole source, and says
+            // so first (ruling 10).
+            let Some(buffer) = fetch_whole(&backing, &mut sink) else {
+                return Err(OpenError::NoObjects);
+            };
             let index = ScanIndex::build(&buffer, &names);
             if index.is_empty() {
                 return Err(OpenError::NoObjects);
@@ -399,7 +434,7 @@ impl CosDocument {
             trailer = index.synthesized_trailer(trailer, &mut sink);
             if revisions.is_empty() {
                 revisions.push(Revision {
-                    byte_range: 0..buffer.len() as u64,
+                    byte_range: 0..backing.len(),
                     // Nothing readable to chain to: the tables were discarded.
                     xref_at: 0,
                     trailer: trailer.clone(),
@@ -408,6 +443,9 @@ impl CosDocument {
             scan = Some(Arc::new(index));
         } else if !failures.is_empty() {
             ladder = LadderLevel::Patch;
+            let Some(buffer) = fetch_whole(&backing, &mut sink) else {
+                return Err(OpenError::NoObjects);
+            };
             let index = Arc::new(ScanIndex::build(&buffer, &names));
             for num in failures {
                 let offset = match table.get(num) {
@@ -922,6 +960,57 @@ impl CosDocument {
         Object::Null
     }
 
+    /// Parses the indirect object at `offset` out of a window, growing it
+    /// until the object demonstrably ends inside it.
+    ///
+    /// A window that cut an object short would parse to a *different value*
+    /// than the same bytes in one buffer, and ruling 4 does not allow the two
+    /// to differ -- so the test is where the parse stopped, not whether it
+    /// returned something. A stream is judged on where its data begins rather
+    /// than on where its declared length ends: the dictionary and the `stream`
+    /// keyword are all this parse has to contain, and the data extent is the
+    /// document layer's own question (7.3.8.2).
+    ///
+    /// A document opened from a buffer gets the whole buffer as its window and
+    /// takes one pass, exactly as it always did.
+    fn parse_windowed(&self, offset: u64) -> Option<(ParsedIndirect, Vec<Warning>)> {
+        let view = self.buffer.view();
+        let mut want = limits::OBJECT_WINDOW;
+        loop {
+            let window = view.window(offset, want)?;
+            let reaches_end = window.end() >= self.buffer.len();
+            let local_at = window.local(offset)?;
+            let mut local = WarningSink::new();
+            let mut parsed =
+                parse_indirect_at(window.bytes(), local_at, &self.names.table, &mut local)?;
+            let consumed = match &parsed.object {
+                Object::Stream(stream) => stream.data_start,
+                _ => parsed.end_offset,
+            };
+            if !reaches_end && consumed >= window.bytes().len() as u64 {
+                want = want.saturating_mul(2);
+                continue;
+            }
+            // Window offsets become document offsets. A stream records where
+            // its data starts and that number is read against the document
+            // afterwards, so leaving it window-relative would point every
+            // later read at the wrong bytes.
+            if let Object::Stream(stream) = &mut parsed.object {
+                stream.data_start = window.abs(stream.data_start);
+            }
+            parsed.end_offset = window.abs(parsed.end_offset);
+            let warnings = local
+                .take()
+                .into_iter()
+                .map(|mut warning| {
+                    warning.offset = window.abs(warning.offset);
+                    warning
+                })
+                .collect();
+            return Some((parsed, warnings));
+        }
+    }
+
     /// Parses the object whose header sits at `offset`, if that header names
     /// `num`. The header check is what makes level 1 of the ladder safe.
     fn parse_at(
@@ -931,12 +1020,11 @@ impl CosDocument {
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
     ) -> Option<Object> {
-        let mut local = WarningSink::new();
-        let parsed = parse_indirect_at(self.buffer.whole(), offset, &self.names.table, &mut local)?;
+        let (parsed, warnings) = self.parse_windowed(offset)?;
         if parsed.reference.num != num {
             return None;
         }
-        sink.extend(local.take());
+        sink.extend(warnings);
         let mut object = parsed.object;
 
         // 7.3.8.2: an indirect /Length is resolved on the load path, inside
@@ -1097,6 +1185,23 @@ impl CosDocument {
         }
         self.absorb(sink);
     }
+}
+
+/// Every byte of a document, fetching them when it is a streamed one and
+/// saying so first.
+///
+/// The declaration is the point (ruling 10). A streamed open that quietly
+/// pulled the whole source would satisfy every functional test and destroy the
+/// only thing streaming is for, and the byte budgets could not tell the two
+/// apart. Warned once: a second whole-file operation on the same document
+/// fetches nothing, so warning again would report an operation that did not
+/// happen.
+fn fetch_whole(backing: &Backing, sink: &mut WarningSink) -> Option<Arc<[u8]>> {
+    let declare = backing.is_streamed() && !backing.whole_fetched();
+    if declare {
+        sink.warn(0, WarningKind::WholeFileFetched);
+    }
+    backing.materialise().ok()
 }
 
 struct Validation {

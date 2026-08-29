@@ -263,6 +263,19 @@ pub enum WarningKind {
     /// Ladder level 3: the cross-reference tables were discarded and the whole
     /// buffer was scanned for objects.
     DocumentRescanned,
+    /// A streamed document needed every byte and fetched them.
+    ///
+    /// The repair rescan is one forward pass over everything, a container is
+    /// synthesised whole, and an incremental save must reproduce the original
+    /// bytes exactly as its prefix. Each of those is whole-file by contract
+    /// rather than by accident, and this is how it says so before it happens
+    /// (ruling 10): "it opened by streaming" and "it opened by streaming and
+    /// then pulled the file anyway" are different facts, and a byte budget
+    /// that could not tell them apart would measure nothing.
+    ///
+    /// Never emitted for a document opened from a buffer, which had them all
+    /// from the start.
+    WholeFileFetched,
 }
 
 impl WarningKind {
@@ -347,6 +360,7 @@ impl WarningKind {
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
             WarningKind::DocumentRescanned => "document-rescanned",
+            WarningKind::WholeFileFetched => "whole-file-fetched",
         }
     }
 }
