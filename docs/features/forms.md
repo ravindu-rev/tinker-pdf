@@ -38,7 +38,40 @@ rather than setting it. Layout honours the `/DA` font, size and colour
 comes out right), `/Q` quadding, multiline wrap, auto-size for `Tf 0`, and
 comb fields (12.7.4.3): `/MaxLen` equal cells, one character centred in
 each, overflow dropped rather than drawn outside the last box. Non-ASCII
-values are written as UTF-16BE with a byte-order mark (7.9.2.2). A value
+values are written as UTF-16BE with a byte-order mark (7.9.2.2).
+
+**Non-Latin values are shaped** (milestone 8 of
+[design/shaping.md](../design/shaping.md)). Until it landed, this module
+mapped every character above the single-byte range onto `?` and said
+nothing, so a form whose Arabic field had become a row of question marks
+was indistinguishable from one that had been filled correctly. What
+unblocked it was `tinker_pdf_cos::Font::program`, which walks
+`/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`,
+or `/FontFile`) and returns the stream's *address* — not its bytes, which
+would put every embedded program in a document into memory the moment its
+resources were read. Where the `/DA` font is composite, under
+`/Identity-H`, and embeds a program `tinker_pdf_font::Sfnt` reads, the
+value is shaped through `tinker-pdf-shape` and written as a `TJ` run of
+two-byte codes: joining forms, marks positioned by `GPOS`, and UAX #9's
+rule L2 applied before anything is written, so a right-to-left value is
+drawn in the order a reader of it expects. The advances the run is
+measured at are the shaper's own, and the `TJ` numbers absorb the
+difference between those and the `/W` a viewer will advance by, glyph by
+glyph — one measurement path per run, which is the rule
+`tinker-pdf-layout`'s `metrics.rs` states.
+
+Anything else — a simple font, a composite one under another CMap, a
+program that is not an sfnt — keeps the single-byte path, still draws a
+`?`, and now emits
+`WarningKind::FieldCharacterUnrepresentable { character }` against the
+field's own object for every character it could not write (rulings 2
+and 10). The `/Identity-H` condition is a refusal and not an oversight:
+going from a glyph back to a *code* means reading an encoding CMap
+backwards, 9.7.5's are written to be read forwards, and a build that
+guessed would draw a different wrong glyph, which is worse than a question
+mark that announces itself.
+
+A value
 the field refuses — over `/MaxLen`, not among a non-editable list's
 options, or written by a user into a ReadOnly field (12.7.4.1 Table 227) —
 is refused whole, because truncating hides a data error inside a file that
@@ -152,6 +185,7 @@ let bytes = editor.save(&WriteOptions::default());
 | More than 4 096 calculating fields in one pass | `CalcError::TooManyFields` | refused rather than truncated, for the same reason a failing script refuses the pass | — |
 | A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
+| Shaping a value against a composite `/DA` font under any CMap but `/Identity-H`, or against a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | glyph-to-code needs the encoding CMap read backwards, and a guess draws a *different* wrong glyph | [design/shaping.md](../design/shaping.md) |
 | Keystroke and validate actions; document-level and catalog scripts | surfaced (`FieldScripts`, `DocumentScript`) and never run — nothing is attempted, so nothing errors | events need an interactive host; a document-level script is arbitrary program text with no field to write | [ROADMAP](../ROADMAP.md) Tier 4 |
 | A format action's display string reaching `/V` | none offered — `formatted_value` returns the string and writes nothing | 12.7.3.3 keeps value and appearance apart | [ROADMAP](../ROADMAP.md) Tier 4 |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |

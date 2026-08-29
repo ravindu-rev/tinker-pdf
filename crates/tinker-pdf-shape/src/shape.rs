@@ -344,7 +344,6 @@ impl<'a> Shaper<'a> {
         let slice = text.get(run.text.clone()).unwrap_or("");
         let mut buffer = Buffer::new();
         buffer.set_direction(run.direction());
-        self.map(slice, run.text.start, &mut buffer);
 
         // Whether this run joins is asked of the text and not of the script;
         // `crate::arabic::joins` says why. A caller that asked for its own
@@ -352,11 +351,13 @@ impl<'a> Shaper<'a> {
         // staging below is the *default* plan for a joining script and not a
         // property of the script itself.
         let plan = self.plan(slice);
+        let characters = self.characters(slice, run.text.start, plan == Plan::Universal);
+        let from = self.map(&characters, &mut buffer);
         if plan == Plan::Joining {
-            self.mark_joining_forms(slice, run.text.start, &mut buffer);
+            self.mark_joining_forms(&characters, &from, &mut buffer);
         }
         if plan == Plan::Universal {
-            self.mark_syllables(slice, run.text.start, &mut buffer);
+            self.mark_syllables(&characters, &from, &mut buffer);
         }
 
         let limits = self
@@ -375,7 +376,7 @@ impl<'a> Shaper<'a> {
                 // and the presentation features expect them already in visual
                 // order; see `crate::universal`.
                 if plan == Plan::Universal && index == USE_REORDER_AFTER {
-                    reorder_syllables(slice, &mut buffer);
+                    reorder_syllables(&mut buffer);
                 }
             }
         }
@@ -448,12 +449,24 @@ impl<'a> Shaper<'a> {
         Plan::Default
     }
 
-    /// Numbers each glyph with the Brahmic cluster its character belongs to.
-    fn mark_syllables(&self, text: &str, base: usize, buffer: &mut Buffer) {
-        let syllables = universal::syllables(text);
-        for (at, index) in character_indices(text, base, buffer) {
-            if let Some(syllable) = syllables.get(index) {
+    /// Numbers each glyph with the Brahmic cluster its character belongs to,
+    /// and records what the cluster model calls it.
+    ///
+    /// Both are read off the **character**, here, before any lookup has run —
+    /// and both then travel on the glyph. The category has to, because by the
+    /// time [`reorder_syllables`] runs there may be no character left to ask:
+    /// a conjunct is one glyph standing for three, and asking the text how
+    /// many glyphs a syllable ought to have is what made milestone 5 skip the
+    /// clusters it most needed to reorder.
+    fn mark_syllables(&self, characters: &[(char, u32)], from: &[usize], buffer: &mut Buffer) {
+        let letters: Vec<char> = characters.iter().map(|(c, _)| *c).collect();
+        let syllables = universal::syllables(&letters);
+        for (at, index) in from.iter().enumerate() {
+            if let Some(syllable) = syllables.get(*index) {
                 buffer.set_syllable(at, *syllable);
+            }
+            if let Some(letter) = letters.get(*index) {
+                buffer.set_category(at, universal::category(*letter));
             }
         }
     }
@@ -463,10 +476,11 @@ impl<'a> Shaper<'a> {
     /// The forms are computed over the **text**, before `cmap`, because that
     /// is where the property lives; the mask then travels with the glyph
     /// through every substitution.
-    fn mark_joining_forms(&self, text: &str, base: usize, buffer: &mut Buffer) {
-        let forms = arabic::forms(text);
-        for (at, index) in character_indices(text, base, buffer) {
-            if let Some(form) = forms.get(index) {
+    fn mark_joining_forms(&self, characters: &[(char, u32)], from: &[usize], buffer: &mut Buffer) {
+        let letters: String = characters.iter().map(|(c, _)| *c).collect();
+        let forms = arabic::forms(&letters);
+        for (at, index) in from.iter().enumerate() {
+            if let Some(form) = forms.get(*index) {
                 buffer.set_mask(at, Buffer::GLOBAL | form_mask(*form));
             }
         }
@@ -517,28 +531,90 @@ impl<'a> Shaper<'a> {
     /// to `.notdef`: `FVS` and `VS1`–`VS256` are `Default_Ignorable_Code_Point`
     /// and a reader that drew a box for one would put a box in the middle of a
     /// Han sentence.
-    fn map(&self, text: &str, base: usize, buffer: &mut Buffer) {
+    fn map(&self, characters: &[(char, u32)], buffer: &mut Buffer) -> Vec<usize> {
         let uvs = variation_subtable(self.face);
-        let mut chars = text.char_indices().peekable();
-        while let Some((at, c)) = chars.next() {
-            let cluster = u32::try_from(base.saturating_add(at)).unwrap_or(u32::MAX);
+        let mut from = Vec::with_capacity(characters.len());
+        let mut at = 0usize;
+        while let Some((c, cluster)) = characters.get(at).copied() {
+            at += 1;
             if is_variation_selector(c) {
                 // A selector with no base before it selects nothing. It is
                 // still ignorable, so it is dropped rather than drawn.
                 continue;
             }
-            let selector = chars
-                .peek()
-                .map(|(_, next)| *next)
+            let selector = characters
+                .get(at)
+                .map(|(next, _)| *next)
                 .filter(|next| is_variation_selector(*next));
             let mut glyph = None;
             if let Some(selector) = selector {
-                chars.next();
+                at += 1;
                 glyph = uvs.and_then(|data| variation_glyph(data, c, selector, self.face));
             }
             let glyph = glyph.or_else(|| self.face.glyph_for_char(c)).unwrap_or(0);
             buffer.push(glyph, cluster);
+            from.push(at - 1 - usize::from(selector.is_some()));
         }
+        from
+    }
+
+    /// The characters this run is shaped from, each with the cluster it stands
+    /// for.
+    ///
+    /// Ordinarily this is just the run's own characters and their byte
+    /// offsets. For a Brahmic run it is those characters **canonically
+    /// decomposed**, which is the one preprocessing step the cluster model
+    /// cannot do without.
+    ///
+    /// # Why decomposition is a shaping step and not a nicety
+    ///
+    /// `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is
+    /// `Indic_Positional_Category` `Left_And_Right`: it is drawn on **both**
+    /// sides of its consonant. As one character it is neither `Left` nor
+    /// `Right`, so `crate::universal::category` can only call it a mark that
+    /// stays where it is, and its left half stays where it was typed. Its
+    /// canonical decomposition — `U+1B3E` (`Left`) and `U+1B35` (`Right`) — is
+    /// two characters with two positions, and the reordering pause can then
+    /// move the first and leave the second.
+    ///
+    /// Every part keeps the **whole** character's cluster, so a decomposition
+    /// invents no offsets the caller's text does not have and `/ToUnicode`
+    /// still rebuilds the original.
+    ///
+    /// # Three limits, each deliberate
+    ///
+    /// - It is applied only where the cluster model has an opinion — a
+    ///   character `crate::universal::category` calls anything but `Other`.
+    ///   Latin's precomposed accents are left alone: nothing here needs their
+    ///   halves, and decomposing them would change every Latin run's glyphs
+    ///   for no fixture's benefit.
+    /// - It is applied only when the face has a glyph for **every** part.
+    ///   Decomposing into a `.notdef` would replace a drawable character with
+    ///   an undrawable one, which is worse than not decomposing.
+    /// - Canonical **ordering** — the `Canonical_Combining_Class` sort that
+    ///   makes a decomposition NFD rather than merely decomposed — is not
+    ///   done. Nothing in the vendored corpus reaches a Brahmic cluster whose
+    ///   parts are out of canonical order; `docs/features/fonts.md` records
+    ///   it, and Hangul, whose decomposition is algorithmic rather than
+    ///   tabulated, is not decomposed at all.
+    fn characters(&self, text: &str, base: usize, decompose: bool) -> Vec<(char, u32)> {
+        let mut out = Vec::with_capacity(text.len());
+        for (at, c) in text.char_indices() {
+            let cluster = u32::try_from(base.saturating_add(at)).unwrap_or(u32::MAX);
+            let parts = decompose
+                .then(|| unicode::canonical_decomposition(c))
+                .flatten()
+                .filter(|parts| {
+                    parts
+                        .iter()
+                        .all(|part| self.face.glyph_for_char(*part).is_some_and(|g| g != 0))
+                });
+            match parts {
+                Some(parts) => out.extend(parts.iter().map(|part| (*part, cluster))),
+                None => out.push((c, cluster)),
+            }
+        }
+        out
     }
 }
 
@@ -635,63 +711,28 @@ pub const USE_GSUB_STAGES: &[&[Tag]] = &[
     DEFAULT_GSUB_FEATURES,
 ];
 
-/// Which glyph came from which character of the run, before any substitution.
+/// Moves every pre-base glyph of every syllable in front of its base.
 ///
-/// Pairs each buffer position with an index into `text.chars()`. The bridge is
-/// [`ShapedGlyph::cluster`], which is an offset into the *paragraph*, so the
-/// run's own start is subtracted — a run that does not begin at byte zero is
-/// the case that made this a function rather than two loops.
+/// # The permutation is over glyphs, and that is the whole of the fix
 ///
-/// A character that produced no glyph — a variation selector the face resolved
-/// and swallowed — simply has no pair, which is why the two are walked
-/// together rather than by index.
-fn character_indices(text: &str, base: usize, buffer: &Buffer) -> Vec<(usize, usize)> {
-    let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
-    let mut out = Vec::with_capacity(buffer.len());
-    for at in 0..buffer.len() {
-        let Some(cluster) = buffer.glyph(at).map(|glyph| glyph.cluster) else {
-            continue;
-        };
-        let Some(within) = usize::try_from(cluster)
-            .ok()
-            .and_then(|cluster| cluster.checked_sub(base))
-        else {
-            continue;
-        };
-        if let Some(index) = offsets.iter().position(|offset| *offset == within) {
-            out.push((at, index));
-        }
-    }
-    out
-}
-
-/// Moves every pre-base character of every syllable in front of its base.
+/// This was computed over the **characters** of each syllable and applied to
+/// the *glyphs* carrying that syllable's number, which is the same thing only
+/// while substitution has not changed how many glyphs a character stands for.
+/// Where it had — a conjunct built out of three characters, a decomposition
+/// that made two glyphs out of one — the two lengths differed and the syllable
+/// was **left alone**, so a face that forms its conjuncts before the
+/// reordering pause got no reordering in exactly the clusters where it
+/// mattered. text-rendering-tests SHKNDA-2 is where that cost the most.
 ///
-/// The permutation is computed over the **characters** of each syllable and
-/// applied to the *glyphs* that carry that syllable's number, which is only
-/// the same thing while substitution has not changed how many glyphs a
-/// character stands for. Where it has — a conjunct built out of three
-/// characters, a decomposition that made two glyphs out of one — the glyph
-/// count and the character count differ and the syllable is **left alone**,
-/// because a permutation of the wrong length would scramble it.
-///
-/// That is a real limitation and not a subtlety: a face whose conjuncts are
-/// formed before the reordering pause gets no reordering in the clusters where
-/// they were. `docs/features/fonts.md` records it. What USE does instead is
-/// carry the categories on the glyphs themselves through substitution, which
-/// is a bigger change to the buffer than this milestone makes.
-fn reorder_syllables(text: &str, buffer: &mut Buffer) {
-    let categories: Vec<universal::Category> = text.chars().map(universal::category).collect();
-    let syllables = universal::syllables(text);
+/// The categories now travel on the glyphs ([`Buffer::set_category`]), so
+/// there is no length to disagree about: whatever `GSUB` did to the syllable,
+/// every glyph in it still says what the cluster model calls it, and a
+/// ligature says what its first component did.
+fn reorder_syllables(buffer: &mut Buffer) {
     for range in buffer.syllable_ranges() {
-        let Some(number) = buffer.props_syllable(range.start) else {
-            continue;
-        };
-        let of_syllable: Vec<universal::Category> = syllables
-            .iter()
-            .zip(&categories)
-            .filter(|(id, _)| **id == number)
-            .map(|(_, category)| *category)
+        let of_syllable: Vec<universal::Category> = range
+            .clone()
+            .filter_map(|at| buffer.props_category(at))
             .collect();
         if of_syllable.len() != range.len() {
             continue;

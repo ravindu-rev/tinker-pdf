@@ -526,6 +526,38 @@ const ALLOWED: &[(&str, &[&str])] = &[
             // The public-key security handler's envelope is DER. See the
             // ninth amendment above.
             "tinker-pdf-pki",
+            // Shaping milestone 8, and the argument is worth writing out
+            // because the obvious alternative was tried on paper first.
+            //
+            // `src/fill.rs` builds a text field's appearance stream (12.7.4.3)
+            // from the field's own `/V`. It is the **only** producing path in
+            // this tree whose entry point takes a string and no glyphs:
+            // `build.rs`'s `glyph_run` takes glyphs a caller positioned, which
+            // is exactly why milestone 7 wired shaping in above this crate and
+            // added no edge at all. `DocumentEditor::set_field_value(name,
+            // value)` has nowhere to put such a seam.
+            //
+            // The alternative considered and rejected: a `dyn Shaper` on
+            // `DocumentEditor`, supplied from the facade. It fails on its own
+            // terms twice. The facade **re-exports** `DocumentEditor`
+            // verbatim rather than wrapping it, so a seam only the facade
+            // filled would leave `tinker_pdf_cos::DocumentEditor` — a
+            // published crate's public API — still writing `?` for Arabic
+            // while the identical re-export did not: two answers to one
+            // question, which is the failure `metrics.rs` argues against by
+            // name. And a seam the *caller* fills leaves the default broken,
+            // which is the whole defect milestone 8 exists to close.
+            //
+            // What the edge does not cost: it points down into a leaf, the
+            // direction ruling 8 allows without argument, and this crate hands
+            // it face bytes and a `&str`, so `tinker-pdf-shape` learns no PDF
+            // vocabulary. The reading half of the non-goal stays structural
+            // rather than merely stated: `tinker-pdf-content` and
+            // `tinker-pdf-render` have no edge to it, and this crate does not
+            // interpret content streams at all — the only text it *writes* is
+            // an appearance it built itself, and the only text it reads is a
+            // string in an object.
+            "tinker-pdf-shape",
         ],
     ),
     // Content interpretation emits to a `Device`; it never rasterizes.

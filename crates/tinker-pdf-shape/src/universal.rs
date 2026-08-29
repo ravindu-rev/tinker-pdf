@@ -19,6 +19,9 @@
 //! Tai Tham's `U+1A6E TAI THAM VOWEL SIGN E` is the plain case, and
 //! text-rendering-tests SHLANA-1/21 states it outright: two characters typed
 //! consonant-then-vowel, and an expected rendering of vowel-then-consonant.
+//! Balinese `SHBALI-2/1` is the case that says **how far** it moves: past a
+//! whole conjunct, to the front of the syllable, and not merely past the
+//! consonant it is attached to.
 //!
 //! `Visual_Order_Left` is the opposite value and the reason the property has
 //! two: those characters are *already* stored where they are drawn, and moving
@@ -41,6 +44,24 @@
 //! cluster from a symbol cluster from a broken one — which USE uses to decide
 //! whether to insert a dotted circle. This crate never inserts one; see
 //! `docs/features/fonts.md`.
+//!
+//! # The three rules, reintroduced as defects and counted
+//!
+//! Each was put back and `cargo test -p tinker-pdf-shape --no-fail-fast` run
+//! against it, so these are measured and not expected:
+//!
+//! | Defect reintroduced | Tests that caught it |
+//! | --- | --- |
+//! | The halant moves the reordering insertion point again | 3 |
+//! | The reordering pause is skipped altogether | 2 |
+//! | Canonical decomposition is switched off | 2 |
+//!
+//! The first is caught by this module's own unit test as well as by
+//! `tests/text_rendering.rs` and `tests/fingerprints.rs`; the other two are
+//! caught only by those, because both defects are in `crate::shape`'s *use* of
+//! this module and [`reorder`] answers correctly for the categories it is
+//! handed either way. That asymmetry is the reason the conformance suite is
+//! the guard and the unit tests are the explanation.
 //!
 //! # Why the syllable outlives this module
 //!
@@ -149,11 +170,11 @@ pub(crate) fn category(c: char) -> Category {
 /// them, which merges two clusters that should have been separate rather than
 /// splitting one that should not — the safe direction, and unreachable in any
 /// text a reader would look at.
-pub(crate) fn syllables(text: &str) -> Vec<u16> {
+pub(crate) fn syllables(text: &[char]) -> Vec<u16> {
     let mut out = Vec::new();
     let mut current = 0u16;
     let mut previous = Category::Other;
-    for c in text.chars() {
+    for c in text.iter().copied() {
         let category = category(c);
         let starts = match category {
             // A base starts a syllable unless a halant just said it does not.
@@ -187,24 +208,48 @@ pub(crate) fn syllables(text: &str) -> Vec<u16> {
 ///
 /// # The rule
 ///
-/// Walk the syllable. A halant marks a fresh insertion point just after
-/// itself, because a pre-base vowel belongs in front of the consonant it
-/// attaches to and not in front of the whole conjunct. Every pre-base
-/// character is moved back to the current insertion point, and everything
-/// between shuffles up one.
+/// Every pre-base member of the syllable is moved to the **front of the
+/// syllable**, and everything it passes shuffles up one. The insertion point
+/// advances after each move, so two pre-base characters in one syllable keep
+/// the order they were typed in.
 ///
-/// The insertion point is deliberately **not** advanced after a move. Two
-/// pre-base characters in one syllable therefore come out in the reverse of
-/// the order they were typed in. That is a guess — USE's published rule says
-/// where a pre-base character goes and does not say what two of them do
-/// relative to each other, and no case in the vendored corpus has two — and it
-/// is written down here as one rather than presented as the rule.
+/// # The halant used to move the insertion point, and the corpus said no
+///
+/// This walked the syllable keeping an insertion point just after the last
+/// halant, on the reasoning that *"a pre-base vowel belongs in front of the
+/// consonant it attaches to and not in front of the whole conjunct"*. That is
+/// a plausible sentence and it is not what the fixtures say. Balinese
+/// `SHBALI-2/1` is `KA ADEG-ADEG PA TALING` — a conjunct of two consonants
+/// followed by a pre-base vowel — and the expected rendering puts the taling
+/// **first**, in front of the whole conjunct rather than in front of the
+/// second consonant. Dropping the halant rule moved thirty cases across six
+/// sections and cost none, which is as close to adjudication as ruling 13
+/// permits.
+///
+/// What survives of the old reasoning is a real question this corpus does not
+/// answer: a `pref` consonant — one a face reorders to *before the base* — is
+/// a different move from a pre-base vowel's, and USE has a separate step for
+/// it. Nothing here implements that step, and no fixture reaches one.
+///
+/// # Two pre-base characters come out reversed, and that is adjudicated now
+///
+/// The insertion point does **not** advance after a move, so the second
+/// pre-base member of a syllable ends up in front of the first. That stood
+/// here as a guess, on the grounds that USE says where a pre-base character
+/// goes and does not say what two of them do relative to each other, and that
+/// no case in the vendored corpus had two.
+///
+/// The second half of that was wrong. Tai Tham `SHLANA-6/2` and `SHLANA-6/4`
+/// each have a syllable holding both `U+1A55 CONSONANT SIGN MEDIAL RA` and a
+/// pre-base vowel — two `Left` characters in one cluster — and both expect the
+/// vowel first, which is the reverse of the order they are typed in. Advancing
+/// the insertion point was tried and costs those two cases and one of
+/// `SHLANA-10`'s; not advancing it is what the fixtures say.
 pub(crate) fn reorder(categories: &[Category]) -> Option<Vec<usize>> {
     if !categories.contains(&Category::PreBase) {
         return None;
     }
     let mut order: Vec<usize> = (0..categories.len()).collect();
-    let mut insert = 0usize;
     let mut moved = false;
     for (at, category) in categories.iter().enumerate() {
         // `at` indexes the *original* sequence, and `order` says where each
@@ -213,14 +258,12 @@ pub(crate) fn reorder(categories: &[Category]) -> Option<Vec<usize>> {
         let Some(from) = order.iter().position(|which| *which == at) else {
             continue;
         };
-        match category {
-            Category::Halant => insert = from.saturating_add(1),
-            Category::PreBase if insert < from => {
-                let lifted = order.remove(from);
-                order.insert(insert, lifted);
-                moved = true;
-            }
-            _ => {}
+        // The insertion point is the front of the syllable and stays there,
+        // which is what reverses a pair of pre-base characters.
+        if *category == Category::PreBase && from > 0 {
+            let lifted = order.remove(from);
+            order.insert(0, lifted);
+            moved = true;
         }
     }
     moved.then_some(order)
@@ -271,17 +314,35 @@ mod tests {
         assert_eq!(reorder(&cats), Some(vec![1, 0]));
     }
 
-    /// A halant means the vowel belongs in front of the *second* consonant,
-    /// not in front of the conjunct.
+    /// A halant does **not** move the insertion point: the vowel goes in front
+    /// of the whole conjunct.
+    ///
+    /// text-rendering-tests `SHBALI-2/1` is this shape — `KA ADEG-ADEG PA
+    /// TALING` — and its expected rendering draws the taling first. The
+    /// opposite rule stood here until the fixtures were run against it, and
+    /// dropping it moved thirty cases across six sections.
     #[test]
-    fn a_halant_moves_the_insertion_point() {
+    fn a_halant_does_not_move_the_insertion_point() {
         let cats = [
             Category::Base,
             Category::Halant,
             Category::Base,
             Category::PreBase,
         ];
-        assert_eq!(reorder(&cats), Some(vec![0, 1, 3, 2]));
+        assert_eq!(reorder(&cats), Some(vec![3, 0, 1, 2]));
+    }
+
+    /// Two pre-base characters in one syllable come out in the **reverse** of
+    /// the order they were typed in.
+    ///
+    /// Tai Tham `SHLANA-6/2` and `SHLANA-6/4` are where that is adjudicated:
+    /// each holds `U+1A55 CONSONANT SIGN MEDIAL RA` and a pre-base vowel in
+    /// one syllable, and each expects the vowel drawn first. The opposite rule
+    /// was tried and costs three cases across two sections.
+    #[test]
+    fn two_pre_base_characters_come_out_reversed() {
+        let cats = [Category::Base, Category::PreBase, Category::PreBase];
+        assert_eq!(reorder(&cats), Some(vec![2, 1, 0]));
     }
 
     #[test]
@@ -295,16 +356,27 @@ mod tests {
     #[test]
     fn a_halant_keeps_two_consonants_in_one_syllable() {
         // Devanagari ka, virama, ka: one syllable, not two.
-        assert_eq!(syllables("\u{915}\u{94D}\u{915}"), vec![1, 1, 1]);
+        assert_eq!(
+            syllables(&"\u{915}\u{94D}\u{915}".chars().collect::<Vec<char>>()),
+            vec![1, 1, 1]
+        );
         // Without the virama they are two.
-        assert_eq!(syllables("\u{915}\u{915}"), vec![1, 2]);
+        assert_eq!(
+            syllables(&"\u{915}\u{915}".chars().collect::<Vec<char>>()),
+            vec![1, 2]
+        );
     }
 
     #[test]
     fn what_is_not_brahmic_is_in_no_syllable() {
-        assert_eq!(syllables("a\u{915}b"), vec![0, 1, 0]);
-        assert!(syllables("hello").iter().all(|id| *id == 0));
-        assert!(syllables("").is_empty());
+        assert_eq!(
+            syllables(&"a\u{915}b".chars().collect::<Vec<char>>()),
+            vec![0, 1, 0]
+        );
+        assert!(syllables(&"hello".chars().collect::<Vec<char>>())
+            .iter()
+            .all(|id| *id == 0));
+        assert!(syllables(&"".chars().collect::<Vec<char>>()).is_empty());
     }
 
     /// A mark with no base in front of it is USE's "broken cluster". It is
@@ -312,7 +384,13 @@ mod tests {
     /// nothing else.
     #[test]
     fn a_mark_with_no_base_is_still_a_syllable() {
-        assert_eq!(syllables("\u{94D}\u{915}"), vec![1, 1]);
-        assert_eq!(syllables("a\u{94D}"), vec![0, 1]);
+        assert_eq!(
+            syllables(&"\u{94D}\u{915}".chars().collect::<Vec<char>>()),
+            vec![1, 1]
+        );
+        assert_eq!(
+            syllables(&"a\u{94D}".chars().collect::<Vec<char>>()),
+            vec![0, 1]
+        );
     }
 }

@@ -36,6 +36,43 @@ pub enum FontKind {
     Type0,
 }
 
+/// Which `/FontFile*` key of a font descriptor carried an embedded program
+/// (9.9, Table 126).
+///
+/// The key and not the program's shape, because the two are separate claims: a
+/// `/FontFile3` says "there is a program here and its own `/Subtype` says what
+/// it is", and reading its bytes is what settles which. A caller that wants an
+/// sfnt asks the leaf crate to parse one and finds out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProgramKey {
+    /// `/FontFile`: a Type 1 program.
+    FontFile,
+    /// `/FontFile2`: an sfnt, `glyf` outlines.
+    FontFile2,
+    /// `/FontFile3`: CFF (`/Type1C`, `/CIDFontType0C`) or a whole sfnt
+    /// (`/OpenType`), per the stream's own `/Subtype`.
+    FontFile3,
+}
+
+/// Where a font's embedded program is, and which key named it.
+///
+/// # Why this is a reference and not the bytes
+///
+/// [`read`] runs on every font dictionary a content stream mentions, and a
+/// font program is routinely a megabyte. Holding one in every [`Font`] would
+/// put the whole of a document's embedded type into memory the moment its
+/// resources were read, for the benefit of the one caller — form-field
+/// appearance generation — that actually wants it. So what is stored is the
+/// address, which costs eight bytes, and the caller decodes the stream when it
+/// has a reason to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EmbeddedProgram {
+    /// The stream object holding the program.
+    pub stream: ObjRef,
+    /// Which descriptor key pointed at it.
+    pub key: ProgramKey,
+}
+
 /// One code decoded from a string, ready to lay out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedCode {
@@ -126,6 +163,13 @@ pub struct Font {
     /// be several links up a `usecmap` chain, and because a caller deciding
     /// whether to trust an extracted string should not have to walk one.
     encoding_approximate: bool,
+    /// 9.9: where the descriptor's embedded font program is, if there is one.
+    ///
+    /// For a composite font this is the *descendant's* descriptor, which is
+    /// where 9.7.4 puts it — the Type 0 dictionary has no descriptor of its
+    /// own — so a caller never has to know which of the two dictionaries it
+    /// started from.
+    program: Option<EmbeddedProgram>,
 }
 
 impl Font {
@@ -246,6 +290,58 @@ impl Font {
     #[must_use]
     pub fn has_cid_to_gid_map(&self) -> bool {
         self.cid_to_gid.is_some()
+    }
+
+    /// Where this font's embedded program is (9.9), if it embeds one.
+    ///
+    /// The address rather than the bytes; [`EmbeddedProgram`] says why. A
+    /// caller decodes it with [`CosDocument::stream_decoded`].
+    ///
+    /// This exists for one reason and it is worth naming: without it there is
+    /// nothing for a *producing* path to shape against. A form-field
+    /// appearance is built from the `/DA` font, which is reached through the
+    /// AcroForm `/DR`, and a `Font` that knew every width and no outline could
+    /// only ever write one glyph per byte.
+    #[must_use]
+    pub fn program(&self) -> Option<EmbeddedProgram> {
+        self.program
+    }
+
+    /// Every CID that reaches `glyph`, in ascending order (9.7.4.2).
+    ///
+    /// The inverse of [`Font::gid_for_cid`], and it has to be a set rather
+    /// than a value: `/CIDToGIDMap` is a function from CIDs onto glyphs and
+    /// nothing forbids two CIDs sharing one — a face that unifies two
+    /// characters onto one outline does exactly that. A caller writing a
+    /// string picks the smallest, which is what [`Font::cid_for_gid`] does.
+    ///
+    /// Under `/Identity` the answer is the glyph's own number and the search
+    /// is skipped, which is the overwhelmingly common case and the one that
+    /// would otherwise scan a 128 KB table per glyph.
+    #[must_use]
+    pub fn cids_for_gid(&self, glyph: u16) -> Vec<u32> {
+        let Some(table) = self.cid_to_gid.as_ref() else {
+            return vec![u32::from(glyph)];
+        };
+        let mut out = Vec::new();
+        for (cid, pair) in table.chunks_exact(2).enumerate() {
+            if u16::from_be_bytes([pair[0], pair[1]]) == glyph {
+                if let Ok(cid) = u32::try_from(cid) {
+                    out.push(cid);
+                }
+            }
+        }
+        out
+    }
+
+    /// The lowest CID that reaches `glyph`, or `None` where none does.
+    ///
+    /// `.notdef` is deliberately answerable: a caller that shaped a run and
+    /// got glyph 0 back needs to be able to *write* the missing glyph, and
+    /// under `/Identity` CID 0 is what draws it.
+    #[must_use]
+    pub fn cid_for_gid(&self, glyph: u16) -> Option<u32> {
+        self.cids_for_gid(glyph).first().copied()
     }
 
     /// The glyph name the *document* gives a code, where it gives one.
@@ -513,6 +609,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         vertical: false,
         symbolic: false,
         encoding_approximate: false,
+        program: None,
     };
 
     read_encoding(doc, dict, &mut font, &mut sink);
@@ -662,6 +759,7 @@ fn read_simple(doc: &CosDocument, dict: &Dict, font: &mut Font, base_font: &str)
         if let Some(flags) = doc.resolve_key(&desc, doc.intern(b"Flags")).as_int() {
             font.symbolic = flags & 0b100 != 0;
         }
+        font.program = embedded_program(doc, &desc);
     }
 
     // Standard-14 metrics only matter when the document gave none of its own.
@@ -828,12 +926,37 @@ fn read_composite(doc: &CosDocument, dict: &Dict, font: &mut Font) {
         if let Some(flags) = doc.resolve_key(&desc, doc.intern(b"Flags")).as_int() {
             font.symbolic = flags & 0b100 != 0;
         }
+        // 9.7.4: the descendant carries the descriptor, so this is the only
+        // place a composite font's program can be found. `Font::program`
+        // answers for either kind without the caller knowing which.
+        font.program = embedded_program(doc, &desc);
     }
 }
 
 fn descriptor(doc: &CosDocument, dict: &Dict) -> Option<Arc<Dict>> {
     let value = doc.resolve_key(dict, doc.intern(b"FontDescriptor"));
     value.as_dict().map(|d| Arc::new(d.clone()))
+}
+
+/// The one `/FontFile*` entry of a descriptor, as a reference (9.9 Table 126).
+///
+/// The order is `/FontFile2`, `/FontFile3`, `/FontFile`, and it is not
+/// arbitrary: a descriptor may legally carry only one, so where a damaged file
+/// carries two the sfnt is the one this engine can do the most with. A key
+/// present with a null value is a key absent — `get_ref` answers `None` for
+/// anything that is not an indirect reference, and a font program is always
+/// one because it is a stream.
+fn embedded_program(doc: &CosDocument, desc: &Dict) -> Option<EmbeddedProgram> {
+    for (name, key) in [
+        (&b"FontFile2"[..], ProgramKey::FontFile2),
+        (b"FontFile3", ProgramKey::FontFile3),
+        (b"FontFile", ProgramKey::FontFile),
+    ] {
+        if let Some(stream) = desc.get_ref(doc.intern(name)) {
+            return Some(EmbeddedProgram { stream, key });
+        }
+    }
+    None
 }
 
 /// The font dictionaries in one resource dictionary, by resource name.

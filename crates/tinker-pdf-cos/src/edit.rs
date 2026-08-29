@@ -1416,6 +1416,9 @@ impl DocumentEditor {
                     multiline,
                     comb,
                     resources: resources.as_ref(),
+                    // Ruling 10: a character the `/DA` font cannot draw is
+                    // reported against the field it was written into.
+                    field: Some(field.reference),
                 },
             );
             let form_ref = self.allocate();

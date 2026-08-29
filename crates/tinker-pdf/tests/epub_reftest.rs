@@ -35,7 +35,10 @@
 
 mod epub_support;
 
+use epub_support::book::one_face_book;
 use epub_support::layout::{column, document, Line};
+use epub_support::typeface::{text_objects, Face, Joining};
+use tinker_pdf::Document;
 
 /// The measure every pair is laid out at.
 const MEASURE: f64 = 240.0;
@@ -381,4 +384,83 @@ fn an_inset_block_on_a_wide_page_is_a_full_block_on_a_narrow_one() {
     // have agreed.
     let narrower = lay_at(style, &format!("<p>{text}</p>"), 100.0);
     assert_ne!(strip(&plain), strip(&narrower));
+}
+
+// ---- the right-to-left pair -------------------------------------------------
+
+/// The three Arabic letters and the space the pair below is written with.
+const RTL_COVERS: &str = " \u{628}\u{62D}\u{645}";
+
+/// Two Arabic words, drawn through a face that joins.
+const RTL_LINE: &str = "\u{628}\u{62D}\u{645} \u{645}\u{62D}\u{628}";
+
+/// What one book draws on its first page, as the glyph indices of each text
+/// object in the order they are shown.
+///
+/// The pairs above compare **line boxes**, which is the right unit for a
+/// cascade question and the wrong one here: `flow.rs` breaks lines over
+/// logical text and reorders nothing, so two spellings of a right-to-left line
+/// agree on their boxes whatever the glyphs inside them are doing. So this
+/// pair compares what reaches the page.
+fn drawn(body: &str) -> Vec<String> {
+    let face = Face::new("Fixture Arabic", RTL_COVERS).with_joining(Joining { script: *b"arab" });
+    let book = one_face_book("Fixture Arabic", &face.build(), 24, body);
+    let doc = Document::open(book).expect("a book");
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages.first().expect("one page");
+    let content =
+        String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned();
+    text_objects(&content)
+        .iter()
+        .map(|(_, object)| {
+            let at = object.find('<').expect("a hex string");
+            let end = object[at..].find('>').expect("a closed hex string");
+            object[at + 1..at + end].to_owned()
+        })
+        .collect()
+}
+
+/// **An inline box that wraps a whole paragraph contributes no boxes of its
+/// own** (`css-display-3` §2.1), and a right-to-left line does not care.
+///
+/// The EPUB tier's right-to-left pair. Both sides are the same Arabic line
+/// through the same joining face, and the specification says they are one
+/// document: a `<span>` around the entirety of a block's content adds an
+/// inline box and no content, so the glyphs, their forms and their order must
+/// be identical.
+///
+/// It is a real pair rather than a restatement, because the two sides reach
+/// the glyphs by different routes — one text node against a text node inside
+/// an inline box — and shaping happens per run of one face. A build that
+/// started a fresh shaping run at an inline boundary would join the two sides
+/// differently, and a build that reordered per box rather than per run would
+/// draw one of them backwards.
+///
+/// The mismatch reference is the same line with its two words exchanged, which
+/// must **not** match: without it this pair would pass on a build that drew
+/// nothing at all.
+#[test]
+fn an_inline_box_around_a_whole_arabic_paragraph_changes_nothing() {
+    let plain = drawn(RTL_LINE);
+    let wrapped = drawn(&format!("<span>{RTL_LINE}</span>"));
+    let swapped: String = {
+        let mut words: Vec<&str> = RTL_LINE.split(' ').collect();
+        words.reverse();
+        words.join(" ")
+    };
+    let broken = drawn(&swapped);
+
+    assert!(
+        !plain.is_empty() && plain.iter().all(|shown| !shown.is_empty()),
+        "the reference drew nothing: {plain:?}"
+    );
+    assert_eq!(
+        plain, wrapped,
+        "an inline box around the whole paragraph changed what was drawn"
+    );
+    assert_ne!(
+        plain, broken,
+        "the mismatch reference agrees too, so the pair proves nothing"
+    );
 }

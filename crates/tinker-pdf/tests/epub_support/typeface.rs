@@ -91,6 +91,77 @@ pub struct Face {
     /// it a run of two characters is one glyph and one advance, and without it
     /// two of each.
     pub ligature: Option<Ligature>,
+    /// A `GSUB` giving every covered character an initial, medial and final
+    /// form under `init`, `medi` and `fina`.
+    ///
+    /// `None` — the default — is a face whose letters look the same wherever
+    /// they stand, which is every script but the cursive ones. `Some` is the
+    /// smallest face that makes **joining** observable: shaping a word of
+    /// three letters through it produces three *different* glyphs from the
+    /// three the `cmap` alone would give, so a test can tell a shaped run from
+    /// an unshaped one by glyph index and not by eye.
+    pub joining: Option<Joining>,
+    /// The advance of every glyph a `GSUB` substitution produces, where it
+    /// differs from [`Face::advance`].
+    ///
+    /// `None` is a face whose every glyph is the same width, which is what
+    /// every fixture wanted before shaping existed. `Some` is what makes the
+    /// **shaped** measurement of a run distinguishable from the
+    /// character-at-a-time one: with one advance throughout, a build that
+    /// measured a joined word by summing its unjoined letters gets the right
+    /// answer by arithmetic and nothing can see the mistake.
+    pub joined_advance: Option<u16>,
+}
+
+/// A face whose letters take a different form by position.
+///
+/// One tag and no more: which features are involved is the Unicode Standard's
+/// rule and not a fixture's choice, and a builder that let a caller name them
+/// would be a fixture that could disagree with the specification.
+#[derive(Clone, Copy, Debug)]
+pub struct Joining {
+    /// The script tag the lookups are declared under, such as `arab`.
+    pub script: [u8; 4],
+}
+
+/// Which of the three positional forms a joining face carries.
+///
+/// `isol` is deliberately absent: the isolated form *is* the glyph the `cmap`
+/// gives, so a face that substituted one would be saying nothing, and a test
+/// that saw the substitution could not tell it from a shaper that had left the
+/// glyph alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Form {
+    /// `init`: the first letter of a joined word.
+    Initial,
+    /// `medi`: a letter joined on both sides.
+    Medial,
+    /// `fina`: the last letter of a joined word.
+    Final,
+}
+
+impl Form {
+    /// The OpenType feature tag this form is selected by.
+    const fn tag(self) -> [u8; 4] {
+        match self {
+            Form::Initial => *b"init",
+            Form::Medial => *b"medi",
+            Form::Final => *b"fina",
+        }
+    }
+
+    /// Which block of substituted glyphs this form occupies, counting from the
+    /// first glyph after the plain ones.
+    const fn block(self) -> usize {
+        match self {
+            Form::Initial => 0,
+            Form::Medial => 1,
+            Form::Final => 2,
+        }
+    }
+
+    /// The three, in the order their glyph blocks are laid out.
+    const ALL: [Form; 3] = [Form::Initial, Form::Medial, Form::Final];
 }
 
 /// Two characters that become one glyph.
@@ -122,6 +193,8 @@ impl Face {
             ascender: 800,
             descender: -200,
             ligature: None,
+            joining: None,
+            joined_advance: None,
         }
     }
 
@@ -130,6 +203,42 @@ impl Face {
     pub fn with_ligature(mut self, ligature: Ligature) -> Face {
         self.ligature = Some(ligature);
         self
+    }
+
+    /// The same face, whose substituted glyphs are `advance` units wide.
+    #[must_use]
+    pub fn with_joined_advance(mut self, advance: u16) -> Face {
+        self.joined_advance = Some(advance);
+        self
+    }
+
+    /// The same face, with an initial, medial and final form for every
+    /// character it covers.
+    #[must_use]
+    pub fn with_joining(mut self, joining: Joining) -> Face {
+        self.joining = Some(joining);
+        self
+    }
+
+    /// The glyph a character takes in one joining form.
+    ///
+    /// `None` for a face with no joining, or a character it does not cover —
+    /// the two answers a test wants to be able to tell apart from a glyph
+    /// index that happens to exist.
+    ///
+    /// The blocks are contiguous and in [`Form::ALL`]'s order, after the plain
+    /// glyphs and after the ligature's, so a caller can predict every index
+    /// without reading the font back.
+    #[must_use]
+    pub fn form_glyph(&self, ch: char, form: Form) -> Option<u16> {
+        self.joining?;
+        let plain = self.glyph_of(ch)?;
+        let covered = u16::try_from(self.glyph_order().len()).ok()?;
+        let first = covered + 1 + u16::from(self.ligature.is_some());
+        let block = u16::try_from(form.block()).ok()?;
+        first
+            .checked_add(block.checked_mul(covered)?)?
+            .checked_add(plain - 1)
     }
 
     /// The glyph index the ligature's own glyph has, if this face has one.
@@ -192,8 +301,17 @@ pub fn covering(family: &str, covers: &str) -> Vec<u8> {
 fn build(face: &Face) -> Vec<u8> {
     let order = face.glyph_order();
     // A ligature needs a glyph of its own, after every covered character, so
-    // that `Face::glyph_of` keeps answering for the characters.
-    let glyph_count = order.len() + 1 + usize::from(face.ligature.is_some());
+    // that `Face::glyph_of` keeps answering for the characters. A joining face
+    // needs three more blocks of the same size after that, one per form, which
+    // is what `Face::form_glyph` predicts.
+    let glyph_count = order.len()
+        + 1
+        + usize::from(face.ligature.is_some())
+        + if face.joining.is_some() {
+            order.len() * Form::ALL.len()
+        } else {
+            0
+        };
 
     // ---- glyf and loca ------------------------------------------------------
     //
@@ -242,9 +360,19 @@ fn build(face: &Face) -> Vec<u8> {
     //
     // A full entry per glyph, `.notdef` included: `numberOfHMetrics` equals the
     // glyph count, so nothing here depends on the trailing side-bearing form.
+    //
+    // A joining face may give its substituted forms a **different** advance,
+    // and that is the only way a test can tell the shaped measurement from the
+    // per-character one: with every glyph the same width the two agree by
+    // arithmetic and a build that measured the wrong one would pass.
+    let joined_from = order.len() + 1 + usize::from(face.ligature.is_some());
     let mut hmtx = Vec::with_capacity(glyph_count * 4);
-    for _ in 0..glyph_count {
-        hmtx.extend_from_slice(&face.advance.to_be_bytes());
+    for glyph in 0..glyph_count {
+        let advance = match face.joined_advance {
+            Some(joined) if glyph >= joined_from => joined,
+            _ => face.advance,
+        };
+        hmtx.extend_from_slice(&advance.to_be_bytes());
         hmtx.extend_from_slice(&0i16.to_be_bytes()); // leftSideBearing
     }
 
@@ -258,7 +386,12 @@ fn build(face: &Face) -> Vec<u8> {
     let cmap = cmap_format_4(&order);
     let name = name_table(&face.family);
 
-    let Some(ligature) = face.ligature else {
+    let gsub = match (face.ligature, face.joining) {
+        (Some(ligature), _) => Some(gsub_ligature(face, ligature)),
+        (None, Some(joining)) => Some(gsub_joining(face, joining)),
+        (None, None) => None,
+    };
+    let Some(gsub) = gsub else {
         return assemble(&[
             (b"cmap", &cmap),
             (b"glyf", &glyf),
@@ -270,7 +403,6 @@ fn build(face: &Face) -> Vec<u8> {
             (b"name", &name),
         ]);
     };
-    let gsub = gsub_ligature(face, ligature);
     assemble(&[
         (b"GSUB", &gsub),
         (b"cmap", &cmap),
@@ -282,6 +414,133 @@ fn build(face: &Face) -> Vec<u8> {
         (b"maxp", &maxp),
         (b"name", &name),
     ])
+}
+
+/// A `GSUB` with one single-substitution lookup per joining form.
+///
+/// # Why the offsets are computed here and hand-written above
+///
+/// [`gsub_ligature`] states every offset as a literal because its table has
+/// one of everything and the numbers can be read against the layout in its own
+/// doc comment. This one has three features, three lookups and three coverage
+/// tables whose sizes follow the face's glyph count, so a literal would be a
+/// number nobody could check. What is fixed instead is the *shape*, and each
+/// section is measured as it is built.
+///
+/// Every lookup is `SingleSubstFormat1`: one coverage listing the covered
+/// glyphs, and one `deltaGlyphID` that lands on the right block. That works
+/// only because [`Face::form_glyph`] lays the blocks out contiguously and in
+/// the same order as the plain glyphs — which is the whole reason it does.
+fn gsub_joining(face: &Face, joining: Joining) -> Vec<u8> {
+    let order = face.glyph_order();
+    let covered: Vec<u16> = (1..=order.len())
+        .map(|g| u16::try_from(g).expect("a fixture face has few glyphs"))
+        .collect();
+
+    // ---- the three lookups, and the list that holds them --------------------
+    //
+    // A `Lookup` is six bytes of header plus its own array of subtable
+    // offsets, so its one subtable can only begin at eight.
+    let mut lookups: Vec<Vec<u8>> = Vec::new();
+    for form in Form::ALL {
+        let delta = face
+            .form_glyph(order[0], form)
+            .expect("a joining face gives every covered character a form")
+            .wrapping_sub(covered[0]);
+        let mut subtable = Vec::new();
+        subtable.extend_from_slice(&1u16.to_be_bytes()); // substFormat 1
+        subtable.extend_from_slice(&6u16.to_be_bytes()); // coverage, from here
+        subtable.extend_from_slice(&delta.to_be_bytes()); // deltaGlyphID
+        subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+        subtable.extend_from_slice(
+            &u16::try_from(covered.len())
+                .expect("a fixture face has few glyphs")
+                .to_be_bytes(),
+        );
+        for glyph in &covered {
+            subtable.extend_from_slice(&glyph.to_be_bytes());
+        }
+
+        let mut lookup = Vec::new();
+        lookup.extend_from_slice(&1u16.to_be_bytes()); // lookupType: single
+        lookup.extend_from_slice(&0u16.to_be_bytes()); // lookupFlag
+        lookup.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
+        lookup.extend_from_slice(&8u16.to_be_bytes()); // subtables[0]
+        lookup.extend_from_slice(&subtable);
+        lookups.push(lookup);
+    }
+
+    let mut lookup_list = Vec::new();
+    lookup_list.extend_from_slice(
+        &u16::try_from(lookups.len())
+            .expect("three lookups")
+            .to_be_bytes(),
+    );
+    let mut at = 2 + lookups.len() * 2;
+    for lookup in &lookups {
+        lookup_list.extend_from_slice(&u16::try_from(at).expect("a small table").to_be_bytes());
+        at += lookup.len();
+    }
+    for lookup in &lookups {
+        lookup_list.extend_from_slice(lookup);
+    }
+
+    // ---- the three features -------------------------------------------------
+    let mut feature_list = Vec::new();
+    feature_list.extend_from_slice(&3u16.to_be_bytes()); // featureCount
+    let mut at = 2 + 3 * 6;
+    for (index, form) in Form::ALL.iter().enumerate() {
+        feature_list.extend_from_slice(&form.tag());
+        feature_list.extend_from_slice(&u16::try_from(at).expect("a small table").to_be_bytes());
+        at += 6;
+        let _ = index;
+    }
+    for (index, _) in Form::ALL.iter().enumerate() {
+        feature_list.extend_from_slice(&0u16.to_be_bytes()); // featureParams
+        feature_list.extend_from_slice(&1u16.to_be_bytes()); // lookupIndexCount
+        feature_list
+            .extend_from_slice(&u16::try_from(index).expect("three features").to_be_bytes());
+    }
+
+    // ---- one script, one default language system, all three features -------
+    let mut script_list = Vec::new();
+    script_list.extend_from_slice(&1u16.to_be_bytes()); // scriptCount
+    script_list.extend_from_slice(&joining.script);
+    script_list.extend_from_slice(&8u16.to_be_bytes()); // Script, from the list
+    script_list.extend_from_slice(&4u16.to_be_bytes()); // defaultLangSys
+    script_list.extend_from_slice(&0u16.to_be_bytes()); // langSysCount
+    script_list.extend_from_slice(&0u16.to_be_bytes()); // lookupOrderOffset
+    script_list.extend_from_slice(&0xFFFFu16.to_be_bytes()); // requiredFeature
+    script_list.extend_from_slice(&3u16.to_be_bytes()); // featureIndexCount
+    for index in 0..3u16 {
+        script_list.extend_from_slice(&index.to_be_bytes());
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+    out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+    let script_at = 10usize;
+    let feature_at = script_at + script_list.len();
+    let lookup_at = feature_at + feature_list.len();
+    out.extend_from_slice(
+        &u16::try_from(script_at)
+            .expect("a small table")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(
+        &u16::try_from(feature_at)
+            .expect("a small table")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(
+        &u16::try_from(lookup_at)
+            .expect("a small table")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(&script_list);
+    out.extend_from_slice(&feature_list);
+    out.extend_from_slice(&lookup_list);
+    out
 }
 
 /// A `GSUB` with exactly one ligature substitution, and nothing else.

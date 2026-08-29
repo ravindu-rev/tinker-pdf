@@ -29,6 +29,7 @@
 //! its host's compiler chose to fold the additions in.
 
 use crate::gdef::GlyphClass;
+use crate::universal::Category;
 
 /// One positioned glyph.
 ///
@@ -121,6 +122,13 @@ pub(crate) struct Props {
     /// Which cluster of a Brahmic script this glyph belongs to, or zero. See
     /// [`Buffer::set_syllable`].
     pub(crate) syllable: u16,
+    /// What the Universal Shaping Engine's cluster model calls this glyph.
+    ///
+    /// Set from the *character* before any lookup runs and carried on the
+    /// glyph from then on, which is the whole point: after `GSUB` has built a
+    /// conjunct there is no character left to ask, and the reordering pause
+    /// happens after that. See [`Buffer::set_category`].
+    pub(crate) category: Category,
     /// The glyph this one hangs off, as a signed distance in buffer
     /// positions, or `None` for a glyph that stands on its own.
     ///
@@ -298,9 +306,33 @@ impl Buffer {
         }
     }
 
-    /// The syllable number of the glyph at `at`, or `None` past the end.
-    pub(crate) fn props_syllable(&self, at: usize) -> Option<u16> {
-        self.props.get(at).map(|props| props.syllable)
+    /// Records what the cluster model calls the glyph at `at`.
+    ///
+    /// # Why this is on the glyph and not looked up from the text
+    ///
+    /// Milestone 5 computed the reordering permutation over the syllable's
+    /// **characters** and applied it to its *glyphs*, which is only the same
+    /// thing while substitution has not changed how many glyphs a character
+    /// stands for. Where it had -- a conjunct built out of three characters, a
+    /// decomposition that made two glyphs out of one -- the lengths differed
+    /// and the syllable was left alone, so a face that forms its conjuncts
+    /// before the reordering pause got no reordering in exactly the clusters
+    /// where it mattered.
+    ///
+    /// Carrying the category on the glyph is what USE does and what closes
+    /// that: [`Buffer::replace`] copies a glyph's props onto every glyph it
+    /// becomes, and a ligature keeps its first component's -- so a conjunct
+    /// built from a base, a halant and a base is a base, which is what a
+    /// pre-base vowel in front of it needs it to be.
+    pub(crate) fn set_category(&mut self, at: usize, category: Category) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.category = category;
+        }
+    }
+
+    /// What the cluster model calls the glyph at `at`, or `None` past the end.
+    pub(crate) fn props_category(&self, at: usize) -> Option<Category> {
+        self.props.get(at).map(|props| props.category)
     }
 
     /// Rearranges `range` so that its *n*th glyph is the one `order` names.
