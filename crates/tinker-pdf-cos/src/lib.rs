@@ -82,7 +82,7 @@ pub use appearance::synthesize as synthesize_appearance;
 pub use build::{
     jpeg_shape, BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
     Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry, PageBuilder,
-    PlacedGlyph, Shading, SoftMask, StateMask, Target, TilingPattern, TilingType,
+    PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask, Target, TilingPattern, TilingType,
     TransparencyGroup,
 };
 pub use calc::{formatted_value, recalculate, CalcError, Recalculation};

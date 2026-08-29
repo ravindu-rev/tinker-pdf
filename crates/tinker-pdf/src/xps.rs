@@ -637,9 +637,13 @@ pub enum XpsElementDefect {
     /// A `{StaticResource}` chain longer than [`MAX_XPS_RESOURCE_DEPTH`].
     /// **Painted grey.** Not the same as a cycle and never reported as one.
     BrushTooDeep,
-    /// A brush this milestone does not paint: an `ImageBrush` or a
-    /// `VisualBrush` (gap 30, milestone 8), a `ContextColor` naming an ICC
-    /// profile, or a gradient asked to stroke. **Painted grey.**
+    /// A brush this build does not paint: a `VisualBrush` (15.4), or a
+    /// `ContextColor` naming an ICC profile. **Painted grey.**
+    ///
+    /// Two things this used to name and no longer does, because both are
+    /// painted now: an `ImageBrush`, and a gradient asked to stroke or to fill
+    /// text — the second needed 8.7.4.5.5's shading pattern, which the writer
+    /// had no API for.
     BrushUnsupported,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,

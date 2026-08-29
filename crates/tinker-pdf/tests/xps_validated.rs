@@ -333,6 +333,67 @@ fn a_gradient_becomes_a_shading_over_a_stitching_function() {
     );
 }
 
+/// A gradient asked to **stroke** becomes a `/PatternType 2`, and the document
+/// still holds to ISO 32000.
+///
+/// The pattern is the other half of the shading above and a different
+/// dictionary: 8.7.4.5.5 wraps the shading rather than replacing it, so a
+/// reader that only ever saw the `/Shading` resource would see a stroke painted
+/// in a colour nobody wrote. `/Matrix` is asserted present because 8.7.3.1
+/// makes a pattern ignore the transform in force, and 18.1's scale and flip are
+/// exactly what a pattern with no matrix would drop.
+#[test]
+fn a_gradient_stroke_becomes_a_shading_pattern_that_validates() {
+    let body = concat!(
+        r##"<Path Data="M0,0L400,0" StrokeThickness="8"><Path.Stroke>"##,
+        r##"<LinearGradientBrush StartPoint="0,0" EndPoint="400,0">"##,
+        r##"<LinearGradientBrush.GradientStops>"##,
+        r##"<GradientStop Color="#FF0000" Offset="0" />"##,
+        r##"<GradientStop Color="#0000FF" Offset="1" />"##,
+        r##"</LinearGradientBrush.GradientStops>"##,
+        r##"</LinearGradientBrush></Path.Stroke></Path>"##,
+    );
+    let markup = format!(
+        r#"<FixedPage xmlns="http://schemas.microsoft.com/xps/2005/06" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let package = archive(with(
+        one_page_package(),
+        "Documents/1/Pages/1.fpage",
+        &markup,
+    ));
+
+    let doc = valid("a gradient stroke", &synthesise(&package));
+    let (_, page) = pages(&doc).into_iter().next().expect("one page");
+    let patterns = category(&doc, &page, b"Pattern");
+    assert_eq!(patterns.len(), 1, "one pattern");
+    let (_, pattern) = &patterns[0];
+    let pattern = pattern.as_dict().expect("a pattern dictionary").clone();
+
+    assert_eq!(
+        value(&doc, &pattern, b"PatternType").as_int(),
+        Some(2),
+        "8.7.4.5.5's shading pattern"
+    );
+    assert!(
+        has(&doc, &pattern, b"Matrix"),
+        "18.1's scale and flip live here, because 8.7.3.1 says the CTM does not"
+    );
+    let shading = value(&doc, &pattern, b"Shading");
+    let shading = shading.as_dict().expect("the pattern carries a shading");
+    assert_eq!(value(&doc, shading, b"ShadingType").as_int(), Some(2));
+    assert_eq!(
+        numbers(&doc, shading, b"Coords"),
+        Some(vec![0.0, 0.0, 400.0, 0.0]),
+        "the axis is the markup's own numbers"
+    );
+    // The gradient is not *also* a `/Shading` resource: `sh` cannot stroke, so
+    // an entry there would be a resource no operator on this page can reach.
+    assert!(
+        category(&doc, &page, b"Shading").is_empty(),
+        "a stroking gradient is a pattern and not a flood"
+    );
+}
+
 /// A `Canvas` `Opacity` over overlapping children becomes a transparency
 /// group, and the alpha is on the form rather than in the colours.
 #[test]

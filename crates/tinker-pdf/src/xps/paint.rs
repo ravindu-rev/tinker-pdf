@@ -58,7 +58,7 @@ use std::collections::HashMap;
 
 use tinker_pdf_cos::{
     DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Glyph, PlacedGlyph, Shading,
-    TilingPattern, TilingType, TransparencyGroup,
+    ShadingPattern, TilingPattern, TilingType, TransparencyGroup,
 };
 use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 
@@ -658,12 +658,18 @@ impl State<'_> {
                 }
                 Paint::Image(tile) => {
                     let ctm = self.in_force(scopes, transform);
-                    self.tile(&tile, &mut out, &data, bbox, ctm);
+                    match self.tile(&tile, bbox, ctm) {
+                        Ok(name) => {
+                            fill_with_pattern(&mut out, &name, &data);
+                        }
+                        Err(defect) => grey_fill(self, &mut out, &data, defect),
+                    }
                 }
             }
         }
         if let Some(brush) = stroke {
-            self.stroke(&mut out, node, &data, &brush);
+            let ctm = self.in_force(scopes, transform);
+            self.stroke(&mut out, node, &data, &brush, bbox, ctm);
         }
         out.extend_from_slice(b"Q\n");
 
@@ -863,17 +869,28 @@ impl State<'_> {
                 out.extend_from_slice(b" gs\n");
             }
         }
+        // A brush over text is set as a *colour* and not as a region: 9.4's
+        // glyphs are filled with whatever the non-stroking colour is when `Tj`
+        // runs, and a glyph outline is not a clip a content stream can state —
+        // which is why a gradient over text is a `/PatternType 2` here and an
+        // `sh` over a clip on a `Path`.
+        let ctm = self.in_force(scopes, transform);
         match &fill.paint {
             Paint::Solid(rgb) => markup::op(&mut out, rgb, "rg"),
-            // A gradient over text needs a shading **pattern**, which gap 30's
-            // milestone 5 records in as many words that it does not write. The
-            // placeholder grey rather than the gradient's first stop, which is
-            // gap 07's defect said the other way round — and the same answer a
-            // gradient *stroke* already gets.
-            Paint::Gradient { .. } | Paint::Image(_) => {
-                self.warn(XpsElementDefect::BrushUnsupported);
-                markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
-            }
+            Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
+                Some(name) => fill_pattern_colour(&mut out, &name),
+                None => {
+                    self.warn(XpsElementDefect::BrushUnreadable);
+                    markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+                }
+            },
+            Paint::Image(tile) => match self.tile(tile, Some(bbox), ctm) {
+                Ok(name) => fill_pattern_colour(&mut out, &name),
+                Err(defect) => {
+                    self.warn(defect);
+                    markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+                }
+            },
         }
 
         let run: Vec<PlacedGlyph<'_>> = placed
@@ -980,30 +997,14 @@ impl State<'_> {
     fn tile(
         &mut self,
         tile: &ImageTile,
-        out: &mut Vec<u8>,
-        data: &Geometry,
         bbox: Option<[f64; 4]>,
         ctm: [f64; 6],
-    ) {
-        let grey = |state: &mut Self, out: &mut Vec<u8>, defect: XpsElementDefect| {
-            state.warn(defect);
-            // `rg` and not `g`, to match every other placeholder this module paints:
-            // a reader diffing two content streams should not have to know that
-            // one grey is three numbers and another is one.
-            markup::op(out, &[PLACEHOLDER_GREY; 3], "rg");
-            data.emit(out, true);
-            out.extend_from_slice(data.fill_operator().as_bytes());
-            out.push(b'\n');
-        };
-
-        let image = match self.around.images.get(self.around.part, &tile.source) {
-            Ok(image) => image,
-            // The picture is not there, is a format this build refuses, or
-            // carries a colour profile — each already named by `Images::get`.
-            // The *shape* is still known, so it takes the placeholder and the
-            // rest of the page is untouched, which is row 8's own requirement.
-            Err(defect) => return grey(self, out, defect),
-        };
+    ) -> Result<Vec<u8>, XpsElementDefect> {
+        // The picture is not there, is a format this build refuses, or carries
+        // a colour profile — each already named by `Images::get`. The *shape* is
+        // still known, so the caller paints the placeholder and the rest of the
+        // page is untouched, which is row 8's own requirement.
+        let image = self.around.images.get(self.around.part, &tile.source)?;
         let resource = image.resource.clone();
         let (image_w, image_h) = image.units();
 
@@ -1025,7 +1026,7 @@ impl State<'_> {
             Units::Absolute => tile.viewport,
             Units::RelativeToBoundingBox => {
                 let Some(b) = bbox else {
-                    return grey(self, out, XpsElementDefect::BrushUnreadable);
+                    return Err(XpsElementDefect::BrushUnreadable);
                 };
                 let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
                 [
@@ -1037,7 +1038,7 @@ impl State<'_> {
             }
         };
         if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 {
-            return grey(self, out, XpsElementDefect::BrushUnreadable);
+            return Err(XpsElementDefect::BrushUnreadable);
         }
 
         // Viewbox to viewport, in each direction independently: 15.3 does not
@@ -1121,14 +1122,35 @@ impl State<'_> {
         if !self.builder.add_tiling_pattern(&name, &pattern) {
             // A degenerate cell or a non-finite number: the writer refused it,
             // and the shape takes the placeholder rather than nothing.
-            return grey(self, out, XpsElementDefect::BrushUnreadable);
+            return Err(XpsElementDefect::BrushUnreadable);
         }
-        out.extend_from_slice(b"/Pattern cs /");
-        out.extend_from_slice(&name);
-        out.extend_from_slice(b" scn\n");
-        data.emit(out, true);
-        out.extend_from_slice(data.fill_operator().as_bytes());
-        out.push(b'\n');
+        Ok(name)
+    }
+
+    /// A gradient as a `/PatternType 2` pattern (8.7.4.5.5), which is the one
+    /// shape a **stroke** and a **glyph run** can take a gradient in.
+    ///
+    /// A *fill* keeps 8.7.4.1's `sh` over the shape as a clip: the two paint
+    /// the same picture, `sh` says it in one operator with no colour space to
+    /// change, and the clip is exactly the region being filled. Neither move is
+    /// available to a stroke or to text — a stroke is not a region, and a glyph
+    /// outline is not a clip a content stream can state — so those go through
+    /// the pattern, where 8.7.3.2 makes a gradient a *colour*.
+    ///
+    /// 8.7.3.1's rule about the matrix is why `ctm` is a parameter, and it is
+    /// [`State::tile`]'s trap one shading over: a pattern's `/Matrix` maps
+    /// pattern space into the page's **default** space and ignores the
+    /// transform in force, so the element's own transform is composed in here
+    /// rather than left to the `cm` the operator sits inside.
+    fn gradient(&mut self, shading: &Shading, matrix: [f64; 6], ctm: [f64; 6]) -> Option<Vec<u8>> {
+        let name = self.painter.name("P");
+        let pattern = ShadingPattern {
+            shading: shading.clone(),
+            matrix: Some(markup::concat(matrix, ctm)),
+        };
+        self.builder
+            .add_shading_pattern(&name, &pattern)
+            .then_some(name)
     }
 
     /// Writes a gradient fill: the shape as a clip, then `sh` over it.
@@ -1163,14 +1185,24 @@ impl State<'_> {
         true
     }
 
-    /// Writes the stroke, in the one shape this milestone can: a solid colour
-    /// at a stated width.
+    /// Writes the stroke: the line parameters 11.1 states, and a colour or a
+    /// pattern.
     ///
-    /// A gradient stroke would need a shading **pattern**, which gap 30's
-    /// milestone 5 deliberately does not write — so it takes the placeholder
-    /// grey rather than the first colour of the gradient, which is gap 07's
-    /// defect said the other way round.
-    fn stroke(&mut self, out: &mut Vec<u8>, node: &Node, data: &Geometry, brush: &Brush) {
+    /// Every brush this build paints can stroke, because 8.7.3.2's pattern is a
+    /// *colour* and `SCN` takes one — a gradient through
+    /// [`State::gradient`]'s `/PatternType 2` and an `ImageBrush` through
+    /// [`State::tile`]'s `/PatternType 1`. What is left grey is a brush that
+    /// did not become paint at all, which is `brush_of`'s answer and not this
+    /// one.
+    fn stroke(
+        &mut self,
+        out: &mut Vec<u8>,
+        node: &Node,
+        data: &Geometry,
+        brush: &Brush,
+        bbox: Option<[f64; 4]>,
+        ctm: [f64; 6],
+    ) {
         let width = node
             .attr("StrokeThickness")
             .map_or(Some(1.0), markup::number);
@@ -1190,10 +1222,24 @@ impl State<'_> {
         }
         match &brush.paint {
             Paint::Solid(rgb) => markup::op(out, rgb, "RG"),
-            Paint::Gradient { .. } | Paint::Image(_) => {
-                self.warn(XpsElementDefect::BrushUnsupported);
-                markup::op(out, &[PLACEHOLDER_GREY], "G");
-            }
+            Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
+                Some(name) => stroke_with_pattern(out, &name),
+                None => {
+                    // The writer refused the shading: a zero-length axis, a
+                    // negative radius, a function whose arity is wrong. The
+                    // line is still known, so it takes the placeholder rather
+                    // than nothing.
+                    self.warn(XpsElementDefect::BrushUnreadable);
+                    markup::op(out, &[PLACEHOLDER_GREY], "G");
+                }
+            },
+            Paint::Image(tile) => match self.tile(tile, bbox, ctm) {
+                Ok(name) => stroke_with_pattern(out, &name),
+                Err(defect) => {
+                    self.warn(defect);
+                    markup::op(out, &[PLACEHOLDER_GREY], "G");
+                }
+            },
         }
         data.emit(out, false);
         out.extend_from_slice(b"S\n");
@@ -1337,6 +1383,43 @@ impl State<'_> {
         }
         Err(XpsElementDefect::BrushTooDeep)
     }
+}
+
+/// 8.7.3.2's two operators, which are written together and never apart: a
+/// `scn` naming a pattern in a colour space that is not `/Pattern` is a name
+/// the reader is entitled to read as a number.
+fn fill_pattern_colour(out: &mut Vec<u8>, name: &[u8]) {
+    out.extend_from_slice(b"/Pattern cs /");
+    out.extend_from_slice(name);
+    out.extend_from_slice(b" scn\n");
+}
+
+/// The same pair for the **stroking** colour, which Table 74 spells in capitals.
+fn stroke_with_pattern(out: &mut Vec<u8>, name: &[u8]) {
+    out.extend_from_slice(b"/Pattern CS /");
+    out.extend_from_slice(name);
+    out.extend_from_slice(b" SCN\n");
+}
+
+/// A shape filled with a pattern.
+fn fill_with_pattern(out: &mut Vec<u8>, name: &[u8], data: &Geometry) {
+    fill_pattern_colour(out, name);
+    data.emit(out, true);
+    out.extend_from_slice(data.fill_operator().as_bytes());
+    out.push(b'\n');
+}
+
+/// A shape filled in the neutral placeholder grey, and the defect named.
+///
+/// `rg` and not `g`, to match every other placeholder this module paints: a
+/// reader diffing two content streams should not have to know that one grey is
+/// three numbers and another is one.
+fn grey_fill(state: &mut State<'_>, out: &mut Vec<u8>, data: &Geometry, defect: XpsElementDefect) {
+    state.warn(defect);
+    markup::op(out, &[PLACEHOLDER_GREY; 3], "rg");
+    data.emit(out, true);
+    out.extend_from_slice(data.fill_operator().as_bytes());
+    out.push(b'\n');
 }
 
 /// A `{StaticResource key}` reference, or `None` for an ordinary value.

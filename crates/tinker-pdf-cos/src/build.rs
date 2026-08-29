@@ -524,6 +524,25 @@ pub enum TilingType {
     FasterTiling,
 }
 
+/// A shading pattern, `/PatternType 2` (8.7.4.5.5).
+///
+/// The other half of [`Shading`], and it is a **different capability** rather
+/// than a spelling of the same one. `PageBuilder::shading` writes 8.7.4.1's
+/// `sh`, which floods the current clip: a caller filling a *shape* has to make
+/// that shape the clip first, and a caller **stroking** one, or setting text in
+/// one, has no such move at all — a stroke is not a region and a glyph outline
+/// is not a clip a content stream can state. A shading pattern is a colour, so
+/// it reaches `scn`, `SCN` and every operator that takes one.
+pub struct ShadingPattern {
+    /// `/Shading`, written as its own indirect object.
+    pub shading: Shading,
+    /// `/Matrix`, mapping pattern space into the **default** coordinate system
+    /// of the page the pattern is used on — 8.7.3.1's rule, which 8.7.4.5.5
+    /// inherits whole, so this ignores whatever transform is in force when the
+    /// pattern is set. `None` for the identity.
+    pub matrix: Option<[f64; 6]>,
+}
+
 /// A tiling pattern, `/PatternType 1` (8.7.3).
 ///
 /// `/PaintType` is always 1, a **coloured** pattern, and the reason is written
@@ -2079,6 +2098,61 @@ impl DocumentBuilder {
     /// Returns false for a degenerate geometry, a negative radius, or a
     /// `/Function` that does not produce one number per colour component.
     pub fn add_shading(&mut self, resource: &[u8], shading: &Shading) -> bool {
+        let Some(reference) = self.write_shading(shading) else {
+            return false;
+        };
+        self.resources.shadings.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Registers a **shading pattern** under a resource name (8.7.4.5.5).
+    ///
+    /// The pattern goes into `/Pattern`, not `/Shading`: 8.7.3.2 makes it a
+    /// colour, reached through `set_fill_pattern` / `set_stroke_pattern`, where
+    /// [`DocumentBuilder::add_shading`]'s resource is reached through
+    /// `PageBuilder::shading`'s `sh`. The two are not interchangeable and a
+    /// caller naming one where the other belongs gets a `false` rather than a
+    /// dangling name.
+    ///
+    /// Returns false for the geometries [`DocumentBuilder::add_shading`]
+    /// refuses, or a non-finite `/Matrix`.
+    pub fn add_shading_pattern(&mut self, resource: &[u8], pattern: &ShadingPattern) -> bool {
+        if let Some(matrix) = pattern.matrix {
+            if !all_finite(&matrix) {
+                return false;
+            }
+        }
+        // The shading is validated and written first, so a refused geometry
+        // leaves no pattern dictionary pointing at nothing — `add_image`'s
+        // posture, for `add_ext_gstate`'s reason.
+        let Some(shading_ref) = self.write_shading(&pattern.shading) else {
+            return false;
+        };
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Pattern")));
+        dict.insert(self.names.intern(b"PatternType"), Object::Int(2));
+        dict.insert(self.names.intern(b"Shading"), Object::Ref(shading_ref));
+        if let Some(matrix) = pattern.matrix {
+            dict.insert(
+                self.names.intern(b"Matrix"),
+                Object::Array(matrix.iter().map(|v| Object::Real(*v)).collect()),
+            );
+        }
+
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Dict(dict));
+        self.resources.patterns.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Validates a shading and writes it as an indirect object.
+    ///
+    /// One body for the two doors — `/Shading` resource and `/PatternType 2`
+    /// — because 8.7.4.5's dictionary is the same dictionary either way, and
+    /// two copies of the geometry checks would be two places for a degenerate
+    /// axis to stop being refused.
+    fn write_shading(&mut self, shading: &Shading) -> Option<ObjRef> {
         let (kind, space, coords, function, extend) = match shading {
             Shading::Axial {
                 color_space,
@@ -2090,7 +2164,7 @@ impl DocumentBuilder {
                 // 8.7.4.5.3's parameter is undefined everywhere and the area
                 // paints in whatever the reader falls back to.
                 if !all_finite(coords) || (coords[0] == coords[2] && coords[1] == coords[3]) {
-                    return false;
+                    return None;
                 }
                 (2i64, *color_space, coords.to_vec(), function, *extend)
             }
@@ -2101,19 +2175,19 @@ impl DocumentBuilder {
                 extend,
             } => {
                 if !all_finite(coords) || coords[2] < 0.0 || coords[5] < 0.0 {
-                    return false;
+                    return None;
                 }
                 // Two circles of zero radius in the same place are a point,
                 // and 8.7.4.5.4 has nothing to blend between.
                 if coords[2] == 0.0 && coords[5] == 0.0 {
-                    return false;
+                    return None;
                 }
                 (3i64, *color_space, coords.to_vec(), function, *extend)
             }
         };
 
         if !function.is_valid(space.components() as usize) {
-            return false;
+            return None;
         }
 
         let function_ref = self.write_function(function);
@@ -2135,8 +2209,7 @@ impl DocumentBuilder {
 
         let reference = self.allocate();
         self.objects.insert(reference.num, Object::Dict(dict));
-        self.resources.shadings.push((resource.to_vec(), reference));
-        true
+        Some(reference)
     }
 
     /// Registers a tiling pattern under a resource name (8.7.3).
@@ -5247,6 +5320,166 @@ mod graphics_tests {
             bytes.windows(8).filter(|w| *w == b"the cell").count(),
             1,
             "exactly the accepted pattern's cell is in the file"
+        );
+    }
+
+    // ---- shading patterns ------------------------------------------------
+
+    /// A gradient reached as a **colour**: `/PatternType 2` in `/Pattern`, its
+    /// shading its own object, and a page naming it through `scn` and `SCN`.
+    ///
+    /// The two doors are asserted apart on purpose. A shading registered with
+    /// `add_shading` lands in `/Shading` and is reachable only from `sh`, which
+    /// floods the clip; a shading *pattern* lands in `/Pattern` and is a colour
+    /// operand. A writer that put one in both tables would let a caller stroke
+    /// with `sh`, which no reader can do.
+    #[test]
+    fn a_shading_pattern_is_a_colour_where_a_shading_resource_is_a_flood() {
+        let ramp = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_shading_pattern(
+            b"P0",
+            &ShadingPattern {
+                shading: Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 20.0, 0.0],
+                    function: ramp,
+                    extend: (true, true),
+                },
+                matrix: Some([1.0, 0.0, 0.0, 1.0, 3.0, 7.0]),
+            }
+        ));
+        builder.add_page(40.0, 40.0, |page| {
+            assert!(page.set_fill_pattern(b"P0"));
+            assert!(page.set_stroke_pattern(b"P0"));
+            assert!(
+                !page.shading(b"P0"),
+                "a pattern is not a /Shading resource and `sh` cannot name one"
+            );
+        });
+        let doc = opened(builder);
+
+        let pattern = resource(&doc, b"Pattern", b"P0");
+        assert_eq!(
+            name_of(&doc, &pattern, b"Type").as_deref(),
+            Some(&b"Pattern"[..])
+        );
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"PatternType"))
+                .as_int(),
+            Some(2)
+        );
+        assert_eq!(
+            numbers(&doc, &pattern, b"Matrix"),
+            vec![1.0, 0.0, 0.0, 1.0, 3.0, 7.0]
+        );
+        // 8.7.3.3 does not give a shading pattern a `/PaintType`; that entry
+        // is `/PatternType 1`'s, and writing it here would describe a tiling
+        // pattern with no cell.
+        assert!(
+            doc.resolve_key(&pattern, doc.intern(b"PaintType"))
+                .is_null(),
+            "a shading pattern has no /PaintType"
+        );
+
+        let shading = doc.resolve_key(&pattern, doc.intern(b"Shading"));
+        let shading = shading.as_dict().expect("the shading is a dictionary");
+        assert_eq!(
+            doc.resolve_key(shading, doc.intern(b"ShadingType"))
+                .as_int(),
+            Some(2)
+        );
+        assert_eq!(numbers(&doc, shading, b"Coords"), vec![0.0, 0.0, 20.0, 0.0]);
+
+        let text = content(&doc);
+        assert!(text.contains("/Pattern cs /P0 scn"), "{text}");
+        assert!(text.contains("/Pattern CS /P0 SCN"), "{text}");
+        assert!(!text.contains(" sh"), "{text}");
+    }
+
+    /// A shading pattern refuses what a shading refuses, and a refused one
+    /// leaves **nothing** behind.
+    ///
+    /// The second half is the one worth writing down: the pattern dictionary
+    /// and the shading are two objects, so a writer that allocated the pattern
+    /// first would leave a `/Pattern` entry pointing at a shading it then
+    /// declined to write — a resource that exists and cannot be drawn, which is
+    /// worse than the refusal it was meant to be.
+    #[test]
+    fn a_shading_pattern_that_describes_no_gradient_is_refused_and_writes_nothing() {
+        let ramp = || Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let mut builder = DocumentBuilder::new();
+        for (what, pattern) in [
+            (
+                "an axis of no length",
+                ShadingPattern {
+                    shading: Shading::Axial {
+                        color_space: DeviceSpace::Rgb,
+                        coords: [5.0, 5.0, 5.0, 5.0],
+                        function: ramp(),
+                        extend: (false, false),
+                    },
+                    matrix: None,
+                },
+            ),
+            (
+                "a function of the wrong arity",
+                ShadingPattern {
+                    shading: Shading::Axial {
+                        color_space: DeviceSpace::Rgb,
+                        coords: [0.0, 0.0, 1.0, 0.0],
+                        function: Function::Exponential {
+                            domain: [0.0, 1.0],
+                            c0: vec![0.0, 0.0],
+                            c1: vec![1.0, 1.0],
+                            n: 1.0,
+                        },
+                        extend: (false, false),
+                    },
+                    matrix: None,
+                },
+            ),
+            (
+                "a matrix that is not numbers",
+                ShadingPattern {
+                    shading: Shading::Axial {
+                        color_space: DeviceSpace::Rgb,
+                        coords: [0.0, 0.0, 1.0, 0.0],
+                        function: ramp(),
+                        extend: (false, false),
+                    },
+                    matrix: Some([1.0, 0.0, 0.0, 1.0, f64::NAN, 0.0]),
+                },
+            ),
+        ] {
+            assert!(
+                !builder.add_shading_pattern(b"P", &pattern),
+                "{what} was accepted"
+            );
+        }
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(!page.set_fill_pattern(b"P"));
+        });
+        let bytes = builder.finish();
+        assert_eq!(
+            bytes.windows(13).filter(|w| *w == b"/PatternType ").count(),
+            0,
+            "no pattern dictionary reached the file"
+        );
+        assert_eq!(
+            bytes.windows(12).filter(|w| *w == b"/ShadingType").count(),
+            0,
+            "and neither did the shading a refused pattern would have carried"
         );
     }
 

@@ -56,7 +56,8 @@ no CIE, `/Separation` or `/DeviceN` space.
 with `MaskKind` and `StateMask`), `add_form` (`FormXObject`, optionally a
 `TransparencyGroup`), `add_shading` (`Shading`: axial and radial with a
 `Function`), `add_tiling_pattern` (`TilingPattern`, all three `TilingType`
-values of Table 75); the page side applies them with `set_ext_gstate`, `form`,
+values of Table 75), `add_shading_pattern` (`ShadingPattern`, `/PatternType 2`);
+the page side applies them with `set_ext_gstate`, `form`,
 `shading`, `set_fill_pattern` / `set_stroke_pattern`, plus `fill_rect`,
 `set_fill_rgb` / `set_stroke_rgb`, `image`, and `raw(operators)` for
 anything else. Each page-side call returns `false` when the named resource
@@ -101,8 +102,9 @@ let pdf: Vec<u8> = b.finish();
 ```
 
 `DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `ExtGState`,
-`TransparencyGroup`, `FormXObject`, `Function`, `Shading`, `TilingPattern`,
-`TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`, `StateMask`,
+`TransparencyGroup`, `FormXObject`, `Function`, `Shading`, `ShadingPattern`,
+`TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
+`StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
 `ImageData` and `Target` are `#[non_exhaustive]`: the next shape is an
 addition, not a break.

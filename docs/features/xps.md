@@ -97,7 +97,7 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| `VisualBrush`, a `ContextColor` naming an ICC profile, a gradient used to stroke | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
+| `VisualBrush`, a `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
 | `OpacityMask` | `XpsElementDefect::OpacityMaskUnsupported` | not mapped to a PDF soft mask yet | [ROADMAP.md](../ROADMAP.md) |
 | Remote resource dictionary (`Source=` a separate part) | `XpsElementDefect::ResourceDictionaryRemote` | only in-page dictionaries are resolved | [ROADMAP.md](../ROADMAP.md) |
 | TIFF, JPEG XR, any non-PNG/JPEG image part | `XpsElementDefect::ImageFormatUnsupported` | no decoder for either; named at the element | [ROADMAP.md](../ROADMAP.md) |

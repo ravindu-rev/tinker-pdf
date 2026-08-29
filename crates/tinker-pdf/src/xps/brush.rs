@@ -63,10 +63,12 @@ pub struct Colour {
 pub enum BrushError {
     /// The markup is not 15's brush syntax.
     Syntax,
-    /// It is a brush and this milestone does not paint it: an `ImageBrush` or
-    /// a `VisualBrush` (both gap 30 milestone 8), or a `ContextColor` naming
-    /// an ICC profile (a non-goal of the whole plan, because 15.2.5's syntax
-    /// has nowhere to put an sRGB fallback).
+    /// It is a brush and this build does not paint it: a `VisualBrush` (15.4),
+    /// or a `ContextColor` naming an ICC profile (a non-goal of the whole
+    /// plan, because 15.2.5's syntax has nowhere to put an sRGB fallback).
+    ///
+    /// An `ImageBrush` was here and is not: it is painted, through a tiling
+    /// pattern.
     Unsupported,
 }
 

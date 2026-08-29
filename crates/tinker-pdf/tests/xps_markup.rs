@@ -990,18 +990,24 @@ fn an_image_brush_whose_picture_is_missing_is_grey_and_named() {
     assert!(drawn(body).contains("0.749 0.749 0.749 rg"));
 }
 
-/// A gradient asked to **stroke** is grey, not the gradient's first colour.
+/// A gradient asked to **stroke** is a shading pattern, set as the stroking
+/// colour.
 ///
-/// Gap 07's defect said the other way round: a shading pattern is what a
-/// gradient stroke needs, milestone 5 deliberately writes none, and taking the
-/// first stop would produce a plausible solid rule where a gradient was asked
-/// for.
+/// Gap 07's headline defect was a gradient-stroked rule painting solid black
+/// silently, and the two answers this test has had are the two halves of
+/// getting it right: the placeholder grey while the writer had no
+/// `/PatternType 2` to offer, and the gradient itself now that it has. What is
+/// still asserted is the half that was never about the milestone — the width is
+/// the file's, and nothing paints the first stop as though it were the whole
+/// brush.
 #[test]
-fn a_gradient_stroke_is_grey_rather_than_its_first_colour() {
+fn a_gradient_stroke_is_a_shading_pattern_rather_than_its_first_colour() {
     let body = r##"<Path Data="M0,0L10,0" StrokeThickness="4"><Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="10,0"><LinearGradientBrush.GradientStops><GradientStop Color="#FF0000" Offset="0" /><GradientStop Color="#0000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Stroke></Path>"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushUnsupported]);
+    assert_eq!(body_defects(body), []);
     let content = drawn(body);
-    assert!(content.contains("0.749 G"), "{content}");
+    assert!(content.contains("/Pattern CS /"), "{content}");
+    assert!(content.contains(" SCN"), "{content}");
+    assert!(!content.contains("0.749 G"), "{content}");
     assert!(!content.contains("1 0 0 RG"), "{content}");
     assert!(content.contains("4 w"), "the width is still the file's");
 }
