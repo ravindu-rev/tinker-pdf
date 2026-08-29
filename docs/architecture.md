@@ -68,9 +68,11 @@ published vectors, against a panic or an overread on untrusted structure), and
 tables are read in `shape` because `font`'s charter is the tables *metrics*
 need — a lookup is not a metric).
 
-**Two** more edges point down *out* of a non-leaf, and they are listed here
-because the first of them used to be counted among the leaf-to-leaf edges,
-which it never was. Both come from `cos`, and both make the same argument:
+**Three** more edges point down *out* of a non-leaf, and they are listed
+here because the first of them used to be counted among the leaf-to-leaf
+edges, which it never was. All three come from `cos` — its full set is
+`filters`, `crypto`, `font`, `shape`, `pki`, checked against its manifest
+rather than remembered — and the first two make the same argument:
 
 - `cos → font` — reading a font *dictionary* (`/Encoding`, `/ToUnicode`,
   standard-14 metrics) is object-model work that needs the leaf's CMap parser
@@ -84,7 +86,35 @@ which it never was. Both come from `cos`, and both make the same argument:
   and a public "install this decryptor on an opened document" is a hole with
   no floor under it, offered so that a dependency edge could be avoided.
 
-`cos` is not a leaf, so neither edge is leaf-to-leaf however useful it is.
+The third is a different argument and the only one of the three that a
+reader might expect *not* to be here:
+
+- `cos → shape` — filling a form field. `fill.rs` is the one producing path
+  in the tree whose entry point takes a string and no glyphs:
+  `DocumentBuilder::glyph_run` takes glyphs the caller positioned, so the
+  seam is already in its signature and shaping sits *above* cos for it,
+  but `DocumentEditor::set_field_value(name, value)` has nowhere to put
+  one. Without the edge, `fill.rs` writes `?` for every character above the
+  single-byte range.
+
+  The alternative considered was a `dyn Shaper` on `DocumentEditor` filled
+  from the facade. It fails twice on its own terms. The facade
+  **re-exports `DocumentEditor` verbatim** rather than wrapping it, so a
+  seam only the facade filled would leave `tinker_pdf_cos::DocumentEditor`
+  — a published crate's public API — still writing `?` for Arabic while the
+  identical re-export did not: two answers to one question. And a seam the
+  *caller* fills leaves the default broken, which is the defect it was
+  meant to close.
+
+  What it does not cost: it points down into a leaf, the direction ruling 8
+  allows without argument, and cos hands it face bytes and a `&str`, so
+  `tinker-pdf-shape` learns no PDF vocabulary. The reading half of the
+  shaping non-goal stays structural — `tinker-pdf-content` and
+  `tinker-pdf-render` have no edge to it, and cos interprets no content
+  streams at all. The only text it shapes is an appearance it built itself.
+
+`cos` is not a leaf, so none of the three is leaf-to-leaf however useful
+it is.
 
 The graph cannot cycle, because `filters` depends on nothing.
 
