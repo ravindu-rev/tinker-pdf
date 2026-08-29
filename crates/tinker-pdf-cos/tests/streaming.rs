@@ -34,6 +34,9 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n";
 struct Fed {
     bytes: Vec<u8>,
     available: Mutex<Vec<Range<u64>>>,
+    /// What it had to refuse. A real host records the same thing for the same
+    /// reason: it is the list it has to go and fetch.
+    missed: Mutex<Vec<Range<u64>>>,
 }
 
 impl Fed {
@@ -41,7 +44,13 @@ impl Fed {
         Fed {
             bytes,
             available: Mutex::new(Vec::new()),
+            missed: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The ranges refused since this was last asked, and forgets them.
+    fn take_missed(&self) -> Vec<Range<u64>> {
+        std::mem::take(&mut self.missed.lock().expect("no panic here"))
     }
 
     fn feed(&self, range: Range<u64>) {
@@ -68,6 +77,10 @@ impl ByteSource for Fed {
             return Ok(Arc::from(&[][..]));
         }
         if !self.has(range.start) {
+            self.missed
+                .lock()
+                .expect("no panic here")
+                .push(range.clone());
             return Err(SourceMiss::at(range));
         }
         let mut at = range.start;
@@ -82,6 +95,12 @@ impl ByteSource for Fed {
 
 /// What a document says about itself, as plain values two opens can be
 /// compared on.
+///
+/// `WholeFileFetched` is left out of the warning count on purpose, and it is
+/// the only thing left out. It is the one warning a streamed document has that
+/// a buffered one cannot: it is about transport rather than about the
+/// document, and counting it would make every whole-file operation look like a
+/// difference in what the two paths *read*.
 fn observed(doc: &CosDocument) -> (LadderLevel, usize, Vec<u8>, Option<i64>, usize) {
     let root = doc.resolve_key(doc.trailer(), Name::ROOT);
     let pages = root
@@ -89,9 +108,14 @@ fn observed(doc: &CosDocument) -> (LadderLevel, usize, Vec<u8>, Option<i64>, usi
         .map(|d| doc.resolve_key(d, Name::PAGES))
         .unwrap_or_else(|| Arc::new(tinker_pdf_cos::Object::Null));
     let count = pages.as_dict().and_then(|d| d.get_int(Name::COUNT));
+    let warnings = doc
+        .warnings()
+        .iter()
+        .filter(|w| w.kind != WarningKind::WholeFileFetched)
+        .count();
     (
         doc.ladder_level(),
-        doc.warnings().len(),
+        warnings,
         doc.bytes().to_vec(),
         count,
         doc.xref().len(),
@@ -243,4 +267,90 @@ fn completing_validation_restores_the_verdict_a_buffer_would_have_given() {
             "and it reads nothing for a document that was never streamed"
         );
     }
+}
+
+/// A document whose `startxref` keyword is gone, which is ladder level 3:
+/// the tables cannot be found at all and the scanner becomes truth.
+fn a_rescanned_document() -> Vec<u8> {
+    let mut bytes = a_document();
+    let at = bytes
+        .windows(9)
+        .position(|w| w == b"startxref")
+        .expect("the fixture carries one");
+    bytes[at..at + 9].copy_from_slice(b"startxrEf");
+    bytes
+}
+
+/// A rescan is one forward pass over everything, so a streamed document says
+/// so before it spends the file.
+#[test]
+fn a_rescan_on_a_streamed_source_declares_its_whole_file_fetch() {
+    let bytes = a_rescanned_document();
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let streamed =
+        CosDocument::open_source(Arc::new(SliceSource::new(bytes.clone()))).expect("it opens");
+
+    assert_eq!(buffered.ladder_level(), LadderLevel::Rescan);
+    assert_eq!(
+        streamed.ladder_level(),
+        LadderLevel::Rescan,
+        "the rescan decision needs no eager probe, so it is not deferred"
+    );
+    assert_eq!(observed(&buffered), observed(&streamed));
+
+    let kinds: Vec<WarningKind> = streamed.warnings().iter().map(|w| w.kind).collect();
+    assert!(
+        kinds.contains(&WarningKind::WholeFileFetched),
+        "a streamed rescan declares its fetch: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&WarningKind::DocumentRescanned),
+        "and still says why: {kinds:?}"
+    );
+    assert!(streamed.whole_file_fetched());
+    assert!(!buffered
+        .warnings()
+        .iter()
+        .any(|w| w.kind == WarningKind::WholeFileFetched));
+}
+
+/// The wasm host loop, in miniature and bounded.
+///
+/// A host that cannot answer a range knows which range it was: its own `read`
+/// saw it. So the loop needs nothing from the engine but a refusal -- feed
+/// what was asked for, call again, and because parsing is pure and the store
+/// and chunk cache keep what they built, the retry repeats no completed work.
+/// The bound is what makes it a test rather than a hope: a loop that could not
+/// finish would spin here instead of converging.
+#[test]
+fn a_host_that_feeds_what_it_was_asked_for_converges_in_bounded_rounds() {
+    let bytes = a_document();
+    let source = Arc::new(Fed::new(bytes.clone()));
+    let mut rounds = 0usize;
+    let streamed = loop {
+        rounds += 1;
+        assert!(rounds <= 16, "the host loop has not converged in {rounds}");
+        let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+        match CosDocument::open_source(handle) {
+            Ok(doc) => break doc,
+            Err(_) => {
+                let wanted = source.take_missed();
+                assert!(
+                    !wanted.is_empty(),
+                    "a refusal that named no range is a loop that cannot end"
+                );
+                for range in wanted {
+                    source.feed(range);
+                }
+            }
+        }
+    };
+    assert!(rounds > 1, "the first call really did miss");
+
+    let buffered = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(
+        observed(&streamed),
+        observed(&buffered),
+        "the loop converged on the answer a buffer would have given"
+    );
 }

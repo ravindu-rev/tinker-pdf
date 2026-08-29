@@ -16,8 +16,9 @@
 //! and reporting nonsense calmly is the whole point of the leniency ladder.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{Document, RenderOptions, ShreddedSource, SliceSource};
 
 /// A hand-rolled xorshift, so the corpus is identical everywhere.
 ///
@@ -260,6 +261,63 @@ fn mutated_fixtures_never_panic() {
             let label = format!("{name} case {case}");
             let _guard = Guard(&label);
             exercise(mutated);
+        }
+    }
+}
+
+/// The same document, over a source that answers one byte at a time.
+///
+/// Ruling 1 binds the streaming path as much as the buffered one, and the
+/// streaming path has arithmetic the buffered one does not: window bases,
+/// offsets rebased from window to document, chunk boundaries, and a growth
+/// loop that must terminate. A hostile file drives all of it.
+///
+/// Fewer operations than [`exercise`] on purpose. The point here is the read
+/// path -- open, page tree, render -- rather than every reader in the facade,
+/// which the buffered sweep already covers over the same inputs.
+fn exercise_streamed(bytes: Vec<u8>) {
+    if bytes.is_empty() {
+        return;
+    }
+    let source = Arc::new(ShreddedSource::new(SliceSource::new(bytes)));
+    let Ok(doc) = Document::open_streaming(source) else {
+        return;
+    };
+    let _ = doc.ladder_level();
+    let _ = doc.warnings();
+    let _ = doc.is_streamed();
+    let _ = doc.first_page_end();
+    let _ = doc.page_count();
+    if let Some(page) = doc.page(0) {
+        let _ = page.size();
+        let _ = page.render(&RenderOptions {
+            scale: 0.25,
+            ..RenderOptions::default()
+        });
+        let _ = page.text();
+    }
+    let _ = doc.cos().complete_validation();
+    let _ = doc.whole_file_fetched();
+}
+
+/// The mutated corpus again, streamed.
+#[test]
+fn mutated_fixtures_never_panic_over_a_shredded_source() {
+    let fixtures = fixtures();
+    assert!(
+        !fixtures.is_empty(),
+        "the fixtures are missing, so this test proves nothing"
+    );
+
+    for (name, original) in &fixtures {
+        // The same seeds as the buffered sweep, so the two see the same
+        // inputs and a case number means the same thing in both.
+        let mut rng = Rng(0x5DEE_CE66_D1CE_4001 ^ name.len() as u64);
+        for case in 0..sweep(120) {
+            let mutated = mutate(original, &mut rng);
+            let label = format!("{name} case {case} shredded");
+            let _guard = Guard(&label);
+            exercise_streamed(mutated);
         }
     }
 }
