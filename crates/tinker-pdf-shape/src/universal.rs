@@ -245,6 +245,52 @@ pub(crate) fn syllables(text: &[char]) -> Vec<u16> {
 /// vowel first, which is the reverse of the order they are typed in. Advancing
 /// the insertion point was tried and costs those two cases and one of
 /// `SHLANA-10`'s; not advancing it is what the fixtures say.
+///
+/// # A second move was tried here and the corpus refused it, 6 to 69
+///
+/// The rule tried: **every dependent mark moved to immediately after the last
+/// base of its syllable**, so that a matra separated from its base by a
+/// subjoined consonant is next to it again when the presentation features run.
+///
+/// It is not a guess about Kannada. `ನ್ನಾ` — `NA VIRAMA NA AA`,
+/// text-rendering-tests `SHKNDA-2/1` — shapes here to three glyphs the fixture
+/// does not want; typing the same characters with the matra already next to
+/// its base, `NA AA VIRAMA NA`, shapes through this crate *unchanged* to
+/// gid150, gid57, gid116 at 0, 711 and 1160, which is that case's expected
+/// rendering exactly. Two of the face's lookups need the adjacency and they
+/// are different kinds: `NA` + `AA` rewrites the **base** (gid39 becomes
+/// gid150, because a Kannada consonant gives up part of its own shape to the
+/// matra beside it), and `NA` + `E` **ligates**, to gid256, which is what
+/// `SHKNDA-2/8` and `SHKNDA-2/9` want.
+///
+/// Applied to every Brahmic run it gains **six** cases in `SHKNDA-2` and costs
+/// **sixty-nine**, measured and not estimated:
+///
+/// | Section | Before | After |
+/// | --- | --- | --- |
+/// | `SHKNDA-2` | 8 | **14** |
+/// | `SHKNDA-1`, `SHKNDA-3` | 34, 31 | 33, 30 |
+/// | `SHBALI-1`, `SHBALI-2` | 20, 12 | 13, 7 |
+/// | `SHLANA-1`, `SHLANA-2`, `SHLANA-3`, `SHLANA-4` | 51, 32, 12, 2 | 48, 16, 10, 1 |
+/// | `SHLANA-5`, `SHLANA-6`, `SHLANA-7`, `SHLANA-8` | 13, 7, 16, 11 | 11, 5, 5, 6 |
+/// | `SHLANA-10` | 35 | 22 |
+///
+/// `SHLANA-2/6` is the sentence the other side is making. `ᩉ᩠ᨶᩦ` is a
+/// consonant, a sakot and a consonant with a vowel sign, and it expects
+/// gid226, gid383, gid270 — **base, subjoined consonant, mark**, which is the
+/// exact reverse of what `SHKNDA-2/1` expects for the same shape. The
+/// Universal Shaping Engine's own published cluster order is Tai Tham's:
+/// below-base forms, then post-base forms, then the vowels. Kannada's is the
+/// Indic model's, and `SHKNDA-2`'s own description says so in as many words —
+/// *"a correct implementation should call the Kannada Shaping Engine"*.
+///
+/// **No property this crate reads separates the two.** Both matras are
+/// `Vowel_Dependent`; `Indic_Positional_Category` calls U+0CBE `Right` and
+/// U+1A66 the same. What separates them is which shaping *engine* the script
+/// belongs to, and choosing one per script is a second cluster model — the
+/// thing `docs/design/shaping.md` calls effectively unbounded and the reason
+/// milestone 5 is the roadmap's largest item. So the six cases stay unclaimed
+/// and this is the record of what they would cost.
 pub(crate) fn reorder(categories: &[Category]) -> Option<Vec<usize>> {
     if !categories.contains(&Category::PreBase) {
         return None;

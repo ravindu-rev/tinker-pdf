@@ -397,9 +397,23 @@ mystery:
   cases and `SHKNDA-2` four of its 16, and it was wrong.** `SHKNDA-3` was a
   mark advance — a Brahmic run zeroed the advance a face gave a spacing matra,
   so every glyph of a syllable stacked at one x — and it is now whole. What
-  the `TRIAGE` table measures instead is that twenty-seven of the thirty-four
-  remaining failures are the wrong glyph *set*, **two** are the wrong *order*
-  and four are a *position*.
+  the `TRIAGE` table measures instead is that twenty-five of the thirty-two
+  remaining failures are the wrong glyph *set*, two are the wrong *order* and
+  five are a *position*.
+
+  What is left of it in `SHKNDA-2` is **six cases, one cause, and a price**. A
+  Kannada matra has to be next to its base before the presentation features
+  run: `NA` + `AA` rewrites the base and `NA` + `E` ligates, and neither
+  matches with a subjoined consonant in between. Moving every dependent mark
+  back onto its base was implemented and measured — it gains those six and
+  costs **sixty-nine** across `SHBALI` and `SHLANA`, because Tai Tham's
+  `SHLANA-2/6` expects base, subjoined consonant, mark and Kannada's
+  `SHKNDA-2/1` expects base, mark, subjoined consonant for the same shape.
+  **No property this crate reads separates them**: both matras are
+  `Vowel_Dependent` and `Right`. What separates them is which shaping engine
+  the script belongs to, and choosing one per script is a second cluster
+  model. `crates/tinker-pdf-shape/src/universal.rs` holds the per-section
+  numbers.
 - **`rphf` now asks whether the syllable has a base for the repha**, which is
   the one piece of that model this crate does implement. A word-final `RA` +
   halant is a dead consonant and not a reph, and offering the lookup at both

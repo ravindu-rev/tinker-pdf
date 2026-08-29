@@ -807,19 +807,25 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 ///
 /// # What it says as of this commit, measured and not expected
 ///
-/// Thirty-five rows: **27 `set`, 3 `order`, 4 `advance`, 1 `offset`.** The
-/// shape of that is the finding, and it is not the shape the docs predicted.
+/// Thirty-two rows: **25 `set`, 2 `order`, 4 `advance`, 1 `offset`.** It began
+/// at thirty-five, and the three that have left are the three that were worth
+/// a commit each. The shape of what is left is the finding, and it is not the
+/// shape the docs predicted.
 ///
-/// - **The residue is overwhelmingly `GSUB`.** Twenty-seven of thirty-five are
+/// - **The residue is overwhelmingly `GSUB`.** Twenty-five of thirty-two are
 ///   the wrong glyphs, not the wrong places — a feature that did not fire, one
 ///   that fired where it should not have, or one that fired over a span the
 ///   cluster model cut in the wrong place.
-/// - **`SHKNDA-2` is `set` in seven of its eight.** Not advance: the mark
-///   widths are already right there, and the eighth (`SHKNDA-2/12`) is the one
-///   `order` in Kannada. What is left of Kannada is lookups.
-/// - **`Order` is the rarest verdict in the whole corpus — three rows.** By
-///   this measure `universal::reorder` is very nearly finished, which is the
-///   opposite of where `docs/design/shaping.md` pointed for two milestones.
+/// - **`SHKNDA-2`'s six are one cause and it is priced.** All six are the same
+///   thing: a matra that has to be next to its base before the presentation
+///   features run. Moving it there gains those six and costs **sixty-nine**
+///   across `SHBALI` and `SHLANA`, because Tai Tham wants the opposite order
+///   and no Unicode property this crate reads separates the two. The
+///   measurement is in `universal::reorder`; the six stay unclaimed.
+/// - **`Order` is the rarest verdict in the whole corpus — two rows**, both in
+///   Tai Tham. By this measure `universal::reorder` is very nearly finished,
+///   which is the opposite of where `docs/design/shaping.md` pointed for two
+///   milestones.
 /// - **Four `advance` and one `offset`** are all in Tai Tham, and each is a
 ///   single case in a section whose other failures are `set` — so none of them
 ///   is a cause worth a commit on its own.
