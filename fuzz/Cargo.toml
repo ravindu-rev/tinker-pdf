@@ -175,3 +175,9 @@ name = "layout"
 path = "fuzz_targets/layout.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "tiff"
+path = "fuzz_targets/tiff.rs"
+test = false
+doc = false

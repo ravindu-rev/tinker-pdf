@@ -41,6 +41,7 @@ mod packbits;
 mod png;
 mod predictors;
 mod runlength;
+mod tiff;
 
 use core::fmt;
 
@@ -57,6 +58,10 @@ pub use png::{
     PngImage, PngScan, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
+pub use tiff::{
+    tiff_decode, tiff_scan, TiffCcitt, TiffColour, TiffCompression, TiffError, TiffImage,
+    TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan, MAX_TIFF_SAMPLES,
+};
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
 /// gigabytes, and a lenient decoder without a ceiling is a denial-of-service
@@ -254,6 +259,35 @@ pub enum Warning {
     /// declared a step size its own samples cannot justify.
     JpxCoefficientClamped,
 
+    // ---- TIFF 6.0 --------------------------------------------------------
+    //
+    // Seven, and every one of them is a *leniency* rather than a refusal:
+    // anything a TIFF can get wrong that costs meaning rather than pixels is a
+    // [`tiff::TiffError`], for the reason `png.rs` gives one line below.
+    /// TIFF: the LZW strip was packed least significant bit first and widened
+    /// its codes one code late — the pre-1993 encoders' form, which §13 does
+    /// not describe. It was repacked and decoded.
+    TiffOldStyleLzw,
+    /// TIFF: a strip or tile would not decode at all, so the rows it covers
+    /// are missing from the raster.
+    TiffSegmentUndecodable,
+    /// TIFF: the `NextIFD` chain pointed back at a directory already read, or
+    /// ran past the depth bound. The chain was cut there.
+    TiffDirectoryCycle,
+    /// TIFF: `SamplesPerPixel` was smaller than the
+    /// `PhotometricInterpretation` needs. The photometric won.
+    TiffSamplesPerPixelWrong,
+    /// TIFF: `FillOrder` 2 on a coding whose strips are a byte stream rather
+    /// than a bit stream. Reversing them would destroy the strip, so the tag
+    /// was ignored.
+    TiffFillOrderIgnored,
+    /// TIFF: every `ColorMap` value was at or below 255, so the map was read
+    /// as an 8-bit one rather than as the 16-bit one p.23 describes.
+    TiffColorMapIsEightBit,
+    /// TIFF: the file holds more than one image file directory. The first is
+    /// the image; the rest are not read.
+    TiffExtraPagesIgnored,
+
     // ---- PNG (ISO/IEC 15948) ---------------------------------------------
     //
     // Three, and every one of them is a *leniency* rather than a refusal.
@@ -309,6 +343,13 @@ impl Warning {
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
             Self::PackBitsNoOp => "packbits-no-op",
             Self::PackBitsRunOverruns => "packbits-run-overruns",
+            Self::TiffOldStyleLzw => "tiff-old-style-lzw",
+            Self::TiffSegmentUndecodable => "tiff-segment-undecodable",
+            Self::TiffDirectoryCycle => "tiff-directory-cycle",
+            Self::TiffSamplesPerPixelWrong => "tiff-samples-per-pixel-wrong",
+            Self::TiffFillOrderIgnored => "tiff-fill-order-ignored",
+            Self::TiffColorMapIsEightBit => "tiff-color-map-is-eight-bit",
+            Self::TiffExtraPagesIgnored => "tiff-extra-pages-ignored",
             Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
             Self::JpxMarkerUnknown => "jpx-marker-unknown",
             Self::JpxStructureInvalid => "jpx-structure-invalid",
@@ -352,6 +393,13 @@ impl fmt::Display for Warning {
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
             Self::PackBitsNoOp => "PackBits no-op tag skipped",
             Self::PackBitsRunOverruns => "PackBits run past the expected byte count",
+            Self::TiffOldStyleLzw => "TIFF LZW strip in the pre-1993 bit order, repacked",
+            Self::TiffSegmentUndecodable => "TIFF strip or tile could not be decoded",
+            Self::TiffDirectoryCycle => "TIFF directory chain cycled or ran past its bound",
+            Self::TiffSamplesPerPixelWrong => "TIFF SamplesPerPixel below the photometric's need",
+            Self::TiffFillOrderIgnored => "TIFF FillOrder 2 on a byte-oriented coding, ignored",
+            Self::TiffColorMapIsEightBit => "TIFF ColorMap written at 8 bits rather than 16",
+            Self::TiffExtraPagesIgnored => "TIFF directories after the first are not read",
             Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
             Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
             Self::JpxStructureInvalid => "JPX codestream or box structure invalid",
