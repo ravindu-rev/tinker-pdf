@@ -90,6 +90,7 @@ pub mod limits;
 pub mod read;
 pub mod shape;
 pub mod unicode;
+mod universal;
 
 pub use buffer::{Buffer, Direction, ShapedGlyph};
 pub use common::{

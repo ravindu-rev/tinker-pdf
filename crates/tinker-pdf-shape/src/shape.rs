@@ -60,6 +60,7 @@ use crate::common::Tag;
 use crate::limits::Limits;
 use crate::read::Bytes;
 use crate::unicode::{self, Script};
+use crate::universal;
 use crate::{Layout, MarkWidths, Warning};
 
 /// The `GSUB` features the default shaper turns on, in the order they are
@@ -350,9 +351,12 @@ impl<'a> Shaper<'a> {
         // feature list is taken at its word and gets one stage, because the
         // staging below is the *default* plan for a joining script and not a
         // property of the script itself.
-        let joining = self.gsub_features.is_none() && arabic::joins(slice);
-        if joining {
-            self.mark_joining_forms(slice, &mut buffer);
+        let plan = self.plan(slice);
+        if plan == Plan::Joining {
+            self.mark_joining_forms(slice, run.text.start, &mut buffer);
+        }
+        if plan == Plan::Universal {
+            self.mark_syllables(slice, run.text.start, &mut buffer);
         }
 
         let limits = self
@@ -361,11 +365,18 @@ impl<'a> Shaper<'a> {
         let mut warnings = Vec::new();
         if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
-            for stage in self.gsub_stages(joining) {
+            for (index, stage) in plan.gsub_stages(self.gsub_features).iter().enumerate() {
                 let wanted: Vec<(Tag, u32)> =
                     stage.iter().map(|tag| (*tag, feature_mask(*tag))).collect();
                 let lookups = gsub.lookups_for_masked(script, self.language, &wanted);
                 warnings.extend(self.layout.substitute_masked(&mut buffer, &lookups, limits));
+                // The Universal Shaping Engine's one reordering pause. It sits
+                // where it does because the basic features build the conjuncts
+                // and the presentation features expect them already in visual
+                // order; see `crate::universal`.
+                if plan == Plan::Universal && index == USE_REORDER_AFTER {
+                    reorder_syllables(slice, &mut buffer);
+                }
             }
         }
 
@@ -420,46 +431,44 @@ impl<'a> Shaper<'a> {
         }
     }
 
-    /// The `GSUB` stages this run runs, in order.
-    ///
-    /// One stage for a caller who named their own features, one for a run that
-    /// does not join, and [`JOINING_GSUB_STAGES`] for one that does.
-    fn gsub_stages(&self, joining: bool) -> Vec<&'a [Tag]> {
-        if let Some(features) = self.gsub_features {
-            return vec![features];
+    /// Which plan this run gets. See [`Plan`].
+    fn plan(&self, text: &str) -> Plan {
+        if self.gsub_features.is_some() {
+            return Plan::AsAsked;
         }
-        if joining {
-            return JOINING_GSUB_STAGES.to_vec();
+        if arabic::joins(text) {
+            return Plan::Joining;
         }
-        vec![DEFAULT_GSUB_FEATURES]
+        if text
+            .chars()
+            .any(|c| universal::category(c) != universal::Category::Other)
+        {
+            return Plan::Universal;
+        }
+        Plan::Default
+    }
+
+    /// Numbers each glyph with the Brahmic cluster its character belongs to.
+    fn mark_syllables(&self, text: &str, base: usize, buffer: &mut Buffer) {
+        let syllables = universal::syllables(text);
+        for (at, index) in character_indices(text, base, buffer) {
+            if let Some(syllable) = syllables.get(index) {
+                buffer.set_syllable(at, *syllable);
+            }
+        }
     }
 
     /// Puts each glyph in the joining form its character is in.
     ///
     /// The forms are computed over the **text**, before `cmap`, because that
     /// is where the property lives; the mask then travels with the glyph
-    /// through every substitution. A character that produced no glyph — a
-    /// variation selector this face resolved and swallowed — has no mask to
-    /// set, so the two are walked together rather than by index.
-    fn mark_joining_forms(&self, text: &str, buffer: &mut Buffer) {
+    /// through every substitution.
+    fn mark_joining_forms(&self, text: &str, base: usize, buffer: &mut Buffer) {
         let forms = arabic::forms(text);
-        let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
-        for at in 0..buffer.len() {
-            let Some(cluster) = buffer.glyph(at).map(|glyph| glyph.cluster) else {
-                continue;
-            };
-            // The cluster is an offset into the *paragraph*; the forms are
-            // indexed by character within this run.
-            let Ok(cluster) = usize::try_from(cluster) else {
-                continue;
-            };
-            let Some(index) = offsets.iter().position(|offset| *offset == cluster) else {
-                continue;
-            };
-            let Some(form) = forms.get(index) else {
-                continue;
-            };
-            buffer.set_mask(at, Buffer::GLOBAL | form_mask(*form));
+        for (at, index) in character_indices(text, base, buffer) {
+            if let Some(form) = forms.get(index) {
+                buffer.set_mask(at, Buffer::GLOBAL | form_mask(*form));
+            }
         }
     }
 
@@ -532,6 +541,174 @@ impl<'a> Shaper<'a> {
         }
     }
 }
+
+/// Which of the three plans a run gets.
+///
+/// The choice is made from the **text**, never from a transcribed list of
+/// scripts, for the reason `crate::arabic::joins` gives: a list of scripts here
+/// would be somebody else's list and would be wrong the day Unicode gives an
+/// existing script a joining letter or a dependent vowel, and the properties
+/// themselves cannot be.
+///
+/// A run can satisfy both tests — Arabic-script text with a Brahmic character
+/// in it does — and joining wins, because the joining forms are what a reader
+/// of that run would notice first and because no fixture in the corpus mixes
+/// them. That precedence is a choice and is recorded as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Plan {
+    /// One stage, [`DEFAULT_GSUB_FEATURES`]: Latin, Greek, Han, Hebrew.
+    Default,
+    /// [`JOINING_GSUB_STAGES`], and a form per glyph.
+    Joining,
+    /// [`USE_GSUB_STAGES`], syllables, and one reordering pause.
+    Universal,
+    /// A caller who named their own features, taken at their word.
+    AsAsked,
+}
+
+impl Plan {
+    /// The stages this plan runs, in order.
+    fn gsub_stages(self, asked: Option<&[Tag]>) -> Vec<&[Tag]> {
+        match self {
+            Plan::AsAsked => vec![asked.unwrap_or(DEFAULT_GSUB_FEATURES)],
+            Plan::Default => vec![DEFAULT_GSUB_FEATURES],
+            Plan::Joining => JOINING_GSUB_STAGES.to_vec(),
+            Plan::Universal => USE_GSUB_STAGES.to_vec(),
+        }
+    }
+}
+
+/// The `GSUB` features a Brahmic run turns on, in stages.
+///
+/// The Universal Shaping Engine's own order. Each entry is a stage for the
+/// same reason [`JOINING_GSUB_STAGES`]'s are: the face's `blwf` lookup is
+/// written expecting `rphf` to have finished, and merging them would apply
+/// whichever the compiler happened to lay out first.
+///
+/// # The four groups
+///
+/// 1. **Normalisation.** `locl`, `ccmp`, `nukt`, `akhn` — get the cluster into
+///    the shape the rest of the plan expects.
+/// 2. **Reordering group.** `rphf` then `pref`, each its own stage because
+///    each records something the next depends on.
+/// 3. **Orthographic unit shaping.** The seven that build the conjuncts:
+///    `rkrf`, `abvf`, `blwf`, `half`, `pstf`, `vatu`, `cjct`. The reordering
+///    pause is **after** this group, at [`USE_REORDER_AFTER`].
+/// 4. **Presentation.** `abvs`, `blws`, `haln`, `pres`, `psts`, applied to a
+///    cluster that is by then in the order it will be drawn in.
+///
+/// The topographical group — `isol`, `init`, `medi`, `fina` — is deliberately
+/// **absent**. USE applies them to scripts that join, and the four masks this
+/// crate has are set by `crate::arabic::forms`, which a Brahmic run does not
+/// run; requesting them unmasked would apply a joining form to every glyph of
+/// every syllable. No face in the vendored corpus declares them for a Brahmic
+/// script, so nothing here is lost that a fixture could see, and the omission
+/// is named in `docs/features/fonts.md` rather than left to be discovered.
+///
+/// The default features are the last stage rather than the first, so that a
+/// Brahmic face's `liga` and `calt` see the cluster after it has been built.
+pub const USE_GSUB_STAGES: &[&[Tag]] = &[
+    &[
+        Tag::new(b"locl"),
+        Tag::new(b"ccmp"),
+        Tag::new(b"nukt"),
+        Tag::new(b"akhn"),
+    ],
+    &[Tag::new(b"rphf")],
+    &[Tag::new(b"pref")],
+    &[
+        Tag::new(b"rkrf"),
+        Tag::new(b"abvf"),
+        Tag::new(b"blwf"),
+        Tag::new(b"half"),
+        Tag::new(b"pstf"),
+        Tag::new(b"vatu"),
+        Tag::new(b"cjct"),
+    ],
+    &[
+        Tag::new(b"abvs"),
+        Tag::new(b"blws"),
+        Tag::new(b"haln"),
+        Tag::new(b"pres"),
+        Tag::new(b"psts"),
+    ],
+    DEFAULT_GSUB_FEATURES,
+];
+
+/// Which glyph came from which character of the run, before any substitution.
+///
+/// Pairs each buffer position with an index into `text.chars()`. The bridge is
+/// [`ShapedGlyph::cluster`], which is an offset into the *paragraph*, so the
+/// run's own start is subtracted — a run that does not begin at byte zero is
+/// the case that made this a function rather than two loops.
+///
+/// A character that produced no glyph — a variation selector the face resolved
+/// and swallowed — simply has no pair, which is why the two are walked
+/// together rather than by index.
+fn character_indices(text: &str, base: usize, buffer: &Buffer) -> Vec<(usize, usize)> {
+    let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let mut out = Vec::with_capacity(buffer.len());
+    for at in 0..buffer.len() {
+        let Some(cluster) = buffer.glyph(at).map(|glyph| glyph.cluster) else {
+            continue;
+        };
+        let Some(within) = usize::try_from(cluster)
+            .ok()
+            .and_then(|cluster| cluster.checked_sub(base))
+        else {
+            continue;
+        };
+        if let Some(index) = offsets.iter().position(|offset| *offset == within) {
+            out.push((at, index));
+        }
+    }
+    out
+}
+
+/// Moves every pre-base character of every syllable in front of its base.
+///
+/// The permutation is computed over the **characters** of each syllable and
+/// applied to the *glyphs* that carry that syllable's number, which is only
+/// the same thing while substitution has not changed how many glyphs a
+/// character stands for. Where it has — a conjunct built out of three
+/// characters, a decomposition that made two glyphs out of one — the glyph
+/// count and the character count differ and the syllable is **left alone**,
+/// because a permutation of the wrong length would scramble it.
+///
+/// That is a real limitation and not a subtlety: a face whose conjuncts are
+/// formed before the reordering pause gets no reordering in the clusters where
+/// they were. `docs/features/fonts.md` records it. What USE does instead is
+/// carry the categories on the glyphs themselves through substitution, which
+/// is a bigger change to the buffer than this milestone makes.
+fn reorder_syllables(text: &str, buffer: &mut Buffer) {
+    let categories: Vec<universal::Category> = text.chars().map(universal::category).collect();
+    let syllables = universal::syllables(text);
+    for range in buffer.syllable_ranges() {
+        let Some(number) = buffer.props_syllable(range.start) else {
+            continue;
+        };
+        let of_syllable: Vec<universal::Category> = syllables
+            .iter()
+            .zip(&categories)
+            .filter(|(id, _)| **id == number)
+            .map(|(_, category)| *category)
+            .collect();
+        if of_syllable.len() != range.len() {
+            continue;
+        }
+        if let Some(order) = universal::reorder(&of_syllable) {
+            buffer.reorder(range, &order);
+        }
+    }
+}
+
+/// Which stage of [`USE_GSUB_STAGES`] the reordering pause follows.
+///
+/// Index 3, the orthographic-unit-shaping group. Before it a pre-base vowel is
+/// still where it was typed, which is what the conjunct-forming lookups are
+/// written against; after it the cluster is in the order it will be drawn in,
+/// which is what the presentation lookups are written against.
+const USE_REORDER_AFTER: usize = 3;
 
 /// The mask bit of each joining form.
 ///

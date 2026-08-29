@@ -69,6 +69,8 @@ fn main() {
         "Scripts.txt",
         "PropertyValueAliases.txt",
         "DerivedJoiningType.txt",
+        "IndicSyllabicCategory.txt",
+        "IndicPositionalCategory.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -82,6 +84,7 @@ fn main() {
     mirroring(&data, &mut out);
     scripts(&data, &mut out);
     joining(&data, &mut out);
+    indic(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -393,6 +396,49 @@ fn joining(data: &Path, out: &mut String) {
     emit(out, "JOINING", "JoiningType", &ranges(&map));
 }
 
+/// `Indic_Syllabic_Category` and `Indic_Positional_Category`, which the
+/// Universal Shaping Engine's cluster model is written in terms of.
+///
+/// Two properties rather than one because that is how Unicode publishes them
+/// and because they answer different questions: the syllabic category says
+/// *what a character is* — a consonant, a virama, a dependent vowel — and the
+/// positional category says *where it is drawn* relative to the consonant it
+/// hangs off. The pair is what tells a pre-base vowel, which has to be moved
+/// before the base, from an above-base one, which does not.
+///
+/// Both are sparse: their `@missing` lines are `Other` and `Not_Applicable`
+/// respectively, unconditionally, so a code point outside the Indic and
+/// Southeast Asian blocks has neither and the tables stop there.
+///
+/// The USE categories themselves are **not** generated here. They are derived
+/// from these two in `crate::use_shaper`, because a category is this crate's
+/// reading of the two properties rather than a property Unicode publishes —
+/// the same split `unicode.rs` draws everywhere else between somebody else's
+/// facts and this repository's algorithm.
+fn indic(data: &Path, out: &mut String) {
+    for (file, name, kind) in [
+        (
+            "IndicSyllabicCategory.txt",
+            "INDIC_SYLLABIC",
+            "IndicSyllabic",
+        ),
+        (
+            "IndicPositionalCategory.txt",
+            "INDIC_POSITIONAL",
+            "IndicPositional",
+        ),
+    ] {
+        let mut map: BTreeMap<u32, String> = BTreeMap::new();
+        for (first, last, values) in rows(&data.join(file)) {
+            for code in first..=last {
+                map.insert(code, values[0].clone());
+            }
+        }
+        assert!(!map.is_empty(), "{file} yielded no rows");
+        emit(out, name, kind, &ranges(&map));
+    }
+}
+
 /// A UCD long name as a Rust variant name: `Caucasian_Albanian` becomes
 /// `CaucasianAlbanian`.
 fn variant(long: &str) -> String {
@@ -402,12 +448,14 @@ fn variant(long: &str) -> String {
 fn emit(out: &mut String, name: &str, kind: &str, merged: &[(u32, u32, String)]) {
     let mut body = String::new();
     for (first, last, value) in merged {
-        let value = if kind == "Script" {
+        // `variant` is the identity on a name with no underscores in it, which
+        // every `Bidi_Class` and `Joining_Type` abbreviation is, so one rule
+        // serves all four tables and none of them needs an exception.
+        let _ = writeln!(
+            body,
+            "    ({first:#x}, {last:#x}, {kind}::{}),",
             variant(value)
-        } else {
-            value.clone()
-        };
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}, {kind}::{value}),");
+        );
     }
     let _ = writeln!(
         out,

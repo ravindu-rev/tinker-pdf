@@ -118,6 +118,9 @@ pub(crate) struct Props {
     pub(crate) num_comps: u16,
     /// Which features may touch this glyph. See [`Buffer::set_mask`].
     pub(crate) mask: u32,
+    /// Which cluster of a Brahmic script this glyph belongs to, or zero. See
+    /// [`Buffer::set_syllable`].
+    pub(crate) syllable: u16,
     /// The glyph this one hangs off, as a signed distance in buffer
     /// positions, or `None` for a glyph that stands on its own.
     ///
@@ -269,6 +272,100 @@ impl Buffer {
         if let Some(props) = self.props.get_mut(at) {
             props.mask = mask;
         }
+    }
+
+    /// Which Brahmic cluster the glyph at `at` belongs to, or zero for none.
+    ///
+    /// # What this restricts, and what it deliberately does not
+    ///
+    /// A `GSUB` lookup never matches across a syllable boundary once syllables
+    /// are set: two adjacent clusters are two words as far as a conjunct-
+    /// forming rule is concerned, and a rule that reached across one would
+    /// build a conjunct out of the end of one syllable and the start of the
+    /// next. The Universal Shaping Engine turns this on for every feature it
+    /// asks for, which is why it is a property of the buffer here rather than
+    /// a flag on each lookup.
+    ///
+    /// **`GPOS` is not restricted by it**, and that is the specification's own
+    /// asymmetry rather than an omission: kerning and mark attachment are
+    /// between neighbours, and two neighbours are frequently in two syllables.
+    ///
+    /// Zero means "no syllable" and imposes nothing, so a run that never calls
+    /// this — every Latin, Arabic and Han run — behaves exactly as it did.
+    pub fn set_syllable(&mut self, at: usize, syllable: u16) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.syllable = syllable;
+        }
+    }
+
+    /// The syllable number of the glyph at `at`, or `None` past the end.
+    pub(crate) fn props_syllable(&self, at: usize) -> Option<u16> {
+        self.props.get(at).map(|props| props.syllable)
+    }
+
+    /// Rearranges `range` so that its *n*th glyph is the one `order` names.
+    ///
+    /// Reordering is the one editing operation that would break
+    /// [`ShapedGlyph::cluster`]'s monotonicity, so it merges the range's
+    /// clusters as it goes: every glyph in the range comes out carrying the
+    /// smallest of them. That is the right answer as well as the convenient
+    /// one — after a pre-base vowel has been moved in front of its consonant,
+    /// no glyph of the cluster stands for one character any more, and the
+    /// cluster they share is exactly the statement that the whole syllable
+    /// stands for the whole of its text.
+    pub(crate) fn reorder(&mut self, range: core::ops::Range<usize>, order: &[usize]) {
+        if range.end > self.glyphs.len() || range.len() != order.len() {
+            return;
+        }
+        let glyphs: Vec<ShapedGlyph> = order
+            .iter()
+            .filter_map(|at| self.glyphs.get(range.start.saturating_add(*at)).copied())
+            .collect();
+        let props: Vec<Props> = order
+            .iter()
+            .filter_map(|at| self.props.get(range.start.saturating_add(*at)).copied())
+            .collect();
+        if glyphs.len() != range.len() || props.len() != range.len() {
+            return;
+        }
+        let cluster = glyphs.iter().map(|glyph| glyph.cluster).min().unwrap_or(0);
+        for (slot, mut glyph) in range.clone().zip(glyphs) {
+            glyph.cluster = cluster;
+            if let Some(existing) = self.glyphs.get_mut(slot) {
+                *existing = glyph;
+            }
+        }
+        for (slot, props) in range.zip(props) {
+            if let Some(existing) = self.props.get_mut(slot) {
+                *existing = props;
+            }
+        }
+    }
+
+    /// The half-open ranges of glyphs sharing one non-zero syllable number.
+    ///
+    /// Read after substitution has changed the buffer's length, so it is
+    /// computed rather than remembered.
+    pub(crate) fn syllable_ranges(&self) -> Vec<core::ops::Range<usize>> {
+        let mut out: Vec<core::ops::Range<usize>> = Vec::new();
+        for (at, props) in self.props.iter().enumerate() {
+            if props.syllable == 0 {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last)
+                    if last.end == at
+                        && self
+                            .props
+                            .get(last.start)
+                            .is_some_and(|first| first.syllable == props.syllable) =>
+                {
+                    last.end = at.saturating_add(1);
+                }
+                _ => out.push(at..at.saturating_add(1)),
+            }
+        }
+        out
     }
 
     /// Which way the run is set.

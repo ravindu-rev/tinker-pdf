@@ -83,6 +83,14 @@ pub(crate) struct Skipper<'a> {
     /// turned on for, while its input is the sequence the feature is being
     /// applied to. [`Skipper::over_context`] is the second reading.
     mask: u32,
+    /// The Brahmic cluster this application started in, or `None` where the
+    /// run has no clusters.
+    ///
+    /// A `GSUB` rule may not match outside the syllable it started in; see
+    /// [`crate::buffer::Buffer::set_syllable`] for why, and why `GPOS` is not
+    /// restricted the same way. Like [`Skipper::mask`] it is checked on a
+    /// rule's input and lifted over its context, for the same reason.
+    syllable: Option<u16>,
 }
 
 impl<'a> Skipper<'a> {
@@ -118,7 +126,11 @@ impl<'a> Skipper<'a> {
     /// under different rules. The lookup flags are kept exactly as they are:
     /// a rule that ignores marks ignores them in its context too.
     const fn over_context(self) -> Self {
-        Self { mask: !0, ..self }
+        Self {
+            mask: !0,
+            syllable: None,
+            ..self
+        }
     }
 
     /// A filter that sees everything but marks.
@@ -133,6 +145,15 @@ impl<'a> Skipper<'a> {
             flags: IGNORE_MARKS,
             mark_set: None,
             mask: !0,
+            syllable: None,
+        }
+    }
+
+    /// The same filter, applying inside one Brahmic cluster.
+    const fn in_syllable(self, syllable: u16) -> Self {
+        Self {
+            syllable: if syllable == 0 { None } else { Some(syllable) },
+            ..self
         }
     }
 
@@ -145,7 +166,12 @@ impl<'a> Skipper<'a> {
     /// stepped over — it ends the match, exactly as a glyph of the wrong index
     /// would.
     fn reaches(&self, buffer: &Buffer, at: usize) -> bool {
-        buffer.props(at).mask & self.mask != 0
+        let props = buffer.props(at);
+        if props.mask & self.mask == 0 {
+            return false;
+        }
+        self.syllable
+            .is_none_or(|syllable| props.syllable == syllable)
     }
 
     /// Whether this lookup steps over the glyph at `at`.
@@ -276,6 +302,17 @@ impl<'a, 'g> Runner<'a, 'g> {
         }
     }
 
+    /// The cluster a lookup starting at `at` is confined to, or zero for none.
+    ///
+    /// `GPOS` is never confined; [`crate::buffer::Buffer::set_syllable`] says
+    /// why the two tables differ here.
+    fn per_syllable(&self, buffer: &Buffer, at: usize) -> u16 {
+        match self.table {
+            Table::Gsub => buffer.props(at).syllable,
+            Table::Gpos => 0,
+        }
+    }
+
     /// The filter lookup `index` sees the buffer through.
     ///
     /// The feature mask comes off the runner rather than being passed in,
@@ -292,6 +329,10 @@ impl<'a, 'g> Runner<'a, 'g> {
             flags: lookup.flags(),
             mark_set,
             mask: self.mask,
+            // Filled in per starting position by `run_forward`, because a
+            // syllable is a property of where a lookup is applied and not of
+            // the lookup.
+            syllable: None,
         }
     }
 
@@ -396,6 +437,10 @@ impl<'a, 'g> Runner<'a, 'g> {
                 at += 1;
                 continue;
             }
+            // The rule matches inside the cluster it started in. In a run with
+            // no clusters — every Latin, Arabic and Han run — this is `None`
+            // and restricts nothing.
+            let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
             let before = buffer.len();
             match self.apply_at(buffer, lookup, index, skipper, at, 0) {
                 // A subtable that neither consumed a glyph nor shortened the
@@ -422,6 +467,7 @@ impl<'a, 'g> Runner<'a, 'g> {
             if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
                 continue;
             }
+            let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
             let _ = self.apply_at(buffer, lookup, index, skipper, at, 0);
         }
     }

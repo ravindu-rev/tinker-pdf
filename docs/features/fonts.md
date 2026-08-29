@@ -278,22 +278,59 @@ Landed so far:
 - **UAX #9.** Level resolution per paragraph, bracket pairs, mirroring, and
   L1/L2 per *line*, as a function the caller applies after breaking — because
   only the caller knows where a line ends.
+- **Cursive joining.** `Joining_Type` from the UCD, the four forms from the
+  Unicode Standard's own rule, and a feature mask per glyph so `init` reaches
+  the first letter of a word and no other. Seven `GSUB` stages instead of one,
+  because a face's `medi` lookup is written expecting `init` not to have run.
+- **The Universal Shaping Engine, in part.** `Indic_Syllabic_Category` and
+  `Indic_Positional_Category`, a syllable per Brahmic cluster, every `GSUB`
+  feature applied inside one syllable and never across two, USE's feature
+  stages, and one reordering pause that moves a pre-base vowel in front of the
+  consonant it was typed after. **Milestone 5's exit criterion is not met**;
+  the table below says by how much.
 
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing, so the claim for a script is exactly as strong as
-the fixture behind it, and the scripts divide in three:
+the fixture behind it, and the scripts divide in five:
 
 | Script | What is behind it |
 |---|---|
 | Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
 | Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
-| Arabic *shaping*, and every Indic and Southeast Asian script | **nothing yet.** Joining forms, `rlig` and cursive attachment are milestone 4; the Universal Shaping Engine is milestone 5. Text in these scripts today is mapped, ligated by whatever `liga` the face carries, and positioned — which is deterministic and plausible and *unverified*, which is the failure mode this table exists to name |
+| Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
+| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **223 are reproduced and 110 are not**. Two of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall |
+| Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts, and no fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
+
+Three things milestone 5 does **not** do, each of which costs cases in the
+table above, named so they are a backlog and not a mystery:
+
+- **Canonical decomposition.** A two-part vowel such as `U+1B40 BALINESE VOWEL
+  SIGN TALING TEDUNG` is `Left_And_Right` — drawn on both sides of its
+  consonant — and its left half can only be moved once the character is
+  decomposed into `U+1B3E` and `U+1B35`. Nothing here decomposes, so the left
+  half stays where it was typed. This is the single largest cause.
+- **The Indic shaper's base-finding.** Kannada, Devanagari and their seven
+  relatives form conjuncts by a different model from USE's, in which `rphf`,
+  `half` and `blwf` apply at *one position* of a syllable rather than to the
+  whole of it. This crate applies them to the syllable, which is why
+  `SHKNDA-2`'s conjuncts do not form.
+- **Dotted circles.** USE inserts one into a cluster that its grammar calls
+  broken. This crate never inserts a glyph the text did not ask for, so a
+  malformed cluster renders as its parts.
 
 Two capabilities are refused rather than absent, and both are in
 `tinker-pdf-font` rather than here: a `cmap` of format 13, and a Macintosh
 `cmap` read in a non-Roman encoding. The corpus has a section for each
 (`CMAP-4`, `CMAP-3`) and `crates/tinker-pdf-shape/tests/text_rendering.rs`
 declines them by name with the fix each one wants.
+
+Two more are refused inside `tinker-pdf-shape`, for ruling 13's reason rather
+than for want of code: **Syriac's Alaph**, which selects `fin2`, `fin3` and
+`med2` in place of `fina` by its `Joining_Group`, and the **topographical
+features of a joining Brahmic script**, which would need the four joining masks
+on a run that computes syllables instead. Neither has a fixture in either
+vendored corpus, so implementing either would be adding behavior nothing here
+could show was right.
 
 ## Refused by name
 

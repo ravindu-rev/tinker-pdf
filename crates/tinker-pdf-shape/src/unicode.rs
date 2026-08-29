@@ -140,6 +140,147 @@ pub enum JoiningType {
     U,
 }
 
+/// `Indic_Syllabic_Category`: what a character *is*, in a Brahmic script.
+///
+/// The names are the UCD's own, minus their underscores. The Universal Shaping
+/// Engine's cluster model is written in terms of this and
+/// [`IndicPositional`] together, and neither is enough alone: this one
+/// separates a dependent vowel from a virama from a consonant, and the other
+/// says which side of the consonant the vowel is drawn on.
+///
+/// `Other` is the `@missing` value and covers every character outside the
+/// Brahmic and Southeast Asian blocks — which is almost all of Unicode, and
+/// why [`indic_syllabic`] is a sparse table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IndicSyllabic {
+    /// `Avagraha`.
+    Avagraha,
+    /// `Bindu`: a nasalisation mark, which may sit before the base.
+    Bindu,
+    /// `Brahmi_Joining_Number`.
+    BrahmiJoiningNumber,
+    /// `Cantillation_Mark`.
+    CantillationMark,
+    /// `Consonant`: the ordinary base of a syllable.
+    Consonant,
+    /// `Consonant_Dead`.
+    ConsonantDead,
+    /// `Consonant_Final`.
+    ConsonantFinal,
+    /// `Consonant_Head_Letter`.
+    ConsonantHeadLetter,
+    /// `Consonant_Initial_Postfixed`.
+    ConsonantInitialPostfixed,
+    /// `Consonant_Killer`.
+    ConsonantKiller,
+    /// `Consonant_Medial`.
+    ConsonantMedial,
+    /// `Consonant_Placeholder`: dotted circle and its relatives, which stand
+    /// in for a base where a cluster has none.
+    ConsonantPlaceholder,
+    /// `Consonant_Preceding_Repha`.
+    ConsonantPrecedingRepha,
+    /// `Consonant_Prefixed`.
+    ConsonantPrefixed,
+    /// `Consonant_Subjoined`.
+    ConsonantSubjoined,
+    /// `Consonant_Succeeding_Repha`.
+    ConsonantSucceedingRepha,
+    /// `Consonant_With_Stacker`.
+    ConsonantWithStacker,
+    /// `Gemination_Mark`.
+    GeminationMark,
+    /// `Invisible_Stacker`: a virama that is never drawn, such as Tai Tham's
+    /// sakot.
+    InvisibleStacker,
+    /// `Joiner`: `ZWJ`.
+    Joiner,
+    /// `Modifying_Letter`.
+    ModifyingLetter,
+    /// `Non_Joiner`: `ZWNJ`.
+    NonJoiner,
+    /// `Nukta`.
+    Nukta,
+    /// `Number`.
+    Number,
+    /// `Number_Joiner`.
+    NumberJoiner,
+    /// The `@missing` value: not a Brahmic character at all.
+    Other,
+    /// `Pure_Killer`.
+    PureKiller,
+    /// `Register_Shifter`.
+    RegisterShifter,
+    /// `Reordering_Killer`.
+    ReorderingKiller,
+    /// `Syllable_Modifier`.
+    SyllableModifier,
+    /// `Tone_Letter`.
+    ToneLetter,
+    /// `Tone_Mark`.
+    ToneMark,
+    /// `Virama`: the consonant-killer that stacks the next consonant under
+    /// this one.
+    Virama,
+    /// `Visarga`.
+    Visarga,
+    /// `Vowel`.
+    Vowel,
+    /// `Vowel_Dependent`: a matra, which hangs off a consonant and may be
+    /// drawn on any side of it — including *before* it, which is the whole
+    /// reason the shaper reorders.
+    VowelDependent,
+    /// `Vowel_Independent`.
+    VowelIndependent,
+}
+
+/// `Indic_Positional_Category`: which side of its base a mark is drawn on.
+///
+/// The `@missing` value is `Not_Applicable`, which is every character that is
+/// not a dependent mark.
+///
+/// [`IndicPositional::Left`] is the one that costs work: a mark drawn to the
+/// left of its consonant is *typed* after it and *drawn* before it, so the
+/// shaper has to move it. [`IndicPositional::VisualOrderLeft`] is the opposite
+/// case and is the reason the two are different values — those characters are
+/// already stored in the order they are drawn, and moving one would be a bug.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IndicPositional {
+    /// `Bottom`.
+    Bottom,
+    /// `Bottom_And_Left`.
+    BottomAndLeft,
+    /// `Bottom_And_Right`.
+    BottomAndRight,
+    /// `Left`: drawn before the base, typed after it.
+    Left,
+    /// `Left_And_Right`.
+    LeftAndRight,
+    /// The `@missing` value.
+    NotApplicable,
+    /// `Overstruck`.
+    Overstruck,
+    /// `Right`.
+    Right,
+    /// `Top`.
+    Top,
+    /// `Top_And_Bottom`.
+    TopAndBottom,
+    /// `Top_And_Bottom_And_Left`.
+    TopAndBottomAndLeft,
+    /// `Top_And_Bottom_And_Right`.
+    TopAndBottomAndRight,
+    /// `Top_And_Left`.
+    TopAndLeft,
+    /// `Top_And_Left_And_Right`.
+    TopAndLeftAndRight,
+    /// `Top_And_Right`.
+    TopAndRight,
+    /// `Visual_Order_Left`: drawn before the base **and already typed there**,
+    /// so nothing reorders it.
+    VisualOrderLeft,
+}
+
 /// UAX #24's `Script`, at Unicode 17.0's 175 values.
 ///
 /// `Katakana_Or_Hiragana` is deliberately absent: it is a union value that
@@ -701,6 +842,25 @@ pub fn script(c: char) -> Script {
 #[must_use]
 pub fn joining_type(c: char) -> JoiningType {
     lookup(JOINING, c as u32, JoiningType::U)
+}
+
+/// A character's `Indic_Syllabic_Category`.
+///
+/// [`IndicSyllabic::Other`] — the `@missing` value — for everything the
+/// vendored file does not list, which is every character outside the Brahmic
+/// and Southeast Asian blocks.
+#[must_use]
+pub fn indic_syllabic(c: char) -> IndicSyllabic {
+    lookup(INDIC_SYLLABIC, c as u32, IndicSyllabic::Other)
+}
+
+/// A character's `Indic_Positional_Category`.
+///
+/// [`IndicPositional::NotApplicable`] — the `@missing` value — for everything
+/// that is not a dependent mark.
+#[must_use]
+pub fn indic_positional(c: char) -> IndicPositional {
+    lookup(INDIC_POSITIONAL, c as u32, IndicPositional::NotApplicable)
 }
 
 #[cfg(test)]

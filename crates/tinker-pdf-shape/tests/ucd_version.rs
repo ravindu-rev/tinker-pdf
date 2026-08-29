@@ -196,6 +196,8 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "BidiTest.txt",
             "DerivedBidiClass.txt",
             "DerivedJoiningType.txt",
+            "IndicPositionalCategory.txt",
+            "IndicSyllabicCategory.txt",
             "LICENSE.txt",
             "PropertyValueAliases.txt",
             "Scripts.txt",

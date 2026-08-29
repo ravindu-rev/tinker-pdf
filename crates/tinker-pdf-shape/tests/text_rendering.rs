@@ -33,12 +33,23 @@
 //!
 //! # What runs, and what does not
 //!
-//! `docs/design/shaping.md`'s milestone 2 is graded on the CMAP, GSUB and GPOS
-//! sections and milestone 4 on the Arabic-script ones, of which this corpus
-//! has exactly one: SHARAN-1, six words of Urdu set in Nasta‘līq. Ten of the
-//! thirteen sections run. The three that do not are declined **by name and
-//! with their reason**, in [`the_sections_this_milestone_declines`], because a
-//! section that quietly did not run reads exactly like a section that passed.
+//! Four milestones of `docs/design/shaping.md` are graded here, and they do
+//! **not** all pass:
+//!
+//! - milestone 2 on the CMAP, GSUB and GPOS sections;
+//! - milestone 4 on the Arabic-script ones, of which this corpus has exactly
+//!   one — SHARAN-1, six words of Urdu set in Nasta‘līq;
+//! - milestone 5 on the sixteen Brahmic ones, SHBALI, SHKNDA and SHLANA.
+//!
+//! Twenty-six of the twenty-nine sections run; the three that do not are
+//! declined **by name and with their reason** in
+//! [`the_sections_this_milestone_declines`], because a section that quietly
+//! did not run reads exactly like a section that passed. Of the twenty-six,
+//! eleven reproduce every case and fifteen do not. Which is which, and how
+//! many cases each one gets, is [`PASSING`] — **read that before believing any
+//! other number in this file**, and
+//! [`every_section_this_crate_claims_is_whole`] is what stops the two claims
+//! blurring into each other.
 //!
 //! SHARAN-1 is the only section whose direction is not left to right, and it
 //! is therefore the only one that exercises [`shaped`]'s reordering — and the
@@ -66,7 +77,7 @@ use tinker_pdf_shape::shape::{itemize, Shaper};
 /// every number in a fixture is in.
 const PPEM: i32 = 1000;
 
-/// The thirteen sections of the corpus this crate is graded on, and what
+/// The twenty-nine sections of the corpus this crate is graded on, and what
 /// each one is for.
 const SECTIONS: &[(&str, &str)] = &[
     ("CMAP-1", "Ideographic Variation Sequences"),
@@ -85,6 +96,22 @@ const SECTIONS: &[(&str, &str)] = &[
     ("GPOS-4", "Mark-to-Mark Attachment for Stacked Accents"),
     ("GPOS-5", "Glyph Positioning for Variable Fonts"),
     ("SHARAN-1", "Nasta\u{2018}l\u{12B}q"),
+    ("SHBALI-1", "Balinese"),
+    ("SHBALI-2", "Balinese"),
+    ("SHBALI-3", "Balinese"),
+    ("SHKNDA-1", "Kannada"),
+    ("SHKNDA-2", "Kannada"),
+    ("SHKNDA-3", "Kannada"),
+    ("SHLANA-1", "Tham"),
+    ("SHLANA-2", "Tham"),
+    ("SHLANA-3", "Tham"),
+    ("SHLANA-4", "Tham"),
+    ("SHLANA-5", "Tham"),
+    ("SHLANA-6", "Tham"),
+    ("SHLANA-7", "Tham"),
+    ("SHLANA-8", "Tham"),
+    ("SHLANA-9", "Tham"),
+    ("SHLANA-10", "Tham"),
 ];
 
 /// The sections this crate does not run, each with the reason, and each
@@ -136,6 +163,22 @@ const EXPECTED: &[(&str, usize, usize)] = &[
     ("GSUB-1", 1, 1),
     ("GSUB-2", 11, 6),
     ("SHARAN-1", 6, 6),
+    ("SHBALI-1", 22, 22),
+    ("SHBALI-2", 12, 12),
+    ("SHBALI-3", 9, 9),
+    ("SHKNDA-1", 34, 34),
+    ("SHKNDA-2", 16, 16),
+    ("SHKNDA-3", 31, 31),
+    ("SHLANA-1", 52, 41),
+    ("SHLANA-10", 47, 45),
+    ("SHLANA-2", 37, 35),
+    ("SHLANA-3", 13, 12),
+    ("SHLANA-4", 3, 2),
+    ("SHLANA-5", 13, 13),
+    ("SHLANA-6", 7, 7),
+    ("SHLANA-7", 18, 18),
+    ("SHLANA-8", 13, 12),
+    ("SHLANA-9", 6, 3),
 ];
 
 /// One `<td class="expected">` of a fixture.
@@ -491,7 +534,7 @@ fn the_corpus_is_the_one_that_was_vendored() {
             "{section}.html does not look like {title}"
         );
     }
-    assert_eq!(SECTIONS.len(), 13, "the corpus changed size");
+    assert_eq!(SECTIONS.len(), 29, "the corpus changed size");
 }
 
 /// The expected glyph *names* this repository cannot turn into indices, by
@@ -537,11 +580,85 @@ const UNRESOLVABLE: &[(&str, &str)] = &[("GPOS-1/15", "aacute")];
 /// failure. What can no longer be claimed is that every number matches to the
 /// unit, and that is stated here rather than absorbed into a tolerance nobody
 /// counts.
-const WITHIN_TOLERANCE: &[(&str, usize, char, i32)] =
-    &[("SHARAN-1/5", 6, 'x', -1), ("SHARAN-1/6", 6, 'y', -1)];
+const WITHIN_TOLERANCE: &[(&str, usize, char, i32)] = &[
+    ("SHARAN-1/5", 6, 'x', -1),
+    ("SHARAN-1/6", 6, 'y', -1),
+    ("SHLANA-6/6", 5, 'x', -1),
+];
 
 /// The tolerance `check.py` applies to every comparison it makes.
 const MAX_DELTA: i32 = 1;
+
+/// How many of each section's cases this crate reproduces.
+///
+/// # Read this table before believing anything else in this file
+///
+/// For every section milestones 1 to 4 are graded on, the number here **is**
+/// the section's case count, and [`every_section_this_crate_claims_is_whole`]
+/// asserts that separately so it cannot drift. Those sections pass outright.
+///
+/// The sixteen Brahmic ones do not, and this is where that is said. They are
+/// milestone 5's, whose exit criterion in `docs/design/shaping.md` is *"every
+/// text-rendering-tests USE section passes"* — and it is **not met**. Two of
+/// the sixteen pass whole; the rest do not. Running them anyway, with the
+/// number pinned, is deliberate and is the alternative to two worse options:
+/// declining them, which would hide that most of their cases already pass, and
+/// asserting only that they do not crash, which would let the number fall
+/// silently.
+///
+/// So the number is a ratchet. It may go up, and every increase moves a row
+/// here in the commit that earned it. It may not go down.
+///
+/// # What the shortfall is, and it is one thing more than anything else
+///
+/// **Canonical decomposition.** A two-part vowel such as
+/// `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is `Indic_Positional_Category`
+/// `Left_And_Right` — it is drawn on *both* sides of its consonant — and its
+/// left half only becomes a thing that can be moved once the character is
+/// decomposed into `U+1B3E` (`Left`) and `U+1B35` (`Right`). This crate does
+/// not decompose, so it sees one character that is neither, and the left half
+/// stays where it was typed. Milestone 3's record already named canonical
+/// decomposition as absent; SHBALI-1 is the fixture that makes it cost
+/// something.
+///
+/// The other two are named in `docs/features/fonts.md`: the Indic shaper's
+/// base-finding, which is what forms a Kannada conjunct and is a different
+/// model from USE's, and the positional application of `rphf`, `half` and
+/// `blwf`, which this crate applies to a whole syllable rather than to one
+/// position in it.
+const PASSING: &[(&str, usize)] = &[
+    ("CMAP-1", 4),
+    ("CMAP-2", 2),
+    ("GPOS-1", 19),
+    ("GPOS-2", 3),
+    ("GPOS-3", 4),
+    ("GPOS-4", 4),
+    ("GSUB-1", 1),
+    ("GSUB-2", 11),
+    ("SHARAN-1", 6),
+    ("SHBALI-1", 14),
+    ("SHBALI-2", 5),
+    ("SHBALI-3", 9),
+    ("SHKNDA-1", 31),
+    ("SHKNDA-2", 4),
+    ("SHKNDA-3", 0),
+    ("SHLANA-1", 48),
+    ("SHLANA-2", 26),
+    ("SHLANA-3", 11),
+    ("SHLANA-4", 2),
+    ("SHLANA-5", 12),
+    ("SHLANA-6", 4),
+    ("SHLANA-7", 10),
+    ("SHLANA-8", 11),
+    ("SHLANA-9", 6),
+    ("SHLANA-10", 30),
+];
+
+/// The sections that must pass **whole**, so that milestone 5's partial state
+/// can never be mistaken for milestone 4's complete one.
+const WHOLE: &[&str] = &[
+    "CMAP-1", "CMAP-2", "GPOS-1", "GPOS-2", "GPOS-3", "GPOS-4", "GSUB-1", "GSUB-2", "SHARAN-1",
+];
 
 #[test]
 fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
@@ -574,13 +691,14 @@ fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
         "the set of expected glyph names this repository cannot resolve moved; \
          every one of them is a case comparing positions and not identity"
     );
-    assert_eq!(names, 153, "the number of expected glyphs moved");
+    assert_eq!(names, 1369, "the number of expected glyphs moved");
 }
 
 #[test]
 fn every_runnable_case_produces_what_the_fixture_says() {
     let mut failures: Vec<String> = Vec::new();
     let mut drifted: Vec<(String, usize, char, i32)> = Vec::new();
+    let mut passed: BTreeMap<&str, usize> = BTreeMap::new();
     let mut ran = 0usize;
     for (section, cases) in runnable() {
         for case in &cases {
@@ -608,6 +726,7 @@ fn every_runnable_case_produces_what_the_fixture_says() {
             // identity; every other one compares both. A position is compared
             // within upstream's own tolerance, and every unit of that
             // tolerance actually spent is collected and asserted below.
+            let mut spent: Vec<(String, usize, char, i32)> = Vec::new();
             let agrees = ours.len() == expected.len()
                 && ours
                     .iter()
@@ -616,16 +735,22 @@ fn every_runnable_case_produces_what_the_fixture_says() {
                     .all(|(n, (ours, want))| {
                         let (dx, dy) = (ours.1 - want.1, ours.2 - want.2);
                         if dx != 0 {
-                            drifted.push((case.id.clone(), n, 'x', dx));
+                            spent.push((case.id.clone(), n, 'x', dx));
                         }
                         if dy != 0 {
-                            drifted.push((case.id.clone(), n, 'y', dy));
+                            spent.push((case.id.clone(), n, 'y', dy));
                         }
                         dx.abs() <= MAX_DELTA
                             && dy.abs() <= MAX_DELTA
                             && want.0.is_none_or(|g| g == ours.0)
                     });
-            if !agrees {
+            if agrees {
+                // Only a case that agrees can spend the tolerance. A case that
+                // does not is off by whatever it is off by, and counting that
+                // would turn `WITHIN_TOLERANCE` into a list of failures.
+                drifted.extend(spent);
+                *passed.entry(section).or_insert(0) += 1;
+            } else {
                 let names: Vec<&str> = case.expected.iter().map(|(n, _, _)| n.as_str()).collect();
                 failures.push(format!(
                     "{section} {}: {:?}\n  expected {expected:?} ({names:?})\n  ours     {ours:?}",
@@ -634,13 +759,24 @@ fn every_runnable_case_produces_what_the_fixture_says() {
             }
         }
     }
-    assert!(
-        failures.is_empty(),
-        "{} of {ran} text-rendering-tests cases failed:\n{}",
+    // The number of cases each section reproduces, asserted exactly. See
+    // [`PASSING`]: for every section but the sixteen Brahmic ones this is the
+    // section's whole case count, and for those sixteen it is a ratchet that
+    // may rise and may not fall.
+    let found: Vec<(&str, usize)> = PASSING
+        .iter()
+        .map(|(section, _)| (*section, passed.get(section).copied().unwrap_or(0)))
+        .collect();
+    assert_eq!(
+        found,
+        PASSING.to_vec(),
+        "the number of cases this crate reproduces moved. Up is progress and \
+         the table moves with it; down is a regression and the table is not \
+         the thing to change.\n{} of {ran} cases did not agree:\n{}",
         failures.len(),
         failures.join("\n")
     );
-    assert_eq!(ran, 54, "the number of cases that ran moved");
+    assert_eq!(ran, 387, "the number of cases that ran moved");
     let expected: Vec<(String, usize, char, i32)> = WITHIN_TOLERANCE
         .iter()
         .map(|(id, glyph, axis, by)| ((*id).to_string(), *glyph, *axis, *by))
@@ -649,6 +785,57 @@ fn every_runnable_case_produces_what_the_fixture_says() {
         drifted, expected,
         "the set of coordinates this crate does not reproduce exactly moved; \
          see WITHIN_TOLERANCE for why there are any at all"
+    );
+}
+
+/// The sections that pass outright, and the ones that do not, kept apart.
+///
+/// Milestones 1 to 4 are graded on nine sections and every one of them
+/// reproduces every case. Milestone 5 is graded on sixteen and does not, and
+/// [`PASSING`] is where the shortfall is written down. This test is what stops
+/// the first claim quietly weakening into the second: a section in [`WHOLE`]
+/// that loses a case fails here even if somebody moved its row in `PASSING`.
+#[test]
+fn every_section_this_crate_claims_is_whole() {
+    let cases: BTreeMap<&str, usize> = runnable()
+        .iter()
+        .map(|(section, cases)| (*section, cases.iter().filter(|c| !c.no_crash).count()))
+        .collect();
+    for section in WHOLE {
+        let passing = PASSING
+            .iter()
+            .find(|(name, _)| name == section)
+            .map(|(_, passing)| *passing)
+            .unwrap_or_else(|| panic!("{section} is claimed whole and is not in PASSING"));
+        assert_eq!(
+            Some(&passing),
+            cases.get(section),
+            "{section} is claimed whole and does not reproduce every case"
+        );
+    }
+    let brahmic: Vec<&str> = PASSING
+        .iter()
+        .map(|(section, _)| *section)
+        .filter(|section| !WHOLE.contains(section))
+        .collect();
+    assert_eq!(
+        brahmic.len(),
+        16,
+        "the set of sections milestone 5 is graded on changed: {brahmic:?}"
+    );
+    let whole: usize = brahmic
+        .iter()
+        .filter(|section| {
+            PASSING
+                .iter()
+                .find(|(name, _)| name == *section)
+                .is_some_and(|(_, passing)| cases.get(*section) == Some(passing))
+        })
+        .count();
+    assert_eq!(
+        whole, 2,
+        "the number of Brahmic sections that pass outright moved. \
+         `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );
 }
 
@@ -676,7 +863,7 @@ fn the_sections_this_milestone_declines() {
         .iter()
         .map(|(_, cases)| cases.iter().filter(|c| c.no_crash).count())
         .sum();
-    assert_eq!(ran + crash + skipped, 84, "the corpus changed size");
+    assert_eq!(ran + crash + skipped, 417, "the corpus changed size");
     assert_eq!(crash, 1);
 }
 
