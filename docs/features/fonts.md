@@ -330,13 +330,21 @@ Landed so far:
   fingerprint, and a page-level assertion that the line was measured the way
   it is drawn. `epub_reftest.rs` gains the EPUB tier's right-to-left pair.
 
-  One limit, named rather than implied:
+- **Rule L2 is applied at two levels, not one.** It was applied only inside a
+  face segment, so a right-to-left line whose characters need two faces was
+  drawn as two left-to-right pieces — every glyph the right glyph, and the
+  line read backwards. The segments of a right-to-left run are now drawn in
+  reverse and each keeps the glyph order its own shaping gave it.
+  `epub_shaped.rs` carries a two-face fixture for it and a left-to-right
+  control beside it, because a build that reversed every multi-face run would
+  pass the first and set every English sentence with a fallback character in
+  it backwards.
 
-  - **Reordering is per face segment.** A right-to-left line whose characters
-    need two faces is drawn as two left-to-right pieces, because fallback cuts
-    the run before UAX #9's rule L2 is applied to it. Closing it means
-    resolving levels above the segmentation, which `flow.rs` does not do at
-    all today.
+  One limit remains, named rather than implied: **the unit is the `TextRun`
+  and not the visual line.** `flow.rs` breaks lines over logical text and
+  resolves no levels, so a right-to-left line made of two styled spans is two
+  runs at two `x`s the painter did not choose. Closing that means resolving
+  levels above the line breaker, which is a change to the layout crate.
 
 - **`GPOS` offsets reach the page.** They did not, and it was a **silent**
   defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark

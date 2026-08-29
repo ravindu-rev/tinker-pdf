@@ -1164,7 +1164,11 @@ fn draw_run(
     // face's stretch is shaped whole; a standard-14 one keeps the
     // character-at-a-time path, because a simple font addresses a code and
     // there is no sfnt in this process to shape against.
-    for (range, chosen) in face_runs(fonts.faces(), &font, &run.text) {
+    let mut segments = face_runs(fonts.faces(), &font, &run.text);
+    if right_to_left(&run.text) {
+        segments.reverse();
+    }
+    for (range, chosen) in segments {
         let slice = run.text.get(range).unwrap_or("");
         match chosen {
             Chosen::Embedded(index) => {
@@ -1182,6 +1186,36 @@ fn draw_run(
 
     decorate(page, run, frame, x);
     refused
+}
+
+/// Whether a run reads right to left, by UAX #9's own P2 and P3 over its text.
+///
+/// # Why the question is asked here at all
+///
+/// [`face_runs`] resolves fallback **before** shaping, because a glyph index
+/// means nothing outside the face it came from — so a right-to-left line whose
+/// characters need two faces is two segments, and rule L2 has already been
+/// applied *inside* each of them by the time either is drawn. Reversing the
+/// glyphs of a segment orders the segment; it does not order the segments, and
+/// a build that stopped there drew a two-face Arabic line as two left-to-right
+/// pieces, each internally correct.
+///
+/// So L2 is applied at two levels: the segments of a right-to-left run are
+/// drawn in reverse, and each keeps the glyph order its own shaping gave it.
+/// That is the same two-step [`shaped_glyphs`] performs over one segment's
+/// bidi runs, one level out.
+///
+/// **The unit is the `TextRun` and not the visual line**, and that is a real
+/// limit rather than a simplification. `flow.rs` breaks lines over logical
+/// text and resolves no levels, so a line made of two styled spans is two
+/// `TextRun`s at two `x`s this file did not choose; reordering across them
+/// would mean moving boxes layout placed. What this closes is the case
+/// fallback creates — one run, one style, several faces — which is the case
+/// `docs/features/fonts.md` named.
+fn right_to_left(text: &str) -> bool {
+    Paragraph::new(text, BaseDirection::Auto)
+        .base_level()
+        .is_rtl()
 }
 
 /// One embedded face's stretch: shaped, ordered, positioned, and drawn as text

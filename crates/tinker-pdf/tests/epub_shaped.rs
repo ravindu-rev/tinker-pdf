@@ -20,30 +20,42 @@
 //! an embedded face's segment is shaped whole: `GSUB` runs, UAX #9's rule L2
 //! orders the runs, and a right-to-left run's glyphs are walked backwards.
 //!
-//! # The limit this file does not hide
+//! # Two limits that closed, and each needed a fixture that did not exist
 //!
-//! **Reordering is per face segment.** Fallback is resolved before shaping,
-//! because a glyph index means nothing outside its own face, so a
-//! right-to-left line whose characters need two faces is drawn in two
-//! left-to-right pieces. The fixture face below covers its space for exactly
-//! this reason, and `docs/features/fonts.md` records the limit.
-//!
-//! # And the one that closed
-//!
-//! `GPOS` offsets were not carried: `PageBuilder::glyphs` writes one hex
+//! **`GPOS` offsets were not carried.** `PageBuilder::glyphs` writes one hex
 //! string at one origin, so a mark sat where its advance put it rather than
 //! where its anchor did — a vowelled Arabic or Devanagari book rendered wrong
 //! while every test here passed. Drawing goes through
-//! `DocumentBuilder::glyph_run` now, and
+//! `DocumentBuilder::glyph_run` now, which states each glyph's own position;
 //! [`a_positioned_glyph_is_drawn_where_its_anchor_puts_it`] is the
-//! demonstration. It needed a **new face**: the one above has no marks, so the
-//! fingerprint below did not move when the defect was fixed, which is exactly
-//! how a silent defect stays silent.
+//! demonstration. It needed a **new face**, because the Arabic one below has no
+//! marks: the page a build that dropped every offset drew was byte for byte the
+//! page a build that carried them drew, and [`SHAPED_PAGE`] did not move when
+//! the defect was fixed.
+//!
+//! **Reordering was per face segment.** Fallback is resolved before shaping,
+//! because a glyph index means nothing outside its own face, so a right-to-left
+//! line whose characters need two faces was drawn as two left-to-right pieces,
+//! each internally correct. The Arabic face below covers its own space **for
+//! exactly that reason** — the fixture was arranged around the limit rather
+//! than testing past it — so closing it needed a two-face fixture as well:
+//! [`a_right_to_left_line_in_two_faces_is_drawn_right_to_left`], with a
+//! left-to-right control beside it.
+//!
+//! # The limit that remains
+//!
+//! **The unit of reordering is the `TextRun`, not the visual line.** `flow.rs`
+//! breaks lines over logical text and resolves no levels, so a right-to-left
+//! line made of two styled spans is two runs at two `x`s this repository's
+//! painter did not choose. Reordering across them means resolving levels above
+//! the line breaker, which is a change to the layout crate.
 
 mod epub_support;
 
-use epub_support::book::one_face_book;
-use epub_support::typeface::{shown_glyphs, text_objects, Face, Form, Joining, Placement};
+use epub_support::book::{faces_book, one_face_book};
+use epub_support::typeface::{
+    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Placement,
+};
 use tinker_pdf::{Document, OpenOptions, RenderOptions};
 
 /// Beh, hah and meem: three Arabic letters that join on both sides, and a
@@ -190,6 +202,125 @@ fn the_arabic_book_paginates_and_its_text_extracts() {
             "{ch:?} did not survive into the page's text: {text:?}"
         );
     }
+}
+
+// ---- a right-to-left line in two faces --------------------------------------
+
+/// What the first face of the two-face pair covers: beh and hah.
+const FIRST_HALF: &str = "\u{628}\u{62D}";
+
+/// And the second: meem and noon. **Disjoint from [`FIRST_HALF`] on purpose** —
+/// `css-fonts-4` §5.3 walks the family list per character and takes the first
+/// family that covers it, so a letter in both would never reach the second
+/// face and the line would be one segment again.
+const SECOND_HALF: &str = "\u{645}\u{646}";
+
+/// Four Arabic letters, the first two in one face and the last two in another.
+const SPLIT_LINE: &str = "\u{628}\u{62D}\u{645}\u{646}";
+
+/// The same four letters' Latin stand-in, for the control: one run, two faces,
+/// and a direction that must **not** reorder anything.
+const LTR_LINE: &str = "abcd";
+
+/// A book set in two faces, listed in that order.
+fn two_face_book(first: &str, second: &str, body: &str) -> Vec<u8> {
+    let alpha = Face::new("Fixture Alpha", first)
+        .with_joining(Joining { script: *b"arab" })
+        .build();
+    let beta = Face::new("Fixture Beta", second)
+        .with_joining(Joining { script: *b"arab" })
+        .build();
+    faces_book(
+        &[("Fixture Alpha", &alpha), ("Fixture Beta", &beta)],
+        24,
+        body,
+    )
+}
+
+/// **A right-to-left line needing two faces is drawn right to left.**
+///
+/// The limit this file used to name, closed. Font fallback is resolved before
+/// shaping — a glyph index means nothing outside its own face — so a line whose
+/// characters need two faces is two segments, and UAX #9's rule L2 had been
+/// applied *inside* each of them and to neither of them. Each piece was
+/// internally correct and the line read backwards, which is the shape of defect
+/// that survives inspection: every glyph is the right glyph.
+///
+/// The Arabic fixture above hid it, and said so: its face covers its own space
+/// **precisely so that the line stays one segment**. That is a test arranged
+/// around a limit rather than one that tests past it, and this is the pair that
+/// tests past it.
+///
+/// The claim is on the **order of the objects and their origins**, not on the
+/// glyphs: each face numbers its own from 1, so the two segments draw the same
+/// indices and only where they sit says which came first.
+#[test]
+fn a_right_to_left_line_in_two_faces_is_drawn_right_to_left() {
+    let doc = Document::open(two_face_book(FIRST_HALF, SECOND_HALF, SPLIT_LINE)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(
+        objects.len(),
+        2,
+        "two faces are two text objects: {content}"
+    );
+    assert_eq!(
+        (objects[0].0.as_str(), objects[1].0.as_str()),
+        ("Bf1", "Bf0"),
+        "the two faces were drawn in logical order, so the line reads \
+         backwards: {content}"
+    );
+    let (first, _) = origin_of(&objects[0].1);
+    let (second, _) = origin_of(&objects[1].1);
+    assert!(
+        first < second,
+        "the second face's letters are not to the left of the first's: {content}"
+    );
+
+    // **And the extracted order is the visual one**, pinned here because it is
+    // a surprise worth having written down rather than met.
+    //
+    // A shaped right-to-left run is drawn in visual order — that is what makes
+    // the page right — and `TextPage` reports characters in the order the
+    // content stream showed them, with `TextLine::rtl` a *report* rather than
+    // an instruction. So a right-to-left line extracts reversed. It already
+    // did for a one-face line; the `LINE` above hides it only because those
+    // six letters are a palindrome. What this commit changes is that the
+    // two-face case now agrees with the one-face case, where before it was in
+    // neither order.
+    //
+    // Recorded and not fixed: reversing a line by `TextLine::rtl` is a
+    // decision about every PDF this engine reads and not about this book.
+    let extracted = doc.page(0).expect("a page").text().plain_text();
+    let reversed: String = SPLIT_LINE.chars().rev().collect();
+    assert_eq!(
+        extracted.trim_end(),
+        reversed,
+        "the extracted order is neither logical nor visual"
+    );
+}
+
+/// **And a left-to-right line in two faces is not.**
+///
+/// The control, and the pair proves nothing without it: a build that reversed
+/// every multi-face run would pass the test above and set every English
+/// sentence whose accented letter fell to a second face backwards. The
+/// direction has to be read from the text.
+#[test]
+fn a_left_to_right_line_in_two_faces_keeps_its_order() {
+    let doc = Document::open(two_face_book("ab", "cd", LTR_LINE)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(
+        objects.len(),
+        2,
+        "two faces are two text objects: {content}"
+    );
+    assert_eq!(
+        (objects[0].0.as_str(), objects[1].0.as_str()),
+        ("Bf0", "Bf1"),
+        "a left-to-right line was reordered: {content}"
+    );
 }
 
 // ---- GPOS reaches the page --------------------------------------------------
