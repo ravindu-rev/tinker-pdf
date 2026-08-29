@@ -16,13 +16,22 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **29 cargo-fuzz targets**
-cover every input format: `ascii_filters`, `ccitt`, `cff`, `cmap`,
-`content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
+Ruling 1 makes a fuzz crash a release blocker. **30 cargo-fuzz targets**
+cover every input format: `ascii_filters`, `ccitt`, `cff`, `cff_subset`,
+`cmap`, `content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
 `crypt_ciphers`, `css`, `form_script`, `icc_profile`, `inflate`, `jbig2`,
 `jpeg`, `jpx`, `layout`, `lzw`, `pki_cms`, `pki_der`, `png`, `render_page`,
 `sfnt`, `shape`, `signatures`, `truetype`, `type1`, `xml`, `zip_archive` —
-each landing in the same PR as its parser. Short runs on
+each landing in the same PR as its parser.
+
+`cff_subset` is the one target that fuzzes a **writer**. Its assertion is
+not "it did not panic": whatever the subsetter emits must parse with this
+repository's own `Cff::parse`, every glyph asked for must still be at the
+id it was asked for, and subsetting twice must produce the same bytes. A
+subsetter that renumbered subroutine calls wrongly around the 107 / 1131 /
+32768 bias thresholds produces a *valid* font that draws the wrong glyphs,
+and no other check in the pipeline would see it — the embed path takes the
+bytes and writes them into a `/FontFile3`. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
 longer. Eleven of the corpora are written by an `#[ignore]`d test in the
 crate that owns the fixtures, so the seeds and the fixtures cannot drift:

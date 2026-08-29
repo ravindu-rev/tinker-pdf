@@ -108,14 +108,35 @@ symbolic fonts unless `substituting_symbolic()` was called, because a text
 face standing in for a symbol font draws confidently wrong glyphs.
 
 **Writing** (9.9). `DocumentBuilder::add_embedded_font` and `add_cid_font`
-embed TrueType programs with widths taken from the program's own `hmtx`, and
+embed a TrueType, an `OpenType/CFF` face or a bare CFF program, with widths
+taken from the program's own `hmtx` — or, for a bare CFF, from its charstrings
+through its `FontMatrix`, which need not be the usual 1/1000. Each gets the
+descriptor entry 9.9 Table 126 gives it: `/FontFile2`, `/FontFile3
+/Subtype /OpenType`, or `/FontFile3 /Subtype /Type1C` (`/CIDFontType0C` under a
+composite font).
+
 `set_subset_fonts` (on by default) cuts each program down to the glyphs the
-pages drew: `glyf`/`loca` rebuilt, composite closures followed, glyph
-identifiers never renumbered (a dropped glyph becomes a zero-length `loca`
-entry, so `/Widths`, `/W`, `cmap` and `/CIDToGIDMap` all stay right), hinting
-tables kept for readers that interpret them, and the 9.6.4 six-letter tag
-prefixed to `/BaseFont`. A subset that cannot be built embeds the whole face
-instead — larger and correct (ruling 2).
+pages drew, and **glyph identifiers are never renumbered** — which is what
+lets `/Widths`, `/W`, `cmap`, `/CIDToGIDMap` and `/ToUnicode` stay as written.
+For TrueType that means `glyf`/`loca` rebuilt with composite closures followed
+and a dropped glyph left as a zero-length `loca` entry. For CFF it means the
+CharStrings INDEX, both subroutine INDEXes, the Private DICTs and the Top DICT
+rebuilt together, with a dropped glyph left as a single `endchar`; the charset,
+the encoding, the String INDEX and `FDSelect` are copied through byte for byte,
+because nothing moved and re-encoding them would only be a chance to map a
+glyph to the wrong name. A `callsubr` operand is recomputed from the new index
+and the **new bias** rather than adjusted, since subsetting can move an INDEX
+across the 1 240 and 33 900 thresholds. A global subroutine reached from two
+Font DICTs is written twice, because the local subroutines it calls are the
+caller's.
+
+The 9.6.4 six-letter tag is prefixed to `/BaseFont`. A face that is not cut
+down is embedded whole — larger and correct (ruling 2) — and
+`DocumentBuilder::finish_reporting` returns an `EmbeddedWhole` naming the
+resource and one of three `SubsetRefusal` reasons: the font claimed none of the
+text drawn with it, the program could not be rebuilt, or the rebuild came out
+no smaller than the face. That last one is common: 212 of the fetched corpora's
+441 CFF faces are already producer-made subsets with nothing left to remove.
 
 ## API
 
@@ -237,12 +258,51 @@ to hand them over, and none of them should carry 4.2 MB of ours. `FontProvider`
 remains the seam either way. Provenance and the OFL text are in
 [THIRDPARTY.md](../../THIRDPARTY.md).
 
+## Shaping, and what it is allowed to claim
+
+`crates/tinker-pdf-shape` is the eleventh leaf: face bytes and text in,
+positioned glyph runs out, in integer font design units, with no PDF or CSS
+vocabulary on its API. Nothing in `tinker-pdf-render` calls it and nothing ever
+will — see the row above. Its design and its eight milestones are
+[design/shaping.md](../design/shaping.md).
+
+Landed so far:
+
+- **OpenType Layout.** `GDEF`, `GSUB` types 1–8 and `GPOS` types 1–9,
+  coverage and class definitions, extension and chaining-context lookups.
+- **The default shaper.** `cmap` through `tinker_pdf_font::Sfnt`, plus `cmap`
+  format 14 read here because a variation selector is consumed by a shaper and
+  never reaches a renderer; script itemization; `locl`/`ccmp`/`rlig`/`liga`/
+  `clig`/`calt`, then `kern`/`dist`/`curs`/`mark`/`mkmk`; a cluster on every
+  glyph that is a byte offset into the caller's own text.
+- **UAX #9.** Level resolution per paragraph, bracket pairs, mirroring, and
+  L1/L2 per *line*, as a function the caller applies after breaking — because
+  only the caller knows where a line ends.
+
+**What no shaping engine here adjudicates.** Ruling 13 rules out running
+another shaper and diffing, so the claim for a script is exactly as strong as
+the fixture behind it, and the scripts divide in three:
+
+| Script | What is behind it |
+|---|---|
+| Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
+| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
+| Arabic *shaping*, and every Indic and Southeast Asian script | **nothing yet.** Joining forms, `rlig` and cursive attachment are milestone 4; the Universal Shaping Engine is milestone 5. Text in these scripts today is mapped, ligated by whatever `liga` the face carries, and positioned — which is deterministic and plausible and *unverified*, which is the failure mode this table exists to name |
+
+Two capabilities are refused rather than absent, and both are in
+`tinker-pdf-font` rather than here: a `cmap` of format 13, and a Macintosh
+`cmap` read in a non-Roman encoding. The corpus has a section for each
+(`CMAP-4`, `CMAP-3`) and `crates/tinker-pdf-shape/tests/text_rendering.rs`
+declines them by name with the fix each one wants.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
-| Shaping: GSUB/GPOS, kerning, bidi — advances are per-character from `/Widths`/`/W` | none — layout uses the file's own advances; nothing is dropped, so nothing warns | Long a stated non-goal, since overturned: the roadmap stages a shaping leaf crate | [ROADMAP](../ROADMAP.md) |
-| CFF subsetting on write | `tinker_pdf_font::subset` answers `None`; the whole face is embedded | A CFF subset needs its charstring INDEX rebuilt, and a broken subset renders *almost* right | [ROADMAP](../ROADMAP.md) |
+| Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
+| A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
+| A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
+| A **CID-keyed** CFF under `add_cid_font` | `add_cid_font` returns false | Its charset maps a CID onto a glyph and the two are different numbers; `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make every one of them a CID (9.7.4.2) | this page |
 | Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
@@ -256,6 +316,49 @@ remains the seam either way. Provenance and the OFL text are in
 
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect.
+- `crates/tinker-pdf-font/src/cff_subset/tests.rs` — 21 tests over fonts built
+  byte by byte: local and global subroutine renumbering, a global subroutine
+  reached from two Font DICTs, `hintmask` counting stems a subroutine declared,
+  `seac` components kept, and the four refusals. Two of them cross a **bias
+  threshold**: 1 300 local subroutines cut to one (1 131 → 107), and 34 000 cut
+  to 1 300 (32 768 → 1 131), the second keeping a non-prefix, non-contiguous
+  range so the renumbering is the identity nowhere and every operand form
+  appears on the new side and none on the old. That test pins the whole
+  rewritten charstring against a byte string derived from the renumbering rule
+  rather than read back from the subsetter.
+- `crates/tinker-pdf-cos/tests/cff_subsetting.rs` — the writer end: the 9.6.4
+  tag, the Table 126 descriptor entry for each of the three shapes, `/W` from
+  the original program, and each `SubsetRefusal` reported by name.
+- `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
+  fetched corpora cut to nine glyphs: 297 files, 441 faces (222 CID-keyed, 200
+  bare simple, 19 `OpenType/CFF`), 439 rebuilt and 2 refused, 14.5 MB of font
+  program down to 1.49 MB, and **zero divergences** — every retained glyph's
+  outline, advance and font matrix, every glyph's name, every CID's glyph and
+  every one of the 256 codes identical to the original's.
+- **Counted injection over the CFF subsetter** (`docs/verification.md`'s house
+  practice). Each defect put back, and the assertions that fire. The writer
+  also verifies its own output by outlining every retained glyph, so each row
+  was run twice — with that self-check on and off — to separate what the tests
+  catch from what the writer catches. The counts were the same both ways, so
+  nothing here depends on the self-check:
+
+  | defect reintroduced | unit (21) | writer (9) | census (1) |
+  |---|---|---|---|
+  | none | 0 | 0 | 0 |
+  | the operand is recomputed with the **old** bias | 2 | **0** | 1 |
+  | one global subroutine left out of the rebuilt INDEX | 2 | **0** | 1 |
+  | the operand names the subroutine's **old** index | 7 | 3 | 1 |
+
+  The two zeroes are the finding. The writer's fixtures carry 26 local
+  subroutines and no global ones, so their bias never changes and there is no
+  global INDEX to damage — exactly the "a test that only uses small fonts never
+  crosses a threshold" hole. The two bias-threshold fixtures are the only
+  things in the suite that close it, and the corpus census is the only thing
+  that closes it over fonts nobody here wrote. A third finding came out of the
+  same run: the 33 900 fixture originally kept subroutines 0..1299, a *prefix*
+  of the original numbering that renumbers onto itself, and reintroducing "use
+  the old index" changed nothing there — it now keeps every third subroutine
+  from 20 000 up, and catches that defect too.
 - `crates/tinker-pdf/tests/composite_fonts.rs` — the CID selects glyph and
   advance together; `/CIDToGIDMap` in both forms; `.notdef` plus report for a
   CID the font does not carry.

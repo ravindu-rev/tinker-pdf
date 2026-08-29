@@ -72,6 +72,32 @@ pub struct Bar {
     /// a bar recorded before a relation existed simply has no entry for it,
     /// and a run that adds one is an improvement rather than a refusal.
     pub metamorphic: BTreeMap<String, (u64, u64)>,
+    /// What the structure tree walk reached (ISO 32000-1 14.7), or `None` in a
+    /// bar recorded before the walk existed.
+    ///
+    /// `None` is an improvement rather than a refusal, for the reason an
+    /// absent metamorphic relation is: a bar that predates a measurement
+    /// cannot be regressed against.
+    pub tagged: Option<TaggedBar>,
+}
+
+/// The structure-tree bar for one corpus.
+///
+/// Four counts, compared three ways, and none of them a stored rate — see
+/// [`compare`] for which comparison each takes and why. The counts are over
+/// the corpus, not averaged over its files: a per-file rate averaged is not
+/// the rate over the corpus, and a corpus of mostly-untagged files would
+/// otherwise let one enormous tree carry the figure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaggedBar {
+    /// Files carrying a `/StructTreeRoot` this engine could read.
+    pub files: u64,
+    /// Structure elements reached by the `/K` walk, summed.
+    pub elements: u64,
+    /// Characters a structure element claimed.
+    pub matched: u64,
+    /// Characters carrying an `/MCID` no element on their page claimed.
+    pub orphans: u64,
 }
 
 /// A committed ratchet.
@@ -239,7 +265,7 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
             ));
         } else if !holds(bar.strict_clean, bar.strict_eligible, clean, eligible) {
             out.regressions.push(format!(
-                "{}: {clean}/{eligible} rewrites validate, which is worse than                  the recorded {}/{}",
+                "{}: {clean}/{eligible} rewrites validate, which is worse than the recorded {}/{}",
                 bar.name, bar.strict_clean, bar.strict_eligible
             ));
         } else if u128::from(clean) * u128::from(bar.strict_eligible)
@@ -252,7 +278,7 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
         }
         if !holds(bar.strict_eligible, bar.total, eligible, total) {
             out.regressions.push(format!(
-                "{}: the strict pass ran on {eligible}/{total} files, down from {}/{};                  a smaller denominator is not a better rate",
+                "{}: the strict pass ran on {eligible}/{total} files, down from {}/{}; a smaller denominator is not a better rate",
                 bar.name, bar.strict_eligible, bar.total
             ));
         }
@@ -305,6 +331,74 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                     held_now.get(relation).copied().unwrap_or(0),
                     compared_now.get(relation).copied().unwrap_or(0),
                 ));
+            }
+        }
+
+        // The fifth axis (tagged PDF milestone 4): what the structure tree
+        // walk reached. Three comparisons, because the three counts fail in
+        // three different directions and one of them is not a floor.
+        let now_tagged = corpus.tagged();
+        match bar.tagged {
+            // A first measurement of zero is not an improvement. It is a
+            // corpus with no tagged files in it, or a walk that found none,
+            // and the two are told apart by looking rather than by a word
+            // that says the number went the right way.
+            None if now_tagged.files == 0 => out.notes.push(format!(
+                "{}: no file yielded a structure tree, and there is no recorded bar",
+                bar.name
+            )),
+            None => out.improvements.push(format!(
+                "{}: {} files yield a structure tree with {} elements — new, with no recorded bar",
+                bar.name, now_tagged.files, now_tagged.elements
+            )),
+            Some(before) => {
+                // (1) Files with a tree, as a share of the corpus. This is the
+                // one the seeded regression trips: a walk that stops resolving
+                // `/StructTreeRoot` finds no trees anywhere.
+                if now_tagged.files == 0 && before.files > 0 {
+                    out.regressions.push(format!(
+                        "{}: no file yielded a structure tree at all, against a bar of {}",
+                        bar.name, before.files
+                    ));
+                } else if !holds(before.files, bar.total, now_tagged.files, total) {
+                    out.regressions.push(format!(
+                        "{}: {}/{total} files yield a structure tree, down from {}/{}",
+                        bar.name, now_tagged.files, before.files, bar.total
+                    ));
+                } else if u128::from(now_tagged.files) * u128::from(bar.total)
+                    > u128::from(before.files) * u128::from(total)
+                {
+                    out.improvements.push(format!(
+                        "{}: {}/{total} files yield a structure tree, up from {}/{}",
+                        bar.name, now_tagged.files, before.files, bar.total
+                    ));
+                }
+
+                // (2) Elements per file in the corpus, not per tagged file.
+                // Per tagged file would let a walk that lost the large trees
+                // hold its rate by also losing the small ones.
+                if !holds(before.elements, bar.total, now_tagged.elements, total) {
+                    out.regressions.push(format!(
+                        "{}: the walk reached {} structure elements over {total} files, down from {} over {}",
+                        bar.name, now_tagged.elements, before.elements, bar.total
+                    ));
+                }
+
+                // (3) Orphans are the count that is better small, so the
+                // comparison is on the share of marked characters the tree
+                // *claimed* — matched against matched-plus-orphaned. An
+                // absolute ceiling on orphans would be regressed by reading
+                // more files, which is the opposite of what it is for.
+                let (m, o) = (now_tagged.matched, now_tagged.orphans);
+                if !holds(before.matched, before.matched + before.orphans, m, m + o) {
+                    out.regressions.push(format!(
+                        "{}: the tree claimed {m} of {} marked characters, a smaller share than the recorded {} of {}",
+                        bar.name,
+                        m + o,
+                        before.matched,
+                        before.matched + before.orphans
+                    ));
+                }
             }
         }
     }
@@ -400,6 +494,40 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                  {strict_eligible} eligible of {total}, which cannot be"
             ));
         }
+        let tagged = match entry.get("tagged") {
+            None => None,
+            Some(object) => {
+                let read = |key: &str| -> Result<u64, String> {
+                    object
+                        .get(key)
+                        .and_then(Json::as_u64)
+                        .ok_or_else(|| format!("`{name}`'s `tagged` has no whole-number `{key}`"))
+                };
+                let tagged = TaggedBar {
+                    files: read("files")?,
+                    elements: read("elements")?,
+                    matched: read("matched")?,
+                    orphans: read("orphans")?,
+                };
+                if tagged.files > total {
+                    return Err(format!(
+                        "`{name}` records {} files with a structure tree out of {total}, which cannot be",
+                        tagged.files
+                    ));
+                }
+                // A bar with trees but no elements is what the seeded
+                // regression writes, and it must be refused at the *bar*
+                // rather than only compared against: a committed floor of
+                // zero elements is a floor nothing can fall below.
+                if tagged.files > 0 && tagged.elements == 0 {
+                    return Err(format!(
+                        "`{name}` records {} files with a structure tree and no structure elements at all, which is a floor nothing can fall below",
+                        tagged.files
+                    ));
+                }
+                Some(tagged)
+            }
+        };
         if bars.iter().any(|b: &Bar| b.name == name) {
             return Err(format!("`{name}` appears twice in the ratchet"));
         }
@@ -411,6 +539,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             strict_eligible,
             strict_clean,
             metamorphic,
+            tagged,
         });
     }
     if bars.is_empty() {
@@ -427,7 +556,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
 mod tests {
     use super::*;
     use crate::report::{CorpusReport, Settings};
-    use crate::runner::{FileResult, Outcome};
+    use crate::runner::{FileResult, Outcome, Tagged};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn files(passed: u64, failed: u64, degraded: u64) -> Vec<FileResult> {
@@ -459,6 +588,7 @@ mod tests {
                     kinds: BTreeMap::new(),
                 },
                 metamorphic: BTreeMap::new(),
+                tagged: None,
             });
         }
         out
@@ -490,10 +620,176 @@ mod tests {
                 strict_eligible: total,
                 strict_clean: total,
                 metamorphic: BTreeMap::new(),
+                tagged: None,
             }],
             complete: true,
             fonts: "none".to_string(),
         }
+    }
+
+    /// A run whose files carry the given structure counts, spread evenly.
+    ///
+    /// Evenly because the comparison is over corpus totals: how the elements
+    /// are distributed across files cannot change any of the three answers,
+    /// and a helper that pretended otherwise would be testing itself.
+    fn tagged_run(name: &str, files_with_tree: u64, per_file: Tagged) -> Run {
+        let mut run = run(name, 10, 0, 0);
+        for (index, file) in run.corpora[0].files.iter_mut().enumerate() {
+            if (index as u64) < files_with_tree {
+                file.tagged = Some(per_file);
+            }
+        }
+        run
+    }
+
+    fn tagged_bar(name: &str, tagged: TaggedBar) -> Ratchet {
+        let mut committed = bar(name, 10, 10, 0);
+        committed.bars[0].tagged = Some(tagged);
+        committed
+    }
+
+    /// The seeded regression tagged PDF milestone 4 names: cap the walk's
+    /// elements at zero and the check must fail. It fails twice over — the
+    /// files-with-a-tree share collapses and the element floor is breached —
+    /// and both messages are asserted, because a single message could be
+    /// produced by a comparison that happened to be looking elsewhere.
+    #[test]
+    fn a_structure_walk_that_finds_nothing_is_a_regression() {
+        let committed = tagged_bar(
+            "verapdf",
+            TaggedBar {
+                files: 6,
+                elements: 600,
+                matched: 900,
+                orphans: 100,
+            },
+        );
+        let now = tagged_run("verapdf", 0, Tagged::default());
+        let out = compare(&committed, &now, true);
+        assert!(out.failed(), "{out:?}");
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("no file yielded a structure tree at all")),
+            "{:?}",
+            out.regressions
+        );
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("structure elements")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// The subtler shape: every tree is still found and every element is still
+    /// reached, but the join stopped claiming characters — a `/ParentTree` or
+    /// `/MCID` regression that the element floor cannot see. The share of
+    /// marked characters the tree claimed is what catches it.
+    #[test]
+    fn a_join_that_orphans_what_it_used_to_claim_is_a_regression() {
+        let committed = tagged_bar(
+            "verapdf",
+            TaggedBar {
+                files: 6,
+                elements: 600,
+                matched: 900,
+                orphans: 100,
+            },
+        );
+        let now = tagged_run(
+            "verapdf",
+            6,
+            Tagged {
+                elements: 100,
+                matched: 50,
+                orphans: 116,
+                ..Tagged::default()
+            },
+        );
+        let out = compare(&committed, &now, true);
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("a smaller share")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// A run that reaches more of everything is not a regression, and the two
+    /// improvements are printed rather than passed over in silence.
+    #[test]
+    fn reaching_more_structure_is_an_improvement() {
+        let committed = tagged_bar(
+            "verapdf",
+            TaggedBar {
+                files: 5,
+                elements: 500,
+                matched: 900,
+                orphans: 100,
+            },
+        );
+        let now = tagged_run(
+            "verapdf",
+            6,
+            Tagged {
+                elements: 100,
+                matched: 190,
+                orphans: 10,
+                ..Tagged::default()
+            },
+        );
+        let out = compare(&committed, &now, true);
+        assert!(!out.failed(), "{out:?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("yield a structure tree, up from")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// A bar recorded before the walk existed cannot be regressed against, so
+    /// the first run that measures one is an improvement and never a refusal.
+    #[test]
+    fn a_bar_with_no_structure_row_is_new_rather_than_broken() {
+        let committed = bar("verapdf", 10, 10, 0);
+        let now = tagged_run(
+            "verapdf",
+            6,
+            Tagged {
+                elements: 100,
+                matched: 190,
+                orphans: 10,
+                ..Tagged::default()
+            },
+        );
+        let out = compare(&committed, &now, true);
+        assert!(!out.failed(), "{out:?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("new, with no recorded bar")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// The floor a seeded regression would otherwise be recorded *as*. A
+    /// committed bar of zero elements over files that have trees is a floor
+    /// nothing can fall below, so it is refused when the ratchet is read
+    /// rather than compared against and passed.
+    #[test]
+    fn a_committed_bar_of_zero_elements_is_refused_at_the_ratchet() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,
+            "tagged":{"files":6,"elements":0,"matched":0,"orphans":0}}]}"#;
+        let error = parse(text).expect_err("a floor of zero is not a floor");
+        assert!(error.contains("no structure elements at all"), "{error}");
     }
 
     /// Ruling 13's axis: a rewrite that stops validating is a regression, and

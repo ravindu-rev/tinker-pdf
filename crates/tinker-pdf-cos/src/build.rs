@@ -867,15 +867,10 @@ fn subset_tag(program: &[u8]) -> Vec<u8> {
 /// with no entry. Writing 500 for every glyph, which the simple-font path does
 /// because 9.6.6.4 leaves it no choice, would be a number this document made
 /// up presented as the font's.
-fn width_array(
-    sfnt: &tinker_pdf_font::Sfnt<'_>,
-    units: f64,
-    ids: impl Iterator<Item = u16>,
-) -> Option<Vec<Object>> {
+fn width_array(program: &FontProgram<'_>, ids: impl Iterator<Item = u16>) -> Option<Vec<Object>> {
     let mut runs: Vec<(u16, Vec<Object>)> = Vec::new();
     for id in ids {
-        let advance = sfnt.advance(id)?;
-        let width = (f64::from(advance) * 1000.0 / units).round();
+        let width = program.width(id)?.round();
         match runs.last_mut() {
             // `ids` arrives from a `BTreeMap`'s keys, so it is sorted and
             // duplicate-free; a run therefore continues exactly when the next
@@ -896,6 +891,207 @@ fn width_array(
         out.push(Object::Array(widths));
     }
     Some(out)
+}
+
+/// A font program, and the metrics and dictionary entries it decides.
+///
+/// Three shapes reach an embedding call and they are not interchangeable:
+/// 9.9 Table 126 gives each one a different descriptor entry, and a
+/// `/FontFile2` holding CFF outlines is a stream a conforming reader looks
+/// for `glyf` in and does not find. The metrics differ too — a TrueType
+/// measures in `unitsPerEm`, a CFF in whatever its `FontMatrix` says, and the
+/// two are only the same number when that matrix is the usual 1/1000.
+enum FontProgram<'a> {
+    /// An sfnt carrying `glyf`: `/FontFile2`.
+    TrueType(tinker_pdf_font::Sfnt<'a>),
+    /// An sfnt whose outlines are in `CFF `: `/FontFile3`, `/Subtype
+    /// /OpenType`. Widths still come from `hmtx`, which such a face carries.
+    OpenType(tinker_pdf_font::Sfnt<'a>, tinker_pdf_font::Cff<'a>),
+    /// A bare CFF program, which is what `/FontFile3` carries on its own.
+    Bare(tinker_pdf_font::Cff<'a>),
+}
+
+impl<'a> FontProgram<'a> {
+    /// Reads whichever of the three it is, or `None` for bytes that are none.
+    fn parse(program: &'a [u8]) -> Option<FontProgram<'a>> {
+        if let Some(sfnt) = tinker_pdf_font::Sfnt::parse(program) {
+            // 0x676C7966 `glyf`, 0x43464620 `CFF `.
+            if sfnt.table(0x676C_7966).is_some() {
+                return Some(FontProgram::TrueType(sfnt));
+            }
+            let cff = sfnt
+                .table(0x4346_4620)
+                .and_then(tinker_pdf_font::Cff::parse)?;
+            return Some(FontProgram::OpenType(sfnt, cff));
+        }
+        tinker_pdf_font::Cff::parse(program).map(FontProgram::Bare)
+    }
+
+    /// Whether the program is a CID-keyed CFF, whose charset maps a CID onto a
+    /// glyph rather than the two being the same number.
+    fn is_cid_keyed(&self) -> bool {
+        match self {
+            FontProgram::TrueType(_) => false,
+            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) => cff.is_cid(),
+        }
+    }
+
+    /// One glyph's advance, in the thousandths of a text space unit `/Widths`
+    /// and `/W` are stated in.
+    fn width(&self, glyph: u16) -> Option<f64> {
+        match self {
+            FontProgram::TrueType(sfnt) | FontProgram::OpenType(sfnt, _) => {
+                let units = f64::from(sfnt.units_per_em.max(1));
+                sfnt.advance(glyph)
+                    .map(|advance| f64::from(advance) * 1000.0 / units)
+            }
+            FontProgram::Bare(cff) => {
+                // A CFF states its own scale, and it need not be 1/1000: a
+                // face drawn at 2048 units to the em carries a matrix that
+                // says so, and reading the advance without it makes every
+                // width twice what it should be.
+                let scale = cff.font_matrix_for(glyph)[0];
+                cff.advance(glyph)
+                    .map(|advance| advance * scale * 1000.0)
+                    .filter(|width| width.is_finite())
+            }
+        }
+    }
+
+    /// The glyph a character selects, through whatever the program offers.
+    fn glyph_for_char(&self, c: char) -> Option<u16> {
+        match self {
+            FontProgram::TrueType(sfnt) | FontProgram::OpenType(sfnt, _) => sfnt.glyph_for_char(c),
+            // A bare CFF has no `cmap`; the charset names its glyphs, and its
+            // own encoding is the fallback (9.6.6).
+            FontProgram::Bare(cff) => tinker_pdf_font::glyph_name_for_char(c)
+                .and_then(|name| cff.gid_for_name(&name))
+                .or_else(|| {
+                    u8::try_from(u32::from(c))
+                        .ok()
+                        .and_then(|code| cff.gid_for_code(code))
+                }),
+        }
+    }
+
+    /// The descriptor key that carries the program, and the `/Subtype` its
+    /// stream needs (9.9 Table 126). `/FontFile2` takes `/Length1` instead.
+    fn file_entry(&self, cid: bool) -> (&'static [u8], Option<&'static [u8]>) {
+        match self {
+            FontProgram::TrueType(_) => (b"FontFile2", None),
+            FontProgram::OpenType(_, _) => (b"FontFile3", Some(b"OpenType")),
+            FontProgram::Bare(_) if cid => (b"FontFile3", Some(b"CIDFontType0C")),
+            FontProgram::Bare(_) => (b"FontFile3", Some(b"Type1C")),
+        }
+    }
+
+    /// The `/Subtype` of a **simple** font dictionary built on this program
+    /// (9.6.2.1): an sfnt is a TrueType font whichever table its outlines are
+    /// in, and a bare CFF is a Type 1 one.
+    fn simple_subtype(&self) -> &'static [u8] {
+        match self {
+            FontProgram::TrueType(_) | FontProgram::OpenType(_, _) => b"TrueType",
+            FontProgram::Bare(_) => b"Type1",
+        }
+    }
+
+    /// The `/Subtype` of a **descendant** CIDFont built on this program
+    /// (9.7.4.1). `/CIDToGIDMap` belongs only to the first of the two.
+    fn descendant_subtype(&self) -> &'static [u8] {
+        match self {
+            FontProgram::TrueType(_) | FontProgram::OpenType(_, _) => b"CIDFontType2",
+            FontProgram::Bare(_) => b"CIDFontType0",
+        }
+    }
+}
+
+/// Why a font program was embedded whole rather than cut down.
+///
+/// Not an error: the whole face is larger and correct, which is the right way
+/// round (ruling 2). It is a *leniency*, and ruling 10 says a leniency names
+/// what it touched — without this the only trace of it is the missing
+/// `ABCDEF+` tag on `/BaseFont`, which nothing checks and nobody notices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SubsetRefusal {
+    /// The pages drew text with this font and the program claims none of the
+    /// characters: a missing or unreadable `cmap`, most likely, or a symbolic
+    /// font addressed some other way. Subsetting on that evidence would keep
+    /// `.notdef` alone and every letter would come out blank.
+    NoGlyphResolved,
+    /// The program is not one this engine can rebuild. A TrueType missing
+    /// `glyf` or `loca`; a CFF whose charstrings this cannot renumber without
+    /// guessing (see `tinker_pdf_font::cff_subset` for that list); or bytes
+    /// that are neither.
+    ProgramNotRebuildable,
+    /// The subset came out no smaller than the face. A program a producer had
+    /// already cut down to thirty glyphs has almost nothing left to remove,
+    /// and what a rebuild costs — a `.notdef`-shaped charstring in every
+    /// dropped slot, an offset for it, and DICT operands written at a fixed
+    /// width so the offsets in them cannot move — can exceed what it saves.
+    /// The whole face is then both smaller *and* the one the producer tested,
+    /// so it is the one that goes in.
+    SubsetNotSmaller,
+}
+
+impl core::fmt::Display for SubsetRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            SubsetRefusal::NoGlyphResolved => "the font claims none of the text drawn with it",
+            SubsetRefusal::ProgramNotRebuildable => "the font program cannot be rebuilt",
+            SubsetRefusal::SubsetNotSmaller => "the subset is no smaller than the face",
+        })
+    }
+}
+
+/// A font whose whole program was embedded, and which resource it is
+/// (ruling 10).
+///
+/// Reported by [`DocumentBuilder::finish_reporting`]. Nothing is reported when
+/// [`DocumentBuilder::set_subset_fonts`] turned subsetting off: that is the
+/// caller's stated intent rather than a capability this engine lacked.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EmbeddedWhole {
+    /// The resource name the font was registered under.
+    pub resource: Vec<u8>,
+    /// The `/BaseFont` name it was written with — without the 9.6.4 subset
+    /// tag, because there is no subset.
+    pub base_font: Vec<u8>,
+    /// How many bytes the stream carries, which is the size the subset would
+    /// have been measured against.
+    pub bytes: usize,
+    /// Why.
+    pub reason: SubsetRefusal,
+}
+
+impl core::fmt::Display for EmbeddedWhole {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "/{} embedded whole ({} bytes): {}",
+            String::from_utf8_lossy(&self.resource),
+            self.bytes,
+            self.reason
+        )
+    }
+}
+
+/// Cuts a program down to `glyphs`, and keeps the result only if it is
+/// smaller than the face it came from.
+///
+/// The size comparison is the writer's decision and not the subsetter's:
+/// `tinker_pdf_font::subset` answers "what does this face look like with those
+/// glyphs kept", which is a question about fonts, and whether the answer is
+/// worth writing into a file is a question about documents. Two hundred and
+/// twelve of the fetched corpora's four hundred and forty-one CFF faces are
+/// already subsets a producer cut, and rebuilding one of those costs more
+/// bytes than it saves.
+fn subset_smaller_than(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Vec<u8>, SubsetRefusal> {
+    let reduced =
+        tinker_pdf_font::subset(program, glyphs).ok_or(SubsetRefusal::ProgramNotRebuildable)?;
+    if reduced.len() >= program.len() {
+        return Err(SubsetRefusal::SubsetNotSmaller);
+    }
+    Ok(reduced)
 }
 
 /// A `/ToUnicode` CMap for the glyphs a document drew (9.10.3).
@@ -999,7 +1195,55 @@ pub struct PageBuilder {
     /// in. Written at `finish`, because a destination naming a page index
     /// cannot be resolved until every page exists.
     links: Vec<LinkAnnotation>,
+    /// The next marked-content id this page will hand out (14.7.4.2).
+    ///
+    /// Per page, because that is the scope the specification gives them: an
+    /// `/MCID` identifies a sequence *within one content stream*, and a
+    /// document-wide counter would make `/ParentTree` lookups depend on how
+    /// many pages came before.
+    next_mcid: u32,
+    /// Structure elements closed on this page, in the order they closed.
+    tag_roots: Vec<TaggedNode>,
+    /// Structure elements still open, outermost first.
+    tag_stack: Vec<TaggedNode>,
+    /// Where the most recent `BDC` starts in [`Self::content`], and the
+    /// length immediately after it. Together they say whether the open
+    /// sequence has had anything drawn into it. See [`Self::close_marked`].
+    opened: Option<usize>,
+    opened_end: usize,
 }
+
+/// One structure element under construction, and what it claims.
+///
+/// Built by [`PageBuilder::tagged`] rather than described by the caller, which
+/// is what makes the tree correct by construction: there is no way to name a
+/// marked-content id that was never written, and no way to write one no
+/// element claims.
+struct TaggedNode {
+    /// The structure type, which is also the content stream's tag.
+    tag: Vec<u8>,
+    kids: Vec<TaggedKid>,
+}
+
+/// What a structure element holds: marked content on its own page, or a
+/// nested element.
+///
+/// Two variants and never one, for the reason the reader's `StructKid` keeps
+/// them apart: a marked-content id is a span of this page's content stream and
+/// a child element is a subtree, and a writer that flattened them would have
+/// to guess which it meant on the way back.
+enum TaggedKid {
+    Content(u32),
+    Element(TaggedNode),
+}
+
+/// How deep [`PageBuilder::tagged`] will nest before it stops opening
+/// elements and simply draws.
+///
+/// The reader caps its own walk at [`crate::limits::MAX_NEST_DEPTH`], so a
+/// writer that nested past it would produce a file this engine could not read
+/// back — which is the one thing a writer must not do.
+const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize;
 
 impl PageBuilder {
     /// Sets `/CropBox`, as `[x0 y0 x1 y1]` in points from the bottom-left.
@@ -1018,6 +1262,121 @@ impl PageBuilder {
     /// diff against the source document readable.
     pub fn set_crop_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         self.crop_box = Some([x0, y0, x1, y1]);
+    }
+
+    /// Draws inside a tagged marked-content sequence (14.7.4), recording a
+    /// structure element that claims exactly what was drawn.
+    ///
+    /// `tag` is the structure type and the content stream's tag at once —
+    /// `P`, `H1`, `Figure`, `Span`. It is written as a name, so anything
+    /// 7.3.5 requires escaping is escaped rather than refused.
+    ///
+    /// # Why a closure, and why the tree is not described
+    ///
+    /// The alternative was a pair of `begin`/`end` calls and a separate tree
+    /// the caller hands over, naming marked-content ids. That shape lets a
+    /// caller name an id that was never written, and lets an id be written
+    /// that no element claims — the two defects `Document::structure()`
+    /// reports as orphans and unreadable kids. Here neither is expressible:
+    /// the element and the sequence are opened by the same call, so the tree
+    /// is correct by construction and `finish` has nothing to validate.
+    ///
+    /// Nesting works, and reading order survives it. A sequence that resumes
+    /// after a nested one closes gets a **fresh** id, so an element whose text
+    /// continues after its child reads before *and* after the child rather
+    /// than all of it afterwards. An empty resumption is dropped rather than
+    /// written: a marked sequence with nothing in it is a node the reader
+    /// would report and nobody asked for.
+    ///
+    /// Past [`MAX_TAG_DEPTH`] the content is drawn untagged rather than
+    /// refused (ruling 2). The reader caps its own walk at the same depth, so
+    /// an element written below it is one this engine could not read back.
+    pub fn tagged(&mut self, tag: &[u8], draw: impl FnOnce(&mut PageBuilder)) {
+        if self.tag_stack.len() >= MAX_TAG_DEPTH {
+            draw(self);
+            return;
+        }
+
+        // The parent's sequence closes before the child's opens: 14.7.4.2
+        // scopes content to the innermost sequence, and leaving the parent's
+        // open would make the child's content belong to both.
+        let resume = self.tag_stack.last().map(|parent| parent.tag.clone());
+        if resume.is_some() {
+            self.close_marked();
+        }
+
+        let mcid = self.open_marked(tag);
+        self.tag_stack.push(TaggedNode {
+            tag: tag.to_vec(),
+            kids: vec![TaggedKid::Content(mcid)],
+        });
+        draw(self);
+        self.close_marked();
+
+        let node = self.tag_stack.pop().expect("pushed immediately above");
+        // An element that claims nothing at all is dropped. It can only arise
+        // from a `tagged` whose closure drew nothing, and a structure element
+        // with no content and no children is a node the reader would report
+        // and nobody asked for. `/Alt` on an empty `Figure` is the case that
+        // would want one, and this builder cannot write `/Alt` yet.
+        if !node.kids.is_empty() {
+            match self.tag_stack.last_mut() {
+                Some(parent) => parent.kids.push(TaggedKid::Element(node)),
+                None => self.tag_roots.push(node),
+            }
+        }
+
+        // Reopen the parent so anything drawn after this child still belongs
+        // to it. If nothing is, `close_marked` takes the reopening back.
+        if let Some(tag) = resume {
+            let mcid = self.open_marked(&tag);
+            self.tag_stack
+                .last_mut()
+                .expect("resume implies a parent")
+                .kids
+                .push(TaggedKid::Content(mcid));
+        }
+    }
+
+    /// Writes `/Tag <</MCID n>> BDC` and returns the id it handed out.
+    fn open_marked(&mut self, tag: &[u8]) -> u32 {
+        let mcid = self.next_mcid;
+        self.next_mcid += 1;
+        self.opened = Some(self.content.len());
+        crate::write::write_name(&mut self.content, tag);
+        self.content
+            .extend_from_slice(format!(" <</MCID {mcid}>> BDC\n").as_bytes());
+        self.opened_end = self.content.len();
+        mcid
+    }
+
+    /// Writes `EMC`, or unwrites the `BDC` when nothing was drawn since it.
+    ///
+    /// The empty case is not hypothetical: it is what a resumption after the
+    /// last nested child always is. Writing it would leave a marked sequence
+    /// with no content, which `Document::structure` reports as a node, so the
+    /// bytes are taken back and the id handed back with them.
+    ///
+    /// Taking bytes back is safe because [`Self::open_marked`] only appends
+    /// and `opened_end` is the length immediately after it: a content length
+    /// still equal to it means nothing has been written since, and the bytes
+    /// from `opened` onwards are exactly the ones it wrote. Handing the id
+    /// back is safe for the same reason — a nested `tagged` would have moved
+    /// the length, so the id being dropped is always the last one issued.
+    fn close_marked(&mut self) {
+        let Some(at) = self.opened.take() else {
+            self.content.extend_from_slice(b"EMC\n");
+            return;
+        };
+        if self.content.len() != self.opened_end {
+            self.content.extend_from_slice(b"EMC\n");
+            return;
+        }
+        self.content.truncate(at);
+        self.next_mcid -= 1;
+        if let Some(node) = self.tag_stack.last_mut() {
+            node.kids.pop();
+        }
     }
 
     /// Sets `/BleedBox` (14.11.2), in the same coordinates as
@@ -1538,6 +1897,9 @@ pub struct DocumentBuilder {
     /// `finish`; see that method for why the record is the document's.
     drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
     subset_fonts: bool,
+    /// Fonts written whole because a subset could not be built, gathered at
+    /// `finish` and handed back by `finish_reporting`.
+    embedded_whole: Vec<EmbeddedWhole>,
     info: Dict,
     outline: Vec<OutlineEntry>,
 }
@@ -1565,6 +1927,7 @@ impl DocumentBuilder {
             cid_fonts: Vec::new(),
             drawn: BTreeMap::new(),
             subset_fonts: true,
+            embedded_whole: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
         }
@@ -1706,7 +2069,7 @@ impl DocumentBuilder {
     /// and a table rewriter, and shipping the entire face is correct — merely
     /// larger — where a broken subset is neither.
     pub fn add_embedded_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        if tinker_pdf_font::Sfnt::parse(program).is_none() {
+        if FontProgram::parse(program).is_none() {
             return false;
         }
 
@@ -1748,8 +2111,18 @@ impl DocumentBuilder {
     /// Returns false when the bytes are not a font this can read, for
     /// [`DocumentBuilder::add_embedded_font`]'s reason.
     pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        if tinker_pdf_font::Sfnt::parse(program).is_none() {
-            return false;
+        // A **CID-keyed** bare CFF is refused rather than embedded. Its
+        // charset maps a CID onto a glyph, and the two are different numbers;
+        // `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make
+        // every one of those numbers a CID. Accepting it would silently draw
+        // whichever glyph the charset happened to put at that CID — the
+        // failure this whole path exists to prevent (9.7.4.2).
+        match FontProgram::parse(program) {
+            None => return false,
+            Some(kind) if kind.is_cid_keyed() && !matches!(kind, FontProgram::OpenType(_, _)) => {
+                return false
+            }
+            Some(_) => {}
         }
 
         let file_ref = self.allocate();
@@ -1834,16 +2207,13 @@ impl DocumentBuilder {
             .iter()
             .find(|f| f.resource == font)
             .map(|f| f.program.clone());
-        let sfnt = program.as_deref().and_then(tinker_pdf_font::Sfnt::parse);
-        let units = sfnt
-            .as_ref()
-            .map_or(1000.0, |s| f64::from(s.units_per_em.max(1)));
+        let kind = program.as_deref().and_then(FontProgram::parse);
         let advance = |id: u16| -> f64 {
             // 9.7.4.3: a CID with no `/W` entry takes `/DW`, which this writer
             // states as 1000 — one em.
-            sfnt.as_ref()
-                .and_then(|s| s.advance(id))
-                .map_or(1.0, |a| (f64::from(a) * 1000.0 / units).round() / 1000.0)
+            kind.as_ref()
+                .and_then(|kind| kind.width(id))
+                .map_or(1.0, |width| width.round() / 1000.0)
         };
 
         let mapping = self.drawn.entry(font.to_vec()).or_default();
@@ -2291,7 +2661,10 @@ impl DocumentBuilder {
 
             // A subset that cannot be built is not a reason to fail the
             // document: the whole face is larger and correct, which is the
-            // right way round (ruling 2).
+            // right way round (ruling 2). What ruling 10 does not licence is
+            // silence, so the refusal is recorded with the resource it is
+            // about — until August 2026 the only observable difference was the
+            // missing `ABCDEF+` tag.
             let (program, subsetted) = if self.subset_fonts {
                 let glyphs = tinker_pdf_font::glyphs_for(&font.program, &text);
                 if !text.is_empty() && glyphs.is_empty() {
@@ -2302,11 +2675,25 @@ impl DocumentBuilder {
                     // and every letter would come out blank — which reads as
                     // a rendering bug rather than a subsetting one, and so
                     // gets found far too late.
+                    self.embedded_whole.push(EmbeddedWhole {
+                        resource: font.resource.clone(),
+                        base_font: font.base_font.clone(),
+                        bytes: font.program.len(),
+                        reason: SubsetRefusal::NoGlyphResolved,
+                    });
                     (font.program.clone(), false)
                 } else {
-                    match tinker_pdf_font::subset(&font.program, &glyphs) {
-                        Some(reduced) => (reduced, true),
-                        None => (font.program.clone(), false),
+                    match subset_smaller_than(&font.program, &glyphs) {
+                        Ok(reduced) => (reduced, true),
+                        Err(reason) => {
+                            self.embedded_whole.push(EmbeddedWhole {
+                                resource: font.resource.clone(),
+                                base_font: font.base_font.clone(),
+                                bytes: font.program.len(),
+                                reason,
+                            });
+                            (font.program.clone(), false)
+                        }
                     }
                 }
             } else {
@@ -2334,10 +2721,9 @@ impl DocumentBuilder {
         // reading them from the subset would be no different — but reading
         // them from the original says plainly that it does not depend on
         // which glyphs survived.
-        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(&font.program) else {
+        let Some(kind) = FontProgram::parse(&font.program) else {
             return;
         };
-        let units = f64::from(sfnt.units_per_em.max(1));
 
         // 9.6.6.4: /FirstChar../LastChar with one width each, in glyph space
         // thousandths. WinAnsi is assumed because that is what the encoding
@@ -2347,20 +2733,33 @@ impl DocumentBuilder {
         const LAST: u8 = 255;
         let mut widths = Vec::with_capacity(usize::from(LAST - FIRST) + 1);
         for code in FIRST..=LAST {
-            let width = sfnt
+            let width = kind
                 .glyph_for_char(char::from(code))
-                .and_then(|glyph| sfnt.advance(glyph))
-                .map_or(500.0, |advance| f64::from(advance) * 1000.0 / units);
+                .and_then(|glyph| kind.width(glyph))
+                .unwrap_or(500.0);
             widths.push(Object::Real(width.round()));
         }
 
+        let (file_key, file_subtype) = kind.file_entry(false);
         let mut file_dict = Dict::new();
-        // 9.9: /Length1 is the embedded program's length — the subset's, not
-        // the original's, since the subset is what the stream contains.
-        file_dict.insert(
-            self.names.intern(b"Length1"),
-            Object::Int(program.len() as i64),
-        );
+        match file_subtype {
+            // 9.9 Table 126: a `/FontFile3` stream states what kind of program
+            // it carries, and it is the only thing in the file that does.
+            Some(subtype) => {
+                file_dict.insert(
+                    self.names.intern(b"Subtype"),
+                    Object::Name(self.names.intern(subtype)),
+                );
+            }
+            // /Length1 is the embedded program's length — the subset's, not
+            // the original's, since the subset is what the stream contains.
+            None => {
+                file_dict.insert(
+                    self.names.intern(b"Length1"),
+                    Object::Int(program.len() as i64),
+                );
+            }
+        }
         self.objects.insert_stream(
             font.file_ref.num,
             StreamData {
@@ -2396,7 +2795,7 @@ impl DocumentBuilder {
         descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
         descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
         descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
-        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(font.file_ref));
+        descriptor.insert(self.names.intern(file_key), Object::Ref(font.file_ref));
         self.objects
             .insert(font.descriptor_ref.num, Object::Dict(descriptor));
 
@@ -2404,7 +2803,7 @@ impl DocumentBuilder {
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
         dict.insert(
             self.names.intern(b"Subtype"),
-            Object::Name(self.names.intern(b"TrueType")),
+            Object::Name(self.names.intern(kind.simple_subtype())),
         );
         dict.insert(
             self.names.intern(b"BaseFont"),
@@ -2448,9 +2847,18 @@ impl DocumentBuilder {
             ids.insert(0);
 
             let (program, subsetted) = if self.subset_fonts {
-                match tinker_pdf_font::subset(&font.program, &ids) {
-                    Some(reduced) => (reduced, true),
-                    None => (font.program.clone(), false),
+                match subset_smaller_than(&font.program, &ids) {
+                    Ok(reduced) => (reduced, true),
+                    Err(reason) => {
+                        // Ruling 10, for `write_embedded_fonts`'s reason.
+                        self.embedded_whole.push(EmbeddedWhole {
+                            resource: font.resource.clone(),
+                            base_font: font.base_font.clone(),
+                            bytes: font.program.len(),
+                            reason,
+                        });
+                        (font.program.clone(), false)
+                    }
                 }
             } else {
                 (font.program.clone(), false)
@@ -2479,16 +2887,26 @@ impl DocumentBuilder {
         // subsetting never moves a glyph identifier, and reading the metrics
         // from the face rather than from the cut-down copy says plainly that
         // the widths do not depend on which glyphs survived.
-        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(&font.program) else {
+        let Some(kind) = FontProgram::parse(&font.program) else {
             return;
         };
-        let units = f64::from(sfnt.units_per_em.max(1));
 
+        let (file_key, file_subtype) = kind.file_entry(true);
         let mut file_dict = Dict::new();
-        file_dict.insert(
-            self.names.intern(b"Length1"),
-            Object::Int(program.len() as i64),
-        );
+        match file_subtype {
+            Some(subtype) => {
+                file_dict.insert(
+                    self.names.intern(b"Subtype"),
+                    Object::Name(self.names.intern(subtype)),
+                );
+            }
+            None => {
+                file_dict.insert(
+                    self.names.intern(b"Length1"),
+                    Object::Int(program.len() as i64),
+                );
+            }
+        }
         self.objects.insert_stream(
             font.file_ref.num,
             StreamData {
@@ -2525,7 +2943,7 @@ impl DocumentBuilder {
         descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
         descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
         descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
-        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(font.file_ref));
+        descriptor.insert(self.names.intern(file_key), Object::Ref(font.file_ref));
         self.objects
             .insert(font.descriptor_ref.num, Object::Dict(descriptor));
 
@@ -2548,7 +2966,7 @@ impl DocumentBuilder {
         descendant.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
         descendant.insert(
             self.names.intern(b"Subtype"),
-            Object::Name(self.names.intern(b"CIDFontType2")),
+            Object::Name(self.names.intern(kind.descendant_subtype())),
         );
         descendant.insert(
             self.names.intern(b"BaseFont"),
@@ -2563,16 +2981,22 @@ impl DocumentBuilder {
         // so the absence of a `/W` entry has a stated answer rather than one a
         // reader has to know the default of.
         descendant.insert(self.names.intern(b"DW"), Object::Int(1000));
-        if let Some(widths) = width_array(&sfnt, units, mapping.keys().copied()) {
+        if let Some(widths) = width_array(&kind, mapping.keys().copied()) {
             descendant.insert(self.names.intern(b"W"), Object::Array(widths));
         }
         // 9.7.4.2: `/Identity` makes the CID the glyph index. This is the
         // entry that makes an index addressable, and the reason `subset` may
         // be applied at all — it preserves glyph ids, so the map stays true.
-        descendant.insert(
-            self.names.intern(b"CIDToGIDMap"),
-            Object::Name(self.names.intern(b"Identity")),
-        );
+        // Table 117 puts it on a CIDFontType2 and nowhere else; a
+        // CIDFontType0 over a CFF that is not CID-keyed already uses the CID
+        // as the glyph index, and writing the entry there would be an entry a
+        // reader is entitled to ignore or to object to.
+        if kind.descendant_subtype() == b"CIDFontType2" {
+            descendant.insert(
+                self.names.intern(b"CIDToGIDMap"),
+                Object::Name(self.names.intern(b"Identity")),
+            );
+        }
         self.objects
             .insert(font.descendant_ref.num, Object::Dict(descendant));
 
@@ -2915,6 +3339,11 @@ impl DocumentBuilder {
             crop_box: None,
             bleed_box: None,
             links: Vec::new(),
+            next_mcid: 0,
+            tag_roots: Vec::new(),
+            tag_stack: Vec::new(),
+            opened: None,
+            opened_end: 0,
         };
         draw(&mut page);
         self.pages.push(page);
@@ -2949,9 +3378,80 @@ impl DocumentBuilder {
         true
     }
 
+    /// Writes one page's structure elements and returns the refs a parent
+    /// should list as its kids.
+    ///
+    /// `claims` is indexed by marked-content id and filled with the element
+    /// that opened each one, which is the `/ParentTree` entry 14.7.4.4 asks
+    /// for: the same relation as `/K`, stored the other way round, so a
+    /// consumer holding an id can find its element without walking the tree.
+    /// Both directions are written from the same walk so they cannot disagree.
+    fn write_struct_elements(
+        &mut self,
+        nodes: &[TaggedNode],
+        parent: ObjRef,
+        page: ObjRef,
+        claims: &mut [Option<ObjRef>],
+    ) -> Vec<Object> {
+        let mut out = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let reference = self.allocate();
+            let mut kids = Vec::with_capacity(node.kids.len());
+            for kid in &node.kids {
+                match kid {
+                    TaggedKid::Content(mcid) => {
+                        kids.push(Object::Int(i64::from(*mcid)));
+                        if let Some(slot) = claims.get_mut(*mcid as usize) {
+                            *slot = Some(reference);
+                        }
+                    }
+                    TaggedKid::Element(child) => {
+                        kids.extend(self.write_struct_elements(
+                            std::slice::from_ref(child),
+                            reference,
+                            page,
+                            claims,
+                        ));
+                    }
+                }
+            }
+
+            let mut element = Dict::new();
+            element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
+            element.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(&node.tag)),
+            );
+            element.insert(self.names.intern(b"P"), Object::Ref(parent));
+            // On every element rather than only where it is needed. 14.7.2
+            // Table 323 makes `/Pg` the page a marked-content kid lives on,
+            // and this builder never writes an element whose content is on a
+            // page other than its own — so writing it everywhere is both true
+            // and one less thing for a reader to inherit.
+            element.insert(self.names.intern(b"Pg"), Object::Ref(page));
+            element.insert(self.names.intern(b"K"), Object::Array(kids));
+            self.objects.insert(reference.num, Object::Dict(element));
+            out.push(Object::Ref(reference));
+        }
+        out
+    }
+
     /// Serializes the document.
     #[must_use]
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(self) -> Vec<u8> {
+        self.finish_reporting().0
+    }
+
+    /// The same document, and every font whose whole program was embedded
+    /// because a subset could not be built (ruling 10).
+    ///
+    /// The list is the writer's leniency ledger. An empty one says every
+    /// embedded face was cut down to what the pages drew; an entry says which
+    /// resource was not, how big it is, and why — which is what makes
+    /// "it wrote" and "it wrote a small file" distinguishable without
+    /// measuring the output and guessing.
+    #[must_use]
+    pub fn finish_reporting(mut self) -> (Vec<u8>, Vec<EmbeddedWhole>) {
         let page_refs: Vec<ObjRef> = (0..self.pages.len()).map(|_| self.allocate()).collect();
         let pages_ref = ObjRef::new(2, 0);
 
@@ -2986,6 +3486,18 @@ impl DocumentBuilder {
         }
         self.write_embedded_fonts(&used);
         self.write_cid_fonts(&drawn);
+
+        // 14.7.4.4: the `/ParentTree` entry for each page, and the elements
+        // that claim each of its marked-content ids. Filled as the pages are
+        // written and turned into a number tree afterwards, because an
+        // element names its page and its page names its key.
+        let struct_root = if pages.iter().any(|page| !page.tag_roots.is_empty()) {
+            Some(self.allocate())
+        } else {
+            None
+        };
+        let mut parent_tree: Vec<Vec<Object>> = Vec::new();
+        let mut struct_kids: Vec<Object> = Vec::new();
 
         for (page, reference) in pages.iter().zip(page_refs.iter()) {
             let content_ref = self.allocate();
@@ -3061,6 +3573,36 @@ impl DocumentBuilder {
                 dict.insert(self.names.intern(b"Annots"), Object::Array(annots));
             }
 
+            // 14.7.4.4. Written only on a page that has marked content, for
+            // the reason `/CropBox` is written only when there is one: a
+            // `/StructParents` naming an empty `/Nums` entry is a statement
+            // where its absence is not.
+            if let Some(root) = struct_root {
+                if !page.tag_roots.is_empty() {
+                    let key = parent_tree.len() as i64;
+                    let mut claims: Vec<Option<ObjRef>> = vec![None; page.next_mcid as usize];
+                    let kids =
+                        self.write_struct_elements(&page.tag_roots, root, *reference, &mut claims);
+                    parent_tree.push(
+                        claims
+                            .into_iter()
+                            .map(|claim| match claim {
+                                Some(reference) => Object::Ref(reference),
+                                // An id no element claims cannot happen from
+                                // this builder — `tagged` opens both together
+                                // — so a null here is a defect in this writer
+                                // rather than in the caller's document. It is
+                                // written rather than skipped so the array
+                                // stays indexed by id.
+                                None => Object::Null,
+                            })
+                            .collect(),
+                    );
+                    struct_kids.extend(kids);
+                    dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
+                }
+            }
+
             self.objects.insert(reference.num, Object::Dict(dict));
         }
 
@@ -3078,6 +3620,70 @@ impl DocumentBuilder {
         let mut catalog = Dict::new();
         catalog.insert(Name::TYPE, Object::Name(self.names.intern(b"Catalog")));
         catalog.insert(Name::PAGES, Object::Ref(pages_ref));
+
+        // 14.7.2: the structure tree, when any page tagged anything. One
+        // `/Document` element holds every page's roots, which is the shape
+        // ISO 19005 Level A asks for and costs a document with one page
+        // nothing it would not otherwise have.
+        if let Some(root) = struct_root {
+            let document = self.allocate();
+            let mut element = Dict::new();
+            element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
+            element.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(b"Document")),
+            );
+            // 14.7.2 Table 323: a structure element's parent is `/P` and its
+            // children are `/K`. They are not `/Parent` and `/Kids` — those
+            // are the page tree's — and using the page tree's constants here
+            // produced a file every reader accepted and none could use, with
+            // every marked-content id orphaned and no error anywhere.
+            element.insert(self.names.intern(b"P"), Object::Ref(root));
+            element.insert(self.names.intern(b"K"), Object::Array(struct_kids));
+            self.objects.insert(document.num, Object::Dict(element));
+
+            // 7.9.7: a number tree whose root is also its only leaf, which is
+            // what `/Nums` on the root node means. Legal at any size, and a
+            // document this builder produced has one entry per tagged page —
+            // splitting into `/Kids` would buy a lookup nothing here performs.
+            let mut nums = Vec::with_capacity(parent_tree.len() * 2);
+            for (key, claims) in parent_tree.iter().enumerate() {
+                nums.push(Object::Int(key as i64));
+                nums.push(Object::Array(claims.clone()));
+            }
+            let tree_ref = self.allocate();
+            let mut tree = Dict::new();
+            tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
+            self.objects.insert(tree_ref.num, Object::Dict(tree));
+
+            let mut dict = Dict::new();
+            dict.insert(
+                Name::TYPE,
+                Object::Name(self.names.intern(b"StructTreeRoot")),
+            );
+            dict.insert(
+                self.names.intern(b"K"),
+                Object::Array(vec![Object::Ref(document)]),
+            );
+            dict.insert(self.names.intern(b"ParentTree"), Object::Ref(tree_ref));
+            // The key a future incremental update would take next, which is
+            // one past the last used and not the count of pages: an untagged
+            // page takes no key.
+            dict.insert(
+                self.names.intern(b"ParentTreeNextKey"),
+                Object::Int(parent_tree.len() as i64),
+            );
+            self.objects.insert(root.num, Object::Dict(dict));
+            catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));
+
+            // 14.7.1: `/Marked true` is the claim that the tagging is
+            // complete enough to be used, which is what this builder's
+            // construction guarantees — every marked sequence is claimed by
+            // the element that opened it.
+            let mut mark_info = Dict::new();
+            mark_info.insert(self.names.intern(b"Marked"), Object::Bool(true));
+            catalog.insert(self.names.intern(b"MarkInfo"), Object::Dict(mark_info));
+        }
 
         let outline = std::mem::take(&mut self.outline);
         if !outline.is_empty() {
@@ -3108,12 +3714,13 @@ impl DocumentBuilder {
             trailer.insert(Name::INFO, Object::Ref(info_ref));
         }
 
-        rewrite(
+        let bytes = rewrite(
             &self.objects,
             &trailer,
             &WriteOptions::default(),
             &self.names,
-        )
+        );
+        (bytes, std::mem::take(&mut self.embedded_whole))
     }
 
     /// Writes one level of outline entries, returning `(first, last, visible)`.

@@ -117,6 +117,25 @@ impl CorpusReport {
         out
     }
 
+    /// What the structure tree walk reached over this corpus (14.7).
+    ///
+    /// Summed over files rather than averaged over them: a per-file rate
+    /// averaged is not the rate over the corpus, and most corpus files carry
+    /// no structure tree at all.
+    pub fn tagged(&self) -> crate::ratchet::TaggedBar {
+        let mut out = crate::ratchet::TaggedBar::default();
+        for file in &self.files {
+            let Some(tagged) = file.tagged else {
+                continue;
+            };
+            out.files += 1;
+            out.elements += tagged.elements;
+            out.matched += tagged.matched;
+            out.orphans += tagged.orphans;
+        }
+        out
+    }
+
     /// How many files each metamorphic relation was **asked** of, by name.
     ///
     /// Asked and held are two counts and both are recorded, for the reason the
@@ -439,6 +458,20 @@ impl Run {
                             },
                         )),
                     ),
+                    // Tagged PDF milestone 4. Four counts, and the reason
+                    // `orphans` is recorded beside `matched` rather than on
+                    // its own is that a tree claiming fewer characters and a
+                    // corpus offering fewer marked characters are different
+                    // facts that a lone orphan count cannot tell apart.
+                    ("tagged", {
+                        let tagged = corpus.tagged();
+                        Json::object([
+                            ("files", Json::count(tagged.files)),
+                            ("elements", Json::count(tagged.elements)),
+                            ("matched", Json::count(tagged.matched)),
+                            ("orphans", Json::count(tagged.orphans)),
+                        ])
+                    }),
                 ])
             })
             .collect();
@@ -572,6 +605,7 @@ mod tests {
             outcome,
             cost: crate::runner::Cost::default(),
             bundled_faces: false,
+            tagged: None,
             pages: 1,
             rendered: 1,
             warnings: warnings

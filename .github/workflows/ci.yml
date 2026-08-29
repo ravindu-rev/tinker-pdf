@@ -52,6 +52,19 @@ jobs:
           cargo test -p tinker-pdf --test determinism 2>&1 | tee determinism.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
           grep -Eq 'rendering_is_stable_across_targets [.]{3} ok' determinism.log
+      # The same claim for shaping, which `cargo test --workspace` above
+      # already runs — and which the same `#[ignore]`-one-afternoon hazard
+      # would silence just as quietly. `docs/design/shaping.md` milestone 2
+      # asks for the fingerprints to be *reproduced by the determinism CI
+      # legs*, so the leg has to say that it did.
+      - name: The shaping fingerprints were reproduced on this target
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-shape --test fingerprints 2>&1 | tee shaping.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' shaping.log
+          grep -Eq 'shaping_is_stable_across_targets [.]{3} ok' shaping.log
+          grep -Eq 'bidi_is_stable_across_targets [.]{3} ok' shaping.log
       # `cmap-predefined` off, *run* rather than merely linked: a build
       # without the CJK tables keeps the codespaces and drops the CIDs, and
       # `tinker-pdf-font/tests/predefined_cmaps_absent.rs` is the only place
@@ -138,9 +151,9 @@ jobs:
     #
     # Bounded on purpose, and bounded per target rather than in total, so
     # adding a target adds a known amount of time instead of quietly taking
-    # it from the others: twenty-four targets, twenty seconds each, one build.
-    # Unlike the nightly this is one runner rather than twenty-four, because
-    # holding twenty-four machines for twenty seconds each is worse for everyone
+    # it from the others: thirty targets, twenty seconds each, one build.
+    # Unlike the nightly this is one runner rather than thirty, because
+    # holding thirty machines for twenty seconds each is worse for everyone
     # queueing behind it than holding one for five minutes.
     #
     # `crypt` is the one target for which twenty seconds is not twenty seconds
@@ -274,6 +287,22 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
           grep -q 'test rendering_is_stable_across_targets \.\.\. ok' \
             determinism.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # Shaping's fourth target. The corpora are `include_bytes!` rather than
+      # files on purpose: wasmtime grants no filesystem unless somebody
+      # remembers `--dir`, and a fingerprint test that could not read its own
+      # fonts would fail here rather than silently measuring nothing — but it
+      # would fail for the wrong reason, and this leg exists to catch the right
+      # one.
+      - name: Shape on wasm32-wasip1 and compare against the fingerprints
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-shape --test fingerprints \
+            --target wasm32-wasip1 2>&1 | tee shaping.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' shaping.log
+          grep -q 'test shaping_is_stable_across_targets \.\.\. ok' shaping.log
+          grep -q 'test bidi_is_stable_across_targets \.\.\. ok' shaping.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
 

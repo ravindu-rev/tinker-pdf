@@ -162,8 +162,50 @@ semantics stay with [../features/content-and-text.md](../features/content-and-te
 | 2 | MCID and 14.9 properties across the `Device` seam (inline and `/Properties`-named) | Interpreter unit tests: inline `/MCID`, named list, malformed list (no MCID, still visible), nesting under a hidden `/OC` scope; all existing `interpret.rs` and `optional_content.rs` tests unchanged | M |
 | 3 | `TextChar` MCID + `Page::structured_text()` reading order, `/Alt`, `/ActualText`, `/E`, orphan count | A fixture whose content-stream order differs from structure order extracts in structure order; `/ActualText` replaces enclosed chars; `Figure` alt text surfaces; `plain_text()` output byte-identical to before on the whole fingerprint suite | M |
 | 4 | Corpus graduation: `tpdf probe` structure lines, ratchet bars over the veraPDF corpus | `cargo xtask corpus-run --check` compares `struct elements` / `mcids` / `orphans` bars; `corpus/ratchet.json` committed with non-zero element counts for `verapdf`; a seeded regression (element cap set to 0) fails the check | S |
-| 5 | PDF/UA measurement against corpus annotations, scoped to implemented clauses | An xtask report line states agreement per clause; every disagreement is a named file in `corpus/report.json`; CI job green with the agreement bars recorded in the ratchet | M |
+| 5 | PDF/UA measurement against corpus annotations, scoped to implemented clauses | **Amended, see below.** A `#[ignore]`d census in `crates/tinker-pdf/tests/pdfua.rs` states caught/abstained per clause over all 434 annotated fixtures; **zero false alarms is a hard assertion**; the caught count is a recorded floor; every false alarm is a named file | M |
 | 6 | `/StructParents` + `/ParentTree` emission on `DocumentBuilder` | A builder-produced two-paragraph document round-trips through `Document::structure()` with both MCIDs matched and zero orphans; the strict structural validator reports the file clean | S |
+
+## Milestone 5's amendment, and why
+
+The row above originally asked for agreement bars in `corpus/ratchet.json`
+and disagreements in `corpus/report.json`. It was written before the
+measurement existed, and the measurement is not shaped the way it assumed.
+
+**Most of ISO 14289 is not decidable by a reader.** The clauses are about
+whether tagging is *correct* — whether a `/P` is really a paragraph, whether
+the reading order is the author's, whether an `/Alt` describes the picture.
+Those are judgements about meaning. What a structure-tree reader can decide
+is the small remainder: the tree exists and walks, `/MarkInfo` says what it
+should, an identifier is present, a `/Figure` has *some* alternative text, the
+heading levels form an outline, a language is stated, a font is embedded.
+
+Measured over all 434 annotated fixtures, that catches **29 of 239
+non-conforming files with zero false alarms**, and abstains on 210. So the
+number a ratchet bar would carry is dominated by abstention — and an
+abstention count is not a quality that can regress. A bar over it would rise
+when the engine got worse at nothing in particular, and reporting it as
+"agreement" would count 210 silences as successes, which is exactly how a
+validator comes to claim a conformance level it has not earned.
+
+What replaces it is stricter in the direction that matters:
+
+- **Zero false alarms is an assertion, not a bar.** A `-pass-` file that trips
+  a rule fails the test outright. The cost of a false accusation is a caller
+  who stops believing the true ones.
+- **The caught count is a floor**, so a rule that quietly stops firing is
+  caught. It was recorded from a run: the first floor written here was 40,
+  guessed before the census ran, and it was wrong in the flattering direction.
+- **Abstention is printed as abstention**, per clause, never as agreement.
+
+One reading was overturned by a fixture on the way.
+`PDF_UA-1/7.4 Headings/7.4.2 Numbered headings/7.4.2-t01-pass-d.pdf` is a
+conforming file whose H1, H2 and H3 sit in three *sibling* `Sect` elements.
+A heading rule that carried the deepest level only downwards saw each `Sect`
+start from nothing and called the H2 a skip. 7.4.2 is about the outline a
+reader hears, and that outline is the headings in reading order (14.8)
+regardless of what contains them — so the level carries across siblings and
+out of containers. The corpus found that; the unit tests, all of which used
+flat siblings, could not have.
 
 ## Dependencies
 

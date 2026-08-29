@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use tinker_pdf::{
     Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
-    SimpleFontProvider, StreamObj, Tier, WriteMode, WriteOptions, XrefEntry,
+    SimpleFontProvider, StreamObj, StructureTree, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -125,6 +125,14 @@ struct Options {
     raw: bool,
     stream: bool,
     strict: bool,
+    /// Print the record format version and stop, naming no file.
+    ///
+    /// The corpus runner asks before it spawns anything, because a child one
+    /// version behind writes a complete record the runner then refuses, once
+    /// per file — and four thousand refusals read as an engine that stopped
+    /// rendering rather than as a binary that needs rebuilding. Asking costs
+    /// one process at the start of a run that spawns thousands.
+    record_version: bool,
 }
 
 impl Options {
@@ -142,6 +150,7 @@ impl Options {
             raw: false,
             stream: false,
             strict: false,
+            record_version: false,
         };
 
         let mut index = 0;
@@ -192,13 +201,16 @@ impl Options {
                 "--raw" => options.raw = true,
                 "--stream" => options.stream = true,
                 "--strict" => options.strict = true,
+                "--record-version" => options.record_version = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
             index += 1;
         }
 
-        if options.files.is_empty() {
+        // `--record-version` names no file by design: it asks what this
+        // binary writes, which is true before any document exists.
+        if options.files.is_empty() && !options.record_version {
             return Err("no input file".to_string());
         }
         Ok(options)
@@ -1288,7 +1300,7 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 4;
+const PROBE_VERSION: u32 = 5;
 
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
@@ -1300,12 +1312,44 @@ const BUNDLED: &str = "bundled";
 /// than a flag anybody can pass.
 const BUNDLED_FACES: bool = cfg!(feature = "bundled-fonts");
 
+/// What the structure join reached, summed over the pages the probe rendered.
+///
+/// Three counts and never a rate: `matched` alone says nothing without the
+/// characters beside it that the tree did not claim. The two kinds of unclaimed
+/// character stay apart for the reason [`StructuredText`] keeps them apart —
+/// untagged text is a producer that never marked it, and a marked run nothing
+/// claims is a structure tree that lost track of it.
+///
+/// [`StructuredText`]: tinker_pdf::StructuredText
+#[derive(Default)]
+struct Join {
+    matched: usize,
+    orphans: usize,
+    unmarked: usize,
+}
+
+impl Join {
+    fn add(&mut self, tree: &StructureTree, index: u32, page: &Page) {
+        let structured = tree.text_for_page(index, &page.text());
+        self.matched += structured.matched;
+        self.orphans += structured.orphans;
+        self.unmarked += structured.unmarked;
+    }
+}
+
 /// Opens and renders one file at a time, writing a record per file.
 ///
 /// Never returns `Err` for anything the file did: the runner reads outcomes
 /// from the record, and reserves the exit code for "this process did not
 /// finish", which is the one thing a record cannot say about itself.
 fn probe(options: &Options) -> Result<(), String> {
+    // Before the font provider, so the answer does not depend on a `--fonts`
+    // path being resolvable: the question is what this binary writes, and it
+    // writes the same version whatever faces it was pointed at.
+    if options.record_version {
+        println!("probe {PROBE_VERSION}");
+        return Ok(());
+    }
     let fonts = options.font_provider()?;
     for path in &options.files {
         probe_one(options, path, fonts.as_ref());
@@ -1365,16 +1409,40 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         println!("cap {capability}");
     }
 
+    // Bound once, outside the page loop. `Document::structure()` re-walks
+    // `/StructTreeRoot` on every call, so asking per page would make an
+    // N-page document cost N walks of a tree that did not change.
+    let tree = doc.structure();
+    match &tree {
+        Some(tree) => println!(
+            "tagged tree yes elements {} content {} objects {}",
+            tree.element_count(),
+            tree.content_count(),
+            tree.object_count()
+        ),
+        // Its own line rather than an omission: a record with no `tagged` key
+        // at all is one from a child that did not look, and that is a
+        // different fact from a document with no structure tree.
+        None => println!("tagged tree no"),
+    }
+
     let render = RenderOptions {
         annotations: options.annotations,
         ..RenderOptions::at_dpi(options.dpi)
     };
     println!("phase render");
     let mut rendered = 0u32;
+    let mut join = Join::default();
     for index in options.pages(&doc) {
         let Some(page) = doc.page(index) else {
             continue;
         };
+        // Only where there is a tree to join to. Text extraction is cheap
+        // beside rendering, but it is not free, and on the 3 800-odd corpus
+        // files carrying no structure tree it would measure nothing.
+        if let Some(tree) = &tree {
+            join.add(tree, index, &page);
+        }
         // Before the page rather than after it, so the line names the page
         // being worked on when a kill arrives rather than the last one that
         // finished. The runner never reads the number, only the fact that the
@@ -1391,6 +1459,12 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         }
     }
     println!("rendered {rendered}");
+    if tree.is_some() {
+        println!(
+            "tagged chars matched {} orphans {} unmarked {}",
+            join.matched, join.orphans, join.unmarked
+        );
+    }
 
     // What this document costs to work on, as properties of the document.
     // Read by nothing yet; measured so the metamorphic gate can stop being a

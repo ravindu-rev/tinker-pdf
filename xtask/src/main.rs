@@ -755,6 +755,13 @@ const SPAWNERS: &[(&str, &str)] = &[
          revision into the same directory as the runner. A workspace binary, \
          resolved as a sibling rather than from PATH for exactly that reason",
     ),
+    (
+        "xtask/src/corpus.rs",
+        "PERMANENT: asks that same sibling `tpdf` what record format it writes, \
+         once, before a run spawns it per file. It adjudicates nothing about a \
+         document — the question is what this repository's own binary is, and \
+         the answer only decides whether to refuse the run",
+    ),
 ];
 
 /// Ruling 13's boundary, held by a build failure rather than by habit.
@@ -1166,7 +1173,7 @@ mod tests {
         for (file, reason) in SPAWNERS {
             assert!(
                 reason.starts_with("PERMANENT: ") || reason.starts_with("DEBT ("),
-                "{file}: a reason must begin `PERMANENT: ` or `DEBT (step N): `,                  so that a debt cannot be filed as a fact of life: {reason}"
+                "{file}: a reason must begin `PERMANENT: ` or `DEBT (step N): `, so that a debt cannot be filed as a fact of life: {reason}"
             );
             assert!(
                 reason.len() > 40,

@@ -79,6 +79,7 @@
 #![deny(clippy::float_arithmetic)]
 
 mod apply;
+pub mod bidi;
 pub mod buffer;
 pub mod common;
 pub mod gdef;
@@ -86,6 +87,8 @@ mod gpos;
 mod gsub;
 pub mod limits;
 pub mod read;
+pub mod shape;
+pub mod unicode;
 
 pub use buffer::{Buffer, Direction, ShapedGlyph};
 pub use common::{
@@ -94,6 +97,7 @@ pub use common::{
 };
 pub use gdef::{AttachList, Caret, Gdef, GlyphClass, LigCaretList};
 pub use limits::Limits;
+pub use shape::{ShapedRun, Shaper};
 
 use apply::Runner;
 use read::Bytes;
@@ -501,6 +505,24 @@ impl<'a> Layout<'a> {
             buffer.zero_mark_advances();
         }
         runner.warnings
+    }
+
+    /// Zeroes the advance of every glyph `GDEF` calls a mark, running no
+    /// lookup at all.
+    ///
+    /// [`Layout::position`] does this at the end of positioning, and a face
+    /// with no `GPOS` never reaches it — while still having combining marks in
+    /// it, and an `hmtx` that gives each of them a real advance. See
+    /// [`MarkWidths`] for why the answer is a caller's and not a rule's; this
+    /// is the same decision for the face that has nothing to say about it.
+    ///
+    /// A face with no `GDEF` either is left exactly as it stands, because
+    /// nothing has claimed any of its glyphs is a mark.
+    pub fn zero_marks(&self, buffer: &mut Buffer) {
+        let empty = LookupList::new(Bytes::new(&[]));
+        let runner = Runner::new(Table::Gpos, empty, self.gdef.as_ref(), Limits::DEFAULT);
+        runner.classify(buffer);
+        buffer.zero_mark_advances();
     }
 }
 
