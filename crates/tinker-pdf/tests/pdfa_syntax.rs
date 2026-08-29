@@ -737,6 +737,11 @@ fn a_syntax_only_request_runs_the_syntax_group_and_says_so() {
 
 /// Asking for a group this build has no rules for must not make the verdict
 /// claim it ran. A caller who reads `coverage` is reading what happened.
+///
+/// The group this is about moves as the milestones land: fonts was one until
+/// milestone 5 gave it rules, and colour is the remaining one. Both directions
+/// are asserted, because a `coverage` that under-reports a group that *did*
+/// run is the same defect wearing the other face.
 #[test]
 fn a_group_with_no_rules_never_reports_itself_as_having_run() {
     let document = Document::open(conforming().build()).expect("opens");
@@ -747,7 +752,7 @@ fn a_group_with_no_rules_never_reports_itself_as_having_run() {
         colour: true,
     };
     let verdict = document.validate_pdfa_with(everything);
-    assert!(!verdict.coverage.fonts);
+    assert!(verdict.coverage.fonts, "fonts landed at milestone 5");
     assert!(!verdict.coverage.colour);
     assert!(!verdict.coverage.is_complete());
 }
