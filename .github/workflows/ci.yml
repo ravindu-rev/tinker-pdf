@@ -343,6 +343,24 @@ jobs:
       # fonts would fail here rather than silently measuring nothing — but it
       # would fail for the wrong reason, and this leg exists to catch the right
       # one.
+      # The archival packet's byte-hash. It lives in `pdfa_writer.rs` rather
+      # than `determinism.rs` because the fixture it hashes is built from
+      # that file's own helpers, and its name claims "on every target" — a
+      # claim nothing checked until this step existed. Every other committed
+      # document hash is about geometry; this one is about a *claim*, and an
+      # XMP packet is the one part of a written document with an obvious
+      # route to nondeterminism, since a producer stamping `xmp:CreateDate`
+      # from a clock is the ordinary thing to do.
+      - name: Write a PDF/A document on wasm32-wasip1 and compare its hash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test pdfa_writer \
+            --target wasm32-wasip1 2>&1 | tee pdfa.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' pdfa.log
+          grep -q 'the_archival_fixture_hashes_the_same_on_every_target \.\.\. ok' \
+            pdfa.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       - name: Shape on wasm32-wasip1 and compare against the fingerprints
         run: |
           set -o pipefail

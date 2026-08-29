@@ -100,7 +100,10 @@ regions).
 
 ## Tier 3 — capabilities absent today
 
-Ordered by leverage, not size.
+Ordered by leverage, not size. **Seven of the eight have left it**;
+what follows records what each one settled, because a row that simply
+disappeared would take its evidence with it. Text shaping is the one still
+open, and it is open at five of eight milestones rather than untouched.
 
 **Digital signatures have left this list.** All nine milestones of
 [design/signatures.md](design/signatures.md) are green: signatures are found,
@@ -182,6 +185,55 @@ was swallowed at both call sites and the whole face embedded with **no warning
 at all**, observable only as a missing `ABCDEF+` tag. `EmbeddedWhole` and
 `SubsetRefusal` now say so.
 
+**PDF/A has left this list.** All six milestones of
+[design/pdfa.md](design/pdfa.md) are green. `Document::validate_pdfa` runs
+all four rule groups — metadata, syntax, fonts, colour — and returns
+findings, where **a pass is an empty list and there is no boolean that
+discards it**. `tpdf check --pdfa` exits by the verdict and prints which
+groups ran beside it. `DocumentBuilder::finish_archival` writes a profiled
+document, refusing forbidden features **at the call that makes them** so
+nothing is discovered by the validator that the builder allowed. Level A is
+claimable rather than staged, because tagged PDF landed first — the
+concrete payoff of taking this list's own order rather than the evidence
+order.
+
+Four things worth carrying forward:
+
+- **The denominator was wrong before the numerator was.** 2 896 corpus files
+  carry a `-pass-`/`-fail-` annotation and 525 of them test a *different*
+  standard — 434 PDF/UA, 85 TWG, 6 ISO 32000. A PDF/UA file annotated
+  `pass` makes no PDF/A claim, and scoring it produced 195 spurious
+  disagreements: a measurement measuring itself. Against the 2 371 that are
+  PDF/A tests, agreement is **1 201**, from 1 017 before the font and colour
+  groups.
+- **One false positive, held at one on purpose.** 830 of 831 conforming
+  files agree; the one that does not is a `%PDF-2.0` header this build reads
+  literally against 6.1.2. An early font group scored 1 109 with 53 false
+  positives and was thrown away — a validator that accuses conforming files
+  is worse than one that stays quiet, because the accusations are what a
+  caller stops believing first.
+- **Writing the ledger's "I do not know why" rows is what made them
+  findable.** All three turned out to be defects here rather than readings:
+  `/Info` values were trimmed before comparison so `" veraPDF Consortium "`
+  matched, a present-but-not-a-string `/Info` entry was skipped rather than
+  reported, and the header rule accepted any digit so `%PDF-1.9` passed.
+- **There is no vendored sRGB profile and the parameter is mandatory.** The
+  ICC's own profiles carry a bespoke permission notice with no SPDX
+  identifier, so they fail `cargo xtask vendor` at its first requirement
+  rather than at its allowlist. A CC0 regeneration would clear that gate and
+  was declined on a second argument: everything else vendored here is a
+  published fact about a file format, and an ICC profile characterises a
+  particular device — which device an archival document's colours are *for*
+  is the caller's statement, not this engine's. Same shape as bundling no
+  font faces.
+
+**Not closed, and stated where a caller sees it**: the writer is checked by
+the rule table that would also accept its mistakes. Near-miss twins narrow
+that and do not close it. And `WriteOptions` has no archival profile,
+because `rewrite` returns `Vec<u8>` with nowhere to put a refusal — asking
+for one there would mean discovering violations in the validator, which is
+the failure the builder's design exists to avoid.
+
 **Streaming open has left this list.** `ByteSource` is the seam a host
 implements to supply ranges; `Document::open_streaming` opens from one, and
 the linearized fast path renders page one of a qpdf-corpus file with **zero
@@ -256,38 +308,6 @@ byte-identical outputs from being identically wrong.
   at all — but the seven aots cases stating the opposite still run, with
   both readings written down beside them. (XL,
   [design/shaping.md](design/shaping.md))
-- **PDF/A validation and writing — four of six milestones.** The
-  2 907-file veraPDF corpus was a never-crash bar and is now also a
-  conformance one. `Document::validate_pdfa` reads the flavour a file
-  claims, runs the metadata and syntax rule groups, and returns findings —
-  **a pass is an empty list and there is no boolean that discards it**.
-  `tpdf check --pdfa` exits by the verdict and prints which rule groups
-  ran beside it, because "no findings" from a partial sweep is not "it
-  conforms".
-
-  **Agreement is 1 017 of 2 371, and the denominator is the interesting
-  number.** 2 896 corpus files carry a `-pass-`/`-fail-` annotation, but 525
-  of them test a *different* standard — 434 PDF/UA, 85 TWG, 6 ISO 32000 —
-  and a PDF/UA file annotated `pass` makes no PDF/A claim at all. Scoring
-  them produced 195 spurious disagreements before the scope was fixed, which
-  is a measurement measuring itself. Of what is in scope: 830 of 831 `pass`
-  files agree, and 187 of 1 540 `fail` files do — the gap being fonts and
-  colour, which are milestone 5.
-
-  Every disagreement is a row in a committed ledger with a **mandatory
-  reason string**, and a row without one fails the test that reads it. The
-  first ledger carried three rows saying, in those words, that nobody had
-  established why — and writing them down is what made them findable: all
-  three were defects here, not readings. `/Info` values were trimmed before
-  comparison so `" veraPDF Consortium "` matched; a present-but-not-a-string
-  `/Info` entry was skipped rather than reported; and the header rule
-  accepted any digit, so `%PDF-1.9` passed.
-
-  **Not done**: the font and colour rule groups, and the writer profile
-  (`/OutputIntents`, generated XMP, typed refusals at the call that makes
-  them). Level A is now reachable rather than staged, because tagged PDF
-  landed first — which is the concrete payoff of taking the roadmap's own
-  order. (L–XL, [design/pdfa.md](design/pdfa.md))
 
 Decision items, not commitments: **OCR** (if ever, as a host seam like
 `FontProvider`, not an in-engine engine) and **container writing** (CBZ,
