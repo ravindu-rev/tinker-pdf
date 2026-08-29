@@ -503,6 +503,59 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     for (group, names) in &false_negatives {
         println!("  {group}: {}", names.len());
     }
+
+    // ---- and every one of them is accounted for in the ledger ------------
+    //
+    // This is what stops the ledger being a snapshot somebody wrote once. A
+    // disagreement with no row fails here by name; a row whose subject no
+    // longer disagrees is stale and fails here too. The reason field is
+    // mandatory at the reader (`a_row_without_a_reason_is_refused`), so
+    // "covered" cannot mean "listed without an explanation".
+    let rows = read_ledger(&ledger_text()).expect("the committed ledger is complete");
+    let covers = |subject: &str| {
+        rows.iter()
+            .any(|row| subject == row.subject || subject.starts_with(&row.subject))
+    };
+
+    let mut uncovered: Vec<String> = Vec::new();
+    for line in &false_positives {
+        let subject = line.split('\n').next().unwrap_or(line);
+        if !covers(subject) {
+            uncovered.push(subject.to_string());
+        }
+    }
+    for subject in false_negatives.keys() {
+        if !covers(subject) {
+            uncovered.push(subject.clone());
+        }
+    }
+    let stale: Vec<&str> = rows
+        .iter()
+        .map(|row| row.subject.as_str())
+        .filter(|subject| {
+            !false_negatives.keys().any(|key| key.starts_with(*subject))
+                && !false_positives
+                    .iter()
+                    .any(|line| line.starts_with(*subject))
+        })
+        .collect();
+
+    println!(
+        "\nledger: {} rows, {} disagreements uncovered, {} rows stale",
+        rows.len(),
+        uncovered.len(),
+        stale.len()
+    );
+    assert!(
+        uncovered.is_empty(),
+        "disagreements with no ledger row — every one of these needs a class \
+         and a reason, and \"I do not know why\" is an acceptable reason and a \
+         missing row is not: {uncovered:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "ledger rows whose subject no longer disagrees; delete them: {stale:#?}"
+    );
 }
 
 /// The syntax group alone, over the same files, so the sweep the design doc

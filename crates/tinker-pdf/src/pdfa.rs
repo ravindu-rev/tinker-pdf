@@ -329,6 +329,143 @@ pub const STAGED: &[StagedRule] = &[
         rule: "fonts: embedding, widths, symbolic flags, Unicode mapping",
         because: "milestone 5 of docs/design/pdfa.md",
     },
+    StagedRule {
+        clause: "6.1.4",
+        rule: "the cross-reference table's own syntax: subsection header \
+                spacing, the prohibition on a cross-reference stream in a \
+                part 1 file, and hybrid-reference files",
+        because: "the reader merges every revision's table into one \
+                   before a rule could see how any of them was spelled. \
+                   Catching this needs the per-section bytes, which the \
+                   strict structural validator in tinker-pdf-cos already \
+                   walks and this group does not",
+    },
+    StagedRule {
+        clause: "6.1.7",
+        rule: "stream objects: the EOL after the stream keyword, the \
+                endstream keyword's own EOL, and Length against the \
+                actual byte count",
+        because: "the same reason as 6.1.8 - the parser has resolved the \
+                   extent and consumed the whitespace by the time a \
+                   stream object exists to have a rule applied to it",
+    },
+    StagedRule {
+        clause: "6.1.9",
+        rule: "inline image dictionaries",
+        because: "an inline image lives inside a content stream, and \
+                   opening one is the interpreter's job rather than this \
+                   group's. Every filter reachable from the cross- \
+                   reference table is checked; no filter that is not",
+    },
+    StagedRule {
+        clause: "6.1.12",
+        rule: "the contents of a permissions dictionary: what the DocMDP \
+                transform inside Perms says",
+        because: "this build checks which keys Perms carries, which is \
+                   the clause's first sentence, and not what the \
+                   signature reference dictionary under DocMDP permits",
+    },
+    StagedRule {
+        clause: "6.3.1",
+        rule: "annotations: the permitted subtypes, the flags an \
+                annotation dictionary must and must not set, and the \
+                appearance stream every annotation needs",
+        because: "milestone 5's neighbour rather than milestone 5 \
+                   itself. The appearance rules need the annotation \
+                   appearance machinery and the colour rules need an \
+                   output intent, and neither is in this group",
+    },
+    StagedRule {
+        clause: "6.4",
+        rule: "transparency in part 1, and interactive form field \
+                appearances in parts 2 to 4",
+        because: "part 1's transparency prohibition needs the graphics \
+                   state, and the form rules need the appearance streams \
+                   the annotation group will bring. Both are milestone 5",
+    },
+    StagedRule {
+        clause: "6.5",
+        rule: "part 1's annotation rules",
+        because: "part 1 numbers annotations at 6.5 where parts 2 to 4 \
+                   number them at 6.3. The rules are staged for the same \
+                   reason and the clause number is the only difference",
+    },
+    StagedRule {
+        clause: "6.6.3",
+        rule: "part 4's trigger events",
+        because: "ISO 19005-4 6.6.3 permits some additional-action \
+                   entries and forbids others rather than forbidding the \
+                   entry. The same refusal as the 6.5.2 row, under part \
+                   4's clause number",
+    },
+    StagedRule {
+        clause: "6.7",
+        rule: "logical structure: the tagged structure tree level A \
+                requires, its artefacts, and natural language \
+                specification",
+        because: "docs/design/tagged-pdf.md owns the structure tree, and \
+                   docs/design/pdfa.md's non-goals stage level A behind \
+                   it rather than claiming it wrongly",
+    },
+    StagedRule {
+        clause: "6.7.8",
+        rule: "XMP extension schemas: the description a packet must \
+                carry for a property outside the predefined schemas",
+        because: "the other half of the predefined-schema rule, and \
+                   staged with it. A validator that checked the extension \
+                   schema without the schema tables would be checking the \
+                   exception to a rule it does not enforce",
+    },
+    StagedRule {
+        clause: "6.7.11",
+        rule: "version identification beyond the part, level and \
+                revision: whether the packet's pdfaid schema is described \
+                where the part requires a description",
+        because: "this build reads the claim and checks it against the \
+                   part's own table of levels. What it does not do is \
+                   check the claim against the schema description the \
+                   packet is supposed to carry for it",
+    },
+    StagedRule {
+        clause: "6.8",
+        rule: "embedded files: the AF back-reference from a document, \
+                page or annotation to the file specification, and the \
+                MIME type an embedded file stream declares",
+        because: "this build checks the keys a file specification must \
+                   carry. The reference to it from elsewhere in the \
+                   document, and whether the attachment is itself PDF/A, \
+                   are separate walks",
+    },
+    StagedRule {
+        clause: "6.10",
+        rule: "optional content configuration: the entries a part 2-to-4 \
+                file's OCProperties may carry",
+        because: "part 1 forbids optional content outright and that rule \
+                   runs. The parts that permit it constrain the \
+                   configuration dictionary, which is a rule about D and \
+                   AS this build has not written",
+    },
+    StagedRule {
+        clause: "6.11",
+        rule: "alternate presentations and page transitions",
+        because: "two fixtures and no rule. The clause is short and the \
+                   rule is simply not written, which is a gap rather than \
+                   a difficulty",
+    },
+    StagedRule {
+        clause: "6.12",
+        rule: "the document requirements dictionary",
+        because: "one fixture and no rule. The same gap as the 6.11 row, \
+                   and the same honest answer",
+    },
+    StagedRule {
+        clause: "6.9",
+        rule: "part 1's interactive form rules, and part 4's embedded \
+                files",
+        because: "part 1's 6.9 needs the appearance and font machinery \
+                   its fixtures turn on, and part 4's 6.9 is the \
+                   embedded-file row under part 4's clause number",
+    },
 ];
 
 /// Which machinery a reach is for.
