@@ -170,6 +170,15 @@ fn exercise(bytes: Vec<u8>) {
     // bytes itself, which is a second parser over hostile input and belongs
     // here for exactly that reason.
     let _ = doc.validate();
+    // The PDF/A rule engine walks every object in the cross-reference table,
+    // follows the nesting inside each one, and pull-parses whatever the
+    // metadata stream turned out to hold. Three parsers over hostile input,
+    // and the design doc puts the call here for that reason. Each rule group
+    // is asked for on its own as well as together, because a group that only
+    // ever ran beside another has never been shown to survive alone.
+    let _ = doc.validate_pdfa();
+    let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::SYNTAX);
+    let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::METADATA);
     let _ = doc.metadata();
     let _ = doc.pdf_version();
     let _ = doc.page_count();

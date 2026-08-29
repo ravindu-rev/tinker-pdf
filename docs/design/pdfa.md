@@ -189,6 +189,77 @@ named above.
 | 5 | Font and colour rule groups (colour rules needing profile internals staged behind [design/icc.md](icc.md)) | Font- and colour-clause corpus agreement rates recorded and ratcheted; staged colour rules are named refusals asserted by a test, not silent passes | L |
 | 6 | Writer profile on `DocumentBuilder` + `WriteOptions`, output intent, XMP generation, typed refusals | Built fixtures pass milestone 1–5's validator with zero findings and the strict structural validator clean; each fixture is built deliberately at the edge of its clause and its near-miss twin is asserted to fail; one refusal test per forbidden feature; a PDF/A fixture joins the determinism byte-hashes | L |
 
+## What milestones 2 to 4 actually measured
+
+*Recorded August 2026, at the commit that landed the disagreement ledger.*
+Numbers rather than adjectives, because the risk table above says coverage is
+a measured number and not a word.
+
+**The bar is 2 371 files, not 2 896.** The veraPDF corpus carries 2 896 files
+annotated `-pass-` or `-fail-`, and 525 of them are tests of a *different*
+standard — 434 PDF/UA fixtures, 85 in the suite's own TWG directory, six
+against ISO 32000 itself. A PDF/UA file annotated `pass` is a statement that
+it conforms to PDF/UA; it makes no PDF/A claim at all, so this engine
+correctly reports that it claims none, and scoring that as a disagreement
+measures the measurement rather than the engine. The first census did exactly
+that and produced 195 spurious disagreements. They are counted and printed,
+and excluded from the rate. `Isartor test files` **are** in: they are the
+original PDF/A-1b conformance suite.
+
+**1 014 of 2 371 agree.** 830 of 831 files annotated `pass`, and 184 of
+1 540 annotated `fail`. The shape of that is the shape of an early rule
+engine: almost nothing conforming is reported wrongly, and most defects are
+in clauses that have no rule yet.
+
+| | files | agree |
+| --- | --- | --- |
+| annotated `-pass-` | 831 | 830 |
+| annotated `-fail-` | 1 540 | 184 |
+| **total** | **2 371** | **1 014** |
+
+**The single false positive is a reading, and it is recorded as one.** ISO
+19005-1 6.1.2 says the file header consists of `%PDF-1.n`. One fixture carries
+`%PDF-2.0`, is annotated `pass`, and this build reports it. The rule is left
+as it is and the ledger's first row records the reading against the clause,
+which is the shape ruling 13 asks for when a first-party reading and a
+published annotation disagree.
+
+**Every disagreement is in the ledger.**
+`crates/tinker-pdf/tests/pdfa_ledger.tsv`, 118 rows, each carrying a class
+(`bug` / `staged` / `reading`) and a mandatory reason. The census asserts
+coverage in both directions: a disagreement with no row fails, and a row whose
+subject no longer disagrees fails as stale. Three rows say, in those words,
+that nobody has established why — two part 1 information-dictionary fixtures
+the consistency rule ought to catch and does not, and one part 2 file-header
+fixture that survives all four header rules. They are classified `bug`,
+because nothing found so far justifies calling them anything else.
+
+**Where the 1 356 unagreed `fail` files are.** 490 in the XMP
+predefined-schema property rule, which needs the XMP specification's property
+tables as vendored data and is the largest single staged rule in the build.
+Roughly 600 in graphics, fonts, annotations and transparency — milestone 5 and
+`docs/design/icc.md`. The rest are file-structure clauses whose defects the
+reader has already normalised away by the time an object exists to apply a
+rule to: implementation limits, hexadecimal string syntax, the EOL markers
+around `obj` and `stream`, cross-reference subsection spelling. That last
+family is worth naming as a limit rather than a backlog: **this rule engine
+reads the object graph, and a defect that only exists in the bytes is
+invisible to it.** The strict structural validator in `tinker-pdf-cos` already
+walks those bytes, and joining the two is the honest way to close that group.
+
+**`PDFA_STAGED` has 27 entries** — every rule this build knows it does not
+run, each with its clause and what it is waiting for. A `staged` row in the
+ledger has to point at one, so the classification is checkable rather than a
+story.
+
+**The laziness requirement is counted, not asserted.** Every reach past the
+COS document goes through `Machinery::reach`, and a syntax-only validation of
+a document that embeds a font program leaves the font and colour counters at
+zero. The counter is not vacuous: it records the one XML parse a syntax sweep
+genuinely needs, the flavour claim, so the mechanism fires on nearly every
+document in the corpus. Injecting a font rule into the syntax group fails four
+of the workspace's 3 375 tests.
+
 ## Dependencies
 
 - **[design/icc.md](icc.md)** — ICC profile parsing for colour rules that
