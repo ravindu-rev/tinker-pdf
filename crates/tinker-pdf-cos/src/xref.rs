@@ -297,12 +297,45 @@ pub(crate) fn build_limited(
     sink: &mut WarningSink,
     max_sections: u32,
 ) -> XrefBuild {
+    build_with(bytes, start, shift, names, sink, max_sections, false)
+}
+
+/// [`build_limited`], told that this section's revision is the whole document.
+///
+/// Annex F's first-page cross-reference section is at the front of the file
+/// and the only `%%EOF` is at the very back (part 11), so searching forward
+/// for it would read everything -- to learn what the layout already says. The
+/// head-only open passes `true` and the walker takes the document's end.
+pub(crate) fn build_head(
+    bytes: Bytes<'_>,
+    start: u64,
+    names: &DocNames,
+    sink: &mut WarningSink,
+) -> XrefBuild {
+    build_with(bytes, start, 0, names, sink, 1, true)
+}
+
+fn build_with(
+    bytes: Bytes<'_>,
+    start: u64,
+    shift: u64,
+    names: &DocNames,
+    sink: &mut WarningSink,
+    max_sections: u32,
+    revision_is_the_document: bool,
+) -> XrefBuild {
     let len = bytes.len();
     let mut walker = Walker {
         bytes,
         len,
         shift,
         names,
+        revision_is_the_document,
+        first_window: if revision_is_the_document {
+            limits::HEAD_SECTION_WINDOW
+        } else {
+            limits::XREF_SECTION_WINDOW
+        },
         table: XrefTable::new(),
         revisions: Vec::new(),
     };
@@ -328,6 +361,14 @@ struct Walker<'a> {
     len: u64,
     shift: u64,
     names: &'a DocNames,
+    /// Annex F: this section's revision is the whole file, so there is nothing
+    /// to search forward for.
+    revision_is_the_document: bool,
+    /// How much to fetch for a section before the window doubles. The head
+    /// path asks for less: a linearized file's first-page table is small, its
+    /// `/E` can be under a single chunk, and an over-eager first window would
+    /// read the tail of a small file to parse the front of it.
+    first_window: u64,
     table: XrefTable,
     revisions: Vec<Revision>,
 }
@@ -445,7 +486,7 @@ impl Walker<'_> {
     /// cache already holds every chunk the shorter attempt pulled, so the
     /// doubling costs arithmetic and no transport.
     fn classic_section(&mut self, at: u64, sink: &mut WarningSink) -> Option<Section> {
-        let mut want = limits::XREF_SECTION_WINDOW;
+        let mut want = self.first_window;
         loop {
             let window = self.bytes.window(at, want)?;
             let reaches_end = window.end() >= self.len;
@@ -622,7 +663,7 @@ impl Walker<'_> {
     /// one window for both would either fetch far too much or fail on a table
     /// bigger than its guess.
     fn xref_stream_section(&mut self, at: u64, sink: &mut WarningSink) -> Option<Section> {
-        let mut want = limits::XREF_SECTION_WINDOW;
+        let mut want = self.first_window;
         let (window, parsed) = loop {
             let window = self.bytes.window(at, want)?;
             let reaches_end = window.end() >= self.len;
@@ -649,7 +690,7 @@ impl Walker<'_> {
         let data_start = window.abs(stream.data_start);
         let want_data = match stream.len_hint {
             Some(declared) => declared.saturating_add(slack),
-            None => limits::XREF_SECTION_WINDOW,
+            None => self.first_window,
         };
         let data = self.bytes.window(data_start, want_data)?;
         let local_start = data.local(data_start)?;
@@ -771,6 +812,9 @@ impl Walker<'_> {
     /// found or the document runs out, which costs no transport it has not
     /// already paid for -- the chunk cache holds what the shorter search read.
     fn revision_end_from(&self, from: u64) -> u64 {
+        if self.revision_is_the_document {
+            return self.len;
+        }
         let mut want = limits::XREF_SECTION_WINDOW;
         loop {
             let Some(window) = self.bytes.window(from, want) else {

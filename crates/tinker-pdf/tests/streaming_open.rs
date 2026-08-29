@@ -12,6 +12,7 @@
 //! produce the same bytes on every target, which is what `determinism.rs`
 //! pins for the writer already.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tinker_pdf::{
@@ -29,7 +30,7 @@ use tinker_pdf::{
 const OPEN_BUDGET: u64 = 13_753;
 
 /// And how many it may read to open *and* pull one object out of the middle.
-const OPEN_AND_ONE_OBJECT_BUDGET: u64 = 71_097;
+const OPEN_AND_ONE_OBJECT_BUDGET: u64 = 67_001;
 
 /// A document of `pages` pages, each carrying a content stream of a few tens
 /// of kilobytes, so the whole thing runs to megabytes and one page is a small
@@ -199,6 +200,26 @@ fn ink(bitmap: &tinker_pdf::Bitmap) -> usize {
         .count()
 }
 
+/// How many files in the pinned qpdf corpus open through Annex F's head-only
+/// path. Committed, so that a set which shrank cannot read as a pass.
+///
+/// Measured against the `qpdf` entry of `corpus/corpora.lock`, commit
+/// e8adee32, whose pinned subdirectory holds 626 PDFs, 45 of them already
+/// linearized. The two that do not open from their heads state parameters
+/// this reader will not act on, and fall back rather than guess.
+const HEAD_OPENED_CORPUS_FILES: usize = 43;
+
+/// The linearized corpus files whose page-one render reaches past `/E`, by
+/// name and with the reason.
+///
+/// `badlin1.pdf` is qpdf's deliberately damaged linearization fixture: its
+/// declared `/E` is not where the first page ends, so the objects page one
+/// really needs are past it. Reading them is the correct answer -- hints
+/// accelerate, they never decide, and the head ceiling is a guess the object
+/// is allowed to overrule. Named rather than counted, so that a file which
+/// stopped trespassing, or a second which started, both fail here.
+const REACHES_PAST_E: &[&str] = &["badlin1.pdf"];
+
 /// How many bytes a page-one render of the 60-page linearized fixture may
 /// read. A ratchet, measured and committed.
 ///
@@ -319,4 +340,86 @@ fn reading_past_page_one_is_what_pays_for_the_tail() {
         source.touched(&tail),
         "the main table at /T is in the tail, and reading past page one needs it"
     );
+}
+
+// ---- Files this project did not write ----------------------------------
+
+/// Where `cargo xtask corpus-fetch` puts the qpdf corpus, and the override for
+/// a checkout that shares one fetch between worktrees.
+fn qpdf_corpus() -> Option<PathBuf> {
+    let named = std::env::var_os("TINKER_QPDF_CORPUS").map(PathBuf::from);
+    let default =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/files/qpdf/qpdf/qtest/qpdf");
+    named
+        .into_iter()
+        .chain(std::iter::once(default))
+        .find(|dir| dir.is_dir())
+}
+
+/// Every linearized file in the corpus that this reader can open from its head
+/// renders page one without reading its tail.
+///
+/// The writer-made fixture above proves the path works on a file laid out by
+/// the same code that reads it, which is the agreement that proves the least.
+/// These were linearized by somebody else.
+#[test]
+fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
+    let Some(dir) = qpdf_corpus() else {
+        println!("SKIPPED linearized corpus render: the qpdf corpus is not fetched");
+        return;
+    };
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "pdf"))
+        .collect();
+    files.sort();
+
+    let mut engaged = 0usize;
+    let mut rendered = 0usize;
+    let mut trespassed: Vec<String> = Vec::new();
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+        let Ok(document) = Document::open_streaming(source.clone()) else {
+            continue;
+        };
+        let Some(end_of_first_page) = document.first_page_end() else {
+            continue;
+        };
+        engaged += 1;
+        let Some(page) = document.page(0) else {
+            continue;
+        };
+        let _ = page.render(&RenderOptions::default());
+        rendered += 1;
+        let tail = end_of_first_page.div_ceil(CHUNK_SIZE) * CHUNK_SIZE..bytes.len() as u64;
+        if source.touched(&tail) {
+            trespassed.push(name);
+        }
+    }
+
+    println!(
+        "RAN linearized corpus render: {engaged} files opened from their heads, \
+         {rendered} rendered page one, over {} PDFs",
+        files.len()
+    );
+    assert_eq!(
+        trespassed, REACHES_PAST_E,
+        "these are the linearized corpus files whose page one reaches past /E, and no others"
+    );
+    assert!(
+        engaged >= HEAD_OPENED_CORPUS_FILES,
+        "only {engaged} corpus files opened from their heads, and {HEAD_OPENED_CORPUS_FILES} did \
+         when this was measured: a shrinking set reads as a pass"
+    );
+    assert_eq!(rendered, engaged, "every one of them drew its first page");
 }

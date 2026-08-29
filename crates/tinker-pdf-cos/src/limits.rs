@@ -82,7 +82,14 @@ pub const STARTXREF_SCAN_MAX: usize = 64 * 1024;
 /// demonstrably ends inside it, because a window that cut an object short
 /// would parse to a different value than the same bytes in one buffer, and
 /// ruling 4 does not allow the two to differ.
-pub const OBJECT_WINDOW: u64 = 4096;
+///
+/// A quarter of a chunk rather than a whole one, so that reading an object
+/// near the end of the head of a small linearized file does not pull the
+/// chunk after it. Doubling costs no transport -- the chunk cache holds what
+/// the shorter attempt read -- so the small first window is close to free,
+/// and a stream's data is fetched by its declared length rather than by
+/// doubling anyway.
+pub const OBJECT_WINDOW: u64 = 1024;
 
 /// How far past a cross-reference section a streamed reader looks for the
 /// `%%EOF` that ends its revision (7.5.5).
@@ -95,6 +102,15 @@ pub const OBJECT_WINDOW: u64 = 4096;
 /// document, which is where it ends -- give or take the bytes after the
 /// marker, and `Revision::byte_range` on a streamed document says so.
 pub const REVISION_END_SCAN: u64 = 8192;
+
+/// Bytes fetched for the first-page cross-reference section of a linearized
+/// file before the window doubles (Annex F part 3).
+///
+/// Smaller than a generic section's window on purpose. That table describes
+/// one page, so it is short; and a linearized file can be small enough that
+/// `/E` is under a single chunk, where an over-eager first window would read
+/// the tail of the file to parse the front of it.
+pub const HEAD_SECTION_WINDOW: u64 = 1024;
 
 /// Bytes fetched for one cross-reference section before the window doubles.
 ///

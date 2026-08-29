@@ -609,6 +609,16 @@ impl CosDocument {
         self.linearized.as_ref().map(|l| l.end_of_first_page)
     }
 
+    /// The object number of the first page (Annex F `/O`), when this document
+    /// was opened on the linearized fast path.
+    ///
+    /// `None` for every other document. Annex F names it so that a reader
+    /// holding only the head can reach page one without walking the page
+    /// tree, whose root the layout is free to leave in the tail.
+    pub fn first_page_object(&self) -> Option<u32> {
+        self.linearized.as_ref().map(|l| l.first_page_object)
+    }
+
     /// Whether every byte of the document has been fetched.
     ///
     /// Always true for a document opened from a buffer. For a streamed one it
@@ -1112,6 +1122,21 @@ impl CosDocument {
         Object::Null
     }
 
+    /// How far a read that begins inside the first page may reach, on Annex
+    /// F's head-only path.
+    ///
+    /// An object that ends at `/E` needs no byte past it -- but a window sized
+    /// by a guess asks for more, and on a fixed granularity that guess pulls
+    /// the first chunk of the tail for the sake of a few bytes it will not
+    /// use. So the first attempt is clamped to `/E`, and only a parse that
+    /// genuinely comes up short is allowed past it. Nothing is refused: the
+    /// ceiling changes which bytes are fetched first, never which are
+    /// readable.
+    pub(crate) fn head_ceiling(&self, offset: u64) -> Option<u64> {
+        let end = self.linearized.as_ref()?.end_of_first_page;
+        (offset < end).then_some(end)
+    }
+
     /// The repair scanner's index, built on first need for a streamed
     /// document.
     ///
@@ -1157,8 +1182,13 @@ impl CosDocument {
     fn parse_windowed(&self, offset: u64) -> Option<(ParsedIndirect, Vec<Warning>)> {
         let view = self.buffer.view();
         let mut want = limits::OBJECT_WINDOW;
+        let mut ceiling = self.head_ceiling(offset);
         loop {
-            let window = view.window(offset, want)?;
+            let asked = match ceiling {
+                Some(end) => want.min(end.saturating_sub(offset)).max(1),
+                None => want,
+            };
+            let window = view.window(offset, asked)?;
             let reaches_end = window.end() >= self.buffer.len();
             let local_at = window.local(offset)?;
             let mut local = WarningSink::new();
@@ -1169,6 +1199,10 @@ impl CosDocument {
                 _ => parsed.end_offset,
             };
             if !reaches_end && consumed >= window.bytes().len() as u64 {
+                // The ceiling was a guess about where the head ends; a parse
+                // that ran into it is the object saying otherwise, and the
+                // object wins.
+                ceiling = None;
                 want = want.saturating_mul(2);
                 continue;
             }
@@ -1400,6 +1434,13 @@ pub(crate) struct Linearized {
     /// Item 5, `/T`: where the main cross-reference table begins. Fetched only
     /// when a read leaves page one.
     main_table_at: u64,
+    /// Item 3, `/O`: the object number of the first page's page object.
+    ///
+    /// Annex F names it so that a reader holding only the head can reach page
+    /// one **without the page tree**, whose root a linearized file is free to
+    /// leave in the tail -- and which qpdf's linearizer does leave there, so
+    /// this is not a nicety.
+    first_page_object: u32,
 }
 
 /// The head-only open of a linearized file (Annex F).
@@ -1452,7 +1493,11 @@ fn linearized_open(
             sink.warn(head.abs(at), WarningKind::LinearizedLengthMismatch);
             return None;
         }
-        let (Some(end_of_first_page), Some(main_table_at)) = (number(b"E"), number(b"T")) else {
+        let (Some(end_of_first_page), Some(main_table_at), Some(first_page_object)) = (
+            number(b"E"),
+            number(b"T"),
+            number(b"O").and_then(|v| u32::try_from(v).ok()),
+        ) else {
             sink.warn(head.abs(at), WarningKind::LinearizedParametersUnusable);
             return None;
         };
@@ -1488,7 +1533,7 @@ fn linearized_open(
             // points at the main table at the end of the file, and following
             // it is the one thing that would put a tail read in a head-only
             // open.
-            let built = xref::build_limited(backing.view(), section, 0, names, &mut scratch, 1);
+            let built = xref::build_head(backing.view(), section, names, &mut scratch);
             if built.sections > 0
                 && !built.table.is_empty()
                 && root_locatable(&built.table, &built.trailer)
@@ -1499,6 +1544,7 @@ fn linearized_open(
                     Linearized {
                         end_of_first_page,
                         main_table_at,
+                        first_page_object,
                     },
                 ));
             }

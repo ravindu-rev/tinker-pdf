@@ -321,9 +321,44 @@ pub fn count(doc: &CosDocument) -> u32 {
     }
 }
 
+/// Page one of a linearized document, from `/O` (Annex F.2.2 item 3).
+///
+/// Annex F names the first page's object number so a reader holding only the
+/// head can reach it **without the page tree**. That is not a shortcut: a
+/// linearized file is free to leave the page tree root in the tail and qpdf's
+/// linearizer does, so a page-one render that insisted on walking the tree
+/// would fetch the end of every such file to draw the front of it.
+///
+/// The page is built by [`leaf`], the same function the tree walk uses, with
+/// nothing inherited -- which is only sound when the page carries its own
+/// `/MediaBox` and `/Resources`. When it does not, this declines and the walk
+/// runs, because a page laid out at US Letter because its ancestor was not
+/// fetched is the wrong page rather than a cheaper one.
+fn linearized_first_page(doc: &CosDocument) -> Option<Page> {
+    let num = doc.first_page_object()?;
+    let reference = ObjRef::new(num, 0);
+    let object = doc.get(reference).ok()?;
+    let dict = object.as_dict()?;
+    if !dict.contains_key(Name::MEDIA_BOX) || !dict.contains_key(Name::RESOURCES) {
+        return None;
+    }
+    let inherited = Inherited::default().extend(dict, doc);
+    // An empty media box would be defaulted by `leaf` with a warning, which
+    // would be this function guessing rather than declining.
+    if inherited.media_box.is_none_or(|r| r.is_empty()) {
+        return None;
+    }
+    Some(leaf(reference, 0, inherited, doc))
+}
+
 /// Convenience: the page at `index`, if it exists.
 #[must_use]
 pub fn at(doc: &CosDocument, index: u32) -> Option<Page> {
+    if index == 0 {
+        if let Some(page) = linearized_first_page(doc) {
+            return Some(page);
+        }
+    }
     let wanted = (index as usize).checked_add(1)?;
     collect_upto(doc, wanted).into_iter().nth(index as usize)
 }

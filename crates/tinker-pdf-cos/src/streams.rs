@@ -461,8 +461,13 @@ impl CosDocument {
             Some(declared) => declared.saturating_add(slack),
             None => limits::OBJECT_WINDOW,
         };
+        let mut ceiling = self.head_ceiling(stream.data_start);
         loop {
-            let Some(window) = view.window(stream.data_start, want) else {
+            let asked = match ceiling {
+                Some(end) => want.min(end.saturating_sub(stream.data_start)).max(1),
+                None => want,
+            };
+            let Some(window) = view.window(stream.data_start, asked) else {
                 return stream.data_start..stream.data_start;
             };
             let reaches_end = window.end() >= self.buffer.len();
@@ -478,6 +483,9 @@ impl CosDocument {
                 &mut scratch,
             );
             if !reaches_end && local.end >= window.bytes().len() as u64 {
+                // The head ceiling was a guess; an extent that ran into it is
+                // the stream saying otherwise.
+                ceiling = None;
                 want = want.saturating_mul(2);
                 continue;
             }
