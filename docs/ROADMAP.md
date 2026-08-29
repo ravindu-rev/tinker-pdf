@@ -352,10 +352,10 @@ refusal table.
   odd `BidiLevel`; `OpacityMask`; and a corpus from more than one
   producer — every committed package is from a single vendor's two
   serialisers, and the doc says so.
-- **CBZ** ([features/cbz.md](features/cbz.md)): open archives real
-  archivers wrote (none has been — every fixture is hand-built, and the
-  doc says so); CBR/CB7/CBT, sized honestly — CBR means a hand-rolled RAR
-  decoder; `ComicInfo.xml` metadata.
+- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
+  honestly in [design/comic-archives.md](design/comic-archives.md) — each
+  means a hand-rolled decompressor, and RAR 4 has no fixture this machine
+  can produce.
 - **Forms** ([features/forms.md](features/forms.md)): an execution policy
   for the surfaced-but-never-run keystroke, validate and document-level
   scripts; whether a format action's display string may ever reach `/V`.

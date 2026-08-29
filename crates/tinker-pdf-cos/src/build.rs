@@ -3760,7 +3760,6 @@ impl DocumentBuilder {
     }
 
     /// Sets an `/Info` field.
-    /// Sets an `/Info` field.
     ///
     /// **Under a part 4 [`ArchivalProfile`]** ISO 19005-4 6.1.3 admits a
     /// document information dictionary only where a `/PieceInfo` justifies it,

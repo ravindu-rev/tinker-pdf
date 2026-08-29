@@ -44,7 +44,10 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
-pub use cbz::{ArchiveRefusal, ArchiveReport, ArchiveWarning, Container, PageDefect, PageOrigin};
+pub use cbz::{
+    ArchiveRefusal, ArchiveReport, ArchiveWarning, ComicInfo, ComicInfoDefect, Container,
+    PageDefect, PageOrigin,
+};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};

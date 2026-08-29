@@ -42,7 +42,10 @@
 mod cbz_support;
 
 use std::path::{Path, PathBuf};
-use tinker_pdf::{cbz, ArchiveRefusal, Container, Document, OpenError, RenderOptions};
+use tinker_pdf::{
+    cbz, ArchiveRefusal, ArchiveWarning, ComicInfoDefect, Container, Document, Name, OpenError,
+    RenderOptions,
+};
 use tinker_pdf_zip::{Archive, Limits as ZipLimits, Method};
 
 /// The pages, in the order a reader of the comic should meet them, with the
@@ -279,6 +282,122 @@ fn the_containers_this_build_does_not_read_are_refused_by_name() {
             other => panic!("{name}: expected NotAZip, got {other:?}"),
         }
     }
+}
+
+/// The five pages of the corpus, as `source/` holds them.
+///
+/// Read from the committed pictures rather than regenerated, so an archive
+/// built here holds the same bytes the eight producers were handed.
+fn source_pages() -> Vec<(String, Vec<u8>)> {
+    PAGES
+        .iter()
+        .map(|(name, _, _)| {
+            let path = corpus().join("source").join(name);
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            ((*name).to_owned(), bytes)
+        })
+        .collect()
+}
+
+/// A comic archive of the corpus' own pages plus one `ComicInfo.xml`.
+///
+/// Written by `cbz_support::zip` rather than by a producer, and that is the
+/// honest shape rather than a shortcut: no committed archive carries a
+/// `ComicInfo.xml`, because none of the four writers puts one there — an
+/// archiver frames files and a comic *manager* is what writes the metadata.
+/// So the pictures are the corpus' and the metadata entry is this
+/// repository's, and the test below says which half proves what.
+fn comic_with_metadata(comic_info: &[u8]) -> Vec<u8> {
+    let pages = source_pages();
+    let mut files: Vec<cbz_support::ZipFile> = pages
+        .iter()
+        .map(|(name, bytes)| cbz_support::ZipFile::stored(name, bytes))
+        .collect();
+    files.push(cbz_support::ZipFile::stored("ComicInfo.xml", comic_info));
+    cbz_support::zip(&files, cbz_support::Damage::None)
+}
+
+/// **The metadata a comic carries reaches the document it describes.**
+///
+/// Gap 29 skipped `ComicInfo.xml` by name, and was right about two of its three
+/// reasons: it is not a page, and warning about it would bury the warnings that
+/// matter. The third — that nothing downstream had a use for a title — stopped
+/// being true when the book path started writing `dc:title` into `/Info`, and
+/// this is that asymmetry closed.
+///
+/// Read out of the trailer's own `/Info` dictionary rather than through the
+/// report, because the report is this build's account of what it did and the
+/// dictionary is what a reader will actually find.
+#[test]
+fn the_metadata_a_comic_carries_reaches_the_document() {
+    let bytes = comic_with_metadata(
+        b"<ComicInfo><Series>Nightwatch</Series><Number>12</Number>\
+          <Writer>A. Writer</Writer></ComicInfo>",
+    );
+    let document = Document::open(bytes).expect("a comic with metadata opens");
+
+    // The pages are untouched: metadata is a third thing an entry can be, and
+    // adding it must not have made the archive one page longer or shorter.
+    let report = document.archive().expect("a synthesised document");
+    let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+    let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
+    assert_eq!(
+        order, want,
+        "ComicInfo.xml is not a page and did not become one"
+    );
+    assert!(
+        report.warnings().is_empty(),
+        "a ComicInfo.xml this build reads is not a leniency: {:?}",
+        report.warnings()
+    );
+
+    let info = report
+        .comic_info()
+        .expect("the report carries what it read");
+    assert_eq!(info.series(), Some("Nightwatch"));
+    assert_eq!(info.number(), Some("12"));
+    assert_eq!(info.writer(), Some("A. Writer"));
+
+    let cos = document.cos();
+    let dict = cos
+        .get(
+            cos.trailer()
+                .get_ref(Name::INFO)
+                .expect("an /Info reference"),
+        )
+        .expect("the /Info resolves");
+    let dict = dict.as_dict().expect("an /Info dictionary");
+    let entry = |key: &[u8]| -> String {
+        dict.get_string(cos.intern(key))
+            .map(|s| String::from_utf8_lossy(&s.bytes).into_owned())
+            .unwrap_or_default()
+    };
+    assert_eq!(entry(b"Title"), "Nightwatch #12");
+    assert_eq!(entry(b"Author"), "A. Writer");
+    assert_eq!(entry(b"Keywords"), "Nightwatch #12");
+    assert_eq!(entry(b"Subject"), "", "no <Summary>, so no /Subject");
+}
+
+/// A `ComicInfo.xml` this build cannot read costs the archive nothing but its
+/// title — and says so by name (rulings 2 and 10).
+#[test]
+fn unreadable_metadata_degrades_and_is_named() {
+    let bytes = comic_with_metadata(b"<ComicInfo><Title>unclosed");
+    let document = Document::open(bytes).expect("the pages open regardless");
+    let report = document.archive().expect("a synthesised document");
+    assert_eq!(
+        report.pages().len(),
+        PAGES.len(),
+        "every page is still here"
+    );
+    assert_eq!(report.comic_info(), None);
+    assert!(
+        report
+            .warnings()
+            .contains(&ArchiveWarning::ComicInfo(ComicInfoDefect::Unreadable)),
+        "the defect is named: {:?}",
+        report.warnings()
+    );
 }
 
 /// What five real archivers did that eight years of hand-built fixtures never

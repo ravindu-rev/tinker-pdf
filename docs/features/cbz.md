@@ -74,9 +74,28 @@ saying so. Classification is by magic bytes, never by extension — a `.jpg`
 that is a PNG is routine — with one narrow exception: an entry whose bytes
 cannot be read at all (encrypted, checksum failed) is judged by its name,
 because a spurious placeholder is visible where a missing page is not. Entries
-that are not images at all — `ComicInfo.xml`, `Thumbs.db`, `__MACOSX/`,
-directory records (a stored path ending in `/`, APPNOTE 4.4.17.1) — are
-neither pages nor warnings.
+that are not images at all — `Thumbs.db`, `__MACOSX/`, directory records (a
+stored path ending in `/`, APPNOTE 4.4.17.1) — are neither pages nor warnings.
+
+**`ComicInfo.xml` is a third thing an entry can be.** Not a page, not ignored:
+it is read with `tinker-pdf-xml` and becomes the synthesised document's `/Info`
+dictionary. Six of ComicRack's fifty-odd elements are mapped, because six is
+what §14.3.3 has anywhere sensible to put them — `Title` to `/Title`, `Series`
+and `Number` to `/Keywords` and, **when there is no `Title`**, to `/Title` as
+`Series #Number` (most issues carry no title of their own, and the series and
+the number are what the book is called); `Writer` and `Penciller` to `/Author`,
+joined, one name when they are one person; `Summary` to `/Subject`. `Publisher`
+is deliberately not `/Creator` or `/Producer`: those two name the application
+that wrote the file, and this engine is that application. It is matched by its
+whole stored path, case-insensitively — a nested copy describes something that
+is not this document. `MAX_COMIC_INFO_BYTES` (64 KiB) decides whether it is
+parsed at all, because a `/Info` dictionary is not a page and nothing else in
+this path would have bounded it. Everything that can go wrong degrades: the
+document is every page the archive holds either way, with
+`ArchiveWarning::ComicInfo` naming why the metadata did not arrive.
+`ArchiveReport::comic_info()` is what was read — `Some` and empty for a
+`<ComicInfo/>` that names nothing, `None` for an archive that carries no such
+file, which is the distinction a warning would otherwise have had to make.
 
 **Bounds on the synthesis itself.** At most `MAX_CBZ_PAGES` (4 096) pages, and
 at most `MAX_SYNTHESISED_PDF` (512 MiB) of document, charged *before* each
@@ -126,12 +145,16 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 ```
 
 - `ArchiveReport` — `pages()` (one `PageOrigin` per page, in page order),
-  `warnings()` (every `ArchiveWarning`, in the order it happened, ruling 10)
-  and `synthesised_bytes()`, published so the byte bound is measurable rather
-  than asserted about in prose.
+  `warnings()` (every `ArchiveWarning`, in the order it happened, ruling 10),
+  `synthesised_bytes()`, published so the byte bound is measurable rather
+  than asserted about in prose, and `comic_info()`.
 - `cbz::container(bytes)` — the fixed-position sniff, returning `Container`.
 - `cbz::image_format(bytes)` — magic-byte classification, returning
   `ImageFormat`.
+- `cbz::comic_info::parse(bytes, &xml_limits)` — `ComicInfo.xml` to a
+  `ComicInfo`, whose `info_entries()` is the `/Info` mapping itself rather than
+  a description of it, and `cbz::comic_info::is_comic_info(name)`, which is the
+  only place a comic entry's *name* decides that it is metadata.
 - `cbz::synthesise(container, bytes, &cbz::Limits)` — archive bytes to
   `(Vec<u8>, ArchiveReport)`, public so a host can convert a comic to a PDF
   for its own sake and so tests can reach the bounds without building half a
@@ -157,7 +180,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | Compression method other than stored/deflated | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, bzip2, LZMA, Zstandard — named by code so a refusal says which | — |
 | GIF, WebP, BMP, TIFF, AVIF, JPEG 2000 entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
 | A JPEG or PNG that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a raster past the ceiling | — |
-| `ComicInfo.xml` | *(none — skipped by design)* | metadata is neither a page nor a warning; reading it is a named non-goal | [roadmap](../ROADMAP.md) |
+| A `ComicInfo.xml` that will not read | `ArchiveWarning::ComicInfo(ComicInfoDefect)` | past 64 KiB, an entry the archive refused, markup that is not well formed, or a root that is not `ComicInfo`; the pages are unaffected | — |
 
 ## Verified
 
@@ -192,8 +215,13 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   held to `ArchiveRefusal::NotAZip`, so a decoder that arrives later has
   something to be compared against that was put there before it existed.
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
-  archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 17 unit tests over
-  ordering and classification.
+  archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 28 unit tests over
+  ordering, classification and the `ComicInfo.xml` mapping, which is asserted
+  as the table it is rather than as whatever the code emitted.
+  `the_metadata_entry_is_read_and_is_still_not_a_page` makes the three claims
+  separately, because the middle one is the one that would have gone quietly:
+  the *name* answers the metadata question, the *extension* still answers false
+  to the image question, and the bytes are not an image either.
 - [Determinism](determinism.md) — the `cbz` render fingerprint (one of the
   15) opens a four-page mixed archive whose stored, lexicographic and natural
   orders all disagree about which entry is page 0, so a regression to either
