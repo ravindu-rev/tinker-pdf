@@ -41,5 +41,9 @@ foreach ($file in Get-ChildItem -LiteralPath $Dir -Filter *.cbz | Sort-Object Na
 }
 
 $out = Join-Path $Dir 'INVENTORY.tsv'
-Set-Content -LiteralPath $out -Value $rows -Encoding UTF8
+# LF and no byte-order mark, written the way `tests/xps/inventory.ps1` writes
+# its own: `Set-Content` would give CRLF on Windows, `.gitattributes` would
+# normalise it back to LF on commit, and every regeneration would then show a
+# whole-file diff that changes nothing.
+[System.IO.File]::WriteAllText($out, ($rows -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
 "wrote {0}  ({1} rows)" -f $out, ($rows.Count - 1)
