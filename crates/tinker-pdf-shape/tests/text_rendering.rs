@@ -24,18 +24,26 @@
 //!   both sides. In this corpus it is the space of GSUB-1, which is why that
 //!   case expects two glyphs from three characters.
 //! - **Positions are in a thousandth of an em**, so a face whose `unitsPerEm`
-//!   is not 1000 — two of the ten here are 2048 — has its design units scaled.
-//!   The scaling is integer: `units * 1000 / upem`, rounded half away from
-//!   zero, which is the same arithmetic `docs/design/shaping.md` says a
-//!   consumer does and never a float in this crate.
+//!   is not 1000 — several here are 2048 — has its design units scaled. The
+//!   scaling is integer: `units * 1000 / upem`, rounded half away from zero,
+//!   which is the same arithmetic `docs/design/shaping.md` says a consumer
+//!   does and never a float in this crate. It is **not** the same arithmetic
+//!   upstream does, and [`WITHIN_TOLERANCE`] is where the difference is
+//!   accounted for.
 //!
-//! # What this milestone runs, and what it does not
+//! # What runs, and what does not
 //!
 //! `docs/design/shaping.md`'s milestone 2 is graded on the CMAP, GSUB and GPOS
-//! sections. Nine of the twelve run. The three that do not are declined **by
-//! name and with their reason**, in [`the_sections_this_milestone_declines`],
-//! because a section that quietly did not run reads exactly like a section
-//! that passed.
+//! sections and milestone 4 on the Arabic-script ones, of which this corpus
+//! has exactly one: SHARAN-1, six words of Urdu set in Nasta‘līq. Ten of the
+//! thirteen sections run. The three that do not are declined **by name and
+//! with their reason**, in [`the_sections_this_milestone_declines`], because a
+//! section that quietly did not run reads exactly like a section that passed.
+//!
+//! SHARAN-1 is the only section whose direction is not left to right, and it
+//! is therefore the only one that exercises [`shaped`]'s reordering — and the
+//! only evidence in the repository that a right-to-left run's *glyphs* are
+//! right rather than only its levels.
 //!
 //! # The counts, in aots's discipline
 //!
@@ -58,7 +66,7 @@ use tinker_pdf_shape::shape::{itemize, Shaper};
 /// every number in a fixture is in.
 const PPEM: i32 = 1000;
 
-/// The twelve sections of the corpus this milestone is graded on, and what
+/// The thirteen sections of the corpus this crate is graded on, and what
 /// each one is for.
 const SECTIONS: &[(&str, &str)] = &[
     ("CMAP-1", "Ideographic Variation Sequences"),
@@ -76,9 +84,10 @@ const SECTIONS: &[(&str, &str)] = &[
     ("GPOS-3", "Mark-to-Base Attachment for Ethiopic Diacritics"),
     ("GPOS-4", "Mark-to-Mark Attachment for Stacked Accents"),
     ("GPOS-5", "Glyph Positioning for Variable Fonts"),
+    ("SHARAN-1", "Nasta\u{2018}l\u{12B}q"),
 ];
 
-/// The sections this milestone does not run, each with the reason, and each
+/// The sections this crate does not run, each with the reason, and each
 /// reason a thing somebody could go and fix.
 const DECLINED: &[(&str, &str)] = &[
     (
@@ -126,6 +135,7 @@ const EXPECTED: &[(&str, usize, usize)] = &[
     ("GPOS-4", 4, 4),
     ("GSUB-1", 1, 1),
     ("GSUB-2", 11, 6),
+    ("SHARAN-1", 6, 6),
 ];
 
 /// One `<td class="expected">` of a fixture.
@@ -386,13 +396,41 @@ fn has_outline(face: &Sfnt<'_>, cff: Option<&Cff<'_>>, glyph: u16) -> bool {
 }
 
 /// What one case's text shapes to: `(glyph, x, y)` in the fixture's units.
+///
+/// # Visual order, and where it comes from
+///
+/// A fixture's `<use>` elements are in the order the glyphs are drawn, left to
+/// right, because that is what a renderer emits. This crate shapes and returns
+/// **logical** order, whichever way a run reads, so the two are joined here by
+/// the same two steps `docs/design/shaping.md` puts in a consumer: UAX #9's
+/// rule L2 orders the runs, through [`tinker_pdf_shape::bidi::reorder`], and a
+/// right-to-left run's glyphs are then walked backwards.
+///
+/// This is the only place in the suite where direction is read at all, and it
+/// is the reason SHARAN-1 is the first section that can fail for a reason that
+/// is not about `GSUB` or `GPOS`.
 fn shaped(face: &Sfnt<'_>, cff: Option<&Cff<'_>>, text: &str) -> Vec<(u16, i32, i32)> {
-    let paragraph = Paragraph::new(text, BaseDirection::LeftToRight);
+    // `Auto` rather than a fixed direction: upstream's harness derives the
+    // direction from the script, and P2/P3 is this crate's way of saying the
+    // same thing.
+    let paragraph = Paragraph::new(text, BaseDirection::Auto);
     let shaper = Shaper::new(face);
+    let runs = itemize(text, &paragraph);
+    let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
+    let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
+
     let mut out = Vec::new();
     let mut pen = 0i32;
-    for run in itemize(text, &paragraph) {
-        for glyph in shaper.shape(text, &run).glyphs() {
+    for index in tinker_pdf_shape::bidi::reorder(&levels) {
+        let Some(run) = shaped.get(index) else {
+            continue;
+        };
+        let glyphs: Vec<_> = if run.direction().is_forward() {
+            run.glyphs().to_vec()
+        } else {
+            run.glyphs().iter().rev().copied().collect()
+        };
+        for glyph in glyphs {
             if has_outline(face, cff, glyph.glyph) {
                 out.push((
                     glyph.glyph,
@@ -453,7 +491,7 @@ fn the_corpus_is_the_one_that_was_vendored() {
             "{section}.html does not look like {title}"
         );
     }
-    assert_eq!(SECTIONS.len(), 12, "the corpus changed size");
+    assert_eq!(SECTIONS.len(), 13, "the corpus changed size");
 }
 
 /// The expected glyph *names* this repository cannot turn into indices, by
@@ -467,6 +505,43 @@ fn the_corpus_is_the_one_that_was_vendored() {
 /// and vendoring a whole published name list to check one glyph of one case is
 /// out of proportion — so it is recorded instead.
 const UNRESOLVABLE: &[(&str, &str)] = &[("GPOS-1/15", "aacute")];
+
+/// Every coordinate in the whole corpus that this crate does not reproduce
+/// **exactly**, by case, glyph and axis, with the amount.
+///
+/// # Upstream allows one unit, and this is the list of where it is spent
+///
+/// `check.py` compares with `maxDelta=1.0`. Milestone 2 could assert exactly
+/// instead and did, and said so; milestone 4 cannot, and the reason is not a
+/// defect in either side.
+///
+/// Upstream's numbers come out of a pipeline that scales **every quantity
+/// separately** into thousandths of an em and rounds each — every advance,
+/// every anchor — and then adds. This crate's arithmetic is exact integers in
+/// font design units all the way to the end, where one division rounds once;
+/// ruling 4 is why, and it is the whole reason the output is bit-identical on
+/// four targets. The two disagree by at most one unit, and only where a sum of
+/// separately-rounded halves lands on the other side of a boundary from the
+/// rounded sum.
+///
+/// It is checkable rather than asserted. `SHARAN-1/6`'s seventh glyph is a
+/// mark whose base sits at 1234 design units and whose anchor difference is
+/// −807. Exactly: `1234 − 807 = 427`, and `427 × 1000 ÷ 2048` rounds to
+/// **208**. Separately: `1234` scales to `603` and `−807` scales to `−394`,
+/// and `603 − 394` is **209**, which is what the fixture says. Neither is a
+/// mistake; they are two roundings of `208.4961`.
+///
+/// So the tolerance is upstream's own, and what is asserted instead is this
+/// list. A coordinate that drifts by two units is a failure, a *new*
+/// coordinate that drifts by one is a failure, and the count below moving is a
+/// failure. What can no longer be claimed is that every number matches to the
+/// unit, and that is stated here rather than absorbed into a tolerance nobody
+/// counts.
+const WITHIN_TOLERANCE: &[(&str, usize, char, i32)] =
+    &[("SHARAN-1/5", 6, 'x', -1), ("SHARAN-1/6", 6, 'y', -1)];
+
+/// The tolerance `check.py` applies to every comparison it makes.
+const MAX_DELTA: i32 = 1;
 
 #[test]
 fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
@@ -499,12 +574,13 @@ fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
         "the set of expected glyph names this repository cannot resolve moved; \
          every one of them is a case comparing positions and not identity"
     );
-    assert_eq!(names, 97, "the number of expected glyphs moved");
+    assert_eq!(names, 153, "the number of expected glyphs moved");
 }
 
 #[test]
 fn every_runnable_case_produces_what_the_fixture_says() {
     let mut failures: Vec<String> = Vec::new();
+    let mut drifted: Vec<(String, usize, char, i32)> = Vec::new();
     let mut ran = 0usize;
     for (section, cases) in runnable() {
         for case in &cases {
@@ -529,11 +605,26 @@ fn every_runnable_case_produces_what_the_fixture_says() {
                 .collect();
             let ours = shaped(&face, cff.as_ref(), &case.render);
             // A name [`UNRESOLVABLE`] lists compares its position and not its
-            // identity; every other one compares both.
+            // identity; every other one compares both. A position is compared
+            // within upstream's own tolerance, and every unit of that
+            // tolerance actually spent is collected and asserted below.
             let agrees = ours.len() == expected.len()
-                && ours.iter().zip(&expected).all(|(ours, want)| {
-                    ours.1 == want.1 && ours.2 == want.2 && want.0.is_none_or(|g| g == ours.0)
-                });
+                && ours
+                    .iter()
+                    .zip(&expected)
+                    .enumerate()
+                    .all(|(n, (ours, want))| {
+                        let (dx, dy) = (ours.1 - want.1, ours.2 - want.2);
+                        if dx != 0 {
+                            drifted.push((case.id.clone(), n, 'x', dx));
+                        }
+                        if dy != 0 {
+                            drifted.push((case.id.clone(), n, 'y', dy));
+                        }
+                        dx.abs() <= MAX_DELTA
+                            && dy.abs() <= MAX_DELTA
+                            && want.0.is_none_or(|g| g == ours.0)
+                    });
             if !agrees {
                 let names: Vec<&str> = case.expected.iter().map(|(n, _, _)| n.as_str()).collect();
                 failures.push(format!(
@@ -549,7 +640,16 @@ fn every_runnable_case_produces_what_the_fixture_says() {
         failures.len(),
         failures.join("\n")
     );
-    assert_eq!(ran, 48, "the number of cases that ran moved");
+    assert_eq!(ran, 54, "the number of cases that ran moved");
+    let expected: Vec<(String, usize, char, i32)> = WITHIN_TOLERANCE
+        .iter()
+        .map(|(id, glyph, axis, by)| ((*id).to_string(), *glyph, *axis, *by))
+        .collect();
+    assert_eq!(
+        drifted, expected,
+        "the set of coordinates this crate does not reproduce exactly moved; \
+         see WITHIN_TOLERANCE for why there are any at all"
+    );
 }
 
 #[test]
@@ -576,7 +676,7 @@ fn the_sections_this_milestone_declines() {
         .iter()
         .map(|(_, cases)| cases.iter().filter(|c| c.no_crash).count())
         .sum();
-    assert_eq!(ran + crash + skipped, 78, "the corpus changed size");
+    assert_eq!(ran + crash + skipped, 84, "the corpus changed size");
     assert_eq!(crash, 1);
 }
 

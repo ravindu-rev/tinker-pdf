@@ -24,11 +24,23 @@
 //! `/ToUnicode` from a ligature. Turning logical order into visual order is
 //! [`crate::bidi::reorder`]'s job and happens per line, after breaking.
 //!
-//! **A right-to-left run has no conformance fixture at this milestone.** The
-//! text-rendering-tests sections this milestone is graded on are all left to
-//! right; `docs/design/shaping.md` puts Arabic at milestone 4, and until then
-//! the claim about right-to-left runs is that they are deterministic and that
-//! the levels are right, not that the glyphs are.
+//! Milestone 2 recorded that no right-to-left run had a glyph-level fixture,
+//! so the claim about one was that it was deterministic and that its levels
+//! were right, not that its glyphs were. **Milestone 4 closed that**:
+//! text-rendering-tests SHARAN-1 shapes six Nasta‘līq words of Urdu through
+//! this function, and `tests/text_rendering.rs` checks every glyph and every
+//! position against the fixture — after reordering the runs with
+//! [`crate::bidi::reorder`] and walking a right-to-left run's glyphs
+//! backwards, which is the two-step a consumer does and the only place
+//! direction is read outside this crate.
+//!
+//! # Joining scripts take a different plan
+//!
+//! A run whose text contains a character that cursively joins gets
+//! [`JOINING_GSUB_STAGES`] rather than [`DEFAULT_GSUB_FEATURES`]: seven stages
+//! instead of one, with the four joining features restricted to the glyphs
+//! whose letters are in that form. Which run that is comes from the text and
+//! not from a list of scripts; `crate::arabic` says why.
 //!
 //! # Integer, throughout
 //!
@@ -41,6 +53,7 @@ use core::ops::Range;
 
 use tinker_pdf_font::Sfnt;
 
+use crate::arabic;
 use crate::bidi::{BaseDirection, Level, Paragraph};
 use crate::buffer::{Buffer, Direction, ShapedGlyph};
 use crate::common::Tag;
@@ -85,16 +98,74 @@ pub const DEFAULT_GSUB_FEATURES: &[Tag] = &[
 /// The `GPOS` features the default shaper turns on.
 ///
 /// `kern`, `mark` and `mkmk` are the three `docs/design/shaping.md` names for
-/// this milestone and all three are adjudicated: GPOS-1 and GPOS-2 are `kern`,
-/// GPOS-3 is `mark`, GPOS-4 is `mkmk`. `dist` and `curs` are the registry's
-/// other two default-on positioning features; neither is reached by a fixture
-/// here, and `curs` is milestone 4's subject.
+/// milestone 2 and all three are adjudicated: GPOS-1 and GPOS-2 are `kern`,
+/// GPOS-3 is `mark`, GPOS-4 is `mkmk`. `curs` was milestone 4's subject and is
+/// now adjudicated too — SHARAN-1 is nothing but cursive attachment, and it is
+/// what settled which of the two readings of that lookup this crate follows;
+/// see [`crate::gpos`]'s type 3.
+///
+/// `dist`, `abvm` and `blwm` are the registry's other default-on positioning
+/// features in horizontal text. `abvm` and `blwm` are here for milestone 5 —
+/// the Kannada faces of the `SHKNDA` sections put their mark positioning
+/// behind `blwm` — and `dist` is reached by no fixture in this corpus at all.
+/// Adding the two moved nothing: the twelve sections milestone 2 was graded on
+/// use none of them, and their counts are unchanged.
 pub const DEFAULT_GPOS_FEATURES: &[Tag] = &[
+    Tag::new(b"abvm"),
+    Tag::new(b"blwm"),
     Tag::new(b"kern"),
     Tag::new(b"dist"),
     Tag::new(b"curs"),
     Tag::new(b"mark"),
     Tag::new(b"mkmk"),
+];
+
+/// The `GSUB` features a run of a joining script turns on, **in stages**.
+///
+/// Each entry is one stage: every lookup the stage's features name is run over
+/// the whole buffer before the next stage starts. That is not how
+/// [`DEFAULT_GSUB_FEATURES`] works — there the lookups of every feature are
+/// merged and sorted by lookup index, which is the specification's rule for a
+/// single application — and the difference is load-bearing here.
+///
+/// # Why the four forms are four stages and not one
+///
+/// A Nasta‘līq face's `medi` lookup is written expecting `init` **not** to
+/// have run yet, or the other way round; the two rewrite the same glyphs and
+/// the face's designer chose an order. Merging them and sorting by lookup
+/// index would apply whichever the face happened to lay out first, which is a
+/// property of how the table was compiled rather than of what it means. So
+/// each is its own stage, in the order the OpenType feature registry lists
+/// them for Arabic: isolated, final, medial, initial.
+///
+/// # The masks
+///
+/// The four form features carry a per-glyph mask and the rest are global. A
+/// glyph's mask says which single form [`crate::arabic::forms`] put it in, so
+/// the `init` lookup reaches the first letter of a word and no other.
+///
+/// # Which of these a fixture adjudicates
+///
+/// SHARAN-1 — the corpus's one Arabic-script section, and milestone 4's whole
+/// bar — uses `ccmp`, `isol`, `fina`, `medi`, `init` and `rlig`. Six of the
+/// nine below are therefore evidence. `locl`, `rclt` and `mset` are the
+/// registry's word: `locl` and `rclt` are applied by default in horizontal
+/// text, `mset` is the legacy Arabic mark-positioning feature, and **no
+/// fixture in this corpus reaches any of the three**.
+///
+/// `liga` and `clig` are deliberately absent rather than forgotten. A joining
+/// script's ligatures are `rlig` — required ligatures, which lam-alef is —
+/// and the discretionary ones are turned off, because a reader who typed
+/// `ZWNJ` between two letters asked for them not to be joined and a `liga`
+/// lookup would join them anyway.
+pub const JOINING_GSUB_STAGES: &[&[Tag]] = &[
+    &[Tag::new(b"ccmp"), Tag::new(b"locl")],
+    &[Tag::new(b"isol")],
+    &[Tag::new(b"fina")],
+    &[Tag::new(b"medi")],
+    &[Tag::new(b"init")],
+    &[Tag::new(b"rlig"), Tag::new(b"rclt"), Tag::new(b"calt")],
+    &[Tag::new(b"mset")],
 ];
 
 /// One stretch of text in one script at one embedding level.
@@ -181,8 +252,11 @@ pub struct Shaper<'a> {
     layout: Layout<'a>,
     language: Option<Tag>,
     limits: Option<Limits>,
-    gsub_features: &'a [Tag],
-    gpos_features: &'a [Tag],
+    /// `None` is "whatever the run needs" — [`DEFAULT_GSUB_FEATURES`] in one
+    /// stage, or [`JOINING_GSUB_STAGES`] where the run joins. `Some` is a
+    /// caller who said exactly what they wanted, and is taken at their word.
+    gsub_features: Option<&'a [Tag]>,
+    gpos_features: Option<&'a [Tag]>,
 }
 
 impl<'a> Shaper<'a> {
@@ -194,8 +268,8 @@ impl<'a> Shaper<'a> {
             layout: Layout::parse(face),
             language: None,
             limits: None,
-            gsub_features: DEFAULT_GSUB_FEATURES,
-            gpos_features: DEFAULT_GPOS_FEATURES,
+            gsub_features: None,
+            gpos_features: None,
         }
     }
 
@@ -207,10 +281,15 @@ impl<'a> Shaper<'a> {
     /// discriminating half of that suite's counts is measured: a case that
     /// produces the same answer with every feature switched off is a case that
     /// proves nothing about the features.
+    ///
+    /// A caller who says this is taken at their word in one further respect:
+    /// the run gets **one stage**, even where its script joins. The staging of
+    /// [`JOINING_GSUB_STAGES`] is a default plan, and a caller who has named
+    /// their own features has replaced the plan rather than reordered it.
     #[must_use]
     pub const fn with_features(mut self, gsub: &'a [Tag], gpos: &'a [Tag]) -> Self {
-        self.gsub_features = gsub;
-        self.gpos_features = gpos;
+        self.gsub_features = Some(gsub);
+        self.gpos_features = Some(gpos);
         self
     }
 
@@ -266,14 +345,28 @@ impl<'a> Shaper<'a> {
         buffer.set_direction(run.direction());
         self.map(slice, run.text.start, &mut buffer);
 
+        // Whether this run joins is asked of the text and not of the script;
+        // `crate::arabic::joins` says why. A caller that asked for its own
+        // feature list is taken at its word and gets one stage, because the
+        // staging below is the *default* plan for a joining script and not a
+        // property of the script itself.
+        let joining = self.gsub_features.is_none() && arabic::joins(slice);
+        if joining {
+            self.mark_joining_forms(slice, &mut buffer);
+        }
+
         let limits = self
             .limits
             .unwrap_or_else(|| Limits::for_glyphs(buffer.len()));
-        let script = run.script.opentype_tag();
         let mut warnings = Vec::new();
         if let Some(gsub) = self.layout.gsub() {
-            let lookups = gsub.lookups_for(script, self.language, self.gsub_features);
-            warnings.extend(self.layout.substitute(&mut buffer, &lookups, limits));
+            let script = self.script_tag(gsub, run.script);
+            for stage in self.gsub_stages(joining) {
+                let wanted: Vec<(Tag, u32)> =
+                    stage.iter().map(|tag| (*tag, feature_mask(*tag))).collect();
+                let lookups = gsub.lookups_for_masked(script, self.language, &wanted);
+                warnings.extend(self.layout.substitute_masked(&mut buffer, &lookups, limits));
+            }
         }
 
         // The advances are filled in **after** substitution and not before,
@@ -296,8 +389,15 @@ impl<'a> Shaper<'a> {
         }
 
         if let Some(gpos) = self.layout.gpos() {
-            let lookups = gpos.lookups_for(script, self.language, self.gpos_features);
-            warnings.extend(self.layout.position(
+            let script = self.script_tag(gpos, run.script);
+            let wanted: Vec<(Tag, u32)> = self
+                .gpos_features
+                .unwrap_or(DEFAULT_GPOS_FEATURES)
+                .iter()
+                .map(|tag| (*tag, Buffer::GLOBAL))
+                .collect();
+            let lookups = gpos.lookups_for_masked(script, self.language, &wanted);
+            warnings.extend(self.layout.position_masked(
                 &mut buffer,
                 &lookups,
                 limits,
@@ -318,6 +418,73 @@ impl<'a> Shaper<'a> {
             text: run.text.clone(),
             warnings,
         }
+    }
+
+    /// The `GSUB` stages this run runs, in order.
+    ///
+    /// One stage for a caller who named their own features, one for a run that
+    /// does not join, and [`JOINING_GSUB_STAGES`] for one that does.
+    fn gsub_stages(&self, joining: bool) -> Vec<&'a [Tag]> {
+        if let Some(features) = self.gsub_features {
+            return vec![features];
+        }
+        if joining {
+            return JOINING_GSUB_STAGES.to_vec();
+        }
+        vec![DEFAULT_GSUB_FEATURES]
+    }
+
+    /// Puts each glyph in the joining form its character is in.
+    ///
+    /// The forms are computed over the **text**, before `cmap`, because that
+    /// is where the property lives; the mask then travels with the glyph
+    /// through every substitution. A character that produced no glyph — a
+    /// variation selector this face resolved and swallowed — has no mask to
+    /// set, so the two are walked together rather than by index.
+    fn mark_joining_forms(&self, text: &str, buffer: &mut Buffer) {
+        let forms = arabic::forms(text);
+        let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+        for at in 0..buffer.len() {
+            let Some(cluster) = buffer.glyph(at).map(|glyph| glyph.cluster) else {
+                continue;
+            };
+            // The cluster is an offset into the *paragraph*; the forms are
+            // indexed by character within this run.
+            let Ok(cluster) = usize::try_from(cluster) else {
+                continue;
+            };
+            let Some(index) = offsets.iter().position(|offset| *offset == cluster) else {
+                continue;
+            };
+            let Some(form) = forms.get(index) else {
+                continue;
+            };
+            buffer.set_mask(at, Buffer::GLOBAL | form_mask(*form));
+        }
+    }
+
+    /// The OpenType script tag to ask this table for.
+    ///
+    /// The first of [`Script::opentype_tags`] the face actually declares, then
+    /// the registry's default rule, then `DFLT`. Asked per table because a
+    /// face may declare a script in `GSUB` and not in `GPOS`, and because the
+    /// two are consulted separately anyway.
+    ///
+    /// This is where the version-2 Indic tags earn their place: a face that
+    /// declares `knd2` is asked for `knd2`, and a face that declares only
+    /// `knda` is asked for `knda`, without either being told about the other.
+    fn script_tag(&self, table: &crate::LayoutTable<'a>, script: Script) -> Tag {
+        let scripts = table.scripts();
+        for tag in script.opentype_tags() {
+            if scripts.find(tag).is_some() {
+                return tag;
+            }
+        }
+        let default = script.opentype_tag();
+        if scripts.find(default).is_some() {
+            return default;
+        }
+        Tag::DEFAULT_SCRIPT
     }
 
     /// `cmap`: text to glyph indices, with the cluster each one came from.
@@ -363,6 +530,47 @@ impl<'a> Shaper<'a> {
             let glyph = glyph.or_else(|| self.face.glyph_for_char(c)).unwrap_or(0);
             buffer.push(glyph, cluster);
         }
+    }
+}
+
+/// The mask bit of each joining form.
+///
+/// Bit 0 is [`Buffer::GLOBAL`] and is on every glyph, so these start at bit 1.
+/// Four bits and no more: a glyph is in exactly one of the four forms, or in
+/// none.
+const MASK_ISOL: u32 = 1 << 1;
+/// See [`MASK_ISOL`].
+const MASK_FINA: u32 = 1 << 2;
+/// See [`MASK_ISOL`].
+const MASK_MEDI: u32 = 1 << 3;
+/// See [`MASK_ISOL`].
+const MASK_INIT: u32 = 1 << 4;
+
+/// The mask a glyph in this form carries.
+const fn form_mask(form: arabic::Form) -> u32 {
+    match form {
+        arabic::Form::Isolated => MASK_ISOL,
+        arabic::Form::Final => MASK_FINA,
+        arabic::Form::Medial => MASK_MEDI,
+        arabic::Form::Initial => MASK_INIT,
+        arabic::Form::None => 0,
+    }
+}
+
+/// The mask a feature is requested under.
+///
+/// The four joining features are restricted to the glyphs in their form;
+/// everything else is global. The match is on the tag rather than on a flag
+/// beside it in [`JOINING_GSUB_STAGES`], so that a caller who names `fina` in
+/// [`Shaper::with_features`] gets the same restriction the default plan would
+/// have given it — one answer to "what does `fina` mean", not two.
+const fn feature_mask(tag: Tag) -> u32 {
+    match tag.0 {
+        t if t == Tag::new(b"isol").0 => MASK_ISOL,
+        t if t == Tag::new(b"fina").0 => MASK_FINA,
+        t if t == Tag::new(b"medi").0 => MASK_MEDI,
+        t if t == Tag::new(b"init").0 => MASK_INIT,
+        _ => Buffer::GLOBAL,
     }
 }
 

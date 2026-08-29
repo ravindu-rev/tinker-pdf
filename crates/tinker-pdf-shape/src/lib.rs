@@ -79,6 +79,7 @@
 #![deny(clippy::float_arithmetic)]
 
 mod apply;
+mod arabic;
 pub mod bidi;
 pub mod buffer;
 pub mod common;

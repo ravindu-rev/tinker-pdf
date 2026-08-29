@@ -54,19 +54,23 @@ pub struct ShapedGlyph {
 
 /// Which way the run is set.
 ///
-/// **Nothing in this milestone reads it, and that is a finding rather than an
-/// oversight.** The two places a shaper usually branches on direction are
-/// cursive attachment and the attachment pass at the end of positioning, and
-/// neither does here: which glyph a cursive join moves is the lookup's own
-/// `RIGHT_TO_LEFT` flag rather than the run's direction, and the attachment
-/// arithmetic is stated in terms of pen positions *within the buffer's own
-/// order*, which makes it the same expression whichever way the pen travels.
+/// Milestone 2 recorded that nothing read this, and gave a reason for each of
+/// the two places a shaper usually branches on direction. **Both reasons were
+/// wrong, and text-rendering-tests SHARAN-1 is what showed it.**
 ///
-/// It is carried because the direction is a property of the run that the
-/// consumer needs — a `ShapedRun` has one, per `docs/design/shaping.md` — and
-/// because milestone 3 derives it from UAX #9 and milestone 6's line
-/// reordering is written against it. A caller sets it; until then it is
-/// left-to-right.
+/// Cursive attachment reads it, because the line-direction half of a join is
+/// paid for by shortening an advance and which of the two glyphs loses the
+/// advance is which way the pen travels. And
+/// [`Buffer::propagate_attachments`] reads it, because a right-to-left run is
+/// reversed before it is drawn, so a mark that follows its base in the buffer
+/// precedes it under the pen and the advances between them are added rather
+/// than subtracted. Each place says so at length.
+///
+/// What was right is that the direction is a property of the run a consumer
+/// needs — a `ShapedRun` has one, per `docs/design/shaping.md` — and that
+/// milestone 3 derives it from UAX #9. A caller sets it; until then it is
+/// left-to-right, which is what makes a buffer built from bare glyph indices
+/// behave as it always did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Direction {
     /// Latin, Devanagari, Han: the pen moves right.
@@ -127,6 +131,16 @@ pub(crate) struct Props {
     /// [`Buffer::propagate_attachments`] turns every one of them into a
     /// number, once, at the end.
     pub(crate) attached_to: Option<i32>,
+    /// Whether that attachment is a cursive join rather than a mark's.
+    ///
+    /// The two resolve differently and the difference is not cosmetic. A mark
+    /// has to be dragged back over every advance between it and its base,
+    /// because the pen has moved on since the base was drawn. A cursive join
+    /// has already been paid for in the *advances* — see [`crate::gpos`]'s
+    /// type 3 — so all that is left to inherit is the parent's own placement
+    /// across the line. Walking the advances for a cursive child as well would
+    /// subtract the join twice.
+    pub(crate) attached_cursively: bool,
 }
 
 impl Props {
@@ -340,12 +354,22 @@ impl Buffer {
 
     /// Records that the glyph at `at` hangs off the one at `to`.
     pub(crate) fn attach(&mut self, at: usize, to: usize) {
+        self.attach_kind(at, to, false);
+    }
+
+    /// The same, for a cursive join. See [`Props::attached_cursively`].
+    pub(crate) fn attach_cursive(&mut self, at: usize, to: usize) {
+        self.attach_kind(at, to, true);
+    }
+
+    fn attach_kind(&mut self, at: usize, to: usize, cursively: bool) {
         let chain = i64::try_from(to).unwrap_or(0) - i64::try_from(at).unwrap_or(0);
         let Ok(chain) = i32::try_from(chain) else {
             return;
         };
         if let Some(props) = self.props.get_mut(at) {
             props.attached_to = Some(chain);
+            props.attached_cursively = cursively;
         }
     }
 
@@ -394,13 +418,26 @@ impl Buffer {
     /// ```
     ///
     /// The lookup already wrote the anchor difference; this pass adds the
-    /// other two terms. `pen(parent) - pen(child)` is the signed sum of the
-    /// advances between them, and it is signed rather than direction-
-    /// dependent on purpose: the formula is stated in the buffer's own order,
-    /// so it is the same arithmetic whether the parent is behind the child (a
-    /// mark on its base) or ahead of it (a cursive join whose lookup sets
-    /// `RIGHT_TO_LEFT`), and whether the run reads left to right or right to
-    /// left.
+    /// other two terms.
+    ///
+    /// # `pen(parent) - pen(child)` **is** direction-dependent
+    ///
+    /// Milestone 2 recorded the opposite — that the formula, being stated in
+    /// the buffer's own order, was the same arithmetic whichever way the run
+    /// read — and text-rendering-tests SHARAN-1 says otherwise. The buffer is
+    /// in logical order and a right-to-left run is **reversed before it is
+    /// drawn**, so a mark that follows its base in the buffer *precedes* it
+    /// under the pen. The pen has not passed the base yet; it has still to
+    /// cross the mark's own advance and everything between. So the sum is
+    /// added rather than subtracted, and it runs over a window shifted by one.
+    ///
+    /// The claim was not wrong so much as untested: every fixture milestone 2
+    /// had was left to right, and the two forms agree there. The cost of
+    /// getting it wrong is one dot of `لسان` sitting 861 units to the left of
+    /// the letter it belongs to, which is what this looked like before it was
+    /// fixed.
+    ///
+    /// A cursive join takes neither form; see [`Props::attached_cursively`].
     ///
     /// The parent's own offset is inherited first, which is what makes a mark
     /// on a mark on a base land where the base did, and a chain of cursively
@@ -451,25 +488,40 @@ impl Buffer {
         if let Some(props) = self.props.get_mut(at) {
             props.attached_to = None;
         }
+        if self.props(at).attached_cursively {
+            // A cursive join was already paid for in the advances, so the only
+            // thing left to inherit is the parent's placement across the line.
+            // Adding the advance walk as well would subtract the join twice.
+            if let Some(glyph) = self.glyphs.get_mut(at) {
+                glyph.y_offset = glyph.y_offset.saturating_add(parent.y_offset);
+            }
+            return;
+        }
         let (mut x, mut y) = (parent.x_offset, parent.y_offset);
-        // `pen(parent) - pen(child)`: the advances between them, added when
-        // the parent is ahead and subtracted when it is behind.
-        let (from, to, ahead) = if target > at {
-            (at, target, true)
+        // `pen(parent) - pen(child)`, and which advances that is depends on
+        // which way the consumer will walk the run. See the note on direction
+        // in `propagate_attachments`.
+        let (from, to) = if self.direction.is_forward() {
+            // The mark is drawn after its base, so the pen has already moved
+            // over the base and everything between: subtract them.
+            (target.min(at), at.max(target))
         } else {
-            (target, at, false)
+            // The run is reversed before it is drawn, so the mark is drawn
+            // *before* its base and the pen has not reached the base yet: add
+            // the advances of everything from the mark back to just after the
+            // base, the mark's own included.
+            (
+                target.min(at).saturating_add(1),
+                at.max(target).saturating_add(1),
+            )
         };
+        let sign = if self.direction.is_forward() { -1 } else { 1 };
         for between in from..to {
             let Some(glyph) = self.glyphs.get(between) else {
                 break;
             };
-            if ahead {
-                x = x.saturating_add(glyph.x_advance);
-                y = y.saturating_add(glyph.y_advance);
-            } else {
-                x = x.saturating_sub(glyph.x_advance);
-                y = y.saturating_sub(glyph.y_advance);
-            }
+            x = x.saturating_add(glyph.x_advance.saturating_mul(sign));
+            y = y.saturating_add(glyph.y_advance.saturating_mul(sign));
         }
         if let Some(glyph) = self.glyphs.get_mut(at) {
             glyph.x_offset = glyph.x_offset.saturating_add(x);
