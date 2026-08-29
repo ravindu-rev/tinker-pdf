@@ -482,6 +482,71 @@ fn the_positioned_page_still_extracts_as_one_line() {
     assert_eq!(text.plain_text(), format!("{MARKED_LINE}\n"));
 }
 
+// ---- letter-spacing is in the positions, not in `Tc` ------------------------
+
+/// A book of [`MARKED_LINE`] in a face with no `GPOS`, at `spacing` CSS pixels
+/// of `letter-spacing`.
+///
+/// The spacing arrives through a `style=""` attribute rather than the sheet
+/// [`epub_support::book`] writes, because that is the one place a test can put
+/// a declaration on the run without the builder growing a parameter every
+/// property would need.
+fn spaced_book(spacing: u32) -> Vec<u8> {
+    let face = Face::new("Fixture Marks", MARKED_COVERS).build();
+    one_face_book(
+        "Fixture Marks",
+        &face,
+        24,
+        &format!(r#"<span style="letter-spacing: {spacing}px">{MARKED_LINE}</span>"#),
+    )
+}
+
+/// **`letter-spacing` is folded into the glyph positions and `Tc` is zero.**
+///
+/// Not a preference, and two independent reasons say so.
+///
+/// `DocumentBuilder::glyph_run` works out each `TJ` adjustment from a pen it
+/// advances by the font's own `/W`, and that pen knows nothing about `Tc` — so
+/// a non-zero one would push glyph *k* by *k* × `Tc` past where the caller put
+/// it, and every offset this file is about would be wrong by a growing amount.
+///
+/// And `Tc` is applied by a reader per **glyph** while `tinker-pdf-layout`
+/// measures `letter_spacing × chars().count()` per **character**, so a
+/// ligature or a joined Arabic word — fewer glyphs than characters — was drawn
+/// narrower than the line box it was measured into. Folding at cluster
+/// boundaries makes the drawn width the measured width by construction, and
+/// keeps a mark on its base rather than spacing it away.
+///
+/// Six CSS pixels is 4.5 points, and 9.4.3 measures a `TJ` adjustment in
+/// thousandths of the em: at 18 points that is **250**, once per character
+/// that has gone by. The control below draws the same three letters with no
+/// spacing at all and must have no adjustment in it, because a test that only
+/// looked for `0 Tc` would pass on a build that dropped the spacing entirely.
+#[test]
+fn letter_spacing_is_folded_into_the_positions() {
+    let doc = Document::open(spaced_book(6)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(objects.len(), 1, "one face is one text object: {content}");
+    assert!(
+        content.contains("0 Tc"),
+        "a Tc was written, so the spacing is charged twice: {content}"
+    );
+    assert!(
+        objects[0].1.contains("[<0001> -250 <0002> -250 <0003>] TJ"),
+        "the spacing did not reach the glyph positions: {content}"
+    );
+
+    let plain = Document::open(spaced_book(0)).expect("a book");
+    let plain = page_content(&plain);
+    let plain = text_objects(&plain);
+    assert!(
+        plain[0].1.contains("[<0001><0002><0003>] TJ"),
+        "an unspaced run carries an adjustment, so the pair proves nothing: {}",
+        plain[0].1
+    );
+}
+
 /// The rendered page, hashed — ruling 4's contract over the shaped path.
 ///
 /// # When this fails
