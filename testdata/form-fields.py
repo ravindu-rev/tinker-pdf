@@ -28,7 +28,7 @@ OBJECTS = {}
 
 OBJECTS[1] = (
     b"<< /Type /Catalog /Pages 2 0 R\n"
-    b"   /AcroForm << /Fields [5 0 R 8 0 R 11 0 R]\n"
+    b"   /AcroForm << /Fields [5 0 R 8 0 R 11 0 R 15 0 R]\n"
     b"                /NeedAppearances true\n"
     b"                /DA (/Helv 0 Tf 0 g)\n"
     b"                /DR << /Font << /Helv 4 0 R >> >> >> >>"
@@ -40,7 +40,7 @@ OBJECTS[3] = (
     b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200]\n"
     b"   /Resources << /Font << /Helv 4 0 R >> >>\n"
     b"   /Contents 14 0 R\n"
-    b"   /Annots [6 0 R 8 0 R 12 0 R 13 0 R] >>"
+    b"   /Annots [6 0 R 8 0 R 12 0 R 13 0 R 15 0 R] >>"
 )
 
 OBJECTS[4] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
@@ -107,6 +107,17 @@ CONTENT = (
 
 OBJECTS[14] = (
     b"<< /Length " + str(len(CONTENT)).encode() + b" >>\nstream\n" + CONTENT + b"endstream"
+)
+
+# A second text field, merged with its single widget (12.7.3.3) and entirely
+# well formed. It is the control: filling it must report *nothing*, so a
+# binding that returned a non-empty report for every fill, or that never
+# managed to return an empty one, is caught. Without it the only fill in the
+# fixture is the damaged one, and "the report was non-empty" would be
+# indistinguishable from "the report is always non-empty".
+OBJECTS[15] = (
+    b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes)\n"
+    b"   /Rect [20 20 280 50] /F 4 /MaxLen 64 >>"
 )
 
 # Two 16-byte identifiers, fixed rather than random: this file is committed, so

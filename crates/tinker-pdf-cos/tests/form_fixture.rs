@@ -145,7 +145,27 @@ fn filling_the_damaged_field_reports_exactly_one_skipped_widget() {
     assert!(editor.is_dirty());
 }
 
-/// The two undamaged fields fill with nothing skipped, so the report above is
+/// The control: a text field whose one widget is well formed reports an
+/// **empty** list.
+///
+/// Without this the only fill in the fixture is the damaged one, and "the
+/// report was non-empty" would be indistinguishable from "the report is always
+/// non-empty" — which is the shape a binding that inverted the condition, or
+/// one that reported every widget it drew, would pass.
+#[test]
+fn filling_the_undamaged_text_field_reports_nothing() {
+    let mut editor = DocumentEditor::new(fixture());
+    let skipped = editor
+        .fill_field("notes", "every widget of this field can be drawn")
+        .expect("the value is taken");
+    assert!(
+        skipped.is_empty(),
+        "an undamaged field skips no widget: {skipped:?}"
+    );
+    assert!(editor.is_dirty());
+}
+
+/// The undamaged fields fill with nothing skipped, so the report above is
 /// about the fixture's one defect rather than about this engine.
 #[test]
 fn the_undamaged_fields_fill_with_nothing_skipped() {
@@ -156,6 +176,10 @@ fn the_undamaged_fields_fill_with_nothing_skipped() {
          gets wrong"
     );
     assert!(editor.select_radio("colour", "red"));
+    assert!(editor
+        .fill_field("notes", "seen")
+        .expect("taken")
+        .is_empty());
 
     let saved = editor.save(&WriteOptions {
         mode: WriteMode::Incremental,
@@ -166,7 +190,7 @@ fn the_undamaged_fields_fill_with_nothing_skipped() {
         .into_iter()
         .map(|f| format!("{}={}", f.name, f.value.as_text()))
         .collect();
-    assert_eq!(states, ["name=", "agree=On", "colour=red"]);
+    assert_eq!(states, ["name=", "agree=On", "colour=red", "notes=seen"]);
 }
 
 /// 7.5.6: an incremental update appends, so the original bytes survive as a

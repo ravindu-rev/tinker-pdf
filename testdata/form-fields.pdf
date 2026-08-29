@@ -2,7 +2,7 @@
 %‚„œ”
 1 0 obj
 << /Type /Catalog /Pages 2 0 R
-   /AcroForm << /Fields [5 0 R 8 0 R 11 0 R]
+   /AcroForm << /Fields [5 0 R 8 0 R 11 0 R 15 0 R]
                 /NeedAppearances true
                 /DA (/Helv 0 Tf 0 g)
                 /DR << /Font << /Helv 4 0 R >> >> >> >>
@@ -14,7 +14,7 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200]
    /Resources << /Font << /Helv 4 0 R >> >>
    /Contents 14 0 R
-   /Annots [6 0 R 8 0 R 12 0 R 13 0 R] >>
+   /Annots [6 0 R 8 0 R 12 0 R 13 0 R 15 0 R] >>
 endobj
 4 0 obj
 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
@@ -66,25 +66,30 @@ BT /Helv 12 Tf 20 175 Td (Tinker form fixture) Tj ET
 0.5 w 20 140 260 20 re S
 endstream
 endobj
+15 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes)
+   /Rect [20 20 280 50] /F 4 /MaxLen 64 >>
+endobj
 xref
-0 15
+0 16
 0000000000 65535 f 
 0000000015 00000 n 
-0000000237 00000 n 
-0000000294 00000 n 
-0000000468 00000 n 
-0000000565 00000 n 
-0000000641 00000 n 
-0000000737 00000 n 
-0000000807 00000 n 
-0000000961 00000 n 
-0000001082 00000 n 
-0000001210 00000 n 
-0000001293 00000 n 
-0000001442 00000 n 
-0000001592 00000 n 
+0000000244 00000 n 
+0000000301 00000 n 
+0000000482 00000 n 
+0000000579 00000 n 
+0000000655 00000 n 
+0000000751 00000 n 
+0000000821 00000 n 
+0000000975 00000 n 
+0000001096 00000 n 
+0000001224 00000 n 
+0000001307 00000 n 
+0000001456 00000 n 
+0000001606 00000 n 
+0000001734 00000 n 
 trailer
-<< /Size 15 /Root 1 0 R /ID [<0123456789abcdef0123456789abcdef> <0123456789abcdef0123456789abcdef>] >>
+<< /Size 16 /Root 1 0 R /ID [<0123456789abcdef0123456789abcdef> <0123456789abcdef0123456789abcdef>] >>
 startxref
-1720
+1845
 %%EOF

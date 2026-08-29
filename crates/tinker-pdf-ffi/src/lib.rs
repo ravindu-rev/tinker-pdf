@@ -21,8 +21,10 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 
 use tinker_pdf::{
-    AuthLevel, Bitmap, Chain, CmsState, Coverage, Document, DocumentDigest, PixelFormat,
-    RenderOptions, Signature, SignatureCheck, SimpleFontProvider, TrustAnchors, Verdict, Weakness,
+    AuthLevel, Bitmap, Chain, CmsState, Coverage, Document, DocumentDigest, DocumentEditor,
+    EditCheckpoint, Encryption, FillError, PixelFormat, RenderOptions, Signature, SignatureCheck,
+    SimpleFontProvider, SkippedWidget, TrustAnchors, Verdict, Weakness, WidgetDefect, WriteMode,
+    WriteOptions,
 };
 
 /// How a call went.
@@ -50,6 +52,55 @@ pub enum TpdfStatus {
     /// Appended at 8 rather than inserted: 0-7 are ABI a caller compares
     /// literals against, and a test pins every one of them.
     NoSuchSignature = 8,
+
+    // ---- the write surface (gap 32), appended at 9 -------------------------
+    //
+    // Same rule as 8, and it is the only rule this enum has: **append**.
+    // A released binding compiled against 0-8 must keep working, so nothing
+    // above is renumbered and nothing is inserted between.
+    /// 12.7.3.2: no field carries that fully qualified name.
+    ///
+    /// Also the answer when a field *index* is past the last field, which is
+    /// the same sentence about a different way of asking.
+    NoSuchField = 9,
+    /// The field will not take that value: it is read-only (12.7.4.1 Table
+    /// 227), the value is longer than `/MaxLen`, or a non-editable list does
+    /// not offer it.
+    ///
+    /// Refusing beats truncating, which hides a data error inside a file that
+    /// then looks correctly filled.
+    ValueRefused = 10,
+    /// The field's own object is not a dictionary, so there is nowhere to put
+    /// `/V`. A damaged file rather than a rejected value.
+    FieldUnreadable = 11,
+    /// The handle was consumed by an earlier call, which
+    /// [`tpdf_last_error_message`] names.
+    ///
+    /// `DocumentBuilder::finish` and `push_page` consume in Rust, and a
+    /// consuming call across an ABI is a double-free factory. So the handle
+    /// boxes an `Option` and the consuming call takes it; the handle stays
+    /// live, `tpdf_*_free` stays required and safe, and asking it to work
+    /// twice is this rather than undefined behaviour.
+    SpentHandle = 12,
+    /// The editor refused the edit, and the facade's own answer is a `bool`,
+    /// so the reason does not cross.
+    ///
+    /// This is the [`TpdfCoverage`] decision applied to the write side. The
+    /// operations behind it -- `delete_page`, `move_page`, `rotate_page`,
+    /// `insert_page`, `set_crop_box`, `set_checkbox`, `select_radio`,
+    /// `append_content` -- return `bool` or `Option` on the facade and name
+    /// no reason. An index that does not exist and a page object that is not
+    /// a dictionary are the same `false` there, and it is not this crate's
+    /// place to invent a distinction the facade does not make (ruling 11):
+    /// a C ABI that split them would be guessing, and a caller would believe
+    /// the guess.
+    ///
+    /// What does cross is provenance, through [`tpdf_last_error_message`],
+    /// which names the call and the argument it refused (ruling 10). And a
+    /// caller that wants to tell "past the end" apart itself has
+    /// [`tpdf_editor_page_count`] and [`tpdf_editor_field_count`] to do it
+    /// with, before the call rather than after.
+    EditRefused = 13,
 }
 
 /// How far a password got.
@@ -1483,6 +1534,981 @@ pub unsafe extern "C" fn tpdf_verdict_weakness(
     TpdfStatus::Ok
 }
 
+// ---- writing: the editor (gap 32 milestone 2) -----------------------------
+//
+// `docs/design/bindings-write.md`. The distance between the read surface above
+// and this one was never capability -- `DocumentEditor` and `DocumentBuilder`
+// have been on the facade since gap 26 -- but *shape*: their transactional and
+// page-building APIs take closures, and a closure does not cross this
+// boundary. Ruling 11 says the facade grows the closure-free equivalents
+// first, so it did (`checkpoint`/`restore`, `begin_page`/`push_page`), and
+// everything below is a mechanical wrapping of a Rust API that already exists.
+//
+// **Threading.** A `TpdfDocument` may be used from any thread because a
+// `Document` is `Send + Sync` and every read borrows. An editor and a builder
+// are *mutable state*: the calls below take `&mut`, so two threads calling
+// into one handle at once is the same data race it would be in Rust, and the
+// C ABI cannot stop it. One handle per thread, or the caller's own lock.
+// Handles remain freeable from any thread.
+
+/// An editor over an open document. Opaque to callers.
+///
+/// Independent of the [`TpdfDocument`] it came from: `Document::editor()`
+/// clones the shared `Arc<CosDocument>`, so freeing the document first is
+/// legal and the .NET `SafeHandle`s need no parent-child keep-alive. That is a
+/// property of the facade rather than a promise this crate keeps, which is why
+/// there is a test called
+/// `an_editor_outlives_the_document_it_came_from`.
+pub struct TpdfEditor {
+    inner: DocumentEditor,
+}
+
+/// An editor's state, taken as a value. Opaque to callers.
+///
+/// The closure-free half of `DocumentEditor::transaction`. There is no "open"
+/// state here to leave dangling: taking one changes nothing, freeing one
+/// commits nothing because nothing was pending, and restoring is idempotent.
+pub struct TpdfCheckpoint {
+    inner: EditCheckpoint,
+}
+
+/// Bytes the engine produced. Opaque to callers.
+///
+/// [`tpdf_buffer_data`] borrows until [`tpdf_buffer_free`], exactly the
+/// [`TpdfBitmap`] arrangement and for the same reason: the engine allocates
+/// and the matching free releases.
+pub struct TpdfBuffer {
+    inner: Vec<u8>,
+}
+
+/// Widgets a fill wrote a value for and could not draw. Opaque to callers.
+///
+/// **The fourth outcome, and it must not flatten into failure.** A field that
+/// appears on two pages has two widgets; ruling 2 degrades rather than failing,
+/// so the value is written and the widgets that can be drawn are drawn. What
+/// ruling 2 does not licence is silence, and ruling 10 says the degradation
+/// names its object -- so [`tpdf_editor_fill_field`] returns
+/// [`TpdfStatus::Ok`] *and* a report the caller iterates. An empty report is
+/// the ordinary case and is not an error; a non-empty one is a document that
+/// looks filled and is not wholly drawn.
+pub struct TpdfFillReport {
+    inner: Vec<SkippedWidget>,
+}
+
+/// What is wrong with a widget an appearance could not be written for.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpdfWidgetDefect {
+    /// 12.5.2 Table 164: `/Rect` is required for every annotation and this one
+    /// has none, or none that is a usable rectangle. There is no box to lay
+    /// the value out in and nowhere on the page to draw it.
+    RectMissing = 0,
+}
+
+impl TpdfWidgetDefect {
+    /// The C spelling of a facade widget defect.
+    fn of(defect: WidgetDefect) -> TpdfWidgetDefect {
+        match defect {
+            WidgetDefect::RectMissing => TpdfWidgetDefect::RectMissing,
+        }
+    }
+}
+
+/// Which shape of output a save produces (7.5.6).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpdfWriteMode {
+    /// Emit every object afresh, renumbering from one.
+    Rewrite = 0,
+    /// Append changed objects to the original bytes, so the original survives
+    /// as a prefix and a signature over it still covers what it covered
+    /// (12.8.1).
+    Incremental = 1,
+}
+
+impl From<TpdfWriteMode> for WriteMode {
+    fn from(value: TpdfWriteMode) -> Self {
+        match value {
+            TpdfWriteMode::Rewrite => WriteMode::Rewrite,
+            TpdfWriteMode::Incremental => WriteMode::Incremental,
+        }
+    }
+}
+
+/// How to encrypt on save, as C sees `Encryption`.
+///
+/// **No entropy default, ever.** `entropy` is 48 caller-supplied bytes -- the
+/// 32-byte file key and two 8-byte salts -- because this engine has no opinion
+/// about where randomness comes from and `wasm32-unknown-unknown` has no
+/// source of it at all. A binding that invented one would violate ruling 11
+/// and hide the single input that makes encrypted output non-reproducible.
+/// Passing predictable bytes produces a predictably weak document, which is
+/// the caller's decision and an honest one.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TpdfEncryption {
+    /// The password a reader needs to open the document, as a null-terminated
+    /// UTF-8 string. Null or empty means none.
+    pub user_password: *const c_char,
+    /// The password that lifts the document's restrictions. Null or empty
+    /// means none.
+    pub owner_password: *const c_char,
+    /// The permission bits, as `/P` stores them.
+    pub permissions: i32,
+    /// Exactly [`TPDF_ENTROPY_LEN`] bytes of randomness.
+    pub entropy: *const u8,
+    /// How many bytes `entropy` points at. Anything but
+    /// [`TPDF_ENTROPY_LEN`] is [`TpdfStatus::BadArgument`]: a short buffer
+    /// read to 48 would encrypt with whatever followed it in the caller's
+    /// address space, which is the worst possible way to be "random".
+    pub entropy_len: usize,
+}
+
+/// The number of entropy bytes an encrypted save requires: 32 for the file key
+/// and 8 for each of the two salts.
+pub const TPDF_ENTROPY_LEN: usize = 48;
+
+/// Options for writing, as C sees `WriteOptions`.
+///
+/// Field for field, with the two `bool`s and the version pair widened to
+/// integers so the layout has no packing surprises for a hand-written
+/// P/Invoke. Fill it with [`tpdf_write_options_init`] and change what you
+/// mean, rather than zeroing it: a zeroed struct is a *rewrite* at version
+/// 0.0, which is not the facade's default and not a version any reader knows.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TpdfWriteOptions {
+    /// Rewrite or incremental.
+    pub mode: TpdfWriteMode,
+    /// Lay the file out for the first page to arrive first (Annex F). A
+    /// request rather than a guarantee: it is quietly dropped for an
+    /// incremental update and for a document with no catalog or no pages,
+    /// because a file that claims `/Linearized` and is not is worse than an
+    /// ordinary one.
+    pub linearize: c_int,
+    /// The major PDF version to declare in the header, on a rewrite.
+    pub version_major: u32,
+    /// The minor version. Above 255 either is [`TpdfStatus::BadArgument`];
+    /// the facade holds them in a byte each.
+    pub version_minor: u32,
+    /// Pack eligible objects into object streams (7.5.7).
+    pub object_streams: c_int,
+    /// Compress content streams the caller has not already encoded.
+    pub compress: c_int,
+    /// Drop objects nothing reaches from the trailer, on a rewrite.
+    pub garbage_collect: c_int,
+    /// Encryption, or null for none. Borrowed for the duration of the call
+    /// only; the passwords and entropy are copied out of it before it returns.
+    pub encryption: *const TpdfEncryption,
+}
+
+/// Fills a [`TpdfWriteOptions`] with the facade's own defaults.
+///
+/// `WriteOptions::default()`, projected -- rewrite, not linearized, version
+/// 1.7, no object streams, compressed, no encryption, no garbage collection.
+/// A C caller should not have to know those, and a C caller who guesses them
+/// wrong writes a different file than a Rust caller with the same intent,
+/// which is the whole failure the write-parity suite exists to catch.
+///
+/// # Safety
+///
+/// `out` must be a valid pointer to a `TpdfWriteOptions` to write.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_write_options_init(out: *mut TpdfWriteOptions) -> TpdfStatus {
+    let Some(slot) = (unsafe { out.as_mut() }) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    let defaults = WriteOptions::default();
+    *slot = TpdfWriteOptions {
+        mode: match defaults.mode {
+            WriteMode::Rewrite => TpdfWriteMode::Rewrite,
+            WriteMode::Incremental => TpdfWriteMode::Incremental,
+        },
+        linearize: c_int::from(defaults.linearize),
+        version_major: u32::from(defaults.version.0),
+        version_minor: u32::from(defaults.version.1),
+        object_streams: c_int::from(defaults.object_streams),
+        compress: c_int::from(defaults.compress),
+        garbage_collect: c_int::from(defaults.garbage_collect),
+        encryption: ptr::null(),
+    };
+    TpdfStatus::Ok
+}
+
+/// A C string as an owned `String`, or a refusal.
+///
+/// Null and non-UTF-8 are both [`TpdfStatus::BadArgument`], because the facade
+/// takes `&str` and there is no lossy answer that is not a guess about what
+/// the caller meant.
+unsafe fn required_str(value: *const c_char, what: &str) -> Result<String, TpdfStatus> {
+    if value.is_null() {
+        set_error(&format!("{what} is null"));
+        return Err(TpdfStatus::BadArgument);
+    }
+    match unsafe { CStr::from_ptr(value) }.to_str() {
+        Ok(text) => Ok(text.to_string()),
+        Err(_) => {
+            set_error(&format!("{what} is not valid UTF-8"));
+            Err(TpdfStatus::BadArgument)
+        }
+    }
+}
+
+/// The same, for a pointer that is allowed to be absent.
+unsafe fn optional_str(value: *const c_char, what: &str) -> Result<String, TpdfStatus> {
+    if value.is_null() {
+        return Ok(String::new());
+    }
+    unsafe { required_str(value, what) }
+}
+
+/// The facade's `WriteOptions` from the C struct, or a refusal.
+unsafe fn write_options(options: *const TpdfWriteOptions) -> Result<WriteOptions, TpdfStatus> {
+    let Some(options) = (unsafe { options.as_ref() }) else {
+        set_error("null write options");
+        return Err(TpdfStatus::BadArgument);
+    };
+
+    let (Ok(major), Ok(minor)) = (
+        u8::try_from(options.version_major),
+        u8::try_from(options.version_minor),
+    ) else {
+        set_error("a PDF version component does not fit in a byte");
+        return Err(TpdfStatus::BadArgument);
+    };
+
+    let encryption = match unsafe { options.encryption.as_ref() } {
+        None => None,
+        Some(encryption) => {
+            if encryption.entropy.is_null() || encryption.entropy_len != TPDF_ENTROPY_LEN {
+                set_error(&format!(
+                    "encryption needs exactly {TPDF_ENTROPY_LEN} bytes of caller-supplied entropy"
+                ));
+                return Err(TpdfStatus::BadArgument);
+            }
+            // Safety: the length was just checked against the one value this
+            // field is allowed to hold, and the pointer against null.
+            let bytes = unsafe { std::slice::from_raw_parts(encryption.entropy, TPDF_ENTROPY_LEN) };
+            let mut entropy = [0u8; TPDF_ENTROPY_LEN];
+            entropy.copy_from_slice(bytes);
+            Some(Encryption {
+                user_password: unsafe { optional_str(encryption.user_password, "user password") }?,
+                owner_password: unsafe {
+                    optional_str(encryption.owner_password, "owner password")
+                }?,
+                permissions: encryption.permissions,
+                entropy,
+            })
+        }
+    };
+
+    Ok(WriteOptions {
+        mode: options.mode.into(),
+        linearize: options.linearize != 0,
+        version: (major, minor),
+        object_streams: options.object_streams != 0,
+        compress: options.compress != 0,
+        garbage_collect: options.garbage_collect != 0,
+        encryption,
+    })
+}
+
+/// The status a `FillError` crosses as.
+fn fill_status(error: FillError) -> TpdfStatus {
+    match error {
+        FillError::NoSuchField => TpdfStatus::NoSuchField,
+        FillError::ValueRefused => TpdfStatus::ValueRefused,
+        FillError::FieldUnreadable => TpdfStatus::FieldUnreadable,
+    }
+}
+
+/// A refused edit, with the provenance ruling 10 asks for.
+///
+/// The facade said `false` or `None` and named no reason; what this can still
+/// say is which call refused and what it was given, which is the difference
+/// between a debuggable failure and a number.
+fn refused(call: &str, detail: &str) -> TpdfStatus {
+    set_error(&format!("{call} refused: {detail}"));
+    TpdfStatus::EditRefused
+}
+
+/// Opens an editor over a document.
+///
+/// The editor is independent of `doc`: freeing the document first is legal,
+/// because the editor holds its own reference to the shared object store.
+/// Edits are held in the editor until [`tpdf_editor_save`] and never touch
+/// the document handle.
+///
+/// The caller frees the result with [`tpdf_editor_free`].
+///
+/// # Safety
+///
+/// `doc` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_document_editor(
+    doc: *const TpdfDocument,
+    out: *mut *mut TpdfEditor,
+) -> TpdfStatus {
+    let (Some(doc), false) = (unsafe { doc.as_ref() }, out.is_null()) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    let handle = Box::new(TpdfEditor {
+        inner: doc.inner.editor(),
+    });
+    unsafe { *out = Box::into_raw(handle) };
+    TpdfStatus::Ok
+}
+
+/// Frees an editor. Null is accepted and does nothing.
+///
+/// Pending edits are discarded, because an editor holds them and nothing else
+/// does. Nothing is written to any document.
+///
+/// # Safety
+///
+/// `editor` must have come from [`tpdf_document_editor`] and must not be used
+/// afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_free(editor: *mut TpdfEditor) {
+    if !editor.is_null() {
+        drop(unsafe { Box::from_raw(editor) });
+    }
+}
+
+/// Whether anything has been changed, or zero if the handle is null.
+///
+/// # Safety
+///
+/// `editor` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_is_dirty(editor: *const TpdfEditor) -> c_int {
+    match unsafe { editor.as_ref() } {
+        Some(editor) => c_int::from(editor.inner.is_dirty()),
+        None => 0,
+    }
+}
+
+/// How many pages the document has *as this editor sees it*, or zero if the
+/// handle is null.
+///
+/// Not the same as [`tpdf_document_page_count`] once a page has been inserted
+/// or deleted here, which is exactly why it exists: a caller checking an index
+/// before an edit must check it against the edit's own view.
+///
+/// # Safety
+///
+/// `editor` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_page_count(editor: *const TpdfEditor) -> u32 {
+    match unsafe { editor.as_ref() } {
+        Some(editor) => count(editor.inner.page_refs().len()),
+        None => 0,
+    }
+}
+
+/// Removes a page.
+///
+/// # Safety
+///
+/// `editor` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_delete_page(
+    editor: *mut TpdfEditor,
+    index: u32,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    if editor.inner.delete_page(index) {
+        TpdfStatus::Ok
+    } else {
+        refused("delete_page", &format!("index {index}"))
+    }
+}
+
+/// Moves a page to a new position.
+///
+/// # Safety
+///
+/// `editor` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_move_page(
+    editor: *mut TpdfEditor,
+    from: u32,
+    to: u32,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    if editor.inner.move_page(from, to) {
+        TpdfStatus::Ok
+    } else {
+        refused("move_page", &format!("from {from} to {to}"))
+    }
+}
+
+/// Rotates a page by a quarter-turn multiple, relative to its current
+/// rotation.
+///
+/// # Safety
+///
+/// `editor` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_rotate_page(
+    editor: *mut TpdfEditor,
+    index: u32,
+    degrees: i64,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    if editor.inner.rotate_page(index, degrees) {
+        TpdfStatus::Ok
+    } else {
+        refused("rotate_page", &format!("index {index}, {degrees} degrees"))
+    }
+}
+
+/// Inserts a blank page of the given size at `index`, which may equal the page
+/// count to append.
+///
+/// # Safety
+///
+/// `editor` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_insert_page(
+    editor: *mut TpdfEditor,
+    index: u32,
+    width: f64,
+    height: f64,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    if editor.inner.insert_page(index, width, height).is_some() {
+        TpdfStatus::Ok
+    } else {
+        refused(
+            "insert_page",
+            &format!("index {index}, {width} by {height}"),
+        )
+    }
+}
+
+/// Sets a page's `/CropBox` (14.11.2), in the page's own user space.
+///
+/// # Safety
+///
+/// `editor` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_set_crop_box(
+    editor: *mut TpdfEditor,
+    index: u32,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    if editor.inner.set_crop_box(index, x0, y0, x1, y1) {
+        TpdfStatus::Ok
+    } else {
+        refused(
+            "set_crop_box",
+            &format!("index {index}, [{x0} {y0} {x1} {y1}]"),
+        )
+    }
+}
+
+/// Appends operators to a page's content stream.
+///
+/// # Safety
+///
+/// `editor` must be a live handle and `operators` must point to at least
+/// `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_append_content(
+    editor: *mut TpdfEditor,
+    page: u32,
+    operators: *const u8,
+    len: usize,
+) -> TpdfStatus {
+    let (Some(editor), false) = (unsafe { editor.as_mut() }, operators.is_null()) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    let operators = unsafe { std::slice::from_raw_parts(operators, len) };
+    if editor.inner.append_content(page, operators) {
+        TpdfStatus::Ok
+    } else {
+        refused("append_content", &format!("page {page}"))
+    }
+}
+
+/// How many form fields the document has, or zero if the handle is null.
+///
+/// # Safety
+///
+/// `editor` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_field_count(editor: *const TpdfEditor) -> u32 {
+    match unsafe { editor.as_ref() } {
+        Some(editor) => count(editor.inner.fields().len()),
+        None => 0,
+    }
+}
+
+/// A field's fully qualified name (12.7.3.2), as a null-terminated UTF-8
+/// string the caller frees with [`tpdf_string_free`].
+///
+/// # Safety
+///
+/// `editor` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_field_name(
+    editor: *const TpdfEditor,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_ref() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let fields = editor.inner.fields();
+    let Some(field) = fields.get(index as usize) else {
+        set_error("no such field");
+        return TpdfStatus::NoSuchField;
+    };
+    unsafe { hand_over_string(out, Some(&field.name)) }
+}
+
+/// A field's current value as text, as a null-terminated UTF-8 string the
+/// caller frees with [`tpdf_string_free`].
+///
+/// A field with no value yields an empty string rather than null: "the field
+/// is empty" is an answer, and the absent answer on this surface is reserved
+/// for things a document genuinely does not say.
+///
+/// # Safety
+///
+/// `editor` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_field_value(
+    editor: *const TpdfEditor,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_ref() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let fields = editor.inner.fields();
+    let Some(field) = fields.get(index as usize) else {
+        set_error("no such field");
+        return TpdfStatus::NoSuchField;
+    };
+    let text = field.value.as_text();
+    unsafe { hand_over_string(out, Some(&text)) }
+}
+
+/// Fills a text or choice field, reporting the widgets it could not draw.
+///
+/// Three outcomes and not two:
+///
+/// - a non-`Ok` status -- **nothing was written at all**, and the status says
+///   why ([`TpdfStatus::NoSuchField`], [`TpdfStatus::ValueRefused`],
+///   [`TpdfStatus::FieldUnreadable`]);
+/// - `Ok` with a report of zero entries -- `/V` was written and every widget's
+///   appearance was regenerated;
+/// - `Ok` with a report of some entries -- `/V` was written, and those widgets
+///   were left showing whatever they were showing before, because 12.5.2's
+///   required `/Rect` is missing from them.
+///
+/// The third is the one a `bool` cannot express and the one this exists for.
+/// A caller that wants all-or-nothing checks the count is zero and restores a
+/// checkpoint if it is not, which is what
+/// `DocumentEditor::set_field_value` does in Rust.
+///
+/// `out_report` is always written on `Ok`, never null on `Ok`, and is freed
+/// with [`tpdf_fill_report_free`]. A caller that does not want it may pass
+/// null for `out_report`, in which case the report is dropped -- but a caller
+/// who does that has chosen not to know, which is the silence ruling 10 is
+/// against.
+///
+/// # Safety
+///
+/// `editor` must be a live handle, `name` and `value` null-terminated UTF-8,
+/// and `out_report` a valid pointer or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_fill_field(
+    editor: *mut TpdfEditor,
+    name: *const c_char,
+    value: *const c_char,
+    out_report: *mut *mut TpdfFillReport,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let name = match unsafe { required_str(name, "field name") } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    let value = match unsafe { required_str(value, "field value") } {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+
+    match editor.inner.fill_field(&name, &value) {
+        Ok(skipped) => {
+            if let Some(slot) = unsafe { out_report.as_mut() } {
+                *slot = Box::into_raw(Box::new(TpdfFillReport { inner: skipped }));
+            }
+            TpdfStatus::Ok
+        }
+        Err(error) => {
+            set_error(&format!("{name}: {error}"));
+            fill_status(error)
+        }
+    }
+}
+
+/// Ticks or clears a checkbox by its fully qualified name.
+///
+/// # Safety
+///
+/// `editor` must be a live handle and `name` null-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_set_checkbox(
+    editor: *mut TpdfEditor,
+    name: *const c_char,
+    on: c_int,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let name = match unsafe { required_str(name, "field name") } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    if editor.inner.set_checkbox(&name, on != 0) {
+        TpdfStatus::Ok
+    } else {
+        refused("set_checkbox", &format!("field {name:?}"))
+    }
+}
+
+/// Selects one option of a radio group (12.7.4.2).
+///
+/// # Safety
+///
+/// `editor` must be a live handle, and `name` and `option` null-terminated
+/// UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_select_radio(
+    editor: *mut TpdfEditor,
+    name: *const c_char,
+    option: *const c_char,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let name = match unsafe { required_str(name, "field name") } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    let option = match unsafe { required_str(option, "option") } {
+        Ok(option) => option,
+        Err(status) => return status,
+    };
+    if editor.inner.select_radio(&name, &option) {
+        TpdfStatus::Ok
+    } else {
+        refused(
+            "select_radio",
+            &format!("field {name:?}, option {option:?}"),
+        )
+    }
+}
+
+/// Takes this editor's state as a value, for [`tpdf_editor_restore`] to put
+/// back.
+///
+/// The closure-free half of `DocumentEditor::transaction`, which is
+/// checkpoint -> body -> restore on failure. Taking one changes nothing about
+/// the editor, and holding one across any number of further edits is fine: it
+/// is a copy, not a borrow, and the copy is of the *edits* rather than of the
+/// document.
+///
+/// The caller frees the result with [`tpdf_checkpoint_free`]. Freeing one
+/// commits nothing, because nothing was pending.
+///
+/// # Safety
+///
+/// `editor` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_checkpoint(
+    editor: *const TpdfEditor,
+    out: *mut *mut TpdfCheckpoint,
+) -> TpdfStatus {
+    let (Some(editor), false) = (unsafe { editor.as_ref() }, out.is_null()) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    let handle = Box::new(TpdfCheckpoint {
+        inner: editor.inner.checkpoint(),
+    });
+    unsafe { *out = Box::into_raw(handle) };
+    TpdfStatus::Ok
+}
+
+/// Puts an editor back to what a checkpoint recorded.
+///
+/// Restores objects written, objects deleted, the page order and the
+/// object-number counter -- the same four a rolled-back
+/// `DocumentEditor::transaction` restores, because it is the same function.
+///
+/// **Idempotent**, which is what makes it safe here: a host language's
+/// `finally` may run after its own `catch` has already restored, and
+/// restoring twice is restoring once.
+///
+/// The checkpoint is borrowed, not consumed, so one checkpoint can undo
+/// several attempts and the handle stays the caller's to free.
+///
+/// # Safety
+///
+/// `editor` and `checkpoint` must be live handles.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_restore(
+    editor: *mut TpdfEditor,
+    checkpoint: *const TpdfCheckpoint,
+) -> TpdfStatus {
+    let (Some(editor), Some(checkpoint)) =
+        (unsafe { editor.as_mut() }, unsafe { checkpoint.as_ref() })
+    else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    editor.inner.restore(&checkpoint.inner);
+    TpdfStatus::Ok
+}
+
+/// Frees a checkpoint. Null is accepted and does nothing.
+///
+/// # Safety
+///
+/// `checkpoint` must have come from [`tpdf_editor_checkpoint`] and must not be
+/// used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_checkpoint_free(checkpoint: *mut TpdfCheckpoint) {
+    if !checkpoint.is_null() {
+        drop(unsafe { Box::from_raw(checkpoint) });
+    }
+}
+
+/// Saves the edited document.
+///
+/// The caller frees the result with [`tpdf_buffer_free`].
+///
+/// An incremental save (7.5.6) appends to the original bytes, so the original
+/// survives as a prefix and the property signatures depend on (12.8.1) holds.
+/// A rewrite emits everything afresh.
+///
+/// # Safety
+///
+/// `editor` must be a live handle, `options` a valid pointer, and `out` a
+/// valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_save(
+    editor: *const TpdfEditor,
+    options: *const TpdfWriteOptions,
+    out: *mut *mut TpdfBuffer,
+) -> TpdfStatus {
+    let (Some(editor), false) = (unsafe { editor.as_ref() }, out.is_null()) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    let options = match unsafe { write_options(options) } {
+        Ok(options) => options,
+        Err(status) => return status,
+    };
+    let bytes = editor.inner.save(&options);
+    unsafe { *out = Box::into_raw(Box::new(TpdfBuffer { inner: bytes })) };
+    TpdfStatus::Ok
+}
+
+/// A borrowed pointer to a buffer's bytes, with its length.
+///
+/// The pointer is valid until the buffer is freed. It is **not** the caller's
+/// to release, and this is the [`tpdf_bitmap_data`] arrangement exactly.
+///
+/// # Safety
+///
+/// `buffer` must be a live handle or null; `out_len` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_buffer_data(
+    buffer: *const TpdfBuffer,
+    out_len: *mut usize,
+) -> *const u8 {
+    let Some(buffer) = (unsafe { buffer.as_ref() }) else {
+        if let Some(slot) = unsafe { out_len.as_mut() } {
+            *slot = 0;
+        }
+        return ptr::null();
+    };
+    if let Some(slot) = unsafe { out_len.as_mut() } {
+        *slot = buffer.inner.len();
+    }
+    buffer.inner.as_ptr()
+}
+
+/// A buffer's length in bytes, or zero if the handle is null.
+///
+/// # Safety
+///
+/// `buffer` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_buffer_len(buffer: *const TpdfBuffer) -> usize {
+    unsafe { buffer.as_ref() }.map_or(0, |b| b.inner.len())
+}
+
+/// Frees a buffer. Null is accepted and does nothing.
+///
+/// # Safety
+///
+/// `buffer` must have come from a function that says so, and neither it nor
+/// any pointer [`tpdf_buffer_data`] returned for it may be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_buffer_free(buffer: *mut TpdfBuffer) {
+    if !buffer.is_null() {
+        drop(unsafe { Box::from_raw(buffer) });
+    }
+}
+
+/// How many widgets a fill could not draw. Zero is the ordinary answer and is
+/// not an error.
+///
+/// # Safety
+///
+/// `report` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_fill_report_count(report: *const TpdfFillReport) -> u32 {
+    match unsafe { report.as_ref() } {
+        Some(report) => count(report.inner.len()),
+        None => 0,
+    }
+}
+
+/// One entry rendered as text, naming the widget and the defect.
+///
+/// `"7 0 R: no usable /Rect (12.5.2)"` and the like -- the facade's own
+/// `Display`, so the C ABI and Rust say the same sentence about the same
+/// document. The caller frees it with [`tpdf_string_free`].
+///
+/// # Safety
+///
+/// `report` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_fill_report_message(
+    report: *const TpdfFillReport,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null fill report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(entry) = report.inner.get(index as usize) else {
+        set_error("no such fill report entry");
+        return TpdfStatus::BadArgument;
+    };
+    unsafe { hand_over_string(out, Some(&entry.to_string())) }
+}
+
+/// One entry's widget, as an object number and generation.
+///
+/// The `ObjRef` ruling 10 requires a warning to carry, in the two integers it
+/// is made of -- so a caller can go and look at the object rather than parse a
+/// sentence about it.
+///
+/// # Safety
+///
+/// `report` must be a live handle; the out pointers may be null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_fill_report_widget(
+    report: *const TpdfFillReport,
+    index: u32,
+    out_number: *mut u32,
+    out_generation: *mut u16,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null fill report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(entry) = report.inner.get(index as usize) else {
+        set_error("no such fill report entry");
+        return TpdfStatus::BadArgument;
+    };
+    if let Some(slot) = unsafe { out_number.as_mut() } {
+        *slot = entry.widget.num;
+    }
+    if let Some(slot) = unsafe { out_generation.as_mut() } {
+        *slot = entry.widget.gen;
+    }
+    TpdfStatus::Ok
+}
+
+/// One entry's defect.
+///
+/// # Safety
+///
+/// `report` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_fill_report_defect(
+    report: *const TpdfFillReport,
+    index: u32,
+    out: *mut TpdfWidgetDefect,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null fill report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(entry) = report.inner.get(index as usize) else {
+        set_error("no such fill report entry");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(slot) = (unsafe { out.as_mut() }) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    *slot = TpdfWidgetDefect::of(entry.reason);
+    TpdfStatus::Ok
+}
+
+/// Frees a fill report. Null is accepted and does nothing.
+///
+/// # Safety
+///
+/// `report` must have come from [`tpdf_editor_fill_field`] and must not be
+/// used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_fill_report_free(report: *mut TpdfFillReport) {
+    if !report.is_null() {
+        drop(unsafe { Box::from_raw(report) });
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1978,6 +3004,59 @@ endobj
         assert_eq!(TpdfStatus::NotEncrypted as i32, 6);
         assert_eq!(TpdfStatus::UnsupportedHandler as i32, 7);
         assert_eq!(TpdfStatus::NoSuchSignature as i32, 8);
+
+        // The write surface's five, appended at 9 with gap 32. Once a binding
+        // has shipped against these they are as frozen as the eight above; the
+        // reason they are pinned the day they are added is that renumbering is
+        // easiest, and least noticed, before anybody depends on them.
+        assert_eq!(TpdfStatus::NoSuchField as i32, 9);
+        assert_eq!(TpdfStatus::ValueRefused as i32, 10);
+        assert_eq!(TpdfStatus::FieldUnreadable as i32, 11);
+        assert_eq!(TpdfStatus::SpentHandle as i32, 12);
+        assert_eq!(TpdfStatus::EditRefused as i32, 13);
+    }
+
+    /// A `TpdfStatus` crosses as an `int`, and the three hand-written bindings
+    /// each transcribe these numbers. A variant this test does not name is one
+    /// nobody promised to keep, which is why the count is pinned too: adding a
+    /// variant without adding its line here is caught by the number, not by
+    /// somebody remembering.
+    #[test]
+    fn every_status_the_abi_carries_is_pinned_by_number() {
+        // Nothing in Rust enumerates a `#[repr(C)]` enum's variants, so this
+        // is the list, written out. It is exactly the fourteen pinned above.
+        const EVERY: &[(TpdfStatus, i32)] = &[
+            (TpdfStatus::Ok, 0),
+            (TpdfStatus::BadArgument, 1),
+            (TpdfStatus::NotAPdf, 2),
+            (TpdfStatus::NeedsPassword, 3),
+            (TpdfStatus::WrongPassword, 4),
+            (TpdfStatus::NoSuchPage, 5),
+            (TpdfStatus::NotEncrypted, 6),
+            (TpdfStatus::UnsupportedHandler, 7),
+            (TpdfStatus::NoSuchSignature, 8),
+            (TpdfStatus::NoSuchField, 9),
+            (TpdfStatus::ValueRefused, 10),
+            (TpdfStatus::FieldUnreadable, 11),
+            (TpdfStatus::SpentHandle, 12),
+            (TpdfStatus::EditRefused, 13),
+        ];
+        for (status, number) in EVERY {
+            assert_eq!(*status as i32, *number, "{status:?}");
+        }
+        assert_eq!(EVERY.len(), 14, "append only, and say how many there are");
+    }
+
+    /// The write surface's other two enums, pinned for the reason
+    /// `the_signature_enums_have_the_numbers_the_bindings_transcribe` pins
+    /// its own: `bindings/dotnet/TinkerPdf.cs` writes these numbers out by
+    /// hand, and a reordered variant would compile on both sides and mean
+    /// something different on each.
+    #[test]
+    fn the_write_enums_have_the_numbers_the_bindings_transcribe() {
+        assert_eq!(TpdfWriteMode::Rewrite as i32, 0);
+        assert_eq!(TpdfWriteMode::Incremental as i32, 1);
+        assert_eq!(TpdfWidgetDefect::RectMissing as i32, 0);
     }
 
     /// The signature enums' numbers are transcribed by hand into
@@ -2595,5 +3674,747 @@ endobj
             Some("adbe.pkcs7.detached")
         );
         unsafe { tpdf_signatures_free(signatures) };
+    }
+
+    // -- writing: the editor surface (gap 32 milestone 2) -------------------
+    //
+    // The claim every test below serves is one sentence: **the C ABI writes
+    // the same bytes the facade does**. Not similar bytes and not a valid
+    // document -- the same bytes, because anything less means the four
+    // bindings are four writers and the parity suite is comparing them to each
+    // other rather than to the engine.
+
+    /// A null-terminated C string from a Rust one, kept alive by the caller.
+    fn c(text: &str) -> CString {
+        CString::new(text).expect("no interior nul in a test string")
+    }
+
+    /// The committed form fixture, opened through the C ABI.
+    fn open_form() -> *mut TpdfDocument {
+        open("form-fields.pdf")
+    }
+
+    /// An editor over it, through the C ABI.
+    fn editor_over(doc: *mut TpdfDocument) -> *mut TpdfEditor {
+        let mut editor: *mut TpdfEditor = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_document_editor(doc, &mut editor) },
+            TpdfStatus::Ok
+        );
+        assert!(!editor.is_null());
+        editor
+    }
+
+    /// Incremental save options, as both sides of every comparison use them.
+    fn incremental_options() -> TpdfWriteOptions {
+        let mut options = TpdfWriteOptions {
+            mode: TpdfWriteMode::Rewrite,
+            linearize: 0,
+            version_major: 0,
+            version_minor: 0,
+            object_streams: 0,
+            compress: 0,
+            garbage_collect: 0,
+            encryption: ptr::null(),
+        };
+        assert_eq!(
+            unsafe { tpdf_write_options_init(&mut options) },
+            TpdfStatus::Ok
+        );
+        options.mode = TpdfWriteMode::Incremental;
+        options
+    }
+
+    /// A saved buffer's bytes, copied out and the handle freed.
+    fn take_buffer(buffer: *mut TpdfBuffer) -> Vec<u8> {
+        assert!(!buffer.is_null());
+        let mut len = 0usize;
+        let data = unsafe { tpdf_buffer_data(buffer, &mut len) };
+        assert!(!data.is_null());
+        assert_eq!(len, unsafe { tpdf_buffer_len(buffer) });
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+        unsafe { tpdf_buffer_free(buffer) };
+        bytes
+    }
+
+    /// The fill-and-save script, driven entirely through the C ABI.
+    ///
+    /// Kept beside the facade-direct twin below so the two read as the same
+    /// program written twice, which is what makes a byte difference between
+    /// them a difference in the boundary rather than in the script.
+    fn fill_and_save_through_the_abi() -> (Vec<u8>, Vec<String>) {
+        let doc = open_form();
+        let editor = editor_over(doc);
+        // Freed here, before a single edit, because the editor holds its own
+        // reference to the object store. If that were untrue the rest of this
+        // function would be a use-after-free rather than a test.
+        unsafe { tpdf_document_free(doc) };
+
+        let mut report: *mut TpdfFillReport = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(
+                    editor,
+                    c("name").as_ptr(),
+                    c("Ada Lovelace").as_ptr(),
+                    &mut report,
+                )
+            },
+            TpdfStatus::Ok,
+            "a widget that cannot be drawn is not a failed fill"
+        );
+
+        let mut messages = Vec::new();
+        for index in 0..unsafe { tpdf_fill_report_count(report) } {
+            let mut text: *mut c_char = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_fill_report_message(report, index, &mut text) },
+                TpdfStatus::Ok
+            );
+            messages.push(
+                unsafe { CStr::from_ptr(text) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            unsafe { tpdf_string_free(text) };
+        }
+        unsafe { tpdf_fill_report_free(report) };
+
+        // The control field, filled through the same call: its report must
+        // come back empty, so this script exercises both legs rather than one.
+        let mut clean: *mut TpdfFillReport = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(
+                    editor,
+                    c("notes").as_ptr(),
+                    c("filled through the C ABI").as_ptr(),
+                    &mut clean,
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(unsafe { tpdf_fill_report_count(clean) }, 0);
+        unsafe { tpdf_fill_report_free(clean) };
+
+        assert_eq!(
+            unsafe { tpdf_editor_set_checkbox(editor, c("agree").as_ptr(), 1) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_select_radio(editor, c("colour").as_ptr(), c("red").as_ptr()) },
+            TpdfStatus::Ok
+        );
+
+        let options = incremental_options();
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let bytes = take_buffer(buffer);
+        unsafe { tpdf_editor_free(editor) };
+        (bytes, messages)
+    }
+
+    /// The same script against the facade, in Rust.
+    fn fill_and_save_through_the_facade() -> (Vec<u8>, Vec<String>) {
+        let document = Document::open(fixture("form-fields.pdf")).expect("the fixture opens");
+        let mut editor = document.editor();
+        let skipped = editor
+            .fill_field("name", "Ada Lovelace")
+            .expect("the value is taken");
+        let messages = skipped.iter().map(ToString::to_string).collect();
+        assert!(editor
+            .fill_field("notes", "filled through the C ABI")
+            .expect("the value is taken")
+            .is_empty());
+        assert!(editor.set_checkbox("agree", true));
+        assert!(editor.select_radio("colour", "red"));
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        });
+        (bytes, messages)
+    }
+
+    /// The milestone's own exit criterion, and the one the whole design rests
+    /// on: **byte-equal**.
+    #[test]
+    fn filling_and_saving_through_the_abi_is_byte_equal_to_the_facade() {
+        let (through_abi, abi_messages) = fill_and_save_through_the_abi();
+        let (through_facade, facade_messages) = fill_and_save_through_the_facade();
+
+        assert_eq!(
+            through_abi.len(),
+            through_facade.len(),
+            "the two saves are not even the same length"
+        );
+        assert_eq!(
+            through_abi, through_facade,
+            "the C ABI wrote a different document than the facade did"
+        );
+        assert_eq!(
+            abi_messages, facade_messages,
+            "and it reported the skipped widget in the same words"
+        );
+        assert_eq!(
+            abi_messages,
+            vec!["7 0 R: no usable /Rect (12.5.2)".to_string()],
+            "exactly one widget, named"
+        );
+    }
+
+    /// 7.5.6: an incremental save appends. The original bytes must be a
+    /// prefix, because that is what keeps a signature over them covering what
+    /// it covered (12.8.1) -- and it is a property of *this boundary's* output
+    /// rather than an inherited one, since the C ABI is what chose the mode.
+    #[test]
+    fn an_incremental_save_through_the_abi_keeps_the_original_as_a_prefix() {
+        let original = fixture("form-fields.pdf");
+        let (saved, _) = fill_and_save_through_the_abi();
+        assert!(saved.len() > original.len());
+        assert_eq!(&saved[..original.len()], &original[..]);
+
+        // And the artefact is a document this engine reads back, at the
+        // ladder's top rung: ruling 13 makes the check that the bytes are
+        // right a first-party one, and this is that check on the C ABI's own
+        // output.
+        let reopened = Document::open(saved).expect("the C ABI's output opens");
+        assert!(
+            reopened.validate().is_empty(),
+            "and the strict validator finds nothing in it: {:?}",
+            reopened.validate()
+        );
+    }
+
+    /// The fourth outcome, entry by entry: the widget's `ObjRef` and its
+    /// defect, not only a sentence about them.
+    #[test]
+    fn the_fill_report_carries_the_widget_and_the_defect() {
+        let doc = open_form();
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let mut report: *mut TpdfFillReport = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(editor, c("name").as_ptr(), c("Ada").as_ptr(), &mut report)
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(unsafe { tpdf_fill_report_count(report) }, 1);
+
+        let (mut number, mut generation) = (0u32, 0u16);
+        assert_eq!(
+            unsafe { tpdf_fill_report_widget(report, 0, &mut number, &mut generation) },
+            TpdfStatus::Ok
+        );
+        assert_eq!((number, generation), (7, 0));
+
+        let mut defect = TpdfWidgetDefect::RectMissing;
+        assert_eq!(
+            unsafe { tpdf_fill_report_defect(report, 0, &mut defect) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(defect, TpdfWidgetDefect::RectMissing);
+
+        // Past the end is refused rather than answered.
+        assert_eq!(
+            unsafe { tpdf_fill_report_widget(report, 1, &mut number, &mut generation) },
+            TpdfStatus::BadArgument
+        );
+
+        unsafe { tpdf_fill_report_free(report) };
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// A field whose every widget can be drawn reports an **empty** report,
+    /// which is a success rather than an absence of one.
+    ///
+    /// This is the control for
+    /// [`the_fill_report_carries_the_widget_and_the_defect`]: without it, "the
+    /// report was non-empty" cannot be told apart from "the report is always
+    /// non-empty", which is what a binding that inverted the condition would
+    /// look like from the outside.
+    #[test]
+    fn a_field_that_draws_cleanly_reports_an_empty_report() {
+        let doc = open("form-fields.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let mut report: *mut TpdfFillReport = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(
+                    editor,
+                    c("notes").as_ptr(),
+                    c("all drawable").as_ptr(),
+                    &mut report,
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert!(!report.is_null(), "Ok always writes a report");
+        assert_eq!(
+            unsafe { tpdf_fill_report_count(report) },
+            0,
+            "and for an undamaged field it is empty"
+        );
+        unsafe { tpdf_fill_report_free(report) };
+        assert_eq!(unsafe { tpdf_editor_is_dirty(editor) }, 1);
+
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// A fill that is refused outright writes **no report at all**, because
+    /// nothing was written and there is nothing to report about.
+    #[test]
+    fn a_refused_fill_writes_no_report_at_all() {
+        let doc = open("form-fields.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let mut report: *mut TpdfFillReport = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(
+                    editor,
+                    c("no-such-field").as_ptr(),
+                    c("x").as_ptr(),
+                    &mut report,
+                )
+            },
+            TpdfStatus::NoSuchField
+        );
+        assert!(report.is_null());
+        assert_eq!(unsafe { tpdf_editor_is_dirty(editor) }, 0);
+
+        // And the report accessors tolerate the null they were just handed.
+        assert_eq!(unsafe { tpdf_fill_report_count(report) }, 0);
+        unsafe { tpdf_fill_report_free(report) };
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// Every `FillError` variant reaches C as its own status, so a caller can
+    /// tell "there is no such field" from "the field will not take that".
+    #[test]
+    fn each_fill_refusal_crosses_as_its_own_status() {
+        let doc = open("form-fields.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(editor, c("nope").as_ptr(), c("x").as_ptr(), ptr::null_mut())
+            },
+            TpdfStatus::NoSuchField
+        );
+
+        // /MaxLen is 32 on this field, so 40 characters is refused rather
+        // than truncated -- truncation hides a data error inside a file that
+        // then looks correctly filled.
+        let long = "x".repeat(40);
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(
+                    editor,
+                    c("name").as_ptr(),
+                    c(&long).as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            TpdfStatus::ValueRefused
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_is_dirty(editor) },
+            0,
+            "and a refusal wrote nothing"
+        );
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// Checkpoint, edit, restore -- the round trip, through the boundary.
+    #[test]
+    fn a_checkpoint_round_trips_through_the_abi() {
+        let doc = open("form-fields.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let options = incremental_options();
+        let save = || {
+            let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+                TpdfStatus::Ok
+            );
+            take_buffer(buffer)
+        };
+
+        assert_eq!(
+            unsafe { tpdf_editor_set_checkbox(editor, c("agree").as_ptr(), 1) },
+            TpdfStatus::Ok
+        );
+        let before = save();
+
+        let mut mark: *mut TpdfCheckpoint = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_checkpoint(editor, &mut mark) },
+            TpdfStatus::Ok
+        );
+        assert!(!mark.is_null());
+
+        assert_eq!(
+            unsafe { tpdf_editor_select_radio(editor, c("colour").as_ptr(), c("blue").as_ptr()) },
+            TpdfStatus::Ok
+        );
+        assert_ne!(save(), before, "the second edit changed the file");
+
+        assert_eq!(unsafe { tpdf_editor_restore(editor, mark) }, TpdfStatus::Ok);
+        assert_eq!(save(), before, "and the restore undid exactly it");
+
+        // Idempotent, which is the property a host language's `finally` needs:
+        // it may run after its own `catch` has already restored.
+        for _ in 0..3 {
+            assert_eq!(unsafe { tpdf_editor_restore(editor, mark) }, TpdfStatus::Ok);
+            assert_eq!(save(), before);
+        }
+
+        // The checkpoint is borrowed, not consumed, so it is still the
+        // caller's to free -- and freeing it commits nothing.
+        unsafe { tpdf_checkpoint_free(mark) };
+        assert_eq!(save(), before);
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// The lifetime claim, made explicitly rather than relied on: the editor
+    /// holds its own reference, so the document handle may go first.
+    ///
+    /// This is what lets the .NET `SafeHandle`s stay independent instead of
+    /// needing a parent-child keep-alive, so it is worth a test of its own
+    /// rather than being a side effect of the tests above.
+    #[test]
+    fn an_editor_outlives_the_document_it_came_from() {
+        let doc = open("form-fields.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        assert_eq!(unsafe { tpdf_editor_page_count(editor) }, 1);
+        assert_eq!(unsafe { tpdf_editor_field_count(editor) }, 4);
+
+        let mut name: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_field_name(editor, 0, &mut name) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(name) }.to_string_lossy(),
+            "name",
+            "the field list is readable after the document handle is gone"
+        );
+        unsafe { tpdf_string_free(name) };
+
+        assert_eq!(
+            unsafe { tpdf_editor_field_name(editor, 4, &mut name) },
+            TpdfStatus::NoSuchField,
+            "and an index past the end is named rather than guessed at"
+        );
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// The page operations, and what a refusal says.
+    #[test]
+    fn page_operations_cross_and_a_refusal_names_the_call() {
+        let doc = open("simple-text.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        assert_eq!(unsafe { tpdf_editor_page_count(editor) }, 3);
+        assert_eq!(
+            unsafe { tpdf_editor_rotate_page(editor, 0, 90) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_insert_page(editor, 3, 200.0, 100.0) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_page_count(editor) },
+            4,
+            "the editor's own view of the page count moved with the edit"
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_move_page(editor, 3, 0) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_delete_page(editor, 0) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(unsafe { tpdf_editor_page_count(editor) }, 3);
+        assert_eq!(
+            unsafe { tpdf_editor_set_crop_box(editor, 0, 10.0, 10.0, 100.0, 100.0) },
+            TpdfStatus::Ok
+        );
+
+        // Refusals. The facade answers `bool`, so the status is the same for
+        // each and the *message* is what tells them apart (ruling 10).
+        assert_eq!(
+            unsafe { tpdf_editor_delete_page(editor, 99) },
+            TpdfStatus::EditRefused
+        );
+        let message = unsafe { CStr::from_ptr(tpdf_last_error_message()) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(message, "delete_page refused: index 99");
+
+        assert_eq!(
+            unsafe { tpdf_editor_set_crop_box(editor, 0, 10.0, 10.0, 10.0, 100.0) },
+            TpdfStatus::EditRefused,
+            "a crop box of no area is refused rather than written"
+        );
+        assert!(unsafe { CStr::from_ptr(tpdf_last_error_message()) }
+            .to_string_lossy()
+            .starts_with("set_crop_box refused:"));
+
+        assert_eq!(
+            unsafe { tpdf_editor_insert_page(editor, 0, f64::NAN, 100.0) },
+            TpdfStatus::EditRefused,
+            "and a dimension that is not a number reaches no file"
+        );
+
+        unsafe { tpdf_editor_free(editor) };
+    }
+
+    /// `tpdf_write_options_init` is the facade's defaults and not a second
+    /// opinion about them, which is what stops a C caller writing a different
+    /// file than a Rust caller with the same intent.
+    #[test]
+    fn the_default_write_options_are_the_facades_own() {
+        let mut options = TpdfWriteOptions {
+            mode: TpdfWriteMode::Incremental,
+            linearize: 1,
+            version_major: 9,
+            version_minor: 9,
+            object_streams: 1,
+            compress: 0,
+            garbage_collect: 1,
+            encryption: ptr::null(),
+        };
+        assert_eq!(
+            unsafe { tpdf_write_options_init(&mut options) },
+            TpdfStatus::Ok
+        );
+
+        let facade = WriteOptions::default();
+        assert_eq!(options.mode, TpdfWriteMode::Rewrite);
+        assert_eq!(options.linearize, c_int::from(facade.linearize));
+        assert_eq!(options.version_major, u32::from(facade.version.0));
+        assert_eq!(options.version_minor, u32::from(facade.version.1));
+        assert_eq!(options.object_streams, c_int::from(facade.object_streams));
+        assert_eq!(options.compress, c_int::from(facade.compress));
+        assert_eq!(options.garbage_collect, c_int::from(facade.garbage_collect));
+        assert!(options.encryption.is_null());
+
+        // And a rewrite through the C ABI equals a rewrite through the facade
+        // with those same defaults -- the pair of assertions above says the
+        // struct matches, and this says the struct is what is used.
+        let doc = open("simple-text.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let through_abi = take_buffer(buffer);
+        unsafe { tpdf_editor_free(editor) };
+
+        let document = Document::open(fixture("simple-text.pdf")).expect("it opens");
+        let through_facade = document.editor().save(&WriteOptions::default());
+        assert_eq!(through_abi, through_facade);
+    }
+
+    /// Encryption crosses field for field, and the 48 entropy bytes are the
+    /// caller's -- refused rather than invented when they are the wrong
+    /// length, because a short buffer read to 48 would encrypt with whatever
+    /// followed it in the caller's address space.
+    #[test]
+    fn encryption_crosses_and_a_wrong_entropy_length_is_refused() {
+        let entropy: Vec<u8> = (0..TPDF_ENTROPY_LEN).map(|i| (i * 7) as u8).collect();
+        let user = c("open-sesame");
+        let owner = c("owner-secret");
+
+        let doc = open("simple-text.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let mut options = incremental_options();
+        options.mode = TpdfWriteMode::Rewrite;
+
+        // Short entropy first: the refusal must come before anything is
+        // written.
+        let short = TpdfEncryption {
+            user_password: user.as_ptr(),
+            owner_password: owner.as_ptr(),
+            permissions: -1,
+            entropy: entropy.as_ptr(),
+            entropy_len: TPDF_ENTROPY_LEN - 1,
+        };
+        options.encryption = &short;
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+            TpdfStatus::BadArgument
+        );
+        assert!(buffer.is_null(), "and nothing was allocated for it");
+
+        let good = TpdfEncryption {
+            user_password: user.as_ptr(),
+            owner_password: owner.as_ptr(),
+            permissions: -1,
+            entropy: entropy.as_ptr(),
+            entropy_len: TPDF_ENTROPY_LEN,
+        };
+        options.encryption = &good;
+        assert_eq!(
+            unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let through_abi = take_buffer(buffer);
+        unsafe { tpdf_editor_free(editor) };
+
+        let mut fixed = [0u8; TPDF_ENTROPY_LEN];
+        fixed.copy_from_slice(&entropy);
+        let document = Document::open(fixture("simple-text.pdf")).expect("it opens");
+        let through_facade = document.editor().save(&WriteOptions {
+            encryption: Some(Encryption {
+                user_password: "open-sesame".to_string(),
+                owner_password: "owner-secret".to_string(),
+                permissions: -1,
+                entropy: fixed,
+            }),
+            ..WriteOptions::default()
+        });
+        assert_eq!(
+            through_abi, through_facade,
+            "fixed entropy is the one input that would otherwise vary, so with \
+             it pinned the two sides are byte-identical"
+        );
+
+        let reopened = Document::open(through_abi).expect("the encrypted output opens");
+        assert!(reopened.is_encrypted());
+    }
+
+    /// Null handles are refused rather than dereferenced, and every new free
+    /// accepts null. The read surface has this test; the write surface needs
+    /// its own, because none of these functions existed when that one was
+    /// written.
+    #[test]
+    fn null_handles_across_the_write_surface_are_refused() {
+        let name = c("name");
+        let value = c("Ada");
+
+        assert_eq!(
+            unsafe { tpdf_document_editor(ptr::null(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(unsafe { tpdf_editor_is_dirty(ptr::null()) }, 0);
+        assert_eq!(unsafe { tpdf_editor_page_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { tpdf_editor_field_count(ptr::null()) }, 0);
+        assert_eq!(
+            unsafe { tpdf_editor_delete_page(ptr::null_mut(), 0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_move_page(ptr::null_mut(), 0, 1) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_rotate_page(ptr::null_mut(), 0, 90) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_insert_page(ptr::null_mut(), 0, 10.0, 10.0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_set_crop_box(ptr::null_mut(), 0, 0.0, 0.0, 1.0, 1.0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_append_content(ptr::null_mut(), 0, ptr::null(), 0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(
+                    ptr::null_mut(),
+                    name.as_ptr(),
+                    value.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_set_checkbox(ptr::null_mut(), name.as_ptr(), 1) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_select_radio(ptr::null_mut(), name.as_ptr(), value.as_ptr()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_checkpoint(ptr::null(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_restore(ptr::null_mut(), ptr::null()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_editor_save(ptr::null(), ptr::null(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_write_options_init(ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert!(unsafe { tpdf_buffer_data(ptr::null(), ptr::null_mut()) }.is_null());
+        assert_eq!(unsafe { tpdf_buffer_len(ptr::null()) }, 0);
+        assert_eq!(unsafe { tpdf_fill_report_count(ptr::null()) }, 0);
+        assert_eq!(
+            unsafe { tpdf_fill_report_message(ptr::null(), 0, ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_fill_report_widget(ptr::null(), 0, ptr::null_mut(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_fill_report_defect(ptr::null(), 0, ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+
+        // A non-UTF-8 name is refused too, rather than lossily converted into
+        // a name the caller did not ask for.
+        let doc = open("form-fields.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+        let invalid: [c_char; 3] = [-1i8 as c_char, -2i8 as c_char, 0];
+        assert_eq!(
+            unsafe {
+                tpdf_editor_fill_field(editor, invalid.as_ptr(), value.as_ptr(), ptr::null_mut())
+            },
+            TpdfStatus::BadArgument
+        );
+        unsafe { tpdf_editor_free(editor) };
+
+        // Every new free takes null and does nothing.
+        unsafe { tpdf_editor_free(ptr::null_mut()) };
+        unsafe { tpdf_checkpoint_free(ptr::null_mut()) };
+        unsafe { tpdf_buffer_free(ptr::null_mut()) };
+        unsafe { tpdf_fill_report_free(ptr::null_mut()) };
     }
 }
