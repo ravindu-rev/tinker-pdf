@@ -88,14 +88,17 @@ now, and reviews enforce all four.
    engine crates. This is ruling 1 in [docs/rulings.md](docs/rulings.md) and
    the fuzzers enforce it — a fuzz crash blocks a release.
 
-3. **Leaf crates stay PDF-free.** `filters`, `crypto`, `font`, `color`,
-   `raster`, `math`, `zip`, `xml`, `css` and `layout` — **ten** — take bytes
-   and plain parameter structs, return bytes and values. No COS types, no PDF
-   vocabulary in their public APIs. That is what keeps them independently
-   fuzzable, testable and publishable. This is ruling 8 in
-   [docs/rulings.md](docs/rulings.md), and the test of it is the definition
-   rather than the list: if a crate takes bytes and returns values, it is a
-   leaf and this rule binds it.
+3. **Leaf crates stay PDF-free.** A leaf takes bytes and plain parameter
+   structs and returns bytes and values. No COS types, no PDF vocabulary in
+   their public APIs. That is what keeps them independently fuzzable, testable
+   and publishable. This is ruling 8 in [docs/rulings.md](docs/rulings.md),
+   and the test of it is the definition rather than the list: if a crate takes
+   bytes and returns values, it is a leaf and this rule binds it. The current
+   membership is counted in [docs/architecture.md](docs/architecture.md), in
+   one place, deliberately — this paragraph used to carry its own copy and had
+   drifted to ten names against that file's twelve, which is the third time
+   ruling 8's list has drifted and the reason the ruling made the definition
+   binding rather than the enumeration.
 
 4. **The docs are the record.** Every crate's doc comment names the feature
    doc that describes it ([docs/README.md](docs/README.md) indexes them). A
