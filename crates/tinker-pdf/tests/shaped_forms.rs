@@ -55,22 +55,28 @@
 //! # The defects, reintroduced and counted
 //!
 //! Each was put back into the source and the suites below run against it, so
-//! these are measurements rather than expectations. Twelve tests compile in
-//! either build — the registry pair swap places — and the second column is
-//! `cmap.rs`'s own thirty unit tests, where the two guards that live in the
-//! leaf crate are.
+//! these are measurements rather than expectations. Twelve tests compile here
+//! in either build — the registry pair swap places. The other two columns are
+//! where the leaf crate's own guards live: `cmap.rs`'s thirty unit tests, and
+//! the thirteen in `tinker-pdf-font/tests/predefined_cmaps.rs` that read
+//! Adobe's vendored text rather than this engine's output.
 //!
-//! | Defect reintroduced | Here | `cmap.rs` |
-//! | --- | --- | --- |
-//! | `Composite::of` always answers `Shaping::No`, so the shaped path is never taken | 7 of 12 | 0 of 30 |
-//! | A right-to-left run's glyphs are not reversed for drawing | 6 of 12 | 0 of 30 |
-//! | `escape` writes `?` and names nothing, as it did before milestone 8 | 2 of 12 | 0 of 30 |
-//! | `Composite::of` shapes a registry CMap whose table is absent instead of refusing | 1 of 12, `--no-default-features` | 0 of 30 |
-//! | `report` drops the refusal and emits only the characters | 1 of 12, `--no-default-features` | 0 of 30 |
-//! | `CMap::code_for_cid` answers its first candidate without checking it maps back | 1 of 12 | 1 of 30 |
-//! | `CMap::code_width` always answers two bytes | 1 of 12 | 1 of 30 |
-//! | `Font::cid_for_gid` answers the glyph as its own CID, ignoring `/CIDToGIDMap` | 1 of 12 | 0 of 30 |
-//! | `Composite::of` shapes a vertical CMap as though it were horizontal | 1 of 12 | 0 of 30 |
+//! | Defect reintroduced | Here | `cmap.rs` | registry |
+//! | --- | --- | --- | --- |
+//! | `Composite::of` always answers `Shaping::No`, so the shaped path is never taken | 7 of 12 | 0 of 30 | 0 of 13 |
+//! | A right-to-left run's glyphs are not reversed for drawing | 6 of 12 | 0 of 30 | 0 of 13 |
+//! | `escape` writes `?` and names nothing, as it did before milestone 8 | 2 of 12 | 0 of 30 | 0 of 13 |
+//! | `Composite::of` shapes a registry CMap whose table is absent instead of refusing | 1 of 12, `--no-default-features` | 0 of 30 | — |
+//! | `report` drops the refusal and emits only the characters | 1 of 12, `--no-default-features` | 0 of 30 | — |
+//! | `CMap::code_for_cid` answers its first candidate without checking it maps back | 1 of 12 | 1 of 30 | 0 of 13 |
+//! | `CMap::code_width` always answers two bytes | 1 of 12 | 1 of 30 | 1 of 13 |
+//! | `Font::cid_for_gid` answers the glyph as its own CID, ignoring `/CIDToGIDMap` | 1 of 12 | 0 of 30 | 0 of 13 |
+//! | `Composite::of` shapes a vertical CMap as though it were horizontal | 1 of 12 | 0 of 30 | 0 of 13 |
+//!
+//! The sixth row's zero in the last column is worth reading rather than
+//! skipping: `90ms-RKSJ-H` states no single that overrides a range it also
+//! covers, so the registry suite cannot see an unverified inverse. That guard
+//! is held up by the two tests that build a CMap which does.
 //!
 //! The rows of one are the interesting ones: each names a guard that exactly
 //! one test stands behind, so removing that test removes the property. Row
