@@ -37,7 +37,7 @@ mod epub_support;
 
 use epub_support::book::one_face_book;
 use epub_support::layout::{column, document, Line};
-use epub_support::typeface::{text_objects, Face, Joining};
+use epub_support::typeface::{shown_glyphs, text_objects, Face, Joining};
 use tinker_pdf::Document;
 
 /// The measure every pair is laid out at.
@@ -413,11 +413,7 @@ fn drawn(body: &str) -> Vec<String> {
         String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned();
     text_objects(&content)
         .iter()
-        .map(|(_, object)| {
-            let at = object.find('<').expect("a hex string");
-            let end = object[at..].find('>').expect("a closed hex string");
-            object[at + 1..at + end].to_owned()
-        })
+        .map(|(_, object)| shown_glyphs(object))
         .collect()
 }
 

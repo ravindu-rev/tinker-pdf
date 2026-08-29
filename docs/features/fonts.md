@@ -336,18 +336,48 @@ Landed so far:
   fingerprint, and a page-level assertion that the line was measured the way
   it is drawn. `epub_reftest.rs` gains the EPUB tier's right-to-left pair.
 
-  Two limits, named rather than implied:
+- **Rule L2 is applied at two levels, not one.** It was applied only inside a
+  face segment, so a right-to-left line whose characters need two faces was
+  drawn as two left-to-right pieces — every glyph the right glyph, and the
+  line read backwards. The segments of a right-to-left run are now drawn in
+  reverse and each keeps the glyph order its own shaping gave it.
+  `epub_shaped.rs` carries a two-face fixture for it and a left-to-right
+  control beside it, because a build that reversed every multi-face run would
+  pass the first and set every English sentence with a fallback character in
+  it backwards.
 
-  - **Reordering is per face segment.** A right-to-left line whose characters
-    need two faces is drawn as two left-to-right pieces, because fallback cuts
-    the run before UAX #9's rule L2 is applied to it. Closing it means
-    resolving levels above the segmentation, which `flow.rs` does not do at
-    all today.
-  - **`GPOS` offsets are not carried onto the page.**
-    `PageBuilder::glyphs` writes one hex string at one origin, so a mark sits
-    where its advance puts it rather than where its anchor does. The
-    positioned form exists — `DocumentBuilder::glyph_run`, which milestone 7
-    writes through — and the EPUB painter does not use it yet.
+  One limit remains, named rather than implied: **the unit is the `TextRun`
+  and not the visual line.** `flow.rs` breaks lines over logical text and
+  resolves no levels, so a right-to-left line made of two styled spans is two
+  runs at two `x`s the painter did not choose. Closing that means resolving
+  levels above the line breaker, which is a change to the layout crate.
+
+- **`GPOS` offsets reach the page.** They did not, and it was a **silent**
+  defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark
+  sat where its advance put it rather than where its anchor did, and a
+  vowelled Arabic or Devanagari book rendered wrong while every test passed.
+  The EPUB painter draws through `DocumentBuilder::glyph_run` now — 9.4.3's
+  `TJ` adjustment per glyph and `Ts` for a vertical offset, against the same
+  `/W`-rounded advances the reader will use — and `letter-spacing` is folded
+  into those positions rather than left to `Tc`, which also fixes a
+  measurement disagreement: `Tc` is applied per glyph and `flow.rs` measures
+  per character, so a ligature or a joined word was drawn narrower than it was
+  measured.
+
+  The fingerprint could not see any of it. **No fixture in this repository had
+  a mark**, so the page a build that dropped every offset drew was byte for
+  byte the page a build that carried them drew, and
+  `epub_shaped.rs`'s `SHAPED_PAGE` did not move when the defect was fixed.
+  That file now carries a `GPOS` `SinglePos` face whose one displaced glyph
+  makes the transport visible; the anchor arithmetic itself stays adjudicated
+  by aots and by the `GPOS-3` and `GPOS-4` sections.
+
+  Extraction had the same defect from the other end and it had to be fixed
+  first: `TextDevice` decided which line a glyph was on from where its ink
+  was, so a rise started a new line and a base–mark–base sequence split into
+  three. A glyph now carries its **baseline** origin — the same transform with
+  9.4.3's rise taken out, computed only when there is a rise — and the line
+  tests ask that. The reported quads and origins are unchanged.
 
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing, so the claim for a script is exactly as strong as

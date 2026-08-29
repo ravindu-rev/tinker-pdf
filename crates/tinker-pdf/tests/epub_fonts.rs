@@ -35,7 +35,7 @@ mod epub_support;
 
 use std::sync::{Arc, Mutex};
 
-use epub_support::typeface::{covering, origin_of, text_objects, Face};
+use epub_support::typeface::{covering, origin_of, shown_glyphs, text_objects, Face};
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::epub::obfuscation::{adobe_key, deobfuscate, idpf_key, KeyDefect};
 use tinker_pdf::epub::ocf::{Ocf, ADOBE_OBFUSCATION, IDPF_OBFUSCATION};
@@ -334,9 +334,16 @@ fn a_run_needing_three_faces_becomes_three_text_objects() {
 
     // Each face numbers its own glyphs from 1, in the sorted order of what it
     // covers, so `ABC`, `DEF` and `GHI` are `0001 0002 0003` three times over.
+    //
+    // Read through `shown_glyphs` rather than out of the object's own bytes:
+    // a shaped run is a `TJ` array of one hex string per glyph, so the indices
+    // are there and the *spelling* is not one long string. What the test is
+    // about is which glyphs were drawn and in what order, which is what the
+    // helper answers.
     for (_, object) in &objects {
-        assert!(
-            object.contains("<000100020003>"),
+        assert_eq!(
+            shown_glyphs(object),
+            "000100020003",
             "a segment does not draw its face's own first three glyphs: {object}"
         );
     }
@@ -403,10 +410,9 @@ fn one_face_that_covers_the_whole_run_is_one_text_object() {
         "one face covering the whole run is one text object: {content}"
     );
     assert_eq!(objects[0].0, "Bf0");
-    assert!(
-        objects[0]
-            .1
-            .contains("<000100020003000400050006000700080009>"),
+    assert_eq!(
+        shown_glyphs(&objects[0].1),
+        "000100020003000400050006000700080009",
         "one object draws all nine glyphs: {}",
         objects[0].1
     );
@@ -555,8 +561,9 @@ fn a_face_the_family_list_never_mentions_is_still_the_system_fallback() {
         objects[0].0, "Bf0",
         "the book's own face was never tried: {content}"
     );
-    assert!(
-        objects[0].1.contains("<00010002>"),
+    assert_eq!(
+        shown_glyphs(&objects[0].1),
+        "00010002",
         "the two kanji are not the face's own glyphs: {}",
         objects[0].1
     );

@@ -74,6 +74,10 @@ use tinker_pdf_shape::shape::itemize;
 
 use super::read::PX_TO_PT;
 use super::typeface::FaceSet;
+// `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
+// imported above under that name and is a different thing: layout's is a
+// measurement and this one is a position on a page.
+use crate::shaping::Placed;
 
 /// How many codes one overflow font holds: 32 through 255.
 ///
@@ -911,7 +915,17 @@ impl Frame {
 /// parent's — and then the text, in **reading order**, which is what makes
 /// `Page::text()` return the words in the order the book wrote them rather
 /// than in the order a painter found convenient.
-pub fn draw_page(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, fonts: &Fonts<'_>) {
+///
+/// Returns how many shaped pieces the writer refused, which the caller turns
+/// into [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
+pub fn draw_page(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    laid: &LayoutPage,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+) -> usize {
+    let mut refused = 0usize;
     for fragment in &laid.boxes {
         draw_box(page, fragment, frame);
     }
@@ -929,11 +943,12 @@ pub fn draw_page(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, fonts
         if run.generated {
             page.raw(b"/Artifact BMC");
         }
-        draw_run(page, run, frame, fonts);
+        refused += draw_run(builder, page, run, frame, fonts);
         if run.generated {
             page.raw(b"EMC");
         }
     }
+    refused
 }
 
 fn set_fill(page: &mut PageBuilder, colour: Color) {
@@ -1011,20 +1026,24 @@ struct Segment {
     x: f64,
 }
 
-/// One glyph an embedded face's shaped segment will draw.
-struct Drawn {
-    /// The glyph index in that face.
-    id: u16,
-    /// The characters it stands for, for `/ToUnicode`. Empty where an earlier
-    /// glyph of the same cluster already claimed them.
-    text: String,
-    /// Its advance, as a fraction of the em.
+/// One embedded face's shaped slice: where every glyph goes, and how wide the
+/// whole of it is.
+struct Shaped {
+    /// The glyphs **in the order they are drawn**, positioned in text space
+    /// from the run's own origin — which is what
+    /// [`tinker_pdf_cos::build::DocumentBuilder::glyph_run`] takes.
+    glyphs: Vec<Placed>,
+    /// The slice's whole advance, in **points**, `letter-spacing` included.
+    ///
+    /// Not `glyphs.last()`'s position: the last glyph may be a mark with no
+    /// advance sitting behind its base, and the pen is not where the ink
+    /// stopped.
     advance: f64,
 }
 
 /// One embedded face's glyphs for a slice, **in the order they are drawn**.
 ///
-/// Milestone 6 of `docs/design/shaping.md`. Three things happen here that the
+/// Milestone 6 of `docs/design/shaping.md`. Four things happen here that the
 /// per-character path this replaced could not do:
 ///
 /// - `GSUB` runs, so a joining script's letters take their initial, medial and
@@ -1032,28 +1051,55 @@ struct Drawn {
 /// - UAX #9's rule L2 orders the runs and a right-to-left run's glyphs are
 ///   walked backwards, so an Arabic line is drawn from its last letter;
 /// - each glyph carries the text of its own cluster, so a ligature extracts as
-///   the characters it replaced rather than as one of them.
+///   the characters it replaced rather than as one of them;
+/// - **`GPOS`'s per-glyph offsets are carried**, so a mark sits where its
+///   anchor puts it rather than where its advance does.
 ///
 /// The direction is `Auto` rather than the caller's flag, matching
 /// [`shape_with`]: `flow.rs` resolves no levels and passes `false` for every
 /// run, so P2/P3 over the run's own text is the only answer either side has.
 ///
-/// **What this does not carry** is `GPOS`'s per-glyph offsets.
-/// [`tinker_pdf_cos::build::PageBuilder::glyphs`] writes one hex string at one
-/// origin, so a mark is drawn where its advance puts it and not where its
-/// anchor does. `docs/features/fonts.md` records it; closing it means a
-/// positioned show operator on `PageBuilder`, which is
-/// `DocumentBuilder::glyph_run`'s shape and a separate change.
-fn shaped_glyphs(program: &[u8], text: &str) -> Option<Vec<Drawn>> {
+/// # The pen model, and why it is the shaper's own
+///
+/// `x = pen + x_offset` and `rise = y_offset`, with `pen` accumulating the
+/// advances **in draw order** — the model
+/// `crates/tinker-pdf-shape/tests/text_rendering.rs` measures the vendored
+/// corpus with, so the positions this writes are the positions that suite
+/// adjudicates. `glyph_run` then works out each `TJ` adjustment against its
+/// own `/W`-rounded pen, so the difference between the shaper's advance and
+/// the one a reader will use is absorbed glyph by glyph rather than
+/// accumulating.
+///
+/// # `letter-spacing` is folded in here rather than left to `Tc`
+///
+/// Not a preference. `glyph_run`'s pen model does not know about `Tc`, so a
+/// non-zero one would push glyph *k* by *k* × `Tc` past where this put it. And
+/// `Tc` is applied by a reader per **glyph** while `tinker-pdf-layout`
+/// measures `letter_spacing × chars().count()` per **character**
+/// (`flow.rs`'s `measure`), so a ligature or a joined Arabic word was drawn
+/// *narrower* than the line box it was measured into. Folding the spacing in
+/// at cluster boundaries — one character's worth per character, none between a
+/// mark and its base — makes the drawn width the measured width by
+/// construction.
+fn shaped_glyphs(program: &[u8], text: &str, size: f64, letter_spacing: f64) -> Option<Shaped> {
     let sfnt = Sfnt::parse(program)?;
     let upem = f64::from(sfnt.units_per_em.max(1));
+    let scale = |units: i32| f64::from(units) * size / upem;
     let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
     let paragraph = Paragraph::new(text, BaseDirection::Auto);
     let runs = itemize(text, &paragraph);
     let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
     let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
 
-    let mut out = Vec::new();
+    let mut out: Vec<Placed> = Vec::new();
+    let mut pen = 0.0f64;
+    // Characters whose clusters are already behind the pen, and the characters
+    // of the cluster it is inside. `letter-spacing` is charged once per
+    // character and paid at the cluster boundary, so a mark keeps the position
+    // its anchor gave it.
+    let mut spaced = 0usize;
+    let mut pending = 0usize;
+    let mut cluster: Option<u32> = None;
     for index in reorder(&levels) {
         let Some(run) = shaped.get(index) else {
             continue;
@@ -1062,52 +1108,75 @@ fn shaped_glyphs(program: &[u8], text: &str) -> Option<Vec<Drawn>> {
         // The text each glyph stands for is worked out in **logical** order,
         // because that is the order clusters are monotonic in; the reversal
         // for drawing happens after.
-        let mut logical: Vec<Drawn> = Vec::with_capacity(glyphs.len());
-        for (at, glyph) in glyphs.iter().enumerate() {
-            let first = at == 0 || glyphs[at.saturating_sub(1)].cluster != glyph.cluster;
-            let from = usize::try_from(glyph.cluster).unwrap_or(0);
-            let to = glyphs[at.saturating_add(1)..]
-                .iter()
-                .find(|next| next.cluster != glyph.cluster)
-                .map_or(run.text().end, |next| {
-                    usize::try_from(next.cluster).unwrap_or(from)
-                });
-            let stands_for = if first {
-                text.get(from..to.max(from)).unwrap_or("")
-            } else {
-                ""
+        let texts = crate::shaping::cluster_texts(text, run);
+        let order: Vec<usize> = if run.direction().is_forward() {
+            (0..glyphs.len()).collect()
+        } else {
+            (0..glyphs.len()).rev().collect()
+        };
+        for at in order {
+            let Some(glyph) = glyphs.get(at) else {
+                continue;
             };
-            logical.push(Drawn {
+            if cluster.is_some_and(|last| last != glyph.cluster) {
+                spaced = spaced.saturating_add(pending);
+                pending = 0;
+            }
+            let stands_for = texts.get(at).copied().unwrap_or("");
+            if !stands_for.is_empty() {
+                pending = stands_for.chars().count();
+            }
+            cluster = Some(glyph.cluster);
+            out.push(Placed {
                 id: glyph.glyph,
                 text: stands_for.to_string(),
-                advance: f64::from(glyph.x_advance) / upem,
+                x: pen + letter_spacing * spaced as f64 + scale(glyph.x_offset),
+                rise: scale(glyph.y_offset),
             });
-        }
-        if run.direction().is_forward() {
-            out.extend(logical);
-        } else {
-            out.extend(logical.into_iter().rev());
+            pen += scale(glyph.x_advance);
         }
     }
-    Some(out)
+    Some(Shaped {
+        // The whole slice's `letter-spacing` rather than the sum of the
+        // clusters', so the pen agrees with `flow.rs`'s `measure` exactly even
+        // where a shaper dropped a character that started no cluster of its
+        // own.
+        advance: pen + letter_spacing * text.chars().count() as f64,
+        glyphs: out,
+    })
 }
 
-fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts<'_>) {
+fn draw_run(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+) -> usize {
     let font = request(run);
     let size = run.font_size * PX_TO_PT;
     let baseline = frame.y(run.y);
     let mut x = run.x;
+    let mut refused = 0usize;
 
     set_fill(page, run.color);
     // `css-fonts-4` §5.3 first, then shaping: see [`face_runs`]. An embedded
     // face's stretch is shaped whole; a standard-14 one keeps the
     // character-at-a-time path, because a simple font addresses a code and
     // there is no sfnt in this process to shape against.
-    for (range, chosen) in face_runs(fonts.faces(), &font, &run.text) {
+    let mut segments = face_runs(fonts.faces(), &font, &run.text);
+    if right_to_left(&run.text) {
+        segments.reverse();
+    }
+    for (range, chosen) in segments {
         let slice = run.text.get(range).unwrap_or("");
         match chosen {
             Chosen::Embedded(index) => {
-                x = draw_shaped(page, run, frame, fonts, index, slice, size, baseline, x);
+                let drawn = draw_shaped(
+                    builder, page, run, frame, fonts, index, slice, size, baseline, x,
+                );
+                x = drawn.0;
+                refused += drawn.1;
             }
             Chosen::Standard(_) => {
                 x = draw_coded(page, run, frame, fonts, slice, size, baseline, x);
@@ -1116,11 +1185,53 @@ fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts<
     }
 
     decorate(page, run, frame, x);
+    refused
 }
 
-/// One embedded face's stretch: shaped, ordered, and drawn as text objects.
+/// Whether a run reads right to left, by UAX #9's own P2 and P3 over its text.
 ///
-/// Returns where the pen ended, in layout pixels.
+/// # Why the question is asked here at all
+///
+/// [`face_runs`] resolves fallback **before** shaping, because a glyph index
+/// means nothing outside the face it came from — so a right-to-left line whose
+/// characters need two faces is two segments, and rule L2 has already been
+/// applied *inside* each of them by the time either is drawn. Reversing the
+/// glyphs of a segment orders the segment; it does not order the segments, and
+/// a build that stopped there drew a two-face Arabic line as two left-to-right
+/// pieces, each internally correct.
+///
+/// So L2 is applied at two levels: the segments of a right-to-left run are
+/// drawn in reverse, and each keeps the glyph order its own shaping gave it.
+/// That is the same two-step [`shaped_glyphs`] performs over one segment's
+/// bidi runs, one level out.
+///
+/// **The unit is the `TextRun` and not the visual line**, and that is a real
+/// limit rather than a simplification. `flow.rs` breaks lines over logical
+/// text and resolves no levels, so a line made of two styled spans is two
+/// `TextRun`s at two `x`s this file did not choose; reordering across them
+/// would mean moving boxes layout placed. What this closes is the case
+/// fallback creates — one run, one style, several faces — which is the case
+/// `docs/features/fonts.md` named.
+///
+/// **And a standard-14 segment is still drawn a character at a time in
+/// logical order**, because [`draw_coded`] addresses codes rather than glyphs
+/// and there is no sfnt in this process to shape or reorder against. A
+/// right-to-left run that falls partly to the standard 14 therefore has its
+/// segments in visual order and that segment's letters in logical order.
+/// It was that way before this: the segments were in logical order too, so
+/// what changes is that half of the answer is now right rather than none of
+/// it. Named rather than implied.
+fn right_to_left(text: &str) -> bool {
+    Paragraph::new(text, BaseDirection::Auto)
+        .base_level()
+        .is_rtl()
+}
+
+/// One embedded face's stretch: shaped, ordered, positioned, and drawn as text
+/// objects.
+///
+/// Returns where the pen ended, in layout pixels, and how many pieces the
+/// writer refused.
 ///
 /// A word boundary starts a new text object whenever `word-spacing` is in
 /// force, for the reason the character path gives in as many words: 9.3.3
@@ -1128,12 +1239,26 @@ fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts<
 /// font under `/Identity-H` has none, so the space has to be paid by moving
 /// the origin. Splitting there costs nothing a joining script would notice —
 /// a space is `Joining_Type` `U` and breaks a cursive connection anyway.
+///
+/// # Why `DocumentBuilder::glyph_run` and not `PageBuilder::glyphs`
+///
+/// `glyphs` shows one hex string at one origin and lets the font's advances
+/// place everything after the first glyph, so a `GPOS` offset is
+/// **inexpressible** through it: a mark is drawn where its advance puts it and
+/// not where its anchor does. `glyph_run` takes the position of every glyph
+/// and writes 9.4.3's `TJ` adjustments and `Ts` for them, which is the shape
+/// this needs and the shape XPS has been writing since gap 30.
+///
+/// The borrow that used to make this impossible is gone: `begin_page` takes
+/// `&self` and hands back an owned page, so the document and the page it is
+/// drawing are two independent borrows.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the pen state a segment needs; a struct here would be seven \
+    reason = "the pen state a segment needs; a struct here would be eight \
               fields written once and read once"
 )]
 fn draw_shaped(
+    builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     run: &TextRun,
     frame: &Frame,
@@ -1143,44 +1268,55 @@ fn draw_shaped(
     size: f64,
     baseline: f64,
     mut x: f64,
-) -> f64 {
+) -> (f64, usize) {
     let Some(face) = fonts.faces().faces().get(index) else {
-        return x;
+        return (x, 0);
     };
     let pieces: Vec<&str> = if run.word_spacing == 0.0 {
         vec![slice]
     } else {
         split_after_spaces(slice)
     };
+    let mut refused = 0usize;
     for piece in pieces {
-        let Some(glyphs) = shaped_glyphs(&face.program, piece) else {
-            return x;
+        let Some(shaped) = shaped_glyphs(&face.program, piece, size, run.letter_spacing * PX_TO_PT)
+        else {
+            return (x, refused);
         };
-        if !glyphs.is_empty() {
-            // `PageBuilder::glyphs` writes no `Tc` and no `Tw` of its own, and
-            // both are **text state** that survives a `BT`/`ET` pair — so a
-            // composite draw after a simple one would inherit the simple one's
-            // spacing.
-            page.raw(format!("{} Tc 0 Tw", run.letter_spacing * PX_TO_PT).as_bytes());
-            let drawn: Vec<Glyph<'_>> = glyphs
-                .iter()
-                .map(|glyph| Glyph {
-                    id: glyph.id,
-                    text: glyph.text.as_str(),
-                })
-                .collect();
-            page.glyphs(&face.resource, size, frame.x(x), baseline, &drawn);
+        if !shaped.glyphs.is_empty() {
+            // Neither writer sets `Tc` or `Tw`, and both are **text state**
+            // that survives a `BT`/`ET` pair — so a composite draw after a
+            // simple one would inherit the simple one's spacing. Zero for both
+            // here: `letter-spacing` is already in the glyph positions, and a
+            // `Tc` on top of them would be charged twice.
+            page.raw(b"0 Tc 0 Tw");
+            let placed: Vec<tinker_pdf_cos::build::PlacedGlyph<'_>> =
+                shaped.glyphs.iter().map(Placed::as_glyph).collect();
+            let mut bytes = Vec::new();
+            if builder.glyph_run(
+                &mut bytes,
+                &face.resource,
+                size,
+                [1.0, 0.0, 0.0, 1.0, frame.x(x), baseline],
+                &placed,
+            ) {
+                page.raw(&bytes);
+            } else {
+                // Ruling 10: the writer refusing a run is a fact about the
+                // page, and a page short of a word that says nothing is the
+                // failure this whole file is organised against. Counted here
+                // and named by the caller.
+                refused += 1;
+            }
         }
-        let em: f64 = glyphs.iter().map(|glyph| glyph.advance).sum();
-        x += em * run.font_size
-            + run.letter_spacing * piece.chars().count() as f64
+        x += shaped.advance / PX_TO_PT
             + if piece.ends_with(' ') {
                 run.word_spacing
             } else {
                 0.0
             };
     }
-    x
+    (x, refused)
 }
 
 /// `slice`, cut after every space, with the space kept on the piece it ends.
@@ -1263,6 +1399,21 @@ fn draw_coded(
 }
 
 /// Writes one segment as one text object.
+///
+/// # This is the caller of [`PageBuilder::glyphs`] that survived, and it is
+/// the right one
+///
+/// [`draw_shaped`] went to `DocumentBuilder::glyph_run` because a shaped run
+/// has per-glyph `GPOS` offsets and `glyphs` cannot spell one. **This segment
+/// has none and never will**: it is the standard-14 overflow composite, whose
+/// run is unshaped and one glyph per character at the face's own advances, so
+/// letting the font's advances place it is not a limitation here but the whole
+/// of what it needs. Writing it through `glyph_run` would state a position for
+/// every glyph that the advances already give, and would buy nothing.
+///
+/// Recorded rather than left to be found, because "one path was migrated and
+/// one was not" reads as an unfinished migration until someone works out that
+/// the two paths are not the same path.
 fn flush(
     page: &mut PageBuilder,
     segment: Option<Segment>,

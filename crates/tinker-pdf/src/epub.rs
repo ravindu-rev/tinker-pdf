@@ -1071,6 +1071,7 @@ pub fn synthesise(
     let links = cross_references(&chapters, limits, total_pages);
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
+    let mut unwritable_runs = 0usize;
     for chapter in &chapters {
         if let Some(defect) = chapter.defect {
             let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
@@ -1102,28 +1103,41 @@ pub fn synthesise(
             let chapter_frame = chapter.frame;
             let (page_width, page_height) = chapter_frame.page;
             let clip = chapter.fixed;
-            builder.add_page(page_width, page_height, |page| {
-                // EPUB RS 3.3 §8.1.2's initial containing block, as a clip
-                // path. Pagination has already dropped whatever fell below it;
-                // this is what stops a box that is **wider** than the viewport
-                // from being drawn beside the page it belongs to, which
-                // pagination cannot see.
-                if clip {
-                    page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
-                }
-                draw_page(page, laid, &chapter_frame, &fonts);
-                if clip {
-                    page.raw(b"Q");
-                }
-                for (rect, target) in on_page {
-                    page.link(rect.0, rect.1, rect.2, rect.3, target);
-                }
-            });
+            // `begin_page` / `push_page` rather than `add_page`'s closure, and
+            // the reason is [`paint::draw_shaped`]: a shaped run is written
+            // through `DocumentBuilder::glyph_run`, which needs the document
+            // *and* the page at once. `begin_page` takes `&self` and hands
+            // back an owned page, so the two borrows do not meet. The pair is
+            // documented as being exactly what `add_page` does, so nothing
+            // about when a page's resources are snapshotted changes here.
+            let mut page = builder.begin_page(page_width, page_height);
+            // EPUB RS 3.3 §8.1.2's initial containing block, as a clip path.
+            // Pagination has already dropped whatever fell below it; this is
+            // what stops a box that is **wider** than the viewport from being
+            // drawn beside the page it belongs to, which pagination cannot
+            // see.
+            if clip {
+                page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
+            }
+            unwritable_runs += draw_page(&mut builder, &mut page, laid, &chapter_frame, &fonts);
+            if clip {
+                page.raw(b"Q");
+            }
+            for (rect, target) in on_page {
+                page.link(rect.0, rect.1, rect.2, rect.3, target);
+            }
+            builder.push_page(page);
             pages.push(PageOrigin {
                 name: chapter.name.clone(),
                 defect: None,
             });
         }
+    }
+
+    if unwritable_runs > 0 {
+        warnings.push(ArchiveWarning::UnwritableTextRun {
+            runs: unwritable_runs,
+        });
     }
 
     let entries = outline(book, package, &chapters, limits, total_pages);

@@ -1619,6 +1619,24 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             };
             let transform = placed.then(&self.text_matrix).then(&self.gs.ctm);
 
+            // The same point with 9.4.3's rise taken out, for a consumer that
+            // has to decide which line this glyph belongs to. Computed only
+            // when there is a rise, so the ordinary glyph pays one comparison
+            // and no matrix multiplication: `Ts` is rare and a page is
+            // millions of glyphs. See [`Glyph::baseline`].
+            let baseline = if ts.rise == 0.0 {
+                None
+            } else {
+                let flat = Matrix { f: 0.0, ..scale };
+                let flat = if vertical {
+                    Matrix::translate(-v_x / 1000.0, -v_y / 1000.0).then(&flat)
+                } else {
+                    flat
+                };
+                let at = flat.then(&self.text_matrix).then(&self.gs.ctm);
+                Some((at.e, at.f))
+            };
+
             // 9.6.5: a Type 3 glyph is a content stream. Its procedure runs in
             // glyph space, which the font matrix maps into text space — so the
             // matrix goes *inside* the transform that places the glyph, not
@@ -1662,6 +1680,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 code,
                 text: text.clone(),
                 transform,
+                baseline,
                 advance: if vertical { w1_y } else { width } / 1000.0 * ts.size,
                 size: ts.size,
                 vertical,

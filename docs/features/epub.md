@@ -62,13 +62,20 @@ breaking is **UAX #14** over vendored Unicode 17.0.0 data, passing
 come from the face (embedded, host-provided, or the standard-14 metrics for
 an unembedded family), one per character.
 
-**Painting** (`paint`, `typeface`). Text is set through `PageBuilder::glyphs`
-with embedded faces subset to what the book draws, or through the
-standard-14 fallback when a family is neither embedded nor supplied by the
-host; every run that could not be represented is counted
-(`UnrepresentedCharacters`, `UncoveredCharacters`). Images, borders,
-backgrounds, list markers and links are drawn; every internal link and
-every navigation entry becomes a link annotation or outline item.
+**Painting** (`paint`, `typeface`). An embedded face's run is shaped whole and
+written through `DocumentBuilder::glyph_run`, which states **every glyph's own
+position** — so `GPOS`'s offsets reach the page and a mark sits at its anchor
+rather than at its advance, as 9.4.3's `TJ` adjustments and `Ts`.
+`letter-spacing` is folded into those positions and `0 Tc` written, because a
+reader applies `Tc` per glyph while layout measures it per character, and a
+joined word would otherwise be drawn narrower than the box it was measured
+into. A run in one of the standard 14 is unshaped and one glyph per character,
+and keeps `PageBuilder::glyphs`. Faces are subset to what the book draws; every
+run that could not be represented is counted (`UnrepresentedCharacters`,
+`UncoveredCharacters`), and a run the writer refused is
+`UnwritableTextRun`. Images, borders, backgrounds, list markers and links are
+drawn; every internal link and every navigation entry becomes a link
+annotation or outline item.
 
 **Reflowable and fixed-layout.** A reflowable book is paginated into
 `OpenOptions::page` (default 432 × 648 pt, 36 pt margin, 12 pt base size);

@@ -567,6 +567,25 @@ impl Device for TextDevice {
         }
 
         let origin = (t.e, t.f);
+        // Which line this glyph belongs to is asked at the **baseline**: 9.4.3's
+        // `Ts` displaces the glyph and leaves the pen where it was, so a
+        // superscript marker, a subscript and a `GPOS` mark raised onto its base
+        // are all on the line they interrupt. Without this a base-mark-base
+        // sequence splits the line twice — once where the rise starts and once
+        // where it returns to zero, because `line.origin` below is the previous
+        // glyph's.
+        //
+        // The rule considered and **rejected** is *"a zero-advance glyph never
+        // starts a line"*. It is not equivalent and it is not safe: a producer
+        // that writes every `/W` as zero and positions with `TJ` is in the
+        // corpus, and that rule would collapse such a page into one line. The
+        // baseline rule is **monotone** — it changes nothing when the rise is
+        // zero, so it can only join lines a `Ts` splits today and can never
+        // split a line that is joined.
+        //
+        // `quad` and [`TextChar::origin`] keep the risen position, which is
+        // where the ink is, so nothing a caller reports moves.
+        let anchor = glyph.baseline.unwrap_or(origin);
         // The transform already carries the font size (9.4.4 builds it from
         // `Tf`), so its expansion *is* the device-space size. Multiplying by
         // `glyph.size` again would square it.
@@ -589,13 +608,13 @@ impl Device for TextDevice {
                 let expected_gap = size.max(1.0) * 3.0;
                 let far = match wmode {
                     WritingMode::Horizontal => {
-                        (origin.1 - line.origin.1).abs() > size.max(1.0) * 0.5
+                        (anchor.1 - line.origin.1).abs() > size.max(1.0) * 0.5
                     }
-                    WritingMode::Vertical => (origin.0 - line.origin.0).abs() > size.max(1.0) * 0.5,
+                    WritingMode::Vertical => (anchor.0 - line.origin.0).abs() > size.max(1.0) * 0.5,
                 };
                 let backwards = match wmode {
-                    WritingMode::Horizontal => origin.0 + expected_gap < line.origin.0,
-                    WritingMode::Vertical => origin.1 - expected_gap > line.origin.1,
+                    WritingMode::Horizontal => anchor.0 + expected_gap < line.origin.0,
+                    WritingMode::Vertical => anchor.1 - expected_gap > line.origin.1,
                 };
                 // A line that an `ET` closed is resumed only where the last one
                 // stopped. Half an em of slack, which is a space and is not a
@@ -617,10 +636,10 @@ impl Device for TextDevice {
                 chars: Vec::new(),
                 wmode,
                 direction,
-                origin,
+                origin: anchor,
                 pen: match wmode {
-                    WritingMode::Horizontal => origin.0,
-                    WritingMode::Vertical => origin.1,
+                    WritingMode::Horizontal => anchor.0,
+                    WritingMode::Vertical => anchor.1,
                 },
                 font_id: glyph.font_id,
                 closed: false,
@@ -628,7 +647,7 @@ impl Device for TextDevice {
         }
 
         if let Some(line) = &mut self.current {
-            line.origin = origin;
+            line.origin = anchor;
             line.font_id = glyph.font_id;
             line.closed = false;
             let (x0, y0, x1, y1) = quad.bounds();
@@ -685,6 +704,7 @@ mod tests {
                 e: x,
                 f: y,
             },
+            baseline: None,
             advance: size * 0.5,
             size,
             vertical: false,
@@ -893,5 +913,75 @@ mod tests {
         bad.transform.e = f64::NAN;
         let p = page(&[bad, glyph("A", 0.0, 700.0, 10.0)]);
         assert_eq!(p.plain_text(), "A\n");
+    }
+
+    /// Every byte is one code, half an em wide, standing for itself.
+    struct Simple;
+
+    impl crate::interpret::FontSource for Simple {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+    }
+
+    fn extract(content: &[u8]) -> TextPage {
+        let mut device = TextDevice::new();
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut device, &Simple);
+        device.finish()
+    }
+
+    /// **A rise is not a line break**, and one raised glyph between two
+    /// ordinary ones is the case that says so.
+    ///
+    /// `A`, then `B` twelve units up, then `C` back on the baseline, at a size
+    /// of ten — so the rise is more than half an em and a build that asked
+    /// where the *ink* was would split the line at `B` and again at `C`, since
+    /// the line's remembered origin is the previous glyph's. Three lines out
+    /// of one sentence, and the sentence is a footnote marker in the middle of
+    /// a paragraph or a `GPOS` mark on its base.
+    ///
+    /// The glyphs are counted as well as the lines, because a build that
+    /// dropped the raised glyph altogether would also produce one line.
+    #[test]
+    fn a_rise_does_not_start_a_new_line() {
+        let page = extract(b"BT /F0 10 Tf 0 700 Td (A) Tj 12 Ts (B) Tj 0 Ts (C) Tj ET");
+        let lines = page.lines();
+        assert_eq!(
+            lines.len(),
+            1,
+            "a superscript split the line: {:?}",
+            page.plain_text()
+        );
+        assert_eq!(page.plain_text(), "ABC\n");
+    }
+
+    /// And the geometry a caller reads back is still the **risen** one.
+    ///
+    /// The baseline is used to decide line membership and for nothing else: a
+    /// selection rectangle drawn on the baseline would not cover the
+    /// superscript it is selecting, so `TextChar::origin` and the quad keep
+    /// where the ink is.
+    #[test]
+    fn a_risen_glyph_keeps_the_position_it_was_drawn_at() {
+        let page = extract(b"BT /F0 10 Tf 0 700 Td (A) Tj 12 Ts (B) Tj 0 Ts (C) Tj ET");
+        let line = page.lines().first().copied().expect("one line");
+        let raised = line
+            .chars
+            .iter()
+            .find(|c| c.text == "B")
+            .expect("the raised glyph");
+        assert!(
+            (raised.origin.1 - 712.0).abs() < 1e-9,
+            "the raised glyph moved to {:?}",
+            raised.origin
+        );
+        let (_, y0, _, _) = raised.quad.bounds();
+        assert!(y0 > 700.0, "its quad is on the baseline: {y0}");
     }
 }
