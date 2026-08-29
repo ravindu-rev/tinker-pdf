@@ -160,15 +160,36 @@ cannot multiply per-script caps by carrying more scripts), and **size**
 (64 KiB per script, 4 MiB of source per document, 16 384 tokens, 8 192-byte
 strings, 1 024-entry arrays, 256 variables, 4 096 calculating fields).
 
-**Limits, stated plainly.** Keystroke (`/K`) and validate (`/V`) actions
-are surfaced as source and never run. Document-level scripts
-(`/Names /JavaScript`, 7.7.4) and the catalog's `/AA` (12.6.3 Table 200)
-are surfaced and never run. Nothing recalculates automatically — when a
-calculation runs is host policy, so `recalculate()` is an explicit call.
-Format actions (`/AA` `/F`) produce a display string through
-`formatted_value` that deliberately never becomes `/V`: 12.7.3.3 keeps a
-field's value and its appearance apart, and a `/V` of "GBP 1,234.00" is a
-form whose export is unusable.
+**Which scripts run is a policy, and it is a type.** `ScriptPolicy` names
+the six trigger classes a document's scripts arrive under — `Calculate`
+(`/AA` `/C`), `Format` (`/F`), `Keystroke` (`/K`), `Validate` (`/V`),
+`Document` (`/Names /JavaScript`, 7.7.4) and `Catalog` (12.6.3 Table 200's
+`WC WS DS WP DP`) — and says which of them this host allows to run. Deny by
+default, with two exceptions that are the shipped behaviour written down
+rather than a judgement about safety: `Calculate` and `Format` are allowed
+because `recalculate()` and `formatted_value()` have run them since the
+interpreter landed, and a type that silently turned an existing capability
+off would be a breaking change wearing a safety argument. The other four are
+denied because nothing ran them before the type existed, and a default that
+starts running document program text on the strength of a new struct is
+exactly the change nobody reviews.
+
+A denied trigger is a **named refusal**, never a silent skip:
+`CalcError::Refused` carries the trigger and the field or script that
+carried it (ruling 10), because a pass that quietly ran nothing is
+indistinguishable from a form with no scripts in it. It is raised only
+against a script that is *there* — a form with no calculate action
+recalculates to the same empty answer under every policy, since refusing an
+absent script would collapse "this host does not run calculations" into
+"this document has none".
+
+`recalculate()` and `formatted_value()` keep their signatures and run under
+`ScriptPolicy::default()`; `recalculate_under()` and
+`formatted_value_under()` take one. Nothing recalculates automatically —
+when a calculation runs is host policy, so `recalculate()` is an explicit
+call. Format actions produce a display string that deliberately never
+becomes `/V`: 12.7.3.3 keeps a field's value and its appearance apart, and a
+`/V` of "GBP 1,234.00" is a form whose export is unusable.
 
 ## API
 
@@ -184,8 +205,10 @@ that has to warn before filling — reading a script runs nothing.
 Mutation goes through `Document::editor()`, a `DocumentEditor`:
 `fill_field`, `set_field_values`, `set_field_value`, `set_checkbox`,
 `select_radio`, `reset_form`, `transaction`, `recalculate`, and
-`set_calculated_values` for a host that computes values itself. The format
-event is `tinker_pdf_cos::calc::formatted_value`. The facade re-exports
+`set_calculated_values` for a host that computes values itself.
+`recalculate_under` takes a `ScriptPolicy`. The format event is
+`tinker_pdf_cos::calc::formatted_value`, with `formatted_value_under`
+beside it. The facade re-exports
 `FillError`, `FillRejection`, `SkippedWidget`, `WidgetDefect`, `CalcError`,
 `Recalculation` and `ScriptError` (ruling 11).
 
@@ -219,7 +242,7 @@ let bytes = editor.save(&WriteOptions::default());
 | Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
 | A CID no code means any more — a `cidchar` took the code its `cidrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
-| Keystroke and validate actions; document-level and catalog scripts | surfaced (`FieldScripts`, `DocumentScript`) and never run — nothing is attempted, so nothing errors | events need an interactive host; a document-level script is arbitrary program text with no field to write | [ROADMAP](../ROADMAP.md) Tier 4 |
+| A trigger class the policy denies — keystroke, validate, document-level and catalog by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | [ROADMAP](../ROADMAP.md) Tier 4 |
 | A format action's display string reaching `/V` | none offered — `formatted_value` returns the string and writes nothing | 12.7.3.3 keeps value and appearance apart | [ROADMAP](../ROADMAP.md) Tier 4 |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
 | Signature verification and signing | `Document::signatures()` reads the dictionary, classifies what `/ByteRange` covers and digests it; nothing **verifies** the CMS blob or the certificate chain yet | verify-only cryptography is its own capability, designed separately — the inventory is milestone 1 of it | [ROADMAP](../ROADMAP.md) Tier 3, [design](../design/signatures.md) |
@@ -242,11 +265,13 @@ the bytes it always did, rollback restores objects, deletions, page order
 and the object-number counter, abandoned edits do not grow the next saved
 file, a refused field rolls back the ones before it, and a widget without
 a `/Rect` is reported by object number rather than skipped in silence.
-`crates/tinker-pdf-cos/tests/form_calculations.rs` (26 tests) runs an
+`crates/tinker-pdf-cos/tests/form_calculations.rs` (29 tests) runs an
 invoice fixture end to end — `/CO` order honoured, a failing script
 leaving the editor byte-identical, ReadOnly totals written by the
 calculation and refused to the user, cascades cut and reported, and the
-format string never landing in `/V`.
+format string never landing in `/V`. Its module header carries the six
+policy defaults flipped one at a time and how many assertions each flip
+fired, four of which are zero and say so.
 
 `crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
 `--no-default-features` build — the registry pair swap places) holds up the

@@ -1212,6 +1212,20 @@ impl DocumentEditor {
         crate::calc::recalculate(self)
     }
 
+    /// The same pass, under a [`crate::script::ScriptPolicy`] the host chose.
+    ///
+    /// # Errors
+    ///
+    /// `CalcError::Refused` when the policy denies a trigger class this form
+    /// carries; otherwise exactly what [`DocumentEditor::recalculate`]
+    /// returns. Nothing is written in either case.
+    pub fn recalculate_under(
+        &mut self,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::Recalculation, crate::calc::CalcError> {
+        crate::calc::recalculate_under(self, policy)
+    }
+
     /// Turns a checkbox on or off.
     ///
     /// The on state is whatever the widget's appearance dictionary calls it,

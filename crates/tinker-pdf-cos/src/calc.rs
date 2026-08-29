@@ -54,7 +54,7 @@ use crate::edit::{DocumentEditor, FillRejection, SkippedWidget};
 use crate::fill;
 use crate::form::{self, Script};
 use crate::limits;
-use crate::script::{self, Budget, Host, ScriptError};
+use crate::script::{self, Budget, Host, ScriptError, ScriptPolicy, Trigger};
 
 /// Why a recalculation produced nothing.
 ///
@@ -79,6 +79,20 @@ pub enum CalcError {
     TooManyFields(usize),
     /// [`formatted_value`] was asked about a field the form does not have.
     NoSuchField,
+    /// The [`ScriptPolicy`] this pass ran under does not allow that trigger
+    /// class, and there was a script of that class to run.
+    ///
+    /// A refusal rather than a skip, for the reason ruling 10 exists: a pass
+    /// that quietly ran nothing is indistinguishable from a form that carries
+    /// no scripts, and a caller cannot tell "this document does not compute"
+    /// from "this host did not let it".
+    Refused {
+        /// Which class was refused.
+        trigger: Trigger,
+        /// What carried it: a field's fully qualified name (12.7.3.2), or a
+        /// document-level script's name-tree key.
+        subject: String,
+    },
 }
 
 impl core::fmt::Display for CalcError {
@@ -90,6 +104,9 @@ impl core::fmt::Display for CalcError {
                 write!(f, "{count} fields carry a calculate action")
             }
             CalcError::NoSuchField => f.write_str("no such field"),
+            CalcError::Refused { trigger, subject } => {
+                write!(f, "{subject}: the policy does not run {trigger} scripts")
+            }
         }
     }
 }
@@ -214,7 +231,8 @@ fn sequence(fields: &[form::Field], order: &[crate::object::ObjRef]) -> Vec<usiz
     out
 }
 
-/// Runs the form's calculate actions and applies what they produced.
+/// Runs the form's calculate actions and applies what they produced, under
+/// the default [`ScriptPolicy`].
 ///
 /// # Errors
 ///
@@ -222,6 +240,27 @@ fn sequence(fields: &[form::Field], order: &[crate::object::ObjRef]) -> Vec<usiz
 /// one unrunnable script refuses the whole pass rather than the field it
 /// belongs to.
 pub fn recalculate(editor: &mut DocumentEditor) -> Result<Recalculation, CalcError> {
+    recalculate_under(editor, ScriptPolicy::default())
+}
+
+/// The same pass, under a policy the host chose.
+///
+/// The policy is consulted per trigger class and only where there is a script
+/// of that class to run: a form with no calculate action answers
+/// [`Recalculation::default`] under every policy, because refusing an absent
+/// script would make "this host does not run calculations" and "this document
+/// has none" the same answer, which is the confusion the refusal exists to
+/// prevent.
+///
+/// # Errors
+///
+/// [`CalcError::Refused`] when the policy denies a trigger class this form
+/// carries, and every other [`CalcError`] for the reasons
+/// [`recalculate`] gives. All of them mean nothing was written.
+pub fn recalculate_under(
+    editor: &mut DocumentEditor,
+    policy: ScriptPolicy,
+) -> Result<Recalculation, CalcError> {
     let fields = editor.fields();
     let order = form::calculation_order(editor.document());
     let sequence = sequence(&fields, &order);
@@ -230,6 +269,19 @@ pub fn recalculate(editor: &mut DocumentEditor) -> Result<Recalculation, CalcErr
     }
     if sequence.is_empty() {
         return Ok(Recalculation::default());
+    }
+    // The policy is asked once the form is known to carry a calculate action,
+    // and named against the first field that has one — a refusal with no
+    // subject is a refusal nobody can act on (ruling 10).
+    if !policy.allows(Trigger::Calculate) {
+        let subject = sequence
+            .first()
+            .and_then(|at| fields.get(*at))
+            .map_or_else(String::new, |field| field.name.clone());
+        return Err(CalcError::Refused {
+            trigger: Trigger::Calculate,
+            subject,
+        });
     }
 
     let mut host = StagedHost::new(&fields, true);
@@ -335,6 +387,24 @@ pub fn recalculate(editor: &mut DocumentEditor) -> Result<Recalculation, CalcErr
 /// [`CalcError::NoSuchField`] when the form has no such field, and
 /// [`CalcError::Script`] when the action would not run.
 pub fn formatted_value(editor: &DocumentEditor, name: &str) -> Result<Option<String>, CalcError> {
+    formatted_value_under(editor, name, ScriptPolicy::default())
+}
+
+/// The same display string, under a policy the host chose.
+///
+/// As in [`recalculate_under`], the policy is asked only where there is a
+/// format action to refuse: a field carrying none answers `Ok(None)` under
+/// every policy.
+///
+/// # Errors
+///
+/// [`CalcError::Refused`] when the policy denies [`Trigger::Format`] and the
+/// field carries one, plus everything [`formatted_value`] can return.
+pub fn formatted_value_under(
+    editor: &DocumentEditor,
+    name: &str,
+    policy: ScriptPolicy,
+) -> Result<Option<String>, CalcError> {
     let fields = editor.fields();
     let Some(field) = fields.iter().find(|f| f.name == name) else {
         return Err(CalcError::NoSuchField);
@@ -349,6 +419,12 @@ pub fn formatted_value(editor: &DocumentEditor, name: &str) -> Result<Option<Str
         }
         None => return Ok(None),
     };
+    if !policy.allows(Trigger::Format) {
+        return Err(CalcError::Refused {
+            trigger: Trigger::Format,
+            subject: field.name.clone(),
+        });
+    }
 
     let mut host = StagedHost::new(&fields, false);
     let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);

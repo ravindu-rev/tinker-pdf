@@ -45,6 +45,17 @@
 //!   cheap steps into gigabytes: repeated concatenation doubles, and twenty
 //!   thousand doublings is not a length anything can hold.
 //!
+//! # Which scripts run at all
+//!
+//! Whether a script runs is a separate question from whether it terminates,
+//! and it is answered by [`ScriptPolicy`] rather than by the interpreter:
+//! a [`Trigger`] says which of the six classes a source arrived under, and
+//! the policy says which classes this host allows. Deny by default, except
+//! the two — [`Trigger::Calculate`] and [`Trigger::Format`] — that were
+//! already running before the type existed. A denied trigger is always a
+//! named refusal and never a silent skip, because a pass that quietly ran
+//! nothing reads exactly like a form with no scripts in it.
+//!
 //! # PDF-free on purpose
 //!
 //! Nothing in this module knows what a PDF is. Values reach it through
@@ -202,6 +213,169 @@ pub trait Host {
     /// Records a value for a field. `false` when the field will not take it,
     /// which stops the script with [`ScriptError::FieldRefused`].
     fn set_field(&mut self, name: &str, value: &str) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// Policy
+// ---------------------------------------------------------------------------
+
+/// Where a script came from, which is the only thing that distinguishes one
+/// run of this interpreter from another.
+///
+/// The five field triggers are 12.6.3 table 198's `/AA` entries and the
+/// document ones are 7.7.4's `/Names /JavaScript` and 12.6.3 table 200's
+/// catalog `/AA`. They are a *class* rather than a script, because a policy
+/// that had to name individual scripts would be a policy nobody could write
+/// before opening the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Trigger {
+    /// `/AA /C` — recalculate a field when another changes.
+    Calculate,
+    /// `/AA /F` — produce the text a viewer displays, without touching `/V`.
+    Format,
+    /// `/AA /K` — a keystroke, a paste, or the commit at the end of one.
+    Keystroke,
+    /// `/AA /V` — validate a value the user committed.
+    Validate,
+    /// `/Names /JavaScript` (7.7.4) — the document's own script, which is
+    /// where a form keeps the helpers its field scripts call.
+    Document,
+    /// The catalog's `/AA` (12.6.3 table 200) — `WC`, `WS`, `DS`, `WP`, `DP`.
+    Catalog,
+}
+
+impl Trigger {
+    /// The trigger's name, as this project writes it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Trigger::Calculate => "calculate",
+            Trigger::Format => "format",
+            Trigger::Keystroke => "keystroke",
+            Trigger::Validate => "validate",
+            Trigger::Document => "document-level",
+            Trigger::Catalog => "catalog",
+        }
+    }
+}
+
+impl core::fmt::Display for Trigger {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Which trigger classes a host allows to run.
+///
+/// **Deny by default, with two exceptions that are the shipped behaviour
+/// rather than a judgement about safety.** [`Trigger::Calculate`] and
+/// [`Trigger::Format`] are allowed because `recalculate()` and
+/// `formatted_value()` have run them since gap 27 and a policy type that
+/// silently turned an existing capability off would be a breaking change
+/// wearing a safety argument. The other four are denied because nothing ran
+/// them before this type existed, and a default that starts running document
+/// program text on the strength of a new struct is exactly the change nobody
+/// reviews.
+///
+/// A denied trigger is a **refusal that names itself**, never a silent skip
+/// (ruling 10): a pass that quietly ran nothing is indistinguishable from a
+/// form that carries no scripts, and those are different documents. It is
+/// also only ever raised against a script that is *there* — a form with no
+/// calculate action computes the same empty answer under every policy,
+/// because a policy refuses what there is to run rather than what is absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScriptPolicy {
+    calculate: bool,
+    format: bool,
+    keystroke: bool,
+    validate: bool,
+    document: bool,
+    catalog: bool,
+}
+
+impl Default for ScriptPolicy {
+    fn default() -> ScriptPolicy {
+        ScriptPolicy {
+            calculate: true,
+            format: true,
+            keystroke: false,
+            validate: false,
+            document: false,
+            catalog: false,
+        }
+    }
+}
+
+impl ScriptPolicy {
+    /// A policy that allows nothing at all.
+    ///
+    /// For a host that reads a form's scripts as data and runs none of them,
+    /// which is what the surfacing API was built for.
+    #[must_use]
+    pub fn nothing() -> ScriptPolicy {
+        ScriptPolicy {
+            calculate: false,
+            format: false,
+            keystroke: false,
+            validate: false,
+            document: false,
+            catalog: false,
+        }
+    }
+
+    /// A policy that allows every trigger class.
+    ///
+    /// Named rather than assembled from six `allow` calls, because a host
+    /// that means "run this document's scripts" should say so in one place
+    /// that a reader can grep for.
+    #[must_use]
+    pub fn everything() -> ScriptPolicy {
+        ScriptPolicy {
+            calculate: true,
+            format: true,
+            keystroke: true,
+            validate: true,
+            document: true,
+            catalog: true,
+        }
+    }
+
+    /// The same policy with `trigger` allowed.
+    #[must_use]
+    pub fn allow(self, trigger: Trigger) -> ScriptPolicy {
+        self.set(trigger, true)
+    }
+
+    /// The same policy with `trigger` denied.
+    #[must_use]
+    pub fn deny(self, trigger: Trigger) -> ScriptPolicy {
+        self.set(trigger, false)
+    }
+
+    /// Whether a script arriving under `trigger` may run.
+    #[must_use]
+    pub fn allows(self, trigger: Trigger) -> bool {
+        match trigger {
+            Trigger::Calculate => self.calculate,
+            Trigger::Format => self.format,
+            Trigger::Keystroke => self.keystroke,
+            Trigger::Validate => self.validate,
+            Trigger::Document => self.document,
+            Trigger::Catalog => self.catalog,
+        }
+    }
+
+    fn set(mut self, trigger: Trigger, to: bool) -> ScriptPolicy {
+        match trigger {
+            Trigger::Calculate => self.calculate = to,
+            Trigger::Format => self.format = to,
+            Trigger::Keystroke => self.keystroke = to,
+            Trigger::Validate => self.validate = to,
+            Trigger::Document => self.document = to,
+            Trigger::Catalog => self.catalog = to,
+        }
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2579,5 +2753,63 @@ mod tests {
             Err(ScriptError::OutOfSteps)
         );
         assert!(budget.is_spent());
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy
+    // -----------------------------------------------------------------------
+
+    /// The default is the shipped behaviour written down, and this is what
+    /// says so. If it ever changes, this fails before anything downstream
+    /// silently starts or stops running a document's program text.
+    #[test]
+    fn the_default_policy_allows_calculate_and_format_and_nothing_else() {
+        let policy = ScriptPolicy::default();
+        assert!(policy.allows(Trigger::Calculate));
+        assert!(policy.allows(Trigger::Format));
+        assert!(!policy.allows(Trigger::Keystroke));
+        assert!(!policy.allows(Trigger::Validate));
+        assert!(!policy.allows(Trigger::Document));
+        assert!(!policy.allows(Trigger::Catalog));
+    }
+
+    #[test]
+    fn allowing_and_denying_a_trigger_touches_only_that_trigger() {
+        let every = [
+            Trigger::Calculate,
+            Trigger::Format,
+            Trigger::Keystroke,
+            Trigger::Validate,
+            Trigger::Document,
+            Trigger::Catalog,
+        ];
+        for trigger in every {
+            let allowed = ScriptPolicy::nothing().allow(trigger);
+            let denied = ScriptPolicy::everything().deny(trigger);
+            for other in every {
+                assert_eq!(
+                    allowed.allows(other),
+                    other == trigger,
+                    "{other} after allow"
+                );
+                assert_eq!(denied.allows(other), other != trigger, "{other} after deny");
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_named_policies_are_the_two_extremes() {
+        let every = [
+            Trigger::Calculate,
+            Trigger::Format,
+            Trigger::Keystroke,
+            Trigger::Validate,
+            Trigger::Document,
+            Trigger::Catalog,
+        ];
+        for trigger in every {
+            assert!(!ScriptPolicy::nothing().allows(trigger));
+            assert!(ScriptPolicy::everything().allows(trigger));
+        }
     }
 }

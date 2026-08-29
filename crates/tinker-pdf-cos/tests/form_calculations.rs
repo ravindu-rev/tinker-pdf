@@ -9,12 +9,40 @@
 //! document (ruling 1), so a form that loops forever, cascades forever, or
 //! carries a script the size of the file must leave the editor exactly as it
 //! was — not eventually, but on the call that asked.
+//!
+//! # The policy defaults, flipped and counted
+//!
+//! `ScriptPolicy`'s exit criterion is that its default runs exactly what ran
+//! before it existed, and the whole of this file passing unedited is half of
+//! that. The other half is knowing what each default is *load-bearing for*,
+//! so each of the six was flipped in `ScriptPolicy::default` on its own and
+//! this suite run against it. These are measurements, not expectations.
+//!
+//! | Default flipped | Assertions that fired |
+//! | --- | --- |
+//! | `calculate` allowed → denied | 19 of 29 |
+//! | `format` allowed → denied | 3 of 29 |
+//! | `keystroke` denied → allowed | 0 of 29 |
+//! | `validate` denied → allowed | 0 of 29 |
+//! | `document` denied → allowed | 0 of 29 |
+//! | `catalog` denied → allowed | 0 of 29 |
+//!
+//! **The four zeroes are the finding, and they are not a hole in this file.**
+//! Allowing a trigger nothing runs cannot change an answer: at the commit
+//! that introduced the table, keystroke, validate, document-level and catalog
+//! scripts were surfaced as source and passed to the interpreter nowhere, so
+//! their defaults guarded a door with no room behind it. The rows are kept
+//! rather than deleted because they are the baseline the later milestones
+//! move: `form_document_scripts.rs` is where the `document` row stops being a
+//! zero, and `form_events.rs` is where `keystroke` and `validate` do. A guard
+//! that fires nothing is worth writing down precisely because the next reader
+//! would otherwise assume it fires something.
 
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    calc, fields, CalcError, CosDocument, DocumentEditor, FillError, ScriptError, WidgetDefect,
-    WriteMode, WriteOptions,
+    calc, fields, CalcError, CosDocument, DocumentEditor, FillError, Recalculation, ScriptError,
+    ScriptPolicy, Trigger, WidgetDefect, WriteMode, WriteOptions,
 };
 
 /// Hand-written bytes carry no cross-reference table, so they open through the
@@ -83,6 +111,56 @@ fn ordinary() -> Arc<CosDocument> {
         "/CO [12 0 R 13 0 R]",
         "event.value = getField('net').value * getField('rate').value;",
         "event.value = getField('net').value + getField('vat').value;",
+    )
+}
+
+/// A form with no `/AA` anywhere: the document most callers open.
+fn uncalculated() -> Arc<CosDocument> {
+    normalize(
+        b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R] >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R] >>
+endobj
+10 0 obj
+<< /FT /Tx /T (plain) /V (x) /Rect [10 150 190 170] /Subtype /Widget /Type /Annot >>
+endobj
+trailer
+<< /Size 11 /Root 1 0 R >>
+%%EOF
+"
+        .to_vec(),
+    )
+}
+
+/// One field, one format action, and a `/V` that must survive it.
+fn formatting() -> Arc<CosDocument> {
+    normalize(
+        b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R] >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R] >>
+endobj
+10 0 obj
+<< /FT /Tx /T (amount) /V (1234.5) /Rect [10 150 190 170]
+   /Subtype /Widget /Type /Annot
+   /AA << /F << /JS (AFNumber_Format\\(2, 0, 0, 0, \"GBP \", true\\);) >> >> >>
+endobj
+trailer
+<< /Size 11 /Root 1 0 R >>
+%%EOF
+"
+        .to_vec(),
     )
 }
 
@@ -280,26 +358,7 @@ fn a_calculation_that_changes_nothing_writes_nothing() {
 /// depends on.
 #[test]
 fn a_form_with_no_calculations_is_left_alone() {
-    let mut editor = DocumentEditor::new(normalize(
-        b"%PDF-1.7
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R] >> >>
-endobj
-2 0 obj
-<< /Type /Pages /Count 1 /Kids [3 0 R] >>
-endobj
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R] >>
-endobj
-10 0 obj
-<< /FT /Tx /T (plain) /V (x) /Rect [10 150 190 170] /Subtype /Widget /Type /Annot >>
-endobj
-trailer
-<< /Size 11 /Root 1 0 R >>
-%%EOF
-"
-        .to_vec(),
-    ));
+    let mut editor = DocumentEditor::new(uncalculated());
     let result = editor.recalculate().expect("the pass runs");
     assert!(result.changed.is_empty());
     assert!(!editor.is_dirty(), "nothing was touched");
@@ -668,28 +727,7 @@ fn hostile_scripts_in_a_document_never_panic() {
 /// `/V` of "GBP 1,234.00" is a form whose export is unusable.
 #[test]
 fn a_format_action_produces_a_display_string_and_changes_nothing() {
-    let editor = DocumentEditor::new(normalize(
-        b"%PDF-1.7
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R] >> >>
-endobj
-2 0 obj
-<< /Type /Pages /Count 1 /Kids [3 0 R] >>
-endobj
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R] >>
-endobj
-10 0 obj
-<< /FT /Tx /T (amount) /V (1234.5) /Rect [10 150 190 170]
-   /Subtype /Widget /Type /Annot
-   /AA << /F << /JS (AFNumber_Format\\(2, 0, 0, 0, \"GBP \", true\\);) >> >> >>
-endobj
-trailer
-<< /Size 11 /Root 1 0 R >>
-%%EOF
-"
-        .to_vec(),
-    ));
+    let editor = DocumentEditor::new(formatting());
 
     assert_eq!(
         calc::formatted_value(&editor, "amount").expect("the action runs"),
@@ -779,4 +817,84 @@ fn a_mutual_cascade_terminates_and_names_both_cuts() {
     assert_eq!(result.cascades_cut, vec!["vat".to_string()]);
     assert_eq!(value_of(&editor, "vat"), "9");
     assert_eq!(value_of(&editor, "total"), "2");
+}
+
+// ---------------------------------------------------------------------------
+// The policy
+// ---------------------------------------------------------------------------
+
+/// **The exit criterion for the policy type.** Every assertion above this
+/// point ran before `ScriptPolicy` existed and none of them was edited to
+/// accommodate it, so the suite as a whole is the "nothing regressed" half.
+/// This is the other half, said out loud: the default policy and the entry
+/// points that take no policy at all produce the same answers.
+#[test]
+fn a_default_policy_runs_exactly_what_ran_before() {
+    let mut with_default = DocumentEditor::new(ordinary());
+    let mut without = DocumentEditor::new(ordinary());
+
+    let explicit = with_default
+        .recalculate_under(ScriptPolicy::default())
+        .expect("the pass runs under the default policy");
+    let implicit = without.recalculate().expect("the pass runs");
+    assert_eq!(explicit, implicit);
+    assert_eq!(value_of(&with_default, "total"), "120");
+
+    // And the same two ways round for the format event.
+    let editor = DocumentEditor::new(formatting());
+    assert_eq!(
+        calc::formatted_value_under(&editor, "amount", ScriptPolicy::default()),
+        calc::formatted_value(&editor, "amount"),
+    );
+    assert_eq!(
+        calc::formatted_value(&editor, "amount"),
+        Ok(Some("GBP 1,234.50".to_string()))
+    );
+}
+
+/// A denied trigger is a refusal that names the field it refused, not a pass
+/// that quietly did nothing (ruling 10).
+#[test]
+fn a_policy_that_denies_a_trigger_refuses_by_name() {
+    let mut editor = DocumentEditor::new(ordinary());
+    assert_eq!(
+        editor.recalculate_under(ScriptPolicy::default().deny(Trigger::Calculate)),
+        Err(CalcError::Refused {
+            trigger: Trigger::Calculate,
+            subject: "vat".to_string(),
+        })
+    );
+    assert_eq!(value_of(&editor, "vat"), "0", "nothing was written");
+    assert!(!editor.is_dirty());
+
+    let editor = DocumentEditor::new(formatting());
+    assert_eq!(
+        calc::formatted_value_under(&editor, "amount", ScriptPolicy::nothing()),
+        Err(CalcError::Refused {
+            trigger: Trigger::Format,
+            subject: "amount".to_string(),
+        })
+    );
+}
+
+/// A policy refuses what there is to run, never what is absent.
+///
+/// Without this rule "this host does not run calculations" and "this document
+/// has none" would be the same answer, which is the confusion the refusal was
+/// added to prevent — so a form with nothing to compute keeps answering empty
+/// under the policy that allows nothing.
+#[test]
+fn a_policy_refuses_a_script_that_is_there_and_not_one_that_is_not() {
+    let mut editor = DocumentEditor::new(uncalculated());
+    assert_eq!(
+        editor.recalculate_under(ScriptPolicy::nothing()),
+        Ok(Recalculation::default())
+    );
+
+    let editor = DocumentEditor::new(ordinary());
+    assert_eq!(
+        calc::formatted_value_under(&editor, "total", ScriptPolicy::nothing()),
+        Ok(None),
+        "a field with no format action has nothing to refuse"
+    );
 }

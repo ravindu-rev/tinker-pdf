@@ -90,7 +90,10 @@ pub use build::{
     PlacedGlyph, Shading, SoftMask, StateMask, SubsetRefusal, Target, TilingPattern, TilingType,
     TransparencyGroup,
 };
-pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
+pub use calc::{
+    formatted_value, formatted_value_under, recalculate, recalculate_under, CalcError,
+    Recalculation,
+};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
@@ -115,7 +118,7 @@ pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, Recipient};
-pub use script::{Budget, Host, ScriptError};
+pub use script::{Budget, Host, ScriptError, ScriptPolicy, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
     digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,

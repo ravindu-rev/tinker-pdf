@@ -149,7 +149,12 @@ pub use tinker_pdf_cos::{
 ///
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
 /// caller of [`DocumentEditor::recalculate`] handles.
-pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
+///
+/// [`ScriptPolicy`] and [`Trigger`] are here for the reason `ExtGState` is:
+/// they are the argument to [`DocumentEditor::recalculate_under`], so without
+/// them on this facade the method is callable by nobody outside this
+/// workspace (ruling 11).
+pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError, ScriptPolicy, Trigger};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///
