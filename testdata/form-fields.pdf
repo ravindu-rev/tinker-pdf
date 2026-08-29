@@ -1,0 +1,90 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R
+   /AcroForm << /Fields [5 0 R 8 0 R 11 0 R]
+                /NeedAppearances true
+                /DA (/Helv 0 Tf 0 g)
+                /DR << /Font << /Helv 4 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200]
+   /Resources << /Font << /Helv 4 0 R >> >>
+   /Contents 14 0 R
+   /Annots [6 0 R 8 0 R 12 0 R 13 0 R] >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /FT /Tx /T (name) /Ff 0 /MaxLen 32 /Kids [6 0 R 7 0 R] >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Widget /Parent 5 0 R
+   /Rect [20 140 280 160] /F 4 >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Widget /Parent 5 0 R /F 4 >>
+endobj
+8 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree)
+   /Rect [20 105 40 125] /F 4 /AS /Off
+   /AP << /N << /On 9 0 R /Off 10 0 R >> >> >>
+endobj
+9 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 24 >>
+stream
+0 0 1 rg 2 2 16 16 re f
+endstream
+endobj
+10 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 30 >>
+stream
+0.8 0.8 0.8 rg 2 2 16 16 re f
+endstream
+endobj
+11 0 obj
+<< /FT /Btn /Ff 32768 /T (colour) /V /Off /Kids [12 0 R 13 0 R] >>
+endobj
+12 0 obj
+<< /Type /Annot /Subtype /Widget /Parent 11 0 R
+   /Rect [20 60 40 80] /F 4 /AS /Off
+   /AP << /N << /red 9 0 R /Off 10 0 R >> >> >>
+endobj
+13 0 obj
+<< /Type /Annot /Subtype /Widget /Parent 11 0 R
+   /Rect [60 60 80 80] /F 4 /AS /Off
+   /AP << /N << /blue 9 0 R /Off 10 0 R >> >> >>
+endobj
+14 0 obj
+<< /Length 78 >>
+stream
+BT /Helv 12 Tf 20 175 Td (Tinker form fixture) Tj ET
+0.5 w 20 140 260 20 re S
+endstream
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000015 00000 n 
+0000000237 00000 n 
+0000000294 00000 n 
+0000000468 00000 n 
+0000000565 00000 n 
+0000000641 00000 n 
+0000000737 00000 n 
+0000000807 00000 n 
+0000000961 00000 n 
+0000001082 00000 n 
+0000001210 00000 n 
+0000001293 00000 n 
+0000001442 00000 n 
+0000001592 00000 n 
+trailer
+<< /Size 15 /Root 1 0 R /ID [<0123456789abcdef0123456789abcdef> <0123456789abcdef0123456789abcdef>] >>
+startxref
+1720
+%%EOF

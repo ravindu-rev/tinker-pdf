@@ -130,10 +130,18 @@ pub use tinker_pdf_cos::{
 /// because ruling 10 makes "the face went in whole" a reported fact rather
 /// than an absence: a producer-made subset that this subsetter cannot beat is
 /// a different event from a format it declines, and the caller is told which.
+/// `EditCheckpoint` is gap 32 milestone 1's, and it is here for the reason
+/// the paragraph above gives for `ExtGState` and `Target`: it is the return
+/// type of [`DocumentEditor::checkpoint`] and the argument to
+/// [`DocumentEditor::restore`], so without it on this facade neither method
+/// can be named from outside this workspace. It is the closure-free spelling
+/// of [`DocumentEditor::transaction`] — the same two functions, reachable from
+/// a language that has no closures to hand across a boundary (ruling 11,
+/// `docs/design/bindings-write.md`).
 pub use tinker_pdf_cos::{
-    DocumentBuilder, DocumentEditor, EmbeddedWhole, Encryption, FillError, FillRejection,
-    ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect,
-    WriteMode, WriteOptions,
+    DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption, FillError,
+    FillRejection, ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, Target,
+    WidgetDefect, WriteMode, WriteOptions,
 };
 pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;

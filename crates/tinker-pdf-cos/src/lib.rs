@@ -91,7 +91,9 @@ pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
-pub use edit::{annot, DocumentEditor, FillError, FillRejection, SkippedWidget, WidgetDefect};
+pub use edit::{
+    annot, DocumentEditor, EditCheckpoint, FillError, FillRejection, SkippedWidget, WidgetDefect,
+};
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, Font, FontKind};
 pub use form::{

@@ -139,18 +139,52 @@ pub struct DocumentEditor {
     page_order: Option<Vec<ObjRef>>,
 }
 
-/// Everything a rollback restores.
+/// Everything a rollback restores: an editor's state, taken as a value.
 ///
 /// Exhaustive by construction: [`DocumentEditor`] holds these four fields and
 /// one more -- the `Arc<CosDocument>` it overlays, which is immutable and
 /// therefore has nothing to restore. A field added to the editor without being
 /// added here is a silent hole in every transaction, which is why the two
 /// declarations sit next to each other.
-struct Snapshot {
+///
+/// **A value, not an open transaction.** This is what
+/// [`DocumentEditor::transaction`] uses internally, made public so the same
+/// semantics can be had without a closure -- which is what a foreign-function
+/// boundary needs, because closures do not cross one (ruling 11:
+/// `docs/design/bindings-write.md`). The distinction that keeps that safe is
+/// that there is no *state* here to misuse. Taking one changes nothing;
+/// dropping one commits nothing, because nothing was pending;
+/// [`DocumentEditor::restore`] is idempotent, so restoring twice is restoring
+/// once. The failure a `begin`/`commit`/`rollback` triple has -- an editor
+/// left in a condition a later reader cannot classify -- has no spelling here.
+///
+/// The fields stay private. A checkpoint is meaningful only to the editor it
+/// came from, and this crate does not promise which four things an editor
+/// keeps.
+///
+/// Restoring a checkpoint into a *different* editor is not checked and not
+/// meaningful: object numbers are relative to the document, so the result is
+/// an overlay addressing objects of another file. Nothing panics -- ruling 1
+/// binds this crate -- and nothing else is promised.
+#[derive(Clone)]
+pub struct EditCheckpoint {
     overlay: HashMap<u32, Written>,
     deleted: HashSet<u32>,
     next: u32,
     page_order: Option<Vec<ObjRef>>,
+}
+
+impl core::fmt::Debug for EditCheckpoint {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The overlay's contents are a document's objects, which is not what
+        // a caller printing a checkpoint wants to see; the sizes are.
+        f.debug_struct("EditCheckpoint")
+            .field("written", &self.overlay.len())
+            .field("deleted", &self.deleted.len())
+            .field("next", &self.next)
+            .field("page_order_disturbed", &self.page_order.is_some())
+            .finish()
+    }
 }
 
 /// Why a field could not be filled at all (12.7.4.3).
@@ -305,6 +339,18 @@ impl DocumentEditor {
     /// crosses a function boundary -- is not something a document edit needs,
     /// and is exactly the shape that leaves an edit half applied.
     ///
+    /// **This is sugar over [`DocumentEditor::checkpoint`] and
+    /// [`DocumentEditor::restore`]**, and the two forms run the same two
+    /// functions -- so the contract in the paragraph above is inherited by
+    /// the pair rather than re-proven for it. The pair exists because a
+    /// closure does not cross a foreign-function boundary and this is the API
+    /// every binding must project (ruling 11). It is *not* the triple this
+    /// paragraph rejects: a checkpoint is a value, so there is no open state
+    /// to forget to close. What a caller of the pair gives up is the
+    /// guarantee that it is called at all, which is why the managed bindings
+    /// ship the closure sugar in their own languages and this stays the Rust
+    /// one.
+    ///
     /// Nesting works and means what it says: an inner rollback restores the
     /// inner start, an outer one restores the outer start.
     ///
@@ -320,18 +366,35 @@ impl DocumentEditor {
         &mut self,
         body: impl FnOnce(&mut DocumentEditor) -> Result<T, E>,
     ) -> Result<T, E> {
-        let saved = self.snapshot();
+        let saved = self.checkpoint();
         match body(self) {
             Ok(value) => Ok(value),
             Err(error) => {
-                self.restore(saved);
+                self.restore(&saved);
                 Err(error)
             }
         }
     }
 
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
+    /// Takes this editor's state as a value, for
+    /// [`DocumentEditor::restore`] to put back.
+    ///
+    /// The closure-free half of [`DocumentEditor::transaction`], which is
+    /// nothing but `checkpoint` -> body -> `restore` on `Err`. Taking one
+    /// changes nothing about the editor, and holding one across any number of
+    /// further edits is fine -- it is a copy, not a borrow.
+    ///
+    /// The copy is of *this editor's changes*, never of the document: the
+    /// document is immutable and shared behind an `Arc`. So a checkpoint
+    /// costs what has been edited so far, not what is being edited -- which
+    /// is why taking one per keystroke in a form is affordable and taking one
+    /// per page of a hundred-megabyte file is too.
+    ///
+    /// See [`EditCheckpoint`] for why this is a value rather than an open
+    /// transaction.
+    #[must_use]
+    pub fn checkpoint(&self) -> EditCheckpoint {
+        EditCheckpoint {
             overlay: self.overlay.clone(),
             deleted: self.deleted.clone(),
             next: self.next,
@@ -339,11 +402,26 @@ impl DocumentEditor {
         }
     }
 
-    fn restore(&mut self, saved: Snapshot) {
-        self.overlay = saved.overlay;
-        self.deleted = saved.deleted;
+    /// Puts this editor back to what a checkpoint recorded.
+    ///
+    /// Restores exactly what a rolled-back [`DocumentEditor::transaction`]
+    /// restores, because it is the same function: objects written, objects
+    /// deleted, the page order, and the object-number counter (see
+    /// [`DocumentEditor`]'s `next` for why that last one, and what it costs).
+    ///
+    /// **Idempotent.** Restoring the same checkpoint twice leaves the editor
+    /// where restoring it once did, so a caller that cannot tell whether it
+    /// already restored may simply restore. That is what makes this safe to
+    /// project across a foreign-function boundary where the caller's own
+    /// error handling may run twice.
+    ///
+    /// The checkpoint is borrowed rather than consumed, so one checkpoint can
+    /// undo several attempts -- the retry loop a closure cannot express.
+    pub fn restore(&mut self, saved: &EditCheckpoint) {
+        self.overlay = saved.overlay.clone();
+        self.deleted = saved.deleted.clone();
         self.next = saved.next;
-        self.page_order = saved.page_order;
+        self.page_order = saved.page_order.clone();
     }
 
     /// Reads an object, seeing this editor's changes.
