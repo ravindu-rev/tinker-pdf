@@ -292,8 +292,10 @@ Landed so far:
   reordered. A `ZWJ` or `ZWNJ` survives the whole of `GSUB` — blocking a
   ligature is the whole of what one is for — and is deleted at the end of it,
   before any advance is filled, because a face may give one an outline and a
-  width. **Milestone 5's exit criterion is not met**; the table below says by
-  how much.
+  width. `rphf` is offered only where the syllable has a base for the repha to
+  sit on, so a word-final `RA` and halant is a dead consonant and not a reph.
+  **Milestone 5's exit criterion is not met**; the table below says by how
+  much.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
@@ -355,7 +357,7 @@ the fixture behind it, and the scripts divide in five:
 | Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
 | Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
-| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **299 are reproduced and 34 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
+| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **300 are reproduced and 33 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
 | Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
 
 Three things milestone 5 **closed**, and the largest of them was not on the
@@ -398,6 +400,10 @@ mystery:
   the `TRIAGE` table measures instead is that twenty-seven of the thirty-four
   remaining failures are the wrong glyph *set*, three are the wrong *order*
   and four are a *position*.
+- **`rphf` now asks whether the syllable has a base for the repha**, which is
+  the one piece of that model this crate does implement. A word-final `RA` +
+  halant is a dead consonant and not a reph, and offering the lookup at both
+  cost `SHKNDA-2/7`.
 - **Canonical ordering.** What is done above is decomposition and not NFD: the
   `Canonical_Combining_Class` sort that would follow it is not applied. No
   case in the corpus is known to need it, so it is a gap rather than a cause.

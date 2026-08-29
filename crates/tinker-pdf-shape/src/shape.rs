@@ -471,12 +471,18 @@ impl<'a> Shaper<'a> {
     fn mark_syllables(&self, characters: &[(char, u32)], from: &[usize], buffer: &mut Buffer) {
         let letters: Vec<char> = characters.iter().map(|(c, _)| *c).collect();
         let syllables = universal::syllables(&letters);
+        let categories: Vec<universal::Category> =
+            letters.iter().map(|c| universal::category(*c)).collect();
+        let rphf = repha_positions(&syllables, &categories);
         for (at, index) in from.iter().enumerate() {
             if let Some(syllable) = syllables.get(*index) {
                 buffer.set_syllable(at, *syllable);
             }
-            if let Some(letter) = letters.get(*index) {
-                buffer.set_category(at, universal::category(*letter));
+            if let Some(category) = categories.get(*index) {
+                buffer.set_category(at, *category);
+            }
+            if rphf.get(*index) == Some(&true) {
+                buffer.set_mask(at, Buffer::GLOBAL | MASK_RPHF);
             }
         }
     }
@@ -804,6 +810,60 @@ fn reorder_syllables(buffer: &mut Buffer) {
 /// which is what the presentation lookups are written against.
 const USE_REORDER_AFTER: usize = 3;
 
+/// Where `rphf` may fire, as a flag per character.
+///
+/// # A repha is a consonant that has a base to sit on
+///
+/// `rphf` rewrites a syllable-initial `RA` and its halant into a reph — the
+/// mark drawn above the syllable — and the *whole* of what makes it a reph
+/// rather than a dead consonant is that there is something after it for the
+/// syllable to be about. A word-final `RA` + halant is not a reph; it is a
+/// consonant with its vowel killed, and the face's `haln` lookup is what draws
+/// it.
+///
+/// This crate asked the face for `rphf` over every syllable, so
+/// text-rendering-tests `SHKNDA-2/7` — `ಜಾ಼ಕಿರ್`, which ends U+0CB0 U+0CCD —
+/// got the reph gid94 where the fixture wants the halant form gid193.
+///
+/// So the condition is stated here and carried as a mask: the first two
+/// characters of the syllable are a base and a halant, and a base follows them
+/// **inside the same syllable**. Both of the two are marked, because a
+/// feature's mask is checked against every glyph of a rule's *input* and
+/// `rphf` is a ligature over the pair; see [`crate::apply`]'s `Skipper::mask`.
+///
+/// # What this is not
+///
+/// It does not say which consonant `RA` is, and it must not: that is the
+/// face's own `rphf` coverage table, which is the only place in the system
+/// that knows what a face means by a repha. This narrows *where* the lookup is
+/// offered a position, never *which* glyph it accepts. A face whose `rphf`
+/// covers nothing loses nothing.
+fn repha_positions(syllables: &[u16], categories: &[universal::Category]) -> Vec<bool> {
+    let mut out = vec![false; syllables.len()];
+    let mut at = 0usize;
+    while at < syllables.len() {
+        let syllable = syllables.get(at).copied().unwrap_or(0);
+        let mut end = at;
+        while syllables.get(end) == Some(&syllable) {
+            end = end.saturating_add(1);
+        }
+        let after = at.saturating_add(2);
+        if syllable != 0
+            && categories.get(at) == Some(&universal::Category::Base)
+            && categories.get(at.saturating_add(1)) == Some(&universal::Category::Halant)
+            && categories
+                .get(after..end)
+                .is_some_and(|rest| rest.contains(&universal::Category::Base))
+        {
+            for flag in out.get_mut(at..after).unwrap_or_default() {
+                *flag = true;
+            }
+        }
+        at = end.max(at.saturating_add(1));
+    }
+    out
+}
+
 /// The mask bit of each joining form.
 ///
 /// Bit 0 is [`Buffer::GLOBAL`] and is on every glyph, so these start at bit 1.
@@ -816,6 +876,14 @@ const MASK_FINA: u32 = 1 << 2;
 const MASK_MEDI: u32 = 1 << 3;
 /// See [`MASK_ISOL`].
 const MASK_INIT: u32 = 1 << 4;
+
+/// The mask bit of a position `rphf` is offered. See [`repha_positions`].
+///
+/// Bit 5, and it cannot collide with the four above: a run gets **one** plan,
+/// [`Plan::Joining`] is the only one that sets a form bit and [`Plan::Universal`]
+/// is the only one that sets this, so no glyph in any run carries bits from
+/// both sets.
+const MASK_RPHF: u32 = 1 << 5;
 
 /// The mask a glyph in this form carries.
 const fn form_mask(form: arabic::Form) -> u32 {
@@ -841,6 +909,11 @@ const fn feature_mask(tag: Tag) -> u32 {
         t if t == Tag::new(b"fina").0 => MASK_FINA,
         t if t == Tag::new(b"medi").0 => MASK_MEDI,
         t if t == Tag::new(b"init").0 => MASK_INIT,
+        // And the same restriction for `rphf`, for the same reason and by the
+        // same route: the face's lookup covers every `RA` in the font and the
+        // *position* is what says whether one is a repha. See
+        // [`repha_positions`].
+        t if t == Tag::new(b"rphf").0 => MASK_RPHF,
         _ => Buffer::GLOBAL,
     }
 }
@@ -1030,6 +1103,43 @@ mod tests {
     use crate::bidi::{BaseDirection, Paragraph};
     use crate::unicode::Script;
     use crate::MarkWidths;
+
+    /// Where `rphf` is offered a position, over the four shapes that matter.
+    ///
+    /// The pair that adjudicates it is text-rendering-tests `SHKNDA-2/7`
+    /// against `SHKNDA-2/12`: both end a syllable with U+0CB0 U+0CCD, and only
+    /// one of them is a reph, because only one of them has a base after it.
+    /// Offering the lookup at both cost the first case and got the second
+    /// right for the wrong reason.
+    #[test]
+    fn rphf_is_offered_only_where_the_syllable_has_a_base_for_it() {
+        fn offered(text: &str) -> Vec<bool> {
+            let letters: Vec<char> = text.chars().collect();
+            let categories: Vec<crate::universal::Category> = letters
+                .iter()
+                .map(|c| crate::universal::category(*c))
+                .collect();
+            super::repha_positions(&crate::universal::syllables(&letters), &categories)
+        }
+
+        // KANNADA RA, VIRAMA, KA: a repha, and both of its two characters are
+        // marked, because the mask is checked against every glyph of the
+        // ligature's input.
+        assert_eq!(offered("\u{0CB0}\u{0CCD}\u{0C95}"), [true, true, false]);
+        // The same two characters with nothing after them: a dead consonant,
+        // which `haln` draws. `SHKNDA-2/7` ends this way.
+        assert_eq!(offered("\u{0CB0}\u{0CCD}"), [false, false]);
+        // `SHKNDA-2/12`'s second syllable — RA VIRAMA CHA VIRAMA — is a repha
+        // in front of a base that is itself dead.
+        assert_eq!(
+            offered("\u{0CB0}\u{0CCD}\u{0C9A}\u{0CCD}"),
+            [true, true, false, false]
+        );
+        // A base with no halant after it offers nothing, and neither does a
+        // run with no Brahmic character in it at all.
+        assert_eq!(offered("\u{0CB0}\u{0C95}"), [false, false]);
+        assert_eq!(offered("ab"), [false, false]);
+    }
 
     /// The two joiners, and the width of the predicate stated as a limit.
     ///
