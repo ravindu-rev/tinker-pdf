@@ -312,7 +312,10 @@ fn a_font_named_in_the_resources_and_never_selected_is_not_judged() {
     fixture.descriptor = String::new();
     fixture.program = None;
     fixture.font = "/Type /Font /Subtype /Type1 /BaseFont /Helvetica".to_string();
-    fixture.content = "0 0 1 rg 10 10 50 50 re f".to_string();
+    // A path and no colour operator: the colour group landed beside this one
+    // and a `rg` here would fire its rule instead, which would make this test
+    // pass or fail for a reason that has nothing to do with fonts.
+    fixture.content = "10 10 50 50 re f".to_string();
     assert_eq!(fixture.findings(), Vec::<FindingKind>::new());
 }
 

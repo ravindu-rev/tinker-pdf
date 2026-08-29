@@ -57,27 +57,14 @@
 
 use std::collections::BTreeSet;
 
-use tinker_pdf_content::{Token, Tokenizer};
-use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object};
+use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
+
+use super::content;
 
 use super::{clauses, FindingKind, Flavour, Level, Machinery, Part, Raw, RuleGroup};
 
-/// How many pages the usage scan visits.
-const MAX_PAGES: usize = 1 << 14;
-
-/// How deep a form XObject may invoke another, and how many streams the scan
-/// tokenizes in one document.
-///
-/// A validator is asked to run on untrusted input (ruling 1), and a scan whose
-/// only bound is the file's own is a denial of service with a clause number.
-const MAX_FORM_DEPTH: u32 = 12;
-const MAX_STREAMS: usize = 1 << 14;
-
 /// How many font programs are parsed in one document.
 const MAX_PROGRAM_PARSES: usize = 4096;
-
-/// How many tokens one content stream contributes before the scan moves on.
-const MAX_TOKENS: usize = 1 << 22;
 
 /// The `/Subtype` values a `/FontFile3` stream may declare (ISO 32000-1 9.9
 /// Table 126, as ISO 19005-1 6.3.4 admits them).
@@ -98,9 +85,6 @@ const PREDEFINED_ENCODINGS: &[&[u8]] = &[
     b"MacExpertEncoding",
     b"StandardEncoding",
 ];
-
-/// The text rendering mode 9.3.6 gives to invisible text.
-const RENDER_MODE_INVISIBLE: f64 = 3.0;
 
 /// Runs every font rule that applies to `flavour`.
 pub(super) fn rules(
@@ -128,230 +112,27 @@ pub(super) fn rules(
 
 /// Every font a text-showing operator drew with at a visible rendering mode.
 ///
-/// Returned as an ordered set so the findings come out in object-number order
-/// whatever order the pages happened to reach them in — a verdict is compared
-/// by tests and read by people, and both want it stable.
+/// The walk itself is [`super::content`], shared with the colour group; this
+/// is the visitor over it. Returned as an ordered set so the findings come out
+/// in object-number order whatever order the pages happened to reach them in —
+/// a verdict is compared by tests and read by people, and both want it stable.
 fn usage(doc: &CosDocument) -> BTreeSet<ObjRef> {
-    let mut scan = Scan {
-        doc,
-        rendered: BTreeSet::new(),
-        streams: MAX_STREAMS,
-        visited: BTreeSet::new(),
-    };
-    for page in pages::collect_upto(doc, MAX_PAGES) {
-        let resources = page.resources.clone();
-        let content = pages::content_bytes(doc, &page);
-        scan.stream(&content, resources.as_ref(), 0);
-
-        // 12.5.5: an annotation's appearance stream is drawn by the reader
-        // and is as much a rendering of the file as the page's own content.
-        // A widget whose `/N` is a sub-dictionary of states has one stream
-        // per state and every one of them can be shown.
-        let Ok(page_dict) = doc.get(page.reference) else {
-            continue;
-        };
-        let Some(page_dict) = page_dict.as_dict() else {
-            continue;
-        };
-        let annots = doc.resolve_key(page_dict, doc.intern(b"Annots"));
-        let Some(annots) = annots.as_array() else {
-            continue;
-        };
-        for annot in annots.iter().take(MAX_STREAMS) {
-            let annot = doc.resolve(annot);
-            let Some(annot) = annot.as_dict() else {
-                continue;
-            };
-            let appearance = doc.resolve_key(annot, doc.intern(b"AP"));
-            let Some(appearance) = appearance.as_dict() else {
-                continue;
-            };
-            for (_, slot) in appearance.entries() {
-                scan.appearance(slot, resources.as_ref(), 0);
-            }
-        }
-    }
-    scan.rendered
-}
-
-/// The usage scan's state.
-struct Scan<'a> {
-    doc: &'a CosDocument,
-    rendered: BTreeSet<ObjRef>,
-    /// How many more streams may be tokenized.
-    streams: usize,
-    /// Form XObjects already entered, so a form that invokes itself is walked
-    /// once rather than until the depth bound.
-    visited: BTreeSet<ObjRef>,
-}
-
-impl Scan<'_> {
-    /// One `/AP` slot, which is either a stream or a dictionary of states.
-    fn appearance(&mut self, slot: &Object, inherited: Option<&Dict>, depth: u32) {
-        let resolved = self.doc.resolve(slot);
-        match resolved.as_ref() {
-            Object::Stream(_) => {
-                if let Some(reference) = slot.as_objref() {
-                    self.form(reference, inherited, depth);
-                }
-            }
-            Object::Dict(states) => {
-                for (_, state) in states.entries() {
-                    if let Some(reference) = state.as_objref() {
-                        self.form(reference, inherited, depth);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// One form XObject or appearance stream, with its own resources when it
-    /// has them and the invoking stream's when it does not (7.8.3).
-    fn form(&mut self, reference: ObjRef, inherited: Option<&Dict>, depth: u32) {
-        if depth > MAX_FORM_DEPTH || !self.visited.insert(reference) {
+    let mut rendered = BTreeSet::new();
+    content::walk(doc, &mut |op| {
+        if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"") {
             return;
         }
-        let Ok(object) = self.doc.get(reference) else {
-            return;
-        };
-        let Some(stream) = object.as_stream() else {
-            return;
-        };
-        let own = self
-            .doc
-            .resolve_key(&stream.dict, self.doc.intern(b"Resources"));
-        let own = own.as_dict().cloned();
-        let Ok(bytes) = self.doc.stream_decoded(reference) else {
-            return;
-        };
-        let resources = own.as_ref().or(inherited);
-        self.stream(&bytes, resources, depth);
-    }
-
-    /// Tokenizes one content stream, tracking the text state the clauses ask
-    /// about.
-    ///
-    /// **Each stream starts at rendering mode zero**, which is a simplification
-    /// and named as one: a form XObject invoked while mode 3 is in force
-    /// inherits it, and this scan does not carry the mode across the `Do`. The
-    /// error is in the safe direction for a validator — it can only make a
-    /// font *look* rendered when it was invisible, so a rule fires where a
-    /// stricter reading would have let it pass, and the corpus is where that
-    /// would show as a false positive.
-    fn stream(&mut self, bytes: &[u8], resources: Option<&Dict>, depth: u32) {
-        if self.streams == 0 {
+        if op.mode == content::RENDER_MODE_INVISIBLE {
             return;
         }
-        self.streams -= 1;
-
-        let mut tokenizer = Tokenizer::new(bytes);
-        let mut operands: Vec<Token> = Vec::new();
-        let mut mode = 0.0f64;
-        let mut font: Option<Vec<u8>> = None;
-        // 8.4.2: `q` and `Q` save and restore the whole graphics state, and
-        // 9.3 puts the text font and the text rendering mode in it.
-        let mut saved: Vec<(f64, Option<Vec<u8>>)> = Vec::new();
-        let mut seen = 0usize;
-
-        while let Some(token) = tokenizer.next_token() {
-            seen += 1;
-            if seen > MAX_TOKENS {
-                return;
-            }
-            let Token::Operator(operator) = &token else {
-                if operands.len() < 64 {
-                    operands.push(token);
-                }
-                continue;
-            };
-            match operator.as_slice() {
-                b"q" => saved.push((mode, font.clone())),
-                b"Q" => {
-                    if let Some((old_mode, old_font)) = saved.pop() {
-                        mode = old_mode;
-                        font = old_font;
-                    }
-                }
-                b"Tf" => {
-                    font = operands.iter().find_map(|token| match token {
-                        Token::Name(name) => Some(name.clone()),
-                        _ => None,
-                    });
-                }
-                b"Tr" => {
-                    if let Some(Token::Number(value)) = operands.first() {
-                        mode = *value;
-                    }
-                }
-                b"Tj" | b"TJ" | b"'" | b"\"" => {
-                    if mode != RENDER_MODE_INVISIBLE {
-                        if let (Some(name), Some(resources)) = (font.as_ref(), resources) {
-                            if let Some(reference) = self.lookup(resources, b"Font", name) {
-                                self.rendered.insert(reference);
-                            }
-                        }
-                    }
-                }
-                b"Do" => {
-                    if let (Some(Token::Name(name)), Some(resources)) =
-                        (operands.first(), resources)
-                    {
-                        if let Some(reference) = self.lookup(resources, b"XObject", name) {
-                            let owned = resources.clone();
-                            self.form(reference, Some(&owned), depth + 1);
-                        }
-                    }
-                }
-                // 8.9.7: an inline image's data is not tokenizable, so it is
-                // skipped at the byte level. A byte scan for `EI`, not a
-                // second parser: the tokenizer keeps its own position and this
-                // moves it.
-                b"BI" => {
-                    let consumed = skip_inline_image(tokenizer.rest());
-                    let at = tokenizer.position() + consumed;
-                    tokenizer.seek(at);
-                }
-                _ => {}
-            }
-            operands.clear();
+        let (Some(name), Some(resources)) = (op.font, op.resources) else {
+            return;
+        };
+        if let Some(reference) = content::lookup(doc, resources, b"Font", name) {
+            rendered.insert(reference);
         }
-    }
-
-    /// A named resource's indirect reference, through the resource
-    /// dictionary's own sub-dictionary.
-    fn lookup(&self, resources: &Dict, category: &[u8], name: &[u8]) -> Option<ObjRef> {
-        let category = self
-            .doc
-            .resolve_key(resources, self.doc.intern(category.as_ref()));
-        category.as_dict()?.get_ref(self.doc.intern(name))
-    }
-}
-
-/// How many bytes of `rest` an inline image occupies, up to and including its
-/// `EI`.
-///
-/// The `EI` has to be delimited on both sides: the two bytes appear inside
-/// compressed image data often enough that an undelimited match resumes
-/// tokenizing in the middle of a picture.
-fn skip_inline_image(rest: &[u8]) -> usize {
-    let mut i = 0usize;
-    while i + 1 < rest.len() {
-        if rest[i] == b'E' && rest[i + 1] == b'I' {
-            let before = i == 0
-                || rest
-                    .get(i - 1)
-                    .is_some_and(|b| b.is_ascii_whitespace() || *b == 0);
-            let after = rest
-                .get(i + 2)
-                .is_none_or(|b| b.is_ascii_whitespace() || *b == 0);
-            if before && after {
-                return i + 2;
-            }
-        }
-        i += 1;
-    }
-    rest.len()
+    });
+    rendered
 }
 
 // ---- the rules ------------------------------------------------------------

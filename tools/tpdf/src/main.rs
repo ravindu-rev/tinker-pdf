@@ -1927,7 +1927,7 @@ mod tests {
         // should.
         assert_eq!(
             tinker_pdf::PdfACoverage::IMPLEMENTED.to_string(),
-            "metadata, syntax, fonts"
+            "metadata, syntax, fonts, colour"
         );
         assert_eq!(
             tinker_pdf::PdfACoverage::default().to_string(),

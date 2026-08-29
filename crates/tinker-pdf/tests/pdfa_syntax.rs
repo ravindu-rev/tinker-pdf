@@ -735,15 +735,17 @@ fn a_syntax_only_request_runs_the_syntax_group_and_says_so() {
     );
 }
 
-/// Asking for a group this build has no rules for must not make the verdict
-/// claim it ran. A caller who reads `coverage` is reading what happened.
+/// The verdict's coverage is the request it was given, in both directions.
 ///
-/// The group this is about moves as the milestones land: fonts was one until
-/// milestone 5 gave it rules, and colour is the remaining one. Both directions
-/// are asserted, because a `coverage` that under-reports a group that *did*
-/// run is the same defect wearing the other face.
+/// This test used to say "a group this build has no rules for must not claim
+/// it ran", and the group it was about moved as the milestones landed - fonts,
+/// then colour. Milestone 5 landed both, so the property with nothing left to
+/// protect is replaced by the one that outlives it: a request for everything
+/// reports everything and is complete, and a request for one group reports one
+/// group and is not. A `coverage` that over-reports and one that under-reports
+/// are the same defect wearing two faces.
 #[test]
-fn a_group_with_no_rules_never_reports_itself_as_having_run() {
+fn coverage_is_the_request_the_verdict_was_given() {
     let document = Document::open(conforming().build()).expect("opens");
     let everything = PdfACoverage {
         metadata: true,
@@ -753,8 +755,14 @@ fn a_group_with_no_rules_never_reports_itself_as_having_run() {
     };
     let verdict = document.validate_pdfa_with(everything);
     assert!(verdict.coverage.fonts, "fonts landed at milestone 5");
-    assert!(!verdict.coverage.colour);
-    assert!(!verdict.coverage.is_complete());
+    assert!(verdict.coverage.colour, "and so did colour");
+    assert!(verdict.coverage.is_complete());
+
+    let partial = document.validate_pdfa_with(PdfACoverage::SYNTAX);
+    assert!(partial.coverage.syntax);
+    assert!(!partial.coverage.fonts);
+    assert!(!partial.coverage.colour);
+    assert!(!partial.coverage.is_complete());
 }
 
 /// Every staged rule carries a clause and a reason, and the list is not empty.

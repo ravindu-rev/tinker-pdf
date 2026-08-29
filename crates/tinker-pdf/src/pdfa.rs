@@ -48,6 +48,8 @@ use tinker_pdf_xml::{Event, Source};
 
 use crate::Document;
 
+mod colour;
+mod content;
 mod fonts;
 mod syntax;
 mod xmp;
@@ -277,6 +279,45 @@ pub(crate) mod clauses {
         two_three: "6.2.11.3.2",
         four: "6.2.10.3.2",
     };
+
+    // ---- the colour group (milestone 5) ----------------------------------
+
+    /// The output intent (6.2.2 in part 1, 6.2.3 in parts 2 to 4).
+    pub(crate) const OUTPUT_INTENT: ClauseTable = ClauseTable {
+        one: "6.2.2",
+        two_three: "6.2.3",
+        four: "6.2.3",
+    };
+
+    /// ICCBased colour spaces (6.2.3.2 / 6.2.4.2).
+    pub(crate) const ICC_SPACES: ClauseTable = ClauseTable {
+        one: "6.2.3.2",
+        two_three: "6.2.4.2",
+        four: "6.2.4.2",
+    };
+
+    /// The uncalibrated - device - colour spaces (6.2.3.3 / 6.2.4.3).
+    pub(crate) const DEVICE_SPACES: ClauseTable = ClauseTable {
+        one: "6.2.3.3",
+        two_three: "6.2.4.3",
+        four: "6.2.4.3",
+    };
+
+    /// Rendering intents (6.2.9 in part 1, 6.2.6 in parts 2 and 3, and part
+    /// 4's extended-graphics-state clause, which is where it puts them).
+    pub(crate) const RENDERING_INTENTS: ClauseTable = ClauseTable {
+        one: "6.2.9",
+        two_three: "6.2.6",
+        four: "6.2.5",
+    };
+
+    /// Transparency, which part 1 forbids outright at 6.4 and parts 2 to 4
+    /// constrain at 6.2.10 and 6.2.9.
+    pub(crate) const TRANSPARENCY: ClauseTable = ClauseTable {
+        one: "6.4",
+        two_three: "6.2.10",
+        four: "6.2.9",
+    };
 }
 
 /// One rule this build does not run yet, and what it is waiting for.
@@ -367,11 +408,76 @@ pub const STAGED: &[StagedRule] = &[
         because: "an inline image's dictionary lives inside a content stream,                   and opening one is the interpreter's job rather than this                   group's — the rule covers every filter reachable from the                   cross-reference table and no filter that is not",
     },
     StagedRule {
-        clause: "6.2",
-        rule: "graphics: colour spaces, output intents, transparency, \
-               rendering intents",
-        because: "milestone 5 of docs/design/pdfa.md, staged behind \
-                  docs/design/icc.md for the rules that read inside a profile",
+        clause: "6.2.2",
+        rule: "the destination profile's own conformance: its ICC version, \
+               its device class, and whether it is a well-formed profile at \
+               all",
+        because: "tinker-pdf-color's icc::Profile::parse is a transform \
+                  builder, not a validator. It refuses a profile it cannot \
+                  build a transform from - a v4 profile whose only route to \
+                  the connection space is an mAB tag, for one - and such a \
+                  profile conforms to ICC.1 perfectly well. Reporting every \
+                  one of them would report conforming files, so a profile \
+                  this build cannot read leaves the intent's colour space \
+                  unknown and the rules that need it do not fire",
+    },
+    StagedRule {
+        clause: "6.2.3.4",
+        rule: "Separation and DeviceN: the tint transform function, and two \
+               colourants of the same name having the same transform",
+        because: "the alternate space is read and judged, which is the half \
+                  that decides whether the colour can be reproduced. The tint \
+                  transform is a PDF function, and comparing two of them for \
+                  equality means comparing sampled or PostScript-calculator \
+                  functions - a definition of equality this build has not \
+                  written down",
+    },
+    StagedRule {
+        clause: "6.2.4",
+        rule: "images: the /Interpolate prohibition, /Alternates, /OPI, and \
+               the JPEG2000 constraints parts 2 to 4 add",
+        because: "an image's colour space is judged with every other colour \
+                  space. These are separate prohibitions on the image \
+                  dictionary, and the JPEG2000 half needs the codestream's \
+                  own header rather than the PDF's",
+    },
+    StagedRule {
+        clause: "6.2.5",
+        rule: "form and reference XObjects: /Ref, PostScript XObjects, /OPI, \
+               and the /Subtype2 that makes a reference XObject one",
+        because: "prohibitions on an XObject dictionary rather than on a \
+                  colour, filed under the graphics clause because that is \
+                  where the standard files them. Not written",
+    },
+    StagedRule {
+        clause: "6.2.8",
+        rule: "the extended graphics state beyond transparency: /TR, /TR2, \
+               /HTP and the halftone constraints",
+        because: "the transparency keys of an /ExtGState are read for part 1 \
+                  and the rendering intent for every part. The transfer \
+                  function and halftone prohibitions are a separate list this \
+                  build has not established from the clause text available",
+    },
+    StagedRule {
+        clause: "6.2.10",
+        rule: "content streams: the operators a conforming stream may use, \
+               and the resources every name in it must resolve to",
+        because: "the walk this group runs over content streams is a \
+                  tokenizer with a text state, not an interpreter, and \
+                  deciding that an operator is forbidden means knowing the \
+                  operand stack it was given. That is a renderer's job",
+    },
+    StagedRule {
+        clause: "6.4",
+        rule: "transparency in parts 2 to 4: the blending colour space a \
+               group declares, isolation and knockout, and the soft masks \
+               those parts permit",
+        because: "part 1 forbids transparency outright and that rule runs. \
+                  Parts 2 to 4 permit it and constrain it, and the \
+                  constraints are about what a group composites in rather \
+                  than about whether it exists - the same reading of 11.6.6 \
+                  this group already uses to excuse a device colour space, \
+                  turned into a rule, which is a larger step than reusing it",
     },
     StagedRule {
         clause: "6.3.6",
@@ -1108,7 +1214,7 @@ impl Coverage {
         metadata: true,
         syntax: true,
         fonts: true,
-        colour: false,
+        colour: true,
     };
 
     /// The font group alone.
@@ -1237,6 +1343,9 @@ pub(crate) fn validate_counting(
     if groups.fonts {
         fonts::rules(&document.inner, &machinery, flavour, &mut raw);
     }
+    if groups.colour {
+        colour::rules(&document.inner, &machinery, flavour, &mut raw);
+    }
     if groups.metadata {
         xmp::rules(document, &machinery, flavour, &mut raw);
     }
@@ -1249,9 +1358,7 @@ pub(crate) fn validate_counting(
             metadata: groups.metadata,
             syntax: groups.syntax,
             fonts: groups.fonts,
-            // Milestone 5 of docs/design/pdfa.md. A group that was asked for
-            // and has no rules must not report itself as having run.
-            colour: false,
+            colour: groups.colour,
         },
     };
     (verdict, machinery.reaches())
@@ -1755,29 +1862,35 @@ mod tests {
             "once for the claim and once for the properties"
         );
         assert_eq!(fonts, 1, "the font group runs, and asks once");
-        assert_eq!(colour, 0, "and nothing asks for a colour profile");
+        assert_eq!(colour, 1, "and so does the colour group");
     }
 
-    /// Asking for a group with no rules costs the ask and nothing else, and
-    /// the verdict does not claim it ran.
+    /// Milestone 5 closed the last group, and this is what that means.
     ///
-    /// Colour is the group with no rules now that fonts has some; the test
-    /// moves down the list as the milestones land rather than being deleted,
-    /// because the property it protects — a group that was *asked for* and has
-    /// nothing to run must not report itself as having run — is the one
-    /// [`Coverage`] exists for.
+    /// The earlier version of this test asserted that a group *asked for* with
+    /// no rules must not report itself as having run — first about fonts, then
+    /// about colour. With four groups of four implemented that property has
+    /// nothing left to be about, so it is replaced rather than deleted by the
+    /// one that outlives it: the coverage a verdict reports is the request it
+    /// was given, and a group's machinery is reached only where the request
+    /// asked for it.
+    ///
+    /// This is also the first commit at which an empty finding list from
+    /// [`Coverage::IMPLEMENTED`] can mean "this file conforms" rather than
+    /// "nothing this build checks was broken", which is what
+    /// [`Coverage::is_complete`] says and why it is asserted here.
     #[test]
-    fn asking_for_a_group_with_no_rules_does_not_make_it_have_run() {
+    fn coverage_reports_the_request_and_the_counters_agree_with_it() {
         let document = document_with_a_font_program();
-        let everything = Coverage {
-            metadata: true,
-            syntax: true,
-            fonts: true,
-            colour: true,
-        };
-        let (verdict, (_, _, colour)) = validate_counting(&document, everything);
-        assert_eq!(colour, 0);
-        assert!(verdict.coverage.fonts, "fonts landed at milestone 5");
+        assert!(Coverage::IMPLEMENTED.is_complete());
+        let (verdict, _) = validate_counting(&document, Coverage::IMPLEMENTED);
+        assert!(verdict.coverage.is_complete());
+
+        // One group at a time: asking for fonts alone leaves the colour
+        // counter at zero and does not claim colour ran.
+        let (verdict, (_, fonts, colour)) = validate_counting(&document, Coverage::FONTS);
+        assert_eq!((fonts, colour), (1, 0));
+        assert!(verdict.coverage.fonts);
         assert!(!verdict.coverage.colour);
         assert!(!verdict.coverage.is_complete());
     }
