@@ -14,6 +14,14 @@
 //! they agree and one where they do not, because a rule that fires on
 //! everything agrees with every `-fail-` file in the corpus and is worthless.
 //!
+//! **Injection, counted, on the three defects the corpus census found.**
+//! Trimming both sides of the comparison again, and skipping an /Info entry
+//! that is not a string again, fails two tests here and nothing else - 2 of
+//! the workspace 3 375. Removing the header version upper bound fails one
+//! test in pdfa_syntax.rs and nothing else - 1 of 3 375. Each defect had a
+//! corpus fixture and now has a guard, which is the difference between a fix
+//! and a fix that stays fixed.
+//!
 //! **Injection, counted.** Making `xmp::agrees` return `true` unconditionally —
 //! the shape of the bug where a consistency rule quietly stops comparing —
 //! fails **seven of the workspace's 3 375 tests**: four here
@@ -419,5 +427,93 @@ fn the_consistency_rule_is_staged_outside_part_one() {
     assert!(
         named.because.contains("19005-2"),
         "the refusal has to say which standard it could not establish: {named:?}"
+    );
+}
+
+/// Padding a value with spaces makes it a different value.
+///
+/// The rule trimmed both sides and reported these as equal, which passed a
+/// corpus fixture whose `/Author` is ` veraPDF Consortium ` against an XMP
+/// `veraPDF Consortium`. Both directions are asserted, because the fix has to
+/// keep agreeing where the values really are the same.
+#[test]
+fn whitespace_around_an_information_value_is_part_of_the_value() {
+    let creator = "<dc:creator><rdf:Seq><rdf:li>Ada Lovelace</rdf:li></rdf:Seq></dc:creator>";
+    assert_eq!(
+        findings(document(
+            &packet(creator),
+            Some("<< /Author ( Ada Lovelace ) >>")
+        )),
+        vec![FindingKind::InfoXmpMismatch {
+            key: "Author".to_string()
+        }]
+    );
+    assert_eq!(
+        findings(document(
+            &packet(creator),
+            Some("<< /Author (Ada Lovelace) >>")
+        )),
+        Vec::new()
+    );
+}
+
+/// An attribute's trailing space is the value; a pretty-printed element's
+/// indentation is not.
+///
+/// This is the heuristic `xmp::normalise` names, asserted rather than
+/// described. Comparing both sides verbatim without it reported five
+/// conforming corpus files whose `/Producer` ends in a space that the XMP
+/// attribute ends in too.
+#[test]
+fn an_attribute_keeps_its_spaces_and_a_wrapped_element_does_not() {
+    // The attribute form, trailing space on both sides: equal.
+    let attribute = format!(
+        "{}{}{}",
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns:pdf="http://ns.adobe.com/pdf/1.3/"
+ xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/">
+<rdf:Description rdf:about="" pdfaid:part="1" pdfaid:conformance="B"
+ pdf:Producer="Acme 1.0 "/>"#,
+        "</rdf:RDF></x:xmpmeta>",
+        "<?xpacket end=\"w\"?>"
+    );
+    assert_eq!(
+        findings(document(&attribute, Some("<< /Producer (Acme 1.0 ) >>"))),
+        Vec::new(),
+        "the attribute declares the trailing space and the /Info carries it"
+    );
+
+    // The same value in a wrapped element: the indentation is layout.
+    assert_eq!(
+        findings(document(
+            &packet("<pdf:Producer>\n            Acme 1.0\n         </pdf:Producer>"),
+            Some("<< /Producer (Acme 1.0) >>")
+        )),
+        Vec::new()
+    );
+}
+
+/// An `/Info` entry that is present and is not a string is a mismatch, not an
+/// absence.
+///
+/// One corpus fixture's `/Title` is an indirect reference to a font program,
+/// and reading that as "the entry is absent, so nothing is required" passed a
+/// file the clause fails. Three states, because the clause has three.
+#[test]
+fn an_information_entry_that_is_not_a_string_is_a_finding() {
+    let title = r#"<dc:title><rdf:Alt><rdf:li>A Title</rdf:li></rdf:Alt></dc:title>"#;
+    // `/Title` points at the metadata stream, which is not a string.
+    assert_eq!(
+        findings(document(&packet(title), Some("<< /Title 4 0 R >>"))),
+        vec![FindingKind::InfoXmpMismatch {
+            key: "Title".to_string()
+        }]
+    );
+    // An entry that is simply absent requires nothing.
+    assert_eq!(
+        findings(document(&packet(title), Some("<< >>"))),
+        Vec::new()
     );
 }

@@ -812,3 +812,34 @@ fn a_part_four_file_names_the_amendment_it_claims() {
         );
     }
 }
+
+/// The digit after `1.` names a version of PDF, and 1.8 and 1.9 are not
+/// versions of PDF.
+///
+/// The first rule accepted any digit, and a `%PDF-1.9` fixture went through it
+/// untouched. Asserting the boundary from both sides is what makes this a rule
+/// about the standard rather than about a regular expression.
+#[test]
+fn the_header_version_names_a_version_that_exists() {
+    for digit in 0..=7 {
+        let mut fixture = conforming();
+        let mut header = b"%PDF-1.".to_vec();
+        header.push(b'0' + digit);
+        header.extend_from_slice(b"\n%\xE2\xE3\xCF\xD3\n");
+        fixture.header = header;
+        assert_eq!(fixture.findings(), Vec::<FindingKind>::new(), "1.{digit}");
+    }
+    for digit in [8u8, 9] {
+        let mut fixture = conforming();
+        let mut header = b"%PDF-1.".to_vec();
+        header.push(b'0' + digit);
+        header.extend_from_slice(b"\n%\xE2\xE3\xCF\xD3\n");
+        fixture.header = header;
+        assert_eq!(
+            fixture.one_finding(),
+            FindingKind::HeaderVersionNotInPart {
+                declared: format!("1.{digit}")
+            }
+        );
+    }
+}
