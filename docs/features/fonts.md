@@ -289,6 +289,33 @@ Landed so far:
   consonant it was typed after. **Milestone 5's exit criterion is not met**;
   the table below says by how much.
 
+- **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
+  in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
+  the layout crate gains no dependency; `Metrics::shaper()` is asked once per
+  provider, in one place in `flow.rs`, and a run measured through the shaper is
+  never also measured through `Metrics::measure`.
+  `crates/tinker-pdf-layout/tests/shaper.rs` drives a provider whose `advance`
+  **panics**, so a second measurement path is a failure and not a discrepancy.
+  `BookMetrics` implements it over a book's own `@font-face` faces.
+- **Shaped runs into a document.** `tinker_pdf::shaping` turns a run's clusters
+  back into the text each glyph stands for and writes it through
+  `DocumentBuilder::glyph_run`. An Arabic string built that way extracts back
+  to itself through the `/ToUnicode` the writer wrote, across a ligature, and
+  the document is clean under the strict structural validator.
+
+Two consumers are **not** here, and neither is claimed:
+
+- Milestone 6's EPUB half. The `Shaper` seam exists and `BookMetrics` fills it,
+  but there is no Arabic EPUB fixture, no render fingerprint over one and no
+  RTL reftest pair. What is asserted today is the seam and the one-path rule,
+  not a paginated Arabic book.
+- Milestone 8 entirely. `crates/tinker-pdf-cos/src/fill.rs` still writes `?`
+  for a field value above the single-byte range. The obstacle is named rather
+  than vague: the `/DA` font is reached through `/DR` and `tinker-pdf-cos`'s
+  `Font` does not expose the embedded font *program*, so there is nothing to
+  shape against without first teaching it to walk
+  `/DescendantFonts` → `/FontDescriptor` → `/FontFile2`.
+
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing, so the claim for a script is exactly as strong as
 the fixture behind it, and the scripts divide in five:
