@@ -86,7 +86,9 @@ pub use tinker_pdf_cos::{
 /// implement it. [`SliceSource`] is the degenerate case every existing caller
 /// already uses without knowing it, which is why [`Document::open`] keeps its
 /// exact signature.
-pub use tinker_pdf_cos::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss};
+pub use tinker_pdf_cos::{
+    ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE,
+};
 
 /// How many bytes are read to decide whether a source holds a container.
 ///
@@ -676,6 +678,17 @@ impl Document {
         self.inner.is_streamed()
     }
 
+    /// Where the first page's objects end (Annex F `/E`), when this document
+    /// was opened on the linearized fast path.
+    ///
+    /// `None` for every other document. A caller measuring what a page-one
+    /// render cost asks this for where the tail starts, rather than assuming
+    /// a fraction of the file.
+    #[must_use]
+    pub fn first_page_end(&self) -> Option<u64> {
+        self.inner.first_page_end()
+    }
+
     /// Whether every byte of the document has been fetched.
     ///
     /// Always true for one opened from a buffer. For a streamed one it is how
@@ -857,7 +870,16 @@ impl Document {
     /// One page by zero-based index.
     #[must_use]
     pub fn page(&self, index: u32) -> Option<Page> {
-        self.pages().into_iter().nth(index as usize)
+        // Through the bounded walk rather than `pages()`, which collects every
+        // page: on a streamed document opened through Annex F's head-only
+        // path, the rest of the page tree is the rest of the file, and asking
+        // for page one would spend all of it.
+        let inner = cos_pages::at(&self.inner, index)?;
+        Some(Page {
+            doc: Arc::clone(&self.inner),
+            inner,
+            fonts: self.fonts.clone(),
+        })
     }
 
     /// The document's logical structure tree (14.7.2).

@@ -14,7 +14,10 @@
 
 use std::sync::Arc;
 
-use tinker_pdf::{CountingSource, Document, DocumentBuilder, Name, Object, SliceSource};
+use tinker_pdf::{
+    CountingSource, Document, DocumentBuilder, Name, Object, RenderOptions, SliceSource,
+    WarningKind, WriteMode, WriteOptions, CHUNK_SIZE,
+};
 
 /// How many bytes opening the 120-page fixture may read.
 ///
@@ -142,5 +145,178 @@ fn opening_a_large_document_and_reading_one_object_stays_under_budget() {
     assert!(
         !document.whole_file_fetched(),
         "nothing should have pulled the whole document"
+    );
+}
+
+// ---- Annex F: the head-only open ---------------------------------------
+
+/// The same pages, saved linearized (Annex F).
+///
+/// Object streams are off for the same reason `tests/linearized.rs` turns them
+/// off: a container would put the first page's objects in the same blob as
+/// everything else and defeat the layout entirely.
+fn a_linearized_document(pages: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for index in 0..pages {
+        builder.add_page(200.0, 100.0, |page| {
+            // Tens of kilobytes a page, so `/E` lands far past the head window
+            // and "no read reaches the tail" is a claim about the open path
+            // rather than about a document that fits inside one chunk.
+            let mut ops = Vec::with_capacity(24 * 1024);
+            let shade = (index % 7) as f64 / 7.0;
+            for step in 0..400 {
+                let x = (step % 40) as f64 * 4.0;
+                let y = (step / 40) as f64 * 6.0;
+                ops.extend_from_slice(
+                    format!(
+                        "{shade:.3} 0.400 0.600 rg {x:.2} {y:.2} m {:.2} {:.2} l {:.2} {:.2} l h f ",
+                        x + 3.5,
+                        y + 5.5,
+                        x + 1.25,
+                        y + 2.75
+                    )
+                    .as_bytes(),
+                );
+            }
+            page.raw(&ops);
+        });
+    }
+    let base = Document::open(builder.finish()).expect("it opens");
+    base.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..WriteOptions::default()
+    })
+}
+
+/// Pixels that are not the white the page started as.
+fn ink(bitmap: &tinker_pdf::Bitmap) -> usize {
+    bitmap
+        .data
+        .chunks_exact(bitmap.components())
+        .filter(|pixel| pixel.iter().any(|value| *value != 255))
+        .count()
+}
+
+/// How many bytes a page-one render of the 60-page linearized fixture may
+/// read. A ratchet, measured and committed.
+///
+/// 29,696 of 1,631,095 -- 1.8% -- and the shape of the number is the point:
+/// `/E` is 28,224, so page one costs the head up to `/E` rounded up to the
+/// chunk that contains it, and nothing else. A budget much below that would
+/// mean the render was not drawing the page; anything above it would mean
+/// something reached into the tail.
+const LINEARIZED_PAGE_ONE_BUDGET: u64 = 29_696;
+
+/// Page one of a linearized file costs head reads and nothing else.
+#[test]
+fn a_linearized_file_renders_page_one_without_touching_its_tail() {
+    let bytes = a_linearized_document(60);
+    let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let document = Document::open_streaming(source.clone()).expect("it opens");
+
+    let end_of_first_page = document
+        .first_page_end()
+        .expect("the linearized fast path engaged");
+    assert!(
+        end_of_first_page < bytes.len() as u64,
+        "/E is inside the file"
+    );
+
+    let bitmap = document
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default());
+    let drawn = ink(&bitmap);
+    assert!(drawn > 1000, "page one painted {drawn} pixels");
+
+    // The tail begins at the first chunk boundary at or after `/E`. The chunk
+    // that *contains* `/E` holds page one's last bytes as well as the first of
+    // the tail, so a fixed aligned granularity cannot avoid it -- and a test
+    // that pretended otherwise would be measuring the granularity rather than
+    // the open path. Everything beyond that chunk is the tail proper, and
+    // nothing reads it.
+    let tail = end_of_first_page.div_ceil(CHUNK_SIZE) * CHUNK_SIZE..bytes.len() as u64;
+    assert!(
+        !source.touched(&tail),
+        "reads past /E ({end_of_first_page}) in a {} byte file: {:?}",
+        bytes.len(),
+        source.touching(&tail)
+    );
+    println!(
+        "RAN linearized page one: fixture {} bytes, /E {end_of_first_page}, read {}",
+        bytes.len(),
+        source.bytes_read()
+    );
+    assert!(
+        source.bytes_read() <= LINEARIZED_PAGE_ONE_BUDGET,
+        "page one read {} bytes, over the committed budget of {LINEARIZED_PAGE_ONE_BUDGET}",
+        source.bytes_read()
+    );
+    assert!(!document.whole_file_fetched());
+}
+
+/// Annex F's own rule for a linearized file that was updated afterwards: `/L`
+/// is the length the file had when it was linearized, so a file that has grown
+/// is read as an ordinary one.
+#[test]
+fn a_length_that_is_not_the_file_falls_back_to_the_generic_path() {
+    let mut bytes = a_linearized_document(6);
+    let clean = Document::open_streaming(Arc::new(SliceSource::new(bytes.clone())))
+        .expect("the untouched file opens");
+    assert!(clean.first_page_end().is_some(), "the fast path engaged");
+
+    // One byte of trailing junk, which is exactly what an incremental update
+    // looks like to `/L` and nothing like it to any other structure.
+    bytes.push(b'\n');
+    let updated =
+        Document::open_streaming(Arc::new(SliceSource::new(bytes.clone()))).expect("it opens");
+    assert!(
+        updated.first_page_end().is_none(),
+        "the fast path must stand down when /L is not the file's length"
+    );
+    let kinds: Vec<WarningKind> = updated.warnings().iter().map(|w| w.kind).collect();
+    assert!(
+        kinds.contains(&WarningKind::LinearizedLengthMismatch),
+        "and it says so: {kinds:?}"
+    );
+
+    // And it is the same page, drawn the same way, off the generic path.
+    let one = clean
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default());
+    let other = updated
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default());
+    assert_eq!(one.data, other.data, "the fallback draws the same page");
+}
+
+/// Leaving page one is what fetches the main table, and it costs the tail.
+#[test]
+fn reading_past_page_one_is_what_pays_for_the_tail() {
+    let bytes = a_linearized_document(60);
+    let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let document = Document::open_streaming(source.clone()).expect("it opens");
+    let end_of_first_page = document.first_page_end().expect("the fast path engaged");
+    let tail = end_of_first_page.div_ceil(CHUNK_SIZE) * CHUNK_SIZE..bytes.len() as u64;
+
+    let _ = document
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default());
+    assert!(!source.touched(&tail), "page one stays in the head");
+
+    let last = document.page_count() - 1;
+    let bitmap = document
+        .page(last)
+        .expect("the last page")
+        .render(&RenderOptions::default());
+    assert!(ink(&bitmap) > 1000, "the last page really drew something");
+    assert!(
+        source.touched(&tail),
+        "the main table at /T is in the tail, and reading past page one needs it"
     );
 }

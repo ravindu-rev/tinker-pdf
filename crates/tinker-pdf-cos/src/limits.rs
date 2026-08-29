@@ -84,6 +84,18 @@ pub const STARTXREF_SCAN_MAX: usize = 64 * 1024;
 /// ruling 4 does not allow the two to differ.
 pub const OBJECT_WINDOW: u64 = 4096;
 
+/// How far past a cross-reference section a streamed reader looks for the
+/// `%%EOF` that ends its revision (7.5.5).
+///
+/// A generic file puts them within a few hundred bytes of each other. A
+/// linearized one does not: its first-page section is at the front and the
+/// only `%%EOF` is at the very end (Annex F part 11), so an unbounded forward
+/// search would read the whole document to answer a question the head-only
+/// open exists to avoid asking. Past this the revision is taken to end at the
+/// document, which is where it ends -- give or take the bytes after the
+/// marker, and `Revision::byte_range` on a streamed document says so.
+pub const REVISION_END_SCAN: u64 = 8192;
+
 /// Bytes fetched for one cross-reference section before the window doubles.
 ///
 /// Only a streamed document pays this: a document opened from a buffer hands

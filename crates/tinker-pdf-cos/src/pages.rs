@@ -170,8 +170,28 @@ impl Inherited {
 /// makes a very deep legitimate tree terminate too.
 #[must_use]
 pub fn collect(doc: &CosDocument) -> Vec<Page> {
+    collect_upto(doc, limits::MAX_PAGES)
+}
+
+/// The first `limit` pages in document order.
+///
+/// The same walk, stopped early: same order, same cycle guard, same inherited
+/// attributes, and the same `index` on every page it yields. A caller that
+/// wants page one does not need the rest of the tree -- and on a streamed
+/// document opened through Annex F's head-only path, the rest of the tree is
+/// the rest of the file, so walking it would spend the whole file to answer a
+/// question about the first page.
+///
+/// Stopping early is not truncation and does not warn as if it were: a
+/// document whose tree is cyclic or deeper than the cap still says so, and a
+/// document that simply has more pages than the caller asked for does not.
+#[must_use]
+pub fn collect_upto(doc: &CosDocument, limit: usize) -> Vec<Page> {
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
+    if limit == 0 {
+        return pages;
+    }
 
     let Some(root) = doc.catalog() else {
         return pages;
@@ -180,7 +200,15 @@ pub fn collect(doc: &CosDocument) -> Vec<Page> {
         return pages;
     };
 
-    walk(doc, tree, Inherited::default(), 0, &mut visited, &mut pages);
+    walk(
+        doc,
+        tree,
+        Inherited::default(),
+        0,
+        limit,
+        &mut visited,
+        &mut pages,
+    );
     pages
 }
 
@@ -189,9 +217,14 @@ fn walk(
     node: ObjRef,
     inherited: Inherited,
     depth: u32,
+    limit: usize,
     visited: &mut HashSet<u32>,
     out: &mut Vec<Page>,
 ) {
+    if out.len() >= limit {
+        // The caller has what it asked for. Not truncation, so not a warning.
+        return;
+    }
     if depth > limits::MAX_NEST_DEPTH || out.len() >= limits::MAX_PAGES {
         doc.warn(WarningKind::PageTreeTruncated);
         return;
@@ -216,7 +249,7 @@ fn walk(
         Some(kids) => {
             let kids: Vec<ObjRef> = kids.iter().filter_map(Object::as_objref).collect();
             for kid in kids {
-                walk(doc, kid, inherited.clone(), depth + 1, visited, out);
+                walk(doc, kid, inherited.clone(), depth + 1, limit, visited, out);
             }
         }
         // 7.7.3.3: a node without /Kids is a leaf, whatever its /Type says —
@@ -291,7 +324,8 @@ pub fn count(doc: &CosDocument) -> u32 {
 /// Convenience: the page at `index`, if it exists.
 #[must_use]
 pub fn at(doc: &CosDocument, index: u32) -> Option<Page> {
-    collect(doc).into_iter().nth(index as usize)
+    let wanted = (index as usize).checked_add(1)?;
+    collect_upto(doc, wanted).into_iter().nth(index as usize)
 }
 
 /// The `/Contents` streams of a page, in order.

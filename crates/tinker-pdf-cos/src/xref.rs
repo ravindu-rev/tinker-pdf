@@ -280,6 +280,23 @@ pub(crate) fn build(
     names: &DocNames,
     sink: &mut WarningSink,
 ) -> XrefBuild {
+    build_limited(bytes, start, shift, names, sink, limits::MAX_XREF_CHAIN)
+}
+
+/// [`build`], stopping after `max_sections` of the chain.
+///
+/// Annex F's fast path walks exactly one: a linearized file's first-page
+/// cross-reference section carries a `/Prev` to the main table at the end of
+/// the file, and following it is the one thing that would put a tail read in a
+/// head-only open.
+pub(crate) fn build_limited(
+    bytes: Bytes<'_>,
+    start: u64,
+    shift: u64,
+    names: &DocNames,
+    sink: &mut WarningSink,
+    max_sections: u32,
+) -> XrefBuild {
     let len = bytes.len();
     let mut walker = Walker {
         bytes,
@@ -289,7 +306,7 @@ pub(crate) fn build(
         table: XrefTable::new(),
         revisions: Vec::new(),
     };
-    let sections = walker.walk(start, sink);
+    let sections = walker.walk(start, max_sections, sink);
     let mut trailer = Dict::new();
     for revision in &walker.revisions {
         for (key, value) in revision.trailer.iter() {
@@ -350,15 +367,17 @@ impl Walker<'_> {
         offset_candidates(self.len, raw, self.shift)
     }
 
-    fn walk(&mut self, start: u64, sink: &mut WarningSink) -> usize {
+    fn walk(&mut self, start: u64, max_sections: u32, sink: &mut WarningSink) -> usize {
         let mut visited: BTreeSet<u64> = BTreeSet::new();
         let mut next = Some(start);
         let mut sections = 0usize;
         let mut depth = 0u32;
 
         while let Some(raw) = next.take() {
-            if depth >= limits::MAX_XREF_CHAIN {
-                sink.warn(raw, WarningKind::XrefChainCapHit);
+            if depth >= max_sections.min(limits::MAX_XREF_CHAIN) {
+                if max_sections >= limits::MAX_XREF_CHAIN {
+                    sink.warn(raw, WarningKind::XrefChainCapHit);
+                }
                 break;
             }
             depth += 1;
@@ -757,7 +776,12 @@ impl Walker<'_> {
             let Some(window) = self.bytes.window(from, want) else {
                 return self.len;
             };
-            let reaches_end = window.end() >= self.len;
+            // The cap is what keeps a linearized file's first-page section
+            // from reading the whole document to find the one `%%EOF` at the
+            // end of it. A whole buffer never reaches it: its window is the
+            // document, so the first pass either finds the marker or there is
+            // none to find.
+            let reaches_end = window.end() >= self.len || want >= limits::REVISION_END_SCAN;
             if let Some(found) = self.revision_end(&window, from, reaches_end) {
                 return found;
             }

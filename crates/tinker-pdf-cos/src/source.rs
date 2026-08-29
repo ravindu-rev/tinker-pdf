@@ -293,7 +293,7 @@ impl<S: ByteSource> ByteSource for ShreddedSource<S> {
 /// [`crate::limits::MAX_HEADER_SCAN`] -- the head window is exactly one chunk,
 /// and a budget that had to explain a granularity nothing else uses would be a
 /// budget nobody could check.
-pub(crate) const CHUNK: u64 = 4096;
+pub const CHUNK_SIZE: u64 = 4096;
 
 /// Where a document's bytes live: all of them, or a cache over a source.
 ///
@@ -411,8 +411,8 @@ impl ChunkCache {
         if let Some(chunk) = self.chunks.read_lock().get(&index) {
             return Ok(Arc::clone(chunk));
         }
-        let start = index.saturating_mul(CHUNK).min(self.len);
-        let end = start.saturating_add(CHUNK).min(self.len);
+        let start = index.saturating_mul(CHUNK_SIZE).min(self.len);
+        let end = start.saturating_add(CHUNK_SIZE).min(self.len);
 
         // The loop is the whole point of a source being allowed to answer
         // short: bytes are gathered until the chunk is whole, so a source that
@@ -449,12 +449,12 @@ impl ChunkCache {
         if start == end {
             return Ok(Arc::from(&[][..]));
         }
-        let first = start / CHUNK;
-        let last = (end - 1) / CHUNK;
+        let first = start / CHUNK_SIZE;
+        let last = (end - 1) / CHUNK_SIZE;
         let mut out = Vec::with_capacity((end - start) as usize);
         for index in first..=last {
             let chunk = self.chunk(index)?;
-            let base = index.saturating_mul(CHUNK);
+            let base = index.saturating_mul(CHUNK_SIZE);
             let from = start.saturating_sub(base).min(chunk.len() as u64);
             let to = end.saturating_sub(base).min(chunk.len() as u64);
             out.extend_from_slice(chunk.get(from as usize..to as usize).unwrap_or(&[]));

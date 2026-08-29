@@ -117,7 +117,7 @@ pub use sign::{
     digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,
     SigningRequest, SigningTarget,
 };
-pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss};
+pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, parse_date, Date};
 pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};

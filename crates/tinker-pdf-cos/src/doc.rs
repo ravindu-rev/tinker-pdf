@@ -27,7 +27,7 @@
 use core::fmt;
 use core::ops::Range;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tinker_pdf_crypto::handler::FileKey;
 use tinker_pdf_crypto::Permissions;
@@ -38,7 +38,7 @@ use crate::limits;
 use crate::name::{Name, NameTable};
 use crate::objstm::{self, ObjStm, ObjStmCache};
 use crate::parse::{parse_indirect_at, parse_object_at, ParsedIndirect};
-use crate::repair::ScanIndex;
+use crate::repair::{find_from, next_object_header, rfind_from, ScanIndex};
 use crate::security::{AuthError, AuthLevel};
 use crate::source::{Backing, ByteSource, Bytes};
 use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
@@ -268,6 +268,12 @@ pub struct CosDocument {
     pub(crate) buffer: Backing,
     pub(crate) names: DocNames,
     xref: XrefTable,
+    /// Annex F's head-only open, when it engaged. `None` for every document
+    /// opened from a buffer.
+    linearized: Option<Linearized>,
+    /// The first-page table merged with the main one, once a read has left
+    /// page one and paid for it.
+    completed: OnceLock<XrefTable>,
     trailer: Dict,
     revisions: Vec<Revision>,
     store: SlotStore,
@@ -374,9 +380,25 @@ impl CosDocument {
             Some(buffer) => Bytes::Whole(buffer),
             None => backing.view(),
         };
-        let built = match xref::startxref(&view, &mut sink) {
-            Some(start) => xref::build(view, start, shift, &names, &mut sink),
-            None => XrefBuild::default(),
+        // Annex F's fast path first, and only for a streamed document: a
+        // buffer already holds every byte, so there is nothing for a head-only
+        // open to save and every reason not to take a second route through the
+        // same clauses.
+        let mut linearized = None;
+        let fast = if streamed {
+            linearized_open(&backing, &names, &mut sink)
+        } else {
+            None
+        };
+        let built = match fast {
+            Some((built, params)) => {
+                linearized = Some(params);
+                built
+            }
+            None => match xref::startxref(&view, &mut sink) {
+                Some(start) => xref::build(view, start, shift, &names, &mut sink),
+                None => XrefBuild::default(),
+            },
         };
 
         let mut table = built.table;
@@ -491,6 +513,8 @@ impl CosDocument {
             xref: table,
             trailer,
             revisions,
+            linearized,
+            completed: OnceLock::new(),
             store: SlotStore::new(),
             objstm: ObjStmCache::new(),
             scan: RwLock::new(scan),
@@ -523,7 +547,16 @@ impl CosDocument {
     }
 
     /// The merged cross-reference table.
+    ///
+    /// On Annex F's fast path this is the whole of it: asking for the table is
+    /// asking about every object, so the main table at `/T` is fetched here if
+    /// a read has not already paid for it. A caller that wants page one and
+    /// nothing else never calls this, which is why a page-one render still
+    /// touches no byte of the tail.
     pub fn xref(&self) -> &XrefTable {
+        if self.linearized.is_some() {
+            return self.merged_xref();
+        }
         &self.xref
     }
 
@@ -563,6 +596,17 @@ impl CosDocument {
     /// operation is about to pull the whole file needs to be able to ask.
     pub fn is_streamed(&self) -> bool {
         self.buffer.is_streamed()
+    }
+
+    /// Where the first page's objects end (Annex F `/E`), when this document
+    /// was opened on the linearized fast path.
+    ///
+    /// `None` for every other document, which is how a caller tells that the
+    /// head-only open engaged rather than assuming it from the file. Every
+    /// byte from here to the end is the tail, and rendering page one touches
+    /// none of it.
+    pub fn first_page_end(&self) -> Option<u64> {
+        self.linearized.as_ref().map(|l| l.end_of_first_page)
     }
 
     /// Whether every byte of the document has been fetched.
@@ -903,11 +947,67 @@ impl CosDocument {
         Arc::clone(&self.security.read_lock().decryptor)
     }
 
+    /// The cross-reference entry for `num`.
+    ///
+    /// On Annex F's fast path the first-page table is consulted first and the
+    /// main table at `/T` is fetched only when a read leaves page one -- which
+    /// is what makes "not one read touches the tail" true of a page-one render
+    /// and false of anything more.
+    fn entry(&self, num: u32) -> Option<XrefEntry> {
+        if let Some(entry) = self.xref.get(num) {
+            return Some(entry);
+        }
+        self.linearized.as_ref()?;
+        self.merged_xref().get(num)
+    }
+
+    /// The first-page table merged with the main one, fetched once.
+    ///
+    /// `/T` names the byte before the main table's first *entry* (F.2.2 item
+    /// 5) rather than the `xref` keyword, so the keyword is looked for just
+    /// behind it; a cross-reference stream has its object header there
+    /// instead, and both are offered to the same walker. A file whose `/T`
+    /// leads nowhere falls back to `startxref`, which by then costs nothing
+    /// it has not already decided to spend.
+    fn merged_xref(&self) -> &XrefTable {
+        if let Some(table) = self.completed.get() {
+            return table;
+        }
+        let mut sink = WarningSink::new();
+        let mut merged = self.xref.clone();
+        if let Some(params) = &self.linearized {
+            let view = self.buffer.view();
+            let back = params
+                .main_table_at
+                .saturating_sub(limits::XREF_SECTION_WINDOW);
+            let keyword = view
+                .window(back, params.main_table_at.saturating_sub(back) + 16)
+                .and_then(|w| rfind_from(w.bytes(), b"xref", 0).map(|at| w.abs(at as u64)));
+            let starts: Vec<u64> = keyword
+                .into_iter()
+                .chain(std::iter::once(params.main_table_at))
+                .chain(xref::startxref(&self.buffer.view(), &mut sink))
+                .collect();
+            for start in starts {
+                let built = xref::build(self.buffer.view(), start, 0, &self.names, &mut sink);
+                if built.sections > 0 {
+                    for (num, entry) in built.table.iter() {
+                        merged.insert_new(num, entry);
+                    }
+                    break;
+                }
+            }
+        }
+        self.absorb(sink);
+        let _ = self.completed.set(merged);
+        self.completed.get().unwrap_or(&self.xref)
+    }
+
     /// The reference for an object number, taking the generation from the
     /// table, which validation has already reconciled with the file's own
     /// `N G obj` header.
     fn ref_of(&self, num: u32) -> ObjRef {
-        let gen = match self.xref.get(num) {
+        let gen = match self.entry(num) {
             Some(XrefEntry::Offset { gen, .. }) | Some(XrefEntry::Free { gen, .. }) => gen,
             // 7.5.7: objects in an object stream always have generation 0.
             Some(XrefEntry::InStream { .. }) | None => 0,
@@ -916,7 +1016,7 @@ impl CosDocument {
     }
 
     fn entry_offset(&self, num: u32) -> u64 {
-        match self.xref.get(num) {
+        match self.entry(num) {
             Some(XrefEntry::Offset { offset, .. }) => offset,
             _ => 0,
         }
@@ -983,7 +1083,7 @@ impl CosDocument {
     }
 
     fn load_uncached(&self, num: u32, ctx: &mut ResolveCtx, sink: &mut WarningSink) -> Object {
-        let entry = self.xref.get(num);
+        let entry = self.entry(num);
         if let Some(XrefEntry::InStream { stream_num, idx }) = entry {
             return self.load_from_objstm(num, stream_num, idx, ctx, sink);
         }
@@ -1283,6 +1383,129 @@ fn fetch_whole(backing: &Backing, sink: &mut WarningSink) -> Option<Arc<[u8]>> {
         sink.warn(0, WarningKind::WholeFileFetched);
     }
     backing.materialise().ok()
+}
+
+/// What a linearized file (Annex F) promises about its own head.
+///
+/// Held only when the fast path engaged, which is only for a streamed
+/// document: a buffer already has every byte, so there is nothing for a fast
+/// path to save and every reason not to take a second route through the same
+/// clauses.
+pub(crate) struct Linearized {
+    /// F.2.2 item 6, `/E`: the last byte of the first page's objects.
+    ///
+    /// Everything past it is the tail, and page one is rendered without
+    /// touching a byte of it.
+    end_of_first_page: u64,
+    /// Item 5, `/T`: where the main cross-reference table begins. Fetched only
+    /// when a read leaves page one.
+    main_table_at: u64,
+}
+
+/// The head-only open of a linearized file (Annex F).
+///
+/// Hints accelerate, they never decide. Nothing here is trusted further than
+/// it can be checked: `/L` is held to the source's own length, which is Annex
+/// F's own rule for spotting a linearized file that was incrementally updated
+/// and must be read as an ordinary one; the first-page section is parsed by
+/// the same walker every other section goes through; and every object it
+/// names still passes `parse_at`'s `N G obj` check at load. A file whose head
+/// does not hold up falls back to the generic path with a typed warning
+/// rather than failing (rulings 1 and 2).
+fn linearized_open(
+    backing: &Backing,
+    names: &DocNames,
+    sink: &mut WarningSink,
+) -> Option<(XrefBuild, Linearized)> {
+    let view = backing.view();
+    let len = backing.len();
+    let mut want = limits::MAX_HEADER_SCAN as u64;
+    loop {
+        let head = view.window(0, want)?;
+        let reaches_end = head.end() >= len;
+        let mut scratch = WarningSink::new();
+
+        // F.2.2: the parameter dictionary is the first object in the file, and
+        // a file whose first object is anything else is simply not linearized.
+        let at = next_object_header(head.bytes(), 0)?;
+        let Some(first) = parse_indirect_at(head.bytes(), at, &names.table, &mut scratch) else {
+            if reaches_end {
+                return None;
+            }
+            want = want.saturating_mul(2);
+            continue;
+        };
+        let linearized = names.table.intern(b"Linearized");
+        let dict = first
+            .object
+            .as_dict()
+            .filter(|d| d.contains_key(linearized))?;
+        let number = |key: &[u8]| {
+            dict.get_int(names.table.intern(key))
+                .and_then(|v| u64::try_from(v).ok())
+        };
+
+        // Annex F's own rule for a linearized file that was incrementally
+        // updated: `/L` is the length of the whole file as it was linearized,
+        // so a file that has grown since is read as an ordinary one.
+        if number(b"L") != Some(len) {
+            sink.warn(head.abs(at), WarningKind::LinearizedLengthMismatch);
+            return None;
+        }
+        let (Some(end_of_first_page), Some(main_table_at)) = (number(b"E"), number(b"T")) else {
+            sink.warn(head.abs(at), WarningKind::LinearizedParametersUnusable);
+            return None;
+        };
+
+        // The first-page cross-reference section follows part 2 immediately.
+        // Both spellings are tried, because 7.5.8 lets it be a stream.
+        let from = first.end_offset;
+        let classic = find_from(
+            head.bytes(),
+            b"xref",
+            usize::try_from(from).unwrap_or(usize::MAX),
+        );
+        let streamed = next_object_header(head.bytes(), from);
+        let candidates: Vec<u64> = classic
+            .map(|at| at as u64)
+            .into_iter()
+            .chain(streamed)
+            .map(|local| head.abs(local))
+            .collect();
+        if candidates.is_empty() {
+            if !reaches_end {
+                want = want.saturating_mul(2);
+                continue;
+            }
+            sink.warn(head.abs(at), WarningKind::LinearizedParametersUnusable);
+            return None;
+        }
+        drop(head);
+
+        for section in candidates {
+            let mut scratch = WarningSink::new();
+            // One section, never the `/Prev` it carries: that link is what
+            // points at the main table at the end of the file, and following
+            // it is the one thing that would put a tail read in a head-only
+            // open.
+            let built = xref::build_limited(backing.view(), section, 0, names, &mut scratch, 1);
+            if built.sections > 0
+                && !built.table.is_empty()
+                && root_locatable(&built.table, &built.trailer)
+            {
+                sink.extend(scratch.take());
+                return Some((
+                    built,
+                    Linearized {
+                        end_of_first_page,
+                        main_table_at,
+                    },
+                ));
+            }
+        }
+        sink.warn(0, WarningKind::LinearizedParametersUnusable);
+        return None;
+    }
 }
 
 struct Validation {
