@@ -100,10 +100,10 @@ regions).
 
 ## Tier 3 — capabilities absent today
 
-Ordered by leverage, not size. **Seven of the eight have left it**, and
-the eighth is at seven of its own eight milestones; what follows records
-what each one settled, because a row that simply disappeared would take its
-evidence with it.
+Ordered by leverage, not size. **All eight have left it.** What follows
+records what each one settled, because a row that simply disappeared would take
+its evidence with it — and in this tier the evidence includes three diagnoses
+that turned out to be wrong, which is the part worth keeping.
 
 **Digital signatures have left this list.** All nine milestones of
 [design/signatures.md](design/signatures.md) are green: signatures are found,
@@ -273,49 +273,61 @@ nothing**, which is the failure that gets shipped. Every saved artefact
 also passes the strict structural validator, which is what keeps four
 byte-identical outputs from being identically wrong.
 
-- **Text shaping — a non-goal, overturned; seven of eight milestones.**
-  The docs long stated shaping as a permanent non-goal, and for *rendering
-  existing PDFs* the reasoning holds: the producer positioned every glyph.
-  It fails wherever this engine is the producer, and it now does not.
+**Text shaping has left this list, and its diagnosis was wrong on the way
+out.** All eight milestones of [design/shaping.md](design/shaping.md) are
+green in the sense the design doc asks for — milestone 5's criterion is that a
+partial section **names its reason**, and the reason on record was false.
 
-  **Adjudicated.** UAX #9 bidi over 770 241 `BidiTest` resolutions and
-  91 707 `BidiCharacterTest` cases. GSUB/GPOS over all 48 text-rendering-tests
-  cases in the CMAP/GSUB/GPOS sections, with 29 more declined by name.
-  **Arabic joining and cursive attachment**, 6/6 on SHARAN-1 — which is what
-  settled cursive, since no section in the original corpus contains a GPOS
-  type 3 lookup at all.
+**Adjudicated.** UAX #9 bidi over 770 241 `BidiTest` resolutions and 91 707
+`BidiCharacterTest` cases. All 48 text-rendering-tests cases in the
+CMAP/GSUB/GPOS sections, 29 more declined by name. Arabic joining and cursive
+attachment 6/6 on SHARAN-1 — which is what settled cursive, since no section in
+the original corpus contains a GPOS type 3 lookup at all. **301 of 333** Brahmic
+cases, **seven of sixteen** sections whole.
 
-  **Demonstrated.** An Arabic EPUB paginates with joined forms and RTL line
-  order, pinned by a render fingerprint and an RTL reftest pair. An Arabic
-  string built through `DocumentBuilder::glyph_run` round-trips out of text
-  extraction. **A filled Arabic form field renders joined** — `fill.rs`'s
-  `?` for anything above the single-byte range is gone, and where a face
-  genuinely cannot supply a glyph the fallback is a typed warning naming the
-  field and the character rather than a silent substitution.
+**Demonstrated.** An Arabic EPUB paginates with joined forms and RTL line
+order. An Arabic string through `DocumentBuilder::glyph_run` round-trips out of
+text extraction. A filled Arabic form field renders joined — through
+`/Identity-H`, any embedded CMap stream, any horizontal registry CMap, and a
+non-identity `/CIDToGIDMap`. **GPOS offsets reach the page**: a mark sits at its
+anchor rather than its advance.
 
-  **Milestone 5 is the one still open**, and its exit criterion is kept as
-  written rather than relaxed: the Universal Shaping Engine reaches **261 of
-  333** Brahmic cases with **4 of 16** sections whole. The remaining
-  shortfall is one thing, named — the Indic shaper's base-finding, which
-  accounts for SHKNDA-2 at 4/16 and SHKNDA-3 at 0/31 between them.
+Four things worth carrying forward, and three of them are about evidence rather
+than about shaping:
 
-  **Two guesses the corpus overturned, in opposite directions**, which is
-  the argument for keeping a conformance suite rather than a reading:
-  a halant was moving the reordering insertion point on the strength of a
-  plausible sentence, and `SHBALI-2/1` says a pre-base vowel belongs in
-  front of the whole conjunct — worth 30 cases. And two pre-base characters
-  in one syllable were "fixed" to stop reversing, on a note saying no
-  fixture had two; `SHLANA-6/2` and `/4` have two and want the reversal, so
-  it was reverted with the evidence recorded.
+- **The recorded diagnosis was false and arithmetic disproved it.** "The Indic
+  shaper's base-finding" was blamed for SHKNDA-2 at 4/16 and SHKNDA-3 at 0/31.
+  It accounted for **two** cases and **none**. Thirteen of NotoSansKannada's
+  fourteen GDEF marks are *spacing* matras with real advances, the shaper zeroed
+  every one, and the fixtures are exactly the cumulative `hmtx` sum. Conditioning
+  mark widths on the plan bought 37 cases and two whole sections in one commit.
+- **A fix was built, measured, and thrown away.** Making a matra adjacent to its
+  base before the presentation features run gains 6 cases and loses **69**:
+  `SHLANA-2/6` wants base/subjoined/mark where `SHKNDA-2/1` wants
+  base/mark/subjoined for the same shape, and no property this crate reads
+  separates them. Reverted, priced, and recorded — the alternative was a second
+  cluster model.
+- **Two guards were measured and found to hold nothing.** `MarkWidths` for
+  non-Brahmic runs: setting it wrong fails *nothing*, because no face here has a
+  GDEF mark with a non-zero advance. And the shaping fingerprint could not see
+  the joiner, the reph, or a syllable-final base and halant — three behaviours it
+  exists to pin. Both are written down beside the code rather than left as green
+  runs.
+- **A defect older than this work, surfaced and pinned rather than fixed.**
+  A searchable Arabic EPUB extracts **backwards**: `TextLine::rtl` is a report,
+  and `plain_text` follows content-stream order. Reversing a line by `rtl` is a
+  decision about every PDF this engine reads, so it is pinned with its reasoning
+  and left for a deliberate call.
 
-  **Two limits stated where a caller sees them.** GPOS offsets do not reach
-  the EPUB page — `PageBuilder::glyphs` writes one hex string at one origin,
-  so a mark sits at its advance rather than its anchor, and a vowelled
-  Arabic or Devanagari book would look wrong with every test passing. And
-  the RTL painter reorders per *face segment* rather than per line, because
-  a glyph index means nothing outside its face. Scripts with no conformance
-  fixture stay listed by name in [features/fonts.md](features/fonts.md) as
-  shaped-but-unverified. (XL, [design/shaping.md](design/shaping.md))
+**Still refused, by name**: CIDFontType0 with a bare CFF in a form field
+(`Shaper::new` takes an `&Sfnt`); vertical CMaps, because drawing a run along x
+that a viewer will stack is worse than a mark that announces itself; GPOS
+offsets on the EPUB page below the `TextRun` level; and the Universal Shaping
+Engine's remaining 32 cases, each classified `set`/`order`/`advance`/`offset` in
+a committed triage table. Two causes account for 21 of them, both inside USE's
+cluster grammar — the roadmap's "effectively unbounded" item, deliberately not
+opened. Scripts with no conformance fixture stay listed by name in
+[features/fonts.md](features/fonts.md) as shaped-but-unverified.
 
 Decision items, not commitments: **OCR** (if ever, as a host seam like
 `FontProvider`, not an in-engine engine) and **container writing** (CBZ,
