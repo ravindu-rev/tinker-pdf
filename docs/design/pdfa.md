@@ -38,9 +38,22 @@ implements says exactly that: the corpus "graduates to a conformance bar."
 ## Non-goals
 
 - **PDF/UA.** Same corpus, different standard; it needs the structure tree,
-  and belongs to [design/tagged-pdf.md](tagged-pdf.md). Level **A** of parts
-  1–3 also requires tagged structure, so Level A verdicts are staged behind
-  that design too; this one delivers B and U honestly rather than A wrongly.
+  and belongs to [design/tagged-pdf.md](tagged-pdf.md).
+
+  *Amended at milestone 6.* This paragraph used to continue: "Level **A** of
+  parts 1–3 also requires tagged structure, so Level A verdicts are staged
+  behind that design too; this one delivers B and U honestly rather than A
+  wrongly." That was true when it was written and is not now.
+  [design/tagged-pdf.md](tagged-pdf.md) closed all six of its milestones and
+  `PageBuilder::tagged` exists, so **the writer claims Level A** — by tagging,
+  with an untagged page and a missing natural language both refused at
+  `finish_archival` rather than written and discovered.
+
+  The *validator* side of Level A is a different matter and is still staged:
+  reading a structure tree and deciding whether it is a correct one is
+  `PDFA_STAGED`'s 6.7 entry, so a Level A file this build reports nothing
+  about has had its tagging looked at by nobody. Writing A and validating A
+  are two claims and only the first has landed.
 - **PDF/X and PDF/E.** Out entirely.
 - **Conversion.** No "fix this file into PDF/A" repair mode. Validation
   reports; building conforms; nothing rewrites an arbitrary document's
@@ -154,13 +167,27 @@ existing documents. Under a profile:
   (`crates/tinker-pdf/src/fonts.rs`) already demands for rendering, and
   the subsetter the builder already runs at `finish` serves unchanged.
 - **Output intent**: the builder writes `/OutputIntents` with a
-  caller-supplied ICC profile, or a vendored sRGB profile if one clears
-  the [THIRDPARTY.md](../../THIRDPARTY.md) gate — vendored data must carry
-  its licence, appear in that file's table, and pass `cargo xtask vendor`
-  against the `deny.toml` allowlist, the same path the Adobe CMaps and the
-  UCD took. If no profile with a shippable licence exists, the parameter
-  is mandatory and the doc says so; a licence problem must not become an
-  API surprise.
+  caller-supplied ICC profile. **The parameter is mandatory and there is no
+  vendored default**, which is the branch this paragraph reserved and the
+  gate decided.
+
+  The reasoning is the licence and nothing else. `cargo xtask vendor`
+  requires every vendored tree to declare an SPDX identifier `deny.toml`
+  already allows. The ICC's own sRGB profiles — the ones every other producer
+  embeds — carry the ICC's bespoke permission notice, which is permissive in
+  substance and **has no SPDX identifier at all**, so it cannot declare one
+  and cannot clear the gate. A third party's CC0 rebuild would clear it, and
+  is not the canonical profile: it is one person's regeneration, and a file
+  saying "these colours are for *this* device" is a claim about the caller's
+  document that this crate has no standing to make on their behalf. That is
+  the same argument the no-bundled-faces policy makes about a typeface.
+
+  `ArchivalProfile::destination_profile` is therefore a `Vec<u8>` with no
+  `Option` around it and no default, and `destination_space` beside it says
+  which device it characterises — declared rather than parsed, because
+  reading it would put an ICC parser in `tinker-pdf-cos`, which has no edge
+  to `tinker-pdf-color` and should not grow one to answer a question the
+  caller already knows the answer to.
 - **Metadata**: the XMP packet with `pdfaid:*` is generated at `finish`,
   byte-deterministic like the rest of the writer (ruling 4's spirit: the
   determinism suite's document byte-hashes in
@@ -186,8 +213,8 @@ named above.
 | 2 | Syntax-only rule group (part 1 clauses first — largest count, least machinery), then parts 2–4 syntax deltas | Validator verdict vs filename annotation over the veraPDF corpus's file-structure clauses recorded as a ratchet row in `corpus/ratchet.json`; `corpus-run` refuses regression | L |
 | 3 | XMP rule group: packet well-formedness, `pdfaid` agreement, `/Info` consistency | Metadata-clause corpus files agree with annotations at the recorded rate; a wrong-flavour fixture yields exactly the metadata finding, asserted by kind | M |
 | 4 | Disagreement ledger against the corpus annotations | Clause-level disagreement list committed, every row carrying a mandatory reason string; each classified (our bug / staged rule / a reading recorded with its clause); a row without a reason fails the test that reads the ledger | M |
-| 5 | Font and colour rule groups (colour rules needing profile internals staged behind [design/icc.md](icc.md)) | Font- and colour-clause corpus agreement rates recorded and ratcheted; staged colour rules are named refusals asserted by a test, not silent passes | L |
-| 6 | Writer profile on `DocumentBuilder` + `WriteOptions`, output intent, XMP generation, typed refusals | Built fixtures pass milestone 1–5's validator with zero findings and the strict structural validator clean; each fixture is built deliberately at the edge of its clause and its near-miss twin is asserted to fail; one refusal test per forbidden feature; a PDF/A fixture joins the determinism byte-hashes | L |
+| 5 | Font and colour rule groups (colour rules needing profile internals staged behind [design/icc.md](icc.md)) | **Done.** Font-clause files 64/200 to 103/200, colour-clause 134/449 to 278/449, the bar 1017/2371 to 1201/2371 with the false-positive count unchanged at one. Eleven staged rules named in `PDFA_STAGED` and asserted by clause in `pdfa_fonts.rs` and `pdfa_colour.rs` | L |
+| 6 | Writer profile on `DocumentBuilder` + `WriteOptions`, output intent, XMP generation, typed refusals | **Done for `DocumentBuilder`.** Fifteen fixtures in `pdfa_writer.rs`, each with a near-miss twin, each judged twice — by the full validator with complete coverage and by the strict structural validator. One refusal test per forbidden feature. `WriteOptions` is **not** done and the note below says why | L |
 
 ## What milestones 2 to 4 actually measured
 
@@ -275,15 +302,154 @@ genuinely needs, the flavour claim, so the mechanism fires on nearly every
 document in the corpus. Injecting a font rule into the syntax group fails four
 of the workspace's 3 375 tests.
 
+## What milestones 5 and 6 actually measured
+
+*Recorded August 2026, at the commit that landed the writer profile.* Same
+corpus, same 2 371-file bar, same rule: numbers rather than adjectives.
+
+**1 201 of 2 371 agree, against 1 017 before.** The false-positive count did
+not move, and that is the number worth watching rather than the total: a rule
+group that raised agreement by reporting conforming files would have raised it
+for nothing.
+
+| | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| annotated `-pass-` | 831 | 830 | 830 |
+| annotated `-fail-` | 1 540 | 187 | 371 |
+| **total** | **2 371** | **1 017** | **1 201** |
+
+Per rule group, over the files that are tests of that group's clauses:
+
+| clause group | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| fonts (6.3, 6.2.11, 6.2.10) | 200 | 64 | 103 |
+| colour (6.2.2–6.2.4, 6.2.9, 6.4) | 449 | 134 | 278 |
+
+**The corpus taught four clauses that no reading of the text would have
+given.** Each cost a run and each is now a test with a counted injection:
+
+- **"used for rendering" is the clause's own qualifier and it is
+  load-bearing.** The first font group judged every `/Type /Font` dictionary
+  in the file and reported 53 conforming files: an interactive form's `/DR`
+  names three of the standard 14 that nothing draws with, and two fixtures
+  whose own titles say *"the text rendering mode is 3"* are annotated `pass`
+  because mode 3 paints nothing. The group now finds out what is drawn before
+  it judges anything.
+- **A Type 1 font is exempt from the Unicode rule and a TrueType font is
+  not**, because a Type 1 program is keyed by glyph *name* and a name is a
+  route to Unicode through the Adobe Glyph List.
+- **A composite font's character collection is a route to Unicode too.**
+  Three fixtures whose titles read *"…uses the Adobe-Korea1 character
+  collection does not include a ToUnicode entry"* are annotated `pass`, and
+  the reason is that Adobe publishes a `…-UCS2` mapping for each published
+  collection.
+- **A transparency group's blending space stands in for a device colour
+  space**, exactly as `/DefaultRGB` does, and **part 4 admits an output intent
+  on a page**. Between them those two accounted for fifteen conforming files
+  the first colour group reported.
+
+**The sharpest staged rule is 6.3.8, and the corpus is what staged it.**
+`6-3-8-t01-fail-b.pdf` and `6-3-8-t01-pass-e.pdf` carry **byte-identical font
+dictionaries** — the same two Type 1 fonts, the same `/Encoding` dictionary,
+no `/ToUnicode` on either — and opposite annotations. Whatever separates them
+is not in a font dictionary, so no rule over font dictionaries can find it: it
+needs the glyph list as vendored data and the glyphs the content stream drew.
+The half that *is* in the dictionary runs; the half that is not is a named
+refusal.
+
+**`PDFA_STAGED` has 37 entries**, against 27 before. That number went *up*
+while coverage went up, and it should have: milestone 5 replaced two vague
+entries — "graphics: colour spaces, output intents, transparency, rendering
+intents" and "fonts: embedding, widths, symbolic flags, Unicode mapping" —
+with eleven specific ones that each name a rule and why it is not running. A
+staged list that shrinks as rules land and never grows is a list nobody is
+reading carefully.
+
+**Where the 1 169 unagreed `fail` files are.** Roughly 490 are still the XMP
+predefined-schema property rule. About 250 are in graphics clauses this build
+now runs and does not run *far enough*: the profile's own conformance, the
+Separation tint transform, the image and XObject prohibitions filed under the
+graphics clause, and parts 2-to-4's transparency constraints. About 90 are
+font clauses whose remaining half needs the code-to-glyph mapping — metrics,
+`/CharSet`, the `.notdef` glyph. The annotation clauses (6.3.1 to 6.3.3 in
+parts 2 to 4) are about 120 and have no group at all; they are milestone 5's
+neighbour rather than milestone 5.
+
+**The writer.** `DocumentBuilder::archival` produces documents that this
+build's validator finds nothing wrong with at every flavour it can claim —
+1B, 2B, 2U, 2A, 3B, 4, 4E, 4F — and that the strict structural validator in
+`tinker-pdf-cos` also passes. Both gates run on every fixture, and the second
+one matters more than it looks: it reads the *bytes* rather than the object
+graph and was written for the writer rather than for PDF/A, so it is the one
+judgement here that the conformance rules did not also write.
+
+## The limit this milestone narrows and does not close
+
+The risk table below has always said the writer is checked by the rule table
+that would also accept its mistakes. Milestones 5 and 6 sharpened that
+sentence rather than removing it, and it is worth saying precisely what is
+left.
+
+Every near-miss twin in `pdfa_writer.rs` is a second document differing from a
+conforming one by one call, asserted to *fail*. That shows the rule
+**discriminates** — it is not passing everything — which is strictly more than
+"the fixture passed". What it does not show is that the rule discriminates on
+the right axis: a twin fails against the same table the fixture passed
+against, so a clause this build reads wrongly is read wrongly in both
+directions and the pair agrees with itself. Five counted injections say the
+same thing from the other side: undoing the packet, the output intent, the
+header version, the transparency refusal or the standard-14 refusal each turns
+the suite red, so each is load-bearing — but a defect *nobody wrote a rule
+for* is invisible to all of it.
+
+The corpus is the one place that asymmetry breaks, and only for files this
+engine did not write: 2 371 documents somebody else made, with somebody else's
+verdict attached, where a rule read wrongly shows up as a disagreement rather
+than as a matched pair. That is why the census number and not the writer suite
+is the honest measure of how much of ISO 19005 this build understands — and
+why the writer's own conformance is reported as *"our validator, and the
+structural one, find nothing"* rather than as *"it conforms"*.
+
+## `WriteOptions` is not done, and that is a scope decision
+
+The scope list at the top of this document puts the profile on
+`DocumentBuilder` **and** `WriteOptions`, so that a rewrite of an existing
+document could be held to the same standard. Only the builder has it.
+
+The reason is structural rather than a shortage of will. `rewrite` returns
+`Vec<u8>`, so a `WriteOptions` field asking for archival output has nowhere to
+put a refusal: it would have to be discovered by the validator afterwards,
+which is the exact failure the builder's design exists to avoid. Making it
+honest means `rewrite` returning a `Result`, which every caller of the
+serializer would have to be changed for. That is a writer change rather than a
+PDF/A one and it belongs in [features/writing.md](../features/writing.md)'s
+own work.
+
+What the builder does do is set the write options it needs — the header
+version follows the part it claims — so a profiled document is written
+correctly even though `WriteOptions` cannot be *asked* for one.
+
 ## Dependencies
 
 - **[design/icc.md](icc.md)** — ICC profile parsing for colour rules that
   inspect profile internals, and validation of the writer's destination
-  profile. Milestones 1–4 and 6 do not block on it; milestone 5 stages
-  behind it.
-- **[design/tagged-pdf.md](tagged-pdf.md)** — Level A verdicts for parts
-  1–3 need the structure tree; Level A stays "not yet claimable" until it
-  lands.
+  profile.
+
+  *Amended at milestone 5.* That design is **done** through its milestone 7,
+  so the profile fields the colour rules need — the data colour space
+  signature, and through it the channel count — are read rather than staged,
+  and 6.2.3.3 and 6.2.3.2 both run. The staging moved somewhere more specific
+  and is named in `PDFA_STAGED` under 6.2.2: `icc::Profile::parse` is a
+  *transform builder*, and it refuses profiles that conform to ICC.1 and that
+  it cannot render — a v4 profile whose only route to the connection space is
+  an `mAB ` tag, for one. Refusing to render is right; refusing to conform is
+  not. So a destination profile this build cannot read leaves the output
+  intent's colour space **unknown**, the rules that depend on knowing it do
+  not fire in either direction, and a test asserts that silence.
+- **[design/tagged-pdf.md](tagged-pdf.md)** — **Done.** Level A is claimable
+  by the writer, which tags; the validator's structure-tree rules stay staged
+  (`PDFA_STAGED`, 6.7). See the amended non-goal above for why those are two
+  different claims.
 - **`tinker-pdf-xml`** — exists, one of ruling 8's ten leaf crates;
   already a facade dependency, with the cos-side amendment on
   `xmp_metadata` deciding where the parse happens.
@@ -299,7 +465,7 @@ of the workspace's 3 375 tests.
 | Risk | Mitigation |
 | --- | --- |
 | ISO 19005 has hundreds of sub-clauses; "validates PDF/A" overclaims what any first delivery checks | Coverage is a measured number, not a word: the ratchet row records agreement per clause group, staged rules are named refusals with tests, and docs state the rate rather than the ambition (the injection discipline in [verification.md](../verification.md)) |
-| **Nothing outside this repository ever validates a file this engine wrote** (ruling 13), so the writer is checked by the rule table that would also accept its mistakes | Every built fixture has a near-miss twin that must fail, so the rule is shown to discriminate rather than merely to pass; the limit is named in this doc and in [verification.md](../verification.md). Not closed |
+| **Nothing outside this repository ever validates a file this engine wrote** (ruling 13), so the writer is checked by the rule table that would also accept its mistakes | Every built fixture has a near-miss twin that must fail, and five counted injections show each thing the profile does is load-bearing. Both show the rules *discriminate*; neither shows they discriminate on the right axis, because a twin fails against the same table its fixture passed. [The limit this milestone narrows and does not close](#the-limit-this-milestone-narrows-and-does-not-close) says so at length, and [verification.md](../verification.md) names it too. **Not closed** |
 | XMP is a graph serialisation; a pull parser yields tokens, not the graph (the `xmp_metadata` amendment's own warning) | Parse only the property shapes 19005 checks, in the facade, behind fixtures taken from real producers' packets; a packet the subset cannot read is a finding ("metadata not checkable"), not a pass |
-| No shippable ICC profile licence for the writer's default output intent | The THIRDPARTY.md vendor gate decides before the API does: if no profile clears `cargo xtask vendor`, the profile parameter is mandatory and documented, matching the no-bundled-faces precedent |
+| No shippable ICC profile licence for the writer's default output intent | **Realised, and taken.** The ICC's own sRGB profiles carry a permission notice with no SPDX identifier, so no vendored profile can declare one `deny.toml` allows. `ArchivalProfile::destination_profile` is mandatory with no default and the type's own documentation says why, matching the no-bundled-faces precedent |
 | Writer profile refusals drift from validator rules, so the builder emits what the validator rejects | One rule table serves both: builder refusals cite the same `Clause` values, and a round-trip test validates every built fixture with the full validator in the same suite |

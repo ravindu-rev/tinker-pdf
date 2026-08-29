@@ -1920,9 +1920,14 @@ mod tests {
     /// about, and that is the entire reason the type exists.
     #[test]
     fn coverage_names_the_groups_that_ran() {
+        // The list grows as the milestones land — `fonts` joined it at
+        // milestone 5 — and this assertion is written to *notice* that rather
+        // than to pin it: a group that quietly appeared here would be a group
+        // this tool started claiming to have run without anybody deciding it
+        // should.
         assert_eq!(
             tinker_pdf::PdfACoverage::IMPLEMENTED.to_string(),
-            "metadata, syntax"
+            "metadata, syntax, fonts, colour"
         );
         assert_eq!(
             tinker_pdf::PdfACoverage::default().to_string(),

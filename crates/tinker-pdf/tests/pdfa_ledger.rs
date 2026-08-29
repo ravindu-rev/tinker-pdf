@@ -322,6 +322,44 @@ fn group_of(relative: &str) -> String {
     }
 }
 
+/// Which of the validator's **rule groups** a corpus file is a test of.
+///
+/// The directory tree is organised by clause, and the clause numbering differs
+/// per part — fonts are 6.3 in part 1, 6.2.11 in parts 2 and 3 and 6.2.10 in
+/// part 4 — so the mapping is made on the directory *name*, which the suite
+/// keeps stable across parts: every font directory is called `Fonts`, every
+/// output-intent directory `Output intent`, and so on.
+///
+/// This exists because milestone 5's exit criterion is a **font- and
+/// colour-clause agreement rate**, and the per-clause-group table above cannot
+/// give one: `PDF_A-2b/6.2 Graphics` holds the colour clauses, the font
+/// clauses, transparency and images in one row.
+fn rule_group_of(relative: &str) -> Option<&'static str> {
+    let lower = relative.to_ascii_lowercase();
+    // Longest-lived signal first: `6.2.11 Fonts` and `6.3 Fonts` both contain
+    // `fonts`, and nothing else in the tree does.
+    if lower.contains("/fonts") || lower.contains(" fonts/") {
+        return Some("fonts");
+    }
+    for marker in [
+        "output intent",
+        "colour space",
+        "color space",
+        "colour spaces",
+        "iccbased",
+        "uncalibrated",
+        "separation and devicen",
+        "indexed and pattern",
+        "rendering intent",
+        "transparency",
+    ] {
+        if lower.contains(marker) {
+            return Some("colour");
+        }
+    }
+    None
+}
+
 /// One clause group's agreement.
 #[derive(Default, Clone, Copy)]
 struct Tally {
@@ -363,6 +401,7 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     files.sort();
 
     let mut groups: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut rule_groups: BTreeMap<&'static str, Tally> = BTreeMap::new();
     let mut other_suites: BTreeMap<String, Tally> = BTreeMap::new();
     let mut bar = Tally::default();
     let mut false_positives: Vec<String> = Vec::new();
@@ -409,6 +448,15 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
         }
         if !counts_towards_the_bar {
             continue;
+        }
+        if let Some(rule_group) = rule_group_of(&relative) {
+            let tally = rule_groups.entry(rule_group).or_default();
+            match (expected_pass, clean) {
+                (true, true) => tally.pass_agreed += 1,
+                (true, false) => tally.pass_disagreed += 1,
+                (false, false) => tally.fail_agreed += 1,
+                (false, true) => tally.fail_disagreed += 1,
+            }
         }
         match (expected_pass, clean) {
             (true, true) => bar.pass_agreed += 1,
@@ -458,6 +506,23 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
             tally.fail_disagreed
         );
     }
+    println!(
+        "\nper rule group (milestone 5's exit criterion is the font and colour \
+         rows): agreed/total  (pass +/-, fail +/-)"
+    );
+    for (rule_group, tally) in &rule_groups {
+        println!(
+            "  {:<48} {:>4}/{:<4}  pass {}/{}  fail {}/{}",
+            rule_group,
+            tally.agreed(),
+            tally.total(),
+            tally.pass_agreed,
+            tally.pass_disagreed,
+            tally.fail_agreed,
+            tally.fail_disagreed
+        );
+    }
+
     println!(
         "\nTHE BAR (files that are tests of PDF/A) {}/{}  \
          pass agreed {}, pass disagreed {}, fail agreed {}, fail disagreed {}",

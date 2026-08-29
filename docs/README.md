@@ -21,6 +21,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [features/editing.md](features/editing.md) | page surgery, annotations, flattening, redaction |
 | [features/forms.md](features/forms.md) | field tree, fill, transactions, calculations |
 | [features/creation.md](features/creation.md) | `DocumentBuilder`: pages, text, images, patterns, outlines |
+| [features/pdfa.md](features/pdfa.md) | ISO 19005: the validator, its coverage as a measured number, and the writer's archival profile |
 | [features/cbz.md](features/cbz.md) | comic archives as documents |
 | [features/xps.md](features/xps.md) | XPS/OpenXPS as documents |
 | [features/epub.md](features/epub.md) | books as documents: the CSS and layout engines |

@@ -455,3 +455,30 @@ answer. Nothing reads a font directory either: that is an operating-system
 dependency, and `wasm32-unknown-unknown` has no filesystem at all. A host with
 faces of its own still supplies them through `FontProvider`, which remains the
 seam whether the feature is on or off.
+**No ICC profile**, and this is the second decision this file made rather than
+recorded. `docs/design/pdfa.md`'s writer profile needs an output intent, an
+output intent needs an ICC destination profile, and the obvious convenience is
+to vendor sRGB and default to it. The gate at the top of this file decides
+otherwise, on the licence and on nothing else:
+
+- **the ICC's own sRGB profiles**, the ones every other producer embeds, carry
+  the International Color Consortium's bespoke permission notice. It is
+  permissive in substance - copy, distribute, embed, sell, without restriction
+  - and it is **not an SPDX-identified licence**. `cargo xtask vendor`
+  requires every vendored tree to declare an identifier `deny.toml` already
+  allows, and there is no identifier to declare. It fails the gate at the
+  first requirement rather than at the allowlist;
+- **a third party's CC0 regeneration** would clear the gate on the licence and
+  is a different object: one person's rebuild of the numbers, from a personal
+  repository rather than the standards body that owns them. Everything else in
+  the table above is a *published fact about a file format* - Adobe's own CMap
+  resources, the Unicode Character Database, the conformance suites. A colour
+  profile is not that. It is a characterisation of a particular device, and
+  which device an archival document's colours are *for* is a statement about
+  the caller's document.
+
+So `ArchivalProfile::destination_profile` is a mandatory `Vec<u8>` with no
+`Option` around it, and the type's own documentation says why. It is the same
+answer, for the same kind of reason, that the paragraph above gives about
+typefaces: this engine does not decide on a caller's behalf what their file is
+made of.

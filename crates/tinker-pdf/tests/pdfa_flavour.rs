@@ -243,10 +243,17 @@ fn a_document_with_no_metadata_claims_nothing_and_says_so() {
         f.kind,
         FindingKind::MetadataMissing | FindingKind::NoFlavourClaimed
     )));
+    // Milestone 5 landed the fourth group, so a default validation is now
+    // complete — and this document is still not conforming, which is the
+    // point: completeness makes an *empty* list mean conformance and says
+    // nothing at all about a list with findings in it.
     assert!(
-        !verdict.coverage.is_complete(),
-        "one rule group of four has landed, and the verdict must not read as \
-         conformance"
+        verdict.coverage.is_complete(),
+        "all four rule groups have landed"
+    );
+    assert!(
+        !verdict.found_nothing(),
+        "a file that claims no flavour has a finding, complete coverage or not"
     );
 }
 

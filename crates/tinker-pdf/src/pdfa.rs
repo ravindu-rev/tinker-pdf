@@ -48,6 +48,9 @@ use tinker_pdf_xml::{Event, Source};
 
 use crate::Document;
 
+mod colour;
+mod content;
+mod fonts;
 mod syntax;
 mod xmp;
 
@@ -228,6 +231,93 @@ pub(crate) mod clauses {
         two_three: "6.1.5",
         four: "6.1.3",
     };
+
+    // ---- the font group (milestone 5) ------------------------------------
+    //
+    // Part 1 gives fonts a clause of their own at 6.3. Parts 2 to 4 moved them
+    // *inside* graphics — 6.2.11 in parts 2 and 3, 6.2.10 in part 4 — so the
+    // same rule is numbered three ways and the sub-clause tails line up one
+    // for one under each head. The corpus's own directory names are the check
+    // on this table: `PDF_A-1b/6.3 Fonts/6.3.5 Font subsets` and
+    // `PDF_A-2b/6.2 Graphics/6.2.11 Fonts/6.2.11.4 Embedding` are the same
+    // subject filed under two numbers.
+
+    /// Embedding: every font program present in the file (6.3.4 / 6.2.11.4.1 /
+    /// 6.2.10.4.1).
+    pub(crate) const FONT_EMBEDDING: ClauseTable = ClauseTable {
+        one: "6.3.4",
+        two_three: "6.2.11.4.1",
+        four: "6.2.10.4.1",
+    };
+
+    /// Font subsets: the six-letter tag and the descriptor's own name
+    /// (6.3.5 / 6.2.11.4.2 / 6.2.10.4.1).
+    pub(crate) const FONT_SUBSETS: ClauseTable = ClauseTable {
+        one: "6.3.5",
+        two_three: "6.2.11.4.2",
+        four: "6.2.10.4.1",
+    };
+
+    /// Character encodings (6.3.7 / 6.2.11.6 / 6.2.10.6).
+    pub(crate) const FONT_ENCODINGS: ClauseTable = ClauseTable {
+        one: "6.3.7",
+        two_three: "6.2.11.6",
+        four: "6.2.10.6",
+    };
+
+    /// Unicode character maps (6.3.8 / 6.2.11.7 / 6.2.10.7).
+    pub(crate) const FONT_UNICODE: ClauseTable = ClauseTable {
+        one: "6.3.8",
+        two_three: "6.2.11.7",
+        four: "6.2.10.7",
+    };
+
+    /// Composite fonts: the CIDFont dictionary (6.3.3.2 / 6.2.11.3.2 /
+    /// 6.2.10.3.2).
+    pub(crate) const CID_FONTS: ClauseTable = ClauseTable {
+        one: "6.3.3.2",
+        two_three: "6.2.11.3.2",
+        four: "6.2.10.3.2",
+    };
+
+    // ---- the colour group (milestone 5) ----------------------------------
+
+    /// The output intent (6.2.2 in part 1, 6.2.3 in parts 2 to 4).
+    pub(crate) const OUTPUT_INTENT: ClauseTable = ClauseTable {
+        one: "6.2.2",
+        two_three: "6.2.3",
+        four: "6.2.3",
+    };
+
+    /// ICCBased colour spaces (6.2.3.2 / 6.2.4.2).
+    pub(crate) const ICC_SPACES: ClauseTable = ClauseTable {
+        one: "6.2.3.2",
+        two_three: "6.2.4.2",
+        four: "6.2.4.2",
+    };
+
+    /// The uncalibrated - device - colour spaces (6.2.3.3 / 6.2.4.3).
+    pub(crate) const DEVICE_SPACES: ClauseTable = ClauseTable {
+        one: "6.2.3.3",
+        two_three: "6.2.4.3",
+        four: "6.2.4.3",
+    };
+
+    /// Rendering intents (6.2.9 in part 1, 6.2.6 in parts 2 and 3, and part
+    /// 4's extended-graphics-state clause, which is where it puts them).
+    pub(crate) const RENDERING_INTENTS: ClauseTable = ClauseTable {
+        one: "6.2.9",
+        two_three: "6.2.6",
+        four: "6.2.5",
+    };
+
+    /// Transparency, which part 1 forbids outright at 6.4 and parts 2 to 4
+    /// constrain at 6.2.10 and 6.2.9.
+    pub(crate) const TRANSPARENCY: ClauseTable = ClauseTable {
+        one: "6.4",
+        two_three: "6.2.10",
+        four: "6.2.9",
+    };
 }
 
 /// One rule this build does not run yet, and what it is waiting for.
@@ -318,16 +408,130 @@ pub const STAGED: &[StagedRule] = &[
         because: "an inline image's dictionary lives inside a content stream,                   and opening one is the interpreter's job rather than this                   group's — the rule covers every filter reachable from the                   cross-reference table and no filter that is not",
     },
     StagedRule {
-        clause: "6.2",
-        rule: "graphics: colour spaces, output intents, transparency, \
-               rendering intents",
-        because: "milestone 5 of docs/design/pdfa.md, staged behind \
-                  docs/design/icc.md for the rules that read inside a profile",
+        clause: "6.2.2",
+        rule: "the destination profile's own conformance: its ICC version, \
+               its device class, and whether it is a well-formed profile at \
+               all",
+        because: "tinker-pdf-color's icc::Profile::parse is a transform \
+                  builder, not a validator. It refuses a profile it cannot \
+                  build a transform from - a v4 profile whose only route to \
+                  the connection space is an mAB tag, for one - and such a \
+                  profile conforms to ICC.1 perfectly well. Reporting every \
+                  one of them would report conforming files, so a profile \
+                  this build cannot read leaves the intent's colour space \
+                  unknown and the rules that need it do not fire",
     },
     StagedRule {
-        clause: "6.3",
-        rule: "fonts: embedding, widths, symbolic flags, Unicode mapping",
-        because: "milestone 5 of docs/design/pdfa.md",
+        clause: "6.2.3.4",
+        rule: "Separation and DeviceN: the tint transform function, and two \
+               colourants of the same name having the same transform",
+        because: "the alternate space is read and judged, which is the half \
+                  that decides whether the colour can be reproduced. The tint \
+                  transform is a PDF function, and comparing two of them for \
+                  equality means comparing sampled or PostScript-calculator \
+                  functions - a definition of equality this build has not \
+                  written down",
+    },
+    StagedRule {
+        clause: "6.2.4",
+        rule: "images: the /Interpolate prohibition, /Alternates, /OPI, and \
+               the JPEG2000 constraints parts 2 to 4 add",
+        because: "an image's colour space is judged with every other colour \
+                  space. These are separate prohibitions on the image \
+                  dictionary, and the JPEG2000 half needs the codestream's \
+                  own header rather than the PDF's",
+    },
+    StagedRule {
+        clause: "6.2.5",
+        rule: "form and reference XObjects: /Ref, PostScript XObjects, /OPI, \
+               and the /Subtype2 that makes a reference XObject one",
+        because: "prohibitions on an XObject dictionary rather than on a \
+                  colour, filed under the graphics clause because that is \
+                  where the standard files them. Not written",
+    },
+    StagedRule {
+        clause: "6.2.8",
+        rule: "the extended graphics state beyond transparency: /TR, /TR2, \
+               /HTP and the halftone constraints",
+        because: "the transparency keys of an /ExtGState are read for part 1 \
+                  and the rendering intent for every part. The transfer \
+                  function and halftone prohibitions are a separate list this \
+                  build has not established from the clause text available",
+    },
+    StagedRule {
+        clause: "6.2.10",
+        rule: "content streams: the operators a conforming stream may use, \
+               and the resources every name in it must resolve to",
+        because: "the walk this group runs over content streams is a \
+                  tokenizer with a text state, not an interpreter, and \
+                  deciding that an operator is forbidden means knowing the \
+                  operand stack it was given. That is a renderer's job",
+    },
+    StagedRule {
+        clause: "6.4",
+        rule: "transparency in parts 2 to 4: the blending colour space a \
+               group declares, isolation and knockout, and the soft masks \
+               those parts permit",
+        because: "part 1 forbids transparency outright and that rule runs. \
+                  Parts 2 to 4 permit it and constrain it, and the \
+                  constraints are about what a group composites in rather \
+                  than about whether it exists - the same reading of 11.6.6 \
+                  this group already uses to excuse a device colour space, \
+                  turned into a rule, which is a larger step than reusing it",
+    },
+    StagedRule {
+        clause: "6.3.6",
+        rule: "font metrics: the /Widths array against the embedded \
+               program's own advances",
+        because: "the advance is one call into tinker-pdf-font away, and the \
+                  mapping from a character code to the glyph whose advance it \
+                  is, is not: a symbolic TrueType font resolves a code \
+                  through a (3, 0) cmap subtable with the code offset into \
+                  the private-use area, a Type 1 font through the program's \
+                  own encoding vector, and a rule that got either wrong would \
+                  report conforming files by the hundred",
+    },
+    StagedRule {
+        clause: "6.3.3.3",
+        rule: "composite fonts: the CMap, its agreement with the CIDFont's \
+               /CIDSystemInfo, and the predefined-CMap list a /Encoding name \
+               must come from",
+        because: "the predefined CMaps are a published table this build \
+                  carries behind the cmap-predefined feature rather than as \
+                  validation data, so a default build and a --no-default-\
+                  features build would disagree about whether a file \
+                  conforms. A conformance verdict that depends on a cargo \
+                  feature is not a verdict",
+    },
+    StagedRule {
+        clause: "6.3.2",
+        rule: "font types: which of ISO 32000's font subtypes each part \
+               admits, and part 4's prohibition on Type 3",
+        because: "part 1 admits Type 3 and part 4 does not, and the clause \
+                  that says so also carries the conditions under which each \
+                  of the others is admitted. This build checks what a font \
+                  carries rather than whether its kind is on the list",
+    },
+    StagedRule {
+        clause: "6.3.8",
+        rule: "Unicode character maps: whether the glyph names an /Encoding \
+               dictionary's /Differences array introduces are on the Adobe \
+               Glyph List, and whether the page drew one that is not",
+        because: "the corpus settles this one rather than the clause text: \
+                  6-3-8-t01-fail-b.pdf and 6-3-8-t01-pass-e.pdf carry the same \
+                  two Type 1 fonts, the same /Encoding dictionary and no \
+                  /ToUnicode on either, and are annotated fail and pass. What \
+                  separates them is not in the font dictionary at all, so no \
+                  rule over font dictionaries can find it — it needs the glyph \
+                  list as vendored data and the glyphs the content stream \
+                  drew. The half that *is* in the dictionary runs",
+    },
+    StagedRule {
+        clause: "6.3.9",
+        rule: "the .notdef glyph, and /ActualText where a mapping is absent",
+        because: "both are about what a content stream draws rather than \
+                  about what a font dictionary carries, and finding out what \
+                  is drawn is the interpreter's job rather than this group's",
     },
     StagedRule {
         clause: "6.1.4",
@@ -376,12 +580,14 @@ pub const STAGED: &[StagedRule] = &[
                    output intent, and neither is in this group",
     },
     StagedRule {
-        clause: "6.4",
-        rule: "transparency in part 1, and interactive form field \
-                appearances in parts 2 to 4",
-        because: "part 1's transparency prohibition needs the graphics \
-                   state, and the form rules need the appearance streams \
-                   the annotation group will bring. Both are milestone 5",
+        clause: "6.9",
+        rule: "interactive form field appearances in parts 2 to 4",
+        because: "half of this row landed at milestone 5 and the half that \
+                   did not is what is left. Part 1's transparency \
+                   prohibition ran the moment the colour group could see a \
+                   graphics state; the form rules still need the appearance \
+                   streams the annotation group will bring, and there is no \
+                   annotation group",
     },
     StagedRule {
         clause: "6.5",
@@ -818,6 +1024,110 @@ pub enum FindingKind {
         /// The `/Info` key, which names its XMP property in the clause table.
         key: String,
     },
+
+    // ---- the font group (milestone 5) ------------------------------------
+    //
+    // Each cites the clause it comes from in `pdfa/fonts.rs`, beside this
+    // build's reading of that clause.
+    /// A font with no embedded program. The standard 14 are not an exception:
+    /// ISO 19005 has no such list (6.3.4 / 6.2.11.4.1).
+    FontNotEmbedded {
+        /// The font dictionary's `/Subtype`, so a caller can tell a missing
+        /// `/FontFile2` from a missing `/FontFile`.
+        subtype: String,
+    },
+    /// The descriptor carries a font-file key the font's `/Subtype` does not
+    /// admit, or a `/FontFile3` whose own `/Subtype` is outside the set
+    /// (6.3.4 / 6.2.11.4.1).
+    FontProgramSubtypeMismatch {
+        /// Which font-file key.
+        key: String,
+        /// What was declared, either by the font or by the program stream.
+        declared: String,
+    },
+    /// The embedded program will not parse as the format its key declares
+    /// (6.3.4 / 6.2.11.4.1).
+    FontProgramUnreadable {
+        /// Which font-file key.
+        key: String,
+    },
+    /// A subset tag that is not six upper-case letters and a `+`
+    /// (6.3.5 / 6.2.11.4.2).
+    SubsetTagMalformed {
+        /// The `/BaseFont` name as the file spelled it.
+        declared: String,
+    },
+    /// No `/ToUnicode`, where the level requires one (6.3.8 / 6.2.11.7).
+    ToUnicodeMissing,
+    /// A symbolic TrueType font carrying an `/Encoding` (6.3.7 / 6.2.11.6).
+    SymbolicFontHasEncoding,
+    /// A non-symbolic TrueType font whose `/Encoding` is outside the two the
+    /// clause admits (6.3.7 / 6.2.11.6).
+    EncodingNotStandard {
+        /// What the font said.
+        declared: String,
+    },
+    /// An `/Encoding` dictionary carrying `/Differences` where the part
+    /// forbids it (6.3.7).
+    EncodingDifferencesForbidden,
+    /// A CIDFont without a complete `/CIDSystemInfo` (6.3.3.2 / 6.2.11.3.2).
+    CidSystemInfoIncomplete {
+        /// Which key was missing or of the wrong type; `CIDSystemInfo` when
+        /// the dictionary itself was absent.
+        key: String,
+    },
+    /// A `/CIDFontType2` whose `/CIDToGIDMap` is neither `/Identity` nor a
+    /// stream (6.3.3.2 / 6.2.11.3.2).
+    CidToGidMapMalformed {
+        /// What the font said, empty when the entry was absent.
+        declared: String,
+    },
+
+    // ---- the colour group (milestone 5) ----------------------------------
+    /// `/OutputIntents` is not an array of dictionaries, or an entry is
+    /// missing a key its clause requires (6.2.2 / 6.2.3).
+    OutputIntentMalformed {
+        /// Which key, or `OutputIntents` for the array itself.
+        key: String,
+    },
+    /// A `GTS_PDFA1` output intent with no `/DestOutputProfile`
+    /// (6.2.2 / 6.2.3).
+    DestOutputProfileMissing,
+    /// Two `GTS_PDFA1` output intents naming different destination profiles
+    /// (6.2.2 / 6.2.3).
+    OutputIntentsDisagree,
+    /// A device colour space used in a file with no PDF/A output intent and no
+    /// `/Default…` space standing in for it (6.2.3.3 / 6.2.4.3).
+    DeviceColourWithoutOutputIntent {
+        /// `DeviceGray`, `DeviceRGB` or `DeviceCMYK`.
+        space: String,
+    },
+    /// A device colour space used under an output intent whose destination
+    /// profile is for a different kind of device (6.2.3.3 / 6.2.4.3).
+    DeviceColourNotInOutputIntent {
+        /// `DeviceRGB` or `DeviceCMYK`.
+        space: String,
+        /// The destination profile's data colour space, as its ICC signature.
+        profile: String,
+    },
+    /// An `ICCBased` stream whose `/N` is absent, or disagrees with the number
+    /// of channels its profile declares (6.2.3.2 / 6.2.4.2).
+    IccStreamMalformed {
+        /// What was wrong, as the key it is about.
+        key: String,
+    },
+    /// A `/RenderingIntent` outside the four ISO 32000-1 8.6.5.8 defines
+    /// (6.2.9 / 6.2.6).
+    RenderingIntentUnknown {
+        /// What the file said.
+        declared: String,
+    },
+    /// Transparency in a part 1 file, which forbids it outright (6.4).
+    TransparencyForbidden {
+        /// Which construct: the group, the soft mask, the blend mode or the
+        /// constant alpha.
+        feature: String,
+    },
 }
 
 /// One thing wrong with the file.
@@ -905,7 +1215,19 @@ impl Coverage {
     pub const IMPLEMENTED: Coverage = Coverage {
         metadata: true,
         syntax: true,
-        fonts: false,
+        fonts: true,
+        colour: true,
+    };
+
+    /// The font group alone.
+    ///
+    /// The expensive sweep, and the one the laziness counter exists to keep
+    /// out of the others: asking for this is asking for every embedded font
+    /// program in the file to be parsed.
+    pub const FONTS: Coverage = Coverage {
+        metadata: false,
+        syntax: false,
+        fonts: true,
         colour: false,
     };
 
@@ -1011,6 +1333,21 @@ pub(crate) fn validate_counting(
         raw.push(Raw::file(clauses::ENCRYPTION, FindingKind::Encrypted));
     }
     syntax::rules(&document.inner, &machinery, flavour, &mut raw);
+    // Guarded at the call site rather than inside, and that is the laziness
+    // requirement rather than a style: [`Machinery::reach`] records the *ask*
+    // whether or not it is granted, so a group whose entry point is called
+    // unconditionally would move its counter on every syntax-only sweep in the
+    // corpus. The metadata group is called the same way for the same reason.
+    //
+    // Injection, counted: dropping this `if` fails 1 of the workspace's 3 581
+    // tests, `a_syntax_only_sweep_never_reaches_for_a_font_program`, which is
+    // the only test that reads the counter for a group it did not ask for.
+    if groups.fonts {
+        fonts::rules(&document.inner, &machinery, flavour, &mut raw);
+    }
+    if groups.colour {
+        colour::rules(&document.inner, &machinery, flavour, &mut raw);
+    }
     if groups.metadata {
         xmp::rules(document, &machinery, flavour, &mut raw);
     }
@@ -1022,10 +1359,8 @@ pub(crate) fn validate_counting(
         coverage: Coverage {
             metadata: groups.metadata,
             syntax: groups.syntax,
-            // Milestone 5 of docs/design/pdfa.md. A group that was asked for
-            // and has no rules must not report itself as having run.
-            fonts: false,
-            colour: false,
+            fonts: groups.fonts,
+            colour: groups.colour,
         },
     };
     (verdict, machinery.reaches())
@@ -1513,34 +1848,51 @@ mod tests {
         assert!(!verdict.coverage.fonts);
     }
 
-    /// And the full request reaches for the metadata group's machinery once
-    /// more — for the properties — and still never for a font.
+    /// The full request reaches for each group's machinery exactly as often as
+    /// it has rules to run, and no oftener.
+    ///
+    /// Milestone 5 changed this test's numbers and that is the point of having
+    /// it: before the font group existed the font counter was zero here, and a
+    /// counter that stayed at zero once the group landed would have meant the
+    /// group was not running.
     #[test]
-    fn the_full_request_reaches_no_further_than_the_short_one() {
+    fn the_full_request_reaches_each_group_it_asked_for_once() {
         let document = document_with_a_font_program();
         let (_, (metadata, fonts, colour)) = validate_counting(&document, Coverage::IMPLEMENTED);
         assert_eq!(
             metadata, 2,
             "once for the claim and once for the properties"
         );
-        assert_eq!(fonts, 0);
-        assert_eq!(colour, 0);
+        assert_eq!(fonts, 1, "the font group runs, and asks once");
+        assert_eq!(colour, 1, "and so does the colour group");
     }
 
-    /// Asking for a group with no rules costs the ask and nothing else, and
-    /// the verdict does not claim it ran.
+    /// Milestone 5 closed the last group, and this is what that means.
+    ///
+    /// The earlier version of this test asserted that a group *asked for* with
+    /// no rules must not report itself as having run — first about fonts, then
+    /// about colour. With four groups of four implemented that property has
+    /// nothing left to be about, so it is replaced rather than deleted by the
+    /// one that outlives it: the coverage a verdict reports is the request it
+    /// was given, and a group's machinery is reached only where the request
+    /// asked for it.
+    ///
+    /// This is also the first commit at which an empty finding list from
+    /// [`Coverage::IMPLEMENTED`] can mean "this file conforms" rather than
+    /// "nothing this build checks was broken", which is what
+    /// [`Coverage::is_complete`] says and why it is asserted here.
     #[test]
-    fn asking_for_a_group_with_no_rules_does_not_make_it_have_run() {
+    fn coverage_reports_the_request_and_the_counters_agree_with_it() {
         let document = document_with_a_font_program();
-        let everything = Coverage {
-            metadata: true,
-            syntax: true,
-            fonts: true,
-            colour: true,
-        };
-        let (verdict, (_, fonts, colour)) = validate_counting(&document, everything);
-        assert_eq!((fonts, colour), (0, 0));
-        assert!(!verdict.coverage.fonts);
+        assert!(Coverage::IMPLEMENTED.is_complete());
+        let (verdict, _) = validate_counting(&document, Coverage::IMPLEMENTED);
+        assert!(verdict.coverage.is_complete());
+
+        // One group at a time: asking for fonts alone leaves the colour
+        // counter at zero and does not claim colour ran.
+        let (verdict, (_, fonts, colour)) = validate_counting(&document, Coverage::FONTS);
+        assert_eq!((fonts, colour), (1, 0));
+        assert!(verdict.coverage.fonts);
         assert!(!verdict.coverage.colour);
         assert!(!verdict.coverage.is_complete());
     }
