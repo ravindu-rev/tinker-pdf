@@ -1236,6 +1236,49 @@ impl DocumentEditor {
         crate::calc::recalculate_under(self, policy)
     }
 
+    /// Offers a keystroke to a field's `/AA /K` action (12.6.4.16 table 196).
+    ///
+    /// It takes an event because it has to: what is being typed, where, and
+    /// whether this is the commit are facts a host has and a reader does not,
+    /// which is exactly why keystroke actions could never run implicitly.
+    /// Nothing in a recalculation reaches this.
+    ///
+    /// Under the default [`crate::script::ScriptPolicy`] a field that carries
+    /// a keystroke action answers `CalcError::Refused`; one that carries none
+    /// accepts the keystroke as offered.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::keystroke`]. A script that refuses the keystroke is
+    /// not an error — that is `EventVerdict::Refused`.
+    pub fn keystroke(
+        &self,
+        name: &str,
+        event: &crate::calc::Keystroke,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::EventVerdict, crate::calc::CalcError> {
+        crate::calc::keystroke(self, name, event, policy)
+    }
+
+    /// Offers a committed value to a field's `/AA /V` action (12.6.4.16
+    /// table 196).
+    ///
+    /// Nothing is written either way: this answers whether the form would
+    /// take the value, and applying it is still
+    /// [`DocumentEditor::fill_field`]'s job.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::validate`].
+    pub fn validate(
+        &self,
+        name: &str,
+        value: &str,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::EventVerdict, crate::calc::CalcError> {
+        crate::calc::validate(self, name, value, policy)
+    }
+
     /// Turns a checkbox on or off.
     ///
     /// The on state is whatever the widget's appearance dictionary calls it,

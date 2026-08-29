@@ -90,9 +90,15 @@ pub use build::{
     PlacedGlyph, Shading, SoftMask, StateMask, SubsetRefusal, Target, TilingPattern, TilingType,
     TransparencyGroup,
 };
+// `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
+// here: this root already has a `validate`, which is the strict structural
+// validator, and a second meaning of that word at the same path would be
+// worse than the clash it causes. Both are reached as
+// `DocumentEditor::keystroke` / `::validate`, which is the surface a caller
+// wants anyway, or module-qualified as `calc::validate`.
 pub use calc::{
     formatted_value, formatted_value_under, recalculate, recalculate_under, CalcError,
-    Recalculation,
+    EventVerdict, Keystroke, Recalculation,
 };
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
@@ -118,7 +124,7 @@ pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, Recipient};
-pub use script::{Budget, Host, ScriptError, ScriptPolicy, ScriptScope, Trigger};
+pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
     digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,

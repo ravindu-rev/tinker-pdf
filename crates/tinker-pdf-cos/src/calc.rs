@@ -79,6 +79,21 @@ pub enum CalcError {
     TooManyFields(usize),
     /// [`formatted_value`] was asked about a field the form does not have.
     NoSuchField,
+    /// A field's own `/AA /V` validate action refused the value the pass
+    /// computed for it (12.6.4.16 table 196).
+    ///
+    /// Refuses the **whole** pass, not the field. A form whose validation
+    /// rejects one total and whose other nine totals were written anyway is a
+    /// document that disagrees with itself, which is the outcome this
+    /// module's all-or-nothing contract exists to prevent — and a validate
+    /// action saying no is the form working, so the answer is a refusal with
+    /// the value in it rather than a repair.
+    Invalid {
+        /// The field whose action refused.
+        field: String,
+        /// The value it refused.
+        value: String,
+    },
     /// A document-level script (7.7.4) would not read as a name table of
     /// function definitions. Names the tree key it came under and why.
     ///
@@ -122,6 +137,57 @@ impl core::fmt::Display for CalcError {
             CalcError::DocumentScript { name, reason } => {
                 write!(f, "document-level script {name}: {reason}")
             }
+            CalcError::Invalid { field, value } => {
+                write!(f, "{field}: the form refused the value {value}")
+            }
+        }
+    }
+}
+
+/// A keystroke offered to a field's `/AA /K` action (12.6.4.16 table 196).
+///
+/// The value the event runs against is the field's own and is not here: the
+/// editor knows it, and asking a caller for it twice invites two answers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Keystroke {
+    /// `event.change` — the text being inserted. Empty for a deletion.
+    pub change: String,
+    /// `event.selStart` and `event.selEnd`, in that order.
+    pub selection: (i64, i64),
+    /// `event.willCommit` — whether this is the commit at the end of typing
+    /// rather than one keystroke inside it.
+    pub will_commit: bool,
+}
+
+/// What a keystroke or validate action decided.
+///
+/// A refusal is the action **working**, not an error: 12.6.4.16 table 196's
+/// `event.rc` is how a form says "not that value", and a form that rejects a
+/// date in the wrong century is doing its job. Errors are for scripts that
+/// could not run at all, and they are [`CalcError`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventVerdict {
+    /// The action accepted. For a keystroke this is `event.change` as the
+    /// script left it — a keystroke action may rewrite what is being typed —
+    /// and for a validate it is `event.value`.
+    Accepted(String),
+    /// The action set `event.rc = false`. The value is refused whole.
+    Refused,
+}
+
+impl EventVerdict {
+    /// Whether the action accepted.
+    #[must_use]
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, EventVerdict::Accepted(_))
+    }
+
+    /// The accepted text, or `None` for a refusal.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            EventVerdict::Accepted(text) => Some(text),
+            EventVerdict::Refused => None,
         }
     }
 }
@@ -142,6 +208,18 @@ pub struct Recalculation {
     /// calculation — which is the one case where one pass and a full
     /// fixed-point disagree, so it is reported rather than iterated on.
     pub cascades_cut: Vec<String>,
+    /// Fields whose computed value was written **without** their own `/AA /V`
+    /// validate action being consulted, because the policy denies
+    /// [`Trigger::Validate`].
+    ///
+    /// Ruling 10, applied to a check rather than to a repair: a pass that
+    /// silently skipped a form's own validation would be indistinguishable
+    /// from a pass over a form that has none, and the difference is whether
+    /// the numbers now in the document were ever checked. Empty under a
+    /// policy that allows validation — where a refusal aborts the pass
+    /// instead ([`CalcError::Invalid`]) — and empty for a form whose
+    /// calculated fields carry no validate action.
+    pub refused: Vec<String>,
 }
 
 /// The values a pass may see and the ones it has computed.
@@ -430,6 +508,13 @@ pub fn recalculate_under(
         });
     }
 
+    // 12.7.2: a computed value goes through the field's own validate action
+    // before it is committed, and this is the last moment nothing has been
+    // written. A refusal here aborts the whole pass rather than the field,
+    // because a form whose validation rejects one total and whose other nine
+    // were written anyway is a document that disagrees with itself.
+    let refused = validate_computed(&fields, &changed, &scope, policy, &mut budget, &mut host)?;
+
     let pairs: Vec<(&str, &str)> = changed
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -442,7 +527,210 @@ pub fn recalculate_under(
         changed,
         skipped,
         cascades_cut,
+        refused,
     })
+}
+
+/// Runs each changed field's `/AA /V` action against the value the pass
+/// computed for it, and answers the ones that were never consulted.
+///
+/// Two outcomes and no third: the action accepts, or the pass is over. What
+/// comes back is the list of fields whose validation the **policy** declined
+/// to run — written unchecked, and said so rather than left to be assumed
+/// (ruling 10).
+fn validate_computed(
+    fields: &[form::Field],
+    changed: &[(String, String)],
+    scope: &ScriptScope,
+    policy: ScriptPolicy,
+    budget: &mut Budget,
+    host: &mut StagedHost<'_>,
+) -> Result<Vec<String>, CalcError> {
+    // The pass is done computing, so the staging map is sealed for the rest
+    // of it: a validate action that tries to write a field takes the same
+    // `!writable` path a format action does and stops with
+    // `ScriptError::FieldRefused`. It still *reads* the staged values, which
+    // is the whole reason this runs against the pass's own host rather than a
+    // fresh one — a total is validated against the inputs that produced it.
+    host.writable = false;
+    let mut refused = Vec::new();
+    for (name, value) in changed {
+        let Some(field) = fields.iter().find(|f| &f.name == name) else {
+            continue;
+        };
+        let source = match field.scripts.validate.as_ref() {
+            Some(Script::Source(text)) => text.as_str(),
+            Some(Script::Oversize(_)) => {
+                return Err(CalcError::Script {
+                    field: name.clone(),
+                    reason: ScriptError::TooLong,
+                })
+            }
+            None => continue,
+        };
+        if !policy.allows(Trigger::Validate) {
+            refused.push(name.clone());
+            continue;
+        }
+
+        let left = limits::MAX_CALC_STEPS.saturating_sub(budget.used());
+        let mut script_budget = Budget::new(limits::MAX_SCRIPT_STEPS.min(left));
+        let event = script::Event {
+            value: value.clone(),
+            ..script::Event::default()
+        };
+        let outcome = script::run_event(source, name, &event, host, &mut script_budget, scope)
+            .map_err(|reason| CalcError::Script {
+                field: name.clone(),
+                reason,
+            })?;
+        budget
+            .charge(script_budget.used())
+            .map_err(|reason| CalcError::Script {
+                field: name.clone(),
+                reason,
+            })?;
+        if !outcome.accepted {
+            return Err(CalcError::Invalid {
+                field: name.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    Ok(refused)
+}
+
+// ---------------------------------------------------------------------------
+// The two events that need one
+// ---------------------------------------------------------------------------
+
+/// Offers a keystroke to a field's `/AA /K` action (12.6.4.16 table 196).
+///
+/// Keystroke and validate could never run implicitly, and that is why they sat
+/// surfaced-and-never-run for so long: both need an **event** — what is being
+/// typed, where, and whether this is the commit — and a reader has no typing
+/// to report. So they are entry points a host calls with an event it built,
+/// and nothing in a recalculation reaches the keystroke one at all.
+///
+/// `Ok(EventVerdict::Accepted)` with the change unchanged is the answer for a field
+/// that carries no keystroke action, because there is nothing to consult and
+/// the keystroke stands.
+///
+/// # Errors
+///
+/// [`CalcError::NoSuchField`], [`CalcError::Refused`] when the policy denies
+/// [`Trigger::Keystroke`] and the field carries one, and
+/// [`CalcError::Script`] when the action would not run. A script that sets
+/// `event.rc = false` is not an error — that is [`EventVerdict::Refused`].
+pub fn keystroke(
+    editor: &DocumentEditor,
+    name: &str,
+    event: &Keystroke,
+    policy: ScriptPolicy,
+) -> Result<EventVerdict, CalcError> {
+    event_action(editor, name, Trigger::Keystroke, event.clone(), policy)
+}
+
+/// Offers a committed value to a field's `/AA /V` validate action
+/// (12.6.4.16 table 196).
+///
+/// `Ok(EventVerdict::Accepted(value))` for a field that carries no validate action:
+/// a form that does not check a value has accepted it.
+///
+/// # Errors
+///
+/// The same set [`keystroke`] returns, with [`Trigger::Validate`] in the
+/// refusal.
+pub fn validate(
+    editor: &DocumentEditor,
+    name: &str,
+    value: &str,
+    policy: ScriptPolicy,
+) -> Result<EventVerdict, CalcError> {
+    let event = Keystroke {
+        change: value.to_string(),
+        ..Keystroke::default()
+    };
+    event_action(editor, name, Trigger::Validate, event, policy)
+}
+
+/// The one implementation behind both events.
+///
+/// The host is **read-only** — `StagedHost::new(&fields, false)`, the same
+/// door a format action gets — so an event script that tries to write a field
+/// is [`ScriptError::FieldRefused`]. A keystroke that changes data as a side
+/// effect of being typed is a defect wherever it appears, and this module's
+/// only way into the document is the all-or-nothing apply a recalculation
+/// makes.
+fn event_action(
+    editor: &DocumentEditor,
+    name: &str,
+    trigger: Trigger,
+    event: Keystroke,
+    policy: ScriptPolicy,
+) -> Result<EventVerdict, CalcError> {
+    let mut bytes = ScriptBudget::new();
+    let fields = editor.fields_within(&mut bytes);
+    let Some(field) = fields.iter().find(|f| f.name == name) else {
+        return Err(CalcError::NoSuchField);
+    };
+    let current = field.value.as_text();
+    let carried = match trigger {
+        Trigger::Keystroke => field.scripts.keystroke.as_ref(),
+        _ => field.scripts.validate.as_ref(),
+    };
+    let source = match carried {
+        Some(Script::Source(text)) => text.as_str(),
+        Some(Script::Oversize(_)) => {
+            return Err(CalcError::Script {
+                field: field.name.clone(),
+                reason: ScriptError::TooLong,
+            })
+        }
+        // Nothing to consult: a keystroke stands as it was offered, and a
+        // value nothing checks has been accepted.
+        None => return Ok(EventVerdict::Accepted(event.change)),
+    };
+    if !policy.allows(trigger) {
+        return Err(CalcError::Refused {
+            trigger,
+            subject: field.name.clone(),
+        });
+    }
+    let scope = helpers(editor, policy, &mut bytes)?;
+
+    // 12.6.4.16 table 196: a validate action's `event.value` is the value
+    // being committed, and a keystroke's is the field as it stands with
+    // `event.change` holding what is being typed into it.
+    let raw = match trigger {
+        Trigger::Keystroke => script::Event {
+            value: current,
+            change: event.change.clone(),
+            selection: event.selection,
+            will_commit: event.will_commit,
+        },
+        _ => script::Event {
+            value: event.change.clone(),
+            ..script::Event::default()
+        },
+    };
+
+    let mut host = StagedHost::new(&fields, false);
+    let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+    let outcome = script::run_event(source, &field.name, &raw, &mut host, &mut budget, &scope)
+        .map_err(|reason| CalcError::Script {
+            field: field.name.clone(),
+            reason,
+        })?;
+    if !outcome.accepted {
+        return Ok(EventVerdict::Refused);
+    }
+    Ok(EventVerdict::Accepted(match trigger {
+        // A keystroke action may rewrite what is being typed, which is how
+        // every "digits only" field in the wild works.
+        Trigger::Keystroke => outcome.change.unwrap_or(event.change),
+        _ => outcome.value.unwrap_or(event.change),
+    }))
 }
 
 /// The text a field's format action would display, without changing anything.

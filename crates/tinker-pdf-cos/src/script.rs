@@ -1469,7 +1469,32 @@ enum Flow {
 enum Place {
     Var(String),
     EventValue,
+    /// `event.change` — a keystroke action rewriting what is being typed.
+    EventChange,
+    /// `event.rc` — the verdict a keystroke or validate action delivers.
+    EventReturn,
     Field(String),
+}
+
+/// What the `event` object holds when a run starts (12.6.4.16 table 196).
+///
+/// A calculate or format action only ever needs `value`, which is why [`run`]
+/// takes one string. A keystroke or validate action needs the rest, and needs
+/// them from the host: this engine has no caret and no typing, so a selection
+/// and a commit flag are facts the caller states rather than facts the
+/// interpreter could invent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Event {
+    /// `event.value` — the field's value the event runs against.
+    pub value: String,
+    /// `event.change` — the text being inserted. Empty for a deletion.
+    pub change: String,
+    /// `event.selStart` and `event.selEnd`, in that order. JavaScript's own
+    /// convention of `-1` for "no selection" is the caller's to use.
+    pub selection: (i64, i64),
+    /// `event.willCommit` — whether this is the commit at the end of typing
+    /// rather than one keystroke inside it.
+    pub will_commit: bool,
 }
 
 struct Interp<'h, H: Host> {
@@ -1486,6 +1511,17 @@ struct Interp<'h, H: Host> {
     target: String,
     event_value: Value,
     event_assigned: bool,
+    /// `event.change`, and whether the script rewrote it. A keystroke action
+    /// that changes what is being typed is the one legitimate way a script
+    /// alters an event, and the difference between "left alone" and "set to
+    /// the same thing" is one a caller can act on.
+    event_change: Value,
+    event_change_assigned: bool,
+    /// `event.rc` — true until a script says otherwise, which is the whole
+    /// verdict a keystroke or validate action delivers.
+    event_rc: bool,
+    selection: (i64, i64),
+    will_commit: bool,
     wrote: Vec<String>,
 }
 
@@ -1499,6 +1535,13 @@ pub struct Outcome {
     /// The fields the script wrote directly, through
     /// `getField("x").value = ...`, in the order it wrote them.
     pub wrote: Vec<String>,
+    /// The text `event.change` was left holding, when the script assigned it.
+    /// `None` means the keystroke stands as the host offered it.
+    pub change: Option<String>,
+    /// `event.rc`. False means the script refused the keystroke or the value
+    /// (12.6.4.16 table 196), which is the verdict and not an error: a
+    /// validate action saying no is the action working.
+    pub accepted: bool,
 }
 
 /// Runs one script against a host.
@@ -1552,6 +1595,35 @@ pub fn run_in(
     budget: &mut Budget,
     scope: &ScriptScope,
 ) -> Result<Outcome, ScriptError> {
+    let event = Event {
+        value: current.to_string(),
+        ..Event::default()
+    };
+    run_event(source, target, &event, host, budget, scope)
+}
+
+/// The same run, against a whole [`Event`].
+///
+/// A calculate or format action only ever reads `event.value`, which is why
+/// [`run`] and [`run_in`] take one string. A keystroke or validate action
+/// (12.6.4.16 table 196) reads `event.change`, the selection and
+/// `event.willCommit`, and answers through `event.rc` — so those need an
+/// event a host built, because this engine has no caret and no typing and
+/// could not invent one.
+///
+/// # Errors
+///
+/// Everything [`run_in`] can return. A script setting `event.rc = false` is
+/// **not** an error: a validate action saying no is the action working, and
+/// it comes back as [`Outcome::accepted`].
+pub fn run_event(
+    source: &str,
+    target: &str,
+    event: &Event,
+    host: &mut impl Host,
+    budget: &mut Budget,
+    scope: &ScriptScope,
+) -> Result<Outcome, ScriptError> {
     let toks = lex(source)?;
     let mut parser = Parser {
         toks: &toks,
@@ -1567,8 +1639,15 @@ pub fn run_in(
         scope,
         calling: Vec::new(),
         target: target.to_string(),
-        event_value: Value::Str(current.to_string()),
+        event_value: Value::Str(event.value.clone()),
         event_assigned: false,
+        event_change: Value::Str(event.change.clone()),
+        event_change_assigned: false,
+        // 12.6.4.16 table 196: `rc` starts true, and a script that never
+        // touches it has accepted.
+        event_rc: true,
+        selection: event.selection,
+        will_commit: event.will_commit,
         wrote: Vec::new(),
     };
     for stmt in &program {
@@ -1582,9 +1661,16 @@ pub fn run_in(
     } else {
         None
     };
+    let change = if interp.event_change_assigned {
+        Some(to_storable(&interp.event_change)?)
+    } else {
+        None
+    };
     Ok(Outcome {
         value,
         wrote: interp.wrote,
+        change,
+        accepted: interp.event_rc,
     })
 }
 
@@ -1818,6 +1904,18 @@ impl<H: Host> Interp<'_, H> {
                 "value" => Ok(self.event_value.clone()),
                 "target" => Ok(Value::Field(self.target.clone())),
                 "targetName" => Ok(Value::Str(self.target.clone())),
+                // 12.6.4.16 table 196. Everything else on the event needs a
+                // viewer to mean anything — `event.source`, `event.modifier`,
+                // `event.shift` — and an unknown member is refused rather
+                // than answered `undefined`, which is what stops a keystroke
+                // script quietly taking the wrong branch.
+                "change" => Ok(self.event_change.clone()),
+                "rc" => Ok(Value::Bool(self.event_rc)),
+                #[allow(clippy::cast_precision_loss)]
+                "selStart" => Ok(Value::Num(self.selection.0 as f64)),
+                #[allow(clippy::cast_precision_loss)]
+                "selEnd" => Ok(Value::Num(self.selection.1 as f64)),
+                "willCommit" => Ok(Value::Bool(self.will_commit)),
                 _ => Err(ScriptError::UnknownMember),
             },
             Value::Field(field) => match name {
@@ -1873,6 +1971,12 @@ impl<H: Host> Interp<'_, H> {
                 let base = self.eval(base)?;
                 match (&base, name.as_str()) {
                     (Value::Event, "value") => Ok(Place::EventValue),
+                    (Value::Event, "change") => Ok(Place::EventChange),
+                    (Value::Event, "rc") => Ok(Place::EventReturn),
+                    // `selStart`, `selEnd` and `willCommit` are readable and
+                    // not writable: a host with no caret has nowhere to put a
+                    // selection a script moved, and accepting the write would
+                    // be the silent approximation this subset refuses.
                     (Value::Field(field), "value") => Ok(Place::Field(field.clone())),
                     (Value::Null, _) => Err(ScriptError::NoSuchField),
                     _ => Err(ScriptError::NotAssignable),
@@ -1886,6 +1990,8 @@ impl<H: Host> Interp<'_, H> {
         match place {
             Place::Var(name) => self.name(name),
             Place::EventValue => Ok(self.event_value.clone()),
+            Place::EventChange => Ok(self.event_change.clone()),
+            Place::EventReturn => Ok(Value::Bool(self.event_rc)),
             Place::Field(field) => {
                 let handle = Value::Field(field.clone());
                 self.member(&handle, "value")
@@ -1904,6 +2010,15 @@ impl<H: Host> Interp<'_, H> {
             Place::EventValue => {
                 self.event_value = value;
                 self.event_assigned = true;
+                Ok(())
+            }
+            Place::EventChange => {
+                self.event_change = value;
+                self.event_change_assigned = true;
+                Ok(())
+            }
+            Place::EventReturn => {
+                self.event_rc = truthy(&value);
                 Ok(())
             }
             Place::Field(field) => {
@@ -2159,6 +2274,29 @@ fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, ScriptError> 
                 return Err(ScriptError::StringTooLong);
             }
             return Ok(Value::Str(text));
+        }
+    }
+    // 11.8.5: when **both** operands are strings the relational operators
+    // compare code unit by code unit, and only otherwise by number.
+    //
+    // This engine compared by number in every case until keystroke actions
+    // arrived, and the idiom that found it is the commonest keystroke script
+    // there is: `event.change >= '0' && event.change <= '9'`. Under numeric
+    // comparison `'!'` is `NaN`, every comparison against it is false, and a
+    // digits-only field silently accepts or silently refuses everything
+    // depending on which way its author wrote the test — a construct
+    // approximated rather than refused, which is what this subset is written
+    // against. The ordering here is by code point rather than by UTF-16 code
+    // unit, and the two differ only between an astral character and
+    // U+E000..U+FFFF — said rather than left to be discovered.
+    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+        if let (Value::Str(x), Value::Str(y)) = (left, right) {
+            return Ok(Value::Bool(match op {
+                BinOp::Lt => x < y,
+                BinOp::Le => x <= y,
+                BinOp::Gt => x > y,
+                _ => x >= y,
+            }));
         }
     }
     let (a, b) = (to_number(left), to_number(right));
@@ -3115,6 +3253,132 @@ mod tests {
                 );
                 assert_eq!(denied.allows(other), other != trigger, "{other} after deny");
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
+
+    /// 11.8.5: two strings compare code unit by code unit, and only otherwise
+    /// by number.
+    ///
+    /// This engine compared by number in every case until keystroke actions
+    /// arrived. What found it is the commonest keystroke script there is —
+    /// `event.change >= '0' && event.change <= '9'` — under which `'!'` is
+    /// `NaN`, every comparison against it is false, and a digits-only field
+    /// silently accepts everything.
+    #[test]
+    fn two_strings_compare_as_strings_and_a_mixed_pair_as_numbers() {
+        assert_eq!(
+            value_of("event.value = 'a' < 'b';"),
+            Ok(Some("true".into()))
+        );
+        assert_eq!(
+            value_of("event.value = '!' < '0';"),
+            Ok(Some("true".into()))
+        );
+        assert_eq!(
+            value_of("event.value = 'z' > '9';"),
+            Ok(Some("true".into()))
+        );
+        assert_eq!(
+            value_of("event.value = '10' < '9';"),
+            Ok(Some("true".into())),
+            "string order, not numeric: '1' precedes '9'"
+        );
+        // One number on either side and it is arithmetic again, which is what
+        // keeps `getField('a').value > 500` meaning what it says.
+        assert_eq!(
+            value_of("event.value = '10' < 9;"),
+            Ok(Some("false".into()))
+        );
+        assert_eq!(value_of("event.value = 10 > '9';"), Ok(Some("true".into())));
+    }
+
+    /// The event object a keystroke action reads, and the verdict it leaves.
+    #[test]
+    fn an_event_carries_the_change_the_selection_and_the_verdict() {
+        let mut host = Fields::with(&[("total", "abc")]);
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        let event = Event {
+            value: "abc".to_string(),
+            change: "d".to_string(),
+            selection: (1, 2),
+            will_commit: true,
+        };
+        let outcome = run_event(
+            "event.change = event.change + event.selStart + event.selEnd + event.willCommit;",
+            "total",
+            &event,
+            &mut host,
+            &mut budget,
+            &ScriptScope::empty(),
+        )
+        .expect("it runs");
+        assert_eq!(outcome.change, Some("d12true".to_string()));
+        assert!(outcome.accepted, "rc is true until a script says otherwise");
+        assert_eq!(outcome.value, None, "event.value was never touched");
+    }
+
+    #[test]
+    fn a_script_that_clears_rc_has_refused() {
+        let mut host = Fields::default();
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        let outcome = run_event(
+            "if (event.rc) { event.rc = false; }",
+            "total",
+            &Event::default(),
+            &mut host,
+            &mut budget,
+            &ScriptScope::empty(),
+        )
+        .expect("it runs");
+        assert!(!outcome.accepted);
+    }
+
+    /// The three event members a host states and a script may not move: a
+    /// reader has no caret to put a selection back into.
+    #[test]
+    fn the_selection_and_the_commit_flag_are_read_only() {
+        for source in [
+            "event.selStart = 0;",
+            "event.selEnd = 0;",
+            "event.willCommit = true;",
+        ] {
+            let mut host = Fields::default();
+            let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+            assert_eq!(
+                run_event(
+                    source,
+                    "total",
+                    &Event::default(),
+                    &mut host,
+                    &mut budget,
+                    &ScriptScope::empty(),
+                ),
+                Err(ScriptError::NotAssignable),
+                "{source}"
+            );
+        }
+    }
+
+    /// An event member outside the subset is refused rather than answered
+    /// `undefined`, which is what stops a keystroke script quietly taking the
+    /// wrong branch.
+    #[test]
+    fn an_event_member_outside_the_subset_is_refused() {
+        for source in [
+            "event.value = event.modifier;",
+            "event.value = event.shift;",
+            "event.value = event.source;",
+            "event.value = event.commitKey;",
+        ] {
+            assert_eq!(
+                value_of(source),
+                Err(ScriptError::UnknownMember),
+                "{source}"
+            );
         }
     }
 

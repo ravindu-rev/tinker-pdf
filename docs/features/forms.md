@@ -212,6 +212,43 @@ distinction is deliberate: a document-level script is not something the pass
 is asked to run but a resource it may consult, and refusing would make every
 form carrying a `/Names /JavaScript` block uncomputable under the default.
 
+**Keystroke and validate need an event, so they are entry points rather
+than something a pass fires.** A calculate action runs against the document as
+it stands; a keystroke action runs against what is being typed, where the
+caret is, and whether this is the commit at the end — three facts a host has
+and a reader does not — and a validate action runs against a value somebody
+committed. That, and not any limit of the interpreter, is why both sat
+surfaced-and-never-run. `DocumentEditor::keystroke(field, event, policy)` and
+`DocumentEditor::validate(field, value, policy)` take an event a host built
+and answer an `EventVerdict`: `Accepted(text)` — which for a keystroke is
+`event.change` as the script left it, because a keystroke action rewriting
+what is being typed is how every digits-only field in the wild works — or
+`Refused`. A refusal is the action **working**, never an error: a form that
+rejects a date in the wrong century is doing its job, and `CalcError` is
+reserved for scripts that could not run at all. A field carrying no action of
+that class accepts, under every policy, because there is nothing to consult.
+Both run against the read-only host a format action gets, so an event script
+that tries to write a field is `ScriptError::FieldRefused`.
+
+**A computed value goes through its own validate action** (12.7.2), at the
+last moment in the pass when nothing has been written. A refusal aborts the
+**whole** pass — `CalcError::Invalid`, naming the field and the value —
+because a form whose validation rejects one total and whose other nine were
+written anyway is a document that disagrees with itself. Under a policy that
+denies validation the pass still runs and `Recalculation::refused` names every
+field it wrote **without** checking: ruling 10 applied to a check rather than
+a repair, since a pass that silently skipped a form's own validation reads
+exactly like a pass over a form that has none.
+
+**Two strings compare as strings** (11.8.5). This engine compared every
+relational operator by number until the keystroke entry point arrived, and
+what found it is the commonest keystroke script there is —
+`event.change >= '0' && event.change <= '9'`, under which `'!'` is `NaN`,
+every comparison against it is false, and a digits-only field silently accepts
+everything. Both operands strings compares by code point; anything else is
+still arithmetic, which is what keeps `getField('a').value > 500` meaning what
+it says.
+
 **Which scripts run is a policy, and it is a type.** `ScriptPolicy` names
 the six trigger classes a document's scripts arrive under — `Calculate`
 (`/AA` `/C`), `Format` (`/F`), `Keystroke` (`/K`), `Validate` (`/V`),
@@ -260,11 +297,13 @@ Mutation goes through `Document::editor()`, a `DocumentEditor`:
 `fill_field`, `set_field_values`, `set_field_value`, `set_checkbox`,
 `select_radio`, `reset_form`, `transaction`, `recalculate`, and
 `set_calculated_values` for a host that computes values itself.
-`recalculate_under` takes a `ScriptPolicy`. The format event is
+`recalculate_under` takes a `ScriptPolicy`, and `keystroke` and `validate`
+are the two event entry points. The format event is
 `tinker_pdf_cos::calc::formatted_value`, with `formatted_value_under`
 beside it. The facade re-exports
 `FillError`, `FillRejection`, `SkippedWidget`, `WidgetDefect`, `CalcError`,
-`Recalculation` and `ScriptError` (ruling 11).
+`Recalculation`, `ScriptError`, `ScriptPolicy`, `Trigger`, `ScriptScope`,
+`ScriptBudget`, `Keystroke` and `EventVerdict` (ruling 11).
 
 ```rust
 let doc = Document::open(bytes)?;
@@ -299,10 +338,13 @@ let bytes = editor.save(&WriteOptions::default());
 | Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
 | A CID no code means any more — a `cidchar` took the code its `cidrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
-| A trigger class the policy denies — keystroke, validate, document-level and catalog by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | [ROADMAP](../ROADMAP.md) Tier 4 |
+| A trigger class the policy denies — keystroke, validate and document-level by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | — |
+| A computed value a field's own `/AA /V` refuses | `CalcError::Invalid { field, value }`, and the whole pass writes nothing | one total rejected and nine written anyway is a document that disagrees with itself | — |
+| A validate action the policy would not run, over a value the pass wrote anyway | `Recalculation::refused` names the field | a skipped check reads exactly like a form that has none, and the difference is whether the numbers were looked at (ruling 10) | — |
+| A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | — |
 | A format action's display string reaching `/V` | none offered — `formatted_value` returns the string and writes nothing | 12.7.3.3 keeps value and appearance apart | [ROADMAP](../ROADMAP.md) Tier 4 |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
-| Signature verification and signing | `Document::signatures()` reads the dictionary, classifies what `/ByteRange` covers and digests it; nothing **verifies** the CMS blob or the certificate chain yet | verify-only cryptography is its own capability, designed separately — the inventory is milestone 1 of it | [ROADMAP](../ROADMAP.md) Tier 3, [design](../design/signatures.md) |
+| Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md) |
 | XFA | not read anywhere | removed in ISO 32000-2; a stated permanent non-goal | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -362,6 +404,16 @@ that tries to take a builtin's name, and the catalog trigger changing no
 answer anywhere are each asserted by name. Its header carries the same six
 flips: `document` fires 3 of 13 here, where `form_calculations.rs` reports a
 zero.
+
+`crates/tinker-pdf-cos/tests/form_events.rs` (13 tests) covers the two
+actions that need an event: a keystroke accepted, refused and rewritten; the
+selection and commit flag a host states and a script may not move; the
+default policy refusing both by name; a field with no action accepting under
+every policy; an event script refused a write; a validation that aborts a
+whole pass and one that is named as never having run. Its header explains why
+the keystroke and validate flips are 1 and 2 of 13 rather than more — most of
+the file passes an explicit policy, which a change to the default cannot
+reach.
 
 `form_script` is one of the 24 fuzz targets, with a committed seed corpus:
 it drives the lexer, parser and evaluator with arbitrary text against a
