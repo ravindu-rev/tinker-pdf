@@ -68,12 +68,23 @@ published vectors, against a panic or an overread on untrusted structure), and
 tables are read in `shape` because `font`'s charter is the tables *metrics*
 need — a lookup is not a metric).
 
-One more edge points down *out* of a non-leaf and is listed here because it
-used to be counted among the four above, which it never was: `cos → font`,
-reading a font *dictionary* — `/Encoding`, `/ToUnicode`, standard-14 metrics
-— is object-model work that needs the leaf's CMap parser and encoding tables,
-and a crate whose only job is to hold two tables would be worse. `cos` is not
-a leaf, so that edge is not leaf-to-leaf however useful it is.
+**Two** more edges point down *out* of a non-leaf, and they are listed here
+because the first of them used to be counted among the leaf-to-leaf edges,
+which it never was. Both come from `cos`, and both make the same argument:
+
+- `cos → font` — reading a font *dictionary* (`/Encoding`, `/ToUnicode`,
+  standard-14 metrics) is object-model work that needs the leaf's CMap parser
+  and encoding tables, and a crate whose only job is to hold two tables would
+  be worse.
+- `cos → pki` — reading a `/Recipients` envelope (7.6.5) is object-model work
+  that needs a DER parser. The alternative was putting the public-key handler
+  in the facade, which already depends on both crates, and it was rejected on
+  what it would cost: installing a decryptor is `CosDocument`'s own operation,
+  so a facade-level handler needs `set_decryptor_with_key` to become public —
+  and a public "install this decryptor on an opened document" is a hole with
+  no floor under it, offered so that a dependency edge could be avoided.
+
+`cos` is not a leaf, so neither edge is leaf-to-leaf however useful it is.
 
 The graph cannot cycle, because `filters` depends on nothing.
 
