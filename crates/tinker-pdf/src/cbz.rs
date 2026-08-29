@@ -31,7 +31,12 @@
 //! Synthesis happens whole at open, so whatever a page holds is held for the
 //! document's life. A JPEG is placed verbatim ([`ImageData::Jpeg`]) and a PNG
 //! goes through [`png_image`], whose default route copies the IDAT into a
-//! `/FlateDecode` stream with `/Predictor 15` and never builds a raster.
+//! `/FlateDecode` stream with `/Predictor 15` and never builds a raster. A
+//! TIFF goes through [`tiff_image`], which does the same thing for four more
+//! codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW strip is a
+//! `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, and a JPEG strip is
+//! `/DCTDecode` — so a scanned comic costs its own bytes rather than its own
+//! pixels, the same as every other entry here.
 //! Decoding every page instead would cost *w x h x 3* each — about 3.6 GB for
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
@@ -60,7 +65,9 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use tinker_pdf_cos::{png_image, DocumentBuilder, ImageData, PngImageData};
+use tinker_pdf_cos::{
+    png_image, tiff_image, DocumentBuilder, ImageData, PngImageData, TiffImageData,
+};
 use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_zip::{Archive, ArchiveError, Entry};
 
@@ -449,7 +456,9 @@ pub enum ImageFormat {
     WebP,
     /// Windows bitmap. Not read here.
     Bmp,
-    /// TIFF, either byte order. Not read here.
+    /// TIFF, either byte order. Read — see [`tiff_image`], which places a
+    /// single-strip G3, G4, LZW, DEFLATE or JPEG file's own bytes and decodes
+    /// the rest.
     Tiff,
     /// AVIF. Not read here.
     Avif,
@@ -1129,6 +1138,8 @@ enum Content<'a> {
     Jpeg(Cow<'a, [u8]>),
     /// A PNG, through gap 29 milestone 4's chooser.
     Png(Box<PngImageData>),
+    /// A TIFF, through the chooser that is that one's sibling.
+    Tiff(Box<TiffImageData>),
     /// Nothing usable; the page is the neutral placeholder.
     Placeholder,
 }
@@ -1268,6 +1279,7 @@ pub fn pages_from_archive(
         let drawn = match &plan.content {
             Content::Jpeg(data) => builder.add_image(IMAGE_RESOURCE, &ImageData::Jpeg(data)),
             Content::Png(png) => builder.add_image(IMAGE_RESOURCE, &png.image()),
+            Content::Tiff(tiff) => builder.add_image(IMAGE_RESOURCE, &tiff.image()),
             Content::Placeholder => false,
         };
 
@@ -1384,11 +1396,38 @@ fn plan_entry<'a>(
             }
             let size = (f64::from(png.width()), f64::from(png.height()));
             let degraded = !png.complete();
-            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&png));
+            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&png.image()));
             Some(Plan {
                 name: entry.name.clone(),
                 size: Some(size),
                 content: Content::Png(Box::new(png)),
+                defect: None,
+                degraded,
+                charge,
+            })
+        }
+        ImageFormat::Tiff => {
+            // The same ceiling the PNG route takes, for the same reason: the
+            // largest entry this build will read out of an archive is the most
+            // a page's raster may be, and it is the *caller's* number, which is
+            // what `ExceedsOutputLimit` carries back.
+            //
+            // It binds only the decoded route. A single-strip G4 page — the
+            // shape a scanned comic actually has — builds no raster at all, so
+            // a page far past this ceiling still opens.
+            let Ok(tiff) = tiff_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)) else {
+                return Some(placeholder(PageDefect::Undecodable));
+            };
+            if tiff.width() == 0 || tiff.height() == 0 {
+                return Some(placeholder(PageDefect::Undecodable));
+            }
+            let size = (f64::from(tiff.width()), f64::from(tiff.height()));
+            let degraded = !tiff.complete();
+            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&tiff.image()));
+            Some(Plan {
+                name: entry.name.clone(),
+                size: Some(size),
+                content: Content::Tiff(Box::new(tiff)),
                 defect: None,
                 degraded,
                 charge,
@@ -1401,15 +1440,18 @@ fn plan_entry<'a>(
     }
 }
 
-/// How many bytes a prepared PNG will put in the file.
-fn embedded_len(png: &PngImageData) -> usize {
-    match png.image() {
+/// How many bytes a prepared image will put in the file.
+///
+/// Takes the [`ImageData`] rather than the preparer's own type, because both
+/// preparers produce the same shape and the charge is a fact about the bytes.
+fn embedded_len(image: &ImageData<'_>) -> usize {
+    match image {
         ImageData::Compressed(image) => image
             .data
             .len()
-            .saturating_add(image.soft_mask.map_or(0, |m| m.data.len())),
-        // `png_image` builds nothing else, and a shape that costs nothing to
-        // charge for is one that has not been written yet.
+            .saturating_add(image.soft_mask.as_ref().map_or(0, |m| m.data.len())),
+        // Neither preparer builds anything else, and a shape that costs nothing
+        // to charge for is one that has not been written yet.
         _ => 0,
     }
 }

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 7f8f8d69a5b2f5bfce36a58b752178ae0564f18196f57d82af31e71bcb941cd7 # shrinks to data = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], chain = [], cap = 0
+cc fd65daf107b16e484bb9147bfb1868b169a9aa8c2e0f831792e5ebce82ad950c # shrinks to data = [169, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], expected = 89, cap = 89

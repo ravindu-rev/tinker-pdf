@@ -56,6 +56,40 @@ expressed that way, so they take the decoder and are split into samples and an
 multiple of its own size to open, not *w × h × 3* per page — about 3.6 GB for
 200 pages at 2000 × 3000, had every page been decoded.
 
+**And a TIFF is four more of the same argument.** Four of TIFF 6.0's codings
+already have a `/Filter` name, so a single-strip file of any of them is placed
+rather than decoded: compressions 2, 3 and 4 become `/CCITTFaxDecode` with
+Table 11 filled in from the directory's own `T4Options` and geometry, 5 becomes
+`/LZWDecode` (§13's LZW is 7.4.4's, `/EarlyChange 1` included), 7 becomes
+`/DCTDecode` with `JPEGTables` spliced in front, and 8 and 32946 become
+`/FlateDecode`, with `/Predictor 2` where the file used one — which is the same
+Table 10 predictor PDF calls "TIFF horizontal differencing" because that is
+where it came from. A scanned comic is a G4 fax, and a G4 fax reaches the page
+as its own bytes.
+
+What sends a TIFF to the decoder is a shorter list than it looks:
+`PhotometricInterpretation` 0 outside the fax codings (it needs `/Decode [1 0]`,
+which the writer's compressed-image path does not carry), `PlanarConfiguration`
+2, `FillOrder` 2, `ExtraSamples` (PDF wants a separate `/SMask`), tiles (an
+edge tile is stored padded out to the tile size), 16-bit samples in an `II`
+file (8.9.5.2's are big-endian), PackBits (7.4.5 reads the byte 128 as
+end-of-data where TIFF 6.0 §9 reads it as a no-op, so a PackBits strip is not a
+`/RunLengthDecode` stream), LZW in the pre-1993 bit order, and **more than one
+strip**. That last one is decided per filter rather than waved at, and all four
+filters say no for four different reasons: a second CCITT strip would be coded
+against the first's last row, a second LZW strip is past an EndOfInformation
+code, a second zlib header would be read as compressed data, and two JPEG
+datastreams end to end are not a JPEG. It costs less than it sounds, because
+`RowsPerStrip` defaults to 2^32-1 (TIFF 6.0 p.39) and a writer that does not
+set it has written exactly one strip.
+
+One thing the TIFF pass-through gives up is written down rather than absorbed.
+A PNG carries a CRC-32 on every chunk, so the pass-through can check the bytes
+it copies; **a TIFF carries no checksum at all**, so `complete()` on the placed
+route is a claim about the file's structure and not about its bytes. The
+archive's own CRC-32 over the whole entry is what stands behind them, which is
+the same guarantee a placed JPEG has.
+
 **Order and geometry.** Pages come in natural order over the full stored path
 — `page2` before `page10` — in byte arithmetic with no locale anywhere, so the
 order is the same on every target (ruling 4). Lexicographic order fails
@@ -155,13 +189,13 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | Past a bound | `ArchiveRefusal::TooLarge` | `MAX_CBZ_PAGES`, `MAX_SYNTHESISED_PDF`, or one of the archive reader's own | — |
 | One encrypted or checksum-failed entry | `PageDefect::EntryRefused(ZipEntryError)` | placeholder page; the page count and every number after it are unchanged | — |
 | Compression method other than stored/deflated | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, bzip2, LZMA, Zstandard — named by code so a refusal says which | — |
-| GIF, WebP, BMP, TIFF, AVIF, JPEG 2000 entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
-| A JPEG or PNG that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a raster past the ceiling | — |
+| GIF, WebP, BMP, AVIF, JPEG 2000 entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
+| A JPEG, PNG or TIFF that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a raster past the ceiling | [filters](filters.md) |
 | `ComicInfo.xml` | *(none — skipped by design)* | metadata is neither a page nor a warning; reading it is a named non-goal | [roadmap](../ROADMAP.md) |
 
 ## Verified
 
-- `crates/tinker-pdf/tests/cbz.rs` — 33 tests over what the synthesis alone
+- `crates/tinker-pdf/tests/cbz.rs` — 38 tests over what the synthesis alone
   owns: the fixed-position sniff (a PDF carrying `PK\x03\x04` in a stream
   stays a PDF), natural order, pass-through, placeholders, and the bounds —
   `a_page_count_past_the_cap_is_refused_by_name` builds a real 4 097-entry
@@ -169,6 +203,13 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   `the_synthesised_document_fits_inside_what_was_charged_for_it` measures the
   page-overhead charge against documents of 1 to 200 pages. Pictures are
   asserted against literal expected pixels, not only against another render.
+  Five of the 38 are the TIFF route, and the one worth naming is
+  `a_placed_tiff_renders_the_same_as_a_decoded_one`: the same picture as one
+  G4 strip and as two, which is one `/CCITTFaxDecode` stream carrying the
+  file's own bytes against one `/FlateDecode` stream of eight-bit samples —
+  two dictionaries, two filters, two bit depths, and **0 pixels different**.
+  Both sides are held to the literal pattern as well, because two identical
+  blank pages compare equal.
 - `crates/tinker-pdf/tests/cbz_validated.rs` — the synthesised document and
   the same document saved back are both held to the strict validator, and the
   pages are read out of the catalog's own `/Kids` rather than through the
@@ -206,5 +247,10 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take.
   Two of the 24 targets.
+<<<<<<< HEAD
 - The whole workspace: `cargo test --workspace` is 2 963 passed, 0 failed,
   8 ignored (Windows x86_64, as of August 2026).
+=======
+- The whole workspace: `cargo test --workspace` is 3 024 passed, 0 failed,
+  9 ignored across 123 suites (Windows x86_64, as of August 2026).
+>>>>>>> worktree-agent-a7a43abb09bfb795e

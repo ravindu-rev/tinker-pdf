@@ -37,9 +37,11 @@ mod jpeg;
 mod jpx;
 mod lzw;
 pub mod mq;
+mod packbits;
 mod png;
 mod predictors;
 mod runlength;
+mod tiff;
 
 use core::fmt;
 
@@ -56,6 +58,10 @@ pub use png::{
     PngImage, PngScan, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
+pub use tiff::{
+    tiff_decode, tiff_scan, TiffCcitt, TiffColour, TiffCompression, TiffError, TiffImage,
+    TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan, MAX_TIFF_SAMPLES,
+};
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
 /// gigabytes, and a lenient decoder without a ceiling is a denial-of-service
@@ -196,6 +202,13 @@ pub enum Warning {
     /// keep to.
     Jbig2SymbolLimitHit,
 
+    /// PackBits (TIFF 6.0 §9): the -128 tag, which §9 calls a no-op and 7.4.5
+    /// calls an end marker. It was skipped, not obeyed.
+    PackBitsNoOp,
+    /// PackBits: a literal or replicate run reached past the byte count the
+    /// caller expected; the excess was dropped.
+    PackBitsRunOverruns,
+
     // ---- JPEG 2000 (T.800) -----------------------------------------------
     //
     // Ten, and each of them is one *class* of refusal rather than one
@@ -261,6 +274,35 @@ pub enum Warning {
     /// declared a step size its own samples cannot justify.
     JpxCoefficientClamped,
 
+    // ---- TIFF 6.0 --------------------------------------------------------
+    //
+    // Seven, and every one of them is a *leniency* rather than a refusal:
+    // anything a TIFF can get wrong that costs meaning rather than pixels is a
+    // [`tiff::TiffError`], for the reason `png.rs` gives one line below.
+    /// TIFF: the LZW strip was packed least significant bit first and widened
+    /// its codes one code late — the pre-1993 encoders' form, which §13 does
+    /// not describe. It was repacked and decoded.
+    TiffOldStyleLzw,
+    /// TIFF: a strip or tile would not decode at all, so the rows it covers
+    /// are missing from the raster.
+    TiffSegmentUndecodable,
+    /// TIFF: the `NextIFD` chain pointed back at a directory already read, or
+    /// ran past the depth bound. The chain was cut there.
+    TiffDirectoryCycle,
+    /// TIFF: `SamplesPerPixel` was smaller than the
+    /// `PhotometricInterpretation` needs. The photometric won.
+    TiffSamplesPerPixelWrong,
+    /// TIFF: `FillOrder` 2 on a coding whose strips are a byte stream rather
+    /// than a bit stream. Reversing them would destroy the strip, so the tag
+    /// was ignored.
+    TiffFillOrderIgnored,
+    /// TIFF: every `ColorMap` value was at or below 255, so the map was read
+    /// as an 8-bit one rather than as the 16-bit one p.23 describes.
+    TiffColorMapIsEightBit,
+    /// TIFF: the file holds more than one image file directory. The first is
+    /// the image; the rest are not read.
+    TiffExtraPagesIgnored,
+
     // ---- PNG (ISO/IEC 15948) ---------------------------------------------
     //
     // Three, and every one of them is a *leniency* rather than a refusal.
@@ -314,8 +356,20 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
+<<<<<<< HEAD
             Self::Jbig2VariantSkipped => "jbig2-variant-skipped",
             Self::Jbig2SymbolLimitHit => "jbig2-symbol-limit-hit",
+=======
+            Self::PackBitsNoOp => "packbits-no-op",
+            Self::PackBitsRunOverruns => "packbits-run-overruns",
+            Self::TiffOldStyleLzw => "tiff-old-style-lzw",
+            Self::TiffSegmentUndecodable => "tiff-segment-undecodable",
+            Self::TiffDirectoryCycle => "tiff-directory-cycle",
+            Self::TiffSamplesPerPixelWrong => "tiff-samples-per-pixel-wrong",
+            Self::TiffFillOrderIgnored => "tiff-fill-order-ignored",
+            Self::TiffColorMapIsEightBit => "tiff-color-map-is-eight-bit",
+            Self::TiffExtraPagesIgnored => "tiff-extra-pages-ignored",
+>>>>>>> worktree-agent-a7a43abb09bfb795e
             Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
             Self::JpxMarkerUnknown => "jpx-marker-unknown",
             Self::JpxStructureInvalid => "jpx-structure-invalid",
@@ -357,8 +411,20 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
+<<<<<<< HEAD
             Self::Jbig2VariantSkipped => "JBIG2 coding variant not decoded here",
             Self::Jbig2SymbolLimitHit => "JBIG2 symbol dictionary past its bounds",
+=======
+            Self::PackBitsNoOp => "PackBits no-op tag skipped",
+            Self::PackBitsRunOverruns => "PackBits run past the expected byte count",
+            Self::TiffOldStyleLzw => "TIFF LZW strip in the pre-1993 bit order, repacked",
+            Self::TiffSegmentUndecodable => "TIFF strip or tile could not be decoded",
+            Self::TiffDirectoryCycle => "TIFF directory chain cycled or ran past its bound",
+            Self::TiffSamplesPerPixelWrong => "TIFF SamplesPerPixel below the photometric's need",
+            Self::TiffFillOrderIgnored => "TIFF FillOrder 2 on a byte-oriented coding, ignored",
+            Self::TiffColorMapIsEightBit => "TIFF ColorMap written at 8 bits rather than 16",
+            Self::TiffExtraPagesIgnored => "TIFF directories after the first are not read",
+>>>>>>> worktree-agent-a7a43abb09bfb795e
             Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
             Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
             Self::JpxStructureInvalid => "JPX codestream or box structure invalid",
@@ -579,6 +645,24 @@ pub fn ascii85_decode(input: &[u8], limits: &Limits) -> Decoded {
 pub fn run_length_decode(input: &[u8], limits: &Limits) -> Decoded {
     let mut w = Warnings::default();
     let (data, complete) = runlength::rle_bytes(input, limits, &mut w);
+    Decoded {
+        data,
+        complete,
+        warnings: w.into_vec(),
+    }
+}
+
+/// PackBits (TIFF 6.0 §9), the run-length scheme TIFF compression 32773 names.
+///
+/// **Not `/Filter` RunLengthDecode**, though the two are the same Macintosh
+/// scheme: 7.4.5 makes the byte 128 an end-of-data marker and §9 makes it a
+/// no-op, and §9 stops on a byte count where 7.4.5 stops on the marker. So
+/// `expected` — the bytes one strip is declared to hold — is a parameter here
+/// and does not exist there. See [`run_length_decode`] for the other one.
+#[must_use]
+pub fn packbits_decode(input: &[u8], expected: usize, limits: &Limits) -> Decoded {
+    let mut w = Warnings::default();
+    let (data, complete) = packbits::packbits_bytes(input, expected, limits, &mut w);
     Decoded {
         data,
         complete,

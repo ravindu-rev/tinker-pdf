@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use tinker_pdf_filters::CcittParams;
+
 use crate::dest::DestKind;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
@@ -172,6 +174,46 @@ pub enum ImageFilter {
         /// `/Columns`: samples per row.
         columns: u32,
     },
+    /// `/FlateDecode` with
+    /// `/DecodeParms << /Predictor 2 /Colors c /BitsPerComponent b /Columns w >>`.
+    ///
+    /// 7.4.4.4's predictor 2 is TIFF horizontal differencing, and Table 10
+    /// says so in those words - PDF took it from TIFF 6.0 p.64 whole, which is
+    /// why a `Compression` 8 strip with `Predictor` 2 is already a legal
+    /// `/FlateDecode` stream and needs no pixel work to become one.
+    FlateTiffPredictor {
+        /// `/Colors`: components per sample in the *encoded* data.
+        colors: u32,
+        /// `/BitsPerComponent`, as the predictor saw them.
+        bits_per_component: u32,
+        /// `/Columns`: samples per row.
+        columns: u32,
+    },
+    /// `/LZWDecode` over the samples directly, with no `/DecodeParms`.
+    ///
+    /// TIFF 6.0 section 13's LZW is 7.4.4's: nine to twelve bit codes, most
+    /// significant bit first, and the width switched one code early - which is
+    /// `/EarlyChange 1`, PDF's own default, so the parameter is not written.
+    /// The **other** LZW, the pre-1993 bit order, is not this and never
+    /// reaches here.
+    Lzw,
+    /// `/LZWDecode` with `/DecodeParms << /Predictor 2 ... >>`.
+    LzwTiffPredictor {
+        /// `/Colors`: components per sample in the *encoded* data.
+        colors: u32,
+        /// `/BitsPerComponent`, as the predictor saw them.
+        bits_per_component: u32,
+        /// `/Columns`: samples per row.
+        columns: u32,
+    },
+    /// `/CCITTFaxDecode` with Table 11's parameters, which are carried as the
+    /// filters crate's own struct rather than re-spelled here.
+    ///
+    /// Re-spelling them would mean two definitions of `/K`, and the one place
+    /// they could disagree - a `/Rows` that is the strip's rather than the
+    /// image's - is exactly the disagreement that produces a page with the
+    /// right dictionary and the wrong picture.
+    CcittFax(CcittParams),
 }
 
 /// Per-sample opacity, as the `/DeviceGray` sub-image 11.6.5.3 asks for.
@@ -239,11 +281,31 @@ const fn max_sample(bits: u8) -> u32 {
 /// geometry, so a disagreement is refused rather than written out.
 fn filter_describes(filter: Option<ImageFilter>, components: u32, bits: u8, width: u32) -> bool {
     match filter {
-        Some(ImageFilter::FlatePngPredictor {
-            colors,
-            bits_per_component,
-            columns,
-        }) => colors == components && bits_per_component == u32::from(bits) && columns == width,
+        Some(
+            ImageFilter::FlatePngPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            }
+            | ImageFilter::FlateTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            }
+            | ImageFilter::LzwTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            },
+        ) => colors == components && bits_per_component == u32::from(bits) && columns == width,
+        // 7.4.6: a fax is one bit per pixel and `/Columns` is the row length,
+        // so a `/CCITTFaxDecode` whose parameters disagree with the image
+        // dictionary describes a different raster from the one declared -
+        // which is the same failure `/Predictor`'s columns produce, one filter
+        // over.
+        Some(ImageFilter::CcittFax(p)) => {
+            components == 1 && bits == 1 && p.columns == width && p.rows > 0
+        }
         _ => true,
     }
 }
@@ -3651,21 +3713,42 @@ impl DocumentBuilder {
 
     /// Writes `/Filter` and, where the filter has any, `/DecodeParms`.
     fn insert_filter(&mut self, dict: &mut Dict, filter: ImageFilter) {
+        // Written as a match with no wildcard on purpose: a `_ =>` arm here
+        // would silently name the wrong filter for every variant added after
+        // it, and "the bytes are right and the `/Filter` is wrong" is a page
+        // that renders as noise rather than as an error.
         let name = match filter {
             ImageFilter::Dct => b"DCTDecode".as_slice(),
-            _ => b"FlateDecode",
+            ImageFilter::Flate
+            | ImageFilter::FlatePngPredictor { .. }
+            | ImageFilter::FlateTiffPredictor { .. } => b"FlateDecode",
+            ImageFilter::Lzw | ImageFilter::LzwTiffPredictor { .. } => b"LZWDecode",
+            ImageFilter::CcittFax(_) => b"CCITTFaxDecode",
         };
         dict.insert(Name::FILTER, Object::Name(self.names.intern(name)));
 
-        if let ImageFilter::FlatePngPredictor {
-            colors,
-            bits_per_component,
-            columns,
-        } = filter
-        {
+        let predictor = match filter {
+            ImageFilter::FlatePngPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            } => Some((15i64, colors, bits_per_component, columns)),
+            ImageFilter::FlateTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            }
+            | ImageFilter::LzwTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            } => Some((2, colors, bits_per_component, columns)),
+            _ => None,
+        };
+        if let Some((which, colors, bits_per_component, columns)) = predictor {
             let mut parms = Dict::new();
             // 7.4.4.4 Table 10, in the table's own order.
-            parms.insert(self.names.intern(b"Predictor"), Object::Int(15));
+            parms.insert(self.names.intern(b"Predictor"), Object::Int(which));
             parms.insert(self.names.intern(b"Colors"), Object::Int(i64::from(colors)));
             parms.insert(
                 self.names.intern(b"BitsPerComponent"),
@@ -3675,6 +3758,31 @@ impl DocumentBuilder {
                 self.names.intern(b"Columns"),
                 Object::Int(i64::from(columns)),
             );
+            dict.insert(Name::DECODE_PARMS, Object::Dict(parms));
+        }
+
+        if let ImageFilter::CcittFax(p) = filter {
+            // 7.4.6 Table 11, in the table's own order. Every entry is written
+            // rather than left to its default, because three of the defaults
+            // are wrong for a TIFF strip: `/Columns` is 1728, `/Rows` is 0 and
+            // `/EndOfBlock` is true where a strip carries no EOFB at all.
+            let mut parms = Dict::new();
+            parms.insert(self.names.intern(b"K"), Object::Int(i64::from(p.k)));
+            parms.insert(self.names.intern(b"EndOfLine"), Object::Bool(p.end_of_line));
+            parms.insert(
+                self.names.intern(b"EncodedByteAlign"),
+                Object::Bool(p.byte_align),
+            );
+            parms.insert(
+                self.names.intern(b"Columns"),
+                Object::Int(i64::from(p.columns)),
+            );
+            parms.insert(self.names.intern(b"Rows"), Object::Int(i64::from(p.rows)));
+            parms.insert(
+                self.names.intern(b"EndOfBlock"),
+                Object::Bool(p.end_of_block),
+            );
+            parms.insert(self.names.intern(b"BlackIs1"), Object::Bool(p.black_is_1));
             dict.insert(Name::DECODE_PARMS, Object::Dict(parms));
         }
     }

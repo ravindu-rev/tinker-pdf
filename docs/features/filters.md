@@ -161,6 +161,49 @@ with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
 `Crc32` for checksums over non-adjacent slices.
 
+**TIFF** (TIFF 6.0) is the second container decoder, and the argument for it
+being here rather than in a reader is arithmetic: of the seven codings a TIFF
+strip can be in, **six were already written for a `/Filter` name**. Compression
+2, 3 and 4 are `ccitt.rs` (the same T.4/T.6 decoder `/CCITTFaxDecode` uses),
+5 is `lzw.rs`, 7 is `jpeg.rs`, 8 and 32946 are `inflate.rs`, and `Predictor` 2
+is `predictors.rs`'s `/Predictor 2` — Table 10 calls it "TIFF horizontal
+differencing" because that is where PDF took it from. Only compression 32773,
+PackBits (§9), is new, and it is forty lines. What the module adds beyond the
+codecs is the part that is actually TIFF: both byte orders, the image file
+directory with a cycle guard on the `NextIFD` chain, strips and tiles
+(including edge tiles stored full size and padded), `PlanarConfiguration` 2,
+`PhotometricInterpretation` 0 through 3 with the inversion 0 asks for, and a
+`ColorMap` transposed out of p.23's three consecutive arrays into the RGB
+triples every other palette in this engine is. Output is
+[`PngImage`]'s shape deliberately — grey, grey+alpha, RGB or RGBA at 8 or 16
+bits — so a consumer that splits an alpha channel into an `/SMask` learns one
+layout rather than two. `tiff_scan` is `png_scan`'s counterpart: it walks the
+directory, locates every strip and hands them back **without decompressing
+one**, which is what the embed door's pass-through needs.
+
+That door is `tinker_pdf_cos::tiff_image`, `png_image`'s sibling, and it is
+where four of TIFF's codings stop being TIFF at all: compressions 2, 3 and 4
+become `/CCITTFaxDecode` with Table 11 filled in from the directory's own
+`T4Options`, 5 becomes `/LZWDecode`, 7 becomes `/DCTDecode` with `JPEGTables`
+spliced in front, and 8 and 32946 become `/FlateDecode` — with `/Predictor 2`
+where the file used one. A single-strip file of any of those reaches the page
+as its own bytes and no raster is built. `TiffRoute` says which of the three
+routes a file took, because "the picture is right" and "the pass-through
+happened" are different claims and a build that quietly decoded everything
+would satisfy the first.
+
+Two things real TIFFs do that TIFF 6.0 does not describe are handled by name.
+**Old-style LZW** — codes packed least significant bit first and widened one
+code late, which is what encoders wrote before 1993 — is detected from the two
+bytes that can tell it apart (a stream opening with Clear reads `0x80` one way
+and `0x00` with the next bit set the other) and *transcoded* into the ordinary
+packing, so `lzw.rs` decodes both and the dictionary exists once. And a
+`ColorMap` whose every value is at or below 255 was written at 8 bits by a
+encoder that forgot p.23's scaling; it is read as one, with
+`Warning::TiffColorMapIsEightBit`, because the alternative is a palette image
+that is uniformly almost black and reads as a decoder bug rather than as the
+file's.
+
 ## API
 
 The filters never appear on the facade — ruling 11 makes `tinker_pdf` the
@@ -184,7 +227,8 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`). The encoder half is `deflate` and `zlib_compress`; the container
-half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
+half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
+`inflate_raw` and `crc32`.
 
 ## Refused by name
 
@@ -203,6 +247,12 @@ half is `png_decode`, `png_scan`, `inflate_raw` and `crc32`.
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |
 | JPEG arithmetic coding | `JpegError::Arithmetic` (gate `Capability::JpegArithmetic`) | Reported rather than half-decoded | [ROADMAP](../ROADMAP.md) |
 | JPEG precision other than 8 bits | `JpegError::UnsupportedPrecision` (gate `Capability::Jpeg12Bit`) | Same contract: named, not guessed at | [ROADMAP](../ROADMAP.md) |
+| TIFF `PhotometricInterpretation` 4, 5, 8, 32803, and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CMYK or CIELab image read as RGB is not a degraded picture, it is a different one; YCbCr is read only where a JPEG has already undone it | — |
+| TIFF `Compression` 6 (old-style JPEG), 34712 (JPEG 2000) and the rest | `TiffError::UnsupportedCompression` | Named by code, so a refusal says which | — |
+| TIFF `SampleFormat` 2 or 3 (signed, IEEE float) | `TiffError::UnsupportedSampleFormat` | A different number line; reading it as unsigned produces a picture rather than a refusal | — |
+| TIFF `Predictor` 3, `PlanarConfiguration` past 2, `BitsPerSample` outside {1,2,4,8,16}, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Nothing in the sample path carries two depths at once, and half-expanding one is worse than saying so | — |
+| BigTIFF (magic 43) | `TiffError::BigTiff` | Eight-byte offsets and a different directory layout wearing the same two order bytes | — |
+| TIFF past `MAX_TIFF_SAMPLES`, `MAX_TIFF_SEGMENTS` or the caller's ceiling | `TiffError::TooManySamples`, `TooManySegments`, `ExceedsOutputLimit` | Width, height and `StripOffsets`'s count are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 
 Every JPX refusal also returns `FilterError::Unsupported(Capability::Jpx)`;
 the warning names the reason, because the refusal is an `Err` and ruling 10
@@ -232,16 +282,34 @@ wants the reason to survive it.
   pairs, and fourteen broken-by-design files that must each be refused. Runs
   when `TINKER_PNGSUITE` points at the set, and prints `RAN`/`SKIPPED` so a
   missing corpus never reads as a pass.
+- In-crate: `tiff.rs` is held to files this repository writes byte by byte
+  from TIFF 6.0's own field layouts, and to coded strips written from the
+  coding specification that owns each — a real T.4/T.6 coder for compressions
+  2, 3, 3-with-2D and 4, both LZW bit orders from one code stream, and a
+  baseline T.81 datastream split the way Technical Note 2 splits one. Both
+  byte orders, strip and tile layout, all four photometric interpretations and
+  every compression above decode to a raster asserted against literal expected
+  bytes. `packbits.rs` decodes §9's own worked example, both halves
+  transcribed from the specification text. `mutated_fixtures_never_panic` puts
+  the same fixtures through seeded xorshift damage aimed at the directory's
+  entry array, so ruling 1 is enforced on stable and not only under
+  `cargo-fuzz`. All **seven** of the TIFF warnings are reached by a test that
+  asserts them, for the reason `jpx`'s refusal suite exists: a variant nothing
+  can reach is a claim rather than a check.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
   fixture, because the coder serves two codecs; `src/jpx/tests/refusals.rs`
   reaches every entry of the JPX refusal list, so "the refusals are the
   feature" is checked, not claimed.
-- Fuzzing: eight of the 24 fuzz targets exercise this crate —
-  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `png`.
+- Fuzzing: nine of the 25 fuzz targets exercise this crate —
+  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `png`,
+  `tiff`. The last is the first target that reaches five other decoders
+  through one parser, because a two-byte `Compression` field is what chooses
+  between them, and it carries six committed seeds written by an `#[ignore]`d
+  test in this crate so the seeds and the fixtures cannot drift.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 2 963 passed / 0 failed / 8 ignored
+  workspace stands at 3 024 passed / 0 failed / 9 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md) for
   the full harness.

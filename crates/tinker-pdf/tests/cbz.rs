@@ -989,3 +989,220 @@ fn a_page_that_arrived_damaged_says_so_and_is_still_a_page() {
         "the pixels the file did carry are the pixels on the page"
     );
 }
+
+// ---- TIFF ---------------------------------------------------------------
+
+/// A single-strip G4 TIFF: sixteen pixels wide, six rows,
+/// `PhotometricInterpretation` 0, `MM` byte order.
+///
+/// Assembled from TIFF 6.0's own field layouts and coded from T.4 Table 1 and
+/// T.6 Table 4 by `tinker_pdf_filters`' own fixture writer, then committed here
+/// as bytes. There is no `.tif` in this repository and none is fetched, so
+/// every byte of it has a line of specification behind it; what it is *for* in
+/// this file is that a comic archive can hold one, and the picture it decodes
+/// to is [`FAX_PATTERN`].
+const G4_ONE_STRIP: [u8; 146] = [
+    0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, 0x00, 0x09, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x06, 0x01, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x03,
+    0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x01, 0x06, 0x00, 0x03, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x11, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x7A, 0x01, 0x15, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x16,
+    0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x17, 0x00, 0x04, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x33, 0x14, 0xBB, 0x0C, 0x2C, 0x20,
+    0xF0, 0x88, 0xB3, 0x65, 0x0E, 0x50, 0xE1, 0x11, 0xD1, 0x1D, 0x11, 0xD0, 0x20, 0x94, 0x44, 0x44,
+    0x44, 0x58,
+];
+
+/// The same picture, the same coding, cut into **two** strips of three rows.
+///
+/// Which is the one thing that stops it passing through: two T.6 streams end
+/// to end are not one, because the second strip's first row would be decoded
+/// against the first strip's last. So this file takes the decoder and
+/// `G4_ONE_STRIP` does not, and the two of them are what
+/// `a_placed_tiff_renders_the_same_as_a_decoded_one` compares.
+const G4_TWO_STRIPS: [u8; 164] = [
+    0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, 0x00, 0x09, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x06, 0x01, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x03,
+    0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x01, 0x06, 0x00, 0x03, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x11, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x7A, 0x01, 0x15, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x16,
+    0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x17, 0x00, 0x04, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x82, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8A, 0x00, 0x00,
+    0x00, 0x92, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x11, 0x33, 0x14, 0xBB, 0x0C, 0x2C, 0x20,
+    0xF0, 0x00, 0x26, 0xA2, 0xD9, 0x43, 0x94, 0x38, 0x44, 0x74, 0x47, 0x44, 0x74, 0x08, 0x25, 0x11,
+    0x11, 0x11, 0x16, 0x00,
+];
+
+/// The picture both TIFF fixtures hold: `1` is a black pixel.
+///
+/// Written out rather than derived, because it is the literal expectation both
+/// of the tests below are held to — a comparison of two renders can pass on
+/// two blank pages, and this is what stops that.
+const FAX_PATTERN: [&str; 6] = [
+    "0000000011111111",
+    "0011110000111100",
+    "0011000000001100",
+    "1111111100000000",
+    "0101010101010101",
+    "0000000000000000",
+];
+
+/// Asserts a 16 x 6 bitmap against [`FAX_PATTERN`], pixel by pixel.
+fn assert_is_the_fax(bitmap: &Bitmap, what: &str) {
+    assert_eq!((bitmap.width, bitmap.height), (16, 6), "{what}");
+    for (y, row) in FAX_PATTERN.iter().enumerate() {
+        for (x, cell) in row.chars().enumerate() {
+            let want = if cell == '1' {
+                (0u8, 0u8, 0u8)
+            } else {
+                (255, 255, 255)
+            };
+            assert_eq!(
+                pixel(bitmap, x as u32, y as u32),
+                want,
+                "{what}: pixel ({x}, {y})"
+            );
+        }
+    }
+}
+
+/// A TIFF entry is a page, and the page is the picture the file holds.
+///
+/// The expected values are the fixture's own pattern rather than another
+/// render, which is what the module note asks of every picture here.
+#[test]
+fn a_tiff_entry_becomes_a_page_with_the_pixels_the_file_holds() {
+    let archive = zip(&[ZipFile::stored("scan.tif", &G4_ONE_STRIP)], Damage::None);
+    let document = open(&archive);
+
+    assert_eq!(document.page_count(), 1);
+    let report = document
+        .archive()
+        .expect("a synthesised document has a report");
+    assert_eq!(
+        report.pages()[0].defect,
+        None,
+        "a TIFF is a page rather than a placeholder"
+    );
+    assert!(
+        report.warnings().is_empty(),
+        "nothing was tolerated: {:?}",
+        report.warnings()
+    );
+    assert_eq!(document.page(0).expect("a page").size(), (16.0, 6.0));
+
+    assert_is_the_fax(&render(&document, 0), "the placed route");
+}
+
+/// The exit criterion: **0 pixels different** between the two routes.
+///
+/// One strip passes through as a `/CCITTFaxDecode` stream carrying the file's
+/// own bytes; two strips of the same picture cannot, so they are decoded to
+/// eight-bit samples and re-deflated. Those are two entirely different
+/// dictionaries, two different filters and two different bit depths reaching
+/// the rasterizer, and the picture has to be the same one — otherwise the
+/// pass-through is a second decoder wearing the first one's name.
+///
+/// Both sides are also held to [`FAX_PATTERN`], because two identical blank
+/// pages compare equal.
+#[test]
+fn a_placed_tiff_renders_the_same_as_a_decoded_one() {
+    let archive = zip(
+        &[
+            ZipFile::stored("1-placed.tif", &G4_ONE_STRIP),
+            ZipFile::stored("2-decoded.tif", &G4_TWO_STRIPS),
+        ],
+        Damage::None,
+    );
+    let document = open(&archive);
+    assert_eq!(document.page_count(), 2);
+
+    let placed = render(&document, 0);
+    let decoded = render(&document, 1);
+    assert_is_the_fax(&placed, "the placed route");
+    assert_is_the_fax(&decoded, "the decoded route");
+
+    assert_eq!(
+        (placed.width, placed.height),
+        (decoded.width, decoded.height)
+    );
+    let differing = placed
+        .data
+        .iter()
+        .zip(decoded.data.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(differing, 0, "the two routes drew different pictures");
+}
+
+/// The two routes are really two, which is the claim the test above would
+/// satisfy just as well if both files decoded.
+#[test]
+fn the_two_tiff_fixtures_take_two_different_routes() {
+    use tinker_pdf_cos::{tiff_image, TiffRoute};
+    let limits = tinker_pdf_filters::Limits::new(1 << 22);
+    assert_eq!(
+        tiff_image(&G4_ONE_STRIP, &limits)
+            .expect("one strip")
+            .route(),
+        TiffRoute::Placed
+    );
+    assert_eq!(
+        tiff_image(&G4_TWO_STRIPS, &limits)
+            .expect("two strips")
+            .route(),
+        TiffRoute::Decoded,
+        "two T.6 streams end to end are not one"
+    );
+}
+
+/// A TIFF is still classified as one, and is no longer refused for being one.
+#[test]
+fn a_tiff_is_recognised_by_its_magic_and_no_longer_refused() {
+    assert_eq!(cbz::image_format(&G4_ONE_STRIP), Some(ImageFormat::Tiff));
+    // `II` as well as `MM`, which is the sniff's whole job here.
+    assert_eq!(
+        cbz::image_format(b"II\x2a\x00\x08\x00\x00\x00"),
+        Some(ImageFormat::Tiff)
+    );
+
+    let archive = zip(&[ZipFile::stored("p.tif", &G4_ONE_STRIP)], Damage::None);
+    let report = open(&archive)
+        .archive()
+        .expect("a report")
+        .warnings()
+        .to_vec();
+    assert!(
+        !report.iter().any(|w| matches!(
+            w,
+            ArchiveWarning::PlaceholderPage {
+                defect: PageDefect::UnsupportedFormat(ImageFormat::Tiff),
+                ..
+            }
+        )),
+        "the refusal row is gone: {report:?}"
+    );
+}
+
+/// A TIFF that is a TIFF only as far as its header keeps its page number, the
+/// way a broken PNG does.
+#[test]
+fn a_tiff_that_will_not_decode_is_a_placeholder_and_not_a_dropped_page() {
+    let broken = b"MM\x00\x2a\x00\x00\x00\x08nothing that is a directory".to_vec();
+    let document = open(&zip(
+        &[
+            ZipFile::stored("1.tif", &G4_ONE_STRIP),
+            ZipFile::stored("2.tif", &broken),
+            ZipFile::stored("3.tif", &G4_ONE_STRIP),
+        ],
+        Damage::None,
+    ));
+
+    assert_eq!(document.page_count(), 3, "the page count is unchanged");
+    let report = document.archive().expect("a report");
+    assert_eq!(report.pages()[1].defect, Some(PageDefect::Undecodable));
+    assert_eq!(report.pages()[2].defect, None, "page 3 keeps its number");
+    assert_is_the_fax(&render(&document, 2), "the page after the broken one");
+}

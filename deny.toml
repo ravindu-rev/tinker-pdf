@@ -75,6 +75,18 @@ deny = [
   { name = "image" },
   { name = "png" },
   { name = "fax" },
+  # TIFF, denied in the milestone that writes the reader rather than the one
+  # that finishes the plan -- gap 30's rule three sections below, applied where
+  # it bites hardest. A TIFF reader is a *directory walk* over six codings this
+  # repository already owns, so the crate a hurried author reaches for would
+  # bring a second inflate, a second LZW, a second CCITT and a second JPEG in
+  # behind it, and rule 1 would be broken four times by one line of Cargo.toml.
+  #
+  # `image` is denied twelve lines above and is named again here in prose
+  # rather than twice in the list, because it is the crate whose TIFF support
+  # is the reason somebody would add it. `tiff` is the one `image` itself uses.
+  { name = "tiff" },
+  { name = "tiff-decoder" },
   # Archive containers and checksums. `zip` is the one CONTRIBUTING rule 1
   # would have been most quietly broken by: gap 29 reads comic archives, and
   # reaching for the obvious crate would have added a third-party format

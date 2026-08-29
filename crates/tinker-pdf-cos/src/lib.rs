@@ -67,6 +67,7 @@ pub mod security;
 pub mod sign;
 pub mod source;
 pub mod text_string;
+pub mod tiff_embed;
 pub mod trees;
 pub mod validate;
 pub mod warn;
@@ -122,6 +123,7 @@ pub use sign::{
 };
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, parse_date, Date};
+pub use tiff_embed::{tiff_image, TiffImageData, TiffRoute};
 pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};
 pub use warn::{Warning, WarningKind, WarningSink};
