@@ -67,6 +67,29 @@ pub struct Glyph {
     /// The transform from glyph space to device space, including the font
     /// size, horizontal scaling and rise.
     pub transform: Matrix,
+    /// Where the glyph would sit with 9.4.3's `Ts` taken out — the same
+    /// transform's translation with its rise set to zero — and `None`
+    /// whenever the rise is zero, which is every glyph on the hot path.
+    ///
+    /// # Why a rise is not a new line
+    ///
+    /// `Ts` displaces a glyph and **leaves the pen where it was**: a
+    /// superscript footnote marker, a chemical subscript and a `GPOS` mark
+    /// raised onto its base are all on the line they interrupt, not on one of
+    /// their own. A consumer that decided line membership from
+    /// [`Glyph::transform`]'s own origin would split such a line in two — and
+    /// then again where the rise returns to zero, so one raised glyph between
+    /// two ordinary ones makes three lines.
+    ///
+    /// The rule this enables is **monotone**: it can only join lines a `Ts`
+    /// currently splits, and can never split a line that is joined today,
+    /// because it changes nothing at all when the rise is zero.
+    ///
+    /// It is the *origin* rather than a whole matrix because that is what the
+    /// question needs, and reported geometry does not move: a consumer's quads
+    /// and per-character origins keep [`Glyph::transform`]'s risen position,
+    /// which is where the ink is.
+    pub baseline: Option<(f64, f64)>,
     /// The displacement to the next glyph, in text space, before the
     /// transform.
     ///
