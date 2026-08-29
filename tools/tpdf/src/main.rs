@@ -28,7 +28,7 @@ usage:
   tpdf fields  <file.pdf> [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
-  tpdf check   <file.pdf>... [--strict]
+  tpdf check   <file.pdf>... [--strict] [--pdfa]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
 options:
@@ -44,6 +44,7 @@ options:
   --password P the password to open an encrypted file with
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
+  --pdfa       with check, also validate against ISO 19005 (PDF/A)
 
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
@@ -55,6 +56,15 @@ leniency ladder off and held to the structures a tolerant read never consults
 against `endstream`, the trailer against Table 15. Any defect exits non-zero,
 because the question `--strict` asks is not whether it opened but whether it
 is right.
+
+`--pdfa` asks a different question again: not whether the file is a valid
+PDF but whether it is a valid *archival* one. A file can be one and not the
+other in both directions, which is why this is a separate flag rather than a
+level of `--strict`. Each file prints the flavour it claims, every finding
+with its clause, and which rule groups ran -- the last of those because this
+build does not implement all of ISO 19005, and \"no findings\" from a partial
+sweep is not \"it conforms\". A file claiming no flavour is reported and is not
+a failure: most PDFs are not PDF/A and are not pretending to be.
 
 `probe` is the one the corpus runner spawns, one child process per file. It
 opens the file, renders every page, rewrites it and validates the rewrite, and
@@ -125,6 +135,13 @@ struct Options {
     raw: bool,
     stream: bool,
     strict: bool,
+    /// Validate against ISO 19005 (PDF/A) as well, and exit by the verdict.
+    ///
+    /// Separate from `--strict` because they answer different questions and a
+    /// caller wants one or the other: `--strict` asks whether the file is a
+    /// valid PDF, `--pdfa` asks whether it is a valid *archival* PDF. A file
+    /// can be one and not the other in both directions.
+    pdfa: bool,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -150,6 +167,7 @@ impl Options {
             raw: false,
             stream: false,
             strict: false,
+            pdfa: false,
             record_version: false,
         };
 
@@ -201,6 +219,7 @@ impl Options {
                 "--raw" => options.raw = true,
                 "--stream" => options.stream = true,
                 "--strict" => options.strict = true,
+                "--pdfa" => options.pdfa = true,
                 "--record-version" => options.record_version = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
@@ -813,6 +832,8 @@ fn check(options: &Options) -> Result<(), String> {
     let mut failed = 0usize;
     let mut warned = 0usize;
     let mut invalid = 0usize;
+    let mut nonconforming = 0usize;
+    let mut unclaimed = 0usize;
 
     for path in &options.files {
         match open(path, options.password.as_deref(), fonts.as_ref()) {
@@ -843,6 +864,40 @@ fn check(options: &Options) -> Result<(), String> {
                 for defect in &defects {
                     println!("      {} {defect}", defect.kind.tier().as_str());
                 }
+
+                if options.pdfa {
+                    let verdict = doc.validate_pdfa();
+                    match verdict.flavour {
+                        Some(flavour) => {
+                            if !verdict.found_nothing() {
+                                nonconforming += 1;
+                            }
+                            if !options.quiet {
+                                println!("      pdfa claims {flavour}");
+                            }
+                        }
+                        // Not a failure. Most PDFs are not PDF/A and are not
+                        // pretending to be, so a tool that exited non-zero on
+                        // them would be unusable over any real corpus.
+                        None => {
+                            unclaimed += 1;
+                            if !options.quiet {
+                                println!("      pdfa claims nothing");
+                            }
+                        }
+                    }
+                    for finding in &verdict.findings {
+                        println!("      pdfa {finding}");
+                    }
+                    // Which groups ran, always, even when nothing was found.
+                    // "No findings" from a partial sweep is not "it conforms",
+                    // and the only way a caller can tell the two apart is if
+                    // the coverage is printed beside the verdict rather than
+                    // documented somewhere else.
+                    if !options.quiet {
+                        println!("      pdfa ran {}", verdict.coverage);
+                    }
+                }
             }
             Err(message) => {
                 failed += 1;
@@ -860,11 +915,19 @@ fn check(options: &Options) -> Result<(), String> {
     if options.strict {
         println!("{invalid} with defects");
     }
+    if options.pdfa {
+        println!("{nonconforming} with conformance findings, {unclaimed} claiming no flavour");
+    }
     if failed > 0 {
         return Err(format!("{failed} files could not be opened"));
     }
     if invalid > 0 {
         return Err(format!("{invalid} files did not validate"));
+    }
+    if nonconforming > 0 {
+        return Err(format!(
+            "{nonconforming} files did not conform to the flavour they claim"
+        ));
     }
     Ok(())
 }
@@ -1798,6 +1861,74 @@ mod tests {
             page.text(b"F0", 12.0, 10.0, 50.0, "hello");
         });
         Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// `--pdfa` is off unless it is asked for, and asking for it does not
+    /// imply `--strict`.
+    ///
+    /// The two answer different questions — whether the file is a valid PDF,
+    /// and whether it is a valid *archival* PDF — and a flag that quietly
+    /// turned the other on would make one verdict's exit code depend on the
+    /// other's rules.
+    #[test]
+    fn the_two_validators_are_independent_flags() {
+        let neither = Options::parse(&["a.pdf".to_string()]).expect("parses");
+        assert!(!neither.strict && !neither.pdfa);
+
+        let archival =
+            Options::parse(&["--pdfa".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(archival.pdfa, "--pdfa asks for it");
+        assert!(!archival.strict, "and does not imply --strict");
+
+        let strict =
+            Options::parse(&["--strict".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(strict.strict && !strict.pdfa, "nor the other way round");
+    }
+
+    /// A finding prints its clause first, then its object when it has one.
+    ///
+    /// The clause leads because a person reading findings is checking them
+    /// against a standard organised by clause. An object-less finding must not
+    /// print a placeholder: a rule about the file as a whole has no object,
+    /// and saying so on every such line is noise.
+    #[test]
+    fn a_conformance_finding_reads_as_a_clause_and_then_its_object() {
+        let about_the_file = tinker_pdf::ConformanceFinding {
+            clause: tinker_pdf::Clause("6.1.2".to_string()),
+            object: None,
+            kind: tinker_pdf::FindingKind::MetadataMissing,
+        };
+        let text = about_the_file.to_string();
+        assert!(text.starts_with("6.1.2: "), "{text}");
+        assert!(!text.contains("object"), "{text}");
+
+        let about_an_object = tinker_pdf::ConformanceFinding {
+            object: Some(tinker_pdf::ObjRef::new(12, 0)),
+            ..about_the_file
+        };
+        assert!(
+            about_an_object
+                .to_string()
+                .starts_with("6.1.2 object 12 0: "),
+            "{about_an_object}"
+        );
+    }
+
+    /// Coverage names the groups that ran rather than counting them.
+    ///
+    /// "3 of 4" does not tell a caller *which* rules a clean verdict is silent
+    /// about, and that is the entire reason the type exists.
+    #[test]
+    fn coverage_names_the_groups_that_ran() {
+        assert_eq!(
+            tinker_pdf::PdfACoverage::IMPLEMENTED.to_string(),
+            "metadata, syntax"
+        );
+        assert_eq!(
+            tinker_pdf::PdfACoverage::default().to_string(),
+            "nothing",
+            "a verdict that ran nothing says so rather than printing an empty line"
+        );
     }
 
     /// The listing names every object the table claims, with what it is and

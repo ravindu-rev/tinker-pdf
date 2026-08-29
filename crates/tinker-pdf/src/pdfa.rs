@@ -831,6 +831,23 @@ pub struct ConformanceFinding {
     pub kind: FindingKind,
 }
 
+impl core::fmt::Display for ConformanceFinding {
+    /// `6.1.2 object 12 0: <what was wrong>`, or the same without the object.
+    ///
+    /// The clause comes first because it is what a reader looks for: a person
+    /// reading a list of findings is checking them against a standard, and the
+    /// standard is organised by clause. The object is omitted rather than
+    /// printed as `none` when there is none, because a rule about the file as
+    /// a whole has no object and saying so on every line is noise.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.clause)?;
+        if let Some(object) = self.object {
+            write!(f, " object {} {}", object.num, object.gen)?;
+        }
+        write!(f, ": {:?}", self.kind)
+    }
+}
+
 /// Which rule groups a verdict actually ran.
 ///
 /// Not decoration. A verdict with no findings from a validator that checked
@@ -847,6 +864,36 @@ pub struct Coverage {
     pub fonts: bool,
     /// Colour: output intents and device spaces.
     pub colour: bool,
+}
+
+impl core::fmt::Display for Coverage {
+    /// The groups that ran, comma-separated, or `nothing`.
+    ///
+    /// Named groups rather than a count, because "3 of 4 groups" does not tell
+    /// a caller *which* rules a clean verdict is silent about — and that is the
+    /// whole reason this type exists.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut first = true;
+        for (ran, name) in [
+            (self.metadata, "metadata"),
+            (self.syntax, "syntax"),
+            (self.fonts, "fonts"),
+            (self.colour, "colour"),
+        ] {
+            if !ran {
+                continue;
+            }
+            if !first {
+                f.write_str(", ")?;
+            }
+            f.write_str(name)?;
+            first = false;
+        }
+        if first {
+            f.write_str("nothing")?;
+        }
+        Ok(())
+    }
 }
 
 impl Coverage {
