@@ -1153,7 +1153,7 @@ fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
 /// `0.30000000000000004` and the length of a content stream comes to depend on
 /// a floating-point accident. One ten-thousandth of a text space unit is two
 /// orders below what any rasteriser resolves.
-fn number(value: f64) -> String {
+pub(crate) fn number(value: f64) -> String {
     let rounded = (value * 1.0e4).round() / 1.0e4;
     // `-0` is a PDF number and a pointless one, and it is a second spelling of
     // a stream that is otherwise the same bytes.
@@ -1162,7 +1162,7 @@ fn number(value: f64) -> String {
 }
 
 /// Closes an open `TJ` array, if one is open.
-fn close_array(out: &mut Vec<u8>, open: &mut bool) {
+pub(crate) fn close_array(out: &mut Vec<u8>, open: &mut bool) {
     if *open {
         out.extend_from_slice(b"] TJ\n");
         *open = false;

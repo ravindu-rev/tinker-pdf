@@ -97,7 +97,7 @@ pub use edit::{
     annot, DocumentEditor, EditCheckpoint, FillError, FillRejection, SkippedWidget, WidgetDefect,
 };
 pub use fill::{text_appearance, TextLayout};
-pub use font::{DecodedCode, Font, FontKind};
+pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{
     acro_form, calculation_order, catalog_scripts, document_scripts, field_value, fields,
     script_summary, DocumentScript, Field, FieldKind, FieldScripts, FieldValue, Script,

@@ -285,6 +285,27 @@ pub enum WarningKind {
     /// Never emitted for a document opened from a buffer, which had them all
     /// from the start.
     WholeFileFetched,
+
+    // ---- variable text (12.7.4.3) ----------------------------------------
+    /// A character of a field's value did not reach a glyph in the `/DA`
+    /// font, and the appearance was written with a substitute in its place.
+    ///
+    /// The character is carried because it is the whole of what is
+    /// actionable: "this form will not display Arabic" is a guess, and "the
+    /// font Helv has no glyph for U+0645" is a fix. The [`Warning`]'s
+    /// `object` names the field it happened to, which is the other half
+    /// ruling 10 asks for.
+    ///
+    /// This exists because the alternative was a silent `?`. Until milestone
+    /// 8 of `docs/design/shaping.md`, `crate::fill::text_appearance` mapped
+    /// every character above the single-byte range onto `b'?'` and said
+    /// nothing, so a document whose Arabic field had been replaced by
+    /// question marks was indistinguishable, to every caller, from one that
+    /// had been filled correctly.
+    FieldCharacterUnrepresentable {
+        /// The character the font could not draw.
+        character: char,
+    },
 }
 
 impl WarningKind {
@@ -372,6 +393,7 @@ impl WarningKind {
             WarningKind::LinearizedLengthMismatch => "linearized-length-mismatch",
             WarningKind::LinearizedParametersUnusable => "linearized-parameters-unusable",
             WarningKind::WholeFileFetched => "whole-file-fetched",
+            WarningKind::FieldCharacterUnrepresentable { .. } => "field-character-unrepresentable",
         }
     }
 }
@@ -403,6 +425,11 @@ impl fmt::Display for WarningKind {
                 write!(f, "predefined-cmap-approximate (name #{})", n.id())
             }
             WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
+            WarningKind::FieldCharacterUnrepresentable { character } => write!(
+                f,
+                "field-character-unrepresentable (U+{:04X})",
+                u32::from(*character)
+            ),
             other => f.write_str(other.as_str()),
         }
     }

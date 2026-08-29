@@ -19,6 +19,14 @@ cmap-predefined = ["tinker-pdf-font/cmap-predefined"]
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-crypto = { workspace = true }
 tinker-pdf-font = { workspace = true }
+# Shaping milestone 8. `src/fill.rs` builds a form field's appearance stream
+# out of the field's own value, and it is the one producing path in this tree
+# whose entry point takes a `&str` and no glyphs — `build.rs`'s `glyph_run`
+# takes glyphs the caller positioned, which is why milestone 7 needed no edge.
+# The edge points *down* into a leaf, which ruling 8 allows without argument,
+# and `tinker-pdf-shape` gains no PDF vocabulary from it: it is handed face
+# bytes and a string. `xtask`'s ALLOWED carries the argument in full.
+tinker-pdf-shape = { workspace = true }
 # The public-key security handler (7.6.5) reads a CMS `EnvelopedData` out of
 # `/Recipients` to find the seed its file key is derived from. That is a
 # security handler, which is this crate's charter, and the envelope is DER,

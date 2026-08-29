@@ -303,18 +303,24 @@ Landed so far:
   to itself through the `/ToUnicode` the writer wrote, across a ligature, and
   the document is clean under the strict structural validator.
 
-Two consumers are **not** here, and neither is claimed:
+- **Shaped values into a form field.** `tinker_pdf_cos::Font::program` walks
+  `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or
+  `/FontFile`) and returns the stream's *address*, which is what unblocked
+  milestone 8: `fill.rs` reaches its font through the AcroForm `/DR`, and a
+  `Font` that knew every width and no outline had nothing to shape against.
+  Where the `/DA` font is composite, `/Identity-H`, and embeds an sfnt, a
+  field's value is shaped and written as a `TJ` run of two-byte codes in
+  visual order. Everywhere else the single-byte path stands and every
+  character it could not write is named by
+  `WarningKind::FieldCharacterUnrepresentable`, against the field's own
+  object — see [forms.md](forms.md).
+
+One consumer is **not** here, and it is not claimed:
 
 - Milestone 6's EPUB half. The `Shaper` seam exists and `BookMetrics` fills it,
   but there is no Arabic EPUB fixture, no render fingerprint over one and no
   RTL reftest pair. What is asserted today is the seam and the one-path rule,
   not a paginated Arabic book.
-- Milestone 8 entirely. `crates/tinker-pdf-cos/src/fill.rs` still writes `?`
-  for a field value above the single-byte range. The obstacle is named rather
-  than vague: the `/DA` font is reached through `/DR` and `tinker-pdf-cos`'s
-  `Font` does not expose the embedded font *program*, so there is nothing to
-  shape against without first teaching it to walk
-  `/DescendantFonts` → `/FontDescriptor` → `/FontFile2`.
 
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing, so the claim for a script is exactly as strong as
