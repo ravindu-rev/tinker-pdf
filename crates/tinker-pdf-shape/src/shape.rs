@@ -413,13 +413,17 @@ impl<'a> Shaper<'a> {
                 &mut buffer,
                 &lookups,
                 limits,
-                MarkWidths::ZeroByGdef,
+                plan.mark_widths(),
             ));
-        } else {
+        } else if plan.mark_widths() == MarkWidths::ZeroByGdef {
             // A face with no `GPOS` still has marks in it, and a combining
             // accent drawn with the advance `hmtx` gave it pushes the pen
             // along and takes the word apart. `Layout::position` does this at
             // the end of positioning; without a `GPOS` nothing would.
+            //
+            // Conditioned for the same reason the `GPOS` branch is: a Brahmic
+            // face with no `GPOS` at all would otherwise keep the behaviour
+            // this commit is removing, and its syllables would stack.
             self.layout.zero_marks(&mut buffer);
         }
 
@@ -643,6 +647,42 @@ enum Plan {
 }
 
 impl Plan {
+    /// Whether this plan zeroes the advance of a glyph `GDEF` calls a mark.
+    ///
+    /// The two families want opposite answers and the corpus is what says so.
+    ///
+    /// A **joining** script's marks are drawn on top of the letter they belong
+    /// to, and a face that gives one a real `hmtx` advance would push the pen
+    /// along and take the word apart -- so those are zeroed. Every `GDEF` mark
+    /// in `TestShapeAran` and in the three `TestGPOS` faces has an advance of
+    /// zero already, which is the same statement made by the faces.
+    ///
+    /// A **Brahmic** script's are not marks in that sense. Thirteen of
+    /// `NotoSansKannada`'s fourteen `GDEF` marks are *spacing* matras with real
+    /// advances -- U+0CC2 UU is 1526 units at 2048 per em -- and
+    /// text-rendering-tests SHKNDA-3's expected positions are exactly the
+    /// cumulative `hmtx` sum with those advances intact. Zeroing them stacked
+    /// every glyph of a syllable at one x.
+    ///
+    /// # What this is not conditioned on, and why
+    ///
+    /// `General_Category` is the obvious refinement -- zero `Mn`, keep `Mc` --
+    /// and it is **wrong**. U+0CBF (advance 669) and U+0CC6 (712) are `Mn`, and
+    /// the corpus counts their advances. It was tried and refuted before this
+    /// was written.
+    ///
+    /// Nor on a list of scripts: the plan is already chosen from the text (see
+    /// [`Plan`]), so conditioning on the plan inherits that and adds no list.
+    const fn mark_widths(self) -> MarkWidths {
+        match self {
+            // 14.7's own answer for a caller who named their own features: the
+            // default, because a caller asking for `liga` on Latin is not
+            // asking about matras.
+            Plan::Default | Plan::Joining | Plan::AsAsked => MarkWidths::ZeroByGdef,
+            Plan::Universal => MarkWidths::AsSupplied,
+        }
+    }
+
     /// The stages this plan runs, in order.
     fn gsub_stages(self, asked: Option<&[Tag]>) -> Vec<&[Tag]> {
         match self {
@@ -945,9 +985,38 @@ fn variation_glyph(data: Bytes<'_>, base: char, selector: char, face: &Sfnt<'_>)
 
 #[cfg(test)]
 mod tests {
-    use super::{is_variation_selector, itemize};
+    use super::{is_variation_selector, itemize, Plan};
     use crate::bidi::{BaseDirection, Paragraph};
     use crate::unicode::Script;
+    use crate::MarkWidths;
+
+    /// Every plan's mark-width answer, tabled.
+    ///
+    /// A table test and not a behavioural one, and the reason is a finding
+    /// rather than a shortcut. **No face in either conformance corpus can tell
+    /// the two answers apart for a non-Brahmic run.** `TestShapeAran` — the
+    /// only Arabic face here — and the three `TestGPOS` faces have *zero*
+    /// `GDEF` marks with a non-zero `hmtx` advance between them, so
+    /// `ZeroByGdef` and `AsSupplied` produce identical output for every one of
+    /// their cases. Setting `AsSupplied` for all four plans was injected and
+    /// **failed nothing at all**.
+    ///
+    /// So the joining half of this condition rests on the argument in
+    /// [`Plan::mark_widths`] and on nothing that runs. Real Arabic faces do
+    /// give marks non-zero advances — it is why [`MarkWidths::ZeroByGdef`] is
+    /// the default and what its own doc comment describes — but this
+    /// repository has no such face, and saying so is worth more than a guard
+    /// that looks measured and is not.
+    ///
+    /// What this test does buy: a future edit that flips a plan's answer fails
+    /// here and has to argue with the sentence above.
+    #[test]
+    fn each_plan_answers_the_mark_width_question_for_its_own_reason() {
+        assert_eq!(Plan::Universal.mark_widths(), MarkWidths::AsSupplied);
+        for plan in [Plan::Default, Plan::Joining, Plan::AsAsked] {
+            assert_eq!(plan.mark_widths(), MarkWidths::ZeroByGdef, "{plan:?}");
+        }
+    }
 
     fn runs(text: &str) -> Vec<(std::ops::Range<usize>, Script, u8)> {
         let paragraph = Paragraph::new(text, BaseDirection::Auto);

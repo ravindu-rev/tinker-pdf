@@ -583,6 +583,14 @@ const UNRESOLVABLE: &[(&str, &str)] = &[("GPOS-1/15", "aacute")];
 const WITHIN_TOLERANCE: &[(&str, usize, char, i32)] = &[
     ("SHARAN-1/5", 6, 'x', -1),
     ("SHARAN-1/6", 6, 'y', -1),
+    // The three Kannada rows arrived with the per-plan mark widths, and they
+    // are the same one-unit rounding difference the other three are: upstream
+    // scales and rounds every advance separately, this crate stays in integer
+    // design units to the end and rounds once. A spacing matra's advance is
+    // now part of that sum, so three more places can differ by one.
+    ("SHKNDA-3/8", 2, 'x', -1),
+    ("SHKNDA-3/12", 2, 'x', -1),
+    ("SHKNDA-3/27", 2, 'x', -1),
     ("SHLANA-6/6", 5, 'x', -1),
 ];
 
@@ -657,12 +665,12 @@ const PASSING: &[(&str, usize)] = &[
     ("GSUB-1", 1),
     ("GSUB-2", 11),
     ("SHARAN-1", 6),
-    ("SHBALI-1", 19),
-    ("SHBALI-2", 11),
+    ("SHBALI-1", 20),
+    ("SHBALI-2", 12),
     ("SHBALI-3", 9),
-    ("SHKNDA-1", 33),
-    ("SHKNDA-2", 4),
-    ("SHKNDA-3", 0),
+    ("SHKNDA-1", 34),
+    ("SHKNDA-2", 8),
+    ("SHKNDA-3", 30),
     ("SHLANA-1", 51),
     ("SHLANA-2", 32),
     ("SHLANA-3", 12),
@@ -854,7 +862,7 @@ fn every_section_this_crate_claims_is_whole() {
         })
         .count();
     assert_eq!(
-        whole, 4,
+        whole, 6,
         "the number of Brahmic sections that pass outright moved. \
          `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );

@@ -281,7 +281,20 @@ fn unescape(text: &str) -> String {
 /// in the same commit, which is what says the new number is the better one.
 /// `BIDI` did not move, which is the pair of facts that places the change in
 /// the cluster model and not in UAX #9.
-const SHAPING: &str = "9e93d25d282eb37c";
+///
+/// It moved a **second** time, and this one is a position rather than an
+/// order: a Brahmic run no longer zeroes the advance a face gave a spacing
+/// matra. Thirteen of `NotoSansKannada`'s fourteen `GDEF` marks are spacing
+/// matras carrying real `hmtx` advances — U+0CC2 UU is 1526 units at 2048 per
+/// em — and zeroing them stacked every glyph of a syllable at one x.
+/// text-rendering-tests SHKNDA-3's expected positions are exactly the
+/// cumulative `hmtx` sum with those advances intact, which is what says this
+/// number is the better one: SHKNDA-3 went 0/31 to 30/31 and SHKNDA-2 4/16 to
+/// 8/16 in the same commit, and SHKNDA-1 and SHBALI-2 became whole.
+///
+/// `BIDI` did not move again, for the same reason as before: the answer is in
+/// the plan the run gets, not in how its levels resolve.
+const SHAPING: &str = "0ccea87096a94a78";
 const BIDI: &str = "d77c9e938eb9c996";
 
 /// The least each corpus may produce before its fingerprint means anything.
