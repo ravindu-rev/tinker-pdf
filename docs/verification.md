@@ -116,7 +116,26 @@ file that rendered in under two seconds did not finish a rewrite in three
 minutes, and "timed out" is also what a 900-page scan says. The limit of the
 signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
-*made no observable progress for half its budget*. The second axis — 973 files
+*made no observable progress for half its budget*.
+
+**The pdf.js pass bar is load-sensitive, and here is which files and why.**
+Measuring the corpus per file: `freeculture.pdf` takes 20 122 ms and
+`tiling-pattern-box.pdf` 20 010 ms against the 20-second limit, and the
+next slowest file in that corpus is 13 138 ms. Two files sit within a
+factor of two of the limit and nothing else is close, so a run competing
+with a build for the machine flips one or both, `passed` falls from 963,
+and the strict and metamorphic rows fall with it because those two files
+drop out of every denominator. It arrived twice looking like an engine that
+had stopped rendering before it was measured rather than assumed.
+
+The bar is not lowered for it — a re-run on an idle machine gives 963 — and
+the timeout is not raised, because a longer limit would hide a real
+slowdown in exactly these two files. What changed is the message:
+`corpus-run --check` still fails, and now says when the whole shortfall is
+accounted for by timeouts, so the next reader is told to re-run rather than
+to go looking for a rendering bug.
+
+The second axis — 973 files
 (21.5 %) rendering *with something reported* — is measured without font faces,
 and there are now two more bars that say what that costs.
 `corpus/ratchet-fonts.json` is the same 4 525 files with a synthesised face
