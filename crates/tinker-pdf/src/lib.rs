@@ -95,31 +95,6 @@ pub use tinker_pdf_cos::{
 /// `cbz::container` tests fixed positions and reads no further than byte 262;
 /// one kilobyte is that with room, and it is one head read either way.
 const CONTAINER_SNIFF: u64 = 1024;
-/// Form calculations: running the `/AA` calculate actions a form carries.
-///
-/// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
-/// caller of [`DocumentEditor::recalculate`] handles.
-pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
-/// Signing on an incremental save (12.8.1), behind
-/// [`DocumentEditor::save_signed`].
-///
-/// The key never crosses this boundary: a [`Signer`] receives a digest and
-/// returns finished CMS bytes. [`DigestAlgorithm`] is shared with the reading
-/// side on purpose — one definition of what a `/ByteRange` covers, so what is
-/// signed and what is checked cannot drift apart.
-pub use tinker_pdf_cos::{
-    Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
-    SigningTarget,
-};
-/// The object model behind [`Document::cos`].
-///
-/// The escape hatch is only an escape hatch if the types it hands back can be
-/// named without depending on the crate underneath, so they are re-exported
-/// here rather than left for a caller to find.
-pub use tinker_pdf_cos::{
-    CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
-    XrefTable,
-};
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could
@@ -157,10 +132,42 @@ pub use tinker_pdf_cos::{
 /// of [`DocumentEditor::transaction`] — the same two functions, reachable from
 /// a language that has no closures to hand across a boundary (ruling 11,
 /// `docs/design/bindings-write.md`).
+/// `ArchivalProfile` and the three types it is built from are milestone 6 of
+/// `docs/design/pdfa.md`, and they are on this facade for the reason
+/// `ExtGState` is: `DocumentBuilder::archival` cannot be called without naming
+/// its argument. `ArchivalRefusal` comes with them because it is what
+/// `finish_archival` returns and what `refusals` hands back — a refusal a
+/// caller cannot name is a refusal they cannot match on, which is the thing
+/// this whole surface exists to avoid.
 pub use tinker_pdf_cos::{
-    DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption, FillError,
-    FillRejection, ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, Target,
-    WidgetDefect, WriteMode, WriteOptions,
+    ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, DocumentBuilder, DocumentEditor,
+    EditCheckpoint, EmbeddedWhole, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
+    PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect, WriteMode, WriteOptions,
+};
+/// Form calculations: running the `/AA` calculate actions a form carries.
+///
+/// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
+/// caller of [`DocumentEditor::recalculate`] handles.
+pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError};
+/// Signing on an incremental save (12.8.1), behind
+/// [`DocumentEditor::save_signed`].
+///
+/// The key never crosses this boundary: a [`Signer`] receives a digest and
+/// returns finished CMS bytes. [`DigestAlgorithm`] is shared with the reading
+/// side on purpose — one definition of what a `/ByteRange` covers, so what is
+/// signed and what is checked cannot drift apart.
+pub use tinker_pdf_cos::{
+    Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
+    SigningTarget,
+};
+/// The object model behind [`Document::cos`].
+///
+/// The escape hatch is only an escape hatch if the types it hands back can be
+/// named without depending on the crate underneath, so they are re-exported
+/// here rather than left for a caller to find.
+pub use tinker_pdf_cos::{
+    CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
+    XrefTable,
 };
 pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;

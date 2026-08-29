@@ -1211,6 +1211,17 @@ pub struct PageBuilder {
     /// sequence has had anything drawn into it. See [`Self::close_marked`].
     opened: Option<usize>,
     opened_end: usize,
+    /// The device colour space an [`ArchivalProfile`]'s destination profile
+    /// admits, when the document is being written under one.
+    ///
+    /// Copied from the builder at [`DocumentBuilder::begin_page`] rather than
+    /// looked up, because a page is drawn without a handle on the document it
+    /// will join — which is also why the refusals it makes are merged back at
+    /// [`DocumentBuilder::push_page`] rather than pushed straight onto the
+    /// builder's list.
+    archival_space: Option<DeviceSpace>,
+    /// Refusals made while drawing, merged into the document's at push.
+    refusals: Vec<ArchivalRefusal>,
 }
 
 /// One structure element under construction, and what it claims.
@@ -1484,20 +1495,51 @@ impl PageBuilder {
     }
 
     /// Sets the non-stroking colour, as red, green and blue from zero to one.
-    pub fn set_fill_rgb(&mut self, r: f64, g: f64, b: f64) {
+    ///
+    /// **Refused** when the document is written under an [`ArchivalProfile`]
+    /// whose destination profile is not an RGB one: ISO 19005-1 6.2.3.3 admits
+    /// `DeviceRGB` only where the output intent says what an RGB triple means,
+    /// and painting one under a CMYK intent is a colour nobody can reproduce.
+    /// Returns whether the operator was written.
+    pub fn set_fill_rgb(&mut self, r: f64, g: f64, b: f64) -> bool {
+        if self.refuses_device_space(DeviceSpace::Rgb) {
+            return false;
+        }
         let c = |v: f64| v.clamp(0.0, 1.0);
         self.content
             .extend_from_slice(format!("{} {} {} rg\n", c(r), c(g), c(b)).as_bytes());
+        true
+    }
+
+    /// Whether the profile in force refuses this device space, recording the
+    /// refusal if it does.
+    fn refuses_device_space(&mut self, space: DeviceSpace) -> bool {
+        let Some(destination) = self.archival_space else {
+            return false;
+        };
+        // The same reading the validator's 6.2.3.3 rule makes: grey is a value
+        // on the neutral axis of whatever device the intent names.
+        if space == DeviceSpace::Gray || space == destination {
+            return false;
+        }
+        self.refusals.push(ArchivalRefusal::DeviceColour { space });
+        true
     }
 
     /// Sets the **stroking** colour, as red, green and blue from zero to one.
     ///
     /// `RG`, not `rg`. The two are different parameters of the graphics state
     /// and always have been; only this writer conflated them, by having one.
-    pub fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) {
+    /// Refused under a profile on the same terms as
+    /// [`PageBuilder::set_fill_rgb`], and for the same clause.
+    pub fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) -> bool {
+        if self.refuses_device_space(DeviceSpace::Rgb) {
+            return false;
+        }
         let c = |v: f64| v.clamp(0.0, 1.0);
         self.content
             .extend_from_slice(format!("{} {} {} RG\n", c(r), c(g), c(b)).as_bytes());
+        true
     }
 
     /// Applies a graphics state registered with
@@ -1873,6 +1915,260 @@ fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
     true
 }
 
+// ---- the archival profile (ISO 19005) -------------------------------------
+
+/// Which part of ISO 19005 a document is written under.
+///
+/// The vocabulary is deliberately this crate's own and not the facade's
+/// [`tinker_pdf::Part`]. `tinker-pdf-cos` is a leaf and the validator lives in
+/// the facade, so the two cannot share a type without an edge that ruling 8
+/// refuses. They are checked against each other in
+/// `crates/tinker-pdf/tests/pdfa_writer.rs`, which builds under this profile
+/// and validates against that one — which is the only place the agreement
+/// matters and the only place a divergence would show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArchivalPart {
+    /// ISO 19005-1, on PDF 1.4.
+    One,
+    /// ISO 19005-2, on PDF 1.7.
+    Two,
+    /// ISO 19005-3: part 2 plus arbitrary embedded files.
+    Three,
+    /// ISO 19005-4, on PDF 2.0.
+    Four,
+}
+
+impl ArchivalPart {
+    /// The `pdfaid:part` value.
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            ArchivalPart::One => 1,
+            ArchivalPart::Two => 2,
+            ArchivalPart::Three => 3,
+            ArchivalPart::Four => 4,
+        }
+    }
+
+    /// The PDF version the part is defined on, which is what 6.1.2 requires
+    /// the header to declare.
+    const fn version(self) -> (u8, u8) {
+        match self {
+            ArchivalPart::One => (1, 4),
+            ArchivalPart::Two | ArchivalPart::Three => (1, 7),
+            ArchivalPart::Four => (2, 0),
+        }
+    }
+
+    /// Whether this part defines `level`.
+    #[must_use]
+    pub const fn allows(self, level: ArchivalLevel) -> bool {
+        matches!(
+            (self, level),
+            (ArchivalPart::One, ArchivalLevel::A | ArchivalLevel::B)
+                | (
+                    ArchivalPart::Two | ArchivalPart::Three,
+                    ArchivalLevel::A | ArchivalLevel::B | ArchivalLevel::U
+                )
+                | (ArchivalPart::Four, ArchivalLevel::E | ArchivalLevel::F)
+        )
+    }
+}
+
+/// The conformance level, for the parts that have one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArchivalLevel {
+    /// Accessible: level B plus a tagged structure tree.
+    A,
+    /// Basic.
+    B,
+    /// Unicode. Parts 2 and 3.
+    U,
+    /// Engineering. Part 4.
+    E,
+    /// Embedded files. Part 4.
+    F,
+}
+
+impl ArchivalLevel {
+    /// The `pdfaid:conformance` letter.
+    #[must_use]
+    pub const fn letter(self) -> &'static str {
+        match self {
+            ArchivalLevel::A => "A",
+            ArchivalLevel::B => "B",
+            ArchivalLevel::U => "U",
+            ArchivalLevel::E => "E",
+            ArchivalLevel::F => "F",
+        }
+    }
+}
+
+/// The `pdfaid:rev` a part 4 document declares.
+///
+/// ISO 19005-4:2020 is the only published amendment, so this is a constant
+/// rather than a parameter. A knob for a revision that does not exist would be
+/// a way for a caller to write a claim no standard backs.
+const ARCHIVAL_REVISION: u16 = 2020;
+
+/// What a document built under an ISO 19005 profile promises.
+///
+/// # The destination profile is mandatory, and that is a licence decision
+///
+/// There is no `Option` here and no default. The obvious default would be a
+/// vendored sRGB profile, and the gate in [THIRDPARTY.md] decides that before
+/// the API does: a vendored tree must declare an SPDX identifier `deny.toml`
+/// already allows, and the ICC's own sRGB profiles carry the ICC's bespoke
+/// permission notice, which has no SPDX identifier at all. It cannot declare
+/// one, so it cannot clear `cargo xtask vendor`.
+///
+/// The design doc named this outcome in advance — *"if no profile clears
+/// `cargo xtask vendor`, the parameter is mandatory and documented"* — and it
+/// is the same answer the no-bundled-faces policy gives for the same reason.
+/// It is also the better API on the merits: an output intent is a statement
+/// about the device a document's colours are *for*, which is the caller's to
+/// make and not this crate's to assume.
+///
+/// [THIRDPARTY.md]: https://github.com/tinker-pdf/tinker-pdf/blob/main/THIRDPARTY.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchivalProfile {
+    /// Which part.
+    pub part: ArchivalPart,
+    /// The level, which parts 1 to 3 require and part 4 leaves optional.
+    pub level: Option<ArchivalLevel>,
+    /// The ICC destination profile, embedded as the output intent's
+    /// `/DestOutputProfile` (14.11.5). **Mandatory** — see the type note.
+    pub destination_profile: Vec<u8>,
+    /// Which kind of device the profile characterises.
+    ///
+    /// Declared rather than read out of the bytes, and deliberately: reading
+    /// it would put an ICC parser in this crate, and `tinker-pdf-cos` has no
+    /// edge to `tinker-pdf-color` and should not grow one to answer a question
+    /// the caller already knows the answer to. It is what the writer refuses
+    /// device colours against.
+    pub destination_space: DeviceSpace,
+    /// `/OutputConditionIdentifier` (14.11.5 Table 365), which every output
+    /// intent is required to carry.
+    pub output_condition: String,
+    /// The document's natural language, written as the catalog's `/Lang`.
+    ///
+    /// Required at level A (ISO 19005-1 6.8.4) and refused-on at
+    /// [`DocumentBuilder::finish_archival`] when it is absent there.
+    pub language: Option<String>,
+}
+
+/// What the writer refused, and the clause it refused under.
+///
+/// Every variant is a **refusal**: the call that would have written the
+/// forbidden thing wrote nothing and said so. Nothing here is discovered at
+/// validation time — which is the whole point of the profile, since a builder
+/// that emitted what the validator rejects would make the validator the last
+/// line of defence rather than the second.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArchivalRefusal {
+    /// A font with no embedded program: the standard 14, or a named-encoding
+    /// font over one.
+    UnembeddedFont {
+        /// The resource name the caller asked for.
+        resource: Vec<u8>,
+    },
+    /// Transparency in a part 1 document, which forbids it outright.
+    Transparency {
+        /// Which construct: `Group`, `SMask`, `BM`, `CA` or `ca`.
+        feature: &'static str,
+    },
+    /// A device colour space the destination profile does not admit.
+    DeviceColour {
+        /// The space the caller asked to paint in.
+        space: DeviceSpace,
+    },
+    /// An `/Info` entry part 4 does not admit.
+    InfoEntry {
+        /// The key.
+        key: Vec<u8>,
+    },
+    /// A conformance level the part does not define.
+    LevelNotInPart,
+    /// A part 1-to-3 profile with no conformance level.
+    LevelMissing,
+    /// Level A with a page that tagged nothing.
+    UntaggedPage {
+        /// Which page, counting from zero.
+        page: usize,
+    },
+    /// Level A with no natural language.
+    LanguageMissing,
+    /// A profile with no destination profile bytes.
+    DestinationProfileMissing,
+}
+
+impl ArchivalRefusal {
+    /// The clause the refusal cites, as ISO 19005-1 numbers it.
+    ///
+    /// Part 1's numbering, once, for every part — the same choice
+    /// `tinker_pdf::StagedRule` makes and for the same reason: a refusal is
+    /// about a rule, and the rule is one thing however many numbers the parts
+    /// give it.
+    #[must_use]
+    pub const fn clause(&self) -> &'static str {
+        match self {
+            ArchivalRefusal::UnembeddedFont { .. } => "6.3.4",
+            ArchivalRefusal::Transparency { .. } => "6.4",
+            ArchivalRefusal::DeviceColour { .. } => "6.2.3.3",
+            ArchivalRefusal::InfoEntry { .. } => "6.1.3",
+            ArchivalRefusal::LevelNotInPart
+            | ArchivalRefusal::LevelMissing
+            | ArchivalRefusal::LanguageMissing => "6.7.11",
+            ArchivalRefusal::UntaggedPage { .. } => "6.8.2",
+            ArchivalRefusal::DestinationProfileMissing => "6.2.2",
+        }
+    }
+}
+
+impl core::fmt::Display for ArchivalRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: ", self.clause())?;
+        match self {
+            ArchivalRefusal::UnembeddedFont { resource } => write!(
+                f,
+                "the font resource {} has no embedded program, and ISO 19005 \
+                 has no standard-14 exception",
+                String::from_utf8_lossy(resource)
+            ),
+            ArchivalRefusal::Transparency { feature } => {
+                write!(f, "part 1 admits no transparency, and this sets /{feature}")
+            }
+            ArchivalRefusal::DeviceColour { space } => write!(
+                f,
+                "the output intent's destination profile does not admit /{}",
+                String::from_utf8_lossy(space.pdf_name())
+            ),
+            ArchivalRefusal::InfoEntry { key } => write!(
+                f,
+                "part 4 admits no /Info entry but /ModDate, and this is /{}",
+                String::from_utf8_lossy(key)
+            ),
+            ArchivalRefusal::LevelNotInPart => {
+                f.write_str("the part does not define that conformance level")
+            }
+            ArchivalRefusal::LevelMissing => {
+                f.write_str("parts 1 to 3 require a conformance level")
+            }
+            ArchivalRefusal::UntaggedPage { page } => write!(
+                f,
+                "level A requires a tagged structure tree, and page {page} \
+                 tagged nothing"
+            ),
+            ArchivalRefusal::LanguageMissing => {
+                f.write_str("level A requires the document's natural language")
+            }
+            ArchivalRefusal::DestinationProfileMissing => {
+                f.write_str("an output intent needs an ICC destination profile")
+            }
+        }
+    }
+}
+
 /// Assembles a document.
 pub struct DocumentBuilder {
     names: NameTable,
@@ -1902,6 +2198,10 @@ pub struct DocumentBuilder {
     embedded_whole: Vec<EmbeddedWhole>,
     info: Dict,
     outline: Vec<OutlineEntry>,
+    /// The ISO 19005 profile this document is written under, if any.
+    profile: Option<ArchivalProfile>,
+    /// Every call that profile refused, in the order they were made.
+    refusals: Vec<ArchivalRefusal>,
 }
 
 impl Default for DocumentBuilder {
@@ -1930,6 +2230,8 @@ impl DocumentBuilder {
             embedded_whole: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
+            profile: None,
+            refusals: Vec::new(),
         }
     }
 
@@ -1944,7 +2246,15 @@ impl DocumentBuilder {
     /// A standard font needs no `/Widths` and no embedded program, which is
     /// what makes it the right choice for a fixture: the reader supplies the
     /// metrics.
-    pub fn add_base_font(&mut self, resource: &[u8], base_font: &[u8]) {
+    ///
+    /// **Refused under an [`ArchivalProfile`]**, which is the whole of what
+    /// ISO 19005 6.3.4 says about the standard 14: it has no list of them.
+    /// Returns whether the font was registered, so a profiled caller finds out
+    /// at this call rather than at validation; [`Self::refusals`] says why.
+    pub fn add_base_font(&mut self, resource: &[u8], base_font: &[u8]) -> bool {
+        if self.refuses_unembedded_font(resource) {
+            return false;
+        }
         let r = self.allocate();
         let mut dict = Dict::new();
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
@@ -1962,6 +2272,7 @@ impl DocumentBuilder {
         );
         self.objects.insert(r.num, Object::Dict(dict));
         self.resources.fonts.push((resource.to_vec(), r));
+        true
     }
 
     /// Registers one of the standard 14 under an `/Encoding` the caller wrote
@@ -1997,6 +2308,11 @@ impl DocumentBuilder {
         names: &[&str],
         widths: &[u16],
     ) -> bool {
+        // A named encoding over one of the standard 14 is still one of the
+        // standard 14, and still has no embedded program.
+        if self.refuses_unembedded_font(resource) {
+            return false;
+        }
         if names.is_empty() || names.len() != widths.len() {
             return false;
         }
@@ -2298,6 +2614,29 @@ impl DocumentBuilder {
         {
             return false;
         }
+        // ISO 19005-1 6.4: a part 1 document has no transparency, so every
+        // parameter that introduces some is refused here rather than found by
+        // the validator afterwards.
+        if self.forbids_transparency() {
+            let forbidden = if state.fill_alpha.is_some_and(|v| v < 1.0) {
+                Some("ca")
+            } else if state.stroke_alpha.is_some_and(|v| v < 1.0) {
+                Some("CA")
+            } else if state
+                .blend_mode
+                .is_some_and(|mode| mode != BlendMode::Normal)
+            {
+                Some("BM")
+            } else if matches!(state.soft_mask, Some(StateMask::Group { .. })) {
+                Some("SMask")
+            } else {
+                None
+            };
+            if let Some(feature) = forbidden {
+                self.refuse(ArchivalRefusal::Transparency { feature });
+                return false;
+            }
+        }
 
         let mut mask_ref = None;
         if let Some(StateMask::Group { form, backdrop, .. }) = &state.soft_mask {
@@ -2381,6 +2720,15 @@ impl DocumentBuilder {
     /// Returns false for a degenerate `/BBox` or a non-finite `/Matrix`.
     pub fn add_form(&mut self, resource: &[u8], form: &FormXObject<'_>) -> bool {
         if !is_box(&form.bbox) {
+            return false;
+        }
+        // ISO 19005-1 6.4: a transparency group is transparency, and part 1
+        // has none. The form itself is unobjectionable, so only the `/Group`
+        // is refused — and the whole call with it, because a form registered
+        // without the group the caller asked for is not the form they asked
+        // for.
+        if form.group.is_some() && self.forbids_transparency() {
+            self.refuse(ArchivalRefusal::Transparency { feature: "Group" });
             return false;
         }
         if let Some(matrix) = form.matrix {
@@ -3042,6 +3390,15 @@ impl DocumentBuilder {
     /// Returns false when the data does not describe an image of the size it
     /// claims, rather than writing a stream a reader would choke on.
     pub fn add_image(&mut self, resource: &[u8], image: &ImageData<'_>) -> bool {
+        // 6.2.3.3 again, on the other surface a device colour reaches a page
+        // through: an image's samples are values in a colour space just as an
+        // `rg` operator's operands are.
+        if let Some(space) = image_device_space(image) {
+            if !DocumentBuilder::admits_device_space(self.profile.as_ref(), space) {
+                self.refuse(ArchivalRefusal::DeviceColour { space });
+                return false;
+            }
+        }
         let r = self.allocate();
         let mut dict = Dict::new();
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
@@ -3380,6 +3737,8 @@ impl DocumentBuilder {
             tag_stack: Vec::new(),
             opened: None,
             opened_end: 0,
+            archival_space: self.profile.as_ref().map(|p| p.destination_space),
+            refusals: Vec::new(),
         }
     }
 
@@ -3395,17 +3754,50 @@ impl DocumentBuilder {
     /// builder it came from, so names the receiving builder does not have will
     /// reach the file unresolved. Nothing panics (ruling 1); the page is
     /// written with the names it was drawn with.
-    pub fn push_page(&mut self, page: PageBuilder) {
+    pub fn push_page(&mut self, mut page: PageBuilder) {
+        self.refusals.append(&mut page.refusals);
         self.pages.push(page);
     }
 
     /// Sets an `/Info` field.
-    pub fn set_info(&mut self, key: &[u8], value: &str) {
+    /// Sets an `/Info` field.
+    ///
+    /// **Under a part 4 [`ArchivalProfile`]** ISO 19005-4 6.1.3 admits a
+    /// document information dictionary only where a `/PieceInfo` justifies it,
+    /// and admits no entry in it but `/ModDate`; anything else is refused
+    /// here. Parts 1 to 3 keep the dictionary and get the matching XMP
+    /// properties written for them at `finish`, from the same table, so the
+    /// two cannot disagree.
+    ///
+    /// Returns whether the entry was set.
+    pub fn set_info(&mut self, key: &[u8], value: &str) -> bool {
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.part == ArchivalPart::Four)
+            && key != b"ModDate"
+        {
+            self.refuse(ArchivalRefusal::InfoEntry { key: key.to_vec() });
+            return false;
+        }
+        // A date entry the packet could not restate is refused rather than
+        // written: 6.7.3 requires the two to agree, and an `/Info` date this
+        // crate's own parser cannot read would be an entry with no property
+        // to agree with. Refusing it here is the difference between the
+        // builder saying no and the validator saying no later.
+        if self.profile.is_some()
+            && matches!(key, b"CreationDate" | b"ModDate")
+            && iso8601(value).is_none()
+        {
+            self.refuse(ArchivalRefusal::InfoEntry { key: key.to_vec() });
+            return false;
+        }
         let name = self.names.intern(key);
         self.info.insert(
             name,
             Object::String(PdfString::literal(value.as_bytes().to_vec())),
         );
+        true
     }
 
     /// Sets the document outline (12.3.3).
@@ -3671,6 +4063,81 @@ impl DocumentBuilder {
         catalog.insert(Name::TYPE, Object::Name(self.names.intern(b"Catalog")));
         catalog.insert(Name::PAGES, Object::Ref(pages_ref));
 
+        // ---- the archival profile's own three objects ---------------------
+        //
+        // Written here and nowhere else, so a profiled document differs from
+        // an unprofiled one by exactly these: an output intent naming an
+        // embedded ICC profile (14.11.5), an XMP packet declaring the claim
+        // (ISO 19005-1 6.7.11), and the natural language level A asks for
+        // (6.8.4). Allocated in a fixed order, because two runs of the same
+        // program have to produce the same object numbers.
+        if let Some(profile) = self.profile.clone() {
+            let profile_ref = self.allocate();
+            let intent_ref = self.allocate();
+            let metadata_ref = self.allocate();
+
+            let mut profile_dict = Dict::new();
+            // 14.11.5 Table 366: the destination profile stream says how many
+            // components its colour space has, the same way an `ICCBased`
+            // stream does.
+            profile_dict.insert(
+                self.names.intern(b"N"),
+                Object::Int(i64::from(profile.destination_space.components())),
+            );
+            self.objects.insert_stream(
+                profile_ref.num,
+                StreamData {
+                    dict: profile_dict,
+                    data: profile.destination_profile.clone(),
+                },
+            );
+
+            let mut intent = Dict::new();
+            intent.insert(Name::TYPE, Object::Name(self.names.intern(b"OutputIntent")));
+            intent.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(b"GTS_PDFA1")),
+            );
+            intent.insert(
+                self.names.intern(b"OutputConditionIdentifier"),
+                Object::String(PdfString::literal(
+                    profile.output_condition.as_bytes().to_vec(),
+                )),
+            );
+            intent.insert(
+                self.names.intern(b"DestOutputProfile"),
+                Object::Ref(profile_ref),
+            );
+            self.objects.insert(intent_ref.num, Object::Dict(intent));
+            catalog.insert(
+                self.names.intern(b"OutputIntents"),
+                Object::Array(vec![Object::Ref(intent_ref)]),
+            );
+
+            let packet = archival_packet(&profile, &self.info, &self.names);
+            let mut metadata = Dict::new();
+            metadata.insert(Name::TYPE, Object::Name(self.names.intern(b"Metadata")));
+            metadata.insert(
+                self.names.intern(b"Subtype"),
+                Object::Name(self.names.intern(b"XML")),
+            );
+            self.objects.insert_stream(
+                metadata_ref.num,
+                StreamData {
+                    dict: metadata,
+                    data: packet,
+                },
+            );
+            catalog.insert(self.names.intern(b"Metadata"), Object::Ref(metadata_ref));
+
+            if let Some(language) = &profile.language {
+                catalog.insert(
+                    self.names.intern(b"Lang"),
+                    Object::String(PdfString::literal(language.as_bytes().to_vec())),
+                );
+            }
+        }
+
         // 14.7.2: the structure tree, when any page tagged anything. One
         // `/Document` element holds every page's roots, which is the shape
         // ISO 19005 Level A asks for and costs a document with one page
@@ -3764,12 +4231,14 @@ impl DocumentBuilder {
             trailer.insert(Name::INFO, Object::Ref(info_ref));
         }
 
-        let bytes = rewrite(
-            &self.objects,
-            &trailer,
-            &WriteOptions::default(),
-            &self.names,
-        );
+        // 6.1.2: each part is defined on a version of PDF and requires the
+        // header to say which. An unprofiled document keeps the writer's
+        // default, so nothing that was byte-stable before this moved.
+        let mut options = WriteOptions::default();
+        if let Some(profile) = &self.profile {
+            options.version = profile.part.version();
+        }
+        let bytes = rewrite(&self.objects, &trailer, &options, &self.names);
         (bytes, std::mem::take(&mut self.embedded_whole))
     }
 
@@ -3853,6 +4322,319 @@ impl DocumentBuilder {
             _ => None,
         }
     }
+}
+
+// ---- the archival profile, on the builder ---------------------------------
+
+impl DocumentBuilder {
+    /// An empty document written under an ISO 19005 profile.
+    ///
+    /// From here on the builder **refuses** what the profile forbids, at the
+    /// call that would have written it: an unembedded font, transparency in a
+    /// part 1 document, a device colour the destination profile does not
+    /// admit, an `/Info` entry part 4 has no room for. Each of those calls
+    /// returns `false` and registers nothing, and [`Self::refusals`] says why
+    /// with the clause.
+    ///
+    /// What cannot be judged until the document is finished — level A with a
+    /// page that tagged nothing, a level the part does not define — is judged
+    /// by [`Self::finish_archival`], which is the only way to serialize a
+    /// profiled document and be told about it.
+    #[must_use]
+    pub fn archival(profile: ArchivalProfile) -> DocumentBuilder {
+        DocumentBuilder {
+            profile: Some(profile),
+            ..DocumentBuilder::new()
+        }
+    }
+
+    /// The profile this document is being written under, if any.
+    #[must_use]
+    pub fn profile(&self) -> Option<&ArchivalProfile> {
+        self.profile.as_ref()
+    }
+
+    /// Every call the profile refused, in the order they were made.
+    ///
+    /// The typed half of a refusal. The call itself answers `false` so a
+    /// caller who checks it knows immediately; this is what they read to find
+    /// out *which clause* said no, and it is what a test asserts on.
+    #[must_use]
+    pub fn refusals(&self) -> &[ArchivalRefusal] {
+        &self.refusals
+    }
+
+    /// Serializes a profiled document, or refuses it.
+    ///
+    /// # Errors
+    ///
+    /// The conditions only a finished document has: a level the part does not
+    /// define, a part 1-to-3 profile with no level, level A with no natural
+    /// language or with a page that tagged nothing, and a profile carrying no
+    /// destination profile bytes. Each is an [`ArchivalRefusal`] naming its
+    /// clause.
+    ///
+    /// A document with **no** profile is serialized unchanged rather than
+    /// refused: `finish_archival` on an ordinary builder is a caller asking
+    /// for bytes, and there is no standard for it to fail.
+    pub fn finish_archival(self) -> Result<Vec<u8>, ArchivalRefusal> {
+        if let Some(profile) = &self.profile {
+            match profile.level {
+                Some(level) if !profile.part.allows(level) => {
+                    return Err(ArchivalRefusal::LevelNotInPart);
+                }
+                None if profile.part != ArchivalPart::Four => {
+                    return Err(ArchivalRefusal::LevelMissing);
+                }
+                _ => {}
+            }
+            if profile.destination_profile.is_empty() {
+                return Err(ArchivalRefusal::DestinationProfileMissing);
+            }
+            if profile.level == Some(ArchivalLevel::A) {
+                if profile.language.is_none() {
+                    return Err(ArchivalRefusal::LanguageMissing);
+                }
+                // 6.8.2: level A is a tagged structure tree, and a page with
+                // no marked content contributes nothing to one. Caught here
+                // rather than at `push_page` because a caller may legitimately
+                // draw into a page after pushing nothing, and because the page
+                // that matters is the one that reached the document.
+                if let Some(page) = self.pages.iter().position(|p| p.tag_roots.is_empty()) {
+                    return Err(ArchivalRefusal::UntaggedPage { page });
+                }
+            }
+        }
+        Ok(self.finish())
+    }
+
+    /// Records a refusal and answers `true`, so a call site reads
+    /// `if self.refuse(...) { return false; }`.
+    fn refuse(&mut self, refusal: ArchivalRefusal) -> bool {
+        self.refusals.push(refusal);
+        true
+    }
+
+    /// Whether the profile forbids a font with no embedded program.
+    fn refuses_unembedded_font(&mut self, resource: &[u8]) -> bool {
+        if self.profile.is_none() {
+            return false;
+        }
+        self.refuse(ArchivalRefusal::UnembeddedFont {
+            resource: resource.to_vec(),
+        })
+    }
+
+    /// Whether the profile is part 1's, which admits no transparency.
+    fn forbids_transparency(&self) -> bool {
+        self.profile
+            .as_ref()
+            .is_some_and(|profile| profile.part == ArchivalPart::One)
+    }
+
+    /// Whether the destination profile admits `space`.
+    ///
+    /// The same reading the validator's 6.2.3.3 rule makes, and it has to be:
+    /// `DeviceGray` is admitted under any destination — a grey value is a
+    /// value on the neutral axis of whatever device the intent names — and
+    /// `DeviceRGB` and `DeviceCMYK` need their own kind.
+    fn admits_device_space(profile: Option<&ArchivalProfile>, space: DeviceSpace) -> bool {
+        let Some(profile) = profile else {
+            return true;
+        };
+        match space {
+            DeviceSpace::Gray => true,
+            other => other == profile.destination_space,
+        }
+    }
+}
+
+/// The device colour space an image's samples are in, where it has one.
+///
+/// An `/Indexed` image's samples are indices and its *table* is in the base
+/// space, which is the space the page ends up painting in — so the base is
+/// what the archival rule is about, and 8.6.6.3 is why.
+fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
+    match image {
+        ImageData::Gray8 { .. } => Some(DeviceSpace::Gray),
+        ImageData::Rgb8 { .. } => Some(DeviceSpace::Rgb),
+        // A JPEG's colour space follows from its own component count, which
+        // `add_image` reads out of the SOF marker further down. Judged there
+        // would mean reading the marker twice; judged here would mean reading
+        // it before the call that owns it. It is left to the validator, and
+        // `super::STAGED`'s neighbour in the writer is this comment.
+        ImageData::Jpeg(_) => None,
+        ImageData::Compressed(image) => match image.color_space {
+            ImageColorSpace::DeviceGray => Some(DeviceSpace::Gray),
+            ImageColorSpace::DeviceRgb => Some(DeviceSpace::Rgb),
+            ImageColorSpace::DeviceCmyk => Some(DeviceSpace::Cmyk),
+            ImageColorSpace::Indexed { base, .. } => Some(base),
+        },
+    }
+}
+
+/// Escapes the five characters XML gives meaning to.
+///
+/// Written here rather than borrowed from `tinker-pdf-xml`: that crate reads
+/// XML and this writes it, and a reader's unescaper is not a writer's escaper
+/// however symmetric they look.
+fn xml_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// A PDF date string as XMP writes it: ISO 8601.
+///
+/// `D:20240102030405+01'00'` and `2024-01-02T03:04:05+01:00` are the same
+/// instant spelled twice, and ISO 19005-1 6.7.3 requires the `/Info` entry and
+/// the XMP property to agree. Returns `None` for a string this crate's own
+/// date parser cannot read, in which case the property is not written — a
+/// property carrying a date nobody could parse would be a second wrong answer
+/// rather than a first right one.
+fn iso8601(pdf_date: &str) -> Option<String> {
+    let date = crate::text_string::parse_date(pdf_date)?;
+    let zone = match date.utc_offset_minutes {
+        None => String::new(),
+        Some(0) => "Z".to_string(),
+        Some(minutes) => {
+            let sign = if minutes < 0 { '-' } else { '+' };
+            let magnitude = minutes.abs();
+            format!("{sign}{:02}:{:02}", magnitude / 60, magnitude % 60)
+        }
+    };
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{zone}",
+        date.year, date.month, date.day, date.hour, date.minute, date.second
+    ))
+}
+
+/// How an `/Info` entry is written into the packet.
+enum XmpShape {
+    /// A simple property: the text is the element's content.
+    Text,
+    /// An `rdf:Alt` with one language-tagged member.
+    Alt,
+    /// An `rdf:Seq` with one member.
+    Seq,
+    /// An ISO 8601 instant.
+    Instant,
+}
+
+/// The eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, in
+/// the order they are written.
+///
+/// The order is fixed and the table is a constant, which is what makes the
+/// packet byte-deterministic: the same `/Info` dictionary produces the same
+/// bytes on every run and every target, with nothing read from a clock.
+const XMP_PAIRINGS: &[(&[u8], &str, XmpShape)] = &[
+    (b"Title", "dc:title", XmpShape::Alt),
+    (b"Author", "dc:creator", XmpShape::Seq),
+    (b"Subject", "dc:description", XmpShape::Alt),
+    (b"Keywords", "pdf:Keywords", XmpShape::Text),
+    (b"Creator", "xmp:CreatorTool", XmpShape::Text),
+    (b"Producer", "pdf:Producer", XmpShape::Text),
+    (b"CreationDate", "xmp:CreateDate", XmpShape::Instant),
+    (b"ModDate", "xmp:ModifyDate", XmpShape::Instant),
+];
+
+/// The XMP packet a profiled document carries, byte for byte.
+///
+/// # Why it is generated rather than accepted from the caller
+///
+/// ISO 19005-1 6.7.3 requires every `/Info` entry to have an equivalent XMP
+/// property, and the validator in this repository checks it. A caller handing
+/// over a packet would have to satisfy that by hand, against a `/Info`
+/// dictionary the builder owns — so the builder writes both, from one table,
+/// and they cannot disagree.
+///
+/// # Determinism
+///
+/// Nothing here reads a clock, a locale, a hash seed or a pointer. The packet
+/// is a pure function of the profile and the `/Info` dictionary, iterated in
+/// [`XMP_PAIRINGS`]' fixed order, which is what ruling 4 asks of every byte
+/// this writer emits.
+fn archival_packet(profile: &ArchivalProfile, info: &Dict, names: &NameTable) -> Vec<u8> {
+    let mut out = String::with_capacity(1024);
+    out.push_str("<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n");
+    out.push_str("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n");
+    out.push_str("<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n");
+
+    out.push_str(
+        "<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\">\n",
+    );
+    out.push_str(&format!(
+        "<pdfaid:part>{}</pdfaid:part>\n",
+        profile.part.number()
+    ));
+    if let Some(level) = profile.level {
+        out.push_str(&format!(
+            "<pdfaid:conformance>{}</pdfaid:conformance>\n",
+            level.letter()
+        ));
+    }
+    // ISO 19005-4 6.7.3 identifies the amendment as well as the part, and
+    // parts 1 to 3 have no equivalent of it.
+    if profile.part == ArchivalPart::Four {
+        out.push_str(&format!("<pdfaid:rev>{ARCHIVAL_REVISION}</pdfaid:rev>\n"));
+    }
+    out.push_str("</rdf:Description>\n");
+
+    out.push_str(
+        "<rdf:Description rdf:about=\"\" \
+         xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+         xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\" \
+         xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\">\n",
+    );
+    for (key, property, shape) in XMP_PAIRINGS {
+        let Some(value) = info
+            .get(names.intern(key))
+            .and_then(Object::as_string)
+            .map(|string| crate::text_string::decode_text_string(&string.bytes))
+        else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        // Written on one line so the value carries no layout whitespace. A
+        // reader cannot tell a pretty-printer's indentation from a value that
+        // really begins with spaces, and this writer does not make it guess.
+        match shape {
+            XmpShape::Text => out.push_str(&format!(
+                "<{property}>{}</{property}>\n",
+                xml_escaped(&value)
+            )),
+            XmpShape::Alt => out.push_str(&format!(
+                "<{property}><rdf:Alt><rdf:li xml:lang=\"x-default\">{}\
+                 </rdf:li></rdf:Alt></{property}>\n",
+                xml_escaped(&value)
+            )),
+            XmpShape::Seq => out.push_str(&format!(
+                "<{property}><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></{property}>\n",
+                xml_escaped(&value)
+            )),
+            XmpShape::Instant => {
+                if let Some(instant) = iso8601(&value) {
+                    out.push_str(&format!("<{property}>{instant}</{property}>\n"));
+                }
+            }
+        }
+    }
+    out.push_str("</rdf:Description>\n");
+
+    out.push_str("</rdf:RDF>\n</x:xmpmeta>\n<?xpacket end=\"w\"?>");
+    out.into_bytes()
 }
 
 #[cfg(test)]
