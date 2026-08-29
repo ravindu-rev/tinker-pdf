@@ -14,12 +14,19 @@
 *.jp2 binary
 *.pgm binary
 
-# The XPS corpus (gap 30 milestone 1). These are OPC packages -- ZIPs -- so
-# `text=auto` would leave them alone anyway; they are named because the reason
-# not to touch them is stronger than "it found a NUL". Every one was written by
-# a Microsoft serialiser and none of it is regenerable byte for byte, since both
-# serialisers mint a fresh GUID per resource part. A normalised line ending
+# The XPS corpus (gap 30 milestone 1, and Tier 4's second producer). These are
+# OPC packages -- ZIPs -- so `text=auto` would leave them alone anyway; they are
+# named because the reason not to touch them is stronger than "it found a NUL".
+#
+# The eight Microsoft packages are not regenerable byte for byte, since both
+# serialisers mint a fresh GUID per resource part, so a normalised line ending
 # inside a stored part would break its CRC-32 and there would be no way back.
+# The five Ghostscript packages *are* regenerable -- and they need this more,
+# not less. Every one of their thirty entries is **stored**, where WPF deflates
+# all but one, so a normalised byte anywhere in any of them breaks a CRC-32;
+# what regenerability buys is that the damage would be repairable, not that it
+# would be absent, and a corpus that has to be rebuilt to be trusted is not one
+# git is holding correctly.
 *.xps binary
 *.oxps binary
 
