@@ -269,7 +269,11 @@ impl Bitmap {
 /// milestone 5 add [`OpenError::UnsupportedArchive`] without a second break.
 /// Gaps 30 and 31 expect their own. `Copy`, `PartialEq` and `Eq` are kept,
 /// because `tests/tinker_parity.rs` compares values of this type by ruling 12.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Clone` but not `Copy`: [`OpenError::SourceUnavailable`] carries the range
+/// that was wanted, and a range is not `Copy`. Naming the bytes is worth more
+/// than the convenience — a host told only "a range was missing" has to guess
+/// which one to fetch, which is the whole question it needed answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OpenError {
     /// Nothing in the bytes resembles a PDF: not one indirect object could be
@@ -294,6 +298,18 @@ pub enum OpenError {
     /// answers and a host shows different things for them. See
     /// [`ArchiveRefusal`].
     UnsupportedArchive(ArchiveRefusal),
+    /// A [`ByteSource`] could not supply the bytes an open must have.
+    ///
+    /// Only [`Document::open_streaming`] produces it, and the right response
+    /// is the opposite of [`OpenError::NotAPdf`]'s: fetch the range the
+    /// [`SourceMiss`] names and call again. Collapsing the two — which this
+    /// enum did until the C ABI needed to tell a host which one had happened —
+    /// makes the seam unusable for the thing it exists for, because "not a
+    /// PDF" is a reason to stop.
+    ///
+    /// Only the head window produces it. A miss further in has the rescan
+    /// ladder underneath it and degrades (ruling 2) rather than failing.
+    SourceUnavailable(SourceMiss),
 }
 
 /// Why a document could not be *used* after it opened.
@@ -333,6 +349,7 @@ impl core::fmt::Display for OpenError {
             OpenError::NotAPdf => f.write_str("not a PDF: no indirect objects found"),
             OpenError::Empty => f.write_str("no bytes to read"),
             OpenError::UnsupportedArchive(why) => write!(f, "not opened as a document: {why}"),
+            OpenError::SourceUnavailable(miss) => write!(f, "the source could not supply {miss}"),
         }
     }
 }
@@ -662,7 +679,7 @@ impl Document {
         // recognises -- `cbz::container` reads no further than byte 262.
         let head = source
             .read(0..CONTAINER_SNIFF)
-            .map_err(|_| OpenError::NotAPdf)?;
+            .map_err(OpenError::SourceUnavailable)?;
         if cbz::container(&head).is_some() {
             // Whole-file by contract, and the only honest way to read one.
             let mut bytes = Vec::with_capacity(source.len() as usize);
@@ -670,7 +687,7 @@ impl Document {
             while at < source.len() {
                 let got = source
                     .read(at..source.len())
-                    .map_err(|_| OpenError::NotAPdf)?;
+                    .map_err(OpenError::SourceUnavailable)?;
                 if got.is_empty() {
                     return Err(OpenError::NotAPdf);
                 }
@@ -680,7 +697,12 @@ impl Document {
             return Document::open_with(bytes, options);
         }
 
-        let inner = CosDocument::open_source(source).map_err(|_| OpenError::NotAPdf)?;
+        let inner = CosDocument::open_source(source).map_err(|error| match error {
+            tinker_pdf_cos::OpenError::SourceUnavailable(miss) => {
+                OpenError::SourceUnavailable(miss)
+            }
+            tinker_pdf_cos::OpenError::NoObjects => OpenError::NotAPdf,
+        })?;
         Ok(Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),

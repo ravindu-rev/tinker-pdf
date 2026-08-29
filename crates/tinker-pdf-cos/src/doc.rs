@@ -40,6 +40,7 @@ use crate::objstm::{self, ObjStm, ObjStmCache};
 use crate::parse::{parse_indirect_at, parse_object_at, ParsedIndirect};
 use crate::repair::{find_from, next_object_header, rfind_from, ScanIndex};
 use crate::security::{AuthError, AuthLevel};
+use crate::source::SourceMiss;
 use crate::source::{Backing, ByteSource, Bytes};
 use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
 use crate::warn::{Warning, WarningKind, WarningSink};
@@ -63,17 +64,33 @@ pub enum LadderLevel {
 }
 
 /// The only way opening a document fails.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// `Clone` but not `Copy`: [`OpenError::SourceUnavailable`] carries the range
+/// that was wanted, and a range is not `Copy`. Naming the bytes is worth more
+/// than the convenience — a host told only "a range was missing" has to guess
+/// which one to fetch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpenError {
     /// Not one indirect object could be located, even after a full rescan.
     /// This is not a PDF by any reader's definition.
     NoObjects,
+    /// The source could not supply the bytes an open must have.
+    ///
+    /// Kept apart from [`OpenError::NoObjects`] because the right response is
+    /// the opposite: a host told "not a PDF" stops, and a host told this
+    /// fetches the range named and calls again. Collapsing them makes the
+    /// whole [`crate::ByteSource`] seam unusable for the thing it exists for.
+    ///
+    /// Only the head window produces it. A miss further in has the rescan
+    /// ladder underneath it and degrades (ruling 2) rather than failing; a
+    /// miss at byte zero has nothing underneath it at all.
+    SourceUnavailable(SourceMiss),
 }
 
 impl fmt::Display for OpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OpenError::NoObjects => f.write_str("no indirect objects found"),
+            OpenError::SourceUnavailable(miss) => write!(f, "{miss}"),
         }
     }
 }
@@ -360,8 +377,9 @@ impl CosDocument {
         // 7.5.2: bytes before %PDF- shift every offset the file stores. One
         // head window covers the scan limit the clause sets, which on a
         // streamed source is exactly one chunk.
-        let Ok(head) = backing.window(0..limits::MAX_HEADER_SCAN as u64) else {
-            return Err(OpenError::NoObjects);
+        let head = match backing.window(0..limits::MAX_HEADER_SCAN as u64) {
+            Ok(head) => head,
+            Err(miss) => return Err(OpenError::SourceUnavailable(miss)),
         };
         let shift = xref::header_shift(&head, &mut sink);
         drop(head);
