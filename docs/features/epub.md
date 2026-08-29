@@ -51,7 +51,11 @@ cell being `:empty`. `css-cascade-5`'s complete sort order (origin, layer,
 specificity, order) with the UA sheet (`read::UA_STYLESHEET`, derived from
 HTML §15), author sheets and `style=""` attributes; `@media` evaluated
 against a `MediaContext`; `@import` with cycle and depth bounds;
-`@font-face` descriptors collected into a `FaceSet`. Around fifty computed
+`@font-face` descriptors collected into a `FaceSet`; `@layer` in all three
+syntaxes — block, statement and anonymous — with dotted and nested names
+resolving to one layer, first mention fixing a layer's position, the order
+kept per origin, and **`!important` reversing it**, so an important
+declaration in the first layer beats an important one in the last. Around fifty computed
 properties reach `ComputedStyle`. **A property parsed with no consumer does
 not compile** — `tinker-pdf-css/tests/unimplemented_property_does_not_build.rs`
 and `tinker-pdf-layout/tests/uncascaded_field_does_not_build.rs` make a
@@ -134,7 +138,6 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | --- | --- | --- | --- |
 | SVG content documents in the spine | `SpineDefect::SvgContentDocument` | placeholder page; no SVG renderer | [ROADMAP.md](../ROADMAP.md) |
 | `min-width`, `max-width`, `min-height`, `max-height`, `vertical-align`, `gap`, multi-column (`column-*`), `position` other than `static` | `ArchiveWarning::UnimplementedProperty { property, elements }` | parsed and counted by the elements reached; a property with no layout consumer cannot be cascaded silently — the build enforces it | [ROADMAP.md](../ROADMAP.md) Tier 4 |
-| `@layer` | `tinker_pdf_css::Warning::LayerRefused` | `css-cascade-5` §6.1 sorts layers above specificity, so reading the block as ordinary rules would invert the cascade; refused by name | [ROADMAP.md](../ROADMAP.md) |
 | Other at-rules (`@supports`, `@page`, …) | `tinker_pdf_css::Warning::AtRuleUnsupported(name)` | skipped by the spec's own recovery, named | — |
 | `:hover`, `:focus`, `:focus-within`, `:focus-visible`, `:active`, `:target`, `:visited` — **seven, and the whole of what never matches** | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | each names a state of a reading *session*: a pointer, a focus ring, a press, a fragment the reader navigated to, a history. A paginated document has none of them, for any element, ever — so never matching is `selectors-4`'s **answer** here and not this build's gap. Still counted, because a rule that had no effect is something the book said (ruling 10), and the count is asserted by number so a shrinking list cannot read as a passing one | — |
 | `:nth-child(An+B of S)` | `parser::Report::discarded_rules` | the only pseudo-class syntax refused outright. Reading it as the `An+B` without the `of` would style every second row instead of every second `.a`, which is a book that renders beautifully and is wrong; §3.1 drops the rule instead, counted | [ROADMAP.md](../ROADMAP.md) |
@@ -150,9 +153,12 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | Encrypted resources, missing rootfile, unreadable package document, unsupported package version, empty spine, a book that could not be paginated | `ArchiveRefusal::{EncryptedResources, RootfileMissing, UnreadablePackageDocument, UnsupportedPackageVersion, EmptySpine, UnpaginatedBook, UnreadableContainer}` | refused at open, by name | [cbz](cbz.md) |
 | Scripting, MathML layout, media overlays | `ArchiveWarning::UnimplementedFeature` | declared in `properties`, reported, content rendered as its fallback text | — |
 
-**Corpus caveats, stated**: no fixed-layout book from a real producer and
-no real producer's font through the `@font-face` path are in the committed
-set ([ROADMAP.md](../ROADMAP.md) Tier 4).
+**Corpus caveats, stated**: no fixed-layout book from a real producer, no
+real producer's font through the `@font-face` path, and **no stylesheet
+declaring a cascade layer** are in the committed set — `epub_css.rs` asserts
+the layer count is zero rather than assuming it, so `@layer` is verified
+against this engine's own reading of `css-cascade-5` §6.4.2 and against no
+producer at all ([ROADMAP.md](../ROADMAP.md) Tier 4).
 
 ## Verified
 

@@ -19,9 +19,12 @@
 //! 3. **Element-attached styles.** `style=""` beats every selector at the same
 //!    origin and importance, whatever its specificity. Real books use it
 //!    constantly.
-//! 4. **Layers.** `@layer` is refused at the at-rule, by name, because a build
-//!    that read an unknown at-rule's block as ordinary rules would silently
-//!    invert this criterion.
+//! 4. **Layers**, and the second reversal. `@layer` orders declarations
+//!    *below* specificity, so a layered rule loses to an unlayered one of lower
+//!    specificity — unlayered styles are the implicit last layer. And
+//!    `!important` turns the layer order round exactly as it turns the origin
+//!    order round: an important declaration in the **first** layer beats one in
+//!    the last, and an important unlayered declaration loses to every layer.
 //! 5. **Specificity**, `selectors-4` §15's tuple.
 //! 6. **Order of appearance**, last wins.
 //!
@@ -43,7 +46,7 @@
 //! implementation, written so `a_lazy_resolution_and_the_single_pass_agree` can
 //! compare the two; it is not the shipped route and its doc comment says so.
 
-use crate::parser::{Declared, Report, StyleRule, Stylesheet};
+use crate::parser::{Declared, LayerPart, Report, StyleRule, Stylesheet};
 use crate::property::*;
 use crate::selector::{self, Index, Specificity};
 use crate::{Budget, Element, Limits, Refusal};
@@ -91,6 +94,15 @@ struct CascadeKey {
     /// §6.1 criterion 3: an element-attached declaration beats a selector-
     /// matched one at the same origin and importance.
     attached: bool,
+    /// §6.1 criterion 4, already turned the right way round for `!important`
+    /// by [`Layers::key`] — higher wins, like every field here.
+    ///
+    /// It sits **between** `attached` and `specificity` and not next to
+    /// `specificity` because that is where the specification puts it: a layered
+    /// `#id` rule loses to an unlayered `p` rule, and an implementation that
+    /// sorted the two the other way round would be right about every book that
+    /// uses one layer and wrong about every book that uses two.
+    layer: u32,
     /// §6.1 criterion 5.
     specificity: Specificity,
     /// §6.1 criterion 6: later in the document order of the sheets wins.
@@ -606,27 +618,233 @@ fn apply_winners(winners: &[Property], style: &mut ComputedStyle, root_font_size
     }
 }
 
-/// The rules of every sheet, bucketed, with their origin and source order.
+/// One node of an origin's layer tree.
+struct LayerNode {
+    key: LayerKey,
+    /// Sub-layers, in the order their names were first seen — which is
+    /// §6.4.2's order, and the reason the parser records first mention rather
+    /// than every mention.
+    children: Vec<usize>,
+}
+
+/// What makes two layer parts the same layer.
+#[derive(PartialEq, Eq)]
+enum LayerKey {
+    /// The origin itself: the implicit outer layer that unlayered styles are
+    /// in, and the parent of every named one.
+    Root,
+    /// A name, which two sheets of the same origin share — that is the whole
+    /// point of `@layer a` appearing in two files.
+    Named(String),
+    /// `@layer { … }`, keyed by the sheet that wrote it as well as by its
+    /// ordinal, because an anonymous layer in one sheet is **not** the
+    /// anonymous layer in the next: nothing can name either, so nothing can
+    /// put a rule in both.
+    Anonymous { sheet: usize, ordinal: usize },
+}
+
+/// One origin's layer tree, flattened into §6.4.2's order.
+#[derive(Default)]
+struct LayerTree {
+    nodes: Vec<LayerNode>,
+    /// A node's position in the order, **higher winning**, which is the shape
+    /// every field of [`CascadeKey`] is in.
+    position: Vec<u32>,
+    /// The root's position, which is the largest of them. Subtracting from it
+    /// is §6.1's `!important` layer reversal, and it is one subtraction rather
+    /// than a second sort because reversing an order is what it is.
+    top: u32,
+}
+
+impl LayerTree {
+    /// The node one layer name resolves to, creating what is not there yet.
+    fn insert(&mut self, sheet: usize, name: &[LayerPart]) -> usize {
+        let mut at = 0;
+        for part in name {
+            let key = match part {
+                LayerPart::Named(name) => LayerKey::Named(name.clone()),
+                LayerPart::Anonymous(ordinal) => LayerKey::Anonymous {
+                    sheet,
+                    ordinal: *ordinal,
+                },
+            };
+            let mut found = None;
+            for &child in &self.nodes[at].children {
+                if self.nodes[child].key == key {
+                    found = Some(child);
+                    break;
+                }
+            }
+            at = match found {
+                Some(child) => child,
+                None => {
+                    let child = self.nodes.len();
+                    self.nodes.push(LayerNode {
+                        key,
+                        children: Vec::new(),
+                    });
+                    self.nodes[at].children.push(child);
+                    child
+                }
+            };
+        }
+        at
+    }
+
+    /// §6.4.2's order, as a number per node: **sub-layers first, then the layer
+    /// itself**, and the root last of all.
+    ///
+    /// A layer's own rules are the implicit last sub-layer of it, exactly as
+    /// unlayered rules are the implicit last layer of the origin — the same
+    /// clause one level down, which is why one post-order walk produces both
+    /// and why the root's position is the unlayered one.
+    ///
+    /// The walk carries its own stack rather than recursing.
+    /// [`Stylesheet::layers`] is a public field, so a caller can hand this a
+    /// tree deeper than the parser would ever build, and a leaf crate does not
+    /// get to overflow the stack over it (ruling 1).
+    fn flatten(&mut self) {
+        self.position = vec![0; self.nodes.len()];
+        let mut next = 0u32;
+        let mut stack = vec![(0usize, 0usize)];
+        while let Some((at, child)) = stack.pop() {
+            match self.nodes[at].children.get(child) {
+                Some(&descend) => {
+                    stack.push((at, child + 1));
+                    stack.push((descend, 0));
+                }
+                None => {
+                    self.position[at] = next;
+                    next = next.saturating_add(1);
+                }
+            }
+        }
+        self.top = next.saturating_sub(1);
+    }
+}
+
+/// Every origin's layer tree, and the map from a sheet's own layer list into
+/// the tree of the origin that sheet belongs to.
+///
+/// **Per origin**, because that is what §6.4.2 says a layer name is scoped to:
+/// the author's `@layer a` and the user-agent sheet's `@layer a` are two
+/// different layers, and a build with one global table would let a book's
+/// stylesheet reorder this engine's own.
+#[derive(Default)]
+struct Layers {
+    trees: [LayerTree; 3],
+    /// `[sheet][the sheet's own layer index]` — the node it resolves to.
+    placed: Vec<Vec<usize>>,
+}
+
+/// Which tree an origin's layers live in. Not [`Origin`]'s cascade weight —
+/// [`rank`] is that — but a slot, and the two are different numbers on purpose.
+fn slot(origin: Origin) -> usize {
+    match origin {
+        Origin::UserAgent => 0,
+        Origin::User => 1,
+        Origin::Author => 2,
+    }
+}
+
+impl Layers {
+    fn build(sheets: &[Sheet<'_>]) -> Self {
+        let mut layers = Layers::default();
+        for tree in &mut layers.trees {
+            tree.nodes.push(LayerNode {
+                key: LayerKey::Root,
+                children: Vec::new(),
+            });
+        }
+        for (at, (origin, sheet)) in sheets.iter().enumerate() {
+            let tree = &mut layers.trees[slot(*origin)];
+            let mut placed = Vec::with_capacity(sheet.layers.len());
+            for name in &sheet.layers {
+                placed.push(tree.insert(at, name));
+            }
+            layers.placed.push(placed);
+        }
+        for tree in &mut layers.trees {
+            tree.flatten();
+        }
+        layers
+    }
+
+    /// The node a rule's layer resolves to; the root, which is the unlayered
+    /// position, for a rule in no layer.
+    ///
+    /// An index a caller-built sheet does not have resolves to the root rather
+    /// than panicking, which is the same answer as *unlayered* — the honest
+    /// reading of a sheet that names a layer it did not declare.
+    fn node(&self, sheet: usize, layer: Option<usize>) -> usize {
+        let Some(layer) = layer else { return 0 };
+        self.placed
+            .get(sheet)
+            .and_then(|placed| placed.get(layer))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// §6.1's fourth criterion for one declaration, higher winning.
+    ///
+    /// **The `!important` half is the mirror image and not a special case.**
+    /// The root — unlayered — is the highest position, so a normal unlayered
+    /// declaration beats every layer and an important one loses to every layer,
+    /// which is the answer a build that reversed only the origins gets exactly
+    /// backwards.
+    fn key(&self, origin: Origin, node: usize, important: bool) -> u32 {
+        let tree = &self.trees[slot(origin)];
+        let position = tree.position.get(node).copied().unwrap_or(0);
+        if important {
+            tree.top.saturating_sub(position)
+        } else {
+            position
+        }
+    }
+}
+
+/// One rule with everything §6.1 sorts it by that does not depend on the
+/// element: its origin, its layer both ways round, and its source order.
+struct Placed<'a> {
+    origin: Origin,
+    /// §6.1 criterion 4, for a normal declaration.
+    layer: u32,
+    /// §6.1 criterion 4, for an `!important` one.
+    layer_important: u32,
+    /// §6.1 criterion 6: counts up across every sheet in the order the caller
+    /// gave them.
+    order: usize,
+    rule: &'a StyleRule,
+}
+
+/// The rules of every sheet, bucketed, with their origin, layer and order.
 struct Matcher<'a> {
-    /// `(origin, order, rule)` — `order` counts up across every sheet in the
-    /// order the caller gave them, which is §6.1's sixth criterion.
-    rules: Vec<(Origin, usize, &'a StyleRule)>,
+    rules: Vec<Placed<'a>>,
     /// `handle` is an index into a flattened `(rule index, selector index)`
     /// list, so one bucket entry names one selector.
     selectors: Vec<(usize, usize)>,
     index: Index,
+    layers: Layers,
 }
 
 impl<'a> Matcher<'a> {
     fn build(sheets: &[Sheet<'a>]) -> Self {
+        let layers = Layers::build(sheets);
         let mut rules = Vec::new();
         let mut selectors = Vec::new();
         let mut index = Index::default();
         let mut order = 0usize;
-        for (origin, sheet) in sheets {
+        for (at, (origin, sheet)) in sheets.iter().enumerate() {
             for rule in &sheet.rules {
                 let rule_at = rules.len();
-                rules.push((*origin, order, rule));
+                let node = layers.node(at, rule.layer);
+                rules.push(Placed {
+                    origin: *origin,
+                    layer: layers.key(*origin, node, false),
+                    layer_important: layers.key(*origin, node, true),
+                    order,
+                    rule,
+                });
                 order += 1;
                 for (selector_at, selector) in rule.selectors.iter().enumerate() {
                     let handle = selectors.len();
@@ -639,6 +857,7 @@ impl<'a> Matcher<'a> {
             rules,
             selectors,
             index,
+            layers,
         }
     }
 
@@ -658,18 +877,23 @@ impl<'a> Matcher<'a> {
         let mut matched: Vec<(CascadeKey, &Declared)> = Vec::new();
         for handle in self.index.candidates(&elements[at]) {
             let (rule_at, selector_at) = self.selectors[handle];
-            let (origin, order, rule) = self.rules[rule_at];
-            let selector = &rule.selectors[selector_at];
+            let placed = &self.rules[rule_at];
+            let selector = &placed.rule.selectors[selector_at];
             if !selector::matches(selector, elements, at, budget)? {
                 continue;
             }
-            for declared in &rule.declarations {
+            for declared in &placed.rule.declarations {
                 matched.push((
                     CascadeKey {
-                        rank: rank(origin, declared.important),
+                        rank: rank(placed.origin, declared.important),
                         attached: false,
+                        layer: if declared.important {
+                            placed.layer_important
+                        } else {
+                            placed.layer
+                        },
                         specificity: selector.specificity,
-                        order,
+                        order: placed.order,
                     },
                     declared,
                 ));
@@ -688,6 +912,13 @@ impl<'a> Matcher<'a> {
                 CascadeKey {
                     rank: rank(Origin::Author, declared.important),
                     attached: true,
+                    // A `style=""` attribute cannot be in a layer — there is no
+                    // syntax for it — so it takes the unlayered position, which
+                    // is the root's. Criterion 3 already sorts it above every
+                    // layered declaration at the same rank, so this decides
+                    // nothing; it is here because a field left at zero would
+                    // *look* like the weakest layer to the next reader.
+                    layer: self.layers.key(Origin::Author, 0, declared.important),
                     specificity: Specificity::ZERO,
                     order: usize::MAX,
                 },

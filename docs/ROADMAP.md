@@ -345,8 +345,8 @@ refusal table.
   path (WOFF/WOFF2 are refused by name); table-row and flex-line
   fragmentation (staged, not built); the pinned float reading-order
   defect; multi-column; non-static `position`; `min`/`max` sizing;
-  `vertical-align`; SVG content documents; CSS `@layer`; pseudo-classes
-  and pseudo-elements (parsed, never matched / no box generated).
+  `vertical-align`; SVG content documents; pseudo-classes and
+  pseudo-elements (parsed, never matched / no box generated).
 - **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; TIFF and
   JPEG XR decoders; remote resource-dictionary parts; `IsSideways` and
   odd `BidiLevel`; `OpacityMask`; and a corpus from more than one
