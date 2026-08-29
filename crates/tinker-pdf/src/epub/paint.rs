@@ -66,8 +66,10 @@ use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PageBuilder, Target};
 use tinker_pdf_css::property::{BorderStyle, Color, FontFamily, FontStyle, Side, TextDecoration};
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
-use tinker_pdf_layout::metrics::{FontRequest, Metrics, Vertical};
+use tinker_pdf_font::Sfnt;
+use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical};
 use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, TextRun};
+use tinker_pdf_shape::bidi::BaseDirection;
 
 use super::read::PX_TO_PT;
 use super::typeface::FaceSet;
@@ -419,6 +421,118 @@ impl Metrics for BookMetrics<'_> {
             descent: descent * font.size,
         }
     }
+
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        Some(self)
+    }
+}
+
+/// Milestone 6 of `docs/design/shaping.md`: the book's own faces, shaped.
+///
+/// # Why this answers for every run and not only for the ones it can shape
+///
+/// [`tinker_pdf_layout::metrics::Metrics::shaper`] is asked once per provider
+/// and not once per run, so a provider that is a shaper owns **all** of its
+/// runs. That is not a limitation to work around; it is the rule. A run
+/// measured by the shaper and drawn from `Metrics::advance` — or the other way
+/// round — is the two-paths-disagree failure `metrics.rs` warns about, and the
+/// only way to make it unreachable is for one of the two to own everything.
+///
+/// So a run set in one of the standard 14, which has no sfnt in this process
+/// to shape against, is measured here by summing [`BookMetrics::advance`] —
+/// the same number, produced by the same provider, **once**. What changes is
+/// not the arithmetic but who did it.
+///
+/// # The clusters are the run's own
+///
+/// `tinker_pdf_shape` numbers a cluster by byte offset into the paragraph it
+/// was given, and the paragraph here *is* the run, so the offsets come back
+/// indexed from the start of `text` and need no adjustment. Milestone 7 turns
+/// them into `/ToUnicode`.
+impl Shaper for BookMetrics<'_> {
+    fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        let face = match choose(self.faces(), font, text.chars().next()) {
+            Chosen::Embedded(index) => self.faces().faces().get(index),
+            Chosen::Standard(_) => None,
+        };
+        let program = face.map(|face| face.program.as_slice());
+        let shaped = program.and_then(|bytes| shape_with(bytes, text, font, rtl));
+        shaped.unwrap_or_else(|| self.unshaped(text, font, rtl))
+    }
+}
+
+impl BookMetrics<'_> {
+    /// One glyph per character, at this provider's own advances.
+    ///
+    /// The answer for a standard-14 run, and for an embedded face whose sfnt
+    /// this build could not read. The glyph index is zero throughout because
+    /// there is none to give: a simple font addresses a *code* and the
+    /// consumer that draws this run resolves that itself, through
+    /// [`Coded`]. What layout needs from this is the advance, and that is the
+    /// provider's own.
+    fn unshaped(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        let mut glyphs = Vec::new();
+        let mut advance = 0.0;
+        for (at, ch) in text.char_indices() {
+            let width = self.advance(ch, font);
+            glyphs.push(PlacedGlyph {
+                glyph: 0,
+                cluster: u32::try_from(at).unwrap_or(u32::MAX),
+                x_advance: width,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+            advance += width;
+        }
+        ShapedText {
+            glyphs,
+            advance,
+            rtl,
+        }
+    }
+}
+
+/// Shapes one run against one embedded face, scaling design units to points.
+///
+/// `None` where the bytes are not an sfnt this build reads, which is the same
+/// answer [`EmbeddedFace::advance_em`] gives for the same face and leaves the
+/// caller to fall back.
+///
+/// The scale is `units * size / units_per_em`: one multiply and one divide,
+/// both correctly rounded by IEEE 754, which is where ruling 4's integer
+/// pipeline is allowed to end. Every number is an integer until this line.
+fn shape_with(bytes: &[u8], text: &str, font: &FontRequest<'_>, rtl: bool) -> Option<ShapedText> {
+    let sfnt = Sfnt::parse(bytes)?;
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let direction = if rtl {
+        BaseDirection::RightToLeft
+    } else {
+        BaseDirection::Auto
+    };
+    let (_, runs) = shaper.shape_text(text, direction);
+    let mut glyphs = Vec::new();
+    let mut advance = 0.0;
+    for run in &runs {
+        let units = f64::from(run.units_per_em().max(1));
+        let scale = |value: i32| f64::from(value) * font.size / units;
+        for glyph in run.glyphs() {
+            glyphs.push(PlacedGlyph {
+                glyph: glyph.glyph,
+                cluster: glyph.cluster,
+                x_advance: scale(glyph.x_advance),
+                y_advance: scale(glyph.y_advance),
+                x_offset: scale(glyph.x_offset),
+                y_offset: scale(glyph.y_offset),
+            });
+            advance += scale(glyph.x_advance);
+        }
+    }
+    Some(ShapedText {
+        glyphs,
+        advance,
+        rtl,
+    })
 }
 
 /// How one character reaches the page: a code in a simple font, or a glyph

@@ -293,6 +293,55 @@ const EXPECTED: &[(Table, u16, usize, usize)] = &[
     (Table::Gpos, 9, 2, 2),
 ];
 
+/// The seven cursive-attachment cases where aots and text-rendering-tests
+/// **cannot both be satisfied**, with the positions this crate produces.
+///
+/// # The two readings, and which one this crate follows
+///
+/// A `GPOS` type 3 lookup says an exit anchor and an entry anchor must meet.
+/// Both sides agree on where the joined pair ends up relative to each other —
+/// aots's own prose states it, *"glyph 19 will have been moved, to have its
+/// origin at (99, 99) relative to the origin of the new position of glyph
+/// 18"*, and this crate puts it exactly there. They disagree about
+/// **everything after the pair**.
+///
+/// Adobe's reading moves the joined glyph by placement and touches no advance,
+/// so the run is exactly as wide as it was. ISO/IEC 14496-22 and OpenType 1.9
+/// say the layout engine *"adjusts the advance"*, so the pair overlaps and the
+/// run becomes narrower by the overlap — and everything past the join moves
+/// with it. The difference in each row below is that overlap, `1500 − 99`.
+///
+/// Milestone 3 recorded that nothing in the tree could tell the two apart and
+/// named text-rendering-tests SHARAN-1 as the case that would. It did, and it
+/// chose 14496-22: shaping its six Nasta‘līq words under Adobe's reading puts
+/// every glyph identity right and every pen position after a join too far
+/// along, by exactly the accumulated overlap. That is not a close call. Under
+/// Adobe's reading no Arabic face joins at all — a joined word is as wide as
+/// its letters standing apart — which is the opposite of what cursive
+/// attachment is for.
+///
+/// # Why these still run
+///
+/// They are not skipped. Each is shaped, its glyph count is checked, its `y`
+/// deltas are checked against aots unchanged, and its `x` deltas are checked
+/// against the array below — so the number this crate produces is pinned just
+/// as tightly as an agreeing case, and both readings are written down where a
+/// reader can see the one subtracted from the other. What is given up is the
+/// claim that this crate agrees with aots on all 272 cases; it agrees on 265,
+/// and the other seven are here with the reason.
+const CURSIVE_DIVERGENCE: &[(&str, &[i32])] = &[
+    ("gpos3_lookupflag_1", &[0, 0, -1300, -1401, -1401]),
+    (
+        "gpos3_lookupflag_2",
+        &[0, 0, -1300, -1300, -1300, -1401, -1401],
+    ),
+    ("gpos3_test1a", &[0, 0, -1401, -1401]),
+    ("gpos3_test3a", &[0, 0, -1400, -1400]),
+    ("gpos3_test3b", &[0, 0, -1401, -1401]),
+    ("gpos3_test3c", &[0, 0, -1398, -1398]),
+    ("gpos3_test3d", &[0, 0, -1399, -1399]),
+];
+
 /// How many cases the file holds, in total.
 const TOTAL_CASES: usize = 275;
 /// How many of them this milestone runs; the difference is
@@ -309,6 +358,7 @@ fn every_case_produces_what_the_specification_says() {
     );
 
     let mut failures: Vec<String> = Vec::new();
+    let mut diverged: Vec<String> = Vec::new();
     let mut ran = 0usize;
     for case in &cases {
         if case.select {
@@ -351,10 +401,22 @@ fn every_case_produces_what_the_specification_says() {
         }
         if case.kind == Kind::Gpos {
             let (x, y) = deltas(&layout, &buffer);
-            if x != case.x || y != case.y {
+            // Seven cases read their `x` from `CURSIVE_DIVERGENCE` instead of
+            // from aots, because the two published sources disagree there and
+            // that constant says which one this crate follows and why. Their
+            // `y` is aots's, unchanged: the disagreement is only along the
+            // line.
+            let diverges = CURSIVE_DIVERGENCE
+                .iter()
+                .find(|(id, _)| *id == case.id.as_str());
+            let wanted = diverges.map_or(case.x.as_slice(), |(_, x)| *x);
+            if diverges.is_some() {
+                diverged.push(case.id.clone());
+            }
+            if x != wanted || y != case.y {
                 failures.push(format!(
-                    "{}: x {x:?} y {y:?}, expected x {:?} y {:?}",
-                    case.id, case.x, case.y
+                    "{}: x {x:?} y {y:?}, expected x {wanted:?} y {:?}",
+                    case.id, case.y
                 ));
             }
         }
@@ -366,6 +428,14 @@ fn every_case_produces_what_the_specification_says() {
         failures.join("\n")
     );
     assert_eq!(ran, RAN_CASES, "the number of cases that ran moved");
+    let expected: Vec<String> = CURSIVE_DIVERGENCE
+        .iter()
+        .map(|(id, _)| (*id).to_string())
+        .collect();
+    assert_eq!(
+        diverged, expected,
+        "the set of cases where aots and text-rendering-tests disagree moved"
+    );
 }
 
 /// The three cases this milestone declines to run, and why.

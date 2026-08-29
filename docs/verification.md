@@ -16,13 +16,13 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **30 cargo-fuzz targets**
+Ruling 1 makes a fuzz crash a release blocker. **31 cargo-fuzz targets**
 cover every input format: `ascii_filters`, `ccitt`, `cff`, `cff_subset`,
 `cmap`, `content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
 `crypt_ciphers`, `css`, `form_script`, `icc_profile`, `inflate`, `jbig2`,
 `jpeg`, `jpx`, `layout`, `lzw`, `pki_cms`, `pki_der`, `png`, `render_page`,
-`sfnt`, `shape`, `signatures`, `truetype`, `type1`, `xml`, `zip_archive` —
-each landing in the same PR as its parser.
+`sfnt`, `shape`, `shape_text`, `signatures`, `truetype`, `type1`, `xml`,
+`zip_archive` — each landing in the same PR as its parser.
 
 `cff_subset` is the one target that fuzzes a **writer**. Its assertion is
 not "it did not panic": whatever the subsetter emits must parse with this

@@ -96,8 +96,26 @@ fn face_bytes(name: &str) -> Option<&'static [u8]> {
         "TestShapeEthi.ttf" => {
             include_bytes!("../data/text-rendering-tests/fonts/TestShapeEthi.ttf").as_slice()
         }
+        // The one right-to-left face in the corpus, and the only one whose
+        // glyphs reach cursive attachment, the joining forms and the
+        // direction-dependent half of attachment propagation. Without it a
+        // `f32` creeping into a cursive chain would not move any number here.
+        "TestShapeAran.ttf" => {
+            include_bytes!("../data/text-rendering-tests/fonts/TestShapeAran.ttf").as_slice()
+        }
         "TestCMAP14.otf" => {
             include_bytes!("../data/text-rendering-tests/fonts/TestCMAP14.otf").as_slice()
+        }
+        // Two Brahmic faces, for the same reason the Arabic one is here: the
+        // Universal Shaping Engine's syllables and its reordering pause are
+        // reached by no other case in this corpus, so without them a defect in
+        // either would move no number.
+        "NotoSansBalinese-Regular.ttf" => {
+            include_bytes!("../data/text-rendering-tests/fonts/NotoSansBalinese-Regular.ttf")
+                .as_slice()
+        }
+        "TestShapeLana.ttf" => {
+            include_bytes!("../data/text-rendering-tests/fonts/TestShapeLana.ttf").as_slice()
         }
         // The declined sections' faces, and the billion-laughs one, are not
         // fingerprinted: two of them shape to `.notdef` today and one is a
@@ -116,6 +134,9 @@ const FIXTURES: &[&str] = &[
     include_str!("../data/text-rendering-tests/testcases/GPOS-2.html"),
     include_str!("../data/text-rendering-tests/testcases/GPOS-3.html"),
     include_str!("../data/text-rendering-tests/testcases/GPOS-4.html"),
+    include_str!("../data/text-rendering-tests/testcases/SHARAN-1.html"),
+    include_str!("../data/text-rendering-tests/testcases/SHBALI-1.html"),
+    include_str!("../data/text-rendering-tests/testcases/SHLANA-3.html"),
 ];
 
 /// The paragraphs the bidi corpus resolves.
@@ -153,7 +174,12 @@ fn shaping() -> (String, usize) {
             digest.bytes(font.as_bytes());
             digest.bytes(render.as_bytes());
             digest.bytes(&face.units_per_em.to_be_bytes());
-            let (_, runs) = shaper.shape_text(&render, BaseDirection::LeftToRight);
+            // `Auto` rather than a fixed direction, so that the Arabic
+            // fixture resolves to a right-to-left paragraph the way a
+            // consumer's would. Every other case in the corpus is Latin,
+            // Ethiopic or Han and resolves to base level zero either way, so
+            // this changes nothing about them.
+            let (_, runs) = shaper.shape_text(&render, BaseDirection::Auto);
             for run in &runs {
                 digest.byte(u8::from(run.direction().is_forward()));
                 for glyph in run.glyphs() {
@@ -243,14 +269,14 @@ fn unescape(text: &str) -> String {
 /// Reproduced by the determinism CI legs on linux, windows, macos and
 /// `wasm32-wasip1`. Two targets disagreeing here is a determinism bug and not
 /// a reason to move these numbers.
-const SHAPING: &str = "5bb275af438f2314";
+const SHAPING: &str = "3c0c14c870199202";
 const BIDI: &str = "d77c9e938eb9c996";
 
 /// The least each corpus may produce before its fingerprint means anything.
 ///
 /// `determinism.rs`'s `least_ink`, transposed: a corpus that shaped nothing
 /// hashes perfectly stably on every target and proves nothing at all.
-const LEAST_GLYPHS: usize = 90;
+const LEAST_GLYPHS: usize = 230;
 const LEAST_CHARACTERS: usize = 240;
 
 #[test]

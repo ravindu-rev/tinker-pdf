@@ -71,7 +71,7 @@ use tinker_pdf_css::property::{
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
-use crate::metrics::Metrics;
+use crate::metrics::{FontRequest, Metrics};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
@@ -2430,7 +2430,7 @@ impl<M: Metrics> Builder<'_, M> {
             return;
         };
         let font = style.font();
-        let width = self.metrics.measure(&text, &font);
+        let width = self.advance_of(&text, &font);
         for index in first..self.flow.blocks[block].last {
             if let ItemKind::Line(line) = &mut self.flow.items[index].kind {
                 // The marker reads before the first word of its own item, and
@@ -2775,11 +2775,34 @@ impl<M: Metrics> Builder<'_, M> {
             }
             let style = &pieces[*index].style;
             let slice = &content[lo..hi];
-            total += self.metrics.measure(slice, &style.font());
+            total += self.advance_of(slice, &style.font());
             total += style.letter_spacing * slice.chars().count() as f64;
             total += style.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
         }
         total
+    }
+
+    /// The advance of one slice in one style, through **one** path.
+    ///
+    /// The single place this crate decides whether a run belongs to the shaper
+    /// or to `Metrics::measure`. `metrics.rs`'s [`Shaper`] documents why that
+    /// has to be one place: a ligature is narrower than its components and a
+    /// joined Arabic word is narrower still, so a run measured one way and
+    /// drawn the other breaks in the wrong place — the exact failure the
+    /// `Metrics` trait's own documentation warns about, now with a second path
+    /// that really does disagree.
+    ///
+    /// Direction is asked of the text rather than carried in, because a
+    /// paragraph's levels are not resolved in this crate; a run that is
+    /// entirely right-to-left is shaped as such and everything else is not.
+    /// That is a **coarse** answer and it is deliberate — `flow.rs` breaks
+    /// lines over logical text and never reorders, so what it needs from
+    /// direction is the run's *width*, which the two agree on.
+    fn advance_of(&self, text: &str, font: &FontRequest<'_>) -> f64 {
+        match self.metrics.shaper() {
+            Some(shaper) => shaper.shape(text, font, false).advance,
+            None => self.metrics.measure(text, font),
+        }
     }
 
     /// The advance of the collapsible spaces at the end of a range, which
@@ -2860,7 +2883,7 @@ impl<M: Metrics> Builder<'_, M> {
             above = above.max(vertical.ascent + leading);
             below = below.max(vertical.descent + leading);
             let text = content[lo..hi].to_string();
-            let advance = self.metrics.measure(&text, &font)
+            let advance = self.advance_of(&text, &font)
                 + style.letter_spacing * text.chars().count() as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {

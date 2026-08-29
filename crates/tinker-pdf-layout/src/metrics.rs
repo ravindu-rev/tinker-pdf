@@ -65,6 +65,88 @@ impl Vertical {
     }
 }
 
+/// One glyph, positioned, in points.
+///
+/// The projection of `tinker_pdf_shape::ShapedGlyph` into this crate's units
+/// and this crate's vocabulary. It is a **copy** rather than a re-export
+/// because ruling 8 keeps `tinker-pdf-layout` a leaf: nothing here may depend
+/// on the shaping crate, so a provider that has one converts at the seam, and
+/// a provider that has no shaper at all never sees this type.
+///
+/// The conversion the provider does is `units * size / units_per_em` — one
+/// multiply and one divide, both correctly rounded by IEEE 754 and therefore
+/// identical on every target, which is the side of ruling 4's line the rule
+/// allows. The integers stay integers until exactly there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedGlyph {
+    /// The glyph index in the face the run was shaped against.
+    pub glyph: u16,
+    /// The byte offset, in the run's own text, of the character this glyph
+    /// stands for. One glyph may stand for several characters, in which case
+    /// it carries the first — which is what lets a consumer rebuild the text
+    /// behind a ligature.
+    pub cluster: u32,
+    /// How far the pen moves after drawing this glyph.
+    pub x_advance: f64,
+    /// The same vertically, which is zero in horizontal text.
+    pub y_advance: f64,
+    /// Where this glyph is drawn relative to the pen.
+    pub x_offset: f64,
+    /// The same vertically.
+    pub y_offset: f64,
+}
+
+/// One run of text, shaped.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapedText {
+    /// The glyphs, in **logical** order — the order the text was typed in,
+    /// whichever way it reads. Turning that into the order they are drawn in
+    /// is the consumer's, per line, after breaking.
+    pub glyphs: Vec<PlacedGlyph>,
+    /// The sum of the glyphs' horizontal advances.
+    ///
+    /// Carried rather than recomputed because it is what layout asks for
+    /// nine times out of ten, and because a caller that summed the glyphs
+    /// itself would be a second measurement of one run — the failure this
+    /// module's own documentation warns about.
+    pub advance: f64,
+    /// Whether the run reads right to left.
+    pub rtl: bool,
+}
+
+/// Text in, positioned glyphs out: the seam a shaping engine plugs into.
+///
+/// # One path owns a run
+///
+/// [`Metrics`]'s own documentation warns that a face whose real advance
+/// depends on the pair *"would be measured wrong by this crate and drawn right
+/// by the renderer, and the two disagreeing is worse than both being simple"*.
+/// A shaper makes that warning sharp, because now there really are two ways to
+/// measure a run and they really do disagree — a ligature is narrower than its
+/// components and a joined Arabic word is narrower still.
+///
+/// So the rule is absolute: **an item measured through a `Shaper` is never
+/// also measured through [`Metrics::measure`] or [`Metrics::advance`]**, and
+/// which of the two owns a run is decided once, by whether
+/// [`Metrics::shaper`] answers. `flow.rs` asks it in exactly one place, and
+/// `tests/shaper.rs` asserts that a provider whose `advance` panics still
+/// paginates.
+///
+/// # Why the trait is here and not in the shaping crate
+///
+/// Ruling 8. `tinker-pdf-layout` is a leaf and gains no dependency edge for
+/// this: the trait is plain structs and `f64`, and the provider that
+/// implements it is above both crates. `docs/design/shaping.md` puts it
+/// *"next to `Metrics` in `metrics.rs`"* for that reason.
+pub trait Shaper {
+    /// Shapes one run of one style.
+    ///
+    /// `rtl` is the direction the caller resolved, so that a provider does not
+    /// re-run UAX #9 per run — the paragraph's levels were resolved once,
+    /// above.
+    fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText;
+}
+
 /// Where advance widths and line heights come from.
 pub trait Metrics {
     /// One character's advance, in points, at the request's size.
@@ -80,6 +162,21 @@ pub trait Metrics {
     /// cheaply than a character at a time.
     fn measure(&self, text: &str, font: &FontRequest<'_>) -> f64 {
         text.chars().map(|ch| self.advance(ch, font)).sum()
+    }
+
+    /// The [`Shaper`] this provider is, if it is one.
+    ///
+    /// `None` — the default — is a provider that measures a character at a
+    /// time, which is every provider that existed before shaping did and is
+    /// still the right answer for [`FixedPitch`] and for the fuzz target.
+    ///
+    /// This is a method on `Metrics` rather than a second parameter threaded
+    /// through the layout entry point because **the choice has to be made in
+    /// one place or it is not a rule**. A run is measured by the shaper or by
+    /// `measure`, never both, and one accessor is what makes that checkable
+    /// rather than a convention.
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        None
     }
 }
 

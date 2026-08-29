@@ -68,6 +68,9 @@ fn main() {
         "BidiMirroring.txt",
         "Scripts.txt",
         "PropertyValueAliases.txt",
+        "DerivedJoiningType.txt",
+        "IndicSyllabicCategory.txt",
+        "IndicPositionalCategory.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -80,6 +83,8 @@ fn main() {
     brackets(&data, &mut out);
     mirroring(&data, &mut out);
     scripts(&data, &mut out);
+    joining(&data, &mut out);
+    indic(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -351,6 +356,89 @@ fn scripts(data: &Path, out: &mut String) {
     );
 }
 
+/// The `Joining_Type` property, which Arabic cursive joining is written in.
+///
+/// # Why the derived file and not `ArabicShaping.txt`
+///
+/// The two carry the same property and state it differently.
+/// `ArabicShaping.txt` lists the joining letters and leaves `Transparent`
+/// implicit — *"those not explicitly listed and of General Category Mn, Me or
+/// Cf have joining type T"* — so reading it means having `General_Category`,
+/// which this crate does not vendor and does not otherwise need.
+/// `extracted/DerivedJoiningType.txt` has already done that derivation and
+/// lists all 386 `T` ranges outright, so the whole property is a table lookup
+/// and there is no second rule for a transcription error to live in.
+///
+/// The `@missing` line is `Non_Joining`, unconditionally, so a code point the
+/// file does not list is `U` and the table is sparse. That is unlike
+/// `DerivedBidiClass.txt` one function up, whose `@missing` lines are
+/// per-block and *are* applied; the difference is in the files and is why
+/// both are read by hand rather than by one shared rule.
+///
+/// The `Joining_Group` property is deliberately not read. It is needed for
+/// exactly one thing — Syriac's Alaph, which selects the `fin2`, `fin3` and
+/// `med2` features rather than `fina` — and no fixture in either vendored
+/// corpus contains a Syriac face, so implementing it would be adding
+/// unadjudicated behavior. `docs/features/fonts.md` lists Syriac by name for
+/// that reason.
+fn joining(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, values) in rows(&data.join("DerivedJoiningType.txt")) {
+        for code in first..=last {
+            map.insert(code, values[0].clone());
+        }
+    }
+    assert!(
+        !map.is_empty(),
+        "DerivedJoiningType.txt yielded no rows; the joining table would be \
+         empty and every Arabic letter would shape as isolated"
+    );
+    emit(out, "JOINING", "JoiningType", &ranges(&map));
+}
+
+/// `Indic_Syllabic_Category` and `Indic_Positional_Category`, which the
+/// Universal Shaping Engine's cluster model is written in terms of.
+///
+/// Two properties rather than one because that is how Unicode publishes them
+/// and because they answer different questions: the syllabic category says
+/// *what a character is* — a consonant, a virama, a dependent vowel — and the
+/// positional category says *where it is drawn* relative to the consonant it
+/// hangs off. The pair is what tells a pre-base vowel, which has to be moved
+/// before the base, from an above-base one, which does not.
+///
+/// Both are sparse: their `@missing` lines are `Other` and `Not_Applicable`
+/// respectively, unconditionally, so a code point outside the Indic and
+/// Southeast Asian blocks has neither and the tables stop there.
+///
+/// The USE categories themselves are **not** generated here. They are derived
+/// from these two in `crate::use_shaper`, because a category is this crate's
+/// reading of the two properties rather than a property Unicode publishes —
+/// the same split `unicode.rs` draws everywhere else between somebody else's
+/// facts and this repository's algorithm.
+fn indic(data: &Path, out: &mut String) {
+    for (file, name, kind) in [
+        (
+            "IndicSyllabicCategory.txt",
+            "INDIC_SYLLABIC",
+            "IndicSyllabic",
+        ),
+        (
+            "IndicPositionalCategory.txt",
+            "INDIC_POSITIONAL",
+            "IndicPositional",
+        ),
+    ] {
+        let mut map: BTreeMap<u32, String> = BTreeMap::new();
+        for (first, last, values) in rows(&data.join(file)) {
+            for code in first..=last {
+                map.insert(code, values[0].clone());
+            }
+        }
+        assert!(!map.is_empty(), "{file} yielded no rows");
+        emit(out, name, kind, &ranges(&map));
+    }
+}
+
 /// A UCD long name as a Rust variant name: `Caucasian_Albanian` becomes
 /// `CaucasianAlbanian`.
 fn variant(long: &str) -> String {
@@ -360,12 +448,14 @@ fn variant(long: &str) -> String {
 fn emit(out: &mut String, name: &str, kind: &str, merged: &[(u32, u32, String)]) {
     let mut body = String::new();
     for (first, last, value) in merged {
-        let value = if kind == "Script" {
+        // `variant` is the identity on a name with no underscores in it, which
+        // every `Bidi_Class` and `Joining_Type` abbreviation is, so one rule
+        // serves all four tables and none of them needs an exception.
+        let _ = writeln!(
+            body,
+            "    ({first:#x}, {last:#x}, {kind}::{}),",
             variant(value)
-        } else {
-            value.clone()
-        };
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}, {kind}::{value}),");
+        );
     }
     let _ = writeln!(
         out,

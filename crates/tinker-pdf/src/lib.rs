@@ -31,6 +31,7 @@ mod optional;
 pub mod pdfa;
 pub mod redact;
 mod resources;
+pub mod shaping;
 pub mod signature;
 pub mod structure;
 pub mod verdict;

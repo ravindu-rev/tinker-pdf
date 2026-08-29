@@ -214,3 +214,9 @@ name = "shape"
 path = "fuzz_targets/shape.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "shape_text"
+path = "fuzz_targets/shape_text.rs"
+test = false
+doc = false
