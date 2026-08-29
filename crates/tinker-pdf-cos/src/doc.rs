@@ -272,7 +272,14 @@ pub struct CosDocument {
     revisions: Vec<Revision>,
     store: SlotStore,
     objstm: ObjStmCache,
-    scan: Option<Arc<ScanIndex>>,
+    /// The repair scanner's index, when the ladder needed one.
+    ///
+    /// Behind a lock because a streamed document builds it *lazily*: the
+    /// eager validation that decides on one at open is the step a streaming
+    /// open defers, so the decision moves to the first read that finds an
+    /// entry lying. The values a caller sees are the same either way, which is
+    /// the property that matters; what differs is when the fetch happens.
+    scan: RwLock<Option<Arc<ScanIndex>>>,
     warnings: Mutex<WarningSink>,
     pub(crate) stream_ranges: RwLock<HashMap<u32, Range<u64>>>,
     /// Everything authentication installs, behind a lock.
@@ -486,7 +493,7 @@ impl CosDocument {
             revisions,
             store: SlotStore::new(),
             objstm: ObjStmCache::new(),
-            scan,
+            scan: RwLock::new(scan),
             warnings: Mutex::new(WarningSink::new()),
             stream_ranges: RwLock::new(HashMap::new()),
             security: RwLock::new(Security {
@@ -570,6 +577,51 @@ impl CosDocument {
     /// Which rung of the ladder this document opened on.
     pub fn ladder_level(&self) -> LadderLevel {
         self.ladder
+    }
+
+    /// Runs the eager offset probe that a streamed open deferred, and reports
+    /// the ladder level it decides.
+    ///
+    /// [`CosDocument::ladder_level`] on a streamed document is **provisional**:
+    /// it reflects the bytes read so far, because the pass that probes every
+    /// type-1 entry against its `N G obj` header is the one open-time step
+    /// that touches everywhere. This fetches the whole source, runs exactly
+    /// that pass, and returns the answer a buffered open would have given.
+    /// Both are documented observables rather than moods.
+    ///
+    /// Reads nothing and returns [`CosDocument::ladder_level`] for a document
+    /// opened from a buffer, where the eager pass already ran.
+    ///
+    /// The values a caller reads do not depend on whether this was called: an
+    /// entry that lies is repaired at first use either way. What this decides
+    /// is the *verdict*, which a caller checking "did it open cleanly" needs
+    /// and a caller rendering a page does not.
+    pub fn complete_validation(&self) -> LadderLevel {
+        if !self.buffer.is_streamed() {
+            return self.ladder;
+        }
+        let mut sink = WarningSink::new();
+        let Some(buffer) = fetch_whole(&self.buffer, &mut sink) else {
+            self.absorb(sink);
+            return self.ladder;
+        };
+        self.absorb(sink);
+        // The header scan warned at open if it had anything to say; a second
+        // sink keeps it from saying it twice.
+        let mut scratch = WarningSink::new();
+        let shift = xref::header_shift(&buffer, &mut scratch);
+        let mut table = self.xref.clone();
+        let validation = validate(&buffer, &mut table, shift);
+        if validation.failures.is_empty() {
+            return self.ladder;
+        }
+        if validation.failures.len() >= limits::LADDER_RESCAN_MIN_FAILURES
+            && validation.failures.len() * 2 > validation.offsets
+        {
+            LadderLevel::Rescan
+        } else {
+            self.ladder.max(LadderLevel::Patch)
+        }
     }
 
     /// Everything this layer had to tolerate, in the order it happened.
@@ -943,7 +995,7 @@ impl CosDocument {
         }
         // Level 2 at read time: an entry that was good at open but is not the
         // object it claimed, or a type-2 entry whose container fell over.
-        if let Some(hit) = self.scan.as_ref().and_then(|scan| scan.get(num)) {
+        if let Some(hit) = self.repair_index(sink).and_then(|scan| scan.get(num)) {
             if let Some(object) = self.parse_at(num, hit.offset, ctx, sink) {
                 sink.warn_at(
                     hit.offset,
@@ -958,6 +1010,35 @@ impl CosDocument {
         }
         // 7.3.10: a reference to a non-existent object is a reference to null.
         Object::Null
+    }
+
+    /// The repair scanner's index, built on first need for a streamed
+    /// document.
+    ///
+    /// A document opened from a buffer decided at open whether it needed one,
+    /// because the eager offset probe ran then. A streamed document deferred
+    /// that probe, so the same decision is made here, at the first read that
+    /// finds an entry lying about its object -- which is exactly the condition
+    /// the eager pass was looking for. The values a caller reads are therefore
+    /// the same on both paths; what differs is when the whole source is
+    /// fetched, and that is warned about rather than hidden (ruling 10).
+    ///
+    /// Never built for a buffered document: one that reached here with no
+    /// index is one the eager pass found nothing wrong with, and inventing a
+    /// scan for it would repair objects the buffered path reads as null.
+    fn repair_index(&self, sink: &mut WarningSink) -> Option<Arc<ScanIndex>> {
+        if let Some(scan) = self.scan.read_lock().clone() {
+            return Some(scan);
+        }
+        if !self.buffer.is_streamed() {
+            return None;
+        }
+        let buffer = fetch_whole(&self.buffer, sink)?;
+        let index = Arc::new(ScanIndex::build(&buffer, &self.names));
+        let mut slot = self.scan.write_lock();
+        // Another thread may have built the same index meanwhile; it read the
+        // same bytes, so whichever is there wins and this one is dropped.
+        Some(Arc::clone(slot.get_or_insert(index)))
     }
 
     /// Parses the indirect object at `offset` out of a window, growing it
@@ -1164,7 +1245,7 @@ impl CosDocument {
     }
 
     fn expand_object_streams(&mut self) {
-        let Some(scan) = self.scan.clone() else {
+        let Some(scan) = self.scan.read_lock().clone() else {
             return;
         };
         let mut sink = WarningSink::new();

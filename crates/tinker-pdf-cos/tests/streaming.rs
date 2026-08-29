@@ -10,8 +10,8 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf_cos::{
-    ByteSource, CosDocument, CountingSource, LadderLevel, Name, ShreddedSource, SliceSource,
-    SourceMiss,
+    ByteSource, CosDocument, CountingSource, LadderLevel, Name, ObjRef, ShreddedSource,
+    SliceSource, SourceMiss, WarningKind,
 };
 
 /// A minimal, honest document: a catalog, an empty page tree, a classic table.
@@ -163,4 +163,84 @@ fn feeding_what_a_miss_named_converges_on_the_buffer_answer() {
     let fed = CosDocument::open_source(source).expect("it opens once the bytes are there");
     let plain = CosDocument::open(bytes).expect("it opens");
     assert_eq!(observed(&fed), observed(&plain));
+}
+
+/// The same document with object 2's cross-reference entry pointing at
+/// nothing, which is ladder level 2: a lying offset, repaired from the scan.
+fn a_damaged_document() -> Vec<u8> {
+    let mut bytes = a_document();
+    let table = bytes
+        .windows(9)
+        .position(|w| w == b"xref\n0 3\n")
+        .expect("the fixture carries a classic table");
+    // The third line of the table, whose first ten bytes are the offset.
+    let entry = table + 9 + 2 * 20;
+    bytes
+        .get_mut(entry..entry + 10)
+        .expect("an entry")
+        .copy_from_slice(b"0000000004");
+    bytes
+}
+
+/// A damaged document reads the same values whichever way it arrived.
+///
+/// This is the half of "arrival is not an input" that the eager offset probe
+/// used to carry: a buffered open decides at open that it needs the repair
+/// scanner, and a streamed open defers that decision to the first read that
+/// finds an entry lying. Both must reach the same object.
+#[test]
+fn a_lying_offset_is_repaired_on_both_paths() {
+    let bytes = a_damaged_document();
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let streamed = CosDocument::open_source(Arc::new(ShreddedSource::new(SliceSource::new(
+        bytes.clone(),
+    ))))
+    .expect("it opens");
+
+    assert_eq!(buffered.ladder_level(), LadderLevel::Patch);
+    assert_eq!(
+        streamed.ladder_level(),
+        LadderLevel::Trust,
+        "provisional: the probe that would have said Patch is the one deferred"
+    );
+
+    let from_buffer = buffered.get(ObjRef::new(2, 0)).expect("a page tree");
+    let from_source = streamed.get(ObjRef::new(2, 0)).expect("a page tree");
+    assert_eq!(from_buffer, from_source, "the same object, both ways");
+    assert!(
+        from_buffer.as_dict().is_some(),
+        "and it is the real object rather than a null"
+    );
+
+    // The repair cost the whole source, and said so before it spent it.
+    assert!(streamed.whole_file_fetched());
+    let kinds: Vec<WarningKind> = streamed.warnings().iter().map(|w| w.kind).collect();
+    assert!(
+        kinds.contains(&WarningKind::WholeFileFetched),
+        "a streamed repair declares its whole-file fetch: {kinds:?}"
+    );
+    assert!(!buffered
+        .warnings()
+        .iter()
+        .any(|w| w.kind == WarningKind::WholeFileFetched));
+}
+
+/// The completion call gives back the eager answer.
+#[test]
+fn completing_validation_restores_the_verdict_a_buffer_would_have_given() {
+    for bytes in [a_document(), a_damaged_document()] {
+        let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+        let streamed =
+            CosDocument::open_source(Arc::new(SliceSource::new(bytes.clone()))).expect("it opens");
+        assert_eq!(
+            streamed.complete_validation(),
+            buffered.ladder_level(),
+            "provisional then completed equals a whole-buffer open"
+        );
+        assert_eq!(
+            buffered.complete_validation(),
+            buffered.ladder_level(),
+            "and it reads nothing for a document that was never streamed"
+        );
+    }
 }
