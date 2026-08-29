@@ -37,6 +37,7 @@ mod jpeg;
 mod jpx;
 mod lzw;
 pub mod mq;
+mod packbits;
 mod png;
 mod predictors;
 mod runlength;
@@ -181,6 +182,13 @@ pub enum Warning {
     /// allows, so it was refused rather than allocated.
     Jbig2RegionTooLarge,
 
+    /// PackBits (TIFF 6.0 §9): the -128 tag, which §9 calls a no-op and 7.4.5
+    /// calls an end marker. It was skipped, not obeyed.
+    PackBitsNoOp,
+    /// PackBits: a literal or replicate run reached past the byte count the
+    /// caller expected; the excess was dropped.
+    PackBitsRunOverruns,
+
     // ---- JPEG 2000 (T.800) -----------------------------------------------
     //
     // Ten, and each of them is one *class* of refusal rather than one
@@ -299,6 +307,8 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
+            Self::PackBitsNoOp => "packbits-no-op",
+            Self::PackBitsRunOverruns => "packbits-run-overruns",
             Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
             Self::JpxMarkerUnknown => "jpx-marker-unknown",
             Self::JpxStructureInvalid => "jpx-structure-invalid",
@@ -340,6 +350,8 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
+            Self::PackBitsNoOp => "PackBits no-op tag skipped",
+            Self::PackBitsRunOverruns => "PackBits run past the expected byte count",
             Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
             Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
             Self::JpxStructureInvalid => "JPX codestream or box structure invalid",
@@ -560,6 +572,24 @@ pub fn ascii85_decode(input: &[u8], limits: &Limits) -> Decoded {
 pub fn run_length_decode(input: &[u8], limits: &Limits) -> Decoded {
     let mut w = Warnings::default();
     let (data, complete) = runlength::rle_bytes(input, limits, &mut w);
+    Decoded {
+        data,
+        complete,
+        warnings: w.into_vec(),
+    }
+}
+
+/// PackBits (TIFF 6.0 §9), the run-length scheme TIFF compression 32773 names.
+///
+/// **Not `/Filter` RunLengthDecode**, though the two are the same Macintosh
+/// scheme: 7.4.5 makes the byte 128 an end-of-data marker and §9 makes it a
+/// no-op, and §9 stops on a byte count where 7.4.5 stops on the marker. So
+/// `expected` — the bytes one strip is declared to hold — is a parameter here
+/// and does not exist there. See [`run_length_decode`] for the other one.
+#[must_use]
+pub fn packbits_decode(input: &[u8], expected: usize, limits: &Limits) -> Decoded {
+    let mut w = Warnings::default();
+    let (data, complete) = packbits::packbits_bytes(input, expected, limits, &mut w);
     Decoded {
         data,
         complete,

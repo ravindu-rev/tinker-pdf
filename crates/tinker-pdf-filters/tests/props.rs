@@ -4,8 +4,8 @@
 
 use proptest::prelude::*;
 use tinker_pdf_filters::{
-    apply_chain, ascii85_decode, ascii_hex_decode, flate_decode, lzw_decode, predictor_decode,
-    run_length_decode, ChainOutput, Filter, FilterSpec, Limits, PredictorParams,
+    apply_chain, ascii85_decode, ascii_hex_decode, flate_decode, lzw_decode, packbits_decode,
+    predictor_decode, run_length_decode, ChainOutput, Filter, FilterSpec, Limits, PredictorParams,
 };
 
 fn params_strategy() -> impl Strategy<Value = PredictorParams> {
@@ -117,6 +117,20 @@ proptest! {
         if let Ok(d) = lzw_decode(&data, &limits, early, None) {
             prop_assert!(d.data.len() <= cap);
         }
+    }
+
+    /// PackBits is the one decoder with **two** ceilings that can disagree —
+    /// the strip's declared byte count and the caller's `max_output` — so the
+    /// property is that the smaller of them always wins.
+    #[test]
+    fn packbits_never_panics_and_honours_the_smaller_of_two_ceilings(
+        data in prop::collection::vec(any::<u8>(), 0..512),
+        expected in 0usize..2048,
+        cap in 0usize..600,
+    ) {
+        let d = packbits_decode(&data, expected, &Limits::new(cap));
+        prop_assert!(d.data.len() <= cap.min(expected));
+        prop_assert_eq!(d.complete, d.data.len() == expected);
     }
 
     #[test]
