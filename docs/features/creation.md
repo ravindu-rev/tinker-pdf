@@ -107,6 +107,14 @@ let pdf: Vec<u8> = b.finish();
 `ImageData` and `Target` are `#[non_exhaustive]`: the next shape is an
 addition, not a break.
 
+**The archival profile.** `DocumentBuilder::archival` takes an ISO 19005
+profile and turns this whole surface into one that says no: the standard 14,
+transparency under part 1, a device colour the output intent cannot reproduce
+and an `/Info` entry part 4 has no room for are all refused where the caller
+asks for them, and the finished document carries an output intent, a
+byte-deterministic XMP packet and the header version its part requires.
+[features/pdfa.md](pdfa.md) is the whole of it.
+
 ## Refused by name
 
 | What | How it shows | Why | See |
@@ -118,6 +126,7 @@ addition, not a break.
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
 | `ImageData::Compressed` from outside the workspace | `CompressedImage`, `ImageColorSpace`, `ImageFilter` and `SoftMask` are not re-exported by the facade, so the variant cannot be constructed by an external caller | the container formats use it internally; the facade re-export is owed and not yet on the roadmap | — |
 | Layout | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API | — |
+| Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
 
 ## Verified
 
