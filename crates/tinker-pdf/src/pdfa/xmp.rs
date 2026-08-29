@@ -165,11 +165,21 @@ pub(super) fn rules(
         return;
     };
 
-    // ISO 19005-4 has no `/Info` consistency rule: 6.1.3 all but forbids the
-    // dictionary, and `syntax::trailer` enforces that instead. Parts 1 to 3
-    // require agreement, and a file that claimed nothing is checked as part 1
-    // would check it — the clause exists in every part that has an `/Info`.
-    if flavour.map(|f| f.part) == Some(Part::Four) {
+    // **Part 1 only, and the restriction is a refusal rather than a gap.**
+    //
+    // ISO 19005-1 6.7.3 is unambiguous: where the document information
+    // dictionary carries one of the eight entries, the analogous XMP property
+    // shall carry an equivalent value. What this build could not establish
+    // from the clause text is whether ISO 19005-2 kept that requirement when
+    // it moved the subject from clause 6.7 (metadata) to clause 6.1 (file
+    // structure), and PDF/A-4's 6.1.3 all but forbids the dictionary outright
+    // rather than constraining its contents.
+    //
+    // Running the rule anyway on a 60/40 reading would report conforming
+    // part 2 files as broken, and a validator that reports a conforming file
+    // is worse than one that stays quiet. So it runs where the clause is
+    // certain, and `super::STAGED` names where it does not and why.
+    if flavour.map(|f| f.part) != Some(Part::One) {
         return;
     }
 
@@ -349,7 +359,10 @@ fn is_rdf_li(name: &Name<'_>) -> bool {
 
 /// Reads the eight properties out of `packet`, or `None` if it will not parse.
 fn properties(packet: &[u8]) -> Option<Properties> {
-    let source = Source::new(packet).ok()?;
+    // UTF-32 is a legal XMP encoding and not one XML 1.0 asks a reader to
+    // handle; [`super::readable`] says why the transcode lives in the facade.
+    let packet = super::readable(packet);
+    let source = Source::new(&packet).ok()?;
     let limits = tinker_pdf_xml::Limits::default();
     let reader = source.reader(&limits);
 

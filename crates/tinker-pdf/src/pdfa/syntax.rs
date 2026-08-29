@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 use tinker_pdf_cos::{CosDocument, Dict, Name, ObjRef, Object, XrefEntry};
 
-use super::{clauses, FindingKind, Machinery, Part, Raw, RuleGroup};
+use super::{clauses, FindingKind, Flavour, Level, Machinery, Part, Raw, RuleGroup};
 
 /// How deep a directly nested array or dictionary is walked.
 ///
@@ -111,16 +111,17 @@ const STANDARD_FILTERS: &[&[u8]] = &[
 pub(super) fn rules(
     doc: &CosDocument,
     machinery: &Machinery,
-    part: Option<Part>,
+    flavour: Option<Flavour>,
     out: &mut Vec<Raw>,
 ) {
     if !machinery.reach(RuleGroup::Syntax) {
         return;
     }
+    let part = flavour.map(|f| f.part);
     header(doc, part, out);
     trailer(doc, part, out);
     catalog(doc, part, out);
-    objects(doc, part, out);
+    objects(doc, flavour, out);
 }
 
 // ---- 6.1.2 File header ----------------------------------------------------
@@ -182,16 +183,29 @@ fn header(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
         ));
     }
 
-    // The comment line follows the header line.
+    // The clause says the header line is **immediately** followed by a single
+    // EOL marker and then by the comment. Both halves of that matter and this
+    // rule got both wrong at first: it looked for the next line rather than
+    // requiring the next bytes, so `%PDF-1.7` followed by three spaces and a
+    // newline passed, and so did a header with a blank line between it and its
+    // comment. Two corpus fixtures are exactly those two shapes.
     let after_version = at + 5 + digits.len();
     let rest = bytes.get(after_version..).unwrap_or_default();
-    let Some(comment) = second_line(rest) else {
-        out.push(Raw::file(
-            clauses::FILE_HEADER,
-            FindingKind::HeaderCommentMissing,
-        ));
-        return;
+    let eol = match (rest.first(), rest.get(1)) {
+        (Some(b'\r'), Some(b'\n')) => 2,
+        (Some(b'\r' | b'\n'), _) => 1,
+        _ => {
+            out.push(Raw::file(
+                clauses::FILE_HEADER,
+                FindingKind::HeaderNotFollowedBySingleEol,
+            ));
+            // Carry on from the next line anyway: a trailing space is one
+            // defect and a missing binary comment would be another, and a
+            // caller wants both rather than the first.
+            second_line_offset(rest)
+        }
     };
+    let comment = rest.get(eol..).unwrap_or_default();
     if comment.first() != Some(&b'%') {
         out.push(Raw::file(
             clauses::FILE_HEADER,
@@ -220,19 +234,16 @@ fn version_shaped(digits: &[u8], major: u8) -> bool {
     digits.len() == 3 && digits[0] == major && digits[1] == b'.' && digits[2].is_ascii_digit()
 }
 
-/// The bytes of the line after the one `rest` starts inside.
-fn second_line(rest: &[u8]) -> Option<&[u8]> {
-    let eol = rest.iter().position(|b| *b == b'\r' || *b == b'\n')?;
+/// Where the next line begins, having skipped whatever ends this one.
+fn second_line_offset(rest: &[u8]) -> usize {
+    let Some(eol) = rest.iter().position(|b| *b == b'\r' || *b == b'\n') else {
+        return rest.len();
+    };
     let mut start = eol + 1;
     if rest.get(eol) == Some(&b'\r') && rest.get(start) == Some(&b'\n') {
         start += 1;
     }
-    let line = rest.get(start..)?;
-    let end = line
-        .iter()
-        .position(|b| *b == b'\r' || *b == b'\n')
-        .unwrap_or(line.len());
-    line.get(..end)
+    start
 }
 
 // ---- 6.1.3 File trailer ---------------------------------------------------
@@ -434,7 +445,7 @@ fn catalog(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
 /// nesting walked without following references — every referenced object has
 /// its own entry, so following them would visit the same dictionaries twice
 /// and would need a cycle guard to do it.
-fn objects(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
+fn objects(doc: &CosDocument, flavour: Option<Flavour>, out: &mut Vec<Raw>) {
     let mut seen: BTreeSet<u32> = BTreeSet::new();
     for (num, entry) in doc.xref().iter().take(MAX_OBJECTS) {
         let gen = match entry {
@@ -449,13 +460,13 @@ fn objects(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
         let Ok(object) = doc.get(reference) else {
             continue;
         };
-        walk(doc, part, &object, reference, 0, out);
+        walk(doc, flavour, &object, reference, 0, out);
     }
 }
 
 fn walk(
     doc: &CosDocument,
-    part: Option<Part>,
+    flavour: Option<Flavour>,
     object: &Object,
     at: ObjRef,
     depth: u32,
@@ -467,19 +478,19 @@ fn walk(
     match object {
         Object::Array(values) => {
             for value in values {
-                walk(doc, part, value, at, depth + 1, out);
+                walk(doc, flavour, value, at, depth + 1, out);
             }
         }
         Object::Dict(dict) => {
-            dictionary(doc, part, dict, at, false, out);
+            dictionary(doc, flavour, dict, at, false, out);
             for (_, value) in dict.entries() {
-                walk(doc, part, value, at, depth + 1, out);
+                walk(doc, flavour, value, at, depth + 1, out);
             }
         }
         Object::Stream(stream) => {
-            dictionary(doc, part, &stream.dict, at, true, out);
+            dictionary(doc, flavour, &stream.dict, at, true, out);
             for (_, value) in stream.dict.entries() {
-                walk(doc, part, value, at, depth + 1, out);
+                walk(doc, flavour, value, at, depth + 1, out);
             }
         }
         _ => {}
@@ -489,18 +500,25 @@ fn walk(
 /// The rules whose subject is one dictionary.
 fn dictionary(
     doc: &CosDocument,
-    part: Option<Part>,
+    flavour: Option<Flavour>,
     dict: &Dict,
     at: ObjRef,
     is_stream: bool,
     out: &mut Vec<Raw>,
 ) {
+    let part = flavour.map(|f| f.part);
     if is_stream {
         stream_rules(doc, dict, at, out);
+        // 6.1.10 is about a *stream's* filter chain, and only a stream's — a
+        // signature dictionary's `/Filter` names a security handler
+        // (`/Adobe.PPKLite`) and an encryption dictionary's names a crypt
+        // filter. Reading either as a stream filter reported a conforming
+        // part 4 file for carrying a signature, which is what this branch
+        // exists to stop.
+        filters(doc, part, dict, at, out);
     }
-    filters(doc, part, dict, at, is_stream, out);
-    action_rules(doc, part, dict, at, out);
-    trigger_rules(doc, part, dict, at, out);
+    action_rules(doc, flavour, dict, at, out);
+    trigger_rules(doc, flavour, dict, at, out);
     embedded_file_rules(doc, part, dict, at, out);
 }
 
@@ -536,26 +554,13 @@ fn stream_rules(doc: &CosDocument, dict: &Dict, at: ObjRef, out: &mut Vec<Raw>) 
 /// The abbreviated inline-image spellings are checked too: an inline image
 /// dictionary writes `/F /LZW`, and a rule that knew only the long name would
 /// pass the same filter written short.
-fn filters(
-    doc: &CosDocument,
-    part: Option<Part>,
-    dict: &Dict,
-    at: ObjRef,
-    is_stream: bool,
-    out: &mut Vec<Raw>,
-) {
+fn filters(doc: &CosDocument, part: Option<Part>, dict: &Dict, at: ObjRef, out: &mut Vec<Raw>) {
     let mut names: Vec<Vec<u8>> = Vec::new();
     collect_names(
         doc,
         &doc.resolve_key(dict, doc.intern(b"Filter")),
         &mut names,
     );
-    // An inline image's filter is `/F`. In a *stream* dictionary that same key
-    // means the external-file reference 6.1.7 already refused, so it is read
-    // as a filter only outside one.
-    if !is_stream {
-        collect_names(doc, &doc.resolve_key(dict, doc.intern(b"F")), &mut names);
-    }
 
     for name in &names {
         if matches!(name.as_slice(), b"LZWDecode" | b"LZW") {
@@ -652,11 +657,22 @@ fn collect_names(doc: &CosDocument, object: &Object, into: &mut Vec<Vec<u8>>) {
 /// wrong the ledger row for a part 4 JavaScript fixture is where it shows.
 fn action_rules(
     doc: &CosDocument,
-    part: Option<Part>,
+    flavour: Option<Flavour>,
     dict: &Dict,
     at: ObjRef,
     out: &mut Vec<Raw>,
 ) {
+    // ISO 19005-4 level E is the engineering conformance level, and it exists
+    // to permit what the other levels forbid — 3D artwork and rich media. How
+    // far that reaches into 6.6.1's action list is not something this build
+    // has established from the clause, so the prohibition **does not run for
+    // level E at all** rather than running on a guess. `super::STAGED` names
+    // the refusal; enforcing a list read off two fixtures would have been a
+    // transcription of somebody else's reading of a clause we have not read.
+    if flavour.map(|f| f.level) == Some(Some(Level::E)) {
+        return;
+    }
+    let part = flavour.map(|f| f.part);
     let Some(subtype) = doc
         .resolve_key(dict, doc.intern(b"S"))
         .as_name()
@@ -725,12 +741,15 @@ fn action_rules(
 /// the gap.
 fn trigger_rules(
     doc: &CosDocument,
-    part: Option<Part>,
+    flavour: Option<Flavour>,
     dict: &Dict,
     at: ObjRef,
     out: &mut Vec<Raw>,
 ) {
-    if !matches!(part, Some(Part::One | Part::Two | Part::Three)) {
+    if !matches!(
+        flavour.map(|f| f.part),
+        Some(Part::One | Part::Two | Part::Three)
+    ) {
         return;
     }
     if doc.resolve_key(dict, doc.intern(b"AA")).as_dict().is_some() {

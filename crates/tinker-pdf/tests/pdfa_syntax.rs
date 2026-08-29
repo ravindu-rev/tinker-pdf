@@ -23,12 +23,21 @@ fn packet(part: &str, level: Option<&str>) -> String {
         Some(letter) => format!(r#" pdfaid:conformance="{letter}""#),
         None => String::new(),
     };
+    // ISO 19005-4 6.7.3 asks a part 4 file for `pdfaid:rev` as well as
+    // `pdfaid:part` — the four-digit year of the amendment it claims.
+    // Parts 1 to 3 have no equivalent, so it is emitted only for part 4
+    // and a fixture that wants the missing-revision finding removes it.
+    let revision = if part == "4" {
+        r#" pdfaid:rev="2020""#
+    } else {
+        ""
+    };
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
  xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
- pdfaid:part="{part}"{conformance}/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
+ pdfaid:part="{part}"{conformance}{revision}/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
     )
 }
 
@@ -217,6 +226,40 @@ fn a_header_naming_a_version_the_part_does_not_admit_is_a_finding() {
             declared: "1.7".to_string()
         }
     );
+}
+
+/// The header line ends at **one** EOL marker and the comment is the next
+/// thing in the file. Two corpus fixtures are the two ways to get that wrong,
+/// and the first version of this rule passed both: it looked for the next
+/// *line* rather than requiring the next *bytes*.
+#[test]
+fn a_header_line_that_does_not_end_at_a_single_eol_is_a_finding() {
+    // Trailing spaces before the EOL.
+    let mut spaces = conforming();
+    spaces.header = b"%PDF-1.7   \n%\xE2\xE3\xCF\xD3\n".to_vec();
+    assert_eq!(
+        spaces.one_finding(),
+        FindingKind::HeaderNotFollowedBySingleEol
+    );
+
+    // A blank line between the header and its comment. The single EOL after
+    // the version *is* there, so this is caught by the other half of the rule:
+    // what follows it is not a comment. Asserting the kind that actually
+    // happens rather than the one that felt likely is the difference between a
+    // test and a wish — this expectation was wrong when it was written.
+    let mut blank = conforming();
+    blank.header = b"%PDF-1.7\n\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    assert_eq!(blank.one_finding(), FindingKind::HeaderCommentMissing);
+
+    // Every EOL spelling the standard admits, and none of them is a finding.
+    for eol in [&b"\n"[..], b"\r", b"\r\n"] {
+        let mut fixture = conforming();
+        let mut header = b"%PDF-1.7".to_vec();
+        header.extend_from_slice(eol);
+        header.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
+        fixture.header = header;
+        assert_eq!(fixture.findings(), Vec::<FindingKind>::new(), "{eol:?}");
+    }
 }
 
 #[test]
@@ -724,6 +767,48 @@ fn the_staged_rules_are_named() {
             staged.because.len() > 32,
             "a staged rule's reason is what makes it a refusal rather than a \
              gap: {staged:?}"
+        );
+    }
+}
+
+/// ISO 19005-4 6.7.3: a part 4 file identifies its amendment as well as its
+/// part, with a four-digit year in `pdfaid:rev`. Parts 1 to 3 have no
+/// equivalent, so the rule must not fire for them — asserted in both
+/// directions, because a rule that fired everywhere would report every
+/// conforming PDF/A-1 file.
+#[test]
+fn a_part_four_file_names_the_amendment_it_claims() {
+    let mut missing = Fixture::new("4", None);
+    missing.header = b"%PDF-2.0\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    missing.packet = missing.packet.replace(r#" pdfaid:rev="2020""#, "");
+    assert_eq!(missing.one_finding(), FindingKind::RevisionMissing);
+
+    for declared in ["20", "20_y", "", "twenty20"] {
+        let mut malformed = Fixture::new("4", None);
+        malformed.header = b"%PDF-2.0\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        malformed.packet = malformed.packet.replace(
+            r#"pdfaid:rev="2020""#,
+            &format!(r#"pdfaid:rev="{declared}""#),
+        );
+        // An empty attribute value is a value: the reader saw the attribute and
+        // it said nothing, which is a different fact from the attribute being
+        // absent, and `RevisionMalformed { declared: "" }` is the finding that
+        // says which of the two happened.
+        assert_eq!(
+            malformed.one_finding(),
+            FindingKind::RevisionMalformed {
+                declared: declared.to_string()
+            },
+            "{declared:?}"
+        );
+    }
+
+    // Parts 1 to 3 do not have the entry and must not be asked for it.
+    for (part, level) in [("1", Some("B")), ("2", Some("U")), ("3", Some("B"))] {
+        assert_eq!(
+            Fixture::new(part, level).findings(),
+            Vec::<FindingKind>::new(),
+            "part {part}"
         );
     }
 }

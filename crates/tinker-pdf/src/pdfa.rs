@@ -40,6 +40,7 @@
 //! validator that cannot say what it did not check is a validator whose empty
 //! answer cannot be read.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 
 use tinker_pdf_cos::ObjRef;
@@ -302,6 +303,21 @@ pub const STAGED: &[StagedRule] = &[
                   count and the ledger says so",
     },
     StagedRule {
+        clause: "6.1.5",
+        rule: "parts 2 and 3: the document information dictionary's agreement                with the XMP packet",
+        because: "ISO 19005-1 6.7.3 states the requirement plainly and the rule                   runs there. Whether ISO 19005-2 kept it when it moved the                   subject from clause 6.7 to clause 6.1 could not be                   established from the clause text available here, and running                   it on an uncertain reading reports conforming files as broken",
+    },
+    StagedRule {
+        clause: "6.6.1",
+        rule: "part 4 level E: the forbidden-action list",
+        because: "PDF/A-4e is the engineering level and exists to permit 3D                   artwork and rich media that the other levels forbid. How far                   that relaxation reaches into the action list is not                   established here, so the prohibition does not run for level E                   rather than running on a guess",
+    },
+    StagedRule {
+        clause: "6.1.10",
+        rule: "the LZWDecode filter inside an inline image",
+        because: "an inline image's dictionary lives inside a content stream,                   and opening one is the interpreter's job rather than this                   group's — the rule covers every filter reachable from the                   cross-reference table and no filter that is not",
+    },
+    StagedRule {
         clause: "6.2",
         rule: "graphics: colour spaces, output intents, transparency, \
                rendering intents",
@@ -544,6 +560,17 @@ pub enum FindingKind {
     },
     /// A part 1-to-3 file with no conformance level.
     LevelMissing,
+    /// A part 4 file with no `pdfaid:rev`.
+    ///
+    /// ISO 19005-4 identifies its amendment by a four-digit year alongside the
+    /// part, which parts 1 to 3 have no equivalent of. A part 4 file without
+    /// one has not said which PDF/A-4 it is.
+    RevisionMissing,
+    /// A `pdfaid:rev` that is not the four-digit year the part asks for.
+    RevisionMalformed {
+        /// What the file said.
+        declared: String,
+    },
     /// A conformance level that exists, on a part that does not define it —
     /// `U` on part 1, or `B` on part 4.
     LevelNotInPart {
@@ -572,6 +599,9 @@ pub enum FindingKind {
         /// What the header said.
         declared: String,
     },
+    /// The header line does not end at a single EOL marker — trailing spaces,
+    /// or a blank line before the comment (6.1.2).
+    HeaderNotFollowedBySingleEol,
     /// No comment line after the header line (6.1.2).
     HeaderCommentMissing,
     /// The comment after the header does not begin with four bytes above 127,
@@ -796,12 +826,7 @@ pub(crate) fn validate_counting(
     if groups.syntax && document.is_encrypted() {
         raw.push(Raw::file(clauses::ENCRYPTION, FindingKind::Encrypted));
     }
-    syntax::rules(
-        &document.inner,
-        &machinery,
-        flavour.map(|f| f.part),
-        &mut raw,
-    );
+    syntax::rules(&document.inner, &machinery, flavour, &mut raw);
     if groups.metadata {
         xmp::rules(document, &machinery, flavour, &mut raw);
     }
@@ -829,7 +854,7 @@ fn flavour_of(document: &Document, findings: &mut Vec<Raw>) -> Option<Flavour> {
         return None;
     };
 
-    let Some((part_text, level_text)) = pdfaid(&packet) else {
+    let Some((part_text, level_text, revision_text)) = pdfaid(&packet) else {
         findings.push(Raw::file(
             clauses::FLAVOUR_ID,
             if packet.is_empty() {
@@ -881,6 +906,22 @@ fn flavour_of(document: &Document, findings: &mut Vec<Raw>) -> Option<Flavour> {
         }
     };
 
+    // ISO 19005-4 6.7.3 identifies the amendment as well as the part:
+    // `pdfaid:rev` is a four-digit year, and parts 1 to 3 have no equivalent
+    // of it. A part 4 file that omits it, or writes something that is not a
+    // year, has not finished saying which standard it claims.
+    if part == Part::Four {
+        match revision_text {
+            Some(text)
+                if text.trim().len() == 4 && text.trim().bytes().all(|b| b.is_ascii_digit()) => {}
+            Some(text) => findings.push(Raw::file(
+                clauses::FLAVOUR_ID,
+                FindingKind::RevisionMalformed { declared: text },
+            )),
+            None => findings.push(Raw::file(clauses::FLAVOUR_ID, FindingKind::RevisionMissing)),
+        }
+    }
+
     Some(Flavour { part, level })
 }
 
@@ -916,15 +957,84 @@ fn is_pdfaid(name: &tinker_pdf_xml::Name<'_>) -> bool {
     name.prefix() == Some("pdfaid") || name.namespace() == Some(PDFA_ID_NAMESPACE)
 }
 
-fn pdfaid(packet: &[u8]) -> Option<(String, Option<String>)> {
-    let source = Source::new(packet).ok()?;
+/// An XMP packet's bytes, in an encoding the XML reader can take.
+///
+/// # Why this exists, and it is a bug fix rather than a nicety
+///
+/// XMP (ISO 16684-1) permits a packet in UTF-8, UTF-16 **or UTF-32**, in
+/// either byte order, with or without a byte order mark. `tinker-pdf-xml`
+/// decodes UTF-8 and UTF-16, which is everything XML 1.0 requires of a
+/// conforming processor and is therefore the right line for a general XML
+/// reader to draw. It is the wrong line here: a PDF/A file whose packet is
+/// UTF-32 conforms, and reading it as unparseable reported eight conforming
+/// files in the veraPDF corpus as broken metadata.
+///
+/// So the transcode happens in the facade, where the bytes are known to be an
+/// XMP packet, rather than in the leaf, where they are known only to be XML.
+/// Ruling 8's line — format semantics stay in the facade — is the same line.
+///
+/// Returns the packet unchanged when it is not UTF-32, which is nearly always.
+fn readable(packet: &[u8]) -> Cow<'_, [u8]> {
+    match utf32_endianness(packet) {
+        Some(big_endian) => Cow::Owned(from_utf32(packet, big_endian)),
+        None => Cow::Borrowed(packet),
+    }
+}
+
+/// Whether `packet` is UTF-32, and if so whether it is big-endian.
+///
+/// The byte order marks come first, because `FF FE 00 00` is a UTF-32LE mark
+/// and its first two bytes are a *UTF-16LE* mark — a reader that checked two
+/// bytes would decode a UTF-32 packet as UTF-16 and produce a string of NULs.
+/// Without a mark, XMP's own rule is used: the first character of a packet is
+/// `<`, so the null padding around it says the width and the order.
+fn utf32_endianness(packet: &[u8]) -> Option<bool> {
+    match packet.get(..4)? {
+        [0x00, 0x00, 0xFE, 0xFF] => Some(true),
+        [0xFF, 0xFE, 0x00, 0x00] => Some(false),
+        [0x00, 0x00, 0x00, b] if *b != 0 => Some(true),
+        [b, 0x00, 0x00, 0x00] if *b != 0 => Some(false),
+        _ => None,
+    }
+}
+
+/// Transcodes UTF-32 to UTF-8, dropping the byte order mark and anything that
+/// is not a scalar value.
+///
+/// A code unit outside Unicode, or a surrogate, becomes nothing rather than a
+/// replacement character: the packet is about to be parsed as XML, and a
+/// replacement character inside an element name would turn a decoding problem
+/// into a parse error that named the wrong thing.
+fn from_utf32(packet: &[u8], big_endian: bool) -> Vec<u8> {
+    let mut out = String::with_capacity(packet.len() / 4);
+    for unit in packet.chunks_exact(4) {
+        let bytes = [unit[0], unit[1], unit[2], unit[3]];
+        let value = if big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        };
+        // U+FEFF is the mark, which XML does not want to see as content.
+        if value == 0xFEFF {
+            continue;
+        }
+        if let Some(ch) = char::from_u32(value) {
+            out.push(ch);
+        }
+    }
+    out.into_bytes()
+}
+
+fn pdfaid(packet: &[u8]) -> Option<(String, Option<String>, Option<String>)> {
+    let packet = readable(packet);
+    let source = Source::new(&packet).ok()?;
     // An XMP packet carries no doctype and has no business carrying one, so
     // the strict mode is right here — unlike an XHTML content document, which
     // is why `Doctype::SkipExternalId` exists elsewhere in this crate.
     let limits = tinker_pdf_xml::Limits::default();
     let reader = source.reader(&limits);
 
-    let (mut part, mut level) = (None, None);
+    let (mut part, mut level, mut revision) = (None, None, None);
     // Which element's text is being collected, if any.
     let mut collecting: Option<&'static str> = None;
 
@@ -943,6 +1053,9 @@ fn pdfaid(packet: &[u8]) -> Option<(String, Option<String>)> {
                         "conformance" if level.is_none() => {
                             level = Some(attribute.value().to_string());
                         }
+                        "rev" if revision.is_none() => {
+                            revision = Some(attribute.value().to_string());
+                        }
                         _ => {}
                     }
                 }
@@ -950,6 +1063,7 @@ fn pdfaid(packet: &[u8]) -> Option<(String, Option<String>)> {
                     match element.local() {
                         "part" if part.is_none() => Some("part"),
                         "conformance" if level.is_none() => Some("conformance"),
+                        "rev" if revision.is_none() => Some("rev"),
                         _ => None,
                     }
                 } else {
@@ -964,6 +1078,7 @@ fn pdfaid(packet: &[u8]) -> Option<(String, Option<String>)> {
                 match collecting {
                     Some("part") => part = Some(trimmed.to_string()),
                     Some("conformance") => level = Some(trimmed.to_string()),
+                    Some("rev") => revision = Some(trimmed.to_string()),
                     _ => {}
                 }
             }
@@ -972,7 +1087,7 @@ fn pdfaid(packet: &[u8]) -> Option<(String, Option<String>)> {
         }
     }
 
-    part.map(|part| (part, level))
+    part.map(|part| (part, level, revision))
 }
 
 #[cfg(test)]
@@ -980,7 +1095,7 @@ mod tests {
     use super::*;
 
     fn read(packet: &str) -> Option<(String, Option<String>)> {
-        pdfaid(packet.as_bytes())
+        pdfaid(packet.as_bytes()).map(|(part, level, _)| (part, level))
     }
 
     #[test]

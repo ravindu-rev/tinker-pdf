@@ -1,0 +1,2 @@
+# The ledger is written in the next commit; the reader and its refusal are here.
+reading	6.1.2	PDF_A-1b/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t01-pass-a.pdf	ISO 19005-1 6.1.2 says the header consists of %PDF-1.n; this file carries %PDF-2.0 and this build reads the clause literally.

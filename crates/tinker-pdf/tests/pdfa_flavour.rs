@@ -88,12 +88,21 @@ fn packet(part: &str, conformance: Option<&str>) -> String {
         Some(letter) => format!(r#" pdfaid:conformance="{letter}""#),
         None => String::new(),
     };
+    // ISO 19005-4 6.7.3 asks a part 4 file for `pdfaid:rev` as well as
+    // `pdfaid:part` — the four-digit year of the amendment it claims.
+    // Parts 1 to 3 have no equivalent, so it is emitted only for part 4
+    // and a fixture that wants the missing-revision finding removes it.
+    let revision = if part == "4" {
+        r#" pdfaid:rev="2020""#
+    } else {
+        ""
+    };
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
  xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
- pdfaid:part="{part}"{level}/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
+ pdfaid:part="{part}"{level}{revision}/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
     )
 }
 

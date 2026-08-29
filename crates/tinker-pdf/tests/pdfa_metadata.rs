@@ -85,7 +85,12 @@ fn document(packet: &str, info: Option<&str>) -> Vec<u8> {
     out
 }
 
-/// An XMP packet claiming PDF/A-2b and carrying `properties`.
+/// An XMP packet claiming PDF/A-1b and carrying `properties`.
+///
+/// Part 1 because ISO 19005-1 6.7.3 is where the `/Info` consistency
+/// requirement is stated without ambiguity, and it is the only part this
+/// build enforces it for — see `PDFA_STAGED` and
+/// [`the_consistency_rule_is_staged_outside_part_one`].
 fn packet(properties: &str) -> String {
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
@@ -95,7 +100,7 @@ fn packet(properties: &str) -> String {
  xmlns:xmp="http://ns.adobe.com/xap/1.0/"
  xmlns:pdf="http://ns.adobe.com/pdf/1.3/"
  xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/">
-<rdf:Description rdf:about="" pdfaid:part="2" pdfaid:conformance="B">
+<rdf:Description rdf:about="" pdfaid:part="1" pdfaid:conformance="B">
 {properties}
 </rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
     )
@@ -103,12 +108,21 @@ fn packet(properties: &str) -> String {
 
 /// A packet claiming `part` and `level` verbatim, whatever they are.
 fn claiming(part: &str, level: &str) -> String {
+    // ISO 19005-4 6.7.3 asks a part 4 file for `pdfaid:rev` as well as
+    // `pdfaid:part` — the four-digit year of the amendment it claims.
+    // Parts 1 to 3 have no equivalent, so it is emitted only for part 4
+    // and a fixture that wants the missing-revision finding removes it.
+    let revision = if part == "4" {
+        r#" pdfaid:rev="2020""#
+    } else {
+        ""
+    };
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
  xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
- pdfaid:part="{part}" pdfaid:conformance="{level}"/>
+ pdfaid:part="{part}" pdfaid:conformance="{level}"{revision}/>
 </rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
     )
 }
@@ -366,7 +380,7 @@ fn part_four_has_no_information_consistency_rule() {
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
  xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
- pdfaid:part="4"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+ pdfaid:part="4" pdfaid:rev="2020"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
     let bytes = document(four, Some("<< /Producer (Acme) >>"));
     let verdict = Document::open(bytes)
         .expect("opens")
@@ -375,5 +389,35 @@ fn part_four_has_no_information_consistency_rule() {
         verdict.findings.is_empty(),
         "the metadata group has nothing to say about a part 4 /Info: {:?}",
         verdict.findings
+    );
+}
+
+/// The rule runs for part 1 and is a **named refusal** everywhere else.
+///
+/// The same file, claiming part 2 instead of part 1, produces no finding —
+/// and that silence is only readable because `PDFA_STAGED` says out loud
+/// that the requirement's survival into ISO 19005-2 could not be
+/// established here. A staged rule that nothing names is indistinguishable
+/// from a rule that ran.
+#[test]
+fn the_consistency_rule_is_staged_outside_part_one() {
+    let two = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
+ pdfaid:part="2" pdfaid:conformance="B"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+    assert_eq!(
+        findings(document(two, Some("<< /Producer (Acme) >>"))),
+        Vec::new(),
+        "no consistency rule runs for part 2"
+    );
+
+    let named = tinker_pdf::PDFA_STAGED
+        .iter()
+        .find(|rule| rule.clause == "6.1.5")
+        .expect("the refusal is named");
+    assert!(
+        named.because.contains("19005-2"),
+        "the refusal has to say which standard it could not establish: {named:?}"
     );
 }
