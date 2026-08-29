@@ -2,11 +2,17 @@
 //! not write (gap 30, milestone 2).
 //!
 //! Milestone 1 committed eight genuine XPS packages from two Microsoft
-//! producers, and between them they hold **forty-six XML parts**: a
-//! content-types item and a package relationships part each, a fixed document
-//! sequence, a fixed document, one to three fixed pages, and a page
-//! relationships part where there are resources. Every one of them goes through
-//! `tinker-pdf-xml` here.
+//! producers, and Tier 4 added five from Ghostscript's `xpswrite` device.
+//! Between them they hold **seventy-two XML parts**: a content-types item and a
+//! package relationships part each, a fixed document sequence, a fixed
+//! document, one to three fixed pages, and a page relationships part where
+//! there are resources. Every one of them goes through `tinker-pdf-xml` here.
+//!
+//! *Amended, Tier 4.* The third producer moved two of the four pinned figures
+//! at the foot of this file and falsified one assertion outright — `xml:lang`
+//! was compared against the literal `en-us`, and Ghostscript writes `en-US`.
+//! BCP 47 says the case carries no meaning, so the literal was the bug and
+//! eight files agreeing with it was not evidence.
 //!
 //! This test lives in the facade rather than in the leaf, and the reason is in
 //! `crates/tinker-pdf-xml/Cargo.toml`: getting at a part means reading a ZIP,
@@ -44,6 +50,16 @@ const PACKAGES: &[&str] = &[
     "wpf-jpeg-image.xps",
     "xpsom-image-and-text.oxps",
     "xpsom-gradients.oxps",
+    // Tier 4's second producer, and the reason this file wants it: Ghostscript
+    // writes whitespace on **both sides** of an `=` in an attribute, a leading
+    // space inside an attribute value, tabs between elements, and a 65 KB fixed
+    // page of 1 114 elements. Every one of those is a shape no Microsoft
+    // package in this corpus has.
+    "gs-paths.xps",
+    "gs-gradients.xps",
+    "gs-images.xps",
+    "gs-embedded-font.xps",
+    "gs-rasterised-text.xps",
 ];
 
 /// The extensions of the items that hold markup. `[Content_Types].xml` and the
@@ -92,8 +108,8 @@ fn every_markup_part_of_every_real_package_parses() {
     let parts = markup_parts();
     assert_eq!(
         parts.len(),
-        46,
-        "the corpus should hold forty-six markup parts"
+        72,
+        "the corpus should hold seventy-two markup parts"
     );
     for (package, item, bytes) in parts {
         let source =
@@ -261,6 +277,7 @@ fn both_dialects_namespaces_are_resolved_from_the_markup() {
     const OPENXPS: &str = "http://schemas.openxps.org/oxps/v1.0";
 
     let mut seen: Vec<(String, String)> = Vec::new();
+    let mut langs: Vec<String> = Vec::new();
     for (package, item, bytes) in markup_parts() {
         if !item.ends_with(".fpage") {
             continue;
@@ -279,13 +296,20 @@ fn both_dialects_namespaces_are_resolved_from_the_markup() {
                     namespace == MICROSOFT || namespace == OPENXPS,
                     "{package}/{item}: {namespace}"
                 );
-                // `xml:lang` is an ordinary attribute and every real fixed page
-                // carries one.
-                assert_eq!(
-                    element.attribute(Some(tinker_pdf_xml::XML_NAMESPACE), "lang"),
-                    Some("en-us"),
-                    "{package}/{item}"
+                // `xml:lang` is an ordinary attribute and every real fixed
+                // page carries one — in **two spellings**. Microsoft writes
+                // `en-us` and Ghostscript writes `en-US`, and BCP 47 says a
+                // language tag's case carries no meaning, so the value is
+                // compared the way the specification compares it and both
+                // spellings are asserted to be here.
+                let lang = element
+                    .attribute(Some(tinker_pdf_xml::XML_NAMESPACE), "lang")
+                    .unwrap_or_else(|| panic!("{package}/{item}: no xml:lang"));
+                assert!(
+                    lang.eq_ignore_ascii_case("en-us"),
+                    "{package}/{item}: {lang}"
                 );
+                langs.push(lang.to_owned());
                 seen.push((package.clone(), namespace));
             }
         }
@@ -297,6 +321,10 @@ fn both_dialects_namespaces_are_resolved_from_the_markup() {
     assert!(
         seen.iter().any(|(_, ns)| ns == OPENXPS),
         "no OpenXPS fixed page"
+    );
+    assert!(
+        langs.iter().any(|l| l == "en-us") && langs.iter().any(|l| l == "en-US"),
+        "both spellings of the language tag should be in the corpus: {langs:?}"
     );
 
     // And the key prefix, which each producer spells in its own dialect. Two
@@ -469,10 +497,19 @@ fn the_real_corpus_spends_what_the_ledger_says_real_markup_spends() {
         most_events = most_events.max(reader.events());
     }
 
-    assert_eq!(deepest, 6, "the deepest nesting in the corpus moved");
+    // Two of the four moved when Tier 4's second producer arrived, and neither
+    // moved by a little. The depth is `Path > Path.Fill > ImageBrush >
+    // ImageBrush.Transform > MatrixTransform` under a `Canvas` under a
+    // `FixedPage` — a seventh level no Microsoft package reaches, because WPF
+    // states its brushes in a resource dictionary and names them where
+    // Ghostscript nests them in place. The event count is `gs-gradients.xps`'s
+    // one fixed page: two gradients flattened into 1 114 `<Path>` elements,
+    // eighty-one times the largest Microsoft part, out of a source PDF of
+    // 1 328 bytes.
+    assert_eq!(deepest, 7, "the deepest nesting in the corpus moved");
     assert_eq!(widest, 8, "the widest element in the corpus moved");
     assert_eq!(longest_name, 33, "the longest name in the corpus moved");
-    assert_eq!(most_events, 41, "the largest part in the corpus moved");
+    assert_eq!(most_events, 3348, "the largest part in the corpus moved");
 }
 
 /// Not one part of the real corpus needs any leniency at all.

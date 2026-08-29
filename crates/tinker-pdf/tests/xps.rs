@@ -48,6 +48,13 @@ const PACKAGES: &[&str] = &[
     "wpf-jpeg-image.xps",
     "xpsom-image-and-text.oxps",
     "xpsom-gradients.oxps",
+    // Tier 4's second producer: Ghostscript 10.07.1's `xpswrite` device, over
+    // source PDFs this repository wrote. See `tests/xps/README.md`.
+    "gs-paths.xps",
+    "gs-gradients.xps",
+    "gs-images.xps",
+    "gs-embedded-font.xps",
+    "gs-rasterised-text.xps",
 ];
 
 // ---- what the corpus is -------------------------------------------------
@@ -260,10 +267,17 @@ fn an_xps_without_a_raster_resource_is_not_refused_as_having_no_images() {
 /// opened as one-page comics, and not one was read as the document it is.
 ///
 /// Now every one of them opens, the page counts are the `PageContent` counts,
-/// every page is 612 × 792 pt because every fixed page in the corpus states
-/// `Width="816" Height="1056"`, and the dialect each package reports is the one
-/// its **namespace** says — which is the only discriminator there is, since the
-/// content types are byte-identical across the two.
+/// every page is the size its own markup states, and the dialect each package
+/// reports is the one its **namespace** says — which is the only discriminator
+/// there is, since the content types are byte-identical across the two.
+///
+/// *Amended, Tier 4.* The size used to be one number for the whole corpus:
+/// every Microsoft package is `Width="816" Height="1056"`, so 612 × 792 pt
+/// covered all eight. The five Ghostscript packages are 533 × 400 units for a
+/// 400 × 300 pt source, because `xpswrite` **truncates** 533.333 rather than
+/// rounding it — so they read back 399.75 × 300 pt, a quarter of a point short
+/// of what was handed in. A single expected size is exactly the assertion that
+/// could not have noticed.
 #[test]
 fn every_package_in_the_corpus_opens_as_the_document_it_is() {
     // (package, pages, dialect)
@@ -276,6 +290,17 @@ fn every_package_in_the_corpus_opens_as_the_document_it_is() {
         ("wpf-jpeg-image.xps", 1, Dialect::Xps1),
         ("xpsom-image-and-text.oxps", 1, Dialect::OpenXps),
         ("xpsom-gradients.oxps", 1, Dialect::OpenXps),
+        // Tier 4's second producer. Every one of these is 533 x 400 units,
+        // which is 399.75 x 300 pt — **not** the 400 x 300 the source PDF
+        // states, because `xpswrite` truncates 533.333 to 533 on the way out.
+        // That is the producer's arithmetic and not this reader's; it is
+        // asserted rather than papered over so a later reader does not go
+        // looking for a rounding bug here.
+        ("gs-paths.xps", 1, Dialect::Xps1),
+        ("gs-gradients.xps", 1, Dialect::Xps1),
+        ("gs-images.xps", 1, Dialect::Xps1),
+        ("gs-embedded-font.xps", 1, Dialect::Xps1),
+        ("gs-rasterised-text.xps", 1, Dialect::Xps1),
     ];
     assert_eq!(
         expected.len(),
@@ -290,15 +315,20 @@ fn every_package_in_the_corpus_opens_as_the_document_it_is() {
             .archive()
             .unwrap_or_else(|| panic!("{name}: a synthesised document has a report"));
         assert_eq!(report.xps_dialect(), Some(*dialect), "{name}: dialect");
+        let size = if name.starts_with("gs-") {
+            (399.75, 300.0)
+        } else {
+            (612.0, 792.0)
+        };
         for number in 0..*pages {
             let page = document
                 .page(number)
                 .unwrap_or_else(|| panic!("{name}: page {number}"));
             assert_eq!(
                 page.size(),
-                (612.0, 792.0),
-                "{name}: page {number} states Width=\"816\" Height=\"1056\", \
-                 which is 612 x 792 pt at 18.1's 1/96 inch"
+                size,
+                "{name}: page {number} is the size its own markup states, at \
+                 18.1's 1/96 inch"
             );
         }
         // And **no page is a placeholder**. Milestones 3 to 5 gave every page
@@ -635,25 +665,32 @@ fn every_part_is_stored_or_deflated_and_the_corpus_carries_both() {
     );
 }
 
-/// `[Content_Types].xml` is the **last** item of every package here.
+/// `[Content_Types].xml` is in **three different places** across this corpus.
 ///
 /// OPC 7.3.7 leaves its position unconstrained — the brackets were chosen
 /// precisely because they violate the part-name grammar, so it can never
-/// collide with a part — and both Microsoft serialisers put it last. A reader
-/// that assumes it is first is wrong on the first real file it meets, in either
-/// dialect. Pinned here so milestone 3 cannot quietly acquire that assumption.
+/// collide with a part — and milestone 1 could only observe that both Microsoft
+/// serialisers put it last. That is now the weaker half of the claim.
+/// Ghostscript writes it **second**, immediately after
+/// `FixedDocumentSequence.fdseq` and before the fixed document it types, so a
+/// reader that had quietly learnt "last" from eight files would be wrong on the
+/// ninth.
+///
+/// So the assertion is the clause rather than the habit: exactly one such item
+/// per package, and across the corpus its index is **not** a constant. A reader
+/// that assumed either end is wrong on something here.
 #[test]
-fn the_content_types_item_is_last_in_every_package() {
+fn the_content_types_item_is_in_no_fixed_position() {
+    let mut positions = std::collections::BTreeSet::new();
     for name in PACKAGES {
         let bytes = package(name);
         let archive = tinker_pdf_zip::Archive::open(&bytes, &tinker_pdf_zip::Limits::DEFAULT)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let names: Vec<&str> = archive.entries().iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(
-            names.last(),
-            Some(&"[Content_Types].xml"),
-            "{name}: the content-types item is not last"
-        );
+        let at = names
+            .iter()
+            .position(|n| *n == "[Content_Types].xml")
+            .unwrap_or_else(|| panic!("{name}: no content-types item"));
         assert_eq!(
             names
                 .iter()
@@ -662,5 +699,22 @@ fn the_content_types_item_is_last_in_every_package() {
             1,
             "{name}: exactly one content-types item"
         );
+        // Recorded as "the last one" or "the nth", because the two Microsoft
+        // producers vary the item count and Ghostscript does not vary the
+        // index.
+        positions.insert(if at + 1 == names.len() {
+            "last".to_owned()
+        } else {
+            format!("index {at}")
+        });
     }
+    assert!(
+        positions.len() > 1,
+        "the corpus should show the position is unconstrained, and it shows \
+         only {positions:?}"
+    );
+    assert!(
+        positions.contains("last") && positions.contains("index 1"),
+        "both observed positions should still be here: {positions:?}"
+    );
 }
