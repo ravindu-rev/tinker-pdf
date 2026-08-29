@@ -10,8 +10,8 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf_cos::{
-    ByteSource, CosDocument, CountingSource, LadderLevel, Name, ObjRef, ShreddedSource,
-    SliceSource, SourceMiss, WarningKind,
+    ByteSource, CosDocument, CountingSource, DocumentBuilder, LadderLevel, Name, ObjRef, Object,
+    ShreddedSource, SliceSource, SourceMiss, WarningKind, XrefEntry, CHUNK_SIZE,
 };
 
 /// A minimal, honest document: a catalog, an empty page tree, a classic table.
@@ -352,5 +352,124 @@ fn a_host_that_feeds_what_it_was_asked_for_converges_in_bounded_rounds() {
         observed(&streamed),
         observed(&buffered),
         "the loop converged on the answer a buffer would have given"
+    );
+}
+
+/// A feed that stops **inside** a chunk refuses, and the retry converges.
+///
+/// The interruption lands where a whole-chunk feed could never put it, which
+/// is what makes this different from the test above. It is deliberately *not*
+/// the guard for "a half-filled chunk is never published": opening again
+/// builds a new chunk cache, so a poisoned chunk cannot survive between two
+/// opens. `a_miss_never_publishes_a_null_the_host_could_still_fix` is that
+/// guard, and it holds one document across the miss.
+#[test]
+fn a_feed_that_stops_inside_a_chunk_refuses_and_then_converges() {
+    let bytes = a_document();
+    assert!(
+        bytes.len() > 200,
+        "the fixture must be longer than the prefix fed below"
+    );
+    let source = Arc::new(Fed::new(bytes.clone()));
+
+    // A prefix that ends inside the first chunk and inside the document.
+    source.feed(0..120);
+    let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+    assert!(
+        CosDocument::open_source(handle).is_err(),
+        "the first chunk cannot be completed from a 120-byte prefix"
+    );
+
+    source.feed(120..bytes.len() as u64);
+    let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+    let after = CosDocument::open_source(handle).expect("it opens once the rest arrives");
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    assert_eq!(
+        observed(&after),
+        observed(&buffered),
+        "the retry read a chunk that had been cached half-full"
+    );
+    assert_eq!(
+        after.bytes().len(),
+        bytes.len(),
+        "and the document is all of its bytes, not the prefix that arrived first"
+    );
+}
+
+/// A document of several chunks, so a range can be withheld from the middle
+/// of it without withholding the head or the tail.
+fn a_multi_chunk_document() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for index in 0..12 {
+        builder.add_page(200.0, 100.0, |page| {
+            let shade = (index % 5) as f64 / 5.0;
+            let mut ops = Vec::new();
+            for step in 0..80 {
+                let x = (step % 20) as f64 * 8.0;
+                let y = (step / 20) as f64 * 20.0;
+                ops.extend_from_slice(
+                    format!("{shade:.3} 0.4 0.6 rg {x:.2} {y:.2} 6.00 9.00 re f ").as_bytes(),
+                );
+            }
+            page.raw(&ops);
+        });
+    }
+    builder.finish()
+}
+
+/// A slot that could not be read must not become a published null.
+///
+/// This is the risk table's first row, and the one an ordinary retry test
+/// cannot reach: opening again builds a new chunk cache, so a poisoned slot
+/// only shows when **one** document reads, misses, and reads again after the
+/// host has supplied the range. The null is correct as an answer -- 7.3.10
+/// says a missing object is null and ruling 2 says degrade -- and wrong as a
+/// memory, because the object is not missing, its bytes had not arrived.
+#[test]
+fn a_miss_never_publishes_a_null_the_host_could_still_fix() {
+    let bytes = a_multi_chunk_document();
+    let len = bytes.len() as u64;
+    assert!(len > 6 * CHUNK_SIZE, "the fixture spans several chunks");
+
+    // An object in the middle of the file, found through the buffered open so
+    // that the choice does not depend on the path under test.
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let middle = len / 2;
+    let (target, at) = buffered
+        .xref()
+        .iter()
+        .filter_map(|(num, entry)| match entry {
+            XrefEntry::Offset { offset, .. } => Some((num, offset)),
+            _ => None,
+        })
+        .min_by_key(|(_, offset)| offset.abs_diff(middle))
+        .expect("the fixture has objects in the middle");
+    let expected = buffered.get(ObjRef::new(target, 0)).expect("it reads");
+    assert!(
+        !matches!(*expected, Object::Null),
+        "the object chosen is a real one"
+    );
+
+    // Everything except the one chunk that object lives in.
+    let hole = (at / CHUNK_SIZE) * CHUNK_SIZE..((at / CHUNK_SIZE) + 1) * CHUNK_SIZE;
+    let source = Arc::new(Fed::new(bytes.clone()));
+    source.feed(0..hole.start);
+    source.feed(hole.end.min(len)..len);
+
+    let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+    let doc = CosDocument::open_source(handle).expect("the head and tail are enough to open");
+    let absent = doc.get(ObjRef::new(target, 0)).expect("it reads");
+    assert!(
+        matches!(*absent, Object::Null),
+        "an object whose bytes are absent reads as null"
+    );
+
+    // The host goes and fetches what it refused, and the same document reads
+    // the object it could not read before.
+    source.feed(hole);
+    let arrived = doc.get(ObjRef::new(target, 0)).expect("it reads");
+    assert_eq!(
+        *arrived, *expected,
+        "the null was remembered, so the retry read the miss's answer"
     );
 }

@@ -454,7 +454,12 @@ impl CosDocument {
     /// would report the window's end as the stream's -- silently truncating
     /// the data and warning about a length nobody wrote. A document opened
     /// from a buffer gets the whole buffer and takes one pass.
-    fn windowed_extent(&self, r: ObjRef, stream: &StreamObj, sink: &mut WarningSink) -> Range<u64> {
+    fn windowed_extent(
+        &self,
+        r: ObjRef,
+        stream: &StreamObj,
+        sink: &mut WarningSink,
+    ) -> Option<Range<u64>> {
         let view = self.buffer.view();
         let slack = limits::MAX_STREAM_EOL_SKIP as u64 + b"endstream".len() as u64;
         let mut want = match stream.len_hint {
@@ -468,12 +473,12 @@ impl CosDocument {
                 None => want,
             };
             let Some(window) = view.window(stream.data_start, asked) else {
-                return stream.data_start..stream.data_start;
+                // The bytes are not here yet, and an extent computed without
+                // them would be cached as this stream's for good.
+                return None;
             };
             let reaches_end = window.end() >= self.buffer.len();
-            let Some(local_start) = window.local(stream.data_start) else {
-                return stream.data_start..stream.data_start;
-            };
+            let local_start = window.local(stream.data_start)?;
             let mut scratch = WarningSink::new();
             let local = resolve_extent(
                 window.bytes(),
@@ -499,7 +504,7 @@ impl CosDocument {
                     })
                     .collect::<Vec<_>>(),
             );
-            return window.abs(local.start)..window.abs(local.end);
+            return Some(window.abs(local.start)..window.abs(local.end));
         }
     }
 
@@ -512,7 +517,13 @@ impl CosDocument {
             return range.clone();
         }
         let mut sink = WarningSink::new();
-        let range = self.windowed_extent(r, stream, &mut sink);
+        // A miss never publishes: an extent measured over bytes that were not
+        // available would be remembered as this stream's, and the read that
+        // happens after the host supplies them would get the miss's answer.
+        let Some(range) = self.windowed_extent(r, stream, &mut sink) else {
+            self.absorb(sink);
+            return stream.data_start..stream.data_start;
+        };
         let mut cache = self.stream_ranges.write_lock();
         // Another thread may have computed the same extent meanwhile; its
         // warnings are already recorded, so this one's are dropped.

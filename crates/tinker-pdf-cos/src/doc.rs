@@ -1088,7 +1088,15 @@ impl CosDocument {
         }
         // No lock is held here: two threads racing on the same object both
         // parse it and one wins the swap.
+        let missed_before = ctx.missed();
         let object = ctx.enter(num, |ctx| self.load_uncached(num, ctx, sink));
+        if ctx.missed() && !missed_before {
+            // A miss never publishes. This load reads as null because the
+            // bytes were absent, not because the object is; publishing it
+            // would give every later read the miss's answer forever, and the
+            // host that goes and fetches the range would never see it change.
+            return Arc::new(object);
+        }
         self.store.publish(num, Arc::new(object))
     }
 
@@ -1179,7 +1187,11 @@ impl CosDocument {
     ///
     /// A document opened from a buffer gets the whole buffer as its window and
     /// takes one pass, exactly as it always did.
-    fn parse_windowed(&self, offset: u64) -> Option<(ParsedIndirect, Vec<Warning>)> {
+    fn parse_windowed(
+        &self,
+        offset: u64,
+        ctx: &mut ResolveCtx,
+    ) -> Option<(ParsedIndirect, Vec<Warning>)> {
         let view = self.buffer.view();
         let mut want = limits::OBJECT_WINDOW;
         let mut ceiling = self.head_ceiling(offset);
@@ -1188,7 +1200,12 @@ impl CosDocument {
                 Some(end) => want.min(end.saturating_sub(offset)).max(1),
                 None => want,
             };
-            let window = view.window(offset, asked)?;
+            let Some(window) = view.window(offset, asked) else {
+                // The bytes are not here yet. Recorded rather than swallowed,
+                // so nothing publishes a null the host could still fix.
+                ctx.note_miss();
+                return None;
+            };
             let reaches_end = window.end() >= self.buffer.len();
             let local_at = window.local(offset)?;
             let mut local = WarningSink::new();
@@ -1235,7 +1252,7 @@ impl CosDocument {
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
     ) -> Option<Object> {
-        let (parsed, warnings) = self.parse_windowed(offset)?;
+        let (parsed, warnings) = self.parse_windowed(offset, ctx)?;
         if parsed.reference.num != num {
             return None;
         }
@@ -1413,10 +1430,14 @@ impl CosDocument {
 /// happen.
 fn fetch_whole(backing: &Backing, sink: &mut WarningSink) -> Option<Arc<[u8]>> {
     let declare = backing.is_streamed() && !backing.whole_fetched();
+    // The fetch is attempted before it is declared, because a declaration of
+    // something that did not happen is worse than none: a host reading the
+    // warnings would see a whole-file read it was never asked for.
+    let all = backing.materialise().ok()?;
     if declare {
         sink.warn(0, WarningKind::WholeFileFetched);
     }
-    backing.materialise().ok()
+    Some(all)
 }
 
 /// What a linearized file (Annex F) promises about its own head.
