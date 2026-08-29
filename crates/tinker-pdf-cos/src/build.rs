@@ -3327,8 +3327,44 @@ impl DocumentBuilder {
     /// A closure rather than a returned reference so the API stays infallible:
     /// there is no borrow to fumble and no case where "the page just pushed"
     /// has to be recovered from an `Option`.
+    ///
+    /// Exactly [`DocumentBuilder::begin_page`] -> draw ->
+    /// [`DocumentBuilder::push_page`], which is what makes the two forms
+    /// interchangeable rather than merely similar: there is one page
+    /// constructor and one push, and this is a caller of both. The pair exists
+    /// because a closure does not cross a foreign-function boundary (ruling
+    /// 11, `docs/design/bindings-write.md`); this stays the Rust API because
+    /// it is the one that cannot be misordered.
     pub fn add_page(&mut self, width: f64, height: f64, draw: impl FnOnce(&mut PageBuilder)) {
-        let mut page = PageBuilder {
+        let mut page = self.begin_page(width, height);
+        draw(&mut page);
+        self.push_page(page);
+    }
+
+    /// Starts a page, owned by the caller until [`DocumentBuilder::push_page`]
+    /// takes it.
+    ///
+    /// **The resource snapshot happens here**, at the same instant
+    /// [`DocumentBuilder::add_page`] takes it -- because that method is a
+    /// caller of this one. So a font, image, pattern or form registered on the
+    /// builder *after* this call is invisible to this page, exactly as it is
+    /// invisible to a closure form's page. That is timing inherited rather
+    /// than reimplemented, and
+    /// `beginning_a_page_snapshots_resources_when_add_page_does` in this
+    /// module's tests is what holds the two together if either moves.
+    ///
+    /// A page is born from a builder or not at all: [`PageBuilder`] has no
+    /// public constructor, so there is no way to draw on a page whose
+    /// resource names mean nothing.
+    ///
+    /// Nothing about the builder changes here. A page begun and never pushed
+    /// is simply dropped, and the document is what it would have been --
+    /// there is no half-added page and no counter to unwind, which is the
+    /// property that lets this cross an ABI where the caller may abandon a
+    /// handle.
+    #[must_use]
+    pub fn begin_page(&self, width: f64, height: f64) -> PageBuilder {
+        PageBuilder {
             width,
             height,
             content: Vec::new(),
@@ -3344,8 +3380,22 @@ impl DocumentBuilder {
             tag_stack: Vec::new(),
             opened: None,
             opened_end: 0,
-        };
-        draw(&mut page);
+        }
+    }
+
+    /// Adds a page the caller has finished drawing.
+    ///
+    /// Consumes it, so a page reaches a document once. Pages arrive in the
+    /// order they are pushed, which is the order they are numbered -- the
+    /// same order [`DocumentBuilder::add_page`] gives them, because that
+    /// method pushes here.
+    ///
+    /// A page begun against one builder and pushed to another is not checked
+    /// and is a caller error: its resource names were resolved against the
+    /// builder it came from, so names the receiving builder does not have will
+    /// reach the file unresolved. Nothing panics (ruling 1); the page is
+    /// written with the names it was drawn with.
+    pub fn push_page(&mut self, page: PageBuilder) {
         self.pages.push(page);
     }
 

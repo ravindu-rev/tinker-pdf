@@ -51,6 +51,43 @@ asserts the render **twice** — blank without a face, inked with one — becaus
 faces, so "a bitmap of the right size came back" passes on a build whose
 renderer does nothing at all. That is PRE-A's failure, one ecosystem out.
 
+## Writing, and proving it is the same engine
+
+```bash
+python bindings/python/tests/write_parity.py testdata/form-fields.pdf
+```
+
+Two scripts with every input pinned — fill a form and save incrementally, and
+build a document from pages, a font and an image — printing one
+`WROTE sha256=<hex>` line each. The same two run against the facade in Rust,
+through the npm package and through the NuGet package, and
+`cargo xtask bindings-parity` requires all four to be byte-identical. Ruling 11
+is what makes that the right test: a binding projects the facade 1:1 and adds
+no logic of its own, so four surfaces disagreeing means one of them added
+something.
+
+The API is the facade's, closure-free where a closure could not cross:
+
+```python
+editor = doc.editor()
+for widget in editor.fill_field("name", "Ada Lovelace"):
+    print(f"not drawn: {widget}")     # written, and not wholly drawable
+
+with editor.transaction():            # checkpoint, `with`, restore
+    editor.set_checkbox("agree", True)
+
+data = editor.save(mode="incremental")
+assert tinker_pdf.Document(data).validate() == []
+```
+
+`fill_field` has **three** outcomes and not two: it raises when nothing was
+written, returns an empty list when the value was written and every widget
+drawn, and returns a non-empty one when the value was written and those widgets
+were left showing what they showed before. `save` takes no defaults of its own
+— every argument it does not receive is the engine's own — and `entropy` for
+an encrypted save is 48 caller-supplied bytes, because this binding does not
+invent randomness.
+
 ## Nothing has been published
 
 `pip install tinker-pdf` does not work and is not meant to yet. The pipeline

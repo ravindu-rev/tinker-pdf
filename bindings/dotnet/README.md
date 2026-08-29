@@ -77,6 +77,44 @@ As in the Python and JavaScript smoke tests, the render is asserted twice —
 blank without a face, inked with one — because `testdata/simple-text.pdf`
 embeds no font program and this engine bundles no faces.
 
+## Writing, and proving it is the same engine
+
+A third argument turns on the write leg:
+
+```bash
+dotnet run --project bindings/dotnet/tests/Smoke -c Release -- \
+  testdata/simple-text.pdf C:/Windows/Fonts/arial.ttf testdata/form-fields.pdf
+```
+
+Two scripts with every input pinned — fill a form and save incrementally, and
+build a document from pages, a font and an image — printing one
+`DOTNET-SMOKE: WROTE sha256=<hex>` line each. The same two run against the
+facade in Rust, through the wheel and through the npm package, and
+`cargo xtask bindings-parity` requires all four to be byte-identical.
+
+Six more `SafeHandle`s carry the write surface — `Editor`, `Checkpoint`,
+`Buffer`, `Builder`, `PageBuilder`, `OutlineEntry` — on exactly the pattern
+`DocumentHandle` and `BitmapHandle` already follow. Three things about them are
+asserted by the smoke rather than left as documentation:
+
+- **The editor outlives the document.** The engine's editor holds its own
+  reference to the shared object store, so the smoke disposes the `Document`
+  *before* using the editor. That is why `EditorHandle` needs no keep-alive on
+  its parent.
+- **A consuming call is not a double free.** `Finish`, `PushPage` and
+  `AddChild` consume in the engine, so the native handle boxes an option and
+  takes it; calling one twice is `PdfException` with
+  `Status.SpentHandle` and a message naming the call that spent it, and
+  `Dispose` stays required and safe either way.
+- **Finalizer-only teardown.** One document is built with no `using` at all and
+  collected under two GC passes, because the forgot-to-dispose path is the one
+  a caller actually takes and the one nothing else exercises.
+
+`PdfException` carries a `Status`. Folding it into the message would leave you
+comparing strings to make the one distinction that matters:
+`Status.NoSuchField` means your form changed and `Status.ValueRefused` means
+your data is wrong, and those are different bugs in different places.
+
 ## Nothing has been published
 
 `dotnet add package TinkerPdf` does not work and is not meant to yet. The

@@ -159,6 +159,43 @@ budget is 2.5 MB gzipped. Turning the feature off is
 `--no-default-features`, and it is the switch a host that renders no CJK
 reaches for.
 
+## Writing, and proving it is the same engine
+
+```bash
+cd <a directory where the tarball has been npm install'ed>
+node <repo>/bindings/js/tests/write_parity.mjs <repo>/testdata/form-fields.pdf
+```
+
+Two scripts with every input pinned — fill a form and save incrementally, and
+build a document from pages, a font and an image — printing one
+`WROTE sha256=<hex>` line each. The same two run against the facade in Rust,
+through the wheel and through the NuGet package, and
+`cargo xtask bindings-parity` requires all four to be byte-identical.
+
+**There is no `editor.transaction(callback)`**, and the reason is mechanical
+rather than a matter of taste. An exported wasm-bindgen method borrows its
+`this` for the whole call, so JavaScript running inside one that touched the
+same editor would hit *"recursive use of an object detected which would lead to
+unsafe aliasing in Rust"* — a panic, from the one shape a caller would most
+want. What the engine's design asks for is checkpoint, host-language control
+flow, restore, and in JavaScript that is three lines you write:
+
+```js
+const mark = editor.checkpoint();
+try { editor.fillField('name', 'Ada Lovelace'); }
+catch (e) { editor.restore(mark); throw e; }
+finally { mark.free(); }
+```
+
+Wrapping those three lines in a shipped helper was the alternative and was
+rejected: it would be the first logic this binding carries, and ruling 11's
+whole point is that there is none to diverge with. `restore` is idempotent, so
+a `finally` that runs after its own `catch` is safe.
+
+`save` returns a **copy**. `viewUnsafeUntilNextAllocation` is the only aliasing
+view on this surface, and a write API that handed one back would hand it back
+at exactly the moment the caller is about to allocate again.
+
 ## Nothing has been published
 
 `npm install tinker-pdf-js` does not work and is not meant to yet. The pipeline
