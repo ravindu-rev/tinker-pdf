@@ -142,6 +142,12 @@ pub(crate) struct Props {
     /// [`Buffer::propagate_attachments`] turns every one of them into a
     /// number, once, at the end.
     pub(crate) attached_to: Option<i32>,
+    /// Whether this glyph is the reph its syllable's `rphf` lookup produced.
+    ///
+    /// Unlike every other field here it is set from the **buffer** rather than
+    /// from the character, and at one named moment: see
+    /// [`Buffer::set_repha`].
+    pub(crate) repha: bool,
     /// Whether this glyph is a joiner that has to leave before the run does.
     ///
     /// Set from the character, like [`Props::category`] and for the same
@@ -339,6 +345,42 @@ impl Buffer {
     /// What the cluster model calls the glyph at `at`, or `None` past the end.
     pub(crate) fn props_category(&self, at: usize) -> Option<Category> {
         self.props.get(at).map(|props| props.category)
+    }
+
+    /// Records that the glyph at `at` is the reph its syllable's `rphf`
+    /// produced.
+    ///
+    /// # Why this is asked of the buffer and not of the text
+    ///
+    /// Everything else the cluster model carries is read off the character
+    /// before any lookup runs, because the character is what has the property.
+    /// **Whether a `RA` became a reph is not a property of the character**: it
+    /// is a property of the *face*, whose `rphf` coverage is the only thing in
+    /// the system that knows which consonant it treats that way. The text can
+    /// say where the lookup is offered a position — that is
+    /// `crate::shape::repha_positions` and the mask it sets — and only the
+    /// buffer can say whether it took one.
+    ///
+    /// So this is set at one named moment, immediately after the `rphf` stage
+    /// and before anything else has run, by comparing the mask against what
+    /// survived: the pair was two glyphs both carrying the bit, and a reph is
+    /// one glyph carrying it with the halant gone. Asking later would confuse
+    /// `rphf` with `half`, which forms the same shape out of the same two
+    /// characters and is not a reph.
+    pub(crate) fn set_repha(&mut self, at: usize, repha: bool) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.repha = repha;
+        }
+    }
+
+    /// Whether the glyph at `at` is a reph. See [`Buffer::set_repha`].
+    pub(crate) fn props_repha(&self, at: usize) -> bool {
+        self.props.get(at).is_some_and(|props| props.repha)
+    }
+
+    /// The feature mask of the glyph at `at`, or zero past the end.
+    pub(crate) fn props_mask(&self, at: usize) -> u32 {
+        self.props.get(at).map_or(0, |props| props.mask)
     }
 
     /// Marks the glyph at `at` as one that must not survive the run.

@@ -583,6 +583,12 @@ const UNRESOLVABLE: &[(&str, &str)] = &[("GPOS-1/15", "aacute")];
 const WITHIN_TOLERANCE: &[(&str, usize, char, i32)] = &[
     ("SHARAN-1/5", 6, 'x', -1),
     ("SHARAN-1/6", 6, 'y', -1),
+    // And a fourth Kannada row, arriving with the reph move for the same
+    // reason: `SHKNDA-2/12`'s third glyph sits at 2367 + 919 design units,
+    // which is 1604.996 thousandths of an em. Upstream scales and rounds the
+    // two advances separately and gets 1156 + 449 = 1605; this crate adds
+    // first and rounds once, and gets 1604.
+    ("SHKNDA-2/12", 2, 'x', -1),
     // The three Kannada rows arrived with the per-plan mark widths, and they
     // are the same one-unit rounding difference the other three are: upstream
     // scales and rounds every advance separately, this crate stays in integer
@@ -688,7 +694,7 @@ const PASSING: &[(&str, usize)] = &[
     ("SHBALI-2", 12),
     ("SHBALI-3", 9),
     ("SHKNDA-1", 34),
-    ("SHKNDA-2", 9),
+    ("SHKNDA-2", 10),
     ("SHKNDA-3", 31),
     ("SHLANA-1", 51),
     ("SHLANA-2", 32),
@@ -826,7 +832,6 @@ const TRIAGE: &[(&str, Wrong)] = &[
     ("SHKNDA-2/4", Wrong::Set),
     ("SHKNDA-2/8", Wrong::Set),
     ("SHKNDA-2/9", Wrong::Set),
-    ("SHKNDA-2/12", Wrong::Order),
     ("SHLANA-1/35", Wrong::Advance),
     ("SHLANA-2/2", Wrong::Set),
     ("SHLANA-2/3", Wrong::Set),
