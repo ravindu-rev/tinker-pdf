@@ -119,10 +119,13 @@ fn both_crates_vendor_the_same_unicode_version() {
         for (name, version) in tree(&root, path) {
             match version {
                 Some(version) => versions.push(((*path).to_string(), name, version)),
-                // The licence is the one file with no version header, and it
-                // is compared byte for byte below instead.
-                None => assert_eq!(
-                    name, "LICENSE.txt",
+                // Two files carry no version header, and each is pinned
+                // another way: the licence is compared byte for byte between
+                // the trees, and `UnicodeData.txt` -- the one UCD data file
+                // whose first line is data rather than a header -- by the
+                // repertoire cross-check below.
+                None => assert!(
+                    UNVERSIONED.contains(&name.as_str()),
                     "{path}/{name} states no Unicode version in its header, so \
                      nothing here can tell whether it drifted"
                 ),
@@ -201,6 +204,7 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "LICENSE.txt",
             "PropertyValueAliases.txt",
             "Scripts.txt",
+            "UnicodeData.txt",
         ],
         "the shaping crate's vendored UCD changed shape"
     );
@@ -215,5 +219,128 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "emoji-data.txt",
         ],
         "the layout crate's vendored UCD changed shape"
+    );
+}
+
+/// The vendored files that state no Unicode version of their own.
+///
+/// Two, and each is pinned by something other than a header:
+///
+/// - `LICENSE.txt`, compared byte for byte between the two trees by
+///   [`both_crates_carry_the_same_licence_text`];
+/// - `UnicodeData.txt`, whose very first line is data — it is the one UCD data
+///   file published without a header — pinned by
+///   [`unicode_data_covers_the_repertoire_the_versioned_files_name`].
+const UNVERSIONED: &[&str] = &["LICENSE.txt", "UnicodeData.txt"];
+
+/// Every code point `Scripts.txt` names is one `UnicodeData.txt` knows about.
+///
+/// # What this pins, and what it does not
+///
+/// `UnicodeData.txt` carries no version header, so the comparison every other
+/// file gets is unavailable for it. What is available is its **repertoire**:
+/// UAX #24 gives every assigned character a script, so every code point
+/// `Scripts.txt` lists must appear in `UnicodeData.txt` — directly, or inside
+/// one of its `First>`/`Last>` ranges. A `UnicodeData.txt` from an older
+/// release is missing the characters the release after it assigned, and this
+/// finds them by name.
+///
+/// It does **not** catch a `UnicodeData.txt` newer than the rest of the tree:
+/// a superset still contains everything. That direction is left to the upgrade
+/// discipline `docs/design/shaping.md` states — a version bump touches every
+/// file in both trees in one commit — and is written down here rather than
+/// implied, because a check that half works is worse than one that says which
+/// half.
+///
+/// The converse containment is deliberately not asserted either:
+/// `UnicodeData.txt` lists surrogates and private-use blocks that `Scripts.txt`
+/// leaves `Unknown` and therefore does not name, so the two sets are not equal
+/// and never were.
+#[test]
+fn unicode_data_covers_the_repertoire_the_versioned_files_name() {
+    let root = repo_root();
+    let ucd = root.join(TREES[0]);
+    let data = std::fs::read_to_string(ucd.join("UnicodeData.txt")).expect("UnicodeData.txt");
+
+    // The code points `UnicodeData.txt` accounts for, with its ranges opened
+    // out. A `<..., First>` line and the `<..., Last>` line after it stand for
+    // everything between, which is how the CJK and Hangul blocks are written.
+    let mut known: Vec<(u32, u32)> = Vec::new();
+    let mut first: Option<u32> = None;
+    for line in data.lines() {
+        let mut fields = line.split(';');
+        let Some(code) = fields.next().and_then(|c| u32::from_str_radix(c, 16).ok()) else {
+            continue;
+        };
+        let name = fields.next().unwrap_or_default();
+        if name.ends_with(", First>") {
+            first = Some(code);
+            continue;
+        }
+        if let (Some(start), true) = (first, name.ends_with(", Last>")) {
+            known.push((start, code));
+            first = None;
+            continue;
+        }
+        known.push((code, code));
+    }
+    assert!(
+        known.len() > 30_000,
+        "UnicodeData.txt yielded only {} rows, so it is not the file it \
+         claims to be",
+        known.len()
+    );
+    known.sort_unstable();
+    let covers = |code: u32| -> bool {
+        known
+            .binary_search_by(|(low, high)| {
+                if code < *low {
+                    core::cmp::Ordering::Greater
+                } else if code > *high {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    };
+
+    let scripts = std::fs::read_to_string(ucd.join("Scripts.txt")).expect("Scripts.txt");
+    let mut named = 0usize;
+    let mut missing: Vec<u32> = Vec::new();
+    for line in scripts.lines() {
+        let body = line.split('#').next().unwrap_or_default().trim();
+        let Some(codes) = body.split(';').next().map(str::trim) else {
+            continue;
+        };
+        if codes.is_empty() {
+            continue;
+        }
+        let (low, high) = match codes.split_once("..") {
+            Some((a, b)) => (
+                u32::from_str_radix(a, 16).unwrap_or(0),
+                u32::from_str_radix(b, 16).unwrap_or(0),
+            ),
+            None => {
+                let one = u32::from_str_radix(codes, 16).unwrap_or(0);
+                (one, one)
+            }
+        };
+        for code in low..=high {
+            named += 1;
+            if !covers(code) && missing.len() < 8 {
+                missing.push(code);
+            }
+        }
+    }
+    assert!(
+        named > 100_000,
+        "Scripts.txt named only {named} code points"
+    );
+    assert!(
+        missing.is_empty(),
+        "UnicodeData.txt does not know about {missing:04X?}, which Scripts.txt \
+         names — so it is from an earlier Unicode release than the rest of the \
+         tree"
     );
 }

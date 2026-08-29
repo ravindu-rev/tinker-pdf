@@ -269,7 +269,19 @@ fn unescape(text: &str) -> String {
 /// Reproduced by the determinism CI legs on linux, windows, macos and
 /// `wasm32-wasip1`. Two targets disagreeing here is a determinism bug and not
 /// a reason to move these numbers.
-const SHAPING: &str = "3c0c14c870199202";
+///
+/// `SHAPING` moved once, in the commit that finished what milestone 5 could
+/// reach of the Universal Shaping Engine. Three things moved it and each is a
+/// different Brahmic cluster coming back in a different order: the reordering
+/// permutation is computed over the **glyphs** and no longer skipped where
+/// substitution changed their number; the halant no longer moves the insertion
+/// point, so a pre-base vowel goes in front of a whole conjunct; and a Brahmic
+/// character with a canonical decomposition is decomposed before it is mapped.
+/// Thirty-five text-rendering-tests cases across seven sections started passing
+/// in the same commit, which is what says the new number is the better one.
+/// `BIDI` did not move, which is the pair of facts that places the change in
+/// the cluster model and not in UAX #9.
+const SHAPING: &str = "9e93d25d282eb37c";
 const BIDI: &str = "d77c9e938eb9c996";
 
 /// The least each corpus may produce before its fingerprint means anything.

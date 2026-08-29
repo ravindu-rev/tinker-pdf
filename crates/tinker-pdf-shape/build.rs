@@ -71,6 +71,7 @@ fn main() {
         "DerivedJoiningType.txt",
         "IndicSyllabicCategory.txt",
         "IndicPositionalCategory.txt",
+        "UnicodeData.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -85,6 +86,7 @@ fn main() {
     scripts(&data, &mut out);
     joining(&data, &mut out);
     indic(&data, &mut out);
+    decomposition(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -464,4 +466,98 @@ fn emit(out: &mut String, name: &str, kind: &str, merged: &[(u32, u32, String)])
          build**.\npub static {name}: &[(u32, u32, {kind})] = &[\n{body}];",
         merged.len()
     );
+}
+
+/// `Canonical_Decomposition_Mapping`, fully expanded, from `UnicodeData.txt`.
+///
+/// # Why this file and not a derived one
+///
+/// The UCD publishes no extracted file for canonical decompositions: field 5
+/// of `UnicodeData.txt` is where the mappings live and the only place they
+/// do. It is also the one file in the UCD that carries **no version header**
+/// — its first line is data — which is why `tests/ucd_version.rs` pins it by
+/// a repertoire cross-check against `Scripts.txt` instead of by its header.
+///
+/// # Canonical only, and fully expanded
+///
+/// A field-5 value beginning `<` is a *compatibility* mapping — `<circle>`,
+/// `<noBreak>`, `<font>` — and those are not canonical equivalences:
+/// replacing a character with one changes what the text says. Only the
+/// untagged mappings are kept.
+///
+/// The kept ones are expanded until nothing in them decomposes further,
+/// because a canonical mapping may name a character that has one of its own:
+/// Kannada `U+0CCB` maps to `U+0CCA U+0CD5` and `U+0CCA` maps to
+/// `U+0CC6 U+0CC2`, so `U+0CCB` is three characters and not two. Expanding
+/// here rather than at run time keeps `crate::shape` a single lookup.
+///
+/// Hangul is **absent**, because its decomposition is arithmetic rather than
+/// tabulated (UAX #15 §3.12) and `UnicodeData.txt` lists none. The crate
+/// records that rather than silently standing in for it.
+fn decomposition(data: &Path, out: &mut String) {
+    let text = read(&data.join("UnicodeData.txt"));
+    let mut direct: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let fields: Vec<&str> = line.split(';').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let mapping = fields[5].trim();
+        if mapping.is_empty() || mapping.starts_with('<') {
+            continue;
+        }
+        let code = hex(fields[0]);
+        let parts: Vec<u32> = mapping.split_whitespace().map(hex).collect();
+        assert!(
+            !parts.is_empty(),
+            "UnicodeData.txt has an empty decomposition for {code:#x}"
+        );
+        direct.insert(code, parts);
+    }
+    assert!(
+        !direct.is_empty(),
+        "UnicodeData.txt yielded no canonical decompositions"
+    );
+
+    let mut expanded: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (code, parts) in &direct {
+        let mut full = Vec::new();
+        for part in parts {
+            expand(*part, &direct, 0, &mut full);
+        }
+        assert!(
+            full.len() > 1 || full.first() != Some(code),
+            "{code:#x} decomposes to itself"
+        );
+        expanded.insert(*code, full);
+    }
+
+    out.push_str("/// Every canonical decomposition the vendored UCD states, fully expanded.\n");
+    out.push_str("pub(crate) const CANONICAL_DECOMPOSITION: &[(char, &[char])] = &[\n");
+    for (code, parts) in &expanded {
+        let _ = write!(out, "    ('\\u{{{code:04X}}}', &[");
+        for part in parts {
+            let _ = write!(out, "'\\u{{{part:04X}}}', ");
+        }
+        out.push_str("]),\n");
+    }
+    out.push_str("];\n");
+}
+
+/// One character's canonical decomposition, appended to `out`.
+///
+/// The depth cap is a bound rather than a guess: the UCD states that
+/// canonical decomposition terminates, and a file that made it cycle should
+/// fail the build rather than exhaust the stack (ruling 1's posture, applied
+/// to a build script).
+fn expand(code: u32, direct: &BTreeMap<u32, Vec<u32>>, depth: usize, out: &mut Vec<u32>) {
+    match direct.get(&code) {
+        Some(parts) if depth < 32 => {
+            for part in parts {
+                expand(*part, direct, depth + 1, out);
+            }
+        }
+        _ => out.push(code),
+    }
 }

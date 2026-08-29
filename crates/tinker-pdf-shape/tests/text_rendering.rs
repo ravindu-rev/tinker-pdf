@@ -609,23 +609,40 @@ const MAX_DELTA: i32 = 1;
 /// So the number is a ratchet. It may go up, and every increase moves a row
 /// here in the commit that earned it. It may not go down.
 ///
-/// # What the shortfall is, and it is one thing more than anything else
+/// # What the shortfall is, now that three of it have been closed
 ///
-/// **Canonical decomposition.** A two-part vowel such as
-/// `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is `Indic_Positional_Category`
-/// `Left_And_Right` — it is drawn on *both* sides of its consonant — and its
-/// left half only becomes a thing that can be moved once the character is
-/// decomposed into `U+1B3E` (`Left`) and `U+1B35` (`Right`). This crate does
-/// not decompose, so it sees one character that is neither, and the left half
-/// stays where it was typed. Milestone 3's record already named canonical
-/// decomposition as absent; SHBALI-1 is the fixture that makes it cost
-/// something.
+/// Three things moved these numbers from 223 to 258, and the largest was the
+/// one nobody had named:
 ///
-/// The other two are named in `docs/features/fonts.md`: the Indic shaper's
-/// base-finding, which is what forms a Kannada conjunct and is a different
-/// model from USE's, and the positional application of `rphf`, `half` and
-/// `blwf`, which this crate applies to a whole syllable rather than to one
-/// position in it.
+/// - **The halant no longer moves the reordering insertion point.** A pre-base
+///   vowel now goes in front of the whole conjunct rather than in front of the
+///   consonant it attaches to, which is what `SHBALI-2/1` expects. Thirty
+///   cases across six sections.
+/// - **The reordering permutation is computed over the glyphs.** It was
+///   computed over the characters and skipped whenever substitution had
+///   changed their number, which is exactly the clusters that needed it.
+/// - **Canonical decomposition**, of the Brahmic characters that have one.
+///   `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is `Left_And_Right` — drawn on
+///   *both* sides of its consonant — and its left half only becomes something
+///   that can be moved once the character is `U+1B3E` (`Left`) and `U+1B35`
+///   (`Right`). Five cases, which is worth recording: it was named as the
+///   single largest cause and it was not.
+///
+/// # What is left, and which section each shortfall accounts for
+///
+/// - **The Indic shaper's base-finding.** Kannada forms conjuncts by a model
+///   USE does not have, in which `rphf`, `half` and `blwf` apply at *one
+///   position* of a syllable rather than to the whole of it. `SHKNDA-3` (0 of
+///   31) and `SHKNDA-2` (4 of 16) are that, and `SHKNDA-1`'s one remaining
+///   case.
+/// - **Canonical ordering.** The decomposition above is not NFD: the
+///   `Canonical_Combining_Class` sort is not applied. No case here is known to
+///   need it, which is why it is a gap rather than a cause.
+/// - **Dotted circles.** USE inserts one into a cluster its grammar calls
+///   broken; this crate never inserts a glyph the text did not ask for.
+/// - The `Category` collapse — five values where USE has around twenty — and
+///   the syllable rule, both stated as simplifications in `crate::universal`.
+///   The residue in `SHBALI-1`, `SHBALI-2` and the `SHLANA` sections is here.
 const PASSING: &[(&str, usize)] = &[
     ("CMAP-1", 4),
     ("CMAP-2", 2),
@@ -636,22 +653,22 @@ const PASSING: &[(&str, usize)] = &[
     ("GSUB-1", 1),
     ("GSUB-2", 11),
     ("SHARAN-1", 6),
-    ("SHBALI-1", 14),
-    ("SHBALI-2", 5),
+    ("SHBALI-1", 19),
+    ("SHBALI-2", 11),
     ("SHBALI-3", 9),
-    ("SHKNDA-1", 31),
+    ("SHKNDA-1", 33),
     ("SHKNDA-2", 4),
     ("SHKNDA-3", 0),
-    ("SHLANA-1", 48),
-    ("SHLANA-2", 26),
-    ("SHLANA-3", 11),
+    ("SHLANA-1", 51),
+    ("SHLANA-2", 32),
+    ("SHLANA-3", 12),
     ("SHLANA-4", 2),
-    ("SHLANA-5", 12),
-    ("SHLANA-6", 4),
-    ("SHLANA-7", 10),
+    ("SHLANA-5", 13),
+    ("SHLANA-6", 5),
+    ("SHLANA-7", 16),
     ("SHLANA-8", 11),
     ("SHLANA-9", 6),
-    ("SHLANA-10", 30),
+    ("SHLANA-10", 34),
 ];
 
 /// The sections that must pass **whole**, so that milestone 5's partial state
@@ -833,7 +850,7 @@ fn every_section_this_crate_claims_is_whole() {
         })
         .count();
     assert_eq!(
-        whole, 2,
+        whole, 3,
         "the number of Brahmic sections that pass outright moved. \
          `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );

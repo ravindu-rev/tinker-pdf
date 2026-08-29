@@ -742,6 +742,32 @@ impl Script {
     }
 }
 
+/// A character's canonical decomposition, fully expanded, or `None`.
+///
+/// `Canonical_Decomposition_Mapping` from the vendored `UnicodeData.txt`, with
+/// the compatibility mappings excluded and the canonical ones expanded until
+/// nothing in them decomposes further — `build.rs` does both and says why.
+///
+/// # What this is and is not
+///
+/// It is **not** NFD. NFD is this followed by the canonical ordering of
+/// `Canonical_Combining_Class`, and that second half is not done: nothing in
+/// the vendored corpus reaches a cluster whose parts are out of canonical
+/// order, and a sort applied on the strength of a guess would reorder marks
+/// this crate has no fixture for. `docs/features/fonts.md` records the gap.
+///
+/// Hangul syllables decompose too, and **not here**: UAX #15 §3.12 states
+/// their mapping arithmetically and `UnicodeData.txt` lists none, so a Hangul
+/// syllable comes back `None` rather than as its jamo.
+#[must_use]
+pub(crate) fn canonical_decomposition(c: char) -> Option<&'static [char]> {
+    CANONICAL_DECOMPOSITION
+        .binary_search_by_key(&c, |(code, _)| *code)
+        .ok()
+        .and_then(|at| CANONICAL_DECOMPOSITION.get(at))
+        .map(|(_, parts)| *parts)
+}
+
 include!(concat!(env!("OUT_DIR"), "/ucd.rs"));
 
 /// A code point's value in a sorted `(first, last, value)` table.
