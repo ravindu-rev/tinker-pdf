@@ -316,12 +316,18 @@ Landed so far:
   `/FontFile`) and returns the stream's *address*, which is what unblocked
   milestone 8: `fill.rs` reaches its font through the AcroForm `/DR`, and a
   `Font` that knew every width and no outline had nothing to shape against.
-  Where the `/DA` font is composite, `/Identity-H`, and embeds an sfnt, a
-  field's value is shaped and written as a `TJ` run of two-byte codes in
-  visual order. Everywhere else the single-byte path stands and every
-  character it could not write is named by
+  Where the `/DA` font is composite, horizontal, and embeds an sfnt, a
+  field's value is shaped and written as a `TJ` run in visual order — under
+  `/Identity-H`, under an embedded CMap stream, and under a predefined
+  registry CMap where this build compiled its table in, because
+  `CMap::code_for_cid` inverts the encoding and verifies each candidate
+  forwards before answering. Everywhere else the single-byte path stands and
+  every character it could not write is named by
   `WarningKind::FieldCharacterUnrepresentable`, against the field's own
-  object — see [forms.md](forms.md).
+  object; a registry CMap in a `cmap-predefined`-off build is refused with
+  `WarningKind::PredefinedCMapApproximate` against the field first, so the
+  missing table is not mistaken for a missing glyph — see
+  [forms.md](forms.md).
 
 - **A paginated Arabic book.** `epub/paint.rs` resolved fallback per character
   and then asked that character's face for a glyph, so an Arabic paragraph was
