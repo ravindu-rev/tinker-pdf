@@ -1832,6 +1832,120 @@ fn a_strip_that_is_not_inside_the_file_leaves_its_rows_blank() {
     let img = tiff_decode(&file, &CAP).expect("the directory is still readable");
     assert_eq!(img.data, vec![0; 8]);
     assert!(!img.complete, "a strip that is not there is not complete");
+    assert!(img.warnings.contains(&Warning::TiffSegmentUndecodable));
+}
+
+// ---- every warning this module can emit, reached ------------------------
+//
+// Seven variants were added to the closed `Warning` set for TIFF, and a
+// variant nothing can reach is a claim rather than a check -- `jpx`'s refusal
+// suite is this repository's form for saying so. Four of the seven are asserted
+// where the behaviour they describe is: `TiffOldStyleLzw` in
+// `an_old_style_lzw_strip_is_detected_and_reported`, `TiffColorMapIsEightBit`
+// in `a_color_map_written_at_eight_bits_is_read_as_one`, `TiffDirectoryCycle`
+// in `a_directory_chain_that_cycles_is_cut_and_reported` and
+// `TiffSegmentUndecodable` immediately above. These are the other three.
+
+/// `SamplesPerPixel` smaller than the photometric needs: an RGB image that
+/// says it has one sample.
+///
+/// The photometric wins, because it is the stronger claim -- it decides how
+/// many arrays a `ColorMap` has and what a strip holds -- and a reader that
+/// believed the count would read every third byte and produce a picture rather
+/// than a refusal.
+#[test]
+fn a_samples_per_pixel_below_the_photometric_is_corrected_and_reported() {
+    let pixels = distinct_rgb(3, 2);
+    let file = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 3))
+        .tag(long(TAG_IMAGE_LENGTH, 2))
+        .tag(short(TAG_BITS_PER_SAMPLE, 8))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 2))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+        .tag(long(TAG_ROWS_PER_STRIP, 2))
+        .segments(vec![pixels.clone()], false)
+        .build();
+
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!(scan.samples_per_pixel, 3);
+    assert!(scan.warnings.contains(&Warning::TiffSamplesPerPixelWrong));
+    assert_eq!(scan.decode(&CAP).expect("decodes").data, pixels);
+}
+
+/// `FillOrder` 2 on a byte-oriented coding, which is not what p.32 is about.
+///
+/// Reversing the bits of a DEFLATE strip would destroy it, so the tag is
+/// reported and ignored -- and the picture is the one the file holds, which is
+/// the half of this that a warning alone would not say.
+#[test]
+fn fill_order_two_on_a_byte_stream_is_reported_and_ignored() {
+    let pixels = distinct_rgb(4, 2);
+    let file = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 4))
+        .tag(long(TAG_IMAGE_LENGTH, 2))
+        .tag(shorts(TAG_BITS_PER_SAMPLE, &[8, 8, 8]))
+        .tag(short(TAG_COMPRESSION, 8))
+        .tag(short(TAG_PHOTOMETRIC, 2))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 3))
+        .tag(short(TAG_FILL_ORDER, 2))
+        .tag(long(TAG_ROWS_PER_STRIP, 2))
+        .segments(vec![crate::zlib_compress(&pixels)], false)
+        .build();
+    let img = tiff_decode(&file, &CAP).expect("decodes");
+    assert!(img.warnings.contains(&Warning::TiffFillOrderIgnored));
+    assert_eq!(img.data, pixels, "the strip was not reversed");
+}
+
+/// `FillOrder` 2 on a **bit** stream, which is what p.32 *is* about: the bits
+/// of every byte are reversed before the coding sees them.
+#[test]
+fn fill_order_two_on_a_bit_stream_is_honoured() {
+    let file = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 8))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(short(TAG_BITS_PER_SAMPLE, 1))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 1))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+        .tag(short(TAG_FILL_ORDER, 2))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .segments(vec![vec![0b0000_0111]], false)
+        .build();
+    let img = tiff_decode(&file, &CAP).expect("decodes");
+    assert!(!img.warnings.contains(&Warning::TiffFillOrderIgnored));
+    // 0b0000_0111 reversed is 0b1110_0000.
+    assert_eq!(img.data, vec![255, 255, 255, 0, 0, 0, 0, 0]);
+}
+
+/// A second image file directory: the first is the image and the rest are
+/// reported and not read.
+#[test]
+fn a_file_with_a_second_directory_reads_the_first_and_says_so() {
+    let mut file = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 2))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(short(TAG_BITS_PER_SAMPLE, 8))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 1))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .segments(vec![vec![5, 6]], false)
+        .build();
+
+    // The next-IFD pointer sits after the entry array; point it at a second,
+    // empty directory appended to the file.
+    let entries = usize::from(u16::from_le_bytes([file[8], file[9]]));
+    let next_at = 8 + 2 + 12 * entries;
+    let second = file.len() as u32;
+    file[next_at..next_at + 4].copy_from_slice(&second.to_le_bytes());
+    // Zero entries, and no directory after it.
+    file.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!(scan.pages, 2);
+    assert!(scan.warnings.contains(&Warning::TiffExtraPagesIgnored));
+    assert_eq!(scan.decode(&CAP).expect("decodes").data, vec![5, 6]);
 }
 
 #[test]

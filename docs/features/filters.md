@@ -224,7 +224,9 @@ wants the reason to survive it.
   transcribed from the specification text. `mutated_fixtures_never_panic` puts
   the same fixtures through seeded xorshift damage aimed at the directory's
   entry array, so ruling 1 is enforced on stable and not only under
-  `cargo-fuzz`.
+  `cargo-fuzz`. All **seven** of the TIFF warnings are reached by a test that
+  asserts them, for the reason `jpx`'s refusal suite exists: a variant nothing
+  can reach is a claim rather than a check.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
   fixture, because the coder serves two codecs; `src/jpx/tests/refusals.rs`
