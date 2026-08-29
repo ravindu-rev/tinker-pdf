@@ -1,0 +1,10 @@
+# `cargo xtask <command>` is what every doc in this repository says to run --
+# CONTRIBUTING.md's test section, docs/verification.md, docs/architecture.md and
+# each design doc -- and without this alias none of them worked. The workflows
+# spell it `cargo run -p xtask -- <command>` and were the only invocation that
+# did, so the instruction a contributor reads first was the one that failed.
+#
+# An alias rather than sixty doc edits, because `cargo xtask` is the name the
+# pattern is known by and the shorter form is the one worth having true.
+[alias]
+xtask = "run --package xtask --"
