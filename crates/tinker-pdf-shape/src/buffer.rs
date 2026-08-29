@@ -312,6 +312,22 @@ impl Buffer {
     ///
     /// Zero means "no syllable" and imposes nothing, so a run that never calls
     /// this — every Latin, Arabic and Han run — behaves exactly as it did.
+    ///
+    /// # What the restriction costs here, measured
+    ///
+    /// Switching it off entirely — `GSUB` confined to nothing, like `GPOS` —
+    /// **gains three text-rendering-tests cases and costs none**:
+    /// `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5`. So the rule has no
+    /// positive evidence in this corpus and three cases of negative evidence,
+    /// and it stays anyway.
+    ///
+    /// The reason is that the three do not say the restriction is wrong. They
+    /// say the *boundaries* are: `crate::universal`'s syllable rule is a
+    /// one-character lookback standing in for USE's regular expression over
+    /// cluster types, so a lookup blocked at a boundary this crate invented is
+    /// a defect in the grammar and not in the confinement. Dropping the
+    /// confinement would trade a rule USE states for three cases and let a
+    /// conjunct-forming lookup build one out of two words.
     pub fn set_syllable(&mut self, at: usize, syllable: u16) {
         if let Some(props) = self.props.get_mut(at) {
             props.syllable = syllable;

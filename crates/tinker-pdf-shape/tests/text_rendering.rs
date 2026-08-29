@@ -829,6 +829,43 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 /// - **Four `advance` and one `offset`** are all in Tai Tham, and each is a
 ///   single case in a section whose other failures are `set` — so none of them
 ///   is a cause worth a commit on its own.
+///
+/// # Tai Tham's residue is one glyph, and it is not a feature that is missing
+///
+/// **Fifteen of the thirty-two are the same substitution not happening**:
+/// `TestShapeLana`'s gid311 (`uni1A78`) is expected where this crate produces
+/// gid314 (`uni1A7B`), the glyph `cmap` gives U+1A7B outright. `SHLANA-2/2`,
+/// `/3`, `/4`; `SHLANA-7/17`; `SHLANA-8/5`, `/6`; and nine of `SHLANA-10`'s
+/// twelve. **Ten of those differ in nothing else at all** — same glyph count,
+/// same order, every position identical — so one substitution would close a
+/// third of what is left.
+///
+/// Two explanations were tested and both are refuted, which is why this is
+/// recorded rather than fixed:
+///
+/// - **Not a feature this crate fails to ask for.** The face declares exactly
+///   `abvs blwf blws ccmp clig cv01 cv02 cv03 lann liga locl pref psts rlig
+///   rphf ss01 ss02 ss03 ss17 ss18 ss19 ss97 ss98 ss99`. Requesting **all
+///   twenty-four at once** through [`Shaper::with_features`] still produces
+///   gid314. The language system's required feature is applied already, by
+///   `LayoutTable::lookups_for_masked`.
+/// - **Not a `cmap` difference.** The face has one subtable, `(3, 1)` format
+///   4, and it reads monotonically across the whole Tai Tham block:
+///   U+1A78 to gid311, U+1A7B to gid314, neighbours either side in step.
+///
+/// What is left is a lookup that does not *match* the glyph sequence this
+/// crate hands it — a context, an order, or a boundary — which is inside
+/// USE's cluster grammar and is the item `docs/design/shaping.md` calls
+/// effectively unbounded.
+///
+/// One measurement supports that and is worth having: **removing the
+/// per-syllable `GSUB` restriction entirely gains three cases and costs
+/// none** — `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5`, one of which is an
+/// `order` verdict that turns out to be a blocked lookup rather than a
+/// reordering. It was not taken: three is not a reason to drop a rule USE
+/// states and `Buffer::set_syllable` argues for, and what those three
+/// actually say is that *this crate's syllable boundaries* are in the wrong
+/// place, which is the grammar again.
 const TRIAGE: &[(&str, Wrong)] = &[
     ("SHBALI-1/14", Wrong::Set),
     ("SHBALI-1/15", Wrong::Set),
