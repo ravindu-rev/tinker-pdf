@@ -142,6 +142,12 @@ pub(crate) struct Props {
     /// [`Buffer::propagate_attachments`] turns every one of them into a
     /// number, once, at the end.
     pub(crate) attached_to: Option<i32>,
+    /// Whether this glyph is a joiner that has to leave before the run does.
+    ///
+    /// Set from the character, like [`Props::category`] and for the same
+    /// reason, and read once at the end of `GSUB`. See
+    /// [`Buffer::set_ignorable`].
+    pub(crate) ignorable: bool,
     /// Whether that attachment is a cursive join rather than a mark's.
     ///
     /// The two resolve differently and the difference is not cosmetic. A mark
@@ -333,6 +339,45 @@ impl Buffer {
     /// What the cluster model calls the glyph at `at`, or `None` past the end.
     pub(crate) fn props_category(&self, at: usize) -> Option<Category> {
         self.props.get(at).map(|props| props.category)
+    }
+
+    /// Marks the glyph at `at` as one that must not survive the run.
+    ///
+    /// # A joiner has to be in the buffer and must not come out of it
+    ///
+    /// `ZWNJ` and `ZWJ` exist to be *seen by a lookup*: blocking a ligature —
+    /// or demanding one — is the whole of what they are for, and a shaper that
+    /// dropped them at `cmap` time would ligate exactly the pairs the author
+    /// wrote them to keep apart. So they are mapped, pushed, and carried
+    /// through every `GSUB` stage like any other glyph.
+    ///
+    /// They must equally not reach the caller. A face is free to give `ZWNJ` a
+    /// real outline and a real advance — `NotoSansKannada` gives U+200C gid91,
+    /// which draws — and a consumer that painted it would put a mark in the
+    /// middle of a word. text-rendering-tests `SHKNDA-3/31` states it: four
+    /// glyphs expected from text ending in a `ZWNJ`.
+    ///
+    /// So the flag is set here from the character and read once by
+    /// [`Buffer::delete_ignorable`], after the last `GSUB` stage.
+    pub(crate) fn set_ignorable(&mut self, at: usize, ignorable: bool) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.ignorable = ignorable;
+        }
+    }
+
+    /// Removes every glyph [`Buffer::set_ignorable`] marked, and says how many.
+    ///
+    /// Backwards, so that a removal does not move the index of one not yet
+    /// looked at.
+    pub(crate) fn delete_ignorable(&mut self) -> usize {
+        let mut removed = 0usize;
+        for at in (0..self.props.len()).rev() {
+            if self.props.get(at).is_some_and(|props| props.ignorable) {
+                self.remove(at);
+                removed = removed.saturating_add(1);
+            }
+        }
+        removed
     }
 
     /// Rearranges `range` so that its *n*th glyph is the one `order` names.

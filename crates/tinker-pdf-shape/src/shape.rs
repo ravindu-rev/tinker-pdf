@@ -381,6 +381,12 @@ impl<'a> Shaper<'a> {
             }
         }
 
+        // The joiners leave here: after the last `GSUB` stage, so that every
+        // lookup saw them, and before the advances are filled, so that a face
+        // which gives `ZWNJ` an outline and a width cannot spend either. See
+        // [`Buffer::set_ignorable`].
+        buffer.delete_ignorable();
+
         // The advances are filled in **after** substitution and not before,
         // and the ordering is the whole of a bug this crate had for an
         // afternoon. A substitution replaces a glyph and leaves its position
@@ -557,6 +563,13 @@ impl<'a> Shaper<'a> {
             }
             let glyph = glyph.or_else(|| self.face.glyph_for_char(c)).unwrap_or(0);
             buffer.push(glyph, cluster);
+            // A joiner is pushed like anything else and marked for deletion at
+            // the end of `GSUB`. It has to be *in* the buffer for the whole of
+            // substitution, because blocking a ligature is the whole of what
+            // it is for; see [`Buffer::set_ignorable`].
+            if is_joiner(c) {
+                buffer.set_ignorable(buffer.len().saturating_sub(1), true);
+            }
             from.push(at - 1 - usize::from(selector.is_some()));
         }
         from
@@ -902,6 +915,34 @@ pub fn itemize(text: &str, paragraph: &Paragraph) -> Vec<Run> {
     runs
 }
 
+/// `ZWJ` and `ZWNJ`, and nothing else.
+///
+/// # Which property, and which one deliberately not
+///
+/// `Indic_Syllabic_Category`'s `Joiner` and `Non_Joiner`, which this crate
+/// already parses for [`universal::category`] — so the predicate costs no new
+/// table and cannot drift from the one the cluster model reads.
+///
+/// The obvious alternative is `Default_Ignorable_Code_Point`, which is the
+/// property a shaper is *usually* written against and which covers these two
+/// along with the variation selectors, the Mongolian free variation selectors,
+/// `U+00AD SOFT HYPHEN` and some seventy more. It is deliberately **not** used
+/// here: nothing in either vendored corpus reaches a default-ignorable
+/// character that is not one of these two, so vendoring a hundred-odd-entry
+/// property to widen a predicate no fixture exercises would be a table nobody
+/// could adjudicate. The narrower predicate is named as narrower, in
+/// `docs/features/fonts.md`, rather than being quietly the whole answer.
+///
+/// The variation selectors *are* default-ignorable and *are* dropped — in
+/// [`Shaper::map`], where they are consumed rather than deleted, because a
+/// selector chooses a glyph and a joiner does not.
+fn is_joiner(c: char) -> bool {
+    matches!(
+        unicode::indic_syllabic(c),
+        unicode::IndicSyllabic::Joiner | unicode::IndicSyllabic::NonJoiner
+    )
+}
+
 /// The variation selectors: `VS1`–`VS16`, and the 240 ideographic ones.
 ///
 /// The Mongolian free variation selectors at U+180B–U+180F are deliberately
@@ -985,10 +1026,41 @@ fn variation_glyph(data: Bytes<'_>, base: char, selector: char, face: &Sfnt<'_>)
 
 #[cfg(test)]
 mod tests {
-    use super::{is_variation_selector, itemize, Plan};
+    use super::{is_joiner, is_variation_selector, itemize, Plan};
     use crate::bidi::{BaseDirection, Paragraph};
     use crate::unicode::Script;
     use crate::MarkWidths;
+
+    /// The two joiners, and the width of the predicate stated as a limit.
+    ///
+    /// The behavioural half of this is in `tests/text_rendering.rs` and is a
+    /// pair rather than a single case, because a joiner has to do two opposite
+    /// things: `SHKNDA-3/31` says it must not reach the output, and
+    /// `SHLANA-5/10` and `SHLANA-5/12` say it must still block a ligature on
+    /// the way. Deleting it at `cmap` time satisfies the first and breaks the
+    /// second, and that injection costs exactly those two cases.
+    ///
+    /// What is here instead is the **narrowness**. Every character below is
+    /// `Default_Ignorable_Code_Point` and none of them is deleted, which is
+    /// the whole difference between this predicate and the one a shaper is
+    /// usually written against; [`is_joiner`] says why the wider property is
+    /// not vendored.
+    #[test]
+    fn the_only_ignorable_characters_are_the_two_joiners() {
+        assert!(is_joiner('\u{200C}'), "ZWNJ");
+        assert!(is_joiner('\u{200D}'), "ZWJ");
+        for c in [
+            '\u{00AD}', // SOFT HYPHEN
+            '\u{200B}', // ZERO WIDTH SPACE
+            '\u{2060}', // WORD JOINER
+            '\u{180B}', // MONGOLIAN FREE VARIATION SELECTOR ONE
+            '\u{FE00}', // VARIATION SELECTOR-1, consumed in `map` instead
+            '\u{0CBE}', // KANNADA VOWEL SIGN AA, which draws
+            'a',
+        ] {
+            assert!(!is_joiner(c), "{c:?} is not one of the two");
+        }
+    }
 
     /// Every plan's mark-width answer, tabled.
     ///

@@ -689,7 +689,7 @@ const PASSING: &[(&str, usize)] = &[
     ("SHBALI-3", 9),
     ("SHKNDA-1", 34),
     ("SHKNDA-2", 8),
-    ("SHKNDA-3", 30),
+    ("SHKNDA-3", 31),
     ("SHLANA-1", 51),
     ("SHLANA-2", 32),
     ("SHLANA-3", 12),
@@ -828,7 +828,6 @@ const TRIAGE: &[(&str, Wrong)] = &[
     ("SHKNDA-2/8", Wrong::Set),
     ("SHKNDA-2/9", Wrong::Set),
     ("SHKNDA-2/12", Wrong::Order),
-    ("SHKNDA-3/31", Wrong::Set),
     ("SHLANA-1/35", Wrong::Advance),
     ("SHLANA-2/2", Wrong::Set),
     ("SHLANA-2/3", Wrong::Set),
@@ -1085,7 +1084,7 @@ fn every_section_this_crate_claims_is_whole() {
         })
         .count();
     assert_eq!(
-        whole, 6,
+        whole, 7,
         "the number of Brahmic sections that pass outright moved. \
          `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );
