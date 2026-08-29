@@ -189,7 +189,8 @@ fn a_form_computes_through_its_own_helpers_and_refuses_without_them() {
 fn a_format_action_reaches_the_same_helpers() {
     let editor = DocumentEditor::new(formatted_by_helper());
     assert_eq!(
-        calc::formatted_value_under(&editor, "shown", with_helpers()),
+        calc::formatted_value_under(&editor, "shown", with_helpers())
+            .map(|shown| shown.map(|text| text.text().to_string())),
         Ok(Some("84".to_string()))
     );
     assert_eq!(

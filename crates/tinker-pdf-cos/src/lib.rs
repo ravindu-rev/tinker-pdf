@@ -98,7 +98,7 @@ pub use build::{
 // wants anyway, or module-qualified as `calc::validate`.
 pub use calc::{
     formatted_value, formatted_value_under, recalculate, recalculate_under, CalcError,
-    EventVerdict, Keystroke, Recalculation,
+    DisplayString, EventVerdict, Keystroke, Recalculation,
 };
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};

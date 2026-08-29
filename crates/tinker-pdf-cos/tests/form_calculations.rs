@@ -41,8 +41,8 @@
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    calc, fields, CalcError, CosDocument, DocumentEditor, FillError, Recalculation, ScriptError,
-    ScriptPolicy, Trigger, WidgetDefect, WriteMode, WriteOptions,
+    calc, fields, CalcError, CosDocument, DisplayString, DocumentEditor, FillError, Recalculation,
+    ScriptError, ScriptPolicy, Trigger, WidgetDefect, WriteMode, WriteOptions,
 };
 
 /// Hand-written bytes carry no cross-reference table, so they open through the
@@ -729,9 +729,10 @@ fn hostile_scripts_in_a_document_never_panic() {
 fn a_format_action_produces_a_display_string_and_changes_nothing() {
     let editor = DocumentEditor::new(formatting());
 
+    let shown = calc::formatted_value(&editor, "amount").expect("the action runs");
     assert_eq!(
-        calc::formatted_value(&editor, "amount").expect("the action runs"),
-        Some("GBP 1,234.50".to_string())
+        shown.as_ref().map(DisplayString::text),
+        Some("GBP 1,234.50")
     );
     assert_eq!(value_of(&editor, "amount"), "1234.5", "/V is untouched");
     assert!(!editor.is_dirty());
@@ -847,7 +848,8 @@ fn a_default_policy_runs_exactly_what_ran_before() {
         calc::formatted_value(&editor, "amount"),
     );
     assert_eq!(
-        calc::formatted_value(&editor, "amount"),
+        calc::formatted_value(&editor, "amount")
+            .map(|shown| shown.map(|text| text.text().to_string())),
         Ok(Some("GBP 1,234.50".to_string()))
     );
 }

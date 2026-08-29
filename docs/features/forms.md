@@ -249,6 +249,21 @@ everything. Both operands strings compares by code point; anything else is
 still arithmetic, which is what keeps `getField('a').value > 500` meaning what
 it says.
 
+**The format string cannot reach `/V`, and a type says so.** 12.7.3.3 keeps
+a field's value and its appearance apart, and until this milestone that was
+held up by `formatted_value` simply not calling the editor — a property of
+how the code was arranged rather than a rule anything enforced. The first
+caller to write `editor.set_field_value(name, formatted)` would have produced
+a `/V` of "GBP 1,234.00" and nothing would have objected. So
+`formatted_value` returns a `DisplayString`: a newtype with no `Deref`, no
+`Into<String>` and no constructor outside `calc.rs`, and every door into the
+document — `set_field_value`, `fill_field`, `set_field_values`,
+`set_calculated_values` — takes `&str`, which one of these cannot be spelled
+as. `DisplayString::text` is the way out and is deliberately a spelling
+rather than a coercion: a caller who wants the characters writes `.text()`,
+and one who writes `.text()` into `/V` has made a decision a reviewer can
+see. What the type removes is the mistake nobody makes on purpose.
+
 **Which scripts run is a policy, and it is a type.** `ScriptPolicy` names
 the six trigger classes a document's scripts arrive under — `Calculate`
 (`/AA` `/C`), `Format` (`/F`), `Keystroke` (`/K`), `Validate` (`/V`),
@@ -342,7 +357,7 @@ let bytes = editor.save(&WriteOptions::default());
 | A computed value a field's own `/AA /V` refuses | `CalcError::Invalid { field, value }`, and the whole pass writes nothing | one total rejected and nine written anyway is a document that disagrees with itself | — |
 | A validate action the policy would not run, over a value the pass wrote anyway | `Recalculation::refused` names the field | a skipped check reads exactly like a form that has none, and the difference is whether the numbers were looked at (ruling 10) | — |
 | A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | — |
-| A format action's display string reaching `/V` | none offered — `formatted_value` returns the string and writes nothing | 12.7.3.3 keeps value and appearance apart | [ROADMAP](../ROADMAP.md) Tier 4 |
+| A format action's display string reaching `/V` | `DisplayString`, which no write door will take — `error[E0308]`, proved by compiling the mistake | 12.7.3.3 keeps value and appearance apart, and a type is a guarantee where an arrangement of code was a convention | — |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
 | Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md) |
 | XFA | not read anywhere | removed in ISO 32000-2; a stated permanent non-goal | [ROADMAP](../ROADMAP.md) |
@@ -414,6 +429,16 @@ whole pass and one that is named as never having run. Its header explains why
 the keystroke and validate flips are 1 and 2 of 13 rather than more — most of
 the file passes an explicit policy, which a change to the default cannot
 reach.
+
+`crates/tinker-pdf-cos/tests/display_string_does_not_reach_v.rs` (2 tests)
+compiles the mistake rather than describing it: `rustc` builds a caller
+against the real rlib this test run produced, once with `.text()` — which
+must compile, or nothing below it means anything — and once per write door
+with the `DisplayString` handed straight over, each asserted to fail with
+`error[E0308]` naming the type. It is one of the rows in `xtask`'s
+`SPAWNERS`, marked `PERMANENT`: it asks this repository's own compiler
+whether this repository's own type refuses a state, and adjudicates nothing
+about a document (ruling 13).
 
 `form_script` is one of the 24 fuzz targets, with a committed seed corpus:
 it drives the lexer, parser and evaluator with arbitrary text against a

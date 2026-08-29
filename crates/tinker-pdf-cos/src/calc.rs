@@ -733,13 +733,50 @@ fn event_action(
     }))
 }
 
+/// The text a format action produced, in a type no write door will take.
+///
+/// 12.7.3.3 keeps a field's value and its appearance apart, and until this
+/// type existed that was held up by [`formatted_value`] simply not calling
+/// the editor — a property of how the code happened to be arranged rather
+/// than a rule anything enforced. The first caller to write
+/// `editor.set_field_value(name, formatted)` would have produced a form whose
+/// `/V` reads "GBP 1,234.00" where a consumer expects 1234, and nothing would
+/// have objected.
+///
+/// So it is a newtype with **no `Deref`, no `Into<String>` and no constructor
+/// outside this module**: every door into the document —
+/// `DocumentEditor::set_field_value`, `fill_field`, `set_field_values`,
+/// `set_calculated_values` — takes `&str`, and one of these cannot be spelled
+/// as one. `crates/tinker-pdf-cos/tests/display_string_does_not_reach_v.rs`
+/// compiles that mistake and asserts `error[E0308]`.
+///
+/// [`DisplayString::text`] is the way out, and it is deliberately a *spelling*
+/// rather than a coercion. A caller who genuinely wants the characters — to
+/// draw them, to log them — writes `.text()`, and a caller who writes
+/// `.text()` into `/V` has made a decision a reviewer can see. What the type
+/// removes is the mistake nobody makes on purpose.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DisplayString(String);
+
+impl DisplayString {
+    /// The characters, for showing.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for DisplayString {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The text a field's format action would display, without changing anything.
 ///
-/// 12.7.3.3 keeps a field's value and its appearance apart, and so does this:
-/// `/V` holds the number and the format action produces what a viewer shows.
-/// Writing the formatted text into `/V` would give a form whose export reads
-/// "GBP 1,234.00" where a consumer expects 1234, which is the same class of
-/// damage as a stale total.
+/// 12.7.3.3 keeps a field's value and its appearance apart, and so does the
+/// return type: `/V` holds the number and the format action produces what a
+/// viewer shows, in a [`DisplayString`] no write door accepts.
 ///
 /// `Ok(None)` means the field carries no format action, which is most fields.
 ///
@@ -751,7 +788,10 @@ fn event_action(
 ///
 /// [`CalcError::NoSuchField`] when the form has no such field, and
 /// [`CalcError::Script`] when the action would not run.
-pub fn formatted_value(editor: &DocumentEditor, name: &str) -> Result<Option<String>, CalcError> {
+pub fn formatted_value(
+    editor: &DocumentEditor,
+    name: &str,
+) -> Result<Option<DisplayString>, CalcError> {
     formatted_value_under(editor, name, ScriptPolicy::default())
 }
 
@@ -769,7 +809,7 @@ pub fn formatted_value_under(
     editor: &DocumentEditor,
     name: &str,
     policy: ScriptPolicy,
-) -> Result<Option<String>, CalcError> {
+) -> Result<Option<DisplayString>, CalcError> {
     let mut bytes = ScriptBudget::new();
     let fields = editor.fields_within(&mut bytes);
     let Some(field) = fields.iter().find(|f| f.name == name) else {
@@ -811,5 +851,8 @@ pub fn formatted_value_under(
         field: field.name.clone(),
         reason,
     })?;
-    Ok(outcome.value)
+    // The one constructor, and it is here rather than on the type: a
+    // `DisplayString` a caller could build is a `DisplayString` that means
+    // nothing about where the text came from.
+    Ok(outcome.value.map(DisplayString))
 }
