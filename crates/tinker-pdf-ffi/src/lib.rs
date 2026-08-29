@@ -771,6 +771,123 @@ pub unsafe extern "C" fn tpdf_bitmap_free(bitmap: *mut TpdfBitmap) {
     }
 }
 
+/// What the strict structural validator found. Opaque to callers.
+///
+/// Owned rather than borrowed, so this outlives the [`TpdfDocument`] it came
+/// from -- the [`TpdfBitmap`] and [`TpdfSignatures`] arrangement.
+pub struct TpdfDefects {
+    inner: Vec<tinker_pdf::Defect>,
+}
+
+/// Runs the strict structural validator over a document (ruling 13).
+///
+/// **This is the check that keeps four byte-identical outputs from being
+/// identically wrong.** The write-parity suite compares four surfaces' bytes
+/// to each other; agreement alone would be satisfied by four copies of a
+/// broken file, so every saved artefact is re-opened and put through this. It
+/// is first-party by ruling 13, which is precisely why it can be relied on
+/// here rather than being an external step that might be skipped.
+///
+/// An empty result is a clean document. The caller frees the handle with
+/// [`tpdf_defects_free`].
+///
+/// # Safety
+///
+/// `doc` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_document_validate(
+    doc: *const TpdfDocument,
+    out: *mut *mut TpdfDefects,
+) -> TpdfStatus {
+    let (Some(doc), false) = (unsafe { doc.as_ref() }, out.is_null()) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    let handle = Box::new(TpdfDefects {
+        inner: doc.inner.validate(),
+    });
+    unsafe { *out = Box::into_raw(handle) };
+    TpdfStatus::Ok
+}
+
+/// How many defects were found. Zero is a clean document, and is the answer
+/// for a null handle too -- but a caller that never called
+/// [`tpdf_document_validate`] has not validated anything, which is why the
+/// call returns a status of its own.
+///
+/// # Safety
+///
+/// `defects` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_defects_count(defects: *const TpdfDefects) -> u32 {
+    match unsafe { defects.as_ref() } {
+        Some(defects) => count(defects.inner.len()),
+        None => 0,
+    }
+}
+
+/// One defect's rule name, such as `binary-comment-missing`.
+///
+/// The stable slug rather than the prose, because it is what a caller compares
+/// and greps. The caller frees it with [`tpdf_string_free`].
+///
+/// # Safety
+///
+/// `defects` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_defect_rule(
+    defects: *const TpdfDefects,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(defects) = (unsafe { defects.as_ref() }) else {
+        set_error("null defects");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(defect) = defects.inner.get(index as usize) else {
+        set_error("no such defect");
+        return TpdfStatus::BadArgument;
+    };
+    unsafe { hand_over_string(out, Some(defect.kind.as_str())) }
+}
+
+/// One defect rendered as a sentence, the facade's own wording.
+///
+/// The caller frees it with [`tpdf_string_free`].
+///
+/// # Safety
+///
+/// `defects` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_defect_message(
+    defects: *const TpdfDefects,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(defects) = (unsafe { defects.as_ref() }) else {
+        set_error("null defects");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(defect) = defects.inner.get(index as usize) else {
+        set_error("no such defect");
+        return TpdfStatus::BadArgument;
+    };
+    unsafe { hand_over_string(out, Some(&defect.to_string())) }
+}
+
+/// Frees a validation result. Null is accepted and does nothing.
+///
+/// # Safety
+///
+/// `defects` must have come from [`tpdf_document_validate`] and must not be
+/// used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_defects_free(defects: *mut TpdfDefects) {
+    if !defects.is_null() {
+        drop(unsafe { Box::from_raw(defects) });
+    }
+}
+
 // ---- signatures, read (12.8) ----------------------------------------------
 //
 // Reading only. The signing side is not here and is not coming here: a
@@ -4868,7 +4985,7 @@ endobj
                 tpdf_editor_fill_field(
                     editor,
                     c("notes").as_ptr(),
-                    c("filled through the C ABI").as_ptr(),
+                    c("every surface writes this").as_ptr(),
                     &mut clean,
                 )
             },
@@ -4906,7 +5023,7 @@ endobj
             .expect("the value is taken");
         let messages = skipped.iter().map(ToString::to_string).collect();
         assert!(editor
-            .fill_field("notes", "filled through the C ABI")
+            .fill_field("notes", "every surface writes this")
             .expect("the value is taken")
             .is_empty());
         assert!(editor.set_checkbox("agree", true));
