@@ -115,6 +115,17 @@ layout rather than two. `tiff_scan` is `png_scan`'s counterpart: it walks the
 directory, locates every strip and hands them back **without decompressing
 one**, which is what the embed door's pass-through needs.
 
+That door is `tinker_pdf_cos::tiff_image`, `png_image`'s sibling, and it is
+where four of TIFF's codings stop being TIFF at all: compressions 2, 3 and 4
+become `/CCITTFaxDecode` with Table 11 filled in from the directory's own
+`T4Options`, 5 becomes `/LZWDecode`, 7 becomes `/DCTDecode` with `JPEGTables`
+spliced in front, and 8 and 32946 become `/FlateDecode` — with `/Predictor 2`
+where the file used one. A single-strip file of any of those reaches the page
+as its own bytes and no raster is built. `TiffRoute` says which of the three
+routes a file took, because "the picture is right" and "the pass-through
+happened" are different claims and a build that quietly decoded everything
+would satisfy the first.
+
 Two things real TIFFs do that TIFF 6.0 does not describe are handled by name.
 **Old-style LZW** — codes packed least significant bit first and widened one
 code late, which is what encoders wrote before 1993 — is detected from the two

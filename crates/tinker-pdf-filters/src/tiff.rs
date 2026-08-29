@@ -611,6 +611,39 @@ impl TiffScan<'_> {
         Some((colour_channels, kind == 1))
     }
 
+    /// Whether every LZW strip is packed the way §13 describes.
+    ///
+    /// The pass-through's question, and it has to be asked before a strip is
+    /// decompressed: a `/LZWDecode` stream is MSB-first with `/EarlyChange 1`,
+    /// so a pre-1993 strip placed unchanged would decode to noise in every
+    /// reader including this one. `false` sends the file to the decoder, which
+    /// transcodes it.
+    #[must_use]
+    pub fn lzw_bit_order_is_standard(&self) -> bool {
+        self.compression != TiffCompression::Lzw || !self.segments.iter().any(|s| old_style_lzw(s))
+    }
+
+    /// Segments the geometry addresses, which is not always how many the
+    /// arrays hold: TIFF 6.0 lets a writer pad them, and the pass-through's
+    /// "one strip" question is about the geometry rather than the array.
+    #[must_use]
+    pub fn segments_needed(&self) -> u64 {
+        let planes = match self.planar {
+            TiffPlanar::Chunky => 1u64,
+            TiffPlanar::Planar => u64::from(self.samples_per_pixel).max(1),
+        };
+        match self.layout {
+            TiffLayout::Strips { rows_per_strip } => {
+                u64::from(self.height).div_ceil(u64::from(rows_per_strip.max(1)))
+            }
+            TiffLayout::Tiles { width, height } => {
+                u64::from(self.width).div_ceil(u64::from(width.max(1)))
+                    * u64::from(self.height).div_ceil(u64::from(height.max(1)))
+            }
+        }
+        .saturating_mul(planes)
+    }
+
     /// Samples per segment: every sample of a pixel for a chunky image, one
     /// for a planar one (TIFF 6.0 p.38).
     fn segment_samples(&self) -> usize {
@@ -718,6 +751,16 @@ impl TiffScan<'_> {
         } else {
             coded
         };
+
+        // A strip the directory pointed outside the file, or one it declared
+        // zero bytes long. The rows it covers stay at zero and this says so:
+        // several codings pad a short image out to its declared height, so
+        // without this the raster would come back the right *size* and be
+        // reported complete.
+        if coded.is_empty() && expected > 0 {
+            w.push(Warning::TiffSegmentUndecodable);
+            return false;
+        }
 
         let (mut packed, mut ok, samples_here) = match self.compression {
             TiffCompression::Jpeg => match self.jpeg_segment(coded, expected, w) {
