@@ -82,6 +82,32 @@ pub struct Face {
     /// `hhea`'s `descender`, in font units and **negative**, which is the
     /// sfnt's own sign convention.
     pub descender: i16,
+    /// A `GSUB` ligature: two characters this face joins into one glyph, under
+    /// one feature of one script.
+    ///
+    /// `None` — the default — is a face with no `GSUB` at all, which is what
+    /// every fixture wanted before shaping existed and is still what most
+    /// want. `Some` is the smallest face that makes shaping observable: with
+    /// it a run of two characters is one glyph and one advance, and without it
+    /// two of each.
+    pub ligature: Option<Ligature>,
+}
+
+/// Two characters that become one glyph.
+///
+/// The glyph the pair becomes is appended **after** every covered character,
+/// so `Face::glyph_of` keeps answering for the characters and the ligature's
+/// own index is `glyph_order().len() + 1`.
+#[derive(Clone, Copy, Debug)]
+pub struct Ligature {
+    /// The first character of the pair.
+    pub first: char,
+    /// The second.
+    pub second: char,
+    /// The script tag the lookup is declared under, such as `arab`.
+    pub script: [u8; 4],
+    /// The feature tag, such as `rlig`.
+    pub feature: [u8; 4],
 }
 
 impl Face {
@@ -95,7 +121,22 @@ impl Face {
             units_per_em: 1000,
             ascender: 800,
             descender: -200,
+            ligature: None,
         }
+    }
+
+    /// The same face, joining `first` and `second` into one glyph.
+    #[must_use]
+    pub fn with_ligature(mut self, ligature: Ligature) -> Face {
+        self.ligature = Some(ligature);
+        self
+    }
+
+    /// The glyph index the ligature's own glyph has, if this face has one.
+    #[must_use]
+    pub fn ligature_glyph(&self) -> Option<u16> {
+        self.ligature?;
+        u16::try_from(self.glyph_order().len() + 1).ok()
     }
 
     /// The same face at another advance, which is what makes two faces
@@ -150,7 +191,9 @@ pub fn covering(family: &str, covers: &str) -> Vec<u8> {
 
 fn build(face: &Face) -> Vec<u8> {
     let order = face.glyph_order();
-    let glyph_count = order.len() + 1;
+    // A ligature needs a glyph of its own, after every covered character, so
+    // that `Face::glyph_of` keeps answering for the characters.
+    let glyph_count = order.len() + 1 + usize::from(face.ligature.is_some());
 
     // ---- glyf and loca ------------------------------------------------------
     //
@@ -160,9 +203,9 @@ fn build(face: &Face) -> Vec<u8> {
     // because `loca` gives each glyph its own slice and offsets that merely
     // repeat make every glyph empty.
     let outline = box_glyph(i16::try_from(face.units_per_em * 7 / 10).unwrap_or(700));
-    let mut glyf = Vec::with_capacity(outline.len() * order.len());
+    let mut glyf = Vec::with_capacity(outline.len() * glyph_count);
     let mut loca = vec![0u32];
-    for _ in &order {
+    for _ in 1..glyph_count {
         glyf.extend_from_slice(&outline);
         loca.push(u32::try_from(glyf.len()).unwrap_or(0));
     }
@@ -215,7 +258,21 @@ fn build(face: &Face) -> Vec<u8> {
     let cmap = cmap_format_4(&order);
     let name = name_table(&face.family);
 
+    let Some(ligature) = face.ligature else {
+        return assemble(&[
+            (b"cmap", &cmap),
+            (b"glyf", &glyf),
+            (b"head", &head),
+            (b"hhea", &hhea),
+            (b"hmtx", &hmtx),
+            (b"loca", &loca),
+            (b"maxp", &maxp),
+            (b"name", &name),
+        ]);
+    };
+    let gsub = gsub_ligature(face, ligature);
     assemble(&[
+        (b"GSUB", &gsub),
         (b"cmap", &cmap),
         (b"glyf", &glyf),
         (b"head", &head),
@@ -225,6 +282,90 @@ fn build(face: &Face) -> Vec<u8> {
         (b"maxp", &maxp),
         (b"name", &name),
     ])
+}
+
+/// A `GSUB` with exactly one ligature substitution, and nothing else.
+///
+/// The smallest table that makes shaping observable: one script, one language
+/// system, one feature, one lookup, one `LigatureSet` with one `Ligature` in
+/// it. Written out by hand rather than compiled, because a fixture that needed
+/// a font compiler would not be a fixture — and because every offset here is
+/// one this repository's own reader has to get right.
+///
+/// The layout, in order, with each offset written from the start of the table
+/// or of its own subtable as ISO/IEC 14496-22 requires:
+///
+/// | At | What |
+/// | --- | --- |
+/// | 0 | header: version 1.0, three offsets |
+/// | 10 | `ScriptList`: one record, one `Script`, one default `LangSys` |
+/// | 30 | `FeatureList`: one record, one `Feature` naming lookup 0 |
+/// | 44 | `LookupList`: one offset, one `Lookup` of type 4 |
+/// | 56 | the `LigatureSubst` subtable, its coverage and its one ligature |
+fn gsub_ligature(face: &Face, ligature: Ligature) -> Vec<u8> {
+    let first = face.glyph_of(ligature.first).unwrap_or(0);
+    let second = face.glyph_of(ligature.second).unwrap_or(0);
+    let joined = face.ligature_glyph().unwrap_or(0);
+
+    let mut out: Vec<u8> = Vec::new();
+    // Header: major 1, minor 0, then the three list offsets.
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&10u16.to_be_bytes()); // scriptList
+    out.extend_from_slice(&30u16.to_be_bytes()); // featureList
+    out.extend_from_slice(&44u16.to_be_bytes()); // lookupList
+
+    // ScriptList at 10: one record of six bytes, then the Script table.
+    out.extend_from_slice(&1u16.to_be_bytes()); // scriptCount
+    out.extend_from_slice(&ligature.script);
+    out.extend_from_slice(&8u16.to_be_bytes()); // Script, from the list's start
+                                                // Script at 18: a default LangSys and no named ones.
+    out.extend_from_slice(&4u16.to_be_bytes()); // defaultLangSys, from Script
+    out.extend_from_slice(&0u16.to_be_bytes()); // langSysCount
+                                                // LangSys at 22: no required feature, one feature index.
+    out.extend_from_slice(&0u16.to_be_bytes()); // lookupOrderOffset, always 0
+    out.extend_from_slice(&0xFFFFu16.to_be_bytes()); // requiredFeatureIndex: none
+    out.extend_from_slice(&1u16.to_be_bytes()); // featureIndexCount
+    out.extend_from_slice(&0u16.to_be_bytes()); // featureIndices[0]
+
+    // FeatureList at 30: one record of six bytes, then the Feature.
+    out.extend_from_slice(&1u16.to_be_bytes()); // featureCount
+    out.extend_from_slice(&ligature.feature);
+    out.extend_from_slice(&8u16.to_be_bytes()); // Feature, from the list's start
+                                                // Feature at 38.
+    out.extend_from_slice(&0u16.to_be_bytes()); // featureParams
+    out.extend_from_slice(&1u16.to_be_bytes()); // lookupIndexCount
+    out.extend_from_slice(&0u16.to_be_bytes()); // lookupListIndices[0]
+
+    // LookupList at 44.
+    out.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
+    out.extend_from_slice(&4u16.to_be_bytes()); // Lookup, from the list's start
+                                                // Lookup at 48: type 4, no flags, one subtable.
+    out.extend_from_slice(&4u16.to_be_bytes()); // lookupType: ligature
+    out.extend_from_slice(&0u16.to_be_bytes()); // lookupFlag
+    out.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
+                                                // Eight and not six: the `Lookup` is six bytes of header plus its own
+                                                // array of subtable offsets, so the first subtable can only begin after
+                                                // that array — a six would point into the offset it was read from.
+    out.extend_from_slice(&8u16.to_be_bytes()); // subtable, from the Lookup
+
+    // LigatureSubst at 56.
+    out.extend_from_slice(&1u16.to_be_bytes()); // substFormat
+    out.extend_from_slice(&8u16.to_be_bytes()); // coverage, from the subtable
+    out.extend_from_slice(&1u16.to_be_bytes()); // ligatureSetCount
+    out.extend_from_slice(&14u16.to_be_bytes()); // ligatureSets[0]
+                                                 // Coverage at 64: format 1, one glyph — the ligature first component.
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&first.to_be_bytes());
+    // LigatureSet at 70.
+    out.extend_from_slice(&1u16.to_be_bytes()); // ligatureCount
+    out.extend_from_slice(&4u16.to_be_bytes()); // ligatures[0], from the set
+                                                // Ligature at 74: the joined glyph, two components, the second named.
+    out.extend_from_slice(&joined.to_be_bytes());
+    out.extend_from_slice(&2u16.to_be_bytes()); // componentCount
+    out.extend_from_slice(&second.to_be_bytes()); // componentGlyphIDs[0]
+    out
 }
 
 /// A format 4 subtable mapping each character of `order` to its index plus one.

@@ -182,37 +182,112 @@ was swallowed at both call sites and the whole face embedded with **no warning
 at all**, observable only as a missing `ABCDEF+` tag. `EmbeddedWhole` and
 `SubsetRefusal` now say so.
 
-- **Text shaping — a non-goal, overturned; partly landed.** The docs long
-  stated shaping as a permanent non-goal, and for *rendering existing PDFs*
-  the reasoning holds: the producer positioned every glyph. It fails
-  wherever this engine is the producer. `tinker-pdf-shape` now exists —
-  GSUB/GPOS/GDEF, UAX #9 bidi gated on 770 241 `BidiTest` resolutions and
-  91 707 `BidiCharacterTest` cases, and 48 of the 77 text-rendering-tests
-  cases with the other 29 declined by name. **Not finished**: Arabic
-  joining, USE/Indic/SEA, re-shaping, and the three consumers
-  (`tinker-pdf-layout`, `DocumentBuilder`, form-fill appearances) are
-  milestones 4–8. Exit unchanged: an Arabic EPUB paginates legibly; a
-  shaped glyph run round-trips through `DocumentBuilder`. (XL,
+**Streaming open has left this list.** `ByteSource` is the seam a host
+implements to supply ranges; `Document::open_streaming` opens from one, and
+the linearized fast path renders page one of a qpdf-corpus file with **zero
+read ranges intersecting the tail past `/E`**. The byte budgets are
+committed as `<=` ratchets: 13 753 bytes to open a 4.9 MB document (0.28%),
+67 001 to open it and read one mid-file object, 29 696 to render page one of
+a 1.6 MB linearized one.
+
+Three things it settled that are worth keeping:
+
+- **Arrival is not an input.** The determinism fingerprints run over a
+  `ShreddedSource` that splits every read and must be bit-identical to a
+  whole buffer. None moved.
+- **A miss must never publish.** Counted injection found that `load` was
+  publishing the null a `SourceMiss` produced — so a wasm host would fetch
+  the range, ask again, and get the same null forever. Zero assertions
+  caught the first injection, because every retry test re-opened the
+  document and got a fresh cache; the guard that found it holds *one*
+  document across a miss.
+- **The design doc's milestone 3 was stale and was amended, not honoured.**
+  It asked for a hint-table reader to be promoted from tests; a hardened
+  production decoder already existed. It decodes 32 of the 45 linearized
+  files in the qpdf corpus, 10 being password-sealed and 3 refused by name
+  as qpdf's own deliberately malformed fixtures.
+
+**The bindings write surface has left it too.** Ruling 11 in its plainest
+form: the facade grew the closure-free equivalents first —
+`DocumentEditor::checkpoint`/`restore` and
+`DocumentBuilder::begin_page`/`push_page` — because closures do not cross
+FFI, and the C ABI is then a mechanical wrapping of a Rust API that already
+exists. `transaction()` became sugar over its own primitives.
+
+Two scripts, fill-and-save and build-a-document, run from all four surfaces
+and print byte-identical `WROTE sha256=` lines; `cargo xtask
+bindings-parity` fails on a mismatch **or on a surface that ran and printed
+nothing**, which is the failure that gets shipped. Every saved artefact
+also passes the strict structural validator, which is what keeps four
+byte-identical outputs from being identically wrong.
+
+- **Text shaping — a non-goal, overturned; five of eight milestones.** The
+  docs long stated shaping as a permanent non-goal, and for *rendering
+  existing PDFs* the reasoning holds: the producer positioned every glyph.
+  It fails wherever this engine is the producer. `tinker-pdf-shape` now
+  exists, and what it can and cannot claim is worth stating precisely
+  rather than as a percentage.
+
+  **Adjudicated.** UAX #9 bidi over 770 241 `BidiTest` resolutions and
+  91 707 `BidiCharacterTest` cases. GSUB/GPOS over 48 of the 77
+  text-rendering-tests cases in the CMAP/GSUB/GPOS sections, the other 29
+  declined by name. **Arabic joining and cursive attachment**, 6/6 on
+  SHARAN-1 — which is what finally settled cursive, since no section in the
+  original corpus contains a GPOS type 3 lookup at all. An Arabic string
+  built through `DocumentBuilder::glyph_run` round-trips out of text
+  extraction.
+
+  **Partial.** The Universal Shaping Engine reaches 223 of 333 Brahmic
+  cases, with 2 of 16 sections whole. The shortfall is canonical
+  decomposition, the Indic shaper's base-finding, and dotted-circle
+  insertion.
+
+  **Not done.** `tinker-pdf-layout` has a `Shaper` trait with the
+  one-path-owns-a-run rule asserted, but there is no Arabic EPUB fixture
+  and no RTL reftest pair, so milestone 6 is a seam rather than a
+  demonstration. Milestone 8 is untouched: `fill.rs` still writes `?` above
+  the single-byte range, because it reaches its font through `/DR` and
+  `tinker-pdf-cos`'s `Font` does not expose the embedded program.
+
+  **One choice in here should be reviewed.** aots and ISO/IEC 14496-22
+  disagree about cursive attachment: aots says a join moves a glyph by
+  placement and touches no advance, the standard says the advance shortens.
+  14496-22 was taken, because under the other reading no Arabic face joins
+  at all — but the seven aots cases stating the opposite still run, with
+  both readings written down beside them. (XL,
   [design/shaping.md](design/shaping.md))
-- **PDF/A validation and writing.** No `/OutputIntent` handling and no
-  conformance machinery; the 2 907-file veraPDF corpus — the largest in
-  the harness — is used purely as a never-crash bar. It graduates to a
-  conformance bar. Exit: validation verdicts match veraPDF's own
-  pass/fail corpus annotations; the writer gains a PDF/A profile. (L–XL,
-  [design/pdfa.md](design/pdfa.md))
-- **Streaming open.** The contract today is whole-file-in-memory
-  (`Arc<[u8]>`), stated where `Document::open` is declared; memory-mapping
-  is the caller's business on native. A range-request-shaped reader —
-  open, show page one, fetch the rest — has its spec-complete counterpart
-  in-tree already: the writer produces Annex F linearized files and reads
-  back its own hint tables. Exit: first page rendered from a byte-range
-  source without the tail. (L,
-  [design/streaming-open.md](design/streaming-open.md))
-- **Bindings write surface.** The four bindings project reading only.
-  `DocumentEditor` and `DocumentBuilder` cross the C ABI and the three
-  bindings under ruling 11 — the facade shape is already the design. Exit:
-  fill-and-save and build-a-document demonstrated from all four. (M–L,
-  [design/bindings-write.md](design/bindings-write.md))
+- **PDF/A validation and writing — four of six milestones.** The
+  2 907-file veraPDF corpus was a never-crash bar and is now also a
+  conformance one. `Document::validate_pdfa` reads the flavour a file
+  claims, runs the metadata and syntax rule groups, and returns findings —
+  **a pass is an empty list and there is no boolean that discards it**.
+  `tpdf check --pdfa` exits by the verdict and prints which rule groups
+  ran beside it, because "no findings" from a partial sweep is not "it
+  conforms".
+
+  **Agreement is 1 017 of 2 371, and the denominator is the interesting
+  number.** 2 896 corpus files carry a `-pass-`/`-fail-` annotation, but 525
+  of them test a *different* standard — 434 PDF/UA, 85 TWG, 6 ISO 32000 —
+  and a PDF/UA file annotated `pass` makes no PDF/A claim at all. Scoring
+  them produced 195 spurious disagreements before the scope was fixed, which
+  is a measurement measuring itself. Of what is in scope: 830 of 831 `pass`
+  files agree, and 187 of 1 540 `fail` files do — the gap being fonts and
+  colour, which are milestone 5.
+
+  Every disagreement is a row in a committed ledger with a **mandatory
+  reason string**, and a row without one fails the test that reads it. The
+  first ledger carried three rows saying, in those words, that nobody had
+  established why — and writing them down is what made them findable: all
+  three were defects here, not readings. `/Info` values were trimmed before
+  comparison so `" veraPDF Consortium "` matched; a present-but-not-a-string
+  `/Info` entry was skipped rather than reported; and the header rule
+  accepted any digit, so `%PDF-1.9` passed.
+
+  **Not done**: the font and colour rule groups, and the writer profile
+  (`/OutputIntents`, generated XMP, typed refusals at the call that makes
+  them). Level A is now reachable rather than staged, because tagged PDF
+  landed first — which is the concrete payoff of taking the roadmap's own
+  order. (L–XL, [design/pdfa.md](design/pdfa.md))
 
 Decision items, not commitments: **OCR** (if ever, as a host seam like
 `FontProvider`, not an in-engine engine) and **container writing** (CBZ,

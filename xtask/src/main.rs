@@ -567,6 +567,20 @@ const ALLOWED: &[(&str, &[&str])] = &[
             // does not know what a document is, so adding this edge did not
             // buy the leaf a reason to acquire one.
             "tinker-pdf-pki",
+            // Shaping milestone 6. The facade is where a *producing* path
+            // meets a face: `BookMetrics` implements the layout crate's
+            // `Shaper` seam over a book's own `@font-face` faces, and
+            // `DocumentBuilder::glyph_run` writes what comes back. The edge
+            // goes down into a leaf, which ruling 8 allows without argument,
+            // and the direction matters: `tinker-pdf-layout` gains **no** edge
+            // for this, because the trait is plain structs and `f64` and a
+            // leaf that had acquired a shaper would have stopped being one.
+            //
+            // Nothing in `tinker-pdf-render` reaches it. Shaping while
+            // *reading* a PDF stays the permanent non-goal it was — the
+            // producer positioned every glyph and re-shaping them would be
+            // wrong — and `docs/features/fonts.md` keeps that row.
+            "tinker-pdf-shape",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.

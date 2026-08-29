@@ -17,8 +17,9 @@
 #![warn(missing_docs)]
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
+use std::sync::Arc;
 
 use tinker_pdf::{
     AuthLevel, Bitmap, Chain, CmsState, Coverage, DestKind, Document, DocumentBuilder,
@@ -101,6 +102,125 @@ pub enum TpdfStatus {
     /// [`tpdf_editor_page_count`] and [`tpdf_editor_field_count`] to do it
     /// with, before the call rather than after.
     EditRefused = 13,
+
+    // ---- the streaming surface, appended at 14 ------------------------------
+    /// A [`TpdfSourceVtable::read`] refused a range the engine needed, and
+    /// the open could not proceed without it.
+    ///
+    /// Not a failure of the document. The host is expected to fetch the bytes
+    /// [`tpdf_last_error_message`] names and call again — which is why this is
+    /// distinct from [`TpdfStatus::NotAPdf`], where calling again would be
+    /// pointless.
+    SourceMiss = 14,
+}
+
+/// A document's bytes, as ranges the host answers (7.5.6, Annex F).
+///
+/// The C projection of `tinker_pdf::ByteSource`. Function pointers rather
+/// than a callback struct with data, because a vtable is what every host
+/// language already knows how to build: Python fills it from `ctypes`, C#
+/// from `Marshal.GetFunctionPointerForDelegate`, C from three functions.
+///
+/// # Safety
+///
+/// The engine calls these from whatever thread is rendering, and may call
+/// `read` from several at once — `ByteSource` is `Send + Sync` and this type
+/// is how that promise is inherited. **A host whose callbacks are not
+/// thread-safe must serialise them itself.** Nothing here can check it, and
+/// the failure would be a data race rather than an error code.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TpdfSourceVtable {
+    /// The document's total length in bytes.
+    ///
+    /// Fixed for the life of the source. Every offset in a PDF is measured
+    /// against the end of the file, so a length that moved would move the
+    /// document under the reader — and the engine caches nothing to protect
+    /// itself from that.
+    pub len: Option<extern "C" fn(ctx: *mut c_void) -> u64>,
+
+    /// Writes up to `capacity` bytes from `offset` into `out`, and returns how
+    /// many it wrote — or a **negative** value to say the range is not here.
+    ///
+    /// Fewer bytes than asked for is normal and the engine loops, exactly as
+    /// it would over a POSIX read. Zero for a non-empty range inside `len` is
+    /// the one answer that is neither: it would make that loop spin forever,
+    /// so the engine treats it as a miss rather than trusting it.
+    ///
+    /// A negative return is not an error in the document. It says "fetch these
+    /// bytes and ask again", which is the whole point of the seam, and it
+    /// reaches the caller as [`TpdfStatus::SourceMiss`] with the range named
+    /// in [`tpdf_last_error_message`].
+    pub read:
+        Option<extern "C" fn(ctx: *mut c_void, offset: u64, out: *mut u8, capacity: u64) -> i64>,
+
+    /// Called once when the engine is finished with the source. May be null.
+    pub free: Option<extern "C" fn(ctx: *mut c_void)>,
+}
+
+/// A [`TpdfSourceVtable`] and its context, as a `ByteSource`.
+///
+/// `Send + Sync` is asserted rather than derived, and the vtable's own
+/// documentation is where the host is told what it is promising. There is no
+/// way to check it from here.
+struct CallbackSource {
+    vtable: TpdfSourceVtable,
+    ctx: *mut c_void,
+    /// Cached at construction. `len` is documented as fixed, and calling it
+    /// per read would make a host that got that wrong fail in a way that
+    /// looks like corruption instead of like the mistake it is.
+    len: u64,
+}
+
+// SAFETY: the host promises thread-safe callbacks; see `TpdfSourceVtable`.
+unsafe impl Send for CallbackSource {}
+unsafe impl Sync for CallbackSource {}
+
+impl Drop for CallbackSource {
+    fn drop(&mut self) {
+        if let Some(free) = self.vtable.free {
+            free(self.ctx);
+        }
+    }
+}
+
+impl tinker_pdf::ByteSource for CallbackSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read(&self, range: std::ops::Range<u64>) -> Result<Arc<[u8]>, tinker_pdf::SourceMiss> {
+        let Some(read) = self.vtable.read else {
+            return Err(tinker_pdf::SourceMiss::at(range));
+        };
+        // Clamped here rather than trusted to the host: end of file is a fact
+        // about the document, and a host that answered past it would be
+        // handing the reader bytes that are not in the file.
+        let start = range.start.min(self.len);
+        let end = range.end.min(self.len);
+        if start >= end {
+            return Ok(Arc::from(&[][..]));
+        }
+
+        let capacity = end - start;
+        let Ok(capacity_usize) = usize::try_from(capacity) else {
+            return Err(tinker_pdf::SourceMiss::at(range));
+        };
+        let mut buffer = vec![0u8; capacity_usize];
+        let written = read(self.ctx, start, buffer.as_mut_ptr(), capacity);
+        if written < 0 {
+            return Err(tinker_pdf::SourceMiss::at(range));
+        }
+        let written = u64::try_from(written).unwrap_or(0);
+        // A host that claims to have written more than it was given room for
+        // has already overrun the buffer; there is nothing to do about that
+        // here except refuse to compound it by reading the claim.
+        if written == 0 || written > capacity {
+            return Err(tinker_pdf::SourceMiss::at(range));
+        }
+        buffer.truncate(written as usize);
+        Ok(Arc::from(buffer))
+    }
 }
 
 /// How far a password got.
@@ -427,6 +547,97 @@ pub unsafe extern "C" fn tpdf_document_open(
             TpdfStatus::NotAPdf
         }
     }
+}
+
+/// Opens a document whose bytes the host supplies in ranges (Annex F).
+///
+/// The projection of `Document::open_streaming`. The engine reads a head
+/// window and the tail, follows the cross-reference chain, and stops — a
+/// linearized document renders its first page without the bytes past `/E`
+/// ever being asked for.
+///
+/// `vtable.read` returning negative anywhere the open needed bytes gives
+/// [`TpdfStatus::SourceMiss`], with the range named in
+/// [`tpdf_last_error_message`]. That is a "fetch and retry", not a broken
+/// document, and it is a different status from [`TpdfStatus::NotAPdf`] for
+/// exactly that reason: calling again is the right move for one and pointless
+/// for the other.
+///
+/// `vtable.free` is called when the document is freed, or immediately if the
+/// open fails — so a host allocating its context can always pair it with
+/// `free` and never leak, whichever way this returns.
+///
+/// # Safety
+///
+/// `out` must be a valid pointer to write a handle to. `ctx` is passed back
+/// to the callbacks untouched and may be null if they do not need it. The
+/// callbacks must be thread-safe; see [`TpdfSourceVtable`].
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_document_open_streaming(
+    vtable: TpdfSourceVtable,
+    ctx: *mut c_void,
+    out: *mut *mut TpdfDocument,
+) -> TpdfStatus {
+    if out.is_null() {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    }
+    let Some(len_of) = vtable.len else {
+        set_error("the source vtable has no `len`");
+        // Freed here rather than leaked: the host handed over ownership of
+        // `ctx` with this call, and a refusal that kept it would be a leak
+        // the host cannot see and cannot reach.
+        if let Some(free) = vtable.free {
+            free(ctx);
+        }
+        return TpdfStatus::BadArgument;
+    };
+    if vtable.read.is_none() {
+        set_error("the source vtable has no `read`");
+        if let Some(free) = vtable.free {
+            free(ctx);
+        }
+        return TpdfStatus::BadArgument;
+    }
+
+    let source = Arc::new(CallbackSource {
+        vtable,
+        ctx,
+        len: len_of(ctx),
+    });
+    match Document::open_streaming(source) {
+        Ok(inner) => {
+            let handle = Box::new(TpdfDocument { inner });
+            unsafe { *out = Box::into_raw(handle) };
+            TpdfStatus::Ok
+        }
+        Err(error) => {
+            set_error(&error.to_string());
+            // A range the host did not have is not the same answer as bytes
+            // that are not a PDF, and flattening them would send a host
+            // looking for a corrupt file when it should be fetching. Matched
+            // on the variant rather than sniffed out of the message: an error
+            // string is for people, and a status a caller branches on must
+            // not depend on its wording.
+            match error {
+                tinker_pdf::OpenError::SourceUnavailable(_) => TpdfStatus::SourceMiss,
+                _ => TpdfStatus::NotAPdf,
+            }
+        }
+    }
+}
+
+/// Whether this document's bytes come from a [`TpdfSourceVtable`].
+///
+/// # Safety
+///
+/// `doc` must have come from one of the open calls.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_document_is_streamed(doc: *const TpdfDocument) -> c_int {
+    let Some(doc) = (unsafe { doc.as_ref() }) else {
+        return 0;
+    };
+    c_int::from(doc.inner.is_streamed())
 }
 
 /// Frees a document handle. Null is accepted and does nothing.
@@ -4221,7 +4432,7 @@ endobj
     #[test]
     fn every_status_the_abi_carries_is_pinned_by_number() {
         // Nothing in Rust enumerates a `#[repr(C)]` enum's variants, so this
-        // is the list, written out. It is exactly the fourteen pinned above.
+        // is the list, written out. It is exactly the fifteen pinned above.
         const EVERY: &[(TpdfStatus, i32)] = &[
             (TpdfStatus::Ok, 0),
             (TpdfStatus::BadArgument, 1),
@@ -4237,11 +4448,12 @@ endobj
             (TpdfStatus::FieldUnreadable, 11),
             (TpdfStatus::SpentHandle, 12),
             (TpdfStatus::EditRefused, 13),
+            (TpdfStatus::SourceMiss, 14),
         ];
         for (status, number) in EVERY {
             assert_eq!(*status as i32, *number, "{status:?}");
         }
-        assert_eq!(EVERY.len(), 14, "append only, and say how many there are");
+        assert_eq!(EVERY.len(), 15, "append only, and say how many there are");
     }
 
     /// The write surface's other two enums, pinned for the reason
@@ -6407,5 +6619,179 @@ endobj
         unsafe { tpdf_builder_free(ptr::null_mut()) };
         unsafe { tpdf_page_builder_free(ptr::null_mut()) };
         unsafe { tpdf_outline_entry_free(ptr::null_mut()) };
+    }
+
+    // ---- the streaming surface ---------------------------------------------
+
+    fn last_error() -> String {
+        let message = unsafe { tpdf_last_error_message() };
+        if message.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The bytes every streaming test serves, and a counter of what was asked
+    /// for, so a test can assert the engine did not read the whole file.
+    struct Served {
+        bytes: Vec<u8>,
+        /// Ranges refused before this offset, to force a miss.
+        refuse_from: u64,
+        reads: std::sync::atomic::AtomicU64,
+        freed: std::sync::atomic::AtomicBool,
+    }
+
+    thread_local! {
+        static SERVED: RefCell<Option<std::sync::Arc<Served>>> = const { RefCell::new(None) };
+    }
+
+    fn served() -> std::sync::Arc<Served> {
+        SERVED.with(|cell| cell.borrow().clone().expect("a source was installed"))
+    }
+
+    extern "C" fn served_len(_ctx: *mut c_void) -> u64 {
+        served().bytes.len() as u64
+    }
+
+    extern "C" fn served_read(_ctx: *mut c_void, offset: u64, out: *mut u8, capacity: u64) -> i64 {
+        let served = served();
+        served
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if offset >= served.refuse_from {
+            return -1;
+        }
+        let start = offset as usize;
+        let end = (start + capacity as usize).min(served.bytes.len());
+        if start >= end {
+            return 0;
+        }
+        // Deliberately short: half of what was asked for, rounded up, so the
+        // engine's loop over partial reads runs on every single call rather
+        // than only on a source that happens to be chunked.
+        let half = (end - start).div_ceil(2);
+        unsafe { std::ptr::copy_nonoverlapping(served.bytes[start..].as_ptr(), out, half) };
+        half as i64
+    }
+
+    extern "C" fn served_free(_ctx: *mut c_void) {
+        served()
+            .freed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn install(bytes: Vec<u8>, refuse_from: u64) -> std::sync::Arc<Served> {
+        let served = std::sync::Arc::new(Served {
+            bytes,
+            refuse_from,
+            reads: std::sync::atomic::AtomicU64::new(0),
+            freed: std::sync::atomic::AtomicBool::new(false),
+        });
+        SERVED.with(|cell| *cell.borrow_mut() = Some(served.clone()));
+        served
+    }
+
+    fn vtable() -> TpdfSourceVtable {
+        TpdfSourceVtable {
+            len: Some(served_len),
+            read: Some(served_read),
+            free: Some(served_free),
+        }
+    }
+
+    /// The projection works end to end: a document opened through the vtable
+    /// answers the same page count as the same bytes opened directly.
+    ///
+    /// Short reads on every call, because the trait allows them and a host
+    /// that serves fewer bytes than asked is the normal case over a network.
+    #[test]
+    fn a_document_opens_through_the_vtable_and_reads_the_same() {
+        let bytes = fixture("simple-text.pdf");
+        let expected = {
+            let mut doc = ptr::null_mut();
+            let status = unsafe { tpdf_document_open(bytes.as_ptr(), bytes.len(), &raw mut doc) };
+            assert_eq!(status, TpdfStatus::Ok);
+            let pages = unsafe { tpdf_document_page_count(doc) };
+            unsafe { tpdf_document_free(doc) };
+            pages
+        };
+
+        let served = install(bytes, u64::MAX);
+        let mut doc = ptr::null_mut();
+        let status =
+            unsafe { tpdf_document_open_streaming(vtable(), ptr::null_mut(), &raw mut doc) };
+        assert_eq!(status, TpdfStatus::Ok, "{}", last_error());
+        assert_eq!(unsafe { tpdf_document_page_count(doc) }, expected);
+        assert_eq!(unsafe { tpdf_document_is_streamed(doc) }, 1);
+        assert!(
+            served.reads.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the engine asked the host for bytes rather than reading them itself"
+        );
+
+        assert!(!served.freed.load(std::sync::atomic::Ordering::Relaxed));
+        unsafe { tpdf_document_free(doc) };
+        assert!(
+            served.freed.load(std::sync::atomic::Ordering::Relaxed),
+            "freeing the document frees the host's context"
+        );
+    }
+
+    /// A refused range is `SourceMiss` and not `NotAPdf`.
+    ///
+    /// The distinction is the whole point of the seam: one says "fetch these
+    /// bytes and ask again", the other says "stop, this is not a document".
+    /// A host told the wrong one either retries forever or gives up on a file
+    /// that was fine.
+    #[test]
+    fn a_refused_range_is_a_miss_rather_than_a_broken_document() {
+        let bytes = fixture("simple-text.pdf");
+        // Refuse everything: even the tail window cannot be read.
+        install(bytes, 0);
+        let mut doc = ptr::null_mut();
+        let status =
+            unsafe { tpdf_document_open_streaming(vtable(), ptr::null_mut(), &raw mut doc) };
+        assert_eq!(status, TpdfStatus::SourceMiss, "{}", last_error());
+        assert!(doc.is_null());
+        assert!(
+            last_error().contains("not available"),
+            "the message names what was wanted: {}",
+            last_error()
+        );
+    }
+
+    /// A vtable missing a required function is refused, and the context is
+    /// still freed.
+    ///
+    /// The host handed over ownership of `ctx` with the call. A refusal that
+    /// kept it would be a leak the host cannot see and cannot reach.
+    #[test]
+    fn an_incomplete_vtable_is_refused_and_the_context_is_still_freed() {
+        for missing in ["len", "read"] {
+            let served = install(fixture("simple-text.pdf"), u64::MAX);
+            let mut table = vtable();
+            match missing {
+                "len" => table.len = None,
+                _ => table.read = None,
+            }
+            let mut doc = ptr::null_mut();
+            let status =
+                unsafe { tpdf_document_open_streaming(table, ptr::null_mut(), &raw mut doc) };
+            assert_eq!(status, TpdfStatus::BadArgument, "missing {missing}");
+            assert!(
+                served.freed.load(std::sync::atomic::Ordering::Relaxed),
+                "missing {missing}: the context leaked"
+            );
+        }
+    }
+
+    /// A null `out` is refused before anything else happens.
+    #[test]
+    fn a_null_out_pointer_is_refused() {
+        install(fixture("simple-text.pdf"), u64::MAX);
+        let status =
+            unsafe { tpdf_document_open_streaming(vtable(), ptr::null_mut(), ptr::null_mut()) };
+        assert_eq!(status, TpdfStatus::BadArgument);
     }
 }

@@ -374,7 +374,9 @@ mitigation `docs/design/shaping.md`'s risk table names.
 | `BidiBrackets.txt` | `Bidi_Paired_Bracket` and `Bidi_Paired_Bracket_Type`, which rule N0 is written in terms of |
 | `BidiMirroring.txt` | `Bidi_Mirroring_Glyph`, rule L4 |
 | `Scripts.txt` | UAX #24's `Script`, which itemization splits a paragraph on |
+| `extracted/DerivedJoiningType.txt`, here as `DerivedJoiningType.txt` | `Joining_Type`, which the Arabic cursive-joining state machine is written in. The derived file rather than `ArabicShaping.txt` because it lists the 386 `Transparent` ranges outright instead of leaving them to be re-derived from `General_Category`; `build.rs` says so at length |
 | `PropertyValueAliases.txt` | Each script's ISO 15924 code, which an OpenType script tag is derived from, and the long-to-short `Bidi_Class` names the `@missing` lines use |
+| `IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt` | What a Brahmic character *is* and which side of its base it is drawn on. The Universal Shaping Engine's cluster model is written in the two together, and neither is enough alone: the pair is what tells a pre-base vowel, which has to be moved in front of its consonant, from an above-base one, which does not |
 | `BidiTest.txt` | **A conformance oracle.** Every combination of `Bidi_Class` values up to length four: 490 846 data lines, 770 241 resolutions |
 | `BidiCharacterTest.txt` | **The other one.** 91 707 cases of real code points, and the only one of the two that reaches bracket pairs |
 
@@ -402,15 +404,22 @@ the people who publish the tests.
 | File | What it is |
 | --- | --- |
 | `testcases/CMAP-{1,2,3,4}.html`, `GSUB-{1,2,3}.html`, `GPOS-{1,2,3,4,5}.html` | The twelve sections milestone 2 is graded on, **verbatim** — parsed by `tests/text_rendering.rs` rather than distilled first, so nothing stands between what upstream wrote and what the test asserts |
-| `fonts/*.ttf`, `fonts/*.otf` | The ten faces those sections name |
+| `testcases/SHARAN-1.html` | Milestone 4's whole bar: Nasta‘līq, the one Arabic-script section the corpus has |
+| `testcases/SHBALI-{1,2,3}.html`, `SHKNDA-{1,2,3}.html`, `SHLANA-{1,…,10}.html` | Milestone 5's: Balinese, Kannada and Tai Tham — the corpus's only Indic and Southeast Asian sections |
+| `fonts/*.ttf`, `fonts/*.otf` | The sixteen faces those sections name |
 | `LICENSE` | Upstream's own |
 
-Only those twelve sections are vendored. The AAT (`MORX`, `MORT`), variable
-(`GVAR`, `CVAR`, `AVAR`, `HVAR`), outline (`CFF`, `GLYF`, `SFNT`) and shaping
-(`SHARAN`, `SHBALI`, `SHKNDA`, `SHLANA`) sections are not: `morx` is a stated
-non-goal, the variable ones are deferred under ruling 3, the outline ones test
-a rasterizer this crate is not, and the shaping ones arrive with milestones 4
-and 5 — which is when their fonts do.
+Only those twenty-nine sections are vendored. The AAT (`MORX`, `MORT`),
+variable (`GVAR`, `CVAR`, `AVAR`, `HVAR`) and outline (`CFF`, `GLYF`, `SFNT`)
+sections are not: `morx` is a stated non-goal, the variable ones are deferred
+under ruling 3, and the outline ones test a rasterizer this crate is not.
+
+The seventeen shaping sections and their six faces arrived with milestones 4
+and 5, fetched at the same pinned commit as the first twelve so that one
+`ft:render` string cannot be describing a face from a different revision. What
+each of them adjudicates — and, for the ones this repository declines, why —
+is in `crates/tinker-pdf-shape/tests/text_rendering.rs`, which is the file that
+has to stay honest about them; this table only says where the bytes came from.
 
 Upstream's README states that *"the contents of this repository are governed by
 the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is

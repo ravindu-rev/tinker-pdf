@@ -317,46 +317,55 @@ fn pair_format2(
 /// keeps its place on the baseline. The glyph that moves is attached to the
 /// one that does not, so a chain of joined letters rises and falls as one.
 ///
-/// # One divergence from the current specification, chosen deliberately
+/// # The reading, and the fixture that settled which one
 ///
-/// The glyph that moves is moved by **placement**, in both directions, and no
-/// advance is touched. That is what Adobe's annotated specification says, in
-/// the words attached to the fixture this is tested against: after `gpos3`
-/// lookup 0 runs, *"occurrences of glyph 19 will have been moved, to have its
-/// origin at (99, 99) relative to the origin of the new position of the
-/// occurrence of glyph 18"*, and the deltas it then states leave every
-/// following glyph exactly where it was.
+/// Two readings of the line-direction half of this lookup were live until
+/// milestone 4, and they differ by exactly the overlap on every glyph past the
+/// join, so they cannot both be satisfied.
 ///
-/// The OpenType 1.9 text describes the line-direction half differently —
-/// *"the layout engine adjusts the advance of the first glyph (in logical
-/// order)"* — which places the joined pair identically and makes the run
-/// **narrower**, because the shortened advance carries through to everything
-/// after it. The two readings cannot both be satisfied: they differ by
-/// exactly the overlap, on every glyph past the join.
+/// Adobe's annotated specification, in the words attached to the aots fixture,
+/// says the joined glyph is moved by **placement** and no advance is touched:
+/// after `gpos3` lookup 0 runs, *"occurrences of glyph 19 will have been
+/// moved, to have its origin at (99, 99) relative to the origin of the new
+/// position of the occurrence of glyph 18"*. The OpenType 1.9 text says
+/// instead that *"the layout engine adjusts the advance of the first glyph (in
+/// logical order)"*, which places the joined pair identically and makes the
+/// run **narrower**.
 ///
-/// This crate takes the fixture's reading, because ruling 13 makes the
-/// fixture the thing that adjudicates and because a leaf that hands back the
-/// advances its caller supplied is the more conservative of the two — a
-/// consumer can shorten a run it was told the joins of, and cannot lengthen
-/// one that was shortened for it.
+/// Milestone 2 recorded that nothing then in the tree could tell them apart
+/// and named `SHARAN-1` as the case that would. It did, and **the answer is
+/// OpenType 1.9's**: shaping its six Nasta‘līq words with the placement
+/// reading puts every glyph identity right and every pen position after a join
+/// too far along — by 802 units at the first join of `لسان` and by 1650 at the
+/// second, which is the overlap accumulating exactly as the two readings
+/// predict it would.
 ///
-/// ## Milestone 2 looked, and text-rendering-tests does not reach it
+/// The aots fixture is **still green** under this reading, and that is not a
+/// coincidence: it states position deltas and not advances, and the two
+/// readings agree on every position. It could never have discriminated. What
+/// it adjudicates is which glyph moves and by how much, and that is unchanged.
 ///
-/// *Checked rather than assumed, and the answer is "not yet".* Milestone 2
-/// vendored the corpus's CMAP, GSUB and GPOS sections and **none of them
-/// contains a `GPOS` type 3 lookup at all**. The section called `GPOS-3` is a
-/// trap for exactly this question: it is *Mark-to-Base Attachment for Ethiopic
-/// Diacritics*, a type 4 lookup, and the numbering of the sections has nothing
-/// to do with the numbering of the lookup types.
+/// # The arithmetic, and why it is asymmetric
 ///
-/// Scanning every face in the corpus rather than only the ones this milestone
-/// runs, cursive attachment appears in three, and all three belong to later
-/// milestones: `TestShapeAran.ttf` (section `SHARAN-1`, Arabic, milestone 4)
-/// and `NotoSansKannada-Regular.ttf` with `TestShapeKndaV3.ttf` (the `SHKNDA`
-/// sections, milestone 5). So the two readings are still both live, the aots
-/// fixture is still the only thing adjudicating, and **`SHARAN-1` is the case
-/// that will settle it** — named here so the next person does not have to
-/// rediscover which fixture to look at.
+/// The exit anchor of the earlier glyph must land on the entry anchor of the
+/// later one. In the line direction that is done by rewriting advances, and
+/// which of the two is rewritten depends on which way the pen travels — so
+/// this reads [`Buffer::direction`], the first place in the crate that does.
+/// Across the line it is done by placement, and there **`RIGHT_TO_LEFT`**
+/// decides which glyph is the child: clear, and the later glyph hangs off the
+/// earlier; set, and the earlier hangs off the later, so the *last* glyph of a
+/// connected sequence is the one that keeps its place on the baseline. That
+/// is what makes a whole Nasta‘līq word rise and fall as one unit rather than
+/// stepping away from the baseline letter by letter.
+///
+/// # What is not implemented, named
+///
+/// A glyph that is already the child of one cursive join and is made the child
+/// of another has its first chain left as it stands, rather than reversed so
+/// that the older subtree hangs off the new parent. It cannot arise from one
+/// forward sweep of one lookup — the child of each pair is a glyph the sweep
+/// has not attached yet — and would need a face with two cursive lookups whose
+/// coverages overlap. No face in either vendored corpus has one.
 fn cursive<'a>(
     runner: &mut Runner<'a, '_>,
     buffer: &mut Buffer,
@@ -391,16 +400,65 @@ fn cursive<'a>(
     let Some(exit) = entry_exit(data, previous_index, 2) else {
         return Applied::No;
     };
-    // The parent keeps its place; the child is moved so its anchor lands on
-    // the parent's. `RIGHT_TO_LEFT` swaps which is which.
-    let right_to_left = skipper.flags() & RIGHT_TO_LEFT != 0;
-    let (parent, child, parent_anchor, child_anchor) = if right_to_left {
-        (at, previous, entry, exit)
-    } else {
-        (previous, at, exit, entry)
-    };
-    place(buffer, child, parent, child_anchor, parent_anchor);
+    join(buffer, previous, at, exit, entry, skipper.flags());
     Applied::Yes(at.saturating_add(1))
+}
+
+/// Makes `exit` on the glyph at `first` meet `entry` on the glyph at `second`.
+///
+/// Split out from [`cursive`] because it is the whole of the divergence
+/// documented there, and because a reader comparing this against ISO/IEC
+/// 14496-22 should be able to read it without the coverage lookups around it.
+fn join(
+    buffer: &mut Buffer,
+    first: usize,
+    second: usize,
+    exit: (i32, i32),
+    entry: (i32, i32),
+    flags: u16,
+) {
+    // Along the line: the advances close the gap, and which glyph's advance
+    // shrinks is which way the pen is travelling. Both arms leave the pair
+    // overlapping by the same amount; they differ in which side of the pair
+    // keeps its origin.
+    let (first_offset, second_offset) = (
+        buffer.glyph(first).map_or(0, |glyph| glyph.x_offset),
+        buffer.glyph(second).map_or(0, |glyph| glyph.x_offset),
+    );
+    if buffer.direction().is_forward() {
+        if let Some(glyph) = buffer.glyph_mut(first) {
+            glyph.x_advance = exit.0.saturating_add(first_offset);
+        }
+        let shift = entry.0.saturating_add(second_offset);
+        if let Some(glyph) = buffer.glyph_mut(second) {
+            glyph.x_advance = glyph.x_advance.saturating_sub(shift);
+            glyph.x_offset = glyph.x_offset.saturating_sub(shift);
+        }
+    } else {
+        let shift = exit.0.saturating_add(first_offset);
+        if let Some(glyph) = buffer.glyph_mut(first) {
+            glyph.x_advance = glyph.x_advance.saturating_sub(shift);
+            glyph.x_offset = glyph.x_offset.saturating_sub(shift);
+        }
+        if let Some(glyph) = buffer.glyph_mut(second) {
+            glyph.x_advance = entry.0.saturating_add(second_offset);
+        }
+    }
+
+    // Across the line: one of the two hangs off the other, and the offset is
+    // the anchor difference. `propagate_attachments` adds the parent's own
+    // offset once every lookup has run, which is what carries a rise through
+    // a whole joined word.
+    let across = entry.1.saturating_sub(exit.1);
+    let (child, parent, across) = if flags & RIGHT_TO_LEFT != 0 {
+        (first, second, across)
+    } else {
+        (second, first, across.saturating_neg())
+    };
+    if let Some(glyph) = buffer.glyph_mut(child) {
+        glyph.y_offset = across;
+    }
+    buffer.attach_cursive(child, parent);
 }
 
 /// One `EntryExitRecord`'s anchor: `which` is 0 for the entry, 2 for the exit.

@@ -223,6 +223,21 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 u128::from(bar.passed) * u128::from(total),
                 bar.passed,
             ));
+            // Still a regression — the shortfall is real and this does not
+            // forgive it. But a shortfall made entirely of timeouts is a
+            // different fact from one made of files that stopped rendering,
+            // and the message is the only place a reader learns which. Two
+            // pdf.js files sit within a factor of two of the 20-second limit,
+            // so a run competing with other work on the machine flips them,
+            // and twice that arrived looking like an engine that had broken.
+            let timed_out = corpus.outcomes().get("timed_out").copied().unwrap_or(0);
+            let short = bar.passed.saturating_sub(passed);
+            if timed_out > 0 && short <= timed_out {
+                out.regressions.push(format!(
+                    "{}: and {timed_out} of those timed out, which accounts for the whole shortfall of {short}. A file near the limit flips when the machine is busy; re-run before believing this is the engine",
+                    bar.name
+                ));
+            }
         }
 
         // The second axis. Lower is better, so the inequality is the mirror
@@ -592,6 +607,69 @@ mod tests {
             });
         }
         out
+    }
+
+    /// A run where `timed_out` of the non-passing files ran out of time
+    /// rather than failing.
+    fn run_with_timeouts(name: &str, passed: u64, timed_out: u64) -> Run {
+        let mut run = run(name, passed, timed_out, 0);
+        for file in run.corpora[0].files.iter_mut().skip(passed as usize) {
+            file.outcome = Outcome::TimedOut {
+                at: "page 1".to_string(),
+            };
+        }
+        run
+    }
+
+    /// A shortfall made entirely of timeouts is still a regression, and it
+    /// says so — but it also says *why*, because the two causes want
+    /// different responses.
+    ///
+    /// This is not hypothetical. Two pdf.js files render within a factor of
+    /// two of the 20-second limit, so a run competing with a build for the
+    /// machine flips them, and the result arrived twice looking like an
+    /// engine that had stopped rendering.
+    ///
+    /// Counted injection: removing the explanation leaves 1 assertion
+    /// failing here and 0 anywhere else — which is the point of writing it
+    /// down, since nothing else in the suite looks at the cause of a
+    /// shortfall.
+    #[test]
+    fn a_shortfall_made_of_timeouts_is_still_a_regression_and_says_which() {
+        let committed = bar("pdfjs", 963, 974, 0);
+        let out = compare(&committed, &run_with_timeouts("pdfjs", 962, 12), true);
+        assert!(out.failed(), "a timeout is not forgiven: {out:?}");
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("timed out") && r.contains("accounts for the whole shortfall")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// A shortfall bigger than the timeout count is not explained by them,
+    /// and the message must not say it is.
+    ///
+    /// The dangerous direction: a run with one flaky timeout *and* ten real
+    /// failures would otherwise be read as "just the machine being busy".
+    #[test]
+    fn a_shortfall_larger_than_the_timeouts_is_not_explained_away() {
+        let committed = bar("pdfjs", 963, 974, 0);
+        // 950 passed against a bar of 963 is 13 short, and only one timed out.
+        let mut now = run_with_timeouts("pdfjs", 950, 24);
+        for file in now.corpora[0].files.iter_mut().skip(951) {
+            file.outcome = Outcome::Failed("no".to_string());
+        }
+        let out = compare(&committed, &now, true);
+        assert!(out.failed());
+        assert!(
+            !out.regressions
+                .iter()
+                .any(|r| r.contains("accounts for the whole shortfall")),
+            "{:?}",
+            out.regressions
+        );
     }
 
     /// A run whose strict pass ran on every file and found nothing.

@@ -16,13 +16,13 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **30 cargo-fuzz targets**
+Ruling 1 makes a fuzz crash a release blocker. **31 cargo-fuzz targets**
 cover every input format: `ascii_filters`, `ccitt`, `cff`, `cff_subset`,
 `cmap`, `content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
 `crypt_ciphers`, `css`, `form_script`, `icc_profile`, `inflate`, `jbig2`,
 `jpeg`, `jpx`, `layout`, `lzw`, `pki_cms`, `pki_der`, `png`, `render_page`,
-`sfnt`, `shape`, `signatures`, `truetype`, `type1`, `xml`, `zip_archive` —
-each landing in the same PR as its parser.
+`sfnt`, `shape`, `shape_text`, `signatures`, `truetype`, `type1`, `xml`,
+`zip_archive` — each landing in the same PR as its parser.
 
 `cff_subset` is the one target that fuzzes a **writer**. Its assertion is
 not "it did not panic": whatever the subsetter emits must parse with this
@@ -33,10 +33,23 @@ subsetter that renumbered subroutine calls wrongly around the 107 / 1131 /
 and no other check in the pipeline would see it — the embed path takes the
 bytes and writes them into a `/FontFile3`. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
-longer. Eleven of the corpora are written by an `#[ignore]`d test in the
+longer. Twelve of the corpora are written by an `#[ignore]`d test in the
 crate that owns the fixtures, so the seeds and the fixtures cannot drift:
-`crypt`, `crypt_ciphers`, `png`, `cff`, `jbig2`, `zip_archive`,
-`render_page`, `pki_der`, `pki_cms`, `shape` and `signatures`.
+`crypt`, `crypt_ciphers`, `png`, `cff`, `icc_profile`, `jbig2`,
+`zip_archive`, `render_page`, `pki_der`, `pki_cms`, `shape` and
+`signatures`.
+
+`icc_profile` joined that list late, and how it was found is the point:
+`fuzz/Cargo.toml`'s targets listed against `fuzz/corpus`'s directories, not
+read off either. It was the **one target with no seeds at all**, so its
+twenty seconds in `fuzz-seeds` went on random bytes — and for a format
+whose first gate is the `acsp` signature at byte 36, random bytes reach the
+parser essentially never. Half its seeds are profiles this build *refuses*,
+deliberately: `NeedsLut` and `MissingTags` are reached after the header
+check, the tag count and the whole `132 + i * 12` table walk, which is
+where that format's arithmetic lives. Each seed states which it is and the
+test asserts it, so a seed that quietly stopped parsing cannot sit in the
+corpus looking like the coverage it no longer is.
 
 This sentence read 24 and omitted `icc_profile` until the signature work
 counted them, so the number was wrong in the direction that flatters — which
@@ -103,7 +116,26 @@ file that rendered in under two seconds did not finish a rewrite in three
 minutes, and "timed out" is also what a 900-page scan says. The limit of the
 signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
-*made no observable progress for half its budget*. The second axis — 973 files
+*made no observable progress for half its budget*.
+
+**The pdf.js pass bar is load-sensitive, and here is which files and why.**
+Measuring the corpus per file: `freeculture.pdf` takes 20 122 ms and
+`tiling-pattern-box.pdf` 20 010 ms against the 20-second limit, and the
+next slowest file in that corpus is 13 138 ms. Two files sit within a
+factor of two of the limit and nothing else is close, so a run competing
+with a build for the machine flips one or both, `passed` falls from 963,
+and the strict and metamorphic rows fall with it because those two files
+drop out of every denominator. It arrived twice looking like an engine that
+had stopped rendering before it was measured rather than assumed.
+
+The bar is not lowered for it — a re-run on an idle machine gives 963 — and
+the timeout is not raised, because a longer limit would hide a real
+slowdown in exactly these two files. What changed is the message:
+`corpus-run --check` still fails, and now says when the whole shortfall is
+accounted for by timeouts, so the next reader is told to re-run rather than
+to go looking for a rendering bug.
+
+The second axis — 973 files
 (21.5 %) rendering *with something reported* — is measured without font faces,
 and there are now two more bars that say what that costs.
 `corpus/ratchet-fonts.json` is the same 4 525 files with a synthesised face

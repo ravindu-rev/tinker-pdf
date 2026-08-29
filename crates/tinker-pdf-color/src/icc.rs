@@ -1017,6 +1017,109 @@ mod tests {
         out
     }
 
+    /// The seeds `fuzz/corpus/icc_profile/` carries, written from the
+    /// fixtures above so the two cannot drift apart.
+    ///
+    /// Run with `--ignored` when a fixture changes; the corpus is committed,
+    /// and a run that rewrites it is a diff to look at rather than to apply
+    /// blindly. The same arrangement `pki_cms`, `pki_der`, `crypt` and `cff`
+    /// use, for the reason those files record: a hand-laid corpus that no
+    /// longer reaches what it was chosen for looks exactly like one that does.
+    ///
+    /// **`icc_profile` was the one target with no seeds at all** — found by
+    /// listing `fuzz/Cargo.toml`'s targets against `fuzz/corpus`'s
+    /// directories rather than by reading either. Its twenty seconds in the
+    /// `fuzz-seeds` job were spent on random bytes, which for a format whose
+    /// first gate is the `acsp` signature at byte 36 means the parser was
+    /// reached essentially never.
+    ///
+    /// # Why half of these are profiles this build refuses
+    ///
+    /// The fuzz target returns the moment `Profile::parse` says no, so a
+    /// refused seed exercises less than an accepted one — but it is not
+    /// nothing, and it is the *interesting* less. `NeedsLut` and
+    /// `MissingTags` are reached **after** the header check, the tag count
+    /// and the whole `132 + i * 12` table walk, which is where this module's
+    /// doc comment says ruling 1 lives. A corpus of only-accepted profiles
+    /// would leave the refusal paths to random mutation.
+    ///
+    /// So each seed states which it is, and the test asserts it. A seed that
+    /// quietly changed from parsing to refusing would otherwise sit in the
+    /// corpus looking like the coverage it no longer is.
+    #[test]
+    #[ignore = "writes into fuzz/corpus/, which is committed"]
+    fn write_the_fuzz_seeds() {
+        /// What this build does with a seed, asserted so it cannot drift.
+        enum Reaches {
+            /// Parses, so the target also drives `Transform`.
+            Transform,
+            /// Refused by name, after the tag table was walked.
+            Refusal(IccError),
+        }
+
+        let seeds: [(&str, Vec<u8>, Reaches); 6] = [
+            // Three-component matrix/TRC, the commonest profile there is.
+            ("srgb-para-curve", srgb_profile(), Reaches::Transform),
+            // The other curve encoding: `curv` with a single gamma word,
+            // which is a different branch of `read_curve` from `para`.
+            ("rgb-gamma-curve", matrix_profile(), Reaches::Transform),
+            // One component, reached through `kTRC` rather than the three
+            // `*XYZ` tags.
+            (
+                "grey-gamma",
+                build(
+                    b"GRAY",
+                    b"XYZ ",
+                    &[(*b"kTRC", gamma(1.8)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
+                ),
+                Reaches::Transform,
+            ),
+            // Four components into Lab through a lookup table: the tag the
+            // parser reaches by a wholly separate path, and the one whose
+            // internal offsets are its own arithmetic. Refused, and refused
+            // *after* all of that has been read.
+            (
+                "cmyk-lut",
+                build(b"CMYK", b"Lab ", &[(*b"A2B0", vec![0; 32])]),
+                Reaches::Refusal(IccError::NeedsLut),
+            ),
+            // A tag table with no entries. Legal, and the boundary of the
+            // `132 + i * 12` arithmetic from below.
+            (
+                "no-tags",
+                build(b"RGB ", b"XYZ ", &[]),
+                Reaches::Refusal(IccError::MissingTags),
+            ),
+            // A tag whose data is empty: an offset in range and a size of
+            // zero, which is the other end of the same arithmetic.
+            (
+                "empty-tag",
+                build(b"RGB ", b"XYZ ", &[(*b"rXYZ", Vec::new())]),
+                Reaches::Refusal(IccError::MissingTags),
+            ),
+        ];
+
+        // Asserted before anything is written, so a drifted fixture leaves
+        // the committed corpus alone rather than half-rewriting it.
+        for (name, bytes, reaches) in &seeds {
+            let got = Profile::parse(bytes);
+            match reaches {
+                Reaches::Transform => assert!(got.is_ok(), "{name}: {got:?}"),
+                Reaches::Refusal(expected) => {
+                    assert_eq!(got.err().as_ref(), Some(expected), "{name}");
+                }
+            }
+        }
+
+        let base =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/icc_profile");
+        std::fs::create_dir_all(&base).expect("the corpus directory is creatable");
+        for (name, bytes, _) in &seeds {
+            std::fs::write(base.join(format!("{name}.icc")), bytes)
+                .unwrap_or_else(|error| panic!("writing {name}: {error}"));
+        }
+    }
+
     fn matrix_profile() -> Vec<u8> {
         build(
             b"RGB ",

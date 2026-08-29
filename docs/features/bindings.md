@@ -36,7 +36,7 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**One hundred and eight functions**, of which fifty-five are the write surface
+**One hundred and ten functions**, of which fifty-five are the write surface
 below and five are the strict validator it leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
 `tpdf_defect_message`, `tpdf_defects_free` — an owned `TpdfDefects` on the
@@ -47,6 +47,24 @@ render: `tpdf_version`,
 `User` or `Owner`) / `_may_print` / `_set_fonts`, `tpdf_page_size` /
 `_text` / `_render`, `tpdf_string_free`, and `tpdf_bitmap_width` /
 `_height` / `_stride` / `_data` / `_free`.
+
+**Two are the streaming seam** (Annex F): `tpdf_document_open_streaming`,
+which takes a `TpdfSourceVtable` of `len` / `read` / `free` plus an opaque
+context, and `tpdf_document_is_streamed`. Function pointers rather than a
+struct carrying data, because a vtable is what every host language already
+knows how to build — `ctypes` in Python,
+`Marshal.GetFunctionPointerForDelegate` in C#, three functions in C.
+
+Two things about it are worth stating here rather than only in the header.
+**The callbacks must be thread-safe**: the engine calls `read` from whatever
+thread is rendering and may call it from several at once, which is the
+`Send + Sync` on `ByteSource` being inherited across the boundary, and
+nothing on either side can check it. And a `read` that refuses gives
+`TpdfStatus::SourceMiss` rather than `NotAPdf`, with the range named in
+`tpdf_last_error_message` — the two demand opposite responses, since a host
+told "not a PDF" stops and a host told this fetches and calls again.
+Collapsing them, which the facade did until this projection needed the
+distinction, makes the seam unusable for the thing it exists for.
 
 Thirty read signatures (12.8). Reading only: the signing side is not
 projected and is not coming here, because a `Signer` is a host callback

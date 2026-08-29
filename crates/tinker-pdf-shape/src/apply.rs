@@ -59,6 +59,9 @@ pub(crate) struct Runner<'a, 'g> {
     pub(crate) limits: Limits,
     pub(crate) warnings: Vec<Warning>,
     ops: u32,
+    /// The feature mask of the lookup currently running. See
+    /// [`Runner::skipper`].
+    mask: u32,
 }
 
 /// Which glyphs a lookup can see.
@@ -66,6 +69,28 @@ pub(crate) struct Runner<'a, 'g> {
 pub(crate) struct Skipper<'a> {
     flags: u16,
     mark_set: Option<Coverage<'a>>,
+    /// Which glyphs the *feature* this lookup came from may touch.
+    ///
+    /// A separate question from the lookup flags, and asked at a different
+    /// place: the flags say what this lookup cannot see, the mask says which
+    /// positions the feature was turned on at. `!0` — every bit — is a lookup
+    /// no feature restricted, which is every lookup in a run that set no
+    /// masks.
+    ///
+    /// It is checked when matching a rule's **input** and not its backtrack
+    /// or lookahead. That asymmetry is the specification's: a chaining rule's
+    /// context is *"the glyphs around this one"*, whatever features they were
+    /// turned on for, while its input is the sequence the feature is being
+    /// applied to. [`Skipper::over_context`] is the second reading.
+    mask: u32,
+    /// The Brahmic cluster this application started in, or `None` where the
+    /// run has no clusters.
+    ///
+    /// A `GSUB` rule may not match outside the syllable it started in; see
+    /// [`crate::buffer::Buffer::set_syllable`] for why, and why `GPOS` is not
+    /// restricted the same way. Like [`Skipper::mask`] it is checked on a
+    /// rule's input and lifted over its context, for the same reason.
+    syllable: Option<u16>,
 }
 
 impl<'a> Skipper<'a> {
@@ -94,6 +119,20 @@ impl<'a> Skipper<'a> {
         }
     }
 
+    /// The same filter with the feature mask lifted, for matching the
+    /// backtrack and lookahead of a chaining rule.
+    ///
+    /// See [`Skipper::mask`] for why the two halves of a rule are matched
+    /// under different rules. The lookup flags are kept exactly as they are:
+    /// a rule that ignores marks ignores them in its context too.
+    const fn over_context(self) -> Self {
+        Self {
+            mask: !0,
+            syllable: None,
+            ..self
+        }
+    }
+
     /// A filter that sees everything but marks.
     ///
     /// Mark-to-base and mark-to-ligature both search backwards for "the glyph
@@ -105,7 +144,34 @@ impl<'a> Skipper<'a> {
         Self {
             flags: IGNORE_MARKS,
             mark_set: None,
+            mask: !0,
+            syllable: None,
         }
+    }
+
+    /// The same filter, applying inside one Brahmic cluster.
+    const fn in_syllable(self, syllable: u16) -> Self {
+        Self {
+            syllable: if syllable == 0 { None } else { Some(syllable) },
+            ..self
+        }
+    }
+
+    /// Whether the feature this lookup came from was turned on at `at`.
+    ///
+    /// Separate from [`Skipper::skips`] because it is asked in one more place
+    /// than skipping is: a lookup starts at a position only if the feature
+    /// reaches it, and a rule matches an input glyph only if the feature
+    /// reaches that too, but a glyph the feature does not reach is **not**
+    /// stepped over — it ends the match, exactly as a glyph of the wrong index
+    /// would.
+    fn reaches(&self, buffer: &Buffer, at: usize) -> bool {
+        let props = buffer.props(at);
+        if props.mask & self.mask == 0 {
+            return false;
+        }
+        self.syllable
+            .is_none_or(|syllable| props.syllable == syllable)
     }
 
     /// Whether this lookup steps over the glyph at `at`.
@@ -163,6 +229,7 @@ impl<'a, 'g> Runner<'a, 'g> {
             limits,
             warnings: Vec::new(),
             ops: 0,
+            mask: !0,
         }
     }
 
@@ -235,7 +302,25 @@ impl<'a, 'g> Runner<'a, 'g> {
         }
     }
 
+    /// The cluster a lookup starting at `at` is confined to, or zero for none.
+    ///
+    /// `GPOS` is never confined; [`crate::buffer::Buffer::set_syllable`] says
+    /// why the two tables differ here.
+    fn per_syllable(&self, buffer: &Buffer, at: usize) -> u16 {
+        match self.table {
+            Table::Gsub => buffer.props(at).syllable,
+            Table::Gpos => 0,
+        }
+    }
+
     /// The filter lookup `index` sees the buffer through.
+    ///
+    /// The feature mask comes off the runner rather than being passed in,
+    /// because a contextual lookup that names another one hands the named
+    /// lookup the *calling feature's* mask: the nested lookup is part of the
+    /// same feature's work, and giving it a mask of its own would mean a
+    /// chaining rule inside `init` could reach a glyph `init` was not turned
+    /// on at.
     fn skipper(&self, lookup: &Lookup<'a>) -> Skipper<'a> {
         let mark_set = lookup
             .mark_filtering_set()
@@ -243,6 +328,11 @@ impl<'a, 'g> Runner<'a, 'g> {
         Skipper {
             flags: lookup.flags(),
             mark_set,
+            mask: self.mask,
+            // Filled in per starting position by `run_forward`, because a
+            // syllable is a property of where a lookup is applied and not of
+            // the lookup.
+            syllable: None,
         }
     }
 
@@ -303,15 +393,16 @@ impl<'a, 'g> Runner<'a, 'g> {
             .map_or(lookup.kind(), |(k, _)| k)
     }
 
-    /// Runs every lookup in `indices`, in the order given.
-    pub(crate) fn run(&mut self, buffer: &mut Buffer, indices: &[u16]) {
+    /// Runs every lookup in `lookups`, in the order given, each restricted to
+    /// the glyphs its own mask reaches.
+    pub(crate) fn run(&mut self, buffer: &mut Buffer, lookups: &[(u16, u32)]) {
         self.classify(buffer);
-        for index in indices {
-            self.run_lookup(buffer, *index);
+        for (index, mask) in lookups {
+            self.run_lookup(buffer, *index, *mask);
         }
     }
 
-    fn run_lookup(&mut self, buffer: &mut Buffer, index: u16) {
+    fn run_lookup(&mut self, buffer: &mut Buffer, index: u16, mask: u32) {
         let Some(lookup) = self.lookups.get(usize::from(index)) else {
             self.warn(Warning::MissingLookup {
                 table: self.table,
@@ -319,6 +410,7 @@ impl<'a, 'g> Runner<'a, 'g> {
             });
             return;
         };
+        self.mask = mask;
         let skipper = self.skipper(&lookup);
         let kind = self.resolved_kind(&lookup, index);
         // Reverse chaining single substitution is the one lookup the
@@ -341,10 +433,14 @@ impl<'a, 'g> Runner<'a, 'g> {
     ) {
         let mut at = 0usize;
         while at < buffer.len() {
-            if skipper.skips(buffer, at) {
+            if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
                 at += 1;
                 continue;
             }
+            // The rule matches inside the cluster it started in. In a run with
+            // no clusters — every Latin, Arabic and Han run — this is `None`
+            // and restricts nothing.
+            let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
             let before = buffer.len();
             match self.apply_at(buffer, lookup, index, skipper, at, 0) {
                 // A subtable that neither consumed a glyph nor shortened the
@@ -368,9 +464,10 @@ impl<'a, 'g> Runner<'a, 'g> {
         let mut at = buffer.len();
         while at > 0 {
             at -= 1;
-            if skipper.skips(buffer, at) {
+            if skipper.skips(buffer, at) || !skipper.reaches(buffer, at) {
                 continue;
             }
+            let skipper = &skipper.in_syllable(self.per_syllable(buffer, at));
             let _ = self.apply_at(buffer, lookup, index, skipper, at, 0);
         }
     }
@@ -483,7 +580,7 @@ impl<'a, 'g> Runner<'a, 'g> {
                 cursor = self.step_forward(buffer, skipper, cursor)?;
             }
             let glyph = buffer.glyph_id(cursor)?;
-            if !wanted(step, glyph) {
+            if !wanted(step, glyph) || !skipper.reaches(buffer, cursor) {
                 return None;
             }
             positions.push(cursor);
@@ -508,6 +605,9 @@ impl<'a, 'g> Runner<'a, 'g> {
             self.warn(Warning::ContextTooLong { table: self.table });
             return None;
         }
+        // A rule's context is the glyphs around its input, whatever features
+        // they were turned on for. See `Skipper::mask`.
+        let skipper = &skipper.over_context();
         let mut positions = Vec::with_capacity(count);
         let mut cursor = at;
         for step in 0..count {
@@ -537,6 +637,9 @@ impl<'a, 'g> Runner<'a, 'g> {
             self.warn(Warning::ContextTooLong { table: self.table });
             return None;
         }
+        // As in `match_backtrack`: the context is matched with the feature
+        // mask lifted, and only the input sequence is restricted by it.
+        let skipper = &skipper.over_context();
         let mut positions = Vec::with_capacity(count);
         // `from` is one past the last matched glyph, so the first lookahead
         // candidate is `from` itself — but it may be a glyph this lookup
