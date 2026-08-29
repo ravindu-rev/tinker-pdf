@@ -366,7 +366,8 @@ script property need. It is a **second** tree rather than a share of
 depends on the other, and a build script cannot read across a crate boundary.
 The cost of the duplication is version skew, which
 `tests/ucd_version.rs` asserts away by comparing the two trees' headers — the
-mitigation `docs/design/shaping.md`'s risk table names.
+mitigation `docs/design/shaping.md`'s risk table names. One file has no header
+to compare and is pinned another way; its row below says which.
 
 | File | What it is |
 | --- | --- |
@@ -377,6 +378,7 @@ mitigation `docs/design/shaping.md`'s risk table names.
 | `extracted/DerivedJoiningType.txt`, here as `DerivedJoiningType.txt` | `Joining_Type`, which the Arabic cursive-joining state machine is written in. The derived file rather than `ArabicShaping.txt` because it lists the 386 `Transparent` ranges outright instead of leaving them to be re-derived from `General_Category`; `build.rs` says so at length |
 | `PropertyValueAliases.txt` | Each script's ISO 15924 code, which an OpenType script tag is derived from, and the long-to-short `Bidi_Class` names the `@missing` lines use |
 | `IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt` | What a Brahmic character *is* and which side of its base it is drawn on. The Universal Shaping Engine's cluster model is written in the two together, and neither is enough alone: the pair is what tells a pre-base vowel, which has to be moved in front of its consonant, from an above-base one, which does not |
+| `UnicodeData.txt` | `Canonical_Decomposition_Mapping`, field 5, which the cluster model needs before it can reorder: a two-part vowel such as `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is drawn on *both* sides of its consonant, and its left half only becomes something that can be moved once the character is `U+1B3E` and `U+1B35`. The UCD publishes no extracted file for it, and this is the one data file it publishes with **no version header** — so `tests/ucd_version.rs` pins it by a repertoire cross-check against `Scripts.txt` rather than by comparing headers, and says which direction of drift that catches |
 | `BidiTest.txt` | **A conformance oracle.** Every combination of `Bidi_Class` values up to length four: 490 846 data lines, 770 241 resolutions |
 | `BidiCharacterTest.txt` | **The other one.** 91 707 cases of real code points, and the only one of the two that reaches bracket pairs |
 
