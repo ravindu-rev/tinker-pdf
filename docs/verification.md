@@ -33,10 +33,23 @@ subsetter that renumbered subroutine calls wrongly around the 107 / 1131 /
 and no other check in the pipeline would see it — the embed path takes the
 bytes and writes them into a `/FontFile3`. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
-longer. Eleven of the corpora are written by an `#[ignore]`d test in the
+longer. Twelve of the corpora are written by an `#[ignore]`d test in the
 crate that owns the fixtures, so the seeds and the fixtures cannot drift:
-`crypt`, `crypt_ciphers`, `png`, `cff`, `jbig2`, `zip_archive`,
-`render_page`, `pki_der`, `pki_cms`, `shape` and `signatures`.
+`crypt`, `crypt_ciphers`, `png`, `cff`, `icc_profile`, `jbig2`,
+`zip_archive`, `render_page`, `pki_der`, `pki_cms`, `shape` and
+`signatures`.
+
+`icc_profile` joined that list late, and how it was found is the point:
+`fuzz/Cargo.toml`'s targets listed against `fuzz/corpus`'s directories, not
+read off either. It was the **one target with no seeds at all**, so its
+twenty seconds in `fuzz-seeds` went on random bytes — and for a format
+whose first gate is the `acsp` signature at byte 36, random bytes reach the
+parser essentially never. Half its seeds are profiles this build *refuses*,
+deliberately: `NeedsLut` and `MissingTags` are reached after the header
+check, the tag count and the whole `132 + i * 12` table walk, which is
+where that format's arithmetic lives. Each seed states which it is and the
+test asserts it, so a seed that quietly stopped parsing cannot sit in the
+corpus looking like the coverage it no longer is.
 
 This sentence read 24 and omitted `icc_profile` until the signature work
 counted them, so the number was wrong in the direction that flatters — which
