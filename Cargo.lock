@@ -553,6 +553,7 @@ dependencies = [
  "tinker-pdf-pki",
  "tinker-pdf-raster",
  "tinker-pdf-render",
+ "tinker-pdf-shape",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
 ]

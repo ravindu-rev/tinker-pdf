@@ -50,6 +50,7 @@ tinker-pdf-xml = { workspace = true }
 # not already allow and the fifth and sixth amendments already argue.
 tinker-pdf-css = { workspace = true }
 tinker-pdf-layout = { workspace = true }
+tinker-pdf-shape = { workspace = true }
 # Signatures milestone 3: `tests/cms_census.rs` reads the CMS blob out of every
 # signed document in the fetched corpora and parses it, which is the only way
 # to find out what real producers emit rather than what the specification says
