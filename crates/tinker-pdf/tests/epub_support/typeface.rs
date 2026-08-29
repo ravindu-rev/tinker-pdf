@@ -101,6 +101,16 @@ pub struct Face {
     /// three the `cmap` alone would give, so a test can tell a shaped run from
     /// an unshaped one by glyph index and not by eye.
     pub joining: Option<Joining>,
+    /// The advance of every glyph a `GSUB` substitution produces, where it
+    /// differs from [`Face::advance`].
+    ///
+    /// `None` is a face whose every glyph is the same width, which is what
+    /// every fixture wanted before shaping existed. `Some` is what makes the
+    /// **shaped** measurement of a run distinguishable from the
+    /// character-at-a-time one: with one advance throughout, a build that
+    /// measured a joined word by summing its unjoined letters gets the right
+    /// answer by arithmetic and nothing can see the mistake.
+    pub joined_advance: Option<u16>,
 }
 
 /// A face whose letters take a different form by position.
@@ -184,6 +194,7 @@ impl Face {
             descender: -200,
             ligature: None,
             joining: None,
+            joined_advance: None,
         }
     }
 
@@ -191,6 +202,13 @@ impl Face {
     #[must_use]
     pub fn with_ligature(mut self, ligature: Ligature) -> Face {
         self.ligature = Some(ligature);
+        self
+    }
+
+    /// The same face, whose substituted glyphs are `advance` units wide.
+    #[must_use]
+    pub fn with_joined_advance(mut self, advance: u16) -> Face {
+        self.joined_advance = Some(advance);
         self
     }
 
@@ -342,9 +360,19 @@ fn build(face: &Face) -> Vec<u8> {
     //
     // A full entry per glyph, `.notdef` included: `numberOfHMetrics` equals the
     // glyph count, so nothing here depends on the trailing side-bearing form.
+    //
+    // A joining face may give its substituted forms a **different** advance,
+    // and that is the only way a test can tell the shaped measurement from the
+    // per-character one: with every glyph the same width the two agree by
+    // arithmetic and a build that measured the wrong one would pass.
+    let joined_from = order.len() + 1 + usize::from(face.ligature.is_some());
     let mut hmtx = Vec::with_capacity(glyph_count * 4);
-    for _ in 0..glyph_count {
-        hmtx.extend_from_slice(&face.advance.to_be_bytes());
+    for glyph in 0..glyph_count {
+        let advance = match face.joined_advance {
+            Some(joined) if glyph >= joined_from => joined,
+            _ => face.advance,
+        };
+        hmtx.extend_from_slice(&advance.to_be_bytes());
         hmtx.extend_from_slice(&0i16.to_be_bytes()); // leftSideBearing
     }
 

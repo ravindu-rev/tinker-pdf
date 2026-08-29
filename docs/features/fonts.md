@@ -315,12 +315,30 @@ Landed so far:
   `WarningKind::FieldCharacterUnrepresentable`, against the field's own
   object — see [forms.md](forms.md).
 
-One consumer is **not** here, and it is not claimed:
+- **A paginated Arabic book.** `epub/paint.rs` resolved fallback per character
+  and then asked that character's face for a glyph, so an Arabic paragraph was
+  *measured* through the shaper and *drawn* as isolated letters in the order
+  they were typed — two measurement paths disagreeing, which is what
+  `metrics.rs` warns about. Drawing now walks the same segments measurement
+  does (`paint::face_runs`, `css-fonts-4` §5.3 resolved **before** shaping,
+  because a glyph index means nothing outside its own face), and an embedded
+  face's segment is shaped whole. `crates/tinker-pdf/tests/epub_shaped.rs`
+  pins it: joined forms, the line drawn from its last letter, a render
+  fingerprint, and a page-level assertion that the line was measured the way
+  it is drawn. `epub_reftest.rs` gains the EPUB tier's right-to-left pair.
 
-- Milestone 6's EPUB half. The `Shaper` seam exists and `BookMetrics` fills it,
-  but there is no Arabic EPUB fixture, no render fingerprint over one and no
-  RTL reftest pair. What is asserted today is the seam and the one-path rule,
-  not a paginated Arabic book.
+  Two limits, named rather than implied:
+
+  - **Reordering is per face segment.** A right-to-left line whose characters
+    need two faces is drawn as two left-to-right pieces, because fallback cuts
+    the run before UAX #9's rule L2 is applied to it. Closing it means
+    resolving levels above the segmentation, which `flow.rs` does not do at
+    all today.
+  - **`GPOS` offsets are not carried onto the page.**
+    `PageBuilder::glyphs` writes one hex string at one origin, so a mark sits
+    where its advance puts it rather than where its anchor does. The
+    positioned form exists — `DocumentBuilder::glyph_run`, which milestone 7
+    writes through — and the EPUB painter does not use it yet.
 
 **What no shaping engine here adjudicates.** Ruling 13 rules out running
 another shaper and diffing, so the claim for a script is exactly as strong as
