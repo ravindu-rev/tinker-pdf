@@ -580,12 +580,14 @@ pub const STAGED: &[StagedRule] = &[
                    output intent, and neither is in this group",
     },
     StagedRule {
-        clause: "6.4",
-        rule: "transparency in part 1, and interactive form field \
-                appearances in parts 2 to 4",
-        because: "part 1's transparency prohibition needs the graphics \
-                   state, and the form rules need the appearance streams \
-                   the annotation group will bring. Both are milestone 5",
+        clause: "6.9",
+        rule: "interactive form field appearances in parts 2 to 4",
+        because: "half of this row landed at milestone 5 and the half that \
+                   did not is what is left. Part 1's transparency \
+                   prohibition ran the moment the colour group could see a \
+                   graphics state; the form rules still need the appearance \
+                   streams the annotation group will bring, and there is no \
+                   annotation group",
     },
     StagedRule {
         clause: "6.5",
