@@ -112,6 +112,49 @@ for warning in &text.warnings {
 }
 ```
 
+### The structured view (14.7, 14.8)
+
+A tagged document says its own reading order, and that order is often not
+the geometric one. `Document::structure()` returns the tree — `None` for
+the majority of documents, which carry none, and **nothing is inferred for
+them**: a tree guessed from geometry would be this engine's opinion about
+reading order presented as the file's own statement of it.
+
+```rust
+let Some(tree) = doc.structure() else { return };      // untagged
+let page = &doc.pages()[0];
+let structured = tree.text_for_page(0, &page.text());  // the SAME TextPage
+println!("{}", structured.plain_text());               // in structure order
+println!("{} claimed, {} orphaned, {} unmarked",
+    structured.matched, structured.orphans, structured.unmarked);
+```
+
+Three properties are worth stating because each was a decision:
+
+- **It is a join, never a second extractor.** `text_for_page` takes the
+  `TextPage` `page.text()` already produced. Two extractors would be two
+  answers about one page, and the first bug would be a caller finding text
+  in one that the other does not have.
+- **Nodes are runs, not elements.** An element's content and its child
+  elements interleave — `/P [ 3 /Span[4] 5 ]` reads 3, then 4, then 5 —
+  so one node per element would have to report 3 and 5 together and put 4
+  after them. That is a reordering in the middle of a sentence, and it
+  reads as a layout opinion rather than as a bug.
+- **Orphans are counted, not appended.** A character carrying an `/MCID`
+  no element claims is reported as a number, not silently added to the end
+  where it would look like reading order.
+
+Element types are kept **twice** — `raw_type` as the file wrote it and
+`standard_type` after `/RoleMap` — because a consumer that wants to know a
+paragraph is a paragraph and one that wants the file's own vocabulary are
+both real, and keeping one name loses the other. An unmapped custom type
+resolves to itself (ruling 2).
+
+On the write side, `PageBuilder::tagged(tag, |page| …)` draws inside a
+marked-content sequence and records the element that claims it, so the tree
+is correct by construction: there is no way to name a marked-content id
+that was never written, and none to write one no element claims.
+
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the
 interpreter and `TextDevice` live in `tinker-pdf-content` and are
@@ -126,7 +169,10 @@ architecture rather than public API; see [architecture](../architecture.md).
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping — Arabic joining, ligature substitution, bidi reordering | — | `TextLine::rtl` reports the dominant direction and reorders nothing; shaping is staged as its own work | [ROADMAP](../ROADMAP.md) |
-| Tagged-PDF structure-based reading order (14.7, 14.8) | — | lines and blocks are ordered geometrically; no structure tree is read anywhere | [ROADMAP](../ROADMAP.md) |
+| Reading order for an **untagged** document | — | `plain_text()` orders lines and blocks geometrically and always has; a structure tree is read when the document carries one, and never invented when it does not | 14.8 |
+| `/MCR /Stm` and `/StmOwn` — a marked-content reference naming a stream other than the page's | — | `/MCID` and `/Pg` are read and these are not, so two form XObjects on one page with overlapping ids would collide; six orphans across 717 tagged corpus files says it is not biting, which is not the same as shown safe | 14.7.4.2 |
+| `/ActualText` on a property list carrying no `/MCID` | — | the map is `/MCID`-keyed, so it reaches no consumer | 14.9.4 |
+| `/Alt`, `/ActualText`, `/E` and `/Lang` on **written** structure elements | — | `PageBuilder::tagged` writes the type and the content, not the 14.9 properties; an empty element is therefore dropped rather than kept, since an empty `Figure` carrying `/Alt` is the case that would want one | 14.9 |
 
 The rendering side of a hidden layer is reported too —
 `RenderWarning::HiddenOptionalContent { layer }` names which layer was not
