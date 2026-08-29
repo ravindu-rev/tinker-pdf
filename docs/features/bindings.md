@@ -36,8 +36,12 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**One hundred and three functions**, of which fifty-five are the write
-surface below. Eighteen open and render: `tpdf_version`,
+**One hundred and eight functions**, of which fifty-five are the write surface
+below and five are the strict validator it leans on
+(`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
+`tpdf_defect_message`, `tpdf_defects_free` — an owned `TpdfDefects` on the
+`TpdfSignatures` pattern, so it outlives the document). Eighteen open and
+render: `tpdf_version`,
 `tpdf_last_error_message`, `tpdf_document_open` / `_free` / `_page_count` /
 `_is_encrypted` / `_authenticate` (returning a `TpdfAuthLevel` of `None`,
 `User` or `Owner`) / `_may_print` / `_set_fonts`, `tpdf_page_size` /
