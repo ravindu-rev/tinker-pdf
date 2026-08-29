@@ -993,18 +993,31 @@ impl CosDocument {
             let keyword = view
                 .window(back, params.main_table_at.saturating_sub(back) + 16)
                 .and_then(|w| rfind_from(w.bytes(), b"xref", 0).map(|at| w.abs(at as u64)));
-            let starts: Vec<u64> = keyword
+            let mut starts: Vec<u64> = keyword
                 .into_iter()
                 .chain(std::iter::once(params.main_table_at))
-                .chain(xref::startxref(&self.buffer.view(), &mut sink))
                 .collect();
-            for start in starts {
+            let mut found = false;
+            for start in starts.drain(..) {
                 let built = xref::build(self.buffer.view(), start, 0, &self.names, &mut sink);
                 if built.sections > 0 {
                     for (num, entry) in built.table.iter() {
                         merged.insert_new(num, entry);
                     }
+                    found = true;
                     break;
+                }
+            }
+            // `startxref` is the last resort and is asked for only when the
+            // two candidates derived from `/T` came to nothing -- computing it
+            // eagerly would read the tail even on the path that did not need
+            // it, which is a byte budget telling a lie about itself.
+            if !found {
+                if let Some(start) = xref::startxref(&self.buffer.view(), &mut sink) {
+                    let built = xref::build(self.buffer.view(), start, 0, &self.names, &mut sink);
+                    for (num, entry) in built.table.iter() {
+                        merged.insert_new(num, entry);
+                    }
                 }
             }
         }
