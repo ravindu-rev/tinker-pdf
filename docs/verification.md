@@ -16,12 +16,13 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **29 cargo-fuzz targets**
+Ruling 1 makes a fuzz crash a release blocker. **30 cargo-fuzz targets**
 cover every input format: `ascii_filters`, `ccitt`, `cff`, `cmap`,
 `content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
 `crypt_ciphers`, `css`, `form_script`, `icc_profile`, `inflate`, `jbig2`,
 `jpeg`, `jpx`, `layout`, `lzw`, `pki_cms`, `pki_der`, `png`, `render_page`,
-`sfnt`, `shape`, `signatures`, `truetype`, `type1`, `xml`, `zip_archive` —
+`sfnt`, `shape`, `shape_text`, `signatures`, `truetype`, `type1`, `xml`,
+`zip_archive` —
 each landing in the same PR as its parser. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
 longer. Eleven of the corpora are written by an `#[ignore]`d test in the
