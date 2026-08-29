@@ -32,6 +32,19 @@
 # the package document's `dc:identifier` on every run.
 *.epub binary
 
+# The comic corpus (tier 4). Four container formats holding one set of pages,
+# named for the ZIP reason above and one that is sharper for two of them: a
+# `.cbz` written by 7-Zip or WinRAR **stores** most of its entries, so there is
+# more raw picture sitting outside a compressed stream here than anywhere else
+# in the tree, and a normalised line ending in any of it breaks a CRC-32 with
+# no way back. The RAR, 7z and tar are refused by this build today and are
+# committed so that the decoders which read them have something to be held to;
+# a fixture nobody can read yet is exactly the one nothing else would protect.
+*.cbz binary
+*.cbr binary
+*.cb7 binary
+*.cbt binary
+
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.
 fuzz/corpus/** binary

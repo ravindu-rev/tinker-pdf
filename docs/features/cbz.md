@@ -84,9 +84,26 @@ page is built on what that page has undertaken to contribute — because the
 archive's own caps bound the image data and nothing else bounds the object
 graph.
 
-**The honest caveat.** Every committed fixture is hand-built from APPNOTE's
-field layouts; no `.cbz` written by a real archiver has ever been opened by
-this engine. That is recorded as owed in the [roadmap](../ROADMAP.md).
+**Archives real archivers wrote.** Gap 29 closed owing this, and it is owed no
+longer: `crates/tinker-pdf/tests/cbz/` holds five `.cbz` from four independent
+ZIP implementations — 7-Zip 26.02 at two compression levels, WinRAR 7.20, .NET's
+`System.IO.Compression` and CPython 3.12's `zipfile` — over pages this
+repository wrote from the PNG and JPEG specifications. The hand-built fixtures
+stay exactly where they are: the two corpora answer different questions, and
+the census in that directory's README says which. **Real archivers tripped no
+warning at all** and took the central-directory route every time, so the
+leniency ladder's value still rests entirely on the fixtures built to exercise
+it — including the streamed-entry path of APPNOTE 4.3.9, which **no real
+producer here emits** and which is stated as a remaining gap rather than left
+to be inferred.
+
+Two things the first real archives found. **A real archive mixes methods per
+entry** — 7-Zip and WinRAR both stored three pages and deflated two, deciding
+per entry — where every hand-built fixture used one method throughout. And
+**.NET and CPython deflate unconditionally, producing three entries larger than
+their originals**, so `compressed_size > uncompressed_size` is ordinary rather
+than a corruption signal; a reader that treated it as one would refuse most
+comics Windows software makes.
 
 ## API
 
@@ -160,6 +177,20 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   replaces the qpdf oracle retired with ruling 9, and **what left with that
   oracle is that a reader nobody here wrote accepts the file**
   ([verification](../verification.md)).
+- `crates/tinker-pdf/tests/cbz_real.rs` — the five archives real archivers
+  wrote, described in `tests/cbz/README.md`. Every row of `INVENTORY.tsv` is
+  recomputed through `tinker-pdf-zip` on every `cargo test`, so .NET's reader
+  and this one must agree about all 25 entries — and they reach the answer
+  differently, since .NET exposes no method code and infers it from the two
+  lengths where this reader has the central directory's own field. The
+  assertion worth having is `five_zip_writers_produce_the_same_five_pictures`:
+  five implementations sharing no code, disagreeing about what to store and
+  what to deflate, must give this reader the same five pictures at the same
+  sizes. It is a relation between two reads rather than an oracle — nothing
+  outside this repository renders any of it ([verification](../verification.md)).
+  The `.cb7`, `.cbt` and `.cbr` beside them hold the *same five pages* and are
+  held to `ArchiveRefusal::NotAZip`, so a decoder that arrives later has
+  something to be compared against that was put there before it existed.
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 17 unit tests over
   ordering and classification.

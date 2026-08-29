@@ -15,16 +15,17 @@
 //!
 //! # Why the allow
 //!
-//! Two test binaries include this module — `cbz.rs` and `cbz_validated.rs` — and
-//! each compiles its own copy. Every item here is used by at least one of them
-//! and none is used by both, so whichever binary does not use a given fixture
-//! reports it dead. The alternative is splitting the file along a seam that
+//! Three test binaries include this module — `cbz.rs`, `cbz_validated.rs` and
+//! `cbz_real.rs` — and each compiles its own copy. Every item here is used by at
+//! least one of them and none is used by all three, so whichever binary does not
+//! use a given fixture reports it dead. `cbz_real.rs` uses only the picture
+//! writers, because the archives it reads were packed by somebody else. The alternative is splitting the file along a seam that
 //! exists only to satisfy the lint, which would put the ZIP writer and the PDF
 //! writer in different places for no reason a reader would recognise.
 
 #![allow(
     dead_code,
-    reason = "shared by two test binaries; each uses a different subset"
+    reason = "shared by three test binaries; each uses a different subset"
 )]
 
 use tinker_pdf_filters::{crc32, deflate, zlib_compress};
