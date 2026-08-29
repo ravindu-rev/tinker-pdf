@@ -52,9 +52,9 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::edit::{DocumentEditor, FillRejection, SkippedWidget};
 use crate::fill;
-use crate::form::{self, Script};
+use crate::form::{self, Script, ScriptBudget};
 use crate::limits;
-use crate::script::{self, Budget, Host, ScriptError, ScriptPolicy, Trigger};
+use crate::script::{self, Budget, Host, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 
 /// Why a recalculation produced nothing.
 ///
@@ -79,6 +79,18 @@ pub enum CalcError {
     TooManyFields(usize),
     /// [`formatted_value`] was asked about a field the form does not have.
     NoSuchField,
+    /// A document-level script (7.7.4) would not read as a name table of
+    /// function definitions. Names the tree key it came under and why.
+    ///
+    /// Refuses the pass, for the reason an unrunnable field script does: a
+    /// calculation running against a half-built table of helpers is a form
+    /// whose totals disagree with its own definitions.
+    DocumentScript {
+        /// The `/Names /JavaScript` key.
+        name: String,
+        /// Why it would not read.
+        reason: ScriptError,
+    },
     /// The [`ScriptPolicy`] this pass ran under does not allow that trigger
     /// class, and there was a script of that class to run.
     ///
@@ -106,6 +118,9 @@ impl core::fmt::Display for CalcError {
             CalcError::NoSuchField => f.write_str("no such field"),
             CalcError::Refused { trigger, subject } => {
                 write!(f, "{subject}: the policy does not run {trigger} scripts")
+            }
+            CalcError::DocumentScript { name, reason } => {
+                write!(f, "document-level script {name}: {reason}")
             }
         }
     }
@@ -208,6 +223,55 @@ impl Host for StagedHost<'_> {
     }
 }
 
+/// The helpers a pass may call, read out of `/Names /JavaScript` (7.7.4).
+///
+/// **This is the door a real calculating form was failing at.** A generated
+/// form keeps its arithmetic in document-level functions and its `/AA /C`
+/// scripts call them, so the interpreter met the first call, raised
+/// [`ScriptError::UnknownName`] and refused the whole pass — a correctly
+/// authored file this build could not compute.
+///
+/// Denying [`Trigger::Document`] gives an empty table rather than a refusal,
+/// and that distinction is deliberate. A document-level script is not
+/// something the pass is *asked* to run; it is a resource the pass may
+/// consult. Refusing here would make every form that carries a
+/// `/Names /JavaScript` block uncomputable under the default policy, which is
+/// most of them — so under the default the table is empty and a call to a
+/// helper is the `UnknownName` it always was.
+///
+/// The budget is the field walk's own, continued: one read of a document,
+/// one [`ScriptBudget`].
+fn helpers(
+    editor: &DocumentEditor,
+    policy: ScriptPolicy,
+    budget: &mut ScriptBudget,
+) -> Result<ScriptScope, CalcError> {
+    let mut scope = ScriptScope::empty();
+    if !policy.allows(Trigger::Document) {
+        return Ok(scope);
+    }
+    for entry in form::document_scripts_within(editor.document(), budget) {
+        let source = match &entry.script {
+            Script::Source(text) => text.as_str(),
+            // A script too big to read is a table this build will not build
+            // part of.
+            Script::Oversize(_) => {
+                return Err(CalcError::DocumentScript {
+                    name: entry.name.clone(),
+                    reason: ScriptError::TooLong,
+                })
+            }
+        };
+        scope
+            .define(source)
+            .map_err(|reason| CalcError::DocumentScript {
+                name: entry.name.clone(),
+                reason,
+            })?;
+    }
+    Ok(scope)
+}
+
 /// The fields whose calculate action runs, in the order it runs them.
 fn sequence(fields: &[form::Field], order: &[crate::object::ObjRef]) -> Vec<usize> {
     let mut out = Vec::new();
@@ -261,7 +325,11 @@ pub fn recalculate_under(
     editor: &mut DocumentEditor,
     policy: ScriptPolicy,
 ) -> Result<Recalculation, CalcError> {
-    let fields = editor.fields();
+    // One read of the document: the field tree's `/AA` and, if the policy
+    // allows it, `/Names /JavaScript` share this budget rather than starting
+    // from the total apiece.
+    let mut bytes = ScriptBudget::new();
+    let fields = editor.fields_within(&mut bytes);
     let order = form::calculation_order(editor.document());
     let sequence = sequence(&fields, &order);
     if sequence.len() > limits::MAX_CALC_FIELDS {
@@ -283,6 +351,8 @@ pub fn recalculate_under(
             subject,
         });
     }
+
+    let scope = helpers(editor, policy, &mut bytes)?;
 
     let mut host = StagedHost::new(&fields, true);
     // One budget for the whole pass: MAX_SCRIPT_STEPS bounds a script, and
@@ -312,11 +382,18 @@ pub fn recalculate_under(
         // budget of zero, whose first step fails.
         let left = limits::MAX_CALC_STEPS.saturating_sub(budget.used());
         let mut script_budget = Budget::new(limits::MAX_SCRIPT_STEPS.min(left));
-        let outcome = script::run(source, &field.name, &current, &mut host, &mut script_budget)
-            .map_err(|reason| CalcError::Script {
-                field: field.name.clone(),
-                reason,
-            })?;
+        let outcome = script::run_in(
+            source,
+            &field.name,
+            &current,
+            &mut host,
+            &mut script_budget,
+            &scope,
+        )
+        .map_err(|reason| CalcError::Script {
+            field: field.name.clone(),
+            reason,
+        })?;
         // A thousand scripts each inside their own cap are still a thousand
         // scripts, so what one spent counts against the pass.
         budget
@@ -405,7 +482,8 @@ pub fn formatted_value_under(
     name: &str,
     policy: ScriptPolicy,
 ) -> Result<Option<String>, CalcError> {
-    let fields = editor.fields();
+    let mut bytes = ScriptBudget::new();
+    let fields = editor.fields_within(&mut bytes);
     let Some(field) = fields.iter().find(|f| f.name == name) else {
         return Err(CalcError::NoSuchField);
     };
@@ -426,15 +504,24 @@ pub fn formatted_value_under(
         });
     }
 
+    // A format action calls the same document-level helpers a calculate
+    // action does, and gates on the same trigger.
+    let scope = helpers(editor, policy, &mut bytes)?;
+
     let mut host = StagedHost::new(&fields, false);
     let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
     let current = field.value.as_text();
-    let outcome =
-        script::run(source, &field.name, &current, &mut host, &mut budget).map_err(|reason| {
-            CalcError::Script {
-                field: field.name.clone(),
-                reason,
-            }
-        })?;
+    let outcome = script::run_in(
+        source,
+        &field.name,
+        &current,
+        &mut host,
+        &mut budget,
+        &scope,
+    )
+    .map_err(|reason| CalcError::Script {
+        field: field.name.clone(),
+        reason,
+    })?;
     Ok(outcome.value)
 }

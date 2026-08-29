@@ -139,7 +139,8 @@ hand-rolled ECMAScript subset (`crates/tinker-pdf-cos/src/script.rs`) that is PD
 a two-method `Host`: numbers, strings, arithmetic, comparison, logical and
 conditional operators, `if`/`else`, `var`, `while` and C-style `for`,
 blocks, `return`, arrays, member access, indexing, calls, the `event`
-object, `getField`, and the Acrobat helpers `AFSimple_Calculate`,
+object, `getField`, calls to the document's own helpers (7.7.4, under policy), and
+the Acrobat helpers `AFSimple_Calculate`,
 `AFNumber_Format`, `AFPercent_Format`, `AFDate_Format` and
 `AFSpecial_Format` (12.6.4.16 Table 217; `/JS` is read in both its string
 and stream forms, 7.3.8). Every write a script makes lands in a staging map
@@ -178,6 +179,38 @@ it would make reading a document mutate it and the same document read twice
 answer differently. One thing the shape of the defect says out loud: the
 catalog could never have tripled the total on its own, because 12.6.3
 Table 200 defines five triggers and 64 KiB each is a 320 KiB ceiling.
+
+**A form's own helpers now resolve** (7.7.4). `/Names /JavaScript` is where
+a generated form keeps the functions its `/AA /C` scripts call, and until
+`ScriptScope` existed the interpreter met the first call to one, raised
+`ScriptError::UnknownName` and refused the whole pass — a correctly authored
+file this build could not compute at all. Under a policy that allows
+`Trigger::Document`, every document-level source is read into a **name table
+of function definitions and nothing else**, and the table is consulted after
+every builtin, so a document cannot redefine `getField` by declaring a
+function of that name. Anything at document scope that is not a definition is
+`ScriptError::NotADefinition`, named and refusing rather than skipped: a
+skipped statement builds a table silently missing whatever it would have
+defined.
+
+Definition is document scope's production alone. `function` stays reserved
+everywhere a *field* script is parsed, so a calculate action gained the
+ability to **call** a helper and never to declare one — one place declares,
+and it is the one the policy gates. A helper's body is read by the same
+statement productions a calculate action's is, so nothing the subset excludes
+can arrive through one. Recursion is refused by name
+(`ScriptError::Recursion`) rather than bounded by a counter, direct or
+mutual; a chain is therefore at most as long as the table has distinct
+functions, which `MAX_SCRIPT_FUNCTIONS` caps at 256. Work is the pass's own
+budget: a helper that does not terminate cheaply stops the pass. Each call
+gets a fresh frame holding its parameters, so a helper can neither read nor
+overwrite its caller's locals; missing arguments are `undefined` and extra
+ones are dropped.
+
+Denying `Trigger::Document` gives an **empty table**, not a refusal, and the
+distinction is deliberate: a document-level script is not something the pass
+is asked to run but a resource it may consult, and refusing would make every
+form carrying a `/Names /JavaScript` block uncomputable under the default.
 
 **Which scripts run is a policy, and it is a type.** `ScriptPolicy` names
 the six trigger classes a document's scripts arrive under — `Calculate`
@@ -252,7 +285,10 @@ let bytes = editor.save(&WriteOptions::default());
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| `eval`, `function`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | — |
+| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | — |
+| Anything at document scope that is not a function definition | `ScriptError::NotADefinition`, naming the `/Names /JavaScript` key through `CalcError::DocumentScript` | a skipped statement builds a name table silently missing what it would have defined | — |
+| A document-level helper that calls itself, directly or through another | `ScriptError::Recursion` | a depth cap makes the answer depend on a number nobody can predict from the file — the cascade rule's argument | — |
+| More than 256 document-level functions | `ScriptError::TooManyFunctions` | a name table is a lookup scanned per unknown name, so a document-controlled count of them is document-controlled work | — |
 | `app.*` and `console.*` | inert stubs; assigning a stub's result to a field is `ScriptError::NotStorable` | a stub's result must never become a field value | — |
 | A name or member outside the subset | `ScriptError::UnknownName` / `ScriptError::UnknownMember` | a calculation that guesses is a form that lies | — |
 | A script that does not terminate cheaply, or outgrows the size caps | `ScriptError::OutOfSteps` / `TooDeep` / `TooManyTokens` / `StringTooLong` / `ArrayTooLong` / `TooManyVars` | three independent bounds — depth, work, size — because none substitutes for another | — |
@@ -276,9 +312,10 @@ merged widgets, qualified names, on-state discovery, cyclic trees, script
 surfacing including the stream form and the oversize refusal), 18 in
 `fill.rs` (the `/DA` split, quadding, multiline, auto-size shrink, comb
 cells and their overflow, escaping, UTF-16BE values, `/MaxLen` and
-ReadOnly refusals), and 40 in `script.rs` (arithmetic through the AF
-helpers, each excluded construct refused by name, the inert `app.*`
-stubs).
+ReadOnly refusals), and 53 in `script.rs` (arithmetic through the AF
+helpers, each excluded construct refused by name, the inert `app.*` stubs,
+the policy defaults, and the document-level name table — arity, frames,
+recursion, the function cap and a hostile document scope that never panics).
 
 `crates/tinker-pdf-cos/tests/form_transactions.rs` (15 tests) holds up the
 atomicity claims against hand-written fixtures: a successful fill produces
@@ -313,6 +350,18 @@ spent once between them, that the eight name-tree entries and five catalog
 triggers past the line come back named, and that each bare entry point is
 still one read of its own. Its header records what the catalog cannot hold
 and why.
+
+`crates/tinker-pdf-cos/tests/form_document_scripts.rs` (13 tests) is the
+milestone that made real calculating forms computable: one test asserts both
+that a form computes through its own helpers under the trigger **and** that
+it fails with `UnknownName` without it, because "it works now" and "it did
+not work before" are two claims and only the pair is evidence. Recursion
+direct and mutual, a helper that outruns the step budget, a statement at
+document scope, a field script that tries to declare a function, a helper
+that tries to take a builtin's name, and the catalog trigger changing no
+answer anywhere are each asserted by name. Its header carries the same six
+flips: `document` fires 3 of 13 here, where `form_calculations.rs` reports a
+zero.
 
 `form_script` is one of the 24 fuzz targets, with a committed seed corpus:
 it drives the lexer, parser and evaluator with arbitrary text against a

@@ -111,6 +111,26 @@ pub enum ScriptError {
     ArrayTooLong,
     /// More variables than [`limits::MAX_SCRIPT_VARS`].
     TooManyVars,
+    /// Something at document scope that is not a function definition
+    /// (7.7.4).
+    ///
+    /// `/Names /JavaScript` is read for the helpers a form's field scripts
+    /// call, and nothing else in it is taken. A `var`, an assignment or a
+    /// bare call there is program text that would run at open time against a
+    /// document this engine is reading rather than displaying, so it is
+    /// named and refused rather than skipped — skipping it would build a
+    /// name table that is silently missing whatever the statement would have
+    /// defined.
+    NotADefinition,
+    /// A function that calls itself, directly or through another.
+    ///
+    /// Refused by name rather than bounded by a depth cap. A cap makes the
+    /// answer depend on a number nobody can predict from the file, which is
+    /// the same argument that made the cascade rule one pass rather than
+    /// bounded re-entry.
+    Recursion,
+    /// More document-level functions than [`limits::MAX_SCRIPT_FUNCTIONS`].
+    TooManyFunctions,
 }
 
 impl core::fmt::Display for ScriptError {
@@ -133,6 +153,9 @@ impl core::fmt::Display for ScriptError {
             ScriptError::StringTooLong => "the string is too long",
             ScriptError::ArrayTooLong => "the array is too long",
             ScriptError::TooManyVars => "too many variables",
+            ScriptError::NotADefinition => "not a function definition",
+            ScriptError::Recursion => "a function that calls itself",
+            ScriptError::TooManyFunctions => "too many functions",
         })
     }
 }
@@ -621,6 +644,19 @@ enum Expr {
     Assign(Box<Expr>, Option<BinOp>, Box<Expr>),
 }
 
+/// One document-level function definition (7.7.4).
+///
+/// Its body is ordinary [`Stmt`], parsed by the same productions a field
+/// script is, so every construct the subset refuses inside a calculate action
+/// is refused inside a helper as well — including `function`, which is why a
+/// definition cannot nest.
+#[derive(Clone, Debug)]
+struct FnDef {
+    name: String,
+    params: Vec<String>,
+    body: Vec<Stmt>,
+}
+
 #[derive(Clone, Debug)]
 enum Stmt {
     Empty,
@@ -698,6 +734,74 @@ impl<'a> Parser<'a> {
             out.push(self.statement()?);
         }
         Ok(out)
+    }
+
+    /// Document scope: function definitions, and nothing else.
+    ///
+    /// A separate production from [`Parser::program`] on purpose. `function`
+    /// stays a reserved word everywhere a *field* script is parsed, so the
+    /// only thing this gained a calculate action is the ability to **call** a
+    /// helper — never to declare one. One place declares, and it is the one
+    /// the policy gates.
+    fn definitions(&mut self) -> Result<Vec<FnDef>, ScriptError> {
+        let mut out = Vec::new();
+        while self.pos < self.toks.len() {
+            // A semicolon between declarations is punctuation rather than a
+            // statement, and generators write them.
+            if self.eat_punct(";") {
+                continue;
+            }
+            if !self.eat_word("function") {
+                return Err(ScriptError::NotADefinition);
+            }
+            let Some(Tok::Word(name)) = self.peek().cloned() else {
+                return Err(ScriptError::Syntax);
+            };
+            if is_reserved(&name) {
+                return Err(ScriptError::Syntax);
+            }
+            self.pos += 1;
+            self.expect("(")?;
+            let params = self.parameters()?;
+            // The body is a block, read by the ordinary statement production.
+            if !self.at_punct("{") {
+                return Err(ScriptError::Syntax);
+            }
+            let Stmt::Block(body) = self.statement()? else {
+                return Err(ScriptError::Syntax);
+            };
+            out.push(FnDef { name, params, body });
+            if out.len() > limits::MAX_SCRIPT_FUNCTIONS {
+                return Err(ScriptError::TooManyFunctions);
+            }
+        }
+        Ok(out)
+    }
+
+    fn parameters(&mut self) -> Result<Vec<String>, ScriptError> {
+        let mut params: Vec<String> = Vec::new();
+        if self.eat_punct(")") {
+            return Ok(params);
+        }
+        loop {
+            let Some(Tok::Word(name)) = self.peek().cloned() else {
+                return Err(ScriptError::Syntax);
+            };
+            if is_reserved(&name) {
+                return Err(ScriptError::Syntax);
+            }
+            self.pos += 1;
+            params.push(name);
+            if params.len() > limits::MAX_SCRIPT_VARS {
+                return Err(ScriptError::TooManyVars);
+            }
+            if self.eat_punct(",") {
+                continue;
+            }
+            self.expect(")")?;
+            break;
+        }
+        Ok(params)
     }
 
     fn statement(&mut self) -> Result<Stmt, ScriptError> {
@@ -1108,6 +1212,100 @@ fn is_reserved(word: &str) -> bool {
 // Values
 // ---------------------------------------------------------------------------
 
+/// The document-level helpers a run may call (7.7.4).
+///
+/// **This is why real calculating forms failed.** `/Names /JavaScript` is
+/// where a form keeps the functions its `/AA /C` scripts call, and until this
+/// table existed the interpreter met the first call to one, raised
+/// [`ScriptError::UnknownName`], and refused the whole pass — so a form doing
+/// the most ordinary thing a form does could not be computed at all.
+///
+/// Only **function definitions** are taken from a document-level source.
+/// Anything else there is [`ScriptError::NotADefinition`], named rather than
+/// skipped: skipping it would build a table silently missing whatever the
+/// statement would have defined, and a calculation running against a
+/// half-built name table is the "form that lies" this whole subset is
+/// written against.
+///
+/// A later definition of a name replaces an earlier one, which is what a
+/// reader does with two `function f` declarations in one scope. The order is
+/// the order the caller adds sources in, which for a document is the name
+/// tree's own ordering — fixed, so the table is the same on every run
+/// (ruling 4).
+#[derive(Clone, Debug, Default)]
+pub struct ScriptScope {
+    functions: Vec<FnDef>,
+}
+
+impl ScriptScope {
+    /// No helpers at all, which is what a run gets when the policy denies
+    /// [`Trigger::Document`] — and is exactly the behaviour that existed
+    /// before this type did.
+    #[must_use]
+    pub fn empty() -> ScriptScope {
+        ScriptScope::default()
+    }
+
+    /// Reads one document-level source and adds the functions it defines.
+    ///
+    /// Returns how many definitions that source carried.
+    ///
+    /// # Errors
+    ///
+    /// [`ScriptError::NotADefinition`] for anything at document scope that is
+    /// not a `function` declaration, [`ScriptError::TooManyFunctions`] past
+    /// [`limits::MAX_SCRIPT_FUNCTIONS`], and every lexing and parsing refusal
+    /// a field script would get — the body is parsed by the same productions,
+    /// so a helper cannot smuggle in a construct a calculate action could not.
+    pub fn define(&mut self, source: &str) -> Result<usize, ScriptError> {
+        let toks = lex(source)?;
+        let mut parser = Parser {
+            toks: &toks,
+            pos: 0,
+            depth: 0,
+        };
+        let defs = parser.definitions()?;
+        let count = defs.len();
+        for def in defs {
+            match self.functions.iter_mut().find(|f| f.name == def.name) {
+                Some(slot) => *slot = def,
+                None => {
+                    if self.functions.len() >= limits::MAX_SCRIPT_FUNCTIONS {
+                        return Err(ScriptError::TooManyFunctions);
+                    }
+                    self.functions.push(def);
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// How many distinct helpers the table holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.functions.len()
+    }
+
+    /// Whether the table holds none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+    }
+
+    /// Whether a name is one of them, for a caller reporting what a document
+    /// defined without running any of it.
+    #[must_use]
+    pub fn defines(&self, name: &str) -> bool {
+        self.functions.iter().any(|f| f.name == name)
+    }
+
+    /// Every helper's name, in the order the table holds them.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        self.functions.iter().map(|f| f.name.as_str()).collect()
+    }
+}
+
 /// The builtins the subset offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Builtin {
@@ -1137,6 +1335,9 @@ enum Value {
     /// so that calling one does nothing.
     Inert,
     Builtin(Builtin),
+    /// A document-level helper, by its index in the [`ScriptScope`] the run
+    /// was given.
+    Function(usize),
 }
 
 /// JavaScript's number-to-string, near enough for a field value.
@@ -1218,7 +1419,7 @@ fn to_text(value: &Value) -> String {
         Value::Field(name) => name.clone(),
         Value::Event => "[event]".to_string(),
         Value::Doc => "[doc]".to_string(),
-        Value::Inert | Value::Builtin(_) => "undefined".to_string(),
+        Value::Inert | Value::Builtin(_) | Value::Function(_) => "undefined".to_string(),
     }
 }
 
@@ -1253,9 +1454,15 @@ fn loose_eq(a: &Value, b: &Value) -> bool {
 // Interpreter
 // ---------------------------------------------------------------------------
 
+/// How a statement left its block.
+///
+/// `Return` carries the value now, because a document-level helper's whole
+/// purpose is the value it hands back — a `Flow` that only said *that* a
+/// return happened was enough while every script wrote through `event.value`
+/// and nothing could be called.
 enum Flow {
     Normal,
-    Return,
+    Return(Value),
 }
 
 /// Where a value can be put.
@@ -1268,7 +1475,14 @@ enum Place {
 struct Interp<'h, H: Host> {
     host: &'h mut H,
     budget: &'h mut Budget,
+    /// The current frame's variables. A call swaps in a fresh one holding
+    /// its parameters and swaps the caller's back afterwards, so a helper
+    /// cannot see or overwrite the locals of whatever called it.
     vars: Vec<(String, Value)>,
+    scope: &'h ScriptScope,
+    /// The helpers currently on the stack, by index. A name already here is
+    /// [`ScriptError::Recursion`].
+    calling: Vec<usize>,
     target: String,
     event_value: Value,
     event_assigned: bool,
@@ -1311,6 +1525,33 @@ pub fn run(
     host: &mut impl Host,
     budget: &mut Budget,
 ) -> Result<Outcome, ScriptError> {
+    run_in(source, target, current, host, budget, &ScriptScope::empty())
+}
+
+/// The same run, with the document's helpers in scope (7.7.4).
+///
+/// `scope` is what `/Names /JavaScript` defined, and consulting it is what
+/// turns a call to a form's own helper from [`ScriptError::UnknownName`] into
+/// the value it computes. An empty scope is exactly [`run`], which is what a
+/// host that has not allowed [`Trigger::Document`] gets.
+///
+/// The table is consulted **after** every builtin, so a document cannot
+/// redefine `getField` or an `AF` helper by declaring a function of that
+/// name — a form whose `getField` is the document's own is a form nothing
+/// downstream could reason about.
+///
+/// # Errors
+///
+/// Everything [`run`] can return, plus [`ScriptError::Recursion`] for a
+/// helper that calls itself directly or through another.
+pub fn run_in(
+    source: &str,
+    target: &str,
+    current: &str,
+    host: &mut impl Host,
+    budget: &mut Budget,
+    scope: &ScriptScope,
+) -> Result<Outcome, ScriptError> {
     let toks = lex(source)?;
     let mut parser = Parser {
         toks: &toks,
@@ -1323,13 +1564,15 @@ pub fn run(
         host,
         budget,
         vars: Vec::new(),
+        scope,
+        calling: Vec::new(),
         target: target.to_string(),
         event_value: Value::Str(current.to_string()),
         event_assigned: false,
         wrote: Vec::new(),
     };
     for stmt in &program {
-        if matches!(interp.exec(stmt)?, Flow::Return) {
+        if matches!(interp.exec(stmt)?, Flow::Return(_)) {
             break;
         }
     }
@@ -1370,8 +1613,8 @@ impl<H: Host> Interp<'_, H> {
             }
             Stmt::Block(body) => {
                 for stmt in body {
-                    if matches!(self.exec(stmt)?, Flow::Return) {
-                        return Ok(Flow::Return);
+                    if let Flow::Return(value) = self.exec(stmt)? {
+                        return Ok(Flow::Return(value));
                     }
                 }
                 Ok(Flow::Normal)
@@ -1393,8 +1636,8 @@ impl<H: Host> Interp<'_, H> {
                 // them apart.
                 while truthy(&self.eval(cond)?) {
                     self.step()?;
-                    if matches!(self.exec(body)?, Flow::Return) {
-                        return Ok(Flow::Return);
+                    if let Flow::Return(value) = self.exec(body)? {
+                        return Ok(Flow::Return(value));
                     }
                 }
                 Ok(Flow::Normal)
@@ -1410,8 +1653,8 @@ impl<H: Host> Interp<'_, H> {
                         }
                     }
                     self.step()?;
-                    if matches!(self.exec(body)?, Flow::Return) {
-                        return Ok(Flow::Return);
+                    if let Flow::Return(value) = self.exec(body)? {
+                        return Ok(Flow::Return(value));
                     }
                     if let Some(step) = step {
                         self.eval(step)?;
@@ -1420,10 +1663,11 @@ impl<H: Host> Interp<'_, H> {
                 Ok(Flow::Normal)
             }
             Stmt::Return(value) => {
-                if let Some(value) = value {
-                    self.eval(value)?;
-                }
-                Ok(Flow::Return)
+                let value = match value {
+                    Some(expr) => self.eval(expr)?,
+                    None => Value::Undefined,
+                };
+                Ok(Flow::Return(value))
             }
         }
     }
@@ -1556,7 +1800,14 @@ impl<H: Host> Interp<'_, H> {
             "AFPercent_Format" => Value::Builtin(Builtin::PercentFormat),
             "AFDate_Format" => Value::Builtin(Builtin::DateFormat),
             "AFSpecial_Format" => Value::Builtin(Builtin::SpecialFormat),
-            _ => return Err(ScriptError::UnknownName),
+            // The document's own helpers are consulted last, so a form
+            // cannot redefine `getField` or an `AF` helper by declaring a
+            // function of that name (7.7.4). An empty scope makes this arm
+            // exactly the `UnknownName` it was before the table existed.
+            _ => match self.scope.functions.iter().position(|f| f.name == name) {
+                Some(at) => Value::Function(at),
+                None => return Err(ScriptError::UnknownName),
+            },
         })
     }
 
@@ -1672,6 +1923,7 @@ impl<H: Host> Interp<'_, H> {
         self.step()?;
         let builtin = match callee {
             Value::Builtin(builtin) => *builtin,
+            Value::Function(at) => return self.call_helper(*at, args),
             // An inert namespace's members are inert, and calling one is the
             // no-op the boundary promises.
             Value::Inert => return Ok(Value::Undefined),
@@ -1694,6 +1946,75 @@ impl<H: Host> Interp<'_, H> {
             Builtin::DateFormat => self.date_format(args),
             Builtin::SpecialFormat => self.special_format(args),
         }
+    }
+
+    /// Calls one of the document's own helpers (7.7.4).
+    ///
+    /// Three things bound it, and the first is the one that matters:
+    ///
+    /// - **Recursion is refused by name**, not bounded by a counter. A helper
+    ///   already on the stack is [`ScriptError::Recursion`], so a chain is at
+    ///   most as long as the table has distinct functions, which
+    ///   [`limits::MAX_SCRIPT_FUNCTIONS`] caps. A depth cap was the
+    ///   alternative and was rejected for the reason the cascade rule
+    ///   rejected bounded re-entry: it makes the answer depend on a number
+    ///   nobody can predict from the file.
+    /// - **The native stack** is bounded by the same
+    ///   [`limits::MAX_SCRIPT_DEPTH`] the parser counts with, because this
+    ///   recursion is the evaluator's own and the parser cannot see it.
+    /// - **Work** is the shared [`Budget`]: every statement and expression in
+    ///   a helper's body charges against the pass, so a helper that does not
+    ///   terminate cheaply stops the pass rather than the helper.
+    ///
+    /// A frame is a fresh variable list holding the parameters. Missing
+    /// arguments are `undefined` and extra ones are dropped, which is what a
+    /// reader does; the caller's own locals are swapped out and back, so a
+    /// helper can neither read nor overwrite them.
+    fn call_helper(&mut self, at: usize, args: &[Value]) -> Result<Value, ScriptError> {
+        // Copied out first: `scope` is a shared reference the struct holds,
+        // and the body below needs `&mut self` for every step it charges.
+        let scope = self.scope;
+        let Some(def) = scope.functions.get(at) else {
+            return Err(ScriptError::UnknownName);
+        };
+        if self.calling.contains(&at) {
+            return Err(ScriptError::Recursion);
+        }
+        if u32::try_from(self.calling.len()).unwrap_or(u32::MAX) >= limits::MAX_SCRIPT_DEPTH {
+            return Err(ScriptError::TooDeep);
+        }
+
+        let mut frame: Vec<(String, Value)> = Vec::with_capacity(def.params.len());
+        for (index, param) in def.params.iter().enumerate() {
+            frame.push((
+                param.clone(),
+                args.get(index).cloned().unwrap_or(Value::Undefined),
+            ));
+        }
+        let caller = core::mem::replace(&mut self.vars, frame);
+        self.calling.push(at);
+
+        let mut result = Ok(Value::Undefined);
+        for stmt in &def.body {
+            match self.exec(stmt) {
+                Ok(Flow::Normal) => {}
+                Ok(Flow::Return(value)) => {
+                    result = Ok(value);
+                    break;
+                }
+                Err(reason) => {
+                    result = Err(reason);
+                    break;
+                }
+            }
+        }
+
+        // Restored on the failing path as well: a refusal stops the pass, and
+        // leaving the interpreter holding a callee's frame would make any
+        // later inspection of it a lie.
+        self.calling.pop();
+        self.vars = caller;
+        result
     }
 
     /// `AFSimple_Calculate(cFunction, aFields)` — by a wide margin the most
@@ -2794,6 +3115,197 @@ mod tests {
                 );
                 assert_eq!(denied.allows(other), other != trigger, "{other} after deny");
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Document-level helpers
+    // -----------------------------------------------------------------------
+
+    /// Runs against a field set with a name table in scope.
+    fn run_with(source: &str, definitions: &str, current: &str) -> Result<Outcome, ScriptError> {
+        let mut scope = ScriptScope::empty();
+        scope.define(definitions)?;
+        let mut host = Fields::with(&[("a", "10"), ("b", "20"), ("total", "0")]);
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        run_in(source, "total", current, &mut host, &mut budget, &scope)
+    }
+
+    #[test]
+    fn a_helper_computes_and_returns() {
+        assert_eq!(
+            run_with(
+                "event.value = add(getField('a').value, getField('b').value);",
+                "function add(x, y) { return x + y; }",
+                "0",
+            )
+            .map(|outcome| outcome.value),
+            Ok(Some("30".to_string()))
+        );
+    }
+
+    /// Missing arguments are `undefined` and extra ones are dropped, which is
+    /// what a reader does; refusing would make a generated form that passes
+    /// four arguments to a three-parameter helper uncomputable.
+    #[test]
+    fn arity_is_not_checked() {
+        assert_eq!(
+            run_with(
+                "event.value = one(1, 2, 3);",
+                "function one(x) { return x; }",
+                "0",
+            )
+            .map(|outcome| outcome.value),
+            Ok(Some("1".to_string()))
+        );
+        assert_eq!(
+            run_with(
+                "event.value = two(1);",
+                "function two(x, y) { return y; }",
+                "0"
+            ),
+            Err(ScriptError::NotStorable),
+            "an undefined result is refused rather than stored as the word"
+        );
+    }
+
+    /// A helper with no `return` answers `undefined`, and storing that is
+    /// refused for the same reason an inert `app.*` result is.
+    #[test]
+    fn a_helper_with_no_return_produces_nothing_storable() {
+        assert_eq!(
+            run_with(
+                "event.value = quiet();",
+                "function quiet() { var x = 1; }",
+                "0"
+            ),
+            Err(ScriptError::NotStorable)
+        );
+    }
+
+    #[test]
+    fn a_helper_that_calls_itself_is_refused_by_name() {
+        assert_eq!(
+            run_with("event.value = f(1);", "function f(n) { return f(n); }", "0"),
+            Err(ScriptError::Recursion)
+        );
+    }
+
+    #[test]
+    fn a_helper_reached_only_through_another_still_runs() {
+        assert_eq!(
+            run_with(
+                "event.value = outer(4);",
+                "function inner(n) { return n * 2; } function outer(n) { return inner(n) + 1; }",
+                "0",
+            )
+            .map(|outcome| outcome.value),
+            Ok(Some("9".to_string()))
+        );
+    }
+
+    /// A helper writes fields through the same host door a field script does,
+    /// so a refusal there is the same refusal.
+    #[test]
+    fn a_helper_writes_through_the_same_door() {
+        let mut scope = ScriptScope::empty();
+        scope
+            .define("function put(v) { getField('total').value = v; return v; }")
+            .expect("it defines");
+        let mut host = Fields::with(&[("total", "0")]);
+        host.refuse.push("total".to_string());
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        assert_eq!(
+            run_in(
+                "event.value = put(5);",
+                "total",
+                "0",
+                &mut host,
+                &mut budget,
+                &scope,
+            ),
+            Err(ScriptError::FieldRefused)
+        );
+    }
+
+    #[test]
+    fn document_scope_takes_definitions_and_nothing_else() {
+        let mut scope = ScriptScope::empty();
+        for source in [
+            "var x = 1;",
+            "getField('a').value = 1;",
+            "1 + 1;",
+            "if (1) { }",
+            "return 1;",
+        ] {
+            assert_eq!(
+                scope.define(source),
+                Err(ScriptError::NotADefinition),
+                "{source} was taken"
+            );
+        }
+    }
+
+    /// A definition cannot nest, because `function` is still reserved
+    /// everywhere the ordinary statement production reads.
+    #[test]
+    fn a_definition_cannot_nest() {
+        let mut scope = ScriptScope::empty();
+        assert_eq!(
+            scope.define("function a() { function b() { return 1; } return b(); }"),
+            Err(ScriptError::Syntax)
+        );
+    }
+
+    #[test]
+    fn a_table_past_the_function_cap_is_refused() {
+        let mut scope = ScriptScope::empty();
+        let mut source = String::new();
+        for i in 0..=limits::MAX_SCRIPT_FUNCTIONS {
+            source.push_str(&format!("function f{i}() {{ return {i}; }} "));
+        }
+        assert_eq!(scope.define(&source), Err(ScriptError::TooManyFunctions));
+
+        // And across two sources, so the cap is the table's rather than one
+        // source's.
+        let mut scope = ScriptScope::empty();
+        for i in 0..limits::MAX_SCRIPT_FUNCTIONS {
+            assert_eq!(
+                scope.define(&format!("function g{i}() {{ return 1; }}")),
+                Ok(1)
+            );
+        }
+        assert_eq!(
+            scope.define("function last() { return 1; }"),
+            Err(ScriptError::TooManyFunctions)
+        );
+        // Redefining one already there is not a new entry, so it still fits.
+        assert_eq!(scope.define("function g0() { return 2; }"), Ok(1));
+    }
+
+    /// Every one of these is a document-scope source the fuzzer could hand
+    /// `define`, and none of them may panic (ruling 1).
+    #[test]
+    fn hostile_document_scope_never_panics() {
+        let sources = [
+            "function",
+            "function (",
+            "function f",
+            "function f(",
+            "function f()",
+            "function f() {",
+            "function f(,) {}",
+            "function f(a,) {}",
+            "function eval() {}",
+            "function f(eval) {}",
+            ";;;;",
+            "",
+            "\u{1f600}",
+            "function f() { return; } function f() { return; }",
+        ];
+        for source in sources {
+            let mut scope = ScriptScope::empty();
+            let _ = scope.define(source);
         }
     }
 

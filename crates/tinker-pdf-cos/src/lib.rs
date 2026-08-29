@@ -118,7 +118,7 @@ pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, Recipient};
-pub use script::{Budget, Host, ScriptError, ScriptPolicy, Trigger};
+pub use script::{Budget, Host, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
     digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,

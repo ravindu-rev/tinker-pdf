@@ -1045,7 +1045,17 @@ impl DocumentEditor {
     /// rather than blanking it and "absent" is an answer.
     #[must_use]
     pub fn fields(&self) -> Vec<form::Field> {
-        let mut fields = form::fields(&self.doc);
+        self.fields_within(&mut form::ScriptBudget::new())
+    }
+
+    /// The same field list, spending a script budget the caller owns.
+    ///
+    /// The recalculation pass uses this so that the field tree's `/AA` and
+    /// `/Names /JavaScript` share one [`form::ScriptBudget`] rather than
+    /// starting from the total apiece.
+    #[must_use]
+    pub fn fields_within(&self, budget: &mut form::ScriptBudget) -> Vec<form::Field> {
+        let mut fields = form::fields_within(&self.doc, budget);
         if self.overlay.is_empty() && self.deleted.is_empty() {
             return fields;
         }
