@@ -130,33 +130,78 @@ fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) {
 /// `/DR`, and a [`Font`] that knew every width and no outline had nothing for
 /// a shaper to work on. [`Font::program`] is the entry that changed.
 ///
-/// # The three conditions, each checked rather than assumed
+/// # The conditions, each checked rather than assumed
 ///
 /// 1. **The font is composite** (9.7). A simple font addresses a byte, so it
 ///    cannot name a glyph beyond 255 whatever is embedded in it.
-/// 2. **Its `/Encoding` is `/Identity-H`.** The writer needs to go from a
-///    glyph back to a *code*, and 9.7.5's CMaps are written to be read the
-///    other way. Under `/Identity-H` the code is the CID outright, and
-///    [`Font::cid_for_gid`] inverts the remaining step — `/CIDToGIDMap` —
-///    which is a table this crate already holds whole. A font under any other
-///    CMap keeps the single-byte path and says so.
-/// 3. **The descriptor embeds a program `tinker_pdf_font::Sfnt` reads.** A
+/// 2. **The writing mode is horizontal.** 9.7.4.3's vertical CMaps advance
+///    the pen downward and this module places every glyph along a baseline.
+///    Selecting the right glyphs and drawing them in a row a viewer will
+///    stack is a worse answer than a question mark, so a `-V` encoding keeps
+///    the single-byte path.
+/// 3. **Its `/Encoding` can be read backwards to a code.** This is the
+///    condition that used to say `/Identity-H` and no longer does. A writer
+///    needs to go from a glyph to a *code*, and 9.7.5's CMaps are written to
+///    be read the other way — but "written to be read forwards" is not "not
+///    invertible". `tinker_pdf_font::CMap::code_for_cid` gathers every code
+///    the CMap's own tables could have meant by a CID and returns the first that maps
+///    **back**, so the round trip is checked rather than assumed and a
+///    `cidchar` override cannot be inverted into a code that now means
+///    something else. That covers `/Identity-H` (where the code is the CID
+///    outright), every embedded CMap stream, and — where this build compiled
+///    the tables in — every horizontal registry CMap of 9.7.5.2.
+///    [`Font::cid_for_gid`] inverts the remaining step, `/CIDToGIDMap`.
+///    Inversion is what condition 2 leaves on the table: `/Identity-V` is
+///    just as invertible and is still refused, because the refusal there is
+///    about where the glyph is *drawn* rather than about which one it is.
+/// 4. **The descriptor embeds a program `tinker_pdf_font::Sfnt` reads.** A
 ///    bare CFF (`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`) is not an
 ///    sfnt and carries no `GSUB`/`GPOS` for this crate to execute, so a
-///    CIDFontType0 face is outside what milestone 8 claims.
+///    CIDFontType0 face is still outside what this claims.
 struct Composite {
     /// The embedded program, decoded once per appearance rather than once per
     /// line: a multiline field would otherwise inflate a megabyte per row.
     program: Vec<u8>,
 }
 
+/// Whether a field's value can be shaped against its `/DA` font, and where it
+/// cannot, whether that is worth saying out loud.
+enum Shaping {
+    /// It can, against this program.
+    Yes(Composite),
+    /// It cannot, and the single-byte path is the right answer for this font
+    /// — a simple font, a vertical one, one that embeds no sfnt. Every
+    /// character that path cannot write is still named (ruling 10); there is
+    /// just nothing to say about the *font* beyond what the file already
+    /// says.
+    No,
+    /// It cannot, and the reason is this **build** rather than this document.
+    ///
+    /// The registry's code-to-CID tables are a megabyte and live behind the
+    /// `cmap-predefined` cargo feature, so a `--no-default-features` build
+    /// can read a `UniJIS-UCS2-H` field's widths and codespaces and still
+    /// have nothing to invert. That refusal is typed and named against the
+    /// field, because a capability that quietly depends on a feature is the
+    /// failure this repository already named once in PDF/A: a verdict that
+    /// depends on a feature is not a verdict, and neither is a fill.
+    Refused(WarningKind),
+}
+
 /// One glyph of a shaped line, in the thousandths of an em [`width_of`]
 /// answers in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Placed {
-    /// The character code to write. Under `/Identity-H` this is the CID, and
-    /// it is two bytes wide (9.7.5.2).
+    /// The character code to write. Under `/Identity-H` this is the CID;
+    /// under any other CMap it is whatever code maps to it (9.7.5.2).
     code: u32,
+    /// How many bytes the code occupies, from the CMap's codespace ranges
+    /// (9.7.6.2).
+    ///
+    /// Carried per glyph rather than per font because one CMap may have both
+    /// widths: `90ms-RKSJ-H` takes one byte for ASCII and two for kanji, and
+    /// writing `<0041>` where `<41>` was meant mis-splits every code after
+    /// it.
+    bytes: u8,
     /// Where the glyph's origin sits along the baseline, from the line's
     /// start.
     x: f64,
@@ -179,29 +224,51 @@ struct ShapedLine {
 }
 
 impl Composite {
-    /// The font behind a `/DA`, if all three conditions above hold.
-    fn of(doc: &CosDocument, dict: &Dict, font: &Font) -> Option<Composite> {
+    /// The font behind a `/DA`, if the conditions above hold, and the typed
+    /// reason where one of them fails for a reason this build owns.
+    fn of(doc: &CosDocument, dict: &Dict, font: &Font) -> Shaping {
         if font.kind() != FontKind::Type0 {
-            return None;
+            return Shaping::No;
         }
-        // 9.7.5.2: the one predefined CMap whose code *is* the CID, which is
-        // what makes the glyph-to-code direction available at all. Read off
-        // the dictionary rather than off `Font`, because `Font` models the
-        // forward direction and a name is what this needs.
-        let identity = doc
-            .resolve_key(dict, doc.intern(b"Encoding"))
-            .as_name()
-            .and_then(|n| doc.name_bytes(n))
-            .is_some_and(|name| &*name == b"Identity-H");
-        if !identity {
-            return None;
+        if font.is_vertical() {
+            return Shaping::No;
         }
-        let program = doc.stream_decoded(font.program()?.stream).ok()?;
+        // A composite font whose `/Encoding` names nothing 9.7.5.2 defines
+        // has no codes to write at all. `font::read` has already said which
+        // name it was (`PredefinedCMapUnknown`); repeating it here would only
+        // double it, and the single-byte path still names every character.
+        if !font.has_encoding_cmap() {
+            return Shaping::No;
+        }
+        // 9.7.5.2: the registry defines this CMap and this build left its
+        // code-to-CID table out, so there is nothing to invert. Declared
+        // before the program is decoded, because the answer does not depend
+        // on the program and a megabyte should not be inflated to reach it.
+        if font.encoding_is_approximate() {
+            // The name is what makes the warning actionable, and the
+            // dictionary is where a name lives — `Font` models the CMap's
+            // forward direction and has no name to give.
+            return match doc.resolve_key(dict, doc.intern(b"Encoding")).as_name() {
+                Some(name) => Shaping::Refused(WarningKind::PredefinedCMapApproximate(name)),
+                // An embedded CMap stream that inherited approximateness up a
+                // `usecmap` chain: real, and with no name of its own to
+                // report.
+                None => Shaping::No,
+            };
+        }
+        let Some(program) = font
+            .program()
+            .and_then(|p| doc.stream_decoded(p.stream).ok())
+        else {
+            return Shaping::No;
+        };
         // Parsed here and thrown away, so that a program which is not an sfnt
         // — a bare CFF, or bytes that are not a font at all — declines now
         // rather than per line.
-        Sfnt::parse(&program)?;
-        Some(Composite { program })
+        if Sfnt::parse(&program).is_none() {
+            return Shaping::No;
+        }
+        Shaping::Yes(Composite { program })
     }
 
     /// Shapes one line and places every glyph, in visual order.
@@ -245,8 +312,9 @@ impl Composite {
             };
             for glyph in glyphs {
                 match self.code_for(font, glyph.glyph) {
-                    Some(code) => out.glyphs.push(Placed {
+                    Some((code, bytes)) => out.glyphs.push(Placed {
                         code,
+                        bytes,
                         x: pen + scale(glyph.x_offset),
                         rise: scale(glyph.y_offset),
                     }),
@@ -270,17 +338,23 @@ impl Composite {
         out
     }
 
-    /// The code that draws `glyph`, or `None` where the font cannot name it.
+    /// The code that draws `glyph` and its byte width, or `None` where the
+    /// font cannot name it.
+    ///
+    /// Two inversions, in the order 9.7.4 composes them forwards: the glyph
+    /// back through `/CIDToGIDMap` to a CID, the CID back through the
+    /// encoding CMap to a code. Either may refuse, and a refusal at either
+    /// step is a character this appearance will not draw.
     ///
     /// Glyph 0 is `.notdef` and is refused rather than written: it is the
     /// face saying it has nothing for that character, and drawing the empty
     /// box while reporting success is the invisible failure ruling 10 exists
     /// to prevent.
-    fn code_for(&self, font: &Font, glyph: u16) -> Option<u32> {
+    fn code_for(&self, font: &Font, glyph: u16) -> Option<(u32, u8)> {
         if glyph == 0 {
             return None;
         }
-        font.cid_for_gid(glyph)
+        font.code_for_cid(font.cid_for_gid(glyph)?)
     }
 }
 
@@ -318,9 +392,16 @@ fn write_shaped(out: &mut Vec<u8>, font: &Font, line: &ShapedLine, x: f64, y: f6
             out.extend_from_slice(number(adjust).as_bytes());
             out.push(b' ');
         }
-        // 9.7.5.2: `/Identity-H` is a two-byte codespace, so every code is
-        // written in four hex digits whatever its magnitude.
-        out.extend_from_slice(format!("<{:04X}>", placed.code & 0xFFFF).as_bytes());
+        // 9.7.6.2: a code is as many bytes as its codespace range says, and
+        // the string carries no separators — so the width is what tells a
+        // reader where this code ends. Two hex digits per byte, zero-padded,
+        // whatever the code's magnitude; `/Identity-H`'s two bytes are the
+        // common case rather than the only one.
+        let digits = usize::from(placed.bytes).clamp(1, 4) * 2;
+        let mask = u32::MAX >> (32 - digits * 4);
+        out.extend_from_slice(
+            format!("<{:0digits$X}>", placed.code & mask, digits = digits).as_bytes(),
+        );
         pen = placed.x + font.width_of(placed.code).0;
     }
     close_array(out, &mut open);
@@ -389,10 +470,19 @@ pub fn text_appearance(
     // glyphs rather than as bytes. `None` keeps every line on the single-byte
     // path this module has always had, which is still right for the `/Helv`
     // most forms name.
-    let composite = font_dict
+    let mut refusals: Vec<WarningKind> = Vec::new();
+    let composite = match font_dict
         .as_ref()
         .zip(font.as_ref())
-        .and_then(|(dict, font)| Composite::of(doc, dict, font));
+        .map_or(Shaping::No, |(dict, font)| Composite::of(doc, dict, font))
+    {
+        Shaping::Yes(composite) => Some(composite),
+        Shaping::No => None,
+        Shaping::Refused(kind) => {
+            refusals.push(kind);
+            None
+        }
+    };
 
     // 12.7.3.3: two units of padding on each side is the convention, and
     // matching it is what keeps a regenerated appearance from jumping.
@@ -512,7 +602,7 @@ pub fn text_appearance(
         }
 
         content.extend_from_slice(b"ET\nQ\nEMC\n");
-        report_unwritable(doc, field, &unwritable);
+        report(doc, field, &refusals, &unwritable);
         return finish_appearance(doc, content, w, h, resources);
     }
 
@@ -551,21 +641,34 @@ pub fn text_appearance(
     }
 
     content.extend_from_slice(b"ET\nQ\nEMC\n");
-    report_unwritable(doc, field, &unwritable);
+    report(doc, field, &refusals, &unwritable);
     finish_appearance(doc, content, w, h, resources)
 }
 
-/// One typed warning per character the appearance could not draw (ruling 10).
+/// What this appearance could not do, against the field it could not do it to
+/// (ruling 10).
+///
+/// Two kinds, and the order is the order a reader wants them in: the
+/// **refusal** first, because it is the cause and it names the font or the
+/// build, then one warning per character the appearance could not draw.
 ///
 /// Distinct characters and not occurrences: a value of two hundred Devanagari
 /// letters in a Latin face is one problem with one fix, and two hundred
 /// warnings would spend the sink's whole budget saying so.
-fn report_unwritable(doc: &CosDocument, field: Option<ObjRef>, unwritable: &[char]) {
-    if unwritable.is_empty() {
+///
+/// Both carry the field as their object, which is what makes a
+/// `cmap-predefined`-off build's `predefined-cmap-approximate` here
+/// distinguishable from the one `font::read` emits when the same font is
+/// merely *read*: this one names a field, and it means a fill was refused.
+fn report(doc: &CosDocument, field: Option<ObjRef>, refusals: &[WarningKind], unwritable: &[char]) {
+    if refusals.is_empty() && unwritable.is_empty() {
         return;
     }
     let mut sink = WarningSink::new();
     sink.set_context(field);
+    for kind in refusals {
+        sink.warn(0, *kind);
+    }
     for c in unwritable {
         sink.warn(
             0,
