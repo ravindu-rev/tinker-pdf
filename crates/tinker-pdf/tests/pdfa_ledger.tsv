@@ -18,17 +18,15 @@
 # `agreement_with_the_corpus_annotations_per_clause_group` and nothing else -
 # 1 of the workspace's 3 375 tests, and only when the corpus is present, which
 # is why that test prints RAN or SKIPPED rather than passing quietly. Blanking
-# a row's reason field instead fails `the_committed_ledger_is_complete`
-# and nothing else - 1 of 3 375, with no corpus needed. It is one rather than
-# two because `a_row_without_a_reason_is_refused` feeds the reader its own rows:
-# it proves the refusal exists, and this file proves it is applied here.
+# a row's reason field instead fails `a_row_without_a_reason_is_refused` and
+# `the_committed_ledger_is_complete` - 2 of 3 375, with no corpus needed.
 #
 # `agreement_with_the_corpus_annotations_per_clause_group` asserts that every
 # disagreement it measures is covered by a row here, so a subject that stops
 # disagreeing leaves a stale row and a new disagreement fails the test.
 #
-# Measured at 1014/2371 against the files that are tests of PDF/A: 830 of 831
-# `-pass-` files agree, 184 of 1540 `-fail-` files agree. The one false
+# Measured at 1017/2371 against the files that are tests of PDF/A: 830 of 831
+# `-pass-` files agree, 187 of 1540 `-fail-` files agree. The one false
 # positive is the first row below and it is a reading, not a bug.
 #
 reading	6.1.2	PDF_A-1b/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t01-pass-a.pdf	ISO 19005-1 6.1.2 says the file header consists of %PDF-1.n. This file carries %PDF-2.0 and the suite annotates it pass; this build reads the clause literally and reports it. The whole disagreement is one sentence of the standard read two ways, and the rule is left as it is rather than moved to match.
@@ -47,7 +45,6 @@ staged	6.7	PDF_A-1a/6.8 Logical structure/6.8.4 Natural language specification	N
 staged	6.1.12	PDF_A-1b/6.1 File structure/6.1.12 Implementation limits	No rule: string length, name length, integer and real magnitude, dictionary size and nesting depth differ per part and several are should rather than shall. A rule guessed at the wrong side of that line reports conforming files as broken. (16 files)
 reading	6.1.3	PDF_A-1b/6.1 File structure/6.1.3 File trailer	This build reads the file identifier from the reader's merged trailer, so an ID present in any revision satisfies the clause. These fixtures withhold it from one specific trailer - a linearized file's first-page trailer, or every trailer but the last. The clause is about the file having an identifier rather than about any one section's spelling of it, and that reading is recorded in syntax::trailer. I cannot rule out that it is our bug: the stricter reading is available from CosDocument::revisions and was not taken. (2 files)
 staged	6.1.4	PDF_A-1b/6.1 File structure/6.1.4 Cross reference table	No rule: the reader merges every revision's cross-reference table into one before a rule could see how any of them was spelled, and these fixtures break the spelling. (5 files)
-bug	6.1.5	PDF_A-1b/6.1 File structure/6.1.5 Document information dictionary	The part 1 Info-to-XMP consistency rule runs and does not fire on these two. I have not established why. It may be an entry pairing this build does not implement, or an equivalence it treats as equal that the clause treats as different. Recorded as our bug because the rule is meant to cover this clause and does not. (2 files)
 staged	6.1.6	PDF_A-1b/6.1 File structure/6.1.6 String objects	No rule: a hexadecimal string with an odd digit count or a non-hexadecimal character is normalised by the lexer before an object exists to have a rule applied to it. (2 files)
 staged	6.1.8	PDF_A-1b/6.1 File structure/6.1.8 Indirect objects	No rule: the EOL markers around obj and endobj are consumed by the parser before an object exists to have a rule applied to it. (1 files)
 staged	6.2	PDF_A-1b/6.2 Graphics/6.2.2 Output intent	No rule in this group: colour spaces, output intents, transparency, rendering intents and the font rules parts 2 to 4 number under 6.2 are milestone 5 of docs/design/pdfa.md, and the ones that read inside an ICC profile stage behind docs/design/icc.md. (3 files)
@@ -76,7 +73,6 @@ staged	6.7	PDF_A-2a/6.7 Logical structure/6.7.4 Natural language specification	N
 staged	6.1.9	PDF_A-2b/6.1 File structure/6.1.10 Inline image dictionaries	No rule: an inline image dictionary lives inside a content stream, and this group does not open one. (2 files)
 staged	6.1.12	PDF_A-2b/6.1 File structure/6.1.12 Permissions	The key-set rule runs and passes these: the Perms dictionary carries only DocMDP, which the clause admits. What these fixtures break is inside the DocMDP transform, which this build does not read. (3 files)
 staged	6.1.12	PDF_A-2b/6.1 File structure/6.1.13 Implementation limits	No rule: parts 2 and 3 number implementation limits at 6.1.13; the reason is unchanged. (15 files)
-bug	6.1.2	PDF_A-2b/6.1 File structure/6.1.2 File header	One part 2 fixture remains after the EOL rule was fixed, and I do not know why it does not fire. The header rules that exist - offset zero, the 1.n shape, a single EOL, four bytes above 127 - all pass on it, so either the defect is one of them read more strictly than this build reads it, or it is a fifth requirement in the clause that has not been read. Recorded as our bug rather than as a reading, because nothing here justifies calling it anything else. (1 files)
 reading	6.1.3	PDF_A-2b/6.1 File structure/6.1.3 File trailer	This build reads the file identifier from the reader's merged trailer, so an ID present in any revision satisfies the clause. These fixtures withhold it from one specific trailer - a linearized file's first-page trailer, or every trailer but the last. The clause is about the file having an identifier rather than about any one section's spelling of it, and that reading is recorded in syntax::trailer. I cannot rule out that it is our bug: the stricter reading is available from CosDocument::revisions and was not taken. (2 files)
 staged	6.1.4	PDF_A-2b/6.1 File structure/6.1.4 Cross reference table	No rule: the reader merges every revision's cross-reference table into one before a rule could see how any of them was spelled, and these fixtures break the spelling. (2 files)
 staged	6.1.6	PDF_A-2b/6.1 File structure/6.1.6 String objects	No rule: a hexadecimal string with an odd digit count or a non-hexadecimal character is normalised by the lexer before an object exists to have a rule applied to it. (2 files)

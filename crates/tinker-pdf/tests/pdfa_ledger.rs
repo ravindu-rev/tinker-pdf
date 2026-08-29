@@ -502,6 +502,16 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     );
     for (group, names) in &false_negatives {
         println!("  {group}: {}", names.len());
+        // A small group is named file by file. A ledger row for four files
+        // that cannot say which four is a row nobody can act on, and the
+        // three rows that currently say "nobody has established why" are
+        // exactly the small groups — so this is the affordance that lets the
+        // next person turn them into something better.
+        if names.len() <= 4 {
+            for name in names {
+                println!("      {name}");
+            }
+        }
     }
 
     // ---- and every one of them is accounted for in the ledger ------------

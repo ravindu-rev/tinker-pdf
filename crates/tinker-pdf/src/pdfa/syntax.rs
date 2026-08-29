@@ -169,10 +169,16 @@ fn header(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
         .collect();
     let declared = String::from_utf8_lossy(&digits).into_owned();
     let admitted = match part {
-        Some(Part::Four) => version_shaped(&digits, b'2'),
+        // ISO 19005-4 is defined on ISO 32000-2 and spells its header
+        // requirement `%PDF-2.n`. The digit is left open here: 2.0 is the only
+        // one published, and a rule that said so would report a file written
+        // against an amendment this build has not heard of. A reading, and it
+        // errs towards accepting.
+        Some(Part::Four) => version_shaped(&digits, b'2', b'9'),
         // Parts 1 to 3 are defined on PDF 1.4, 1.7 and 1.7 respectively, and
-        // all three spell the header requirement as `%PDF-1.n`.
-        Some(_) => version_shaped(&digits, b'1'),
+        // all three spell the requirement `%PDF-1.n`. The 1.x versions that
+        // exist stop at 1.7.
+        Some(_) => version_shaped(&digits, b'1', b'7'),
         // No claim: nothing to check the version against.
         None => true,
     };
@@ -229,9 +235,19 @@ fn find_header(bytes: &[u8]) -> Option<usize> {
     window.windows(5).position(|w| w == b"%PDF-")
 }
 
-/// Whether `digits` is exactly `major`, `.`, and one decimal digit.
-fn version_shaped(digits: &[u8], major: u8) -> bool {
-    digits.len() == 3 && digits[0] == major && digits[1] == b'.' && digits[2].is_ascii_digit()
+/// Whether `digits` is exactly `major`, `.`, and one decimal digit no higher
+/// than `highest`.
+///
+/// The upper bound is not decoration. Parts 1 to 3 spell the requirement as
+/// `%PDF-1.n`, and the `n`s that exist are 0 to 7 — there is no PDF 1.8 or 1.9
+/// for a file to claim. Reading the clause as "any digit" let a `%PDF-1.9`
+/// fixture through, which is a version of PDF that has never been published.
+fn version_shaped(digits: &[u8], major: u8, highest: u8) -> bool {
+    digits.len() == 3
+        && digits[0] == major
+        && digits[1] == b'.'
+        && digits[2].is_ascii_digit()
+        && digits[2] <= highest
 }
 
 /// Where the next line begins, having skipped whatever ends this one.
@@ -424,7 +440,7 @@ fn catalog(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
     if part == Some(Part::Four) {
         let version = doc.resolve_key(&catalog, doc.intern(b"Version"));
         if let Some(bytes) = version.as_name().and_then(|n| doc.name_bytes(n)) {
-            if !version_shaped(&bytes, b'2') {
+            if !version_shaped(&bytes, b'2', b'9') {
                 out.push(Raw {
                     rule: clauses::CATALOG,
                     object: at,

@@ -191,14 +191,18 @@ pub(super) fn rules(
     };
 
     for pairing in PAIRINGS {
-        let Some(value) = info_string(doc, info, pairing.info) else {
-            continue;
+        let agreed = match info_entry(doc, info, pairing.info) {
+            InfoEntry::Absent => continue,
+            // An empty value is no claim to be consistent with.
+            InfoEntry::Text(value) if value.is_empty() => continue,
+            InfoEntry::Text(value) => agrees(
+                &value,
+                properties.get(pairing.namespace, pairing.prefix, pairing.local),
+                pairing.kind,
+            ),
+            InfoEntry::NotAString => false,
         };
-        if value.is_empty() {
-            continue;
-        }
-        let found = properties.get(pairing.namespace, pairing.prefix, pairing.local);
-        if !agrees(&value, found, pairing.kind) {
+        if !agreed {
             out.push(Raw {
                 rule: clauses::INFO_XMP,
                 object: info_ref,
@@ -210,11 +214,35 @@ pub(super) fn rules(
     }
 }
 
-/// An `/Info` entry as text, resolved through an indirect reference.
-fn info_string(doc: &tinker_pdf_cos::CosDocument, info: &Dict, key: &[u8]) -> Option<String> {
+/// An `/Info` entry, resolved through an indirect reference.
+///
+/// Three answers rather than two, because the clause distinguishes three
+/// cases and a rule that collapsed them missed a corpus fixture for each:
+/// the entry is absent and there is nothing to require, the entry is a string
+/// and it must match, or **the entry is there and is not a string** — which
+/// is a mismatch by itself, since a value that is not text cannot be
+/// equivalent to an XMP property. One fixture's `/Title` is an indirect
+/// reference to a font program, and reading that as "absent" passed a file
+/// the clause fails.
+///
+/// The value is **not trimmed**. Padding a value with spaces makes it a
+/// different value, and trimming it here hid a fixture whose `/Author` is
+/// ` veraPDF Consortium ` against an XMP `veraPDF Consortium`.
+enum InfoEntry {
+    Absent,
+    Text(String),
+    NotAString,
+}
+
+fn info_entry(doc: &tinker_pdf_cos::CosDocument, info: &Dict, key: &[u8]) -> InfoEntry {
     let value = doc.resolve_key(info, doc.intern(key));
-    let string = value.as_string()?;
-    Some(decode_text_string(&string.bytes).trim().to_string())
+    if value.is_null() {
+        return InfoEntry::Absent;
+    }
+    match value.as_string() {
+        Some(string) => InfoEntry::Text(decode_text_string(&string.bytes)),
+        None => InfoEntry::NotAString,
+    }
 }
 
 /// Whether an `/Info` value and the XMP members found for it agree.
@@ -225,7 +253,13 @@ fn agrees(info: &str, found: Option<&[String]>, kind: Compare) -> bool {
         return false;
     };
     match kind {
-        Compare::Text | Compare::Array => found.len() == 1 && found[0].trim() == info,
+        // Compared as written on both sides. Padding a value with spaces
+        // makes it a different value, and trimming here hid a fixture whose
+        // `/Author` is ` veraPDF Consortium ` against an XMP
+        // `veraPDF Consortium`. What whitespace an XMP element's content
+        // really carries is decided in `normalise`, once, where the packet is
+        // read — not here, where the difference would be silently forgiven.
+        Compare::Text | Compare::Array => found.len() == 1 && found[0] == info,
         Compare::Instant => {
             found.len() == 1
                 && match (parse_date(info), parse_date(&normalise_iso8601(&found[0]))) {
@@ -340,6 +374,25 @@ impl Properties {
     }
 }
 
+/// An XMP element's text, with a pretty-printer's layout removed and nothing
+/// else.
+///
+/// A packet written on one line means what it says: `<pdf:Producer>Acme 1.0 </`
+/// declares a trailing space, and a reader that trimmed it would forgive a
+/// `/Info` entry that does not carry one. A packet written across lines has
+/// indentation that belongs to the file's layout rather than to the value, and
+/// a reader that kept it would report every pretty-printed conforming file.
+///
+/// A newline is what tells the two apart. It is a heuristic and it is named as
+/// one; the alternative is to pick one of the two failures and always make it.
+fn normalise(text: &str) -> String {
+    if text.contains('\n') || text.contains('\r') {
+        text.trim().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 /// Whether an XML name is the property `pairing` wants.
 ///
 /// The prefix **or** the resolved namespace, for the reason milestone 1 gives
@@ -393,7 +446,10 @@ fn properties(packet: &[u8]) -> Option<Properties> {
                 for attribute in element.attributes() {
                     for (index, pairing) in PAIRINGS.iter().enumerate() {
                         if matches(attribute.name(), pairing) && values[index].is_none() {
-                            values[index] = Some(vec![attribute.value().trim().to_string()]);
+                            // Verbatim: an attribute value carries no layout
+                            // whitespace to strip, so a space in it is part of
+                            // the value the packet declares.
+                            values[index] = Some(vec![attribute.value().to_string()]);
                         }
                     }
                 }
@@ -421,14 +477,14 @@ fn properties(packet: &[u8]) -> Option<Properties> {
             Event::End(name) => {
                 if let Some((index, at)) = capture {
                     if in_li && is_rdf_li(&name) {
-                        items.push(buffer.trim().to_string());
+                        items.push(normalise(&buffer));
                         buffer.clear();
                         in_li = false;
                     } else if depth == at {
                         if items.is_empty() {
-                            let text = buffer.trim();
+                            let text = normalise(&buffer);
                             if !text.is_empty() {
-                                items.push(text.to_string());
+                                items.push(text);
                             }
                         }
                         values[index] = Some(core::mem::take(&mut items));

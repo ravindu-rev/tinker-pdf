@@ -206,7 +206,7 @@ that and produced 195 spurious disagreements. They are counted and printed,
 and excluded from the rate. `Isartor test files` **are** in: they are the
 original PDF/A-1b conformance suite.
 
-**1 014 of 2 371 agree.** 830 of 831 files annotated `pass`, and 184 of
+**1 017 of 2 371 agree.** 830 of 831 files annotated `pass`, and 187 of
 1 540 annotated `fail`. The shape of that is the shape of an early rule
 engine: almost nothing conforming is reported wrongly, and most defects are
 in clauses that have no rule yet.
@@ -214,8 +214,8 @@ in clauses that have no rule yet.
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 184 |
-| **total** | **2 371** | **1 014** |
+| annotated `-fail-` | 1 540 | 187 |
+| **total** | **2 371** | **1 017** |
 
 **The single false positive is a reading, and it is recorded as one.** ISO
 19005-1 6.1.2 says the file header consists of `%PDF-1.n`. One fixture carries
@@ -225,16 +225,31 @@ which is the shape ruling 13 asks for when a first-party reading and a
 published annotation disagree.
 
 **Every disagreement is in the ledger.**
-`crates/tinker-pdf/tests/pdfa_ledger.tsv`, 118 rows, each carrying a class
+`crates/tinker-pdf/tests/pdfa_ledger.tsv`, 116 rows, each carrying a class
 (`bug` / `staged` / `reading`) and a mandatory reason. The census asserts
 coverage in both directions: a disagreement with no row fails, and a row whose
-subject no longer disagrees fails as stale. Three rows say, in those words,
-that nobody has established why — two part 1 information-dictionary fixtures
-the consistency rule ought to catch and does not, and one part 2 file-header
-fixture that survives all four header rules. They are classified `bug`,
-because nothing found so far justifies calling them anything else.
+subject no longer disagrees fails as stale.
 
-**Where the 1 356 unagreed `fail` files are.** 490 in the XMP
+**The stale half of that assertion earned its keep immediately.** The first
+ledger carried three rows saying, in those words, that nobody had established
+why — two part 1 information-dictionary fixtures the consistency rule ought to
+have caught, and one part 2 file-header fixture that survived every header
+rule. Writing them down was what made them findable, and all three turned out
+to be defects in this engine rather than readings:
+
+- the `/Info` value was trimmed before comparison, so ` veraPDF Consortium `
+  read as equal to `veraPDF Consortium`;
+- an `/Info` entry that is present and is *not* a string was skipped rather
+  than reported, and one fixture's `/Title` is an indirect reference to a font
+  program;
+- the header version rule accepted any digit, so `%PDF-1.9` passed — a version
+  of PDF that has never been published.
+
+Fixing them moved the rate by three files and turned three "I do not know"
+rows into no rows at all, which is the whole argument for making the reason
+field mandatory. What is left is four `reading` rows and 112 `staged` ones.
+
+**Where the 1 353 unagreed `fail` files are.** 490 in the XMP
 predefined-schema property rule, which needs the XMP specification's property
 tables as vendored data and is the largest single staged rule in the build.
 Roughly 600 in graphics, fonts, annotations and transparency — milestone 5 and
