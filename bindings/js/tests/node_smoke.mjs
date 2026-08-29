@@ -44,7 +44,7 @@ const entry = pathToFileURL(require.resolve('tinker-pdf-js')).href;
 console.log(`resolved tinker-pdf-js to ${entry}`);
 const module_ = await import(entry);
 const init = module_.default;
-const { PdfDocument, version } = module_;
+const { PdfDocument, PdfSource, version } = module_;
 
 // The `web` target's default init fetches `tinker_pdf_js_bg.wasm` relative to
 // its own URL. Node's fetch does not do file: URLs, so the bytes are handed
@@ -116,5 +116,62 @@ if (view.length !== 0) {
 if (copied.length === 0 || ink(drawn, copied) !== painted) {
   throw new Error('the copy was disturbed by an allocation');
 }
+
+// ---- Opening by ranges, which is the wasm host loop -----------------------
+//
+// The engine performs no transport. A host that has the bytes hands them over;
+// a host that has to fetch them feeds what it is asked for and calls again.
+// This drives that loop with the file already on disk, which is the shape a
+// browser uses over HTTP range requests with `fetch` in place of `subarray`.
+//
+// Two things are asserted that a weaker version would miss. **It converges in
+// a bounded number of turns**: a loop that could not finish would hang here
+// rather than fail, so the turn count is capped and the cap is an assertion.
+// And **the page it draws is the page the whole-buffer open draws**, pixel for
+// pixel -- because where the bytes came from is not an input to what they mean.
+
+const source = new PdfSource(pdf.length);
+let streamed = null;
+let turns = 0;
+while (streamed === null) {
+  turns += 1;
+  if (turns > 32) throw new Error(`the host loop has not converged in ${turns} turns`);
+  try {
+    streamed = PdfDocument.openStreaming(source);
+  } catch (e) {
+    const needed = source.takeNeeded();
+    if (needed.length === 0) {
+      throw new Error(`refused without naming a range: ${e}`);
+    }
+    for (let i = 0; i < needed.length; i += 2) {
+      const [start, end] = [needed[i], needed[i + 1]];
+      source.feed(start, pdf.subarray(start, end));
+    }
+  }
+}
+console.log(
+  `streamed open converged in ${turns} turns, ` +
+    `${source.bytesFed} of ${pdf.length} bytes fed`,
+);
+if (turns < 2) throw new Error('the first call must have missed: nothing was fed yet');
+if (streamed.pageCount !== doc.pageCount) {
+  throw new Error(`streamed pageCount ${streamed.pageCount}`);
+}
+
+streamed.setFonts(face, undefined, undefined, undefined);
+const streamedPage = streamed.renderPage(0, 1.0);
+const streamedPixels = streamedPage.data();
+if (streamedPage.width !== drawn.width || streamedPage.height !== drawn.height) {
+  throw new Error('the streamed render is a different size');
+}
+if (streamedPixels.length !== copied.length) {
+  throw new Error('the streamed render is a different length');
+}
+for (let i = 0; i < streamedPixels.length; i += 1) {
+  if (streamedPixels[i] !== copied[i]) {
+    throw new Error(`the streamed render differs from the buffered one at byte ${i}`);
+  }
+}
+console.log(`streamed render is byte-identical to the buffered one (${painted} ink)`);
 
 console.log('NODE-SMOKE: RAN, rendered, inked, and the view was invalidated');
