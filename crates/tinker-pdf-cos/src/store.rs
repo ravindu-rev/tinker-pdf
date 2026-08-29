@@ -123,6 +123,16 @@ impl SlotStore {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResolveCtx {
     stack: Vec<u32>,
+    /// Whether a range the load needed was not available.
+    ///
+    /// **A miss never publishes.** An object whose bytes could not be fetched
+    /// reads as null, because 7.3.10 says a missing object is null and ruling
+    /// 2 says degrade rather than fail -- but that null must not enter the
+    /// store, or every later read of the slot would get the miss's answer
+    /// forever, including the read that happens after the host has supplied
+    /// the bytes. The flag is set where the window was refused and checked
+    /// where the value would be published.
+    missed: bool,
 }
 
 impl ResolveCtx {
@@ -132,6 +142,16 @@ impl ResolveCtx {
 
     pub(crate) fn contains(&self, num: u32) -> bool {
         self.stack.contains(&num)
+    }
+
+    /// Records that a range this load needed was not available.
+    pub(crate) fn note_miss(&mut self) {
+        self.missed = true;
+    }
+
+    /// Whether anything in this resolve has missed.
+    pub(crate) fn missed(&self) -> bool {
+        self.missed
     }
 
     pub(crate) fn depth(&self) -> usize {
