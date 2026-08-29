@@ -9,7 +9,9 @@
 //! *a leaf is any crate that takes bytes and plain parameters and returns bytes
 //! and values, whatever the list says.* Nothing below knows what a PDF, a page,
 //! an EPUB or an XHTML element is — the document tree lives in the facade and
-//! reaches this crate through [`Element`], five methods wide.
+//! reaches this crate through [`Element`], seven required methods wide, with
+//! seven more the caller answers only if its document language has the
+//! concept.
 //!
 //! # The five things worth knowing before reading further
 //!
@@ -134,19 +136,30 @@ pub use parser::{parse, parse_inline, Declared, Report, StyleRule, Stylesheet};
 /// The element side of matching, and the whole of what this crate knows about
 /// a document.
 ///
-/// Five required methods and two provided ones, and the shape is what keeps
+/// Seven required methods and seven provided ones, and the shape is what keeps
 /// XHTML out of a CSS crate. [`Element::id`] and [`Element::classes`] exist
 /// rather than `attribute("id")` and `attribute("class")` because
 /// `selectors-4` §6.5 and §6.6 say the document language defines both — a
 /// matcher that read those two attribute names would have hard-coded HTML into
 /// a crate whose entire argument is that it has not.
 ///
+/// **The seven provided methods are the same sentence, seven more times.**
+/// `selectors-4` defers `:empty`'s idea of a child node, `:lang()`'s language,
+/// `:dir()`'s directionality, `:link`'s hyperlink and the whole of §12's form
+/// states to the document language, so each arrives as a question the caller
+/// answers. Every one of them has a default that says *nothing is known*,
+/// which is what a caller whose document language has no such concept should
+/// say — and what keeps this trait implementable in ten lines, as the example
+/// in this crate's header still is.
+///
 /// **Indices, not references.** A tree of borrowed nodes would put a lifetime
 /// on every signature here and make a cyclic parent link a compile error the
 /// caller has to design around. The caller hands a slice in **document order**
 /// instead, and every link is an index into it; [`cascade::cascade`] refuses a
 /// slice whose parents do not precede their children, by name, rather than
-/// reading an uninitialised style.
+/// reading an uninitialised style. `selector::matches` relies on the same
+/// order for `:has()`, where the subject of a relative selector is always
+/// later in the slice than the element it is relative to.
 pub trait Element {
     /// The element's local name, without a prefix. Compared case-sensitively,
     /// which is XML's rule and therefore XHTML's.
@@ -184,6 +197,62 @@ pub trait Element {
     /// and silently, if both were the caller's to write.
     fn has_class(&self, name: &str) -> bool {
         self.classes().iter().any(|class| class == name)
+    }
+
+    /// Whether the element is **empty** in `selectors-4` §6.6.3's sense: no
+    /// children the document language counts as content.
+    ///
+    /// It is asked rather than derived because the answer is about nodes this
+    /// trait does not carry — text, CDATA, comments — and because *which of
+    /// them count* is the document language's ruling and not this crate's. The
+    /// default is `false`: a caller that says nothing has not said its
+    /// elements are empty.
+    fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// The language this element **declares**, or `None` to inherit it from
+    /// its parent — `selectors-4` §6.5.1.
+    ///
+    /// The split is deliberate: which attribute declares a language is the
+    /// document language's question (`lang`, `xml:lang`, something else
+    /// entirely), and *that it inherits down the tree* is a question about the
+    /// tree, which this crate has. So the caller answers the first and
+    /// `selector`'s matcher walks `parent()` for the second.
+    ///
+    /// An explicitly empty declaration is `Some("")` rather than `None`: an
+    /// element whose language is stated to be unknown does not inherit its
+    /// parent's, and matches no range.
+    fn language(&self) -> Option<&str> {
+        None
+    }
+
+    /// The directionality this element **declares**, or `None` to inherit it —
+    /// `selectors-4` §6.6.
+    ///
+    /// Compared ASCII-case-insensitively against `:dir()`'s keyword, and
+    /// returned verbatim: a value the document language leaves to the content
+    /// (HTML's `dir="auto"`) is reported as itself, where it matches neither
+    /// `:dir(ltr)` nor `:dir(rtl)`, rather than being guessed at.
+    fn direction(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether this element is the source of a hyperlink — `selectors-4`
+    /// §6.6.1's `:link` and `:any-link`.
+    ///
+    /// §6.6.1 splits the two on whether the reading system has visited the
+    /// target, and a paginated document has visited nothing, so one answer
+    /// serves both. What makes an element a link is entirely the document
+    /// language's: this crate does not know that `<a href>` is one.
+    fn is_link(&self) -> bool {
+        false
+    }
+
+    /// The document language's user-interface states for this element —
+    /// `selectors-4` §12, whose every pseudo-class defers to it.
+    fn ui_state(&self) -> selector::UiState {
+        selector::UiState::NONE
     }
 }
 
@@ -458,8 +527,14 @@ pub enum Warning {
     /// A pseudo-class or pseudo-element no specification this build cites
     /// defines. Its rule is dropped, per `selectors-4` §3.1.
     PseudoUnknown(String),
-    /// A pseudo-class `selectors-4` defines that this build never matches —
-    /// `:hover`, `:nth-child()` and their relatives — by name.
+    /// A pseudo-class naming a state a paginated document does not have, by
+    /// name. **Seven of them**: `:hover`, `:focus`, `:focus-within`,
+    /// `:focus-visible`, `:active`, `:target` and `:visited`, each needing a
+    /// pointer, a focus ring, a press, a fragment or a history that a PDF page
+    /// has none of. Never matching is the answer here rather than a gap, and
+    /// it is still counted because a rule that had no effect is something the
+    /// book said (ruling 10). Everything else `selectors-4` defines and this
+    /// build parses is evaluated — see `selector::PseudoClass`.
     PseudoClassUnsupported(&'static str),
     /// A pseudo-element this build parses and does not generate a box for. The
     /// rule matches nothing, which is the honest answer: applying it to the

@@ -14,12 +14,20 @@
 //! **Nothing in this file lays anything out.** The cascade needs an element
 //! tree and that is milestone 8's; what this can say is what the *parser* costs
 //! on real input, which is five of the eight rows.
+//!
+//! One test here is not about the ledger at all, and it is here for the reason
+//! the header above gives: the pseudo-classes `selectors-4` defers to the
+//! document language are answered by `epub::xhtml`'s element and by nothing in
+//! the CSS crate, so the only place the wiring can be checked is a crate that
+//! has both. `tinker-pdf-css`'s own suite proves the matcher; this proves that
+//! `xml:lang`, `href` and `checked` reach it.
 
 mod epub_support;
 
 use std::path::PathBuf;
 
 use epub_support::{entries, is_stylesheet};
+use tinker_pdf::epub::xhtml;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::property::Declaration;
 use tinker_pdf_css::{parse, Budget, Limits, NoImports};
@@ -274,4 +282,170 @@ fn the_unsupported_census_over_the_committed_corpus() {
         implemented > 200,
         "only {implemented} longhands were read out of the whole corpus"
     );
+}
+
+/// The pseudo-classes whose meaning is XHTML's, matched through the real
+/// element tree.
+///
+/// The CSS crate's own suite proves the matcher against a fixture element that
+/// answers whatever the test tells it to. That leaves exactly one thing
+/// unproved and it is the thing ruling 8 is about: whether the *document
+/// language* answers arrive at all. `:lang()` here has to find `xml:lang` on a
+/// grandparent, `:checked` has to find HTML's attribute on HTML's element and
+/// `:empty` has to survive pandoc's indentation — and none of that is
+/// something `tinker-pdf-css` can be asked, because none of it is in it.
+#[test]
+fn the_document_language_answers_the_pseudo_classes_that_are_its_own() {
+    // Indented on purpose: every text node between these tags is white space,
+    // and `:empty` has to be unmoved by all of it.
+    let markup = r#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-GB" lang="fr">
+  <body>
+    <ul id="list">
+      <li>one</li>
+      <li>two</li>
+      <li>three</li>
+      <li>four</li>
+    </ul>
+    <p id="linked"><a id="hyper" href="ch02.xhtml">a link</a><a id="anchor">not a link</a></p>
+    <table>
+      <tr>
+        <td id="bare"></td>
+        <td id="spaced">
+        </td>
+        <td id="full">text</td>
+      </tr>
+    </table>
+    <form>
+      <input id="ticked" type="checkbox" checked="checked" disabled="disabled"/>
+      <input id="plain" type="text" required="required"/>
+    </form>
+    <p id="rtl" dir="rtl"><span id="inherits">child</span></p>
+    <p id="auto" dir="auto"><span id="unresolved">child</span></p>
+  </body>
+</html>
+"#;
+    let dom = xhtml::read(markup.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT).expect("markup");
+    assert!(dom.defects.is_empty(), "{:?}", dom.defects);
+
+    let at = |id: &str| dom.by_id(id).unwrap_or_else(|| panic!("no #{id}"));
+    let hits = |selector: &str, index: usize| {
+        let limits = Limits::DEFAULT;
+        let mut budget = Budget::new(&limits);
+        let sheet = parse(
+            format!("{selector} {{ color: red }}").as_bytes(),
+            None,
+            &NoImports,
+            &MediaContext::screen(432.0, 648.0),
+            &limits,
+            &mut budget,
+        )
+        .expect("a one-rule sheet");
+        assert_eq!(sheet.rules.len(), 1, "`{selector}` did not parse");
+        tinker_pdf_css::selector::matches(
+            &sheet.rules[0].selectors[0],
+            &dom.nodes,
+            index,
+            &mut budget,
+        )
+        .expect("under every cap")
+    };
+
+    // `:nth-child()` over a real `<ul>`, where the sibling links were built by
+    // the reader rather than written down by a fixture — and where the text
+    // between the `<li>`s is not a sibling.
+    let items: Vec<usize> = (0..dom.nodes.len())
+        .filter(|index| dom.nodes[*index].name == "li")
+        .collect();
+    assert_eq!(items.len(), 4);
+    assert!(hits("li:nth-child(odd)", items[0]));
+    assert!(!hits("li:nth-child(odd)", items[1]));
+    assert!(hits("li:nth-child(2n)", items[1]));
+    assert!(hits("li:nth-last-child(1)", items[3]));
+    assert!(!hits("li:nth-last-child(1)", items[2]));
+    assert!(hits("li:first-of-type", items[0]));
+    assert!(hits("li:last-of-type", items[3]));
+    assert!(hits("ul:has(> li)", at("list")));
+    assert!(!hits("ul:has(> p)", at("list")));
+
+    // `xml:lang` beats `lang`, and both are found from a descendant: the
+    // declaration is on `<html>` and the question is about a `<li>`.
+    assert!(hits("li:lang(en)", items[0]));
+    assert!(hits("li:lang(en-GB)", items[0]));
+    assert!(
+        !hits("li:lang(fr)", items[0]),
+        "`lang=fr` is shadowed by `xml:lang=en-GB` on the same element"
+    );
+
+    // §6.6.1's link, which is the attribute and not the element name.
+    assert!(hits("a:link", at("hyper")));
+    assert!(hits("a:any-link", at("hyper")));
+    assert!(!hits("a:link", at("anchor")), "an `<a>` with no href");
+    assert!(!hits("a:visited", at("hyper")));
+
+    // §6.6.3, and the whole reason it is the document language's answer: the
+    // second cell holds a newline and two spaces, and it is still empty.
+    assert!(hits("td:empty", at("bare")));
+    assert!(hits("td:empty", at("spaced")), "indentation is not content");
+    assert!(!hits("td:empty", at("full")));
+
+    // §12, over HTML's own vocabulary.
+    assert!(hits("input:checked", at("ticked")));
+    assert!(hits("input:disabled", at("ticked")));
+    assert!(!hits("input:enabled", at("ticked")));
+    assert!(!hits("input:checked", at("plain")));
+    assert!(hits("input:enabled", at("plain")));
+    assert!(hits("input:required", at("plain")));
+    assert!(hits("input:optional", at("ticked")));
+    assert!(hits("input:read-write", at("plain")));
+    // HTML's rule, stated out loud because it surprises: everything that is
+    // not editable is `:read-only`, a paragraph included.
+    assert!(hits("p:read-only", at("linked")));
+    assert!(!hits("p:read-write", at("linked")));
+    assert!(!hits("p:enabled", at("linked")), "a `<p>` is neither");
+    assert!(!hits("p:disabled", at("linked")));
+
+    // §6.6's direction, inherited down and unresolved where HTML says the
+    // content decides.
+    assert!(hits("span:dir(rtl)", at("inherits")));
+    assert!(!hits("span:dir(ltr)", at("inherits")));
+    assert!(!hits("span:dir(rtl)", at("unresolved")), "`dir=auto`");
+    assert!(!hits("span:dir(ltr)", at("unresolved")));
+    // And the document element's default, which is HTML's and not this
+    // crate's: a book that never writes `dir` is `ltr` throughout.
+    assert!(hits("li:dir(ltr)", items[0]));
+
+    // The seven that never match, over a real document: each is parsed, each
+    // is counted, and none of them styles anything.
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let sheet = parse(
+        b"a:hover, a:focus, a:focus-within, a:focus-visible, a:active, a:target, a:visited \
+          { color: red }",
+        None,
+        &NoImports,
+        &MediaContext::screen(432.0, 648.0),
+        &limits,
+        &mut budget,
+    )
+    .expect("a one-rule sheet");
+    let stateless: usize = sheet
+        .report
+        .warnings
+        .iter()
+        .filter(|(warning, _)| {
+            matches!(warning, tinker_pdf_css::Warning::PseudoClassUnsupported(_))
+        })
+        .map(|(_, count)| *count)
+        .sum();
+    assert_eq!(stateless, 7, "{:?}", sheet.report.warnings);
+    for selector in &sheet.rules[0].selectors {
+        for index in 0..dom.nodes.len() {
+            assert!(
+                !tinker_pdf_css::selector::matches(selector, &dom.nodes, index, &mut budget)
+                    .expect("under every cap"),
+                "a state this document does not have matched element {index}"
+            );
+        }
+    }
 }

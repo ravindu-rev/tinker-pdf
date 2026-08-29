@@ -38,7 +38,16 @@ stays refused by name under both modes.
 
 **The CSS engine** (`tinker-pdf-css`, a leaf crate): a `css-syntax-3`
 tokenizer with the spec's normative error recovery; `selectors-4` matching
-and specificity; `css-cascade-5`'s complete sort order (origin, layer,
+and specificity, with **every pseudo-class a static document can decide
+actually decided** — `:nth-child()` and its three relatives over §6.6.2's
+whole `An+B` grammar, the `of-type` family, `:empty`, `:has()` (a relative
+selector against `:scope`, bounded by the match budget), `:lang()` by
+RFC 4647 extended filtering, `:dir()`, `:link`/`:any-link` and §12's form
+states. The ones whose meaning is the *document language's* are answered by
+`epub::xhtml`'s element and appear nowhere in the CSS crate, which is what
+keeps ruling 8's boundary real: `xml:lang` beats `lang` there, an `<a>` is a
+link only with an `href`, and white-space-only character data does not stop a
+cell being `:empty`. `css-cascade-5`'s complete sort order (origin, layer,
 specificity, order) with the UA sheet (`read::UA_STYLESHEET`, derived from
 HTML §15), author sheets and `style=""` attributes; `@media` evaluated
 against a `MediaContext`; `@import` with cycle and depth bounds;
@@ -127,7 +136,8 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | `min-width`, `max-width`, `min-height`, `max-height`, `vertical-align`, `gap`, multi-column (`column-*`), `position` other than `static` | `ArchiveWarning::UnimplementedProperty { property, elements }` | parsed and counted by the elements reached; a property with no layout consumer cannot be cascaded silently — the build enforces it | [ROADMAP.md](../ROADMAP.md) Tier 4 |
 | `@layer` | `tinker_pdf_css::Warning::LayerRefused` | `css-cascade-5` §6.1 sorts layers above specificity, so reading the block as ordinary rules would invert the cascade; refused by name | [ROADMAP.md](../ROADMAP.md) |
 | Other at-rules (`@supports`, `@page`, …) | `tinker_pdf_css::Warning::AtRuleUnsupported(name)` | skipped by the spec's own recovery, named | — |
-| `:hover`, `:nth-child()` and relatives | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | parsed, never matched — a static document has no hover | — |
+| `:hover`, `:focus`, `:focus-within`, `:focus-visible`, `:active`, `:target`, `:visited` — **seven, and the whole of what never matches** | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | each names a state of a reading *session*: a pointer, a focus ring, a press, a fragment the reader navigated to, a history. A paginated document has none of them, for any element, ever — so never matching is `selectors-4`'s **answer** here and not this build's gap. Still counted, because a rule that had no effect is something the book said (ruling 10), and the count is asserted by number so a shrinking list cannot read as a passing one | — |
+| `:nth-child(An+B of S)` | `parser::Report::discarded_rules` | the only pseudo-class syntax refused outright. Reading it as the `An+B` without the `of` would style every second row instead of every second `.a`, which is a book that renders beautifully and is wrong; §3.1 drops the rule instead, counted | [ROADMAP.md](../ROADMAP.md) |
 | `::before`, `::after`, other pseudo-elements | `tinker_pdf_css::Warning::PseudoElementUnsupported(name)` | parsed; no box generated, so the rule matches nothing rather than colouring the originating element | [ROADMAP.md](../ROADMAP.md) |
 | `display: inline-block` | `tinker_pdf_layout::Warning::InlineBlockAsInline` | laid out as inline text; width/height/vertical margins ignored | [ROADMAP.md](../ROADMAP.md) |
 | A table row taller than a page | `tinker_pdf_layout::Warning::TableRowTallerThanPage` | the row overflows; intra-row slicing is staged, not built | [ROADMAP.md](../ROADMAP.md) |

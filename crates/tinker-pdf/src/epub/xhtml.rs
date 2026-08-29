@@ -8,6 +8,14 @@
 //! trait so that *no XHTML vocabulary is in its public API*, and the whole
 //! value of that boundary is lost if the vocabulary leaks back across it.
 //!
+//! Every pseudo-class `selectors-4` defers to the document language is
+//! answered in [`Node`]'s trait implementation below and **nowhere else**:
+//! that `xml:lang` beats `lang`, that an `<a>` is only a link when it has an
+//! `href`, that a checkbox is `:checked` when it carries the attribute, and
+//! that white-space-only character data does not stop an element being
+//! `:empty`. Each of those is a sentence about HTML and XML, and the CSS crate
+//! contains none of them.
+//!
 //! # The shape, and why it is indices
 //!
 //! [`tinker_pdf_css::cascade::cascade`] takes a slice in **document order**
@@ -37,6 +45,7 @@
 //! [`Node::local_name`], which reports the local name and
 //! [`Node::is_html`], which is what the tree walk keys the UA vocabulary on.
 
+use tinker_pdf_css::selector::UiState;
 use tinker_pdf_css::Element as CssElement;
 use tinker_pdf_xml::{Doctype, Error as XmlError, Event, Limits as XmlLimits, Source};
 
@@ -146,6 +155,126 @@ impl CssElement for Node {
     fn inline_style(&self) -> Option<&str> {
         self.style.as_deref()
     }
+
+    /// `selectors-4` §6.6.3's `:empty`.
+    ///
+    /// **Character data that is only white space is not content**, so
+    /// `<td></td>` and `<td>\n  </td>` are the same empty cell. That is a
+    /// decision and it is made here rather than in the CSS crate because it is
+    /// a claim about *this* document language: a producer's indentation is
+    /// markup formatting, and a book whose every empty table cell stopped
+    /// matching `:empty` because pandoc indents its output would be styled by
+    /// the pretty-printer.
+    ///
+    /// Comments and processing instructions cannot appear in `children` at
+    /// all — [`read`] drops them — so §6.6.3's rule that they do not affect
+    /// emptiness holds by construction rather than by a test here.
+    fn is_empty(&self) -> bool {
+        self.children.iter().all(|child| match child {
+            Child::Element(_) => false,
+            Child::Text(text) => text.chars().all(is_document_white_space),
+        })
+    }
+
+    /// `selectors-4` §6.5.1's language, as XHTML declares it.
+    ///
+    /// `xml:lang` beats `lang`: an EPUB content document is XML (EPUB 3.3
+    /// §3.2), and where a producer writes both — several do, to be readable by
+    /// an HTML parser as well — the XML attribute is the normative one.
+    ///
+    /// An empty declaration is returned as itself rather than as `None`,
+    /// because `lang=""` means *the language is not known* and that is a
+    /// different statement from not having said: the CSS crate stops
+    /// inheriting at it, and it matches no range.
+    fn language(&self) -> Option<&str> {
+        self.attr("xml:lang").or_else(|| self.attr("lang"))
+    }
+
+    /// `selectors-4` §6.6's directionality, as XHTML declares it.
+    ///
+    /// The value is passed through rather than resolved, `auto` included:
+    /// HTML's `dir="auto"` means *work it out from the first strong character
+    /// of the content*, which this build does not do — so it reaches `:dir()`
+    /// as `auto`, matches neither keyword, and stops the inheritance, rather
+    /// than being guessed at as one of the two.
+    ///
+    /// The document element with nothing declared is `ltr`, which is HTML's
+    /// own default and is the one place a default belongs: an element deeper
+    /// in the tree that says nothing must inherit rather than assume.
+    fn direction(&self) -> Option<&str> {
+        match self.attr("dir") {
+            Some(value) if !value.is_empty() => Some(value),
+            _ if self.parent.is_none() => Some("ltr"),
+            _ => None,
+        }
+    }
+
+    /// `selectors-4` §6.6.1's hyperlink source, as HTML defines one: `<a>`,
+    /// `<area>` or `<link>` **with an `href`**. Without the attribute none of
+    /// the three is a link, which is the negative half `:any-link` is for.
+    fn is_link(&self) -> bool {
+        self.is_html()
+            && matches!(self.name.as_str(), "a" | "area" | "link")
+            && self.attr("href").is_some()
+    }
+
+    /// `selectors-4` §12's states, as HTML defines them.
+    ///
+    /// Three of the four are `Option` because HTML scopes them to the elements
+    /// that can hold the state at all — a `<p>` is neither `:enabled` nor
+    /// `:disabled` — and the fourth, `read_only`, is `Some` for **every**
+    /// element, which is HTML's rule rather than a slip: everything that is
+    /// not editable is `:read-only`, so `p:read-only` does match a paragraph.
+    ///
+    /// **Two simplifications, named.** A control inside a disabled
+    /// `<fieldset>` is `:disabled` in HTML and is not here, because this
+    /// method sees one element and the ancestor walk would be the CSS crate
+    /// asking a question only HTML can pose. And `readonly` is treated as
+    /// applying to every `<input>`, where HTML applies it only to the text-like
+    /// types. Both are invisible in an EPUB, whose scripting is refused by
+    /// name and whose forms are inert either way.
+    fn ui_state(&self) -> UiState {
+        if !self.is_html() {
+            return UiState::NONE;
+        }
+        let present = |name: &str| self.attr(name).is_some();
+        let editable = self
+            .attr("contenteditable")
+            .is_some_and(|value| !value.eq_ignore_ascii_case("false"));
+        UiState {
+            checked: match self.name.as_str() {
+                "input" => {
+                    present("checked")
+                        && self.attr("type").is_some_and(|kind| {
+                            kind.eq_ignore_ascii_case("checkbox")
+                                || kind.eq_ignore_ascii_case("radio")
+                        })
+                }
+                "option" => present("selected"),
+                _ => false,
+            },
+            disabled: match self.name.as_str() {
+                "button" | "input" | "select" | "textarea" | "optgroup" | "option" | "fieldset" => {
+                    Some(present("disabled"))
+                }
+                _ => None,
+            },
+            required: match self.name.as_str() {
+                "input" | "select" | "textarea" => Some(present("required")),
+                _ => None,
+            },
+            read_only: Some(match self.name.as_str() {
+                "input" | "textarea" => present("readonly") || present("disabled"),
+                _ => !editable,
+            }),
+        }
+    }
+}
+
+/// `css-text-3`'s document white space: the five characters a producer's
+/// indentation is made of.
+fn is_document_white_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000C}')
 }
 
 /// What could not be read about a content document.
