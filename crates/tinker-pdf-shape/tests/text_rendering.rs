@@ -583,6 +583,12 @@ const UNRESOLVABLE: &[(&str, &str)] = &[("GPOS-1/15", "aacute")];
 const WITHIN_TOLERANCE: &[(&str, usize, char, i32)] = &[
     ("SHARAN-1/5", 6, 'x', -1),
     ("SHARAN-1/6", 6, 'y', -1),
+    // And a fourth Kannada row, arriving with the reph move for the same
+    // reason: `SHKNDA-2/12`'s third glyph sits at 2367 + 919 design units,
+    // which is 1604.996 thousandths of an em. Upstream scales and rounds the
+    // two advances separately and gets 1156 + 449 = 1605; this crate adds
+    // first and rounds once, and gets 1604.
+    ("SHKNDA-2/12", 2, 'x', -1),
     // The three Kannada rows arrived with the per-plan mark widths, and they
     // are the same one-unit rounding difference the other three are: upstream
     // scales and rounds every advance separately, this crate stays in integer
@@ -640,13 +646,31 @@ const MAX_DELTA: i32 = 1;
 ///   `SHLANA-6/2` and `SHLANA-6/4` have two, and expect the reversal. Keeping
 ///   their typed order was tried and costs three cases.
 ///
+/// A fifth then moved them from 261 to 298: **a Brahmic run keeps the advance
+/// the face gave a spacing matra**, which took `SHKNDA-3` from 0 of 31 to 30
+/// and `SHKNDA-2` from 4 of 16 to 8, and made `SHKNDA-1` and `SHBALI-2` whole.
+///
 /// # What is left, and which section each shortfall accounts for
 ///
-/// - **The Indic shaper's base-finding.** Kannada forms conjuncts by a model
-///   USE does not have, in which `rphf`, `half` and `blwf` apply at *one
-///   position* of a syllable rather than to the whole of it. `SHKNDA-3` (0 of
-///   31) and `SHKNDA-2` (4 of 16) are that, and `SHKNDA-1`'s one remaining
-///   case.
+/// [`TRIAGE`] is now the itemised answer and it should be read first; this is
+/// the account of it. **The prose that stood here was wrong and the triage is
+/// what says so**, which is worth leaving visible: it named *"the Indic
+/// shaper's base-finding"* — `rphf`, `half` and `blwf` applying at one
+/// position of a syllable rather than over the whole of it — as the cause of
+/// `SHKNDA-3` at 0 of 31 and `SHKNDA-2` at 4 of 16. `SHKNDA-3` was a mark
+/// advance and is now 30 of 31.
+///
+/// - **`GSUB` accounts for twenty-seven of the thirty-five**, spread over
+///   `SHLANA-10` (nine), `SHKNDA-2` (seven), `SHLANA-2` (three), and one or
+///   two each in `SHBALI-1`, `SHKNDA-3`, `SHLANA-3`, `SHLANA-7` and
+///   `SHLANA-8`. Whether that is a feature not firing, a stage in the wrong
+///   place, or a syllable boundary cut where there is none is per-case and
+///   [`TRIAGE`] does not claim to say which.
+/// - **Reordering accounts for three.** `SHKNDA-2/12`, `SHLANA-4/2` and
+///   `SHLANA-10/28`. That is the whole of what is left of the thing two
+///   milestones of documentation called the largest cause.
+/// - **Positioning accounts for five**, four in `x` and one in `y`, every one
+///   of them a single case in a section whose other failures are `GSUB`.
 /// - **Canonical ordering.** The decomposition above is not NFD: the
 ///   `Canonical_Combining_Class` sort is not applied. No case here is known to
 ///   need it, which is why it is a gap rather than a cause.
@@ -654,7 +678,8 @@ const MAX_DELTA: i32 = 1;
 ///   broken; this crate never inserts a glyph the text did not ask for.
 /// - The `Category` collapse — five values where USE has around twenty — and
 ///   the syllable rule, both stated as simplifications in `crate::universal`.
-///   The residue in `SHBALI-1`, `SHBALI-2` and the `SHLANA` sections is here.
+///   `docs/design/shaping.md` calls opening that grammar properly effectively
+///   unbounded, and the `set` column above is where its cost is visible.
 const PASSING: &[(&str, usize)] = &[
     ("CMAP-1", 4),
     ("CMAP-2", 2),
@@ -669,8 +694,8 @@ const PASSING: &[(&str, usize)] = &[
     ("SHBALI-2", 12),
     ("SHBALI-3", 9),
     ("SHKNDA-1", 34),
-    ("SHKNDA-2", 8),
-    ("SHKNDA-3", 30),
+    ("SHKNDA-2", 10),
+    ("SHKNDA-3", 31),
     ("SHLANA-1", 51),
     ("SHLANA-2", 32),
     ("SHLANA-3", 12),
@@ -688,6 +713,250 @@ const PASSING: &[(&str, usize)] = &[
 const WHOLE: &[&str] = &[
     "CMAP-1", "CMAP-2", "GPOS-1", "GPOS-2", "GPOS-3", "GPOS-4", "GSUB-1", "GSUB-2", "SHARAN-1",
 ];
+
+/// Which one thing is wrong with a case this crate does not reproduce.
+///
+/// # Why a verdict and not the diff
+///
+/// A failing case already prints an expected list and an observed one, and
+/// reading a pair of forty-element lists is exactly how *"the Indic shaper's
+/// base-finding"* stood as the written diagnosis of `SHKNDA-2` and `SHKNDA-3`
+/// through two milestones while the actual cause was a mark advance. The
+/// distinction below is what settles that in one run rather than in an
+/// afternoon: a section that is every-case [`Wrong::Advance`] has had every
+/// lookup fire correctly and only the pen is wrong, and no amount of work on
+/// `GSUB` will move it.
+///
+/// Each verdict names a different part of the shaper, and they are checked in
+/// this order because each is only meaningful once the one before it is ruled
+/// out — comparing `x` between two different glyphs says nothing.
+///
+/// 1. [`Wrong::Set`] — not the glyphs expected. A feature did not fire, one
+///    fired that should not have, or one fired over the wrong span: `GSUB`,
+///    the stage order in `USE_GSUB_STAGES`, or the syllable mask.
+/// 2. [`Wrong::Order`] — the same glyphs in a different sequence, which is
+///    `universal::reorder` and the reordering pause and nothing else.
+/// 3. [`Wrong::Advance`] — the right glyphs in the right order at the wrong
+///    `x`: `hmtx`, the mark-width answer, or a `GPOS` adjustment.
+/// 4. [`Wrong::Offset`] — the same at the wrong `y`, which is mark
+///    attachment. Kept apart from `Advance` because it is a different table
+///    and a different fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wrong {
+    Set,
+    Order,
+    Advance,
+    Offset,
+}
+
+impl Wrong {
+    const fn name(self) -> &'static str {
+        match self {
+            Wrong::Set => "set",
+            Wrong::Order => "order",
+            Wrong::Advance => "advance",
+            Wrong::Offset => "offset",
+        }
+    }
+}
+
+/// The verdict for one case, from its observed and expected glyph lists.
+///
+/// An expected name [`UNRESOLVABLE`] lists has no index to compare, so it is
+/// taken to match whatever stands in its place — the same allowance
+/// [`every_runnable_case_produces_what_the_fixture_says`] makes, and for the
+/// same reason.
+fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wrong {
+    let want: Vec<u16> = expected
+        .iter()
+        .enumerate()
+        .map(|(n, (glyph, _, _))| glyph.or_else(|| ours.get(n).map(|g| g.0)).unwrap_or(0))
+        .collect();
+    let got: Vec<u16> = ours.iter().map(|glyph| glyph.0).collect();
+    if got != want {
+        let (mut sorted_got, mut sorted_want) = (got, want);
+        sorted_got.sort_unstable();
+        sorted_want.sort_unstable();
+        return if sorted_got == sorted_want {
+            Wrong::Order
+        } else {
+            Wrong::Set
+        };
+    }
+    if ours
+        .iter()
+        .zip(expected)
+        .any(|(ours, want)| (ours.2 - want.2).abs() > MAX_DELTA)
+    {
+        Wrong::Offset
+    } else {
+        Wrong::Advance
+    }
+}
+
+/// Every case this crate does not reproduce, with the one thing wrong with it.
+///
+/// # This table is the shortfall, itemised
+///
+/// [`PASSING`] says *how many* cases each section reproduces; this says what
+/// is wrong with each one that it does not, which is the thing a person
+/// picking up milestone 5 actually needs. It is asserted as an exact set for
+/// the same reason `PASSING` is a ratchet: a row that changes verdict is a
+/// finding, and a row that vanishes is progress that has to be claimed in the
+/// commit that earned it.
+///
+/// # What it says as of this commit, measured and not expected
+///
+/// Thirty-two rows: **25 `set`, 2 `order`, 4 `advance`, 1 `offset`.** It began
+/// at thirty-five, and the three that have left are the three that were worth
+/// a commit each. The shape of what is left is the finding, and it is not the
+/// shape the docs predicted.
+///
+/// - **The residue is overwhelmingly `GSUB`.** Twenty-five of thirty-two are
+///   the wrong glyphs, not the wrong places — a feature that did not fire, one
+///   that fired where it should not have, or one that fired over a span the
+///   cluster model cut in the wrong place.
+/// - **`SHKNDA-2`'s six are one cause and it is priced.** All six are the same
+///   thing: a matra that has to be next to its base before the presentation
+///   features run. Moving it there gains those six and costs **sixty-nine**
+///   across `SHBALI` and `SHLANA`, because Tai Tham wants the opposite order
+///   and no Unicode property this crate reads separates the two. The
+///   measurement is in `universal::reorder`; the six stay unclaimed.
+/// - **`Order` is the rarest verdict in the whole corpus — two rows**, both in
+///   Tai Tham. By this measure `universal::reorder` is very nearly finished,
+///   which is the opposite of where `docs/design/shaping.md` pointed for two
+///   milestones.
+/// - **Four `advance` and one `offset`** are all in Tai Tham, and each is a
+///   single case in a section whose other failures are `set` — so none of them
+///   is a cause worth a commit on its own.
+///
+/// # Tai Tham's residue is one glyph, and it is not a feature that is missing
+///
+/// **Fifteen of the thirty-two are the same substitution not happening**:
+/// `TestShapeLana`'s gid311 (`uni1A78`) is expected where this crate produces
+/// gid314 (`uni1A7B`), the glyph `cmap` gives U+1A7B outright. `SHLANA-2/2`,
+/// `/3`, `/4`; `SHLANA-7/17`; `SHLANA-8/5`, `/6`; and nine of `SHLANA-10`'s
+/// twelve. **Ten of those differ in nothing else at all** — same glyph count,
+/// same order, every position identical — so one substitution would close a
+/// third of what is left.
+///
+/// Two explanations were tested and both are refuted, which is why this is
+/// recorded rather than fixed:
+///
+/// - **Not a feature this crate fails to ask for.** The face declares exactly
+///   `abvs blwf blws ccmp clig cv01 cv02 cv03 lann liga locl pref psts rlig
+///   rphf ss01 ss02 ss03 ss17 ss18 ss19 ss97 ss98 ss99`. Requesting **all
+///   twenty-four at once** through [`Shaper::with_features`] still produces
+///   gid314. The language system's required feature is applied already, by
+///   `LayoutTable::lookups_for_masked`.
+/// - **Not a `cmap` difference.** The face has one subtable, `(3, 1)` format
+///   4, and it reads monotonically across the whole Tai Tham block:
+///   U+1A78 to gid311, U+1A7B to gid314, neighbours either side in step.
+///
+/// What is left is a lookup that does not *match* the glyph sequence this
+/// crate hands it — a context, an order, or a boundary — which is inside
+/// USE's cluster grammar and is the item `docs/design/shaping.md` calls
+/// effectively unbounded.
+///
+/// One measurement supports that and is worth having: **removing the
+/// per-syllable `GSUB` restriction entirely gains three cases and costs
+/// none** — `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5`, one of which is an
+/// `order` verdict that turns out to be a blocked lookup rather than a
+/// reordering. It was not taken: three is not a reason to drop a rule USE
+/// states and `Buffer::set_syllable` argues for, and what those three
+/// actually say is that *this crate's syllable boundaries* are in the wrong
+/// place, which is the grammar again.
+const TRIAGE: &[(&str, Wrong)] = &[
+    ("SHBALI-1/14", Wrong::Set),
+    ("SHBALI-1/15", Wrong::Set),
+    ("SHKNDA-2/1", Wrong::Set),
+    ("SHKNDA-2/2", Wrong::Set),
+    ("SHKNDA-2/3", Wrong::Set),
+    ("SHKNDA-2/4", Wrong::Set),
+    ("SHKNDA-2/8", Wrong::Set),
+    ("SHKNDA-2/9", Wrong::Set),
+    ("SHLANA-1/35", Wrong::Advance),
+    ("SHLANA-2/2", Wrong::Set),
+    ("SHLANA-2/3", Wrong::Set),
+    ("SHLANA-2/4", Wrong::Set),
+    ("SHLANA-2/7", Wrong::Advance),
+    ("SHLANA-2/35", Wrong::Advance),
+    ("SHLANA-3/3", Wrong::Set),
+    ("SHLANA-4/2", Wrong::Order),
+    ("SHLANA-7/5", Wrong::Set),
+    ("SHLANA-7/17", Wrong::Set),
+    ("SHLANA-8/5", Wrong::Set),
+    ("SHLANA-8/6", Wrong::Set),
+    ("SHLANA-10/4", Wrong::Offset),
+    ("SHLANA-10/8", Wrong::Set),
+    ("SHLANA-10/28", Wrong::Order),
+    ("SHLANA-10/29", Wrong::Advance),
+    ("SHLANA-10/30", Wrong::Set),
+    ("SHLANA-10/38", Wrong::Set),
+    ("SHLANA-10/39", Wrong::Set),
+    ("SHLANA-10/40", Wrong::Set),
+    ("SHLANA-10/42", Wrong::Set),
+    ("SHLANA-10/45", Wrong::Set),
+    ("SHLANA-10/46", Wrong::Set),
+    ("SHLANA-10/47", Wrong::Set),
+];
+
+#[test]
+fn every_failing_case_says_which_of_three_things_is_wrong() {
+    let mut found: Vec<(String, Wrong)> = Vec::new();
+    for (_, cases) in runnable() {
+        for case in &cases {
+            if case.no_crash {
+                continue;
+            }
+            let bytes = font_bytes(&case.font);
+            let face = Sfnt::parse(&bytes).expect("a fixture font is a valid sfnt");
+            let cff = face
+                .table(u32::from_be_bytes(*b"CFF "))
+                .and_then(Cff::parse);
+            let expected: Vec<(Option<u16>, i32, i32)> = case
+                .expected
+                .iter()
+                .map(|(name, x, y)| (glyph_named(&face, cff.as_ref(), name), *x, *y))
+                .collect();
+            let ours = shaped(&face, cff.as_ref(), &case.render);
+            let agrees = ours.len() == expected.len()
+                && ours.iter().zip(&expected).all(|(ours, want)| {
+                    (ours.1 - want.1).abs() <= MAX_DELTA
+                        && (ours.2 - want.2).abs() <= MAX_DELTA
+                        && want.0.is_none_or(|glyph| glyph == ours.0)
+                });
+            if !agrees {
+                found.push((case.id.clone(), verdict(&ours, &expected)));
+            }
+        }
+    }
+    let expected: Vec<(String, Wrong)> = TRIAGE
+        .iter()
+        .map(|(id, wrong)| ((*id).to_string(), *wrong))
+        .collect();
+    let table: Vec<String> = found
+        .iter()
+        .map(|(id, wrong)| format!("    (\"{id}\", Wrong::{wrong:?}),"))
+        .collect();
+    let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, wrong) in &found {
+        *tally.entry(wrong.name()).or_insert(0) += 1;
+    }
+    assert_eq!(
+        found,
+        expected,
+        "the triage of the cases this crate does not reproduce moved. \
+         {} failing, {tally:?}:\n{}",
+        found.len(),
+        table.join("\n")
+    );
+    assert_eq!(
+        found.len(),
+        PASSING.iter().map(|(_, n)| n).sum::<usize>().abs_diff(387),
+        "the triage and PASSING disagree about how many cases fail"
+    );
+}
 
 #[test]
 fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
@@ -862,7 +1131,7 @@ fn every_section_this_crate_claims_is_whole() {
         })
         .count();
     assert_eq!(
-        whole, 6,
+        whole, 7,
         "the number of Brahmic sections that pass outright moved. \
          `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );

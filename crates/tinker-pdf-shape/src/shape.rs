@@ -367,10 +367,21 @@ impl<'a> Shaper<'a> {
         if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
             for (index, stage) in plan.gsub_stages(self.gsub_features).iter().enumerate() {
+                // The pair `rphf` was offered has to still be a pair. See
+                // [`withdraw_broken_repha_pairs`].
+                if plan == Plan::Universal && index == USE_RPHF_STAGE {
+                    withdraw_broken_repha_pairs(&mut buffer);
+                }
                 let wanted: Vec<(Tag, u32)> =
                     stage.iter().map(|tag| (*tag, feature_mask(*tag))).collect();
                 let lookups = gsub.lookups_for_masked(script, self.language, &wanted);
                 warnings.extend(self.layout.substitute_masked(&mut buffer, &lookups, limits));
+                // Which syllables actually got a reph, asked here and nowhere
+                // else because here is the only moment the answer is
+                // unambiguous; see [`Buffer::set_repha`] and [`mark_repha`].
+                if plan == Plan::Universal && index == USE_RPHF_STAGE {
+                    mark_repha(&mut buffer);
+                }
                 // The Universal Shaping Engine's one reordering pause. It sits
                 // where it does because the basic features build the conjuncts
                 // and the presentation features expect them already in visual
@@ -380,6 +391,12 @@ impl<'a> Shaper<'a> {
                 }
             }
         }
+
+        // The joiners leave here: after the last `GSUB` stage, so that every
+        // lookup saw them, and before the advances are filled, so that a face
+        // which gives `ZWNJ` an outline and a width cannot spend either. See
+        // [`Buffer::set_ignorable`].
+        buffer.delete_ignorable();
 
         // The advances are filled in **after** substitution and not before,
         // and the ordering is the whole of a bug this crate had for an
@@ -465,12 +482,18 @@ impl<'a> Shaper<'a> {
     fn mark_syllables(&self, characters: &[(char, u32)], from: &[usize], buffer: &mut Buffer) {
         let letters: Vec<char> = characters.iter().map(|(c, _)| *c).collect();
         let syllables = universal::syllables(&letters);
+        let categories: Vec<universal::Category> =
+            letters.iter().map(|c| universal::category(*c)).collect();
+        let rphf = repha_positions(&syllables, &categories);
         for (at, index) in from.iter().enumerate() {
             if let Some(syllable) = syllables.get(*index) {
                 buffer.set_syllable(at, *syllable);
             }
-            if let Some(letter) = letters.get(*index) {
-                buffer.set_category(at, universal::category(*letter));
+            if let Some(category) = categories.get(*index) {
+                buffer.set_category(at, *category);
+            }
+            if rphf.get(*index) == Some(&true) {
+                buffer.set_mask(at, Buffer::GLOBAL | MASK_RPHF);
             }
         }
     }
@@ -557,6 +580,13 @@ impl<'a> Shaper<'a> {
             }
             let glyph = glyph.or_else(|| self.face.glyph_for_char(c)).unwrap_or(0);
             buffer.push(glyph, cluster);
+            // A joiner is pushed like anything else and marked for deletion at
+            // the end of `GSUB`. It has to be *in* the buffer for the whole of
+            // substitution, because blocking a ligature is the whole of what
+            // it is for; see [`Buffer::set_ignorable`].
+            if is_joiner(c) {
+                buffer.set_ignorable(buffer.len().saturating_sub(1), true);
+            }
             from.push(at - 1 - usize::from(selector.is_some()));
         }
         from
@@ -778,8 +808,13 @@ fn reorder_syllables(buffer: &mut Buffer) {
             continue;
         }
         if let Some(order) = universal::reorder(&of_syllable) {
-            buffer.reorder(range, &order);
+            buffer.reorder(range.clone(), &order);
         }
+        // And then the reph, which is a different move for a different reason
+        // and is therefore not `universal::reorder`'s: that function answers
+        // the cluster model's question about categories, and this one is about
+        // what a face's `rphf` did. See [`move_repha`].
+        move_repha(buffer, range);
     }
 }
 
@@ -790,6 +825,167 @@ fn reorder_syllables(buffer: &mut Buffer) {
 /// written against; after it the cluster is in the order it will be drawn in,
 /// which is what the presentation lookups are written against.
 const USE_REORDER_AFTER: usize = 3;
+
+/// Which stage of [`USE_GSUB_STAGES`] is `rphf`'s.
+///
+/// Index 1, its own stage, and [`the_stage_indices_name_the_stages_they_mean`]
+/// is what stops this and [`USE_REORDER_AFTER`] drifting off the array they
+/// index.
+const USE_RPHF_STAGE: usize = 1;
+
+/// Where `rphf` may fire, as a flag per character.
+///
+/// # A repha is a consonant that has a base to sit on
+///
+/// `rphf` rewrites a syllable-initial `RA` and its halant into a reph — the
+/// mark drawn above the syllable — and the *whole* of what makes it a reph
+/// rather than a dead consonant is that there is something after it for the
+/// syllable to be about. A word-final `RA` + halant is not a reph; it is a
+/// consonant with its vowel killed, and the face's `haln` lookup is what draws
+/// it.
+///
+/// This crate asked the face for `rphf` over every syllable, so
+/// text-rendering-tests `SHKNDA-2/7` — `ಜಾ಼ಕಿರ್`, which ends U+0CB0 U+0CCD —
+/// got the reph gid94 where the fixture wants the halant form gid193.
+///
+/// So the condition is stated here and carried as a mask: the first two
+/// characters of the syllable are a base and a halant, and a base follows them
+/// **inside the same syllable**. Both of the two are marked, because a
+/// feature's mask is checked against every glyph of a rule's *input* and
+/// `rphf` is a ligature over the pair; see [`crate::apply`]'s `Skipper::mask`.
+///
+/// # What this is not
+///
+/// It does not say which consonant `RA` is, and it must not: that is the
+/// face's own `rphf` coverage table, which is the only place in the system
+/// that knows what a face means by a repha. This narrows *where* the lookup is
+/// offered a position, never *which* glyph it accepts. A face whose `rphf`
+/// covers nothing loses nothing.
+fn repha_positions(syllables: &[u16], categories: &[universal::Category]) -> Vec<bool> {
+    let mut out = vec![false; syllables.len()];
+    let mut at = 0usize;
+    while at < syllables.len() {
+        let syllable = syllables.get(at).copied().unwrap_or(0);
+        let mut end = at;
+        while syllables.get(end) == Some(&syllable) {
+            end = end.saturating_add(1);
+        }
+        let after = at.saturating_add(2);
+        if syllable != 0
+            && categories.get(at) == Some(&universal::Category::Base)
+            && categories.get(at.saturating_add(1)) == Some(&universal::Category::Halant)
+            && categories
+                .get(after..end)
+                .is_some_and(|rest| rest.contains(&universal::Category::Base))
+        {
+            for flag in out.get_mut(at..after).unwrap_or_default() {
+                *flag = true;
+            }
+        }
+        at = end.max(at.saturating_add(1));
+    }
+    out
+}
+
+/// Takes [`MASK_RPHF`] back from a syllable whose pair is no longer a pair.
+///
+/// # The normalisation stage can eat the halant, and this is what it costs
+///
+/// [`repha_positions`] marks two *characters*, and by the time `rphf` runs the
+/// stage before it has had a turn at them. `akhn` is the one that matters:
+/// KA + VIRAMA + SSA is the classic akhand ligature and every Indic face has
+/// it, and the one glyph it produces keeps KA's props — including the bit.
+///
+/// The syllable then looks exactly like a reph that has already formed: one
+/// glyph carrying the bit followed by one that does not. text-rendering-tests
+/// `SHKNDA-3/31` is where that showed: `ಕ್ಷಿ` became gid282 with the bit still
+/// on it, [`mark_repha`] called it a reph, and moving it to the end of the
+/// syllable stopped `ಕ್ಷ` and its `I` ligating into gid285.
+///
+/// So the bit is withdrawn from any syllable whose first *two* glyphs do not
+/// both still carry it, immediately before the stage that would use it. That
+/// makes both readings of the bit exact: `rphf` is offered only a pair that is
+/// still two glyphs, and one glyph carrying the bit afterwards means the
+/// lookup fired.
+fn withdraw_broken_repha_pairs(buffer: &mut Buffer) {
+    for range in buffer.syllable_ranges() {
+        let second = range.start.saturating_add(1);
+        let intact = second < range.end
+            && buffer.props_mask(range.start) & MASK_RPHF != 0
+            && buffer.props_mask(second) & MASK_RPHF != 0;
+        if intact {
+            continue;
+        }
+        for at in range {
+            let mask = buffer.props_mask(at) & !MASK_RPHF;
+            buffer.set_mask(at, mask);
+        }
+    }
+}
+
+/// Records, per syllable, whether `rphf` actually produced a reph.
+///
+/// # The question the mask cannot answer on its own
+///
+/// [`repha_positions`] says where the lookup was *offered* a position. Whether
+/// it took one is the face's answer, and the buffer is where it is written:
+/// the pair went in as two glyphs both carrying [`MASK_RPHF`], and a reph
+/// comes out as **one** glyph carrying it with the halant gone.
+///
+/// So the test is exactly that — the syllable's first glyph carries the bit
+/// and its second does not — and it is asked immediately after the `rphf`
+/// stage, at [`USE_RPHF_STAGE`], because that is the only moment it is
+/// unambiguous. `half` in the stage after next forms the same shape out of the
+/// same two characters and is not a reph; asking at the reordering pause would
+/// call it one.
+fn mark_repha(buffer: &mut Buffer) {
+    for range in buffer.syllable_ranges() {
+        let first = range.start;
+        let second = first.saturating_add(1);
+        let fired = buffer.props_mask(first) & MASK_RPHF != 0
+            && second < range.end
+            && buffer.props_mask(second) & MASK_RPHF == 0;
+        if fired {
+            buffer.set_repha(first, true);
+        }
+    }
+}
+
+/// Moves a reph to the end of its syllable.
+///
+/// # One case says this, and it says it exactly
+///
+/// text-rendering-tests `SHKNDA-2/12` is `ಮಾರ್ಚ್` — `MA AA RA VIRAMA CHA
+/// VIRAMA` — and its second syllable reaches the reordering pause as gid94
+/// (the reph `rphf` just made), gid25 (`CHA`) and gid70 (the virama). The
+/// fixture expects gid172 then gid94: the reph **last**, and `haln` in the
+/// stage after the pause is what turns the remaining `CHA` and virama into
+/// gid172. Moving the reph to the end is what puts those two next to each
+/// other for it.
+///
+/// # What is claimed, and what is a guess
+///
+/// The Indic model gives a face several places a reph may be repositioned to —
+/// after the base, after the first matra, before a post-base matra, at the end
+/// of the syllable — and reads which from the face's own tables. **This
+/// implements one of them and does not read anything.** `SHKNDA-2/12` is the
+/// only case in either vendored corpus with a reph in it, so "the end of the
+/// syllable" is what one fixture says and not a position this crate chose
+/// between alternatives it could see. A face wanting one of the others has no
+/// fixture here and would fail here first, which is the honest state to leave
+/// it in.
+fn move_repha(buffer: &mut Buffer, range: Range<usize>) {
+    let Some(at) = range.clone().find(|at| buffer.props_repha(*at)) else {
+        return;
+    };
+    if at.saturating_add(1) >= range.end {
+        return;
+    }
+    let mut order: Vec<usize> = (0..range.len()).collect();
+    let lifted = order.remove(at.saturating_sub(range.start));
+    order.push(lifted);
+    buffer.reorder(range, &order);
+}
 
 /// The mask bit of each joining form.
 ///
@@ -803,6 +999,14 @@ const MASK_FINA: u32 = 1 << 2;
 const MASK_MEDI: u32 = 1 << 3;
 /// See [`MASK_ISOL`].
 const MASK_INIT: u32 = 1 << 4;
+
+/// The mask bit of a position `rphf` is offered. See [`repha_positions`].
+///
+/// Bit 5, and it cannot collide with the four above: a run gets **one** plan,
+/// [`Plan::Joining`] is the only one that sets a form bit and [`Plan::Universal`]
+/// is the only one that sets this, so no glyph in any run carries bits from
+/// both sets.
+const MASK_RPHF: u32 = 1 << 5;
 
 /// The mask a glyph in this form carries.
 const fn form_mask(form: arabic::Form) -> u32 {
@@ -828,6 +1032,11 @@ const fn feature_mask(tag: Tag) -> u32 {
         t if t == Tag::new(b"fina").0 => MASK_FINA,
         t if t == Tag::new(b"medi").0 => MASK_MEDI,
         t if t == Tag::new(b"init").0 => MASK_INIT,
+        // And the same restriction for `rphf`, for the same reason and by the
+        // same route: the face's lookup covers every `RA` in the font and the
+        // *position* is what says whether one is a repha. See
+        // [`repha_positions`].
+        t if t == Tag::new(b"rphf").0 => MASK_RPHF,
         _ => Buffer::GLOBAL,
     }
 }
@@ -900,6 +1109,34 @@ pub fn itemize(text: &str, paragraph: &Paragraph) -> Vec<Run> {
         runs[index].text.end = runs[index + 1].text.start;
     }
     runs
+}
+
+/// `ZWJ` and `ZWNJ`, and nothing else.
+///
+/// # Which property, and which one deliberately not
+///
+/// `Indic_Syllabic_Category`'s `Joiner` and `Non_Joiner`, which this crate
+/// already parses for [`universal::category`] — so the predicate costs no new
+/// table and cannot drift from the one the cluster model reads.
+///
+/// The obvious alternative is `Default_Ignorable_Code_Point`, which is the
+/// property a shaper is *usually* written against and which covers these two
+/// along with the variation selectors, the Mongolian free variation selectors,
+/// `U+00AD SOFT HYPHEN` and some seventy more. It is deliberately **not** used
+/// here: nothing in either vendored corpus reaches a default-ignorable
+/// character that is not one of these two, so vendoring a hundred-odd-entry
+/// property to widen a predicate no fixture exercises would be a table nobody
+/// could adjudicate. The narrower predicate is named as narrower, in
+/// `docs/features/fonts.md`, rather than being quietly the whole answer.
+///
+/// The variation selectors *are* default-ignorable and *are* dropped — in
+/// [`Shaper::map`], where they are consumed rather than deleted, because a
+/// selector chooses a glyph and a joiner does not.
+fn is_joiner(c: char) -> bool {
+    matches!(
+        unicode::indic_syllabic(c),
+        unicode::IndicSyllabic::Joiner | unicode::IndicSyllabic::NonJoiner
+    )
 }
 
 /// The variation selectors: `VS1`–`VS16`, and the 240 ideographic ones.
@@ -985,10 +1222,101 @@ fn variation_glyph(data: Bytes<'_>, base: char, selector: char, face: &Sfnt<'_>)
 
 #[cfg(test)]
 mod tests {
-    use super::{is_variation_selector, itemize, Plan};
+    use super::{is_joiner, is_variation_selector, itemize, Plan};
     use crate::bidi::{BaseDirection, Paragraph};
+    use crate::common::Tag;
     use crate::unicode::Script;
     use crate::MarkWidths;
+
+    /// Two stage indices point into [`USE_GSUB_STAGES`], and this is what
+    /// stops either drifting off it.
+    ///
+    /// Both are plain integers because the array is a `const` of slices and
+    /// searching it at runtime for a tag would be work done per run for an
+    /// answer that never changes. The cost of that is exactly this test.
+    #[test]
+    fn the_stage_indices_name_the_stages_they_mean() {
+        assert_eq!(
+            super::USE_GSUB_STAGES.get(super::USE_RPHF_STAGE),
+            Some(&[Tag::new(b"rphf")].as_slice()),
+            "USE_RPHF_STAGE no longer indexes the rphf stage"
+        );
+        assert!(
+            super::USE_GSUB_STAGES
+                .get(super::USE_REORDER_AFTER)
+                .is_some_and(|stage| stage.contains(&Tag::new(b"blwf"))),
+            "USE_REORDER_AFTER no longer indexes the orthographic-unit group"
+        );
+        const { assert!(super::USE_RPHF_STAGE < super::USE_REORDER_AFTER) };
+    }
+
+    /// Where `rphf` is offered a position, over the four shapes that matter.
+    ///
+    /// The pair that adjudicates it is text-rendering-tests `SHKNDA-2/7`
+    /// against `SHKNDA-2/12`: both end a syllable with U+0CB0 U+0CCD, and only
+    /// one of them is a reph, because only one of them has a base after it.
+    /// Offering the lookup at both cost the first case and got the second
+    /// right for the wrong reason.
+    #[test]
+    fn rphf_is_offered_only_where_the_syllable_has_a_base_for_it() {
+        fn offered(text: &str) -> Vec<bool> {
+            let letters: Vec<char> = text.chars().collect();
+            let categories: Vec<crate::universal::Category> = letters
+                .iter()
+                .map(|c| crate::universal::category(*c))
+                .collect();
+            super::repha_positions(&crate::universal::syllables(&letters), &categories)
+        }
+
+        // KANNADA RA, VIRAMA, KA: a repha, and both of its two characters are
+        // marked, because the mask is checked against every glyph of the
+        // ligature's input.
+        assert_eq!(offered("\u{0CB0}\u{0CCD}\u{0C95}"), [true, true, false]);
+        // The same two characters with nothing after them: a dead consonant,
+        // which `haln` draws. `SHKNDA-2/7` ends this way.
+        assert_eq!(offered("\u{0CB0}\u{0CCD}"), [false, false]);
+        // `SHKNDA-2/12`'s second syllable — RA VIRAMA CHA VIRAMA — is a repha
+        // in front of a base that is itself dead.
+        assert_eq!(
+            offered("\u{0CB0}\u{0CCD}\u{0C9A}\u{0CCD}"),
+            [true, true, false, false]
+        );
+        // A base with no halant after it offers nothing, and neither does a
+        // run with no Brahmic character in it at all.
+        assert_eq!(offered("\u{0CB0}\u{0C95}"), [false, false]);
+        assert_eq!(offered("ab"), [false, false]);
+    }
+
+    /// The two joiners, and the width of the predicate stated as a limit.
+    ///
+    /// The behavioural half of this is in `tests/text_rendering.rs` and is a
+    /// pair rather than a single case, because a joiner has to do two opposite
+    /// things: `SHKNDA-3/31` says it must not reach the output, and
+    /// `SHLANA-5/10` and `SHLANA-5/12` say it must still block a ligature on
+    /// the way. Deleting it at `cmap` time satisfies the first and breaks the
+    /// second, and that injection costs exactly those two cases.
+    ///
+    /// What is here instead is the **narrowness**. Every character below is
+    /// `Default_Ignorable_Code_Point` and none of them is deleted, which is
+    /// the whole difference between this predicate and the one a shaper is
+    /// usually written against; [`is_joiner`] says why the wider property is
+    /// not vendored.
+    #[test]
+    fn the_only_ignorable_characters_are_the_two_joiners() {
+        assert!(is_joiner('\u{200C}'), "ZWNJ");
+        assert!(is_joiner('\u{200D}'), "ZWJ");
+        for c in [
+            '\u{00AD}', // SOFT HYPHEN
+            '\u{200B}', // ZERO WIDTH SPACE
+            '\u{2060}', // WORD JOINER
+            '\u{180B}', // MONGOLIAN FREE VARIATION SELECTOR ONE
+            '\u{FE00}', // VARIATION SELECTOR-1, consumed in `map` instead
+            '\u{0CBE}', // KANNADA VOWEL SIGN AA, which draws
+            'a',
+        ] {
+            assert!(!is_joiner(c), "{c:?} is not one of the two");
+        }
+    }
 
     /// Every plan's mark-width answer, tabled.
     ///

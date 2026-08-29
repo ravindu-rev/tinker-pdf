@@ -142,6 +142,18 @@ pub(crate) struct Props {
     /// [`Buffer::propagate_attachments`] turns every one of them into a
     /// number, once, at the end.
     pub(crate) attached_to: Option<i32>,
+    /// Whether this glyph is the reph its syllable's `rphf` lookup produced.
+    ///
+    /// Unlike every other field here it is set from the **buffer** rather than
+    /// from the character, and at one named moment: see
+    /// [`Buffer::set_repha`].
+    pub(crate) repha: bool,
+    /// Whether this glyph is a joiner that has to leave before the run does.
+    ///
+    /// Set from the character, like [`Props::category`] and for the same
+    /// reason, and read once at the end of `GSUB`. See
+    /// [`Buffer::set_ignorable`].
+    pub(crate) ignorable: bool,
     /// Whether that attachment is a cursive join rather than a mark's.
     ///
     /// The two resolve differently and the difference is not cosmetic. A mark
@@ -300,6 +312,22 @@ impl Buffer {
     ///
     /// Zero means "no syllable" and imposes nothing, so a run that never calls
     /// this — every Latin, Arabic and Han run — behaves exactly as it did.
+    ///
+    /// # What the restriction costs here, measured
+    ///
+    /// Switching it off entirely — `GSUB` confined to nothing, like `GPOS` —
+    /// **gains three text-rendering-tests cases and costs none**:
+    /// `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5`. So the rule has no
+    /// positive evidence in this corpus and three cases of negative evidence,
+    /// and it stays anyway.
+    ///
+    /// The reason is that the three do not say the restriction is wrong. They
+    /// say the *boundaries* are: `crate::universal`'s syllable rule is a
+    /// one-character lookback standing in for USE's regular expression over
+    /// cluster types, so a lookup blocked at a boundary this crate invented is
+    /// a defect in the grammar and not in the confinement. Dropping the
+    /// confinement would trade a rule USE states for three cases and let a
+    /// conjunct-forming lookup build one out of two words.
     pub fn set_syllable(&mut self, at: usize, syllable: u16) {
         if let Some(props) = self.props.get_mut(at) {
             props.syllable = syllable;
@@ -333,6 +361,81 @@ impl Buffer {
     /// What the cluster model calls the glyph at `at`, or `None` past the end.
     pub(crate) fn props_category(&self, at: usize) -> Option<Category> {
         self.props.get(at).map(|props| props.category)
+    }
+
+    /// Records that the glyph at `at` is the reph its syllable's `rphf`
+    /// produced.
+    ///
+    /// # Why this is asked of the buffer and not of the text
+    ///
+    /// Everything else the cluster model carries is read off the character
+    /// before any lookup runs, because the character is what has the property.
+    /// **Whether a `RA` became a reph is not a property of the character**: it
+    /// is a property of the *face*, whose `rphf` coverage is the only thing in
+    /// the system that knows which consonant it treats that way. The text can
+    /// say where the lookup is offered a position — that is
+    /// `crate::shape::repha_positions` and the mask it sets — and only the
+    /// buffer can say whether it took one.
+    ///
+    /// So this is set at one named moment, immediately after the `rphf` stage
+    /// and before anything else has run, by comparing the mask against what
+    /// survived: the pair was two glyphs both carrying the bit, and a reph is
+    /// one glyph carrying it with the halant gone. Asking later would confuse
+    /// `rphf` with `half`, which forms the same shape out of the same two
+    /// characters and is not a reph.
+    pub(crate) fn set_repha(&mut self, at: usize, repha: bool) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.repha = repha;
+        }
+    }
+
+    /// Whether the glyph at `at` is a reph. See [`Buffer::set_repha`].
+    pub(crate) fn props_repha(&self, at: usize) -> bool {
+        self.props.get(at).is_some_and(|props| props.repha)
+    }
+
+    /// The feature mask of the glyph at `at`, or zero past the end.
+    pub(crate) fn props_mask(&self, at: usize) -> u32 {
+        self.props.get(at).map_or(0, |props| props.mask)
+    }
+
+    /// Marks the glyph at `at` as one that must not survive the run.
+    ///
+    /// # A joiner has to be in the buffer and must not come out of it
+    ///
+    /// `ZWNJ` and `ZWJ` exist to be *seen by a lookup*: blocking a ligature —
+    /// or demanding one — is the whole of what they are for, and a shaper that
+    /// dropped them at `cmap` time would ligate exactly the pairs the author
+    /// wrote them to keep apart. So they are mapped, pushed, and carried
+    /// through every `GSUB` stage like any other glyph.
+    ///
+    /// They must equally not reach the caller. A face is free to give `ZWNJ` a
+    /// real outline and a real advance — `NotoSansKannada` gives U+200C gid91,
+    /// which draws — and a consumer that painted it would put a mark in the
+    /// middle of a word. text-rendering-tests `SHKNDA-3/31` states it: four
+    /// glyphs expected from text ending in a `ZWNJ`.
+    ///
+    /// So the flag is set here from the character and read once by
+    /// [`Buffer::delete_ignorable`], after the last `GSUB` stage.
+    pub(crate) fn set_ignorable(&mut self, at: usize, ignorable: bool) {
+        if let Some(props) = self.props.get_mut(at) {
+            props.ignorable = ignorable;
+        }
+    }
+
+    /// Removes every glyph [`Buffer::set_ignorable`] marked, and says how many.
+    ///
+    /// Backwards, so that a removal does not move the index of one not yet
+    /// looked at.
+    pub(crate) fn delete_ignorable(&mut self) -> usize {
+        let mut removed = 0usize;
+        for at in (0..self.props.len()).rev() {
+            if self.props.get(at).is_some_and(|props| props.ignorable) {
+                self.remove(at);
+                removed = removed.saturating_add(1);
+            }
+        }
+        removed
     }
 
     /// Rearranges `range` so that its *n*th glyph is the one `order` names.

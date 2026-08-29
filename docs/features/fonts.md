@@ -289,8 +289,13 @@ Landed so far:
   one reordering pause that moves a pre-base glyph to the front of its
   syllable — over the glyphs, through a category each one carries from the
   character it came from, so a conjunct formed before the pause is still
-  reordered. **Milestone 5's exit criterion is not met**; the table below says
-  by how much.
+  reordered. A `ZWJ` or `ZWNJ` survives the whole of `GSUB` — blocking a
+  ligature is the whole of what one is for — and is deleted at the end of it,
+  before any advance is filled, because a face may give one an outline and a
+  width. `rphf` is offered only where the syllable has a base for the repha to
+  sit on, so a word-final `RA` and halant is a dead consonant and not a reph.
+  **Milestone 5's exit criterion is not met**; the table below says by how
+  much.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
@@ -388,7 +393,7 @@ the fixture behind it, and the scripts divide in five:
 | Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
 | Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
-| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **261 are reproduced and 72 are not**. Four of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall |
+| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **301 are reproduced and 32 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
 | Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
 
 Three things milestone 5 **closed**, and the largest of them was not on the
@@ -422,8 +427,39 @@ mystery:
 - **The Indic shaper's base-finding.** Kannada, Devanagari and their seven
   relatives form conjuncts by a different model from USE's, in which `rphf`,
   `half` and `blwf` apply at *one position* of a syllable rather than to the
-  whole of it. This crate applies them to the syllable, which is why
-  `SHKNDA-3` reproduces none of its 31 cases and `SHKNDA-2` four of its 16.
+  whole of it. This crate applies them to the syllable.
+
+  **This entry used to say that was why `SHKNDA-3` reproduced none of its 31
+  cases and `SHKNDA-2` four of its 16, and it was wrong.** `SHKNDA-3` was a
+  mark advance — a Brahmic run zeroed the advance a face gave a spacing matra,
+  so every glyph of a syllable stacked at one x — and it is now whole. What
+  the `TRIAGE` table measures instead is that twenty-five of the thirty-two
+  remaining failures are the wrong glyph *set*, two are the wrong *order* and
+  five are a *position*.
+
+  What is left of it in `SHKNDA-2` is **six cases, one cause, and a price**. A
+  Kannada matra has to be next to its base before the presentation features
+  run: `NA` + `AA` rewrites the base and `NA` + `E` ligates, and neither
+  matches with a subjoined consonant in between. Moving every dependent mark
+  back onto its base was implemented and measured — it gains those six and
+  costs **sixty-nine** across `SHBALI` and `SHLANA`, because Tai Tham's
+  `SHLANA-2/6` expects base, subjoined consonant, mark and Kannada's
+  `SHKNDA-2/1` expects base, mark, subjoined consonant for the same shape.
+  **No property this crate reads separates them**: both matras are
+  `Vowel_Dependent` and `Right`. What separates them is which shaping engine
+  the script belongs to, and choosing one per script is a second cluster
+  model. `crates/tinker-pdf-shape/src/universal.rs` holds the per-section
+  numbers.
+- **`rphf` now asks whether the syllable has a base for the repha**, which is
+  the one piece of that model this crate does implement. A word-final `RA` +
+  halant is a dead consonant and not a reph, and offering the lookup at both
+  cost `SHKNDA-2/7`.
+- **A reph is moved to the end of its syllable.** `SHKNDA-2/12` is the one
+  case in either corpus with a reph in it, and what it says is that the reph
+  goes last, so that `haln` can reach the consonant and virama it left behind.
+  The Indic model gives a face several positions to choose between and reads
+  which from the face's own tables; this implements one of them and reads
+  nothing.
 - **Canonical ordering.** What is done above is decomposition and not NFD: the
   `Canonical_Combining_Class` sort that would follow it is not applied. No
   case in the corpus is known to need it, so it is a gap rather than a cause.
@@ -431,9 +467,32 @@ mystery:
   §3.12) and `UnicodeData.txt` lists none, so a Hangul syllable is not
   decomposed. Hangul does not reach the Brahmic plan anyway; the row is here
   so the absence is a decision.
+- **Tai Tham's residue is one glyph.** Fifteen of the thirty-two remaining
+  failures are the same substitution not happening — `TestShapeLana`'s gid311
+  (`uni1A78`) expected where this crate produces gid314, the glyph `cmap`
+  gives U+1A7B — and ten of those differ in nothing else at all. It is **not**
+  a feature this crate fails to ask for: requesting all twenty-four the face
+  declares still produces gid314. It is not a `cmap` difference either; the
+  face has one subtable and it reads monotonically across the block. What is
+  left is a lookup that does not match the glyph sequence this crate hands it,
+  which is inside USE's cluster grammar. `TRIAGE` in
+  `crates/tinker-pdf-shape/tests/text_rendering.rs` holds the case list and
+  both refutations.
+- **The per-syllable `GSUB` confinement costs three cases and gains none** in
+  this corpus, and it stays. What those three say is that this crate's
+  syllable *boundaries* are in the wrong place, not that confining a lookup to
+  a cluster is wrong; `Buffer::set_syllable` has the measurement.
 - **Dotted circles.** USE inserts one into a cluster that its grammar calls
   broken. This crate never inserts a glyph the text did not ask for, so a
   malformed cluster renders as its parts.
+- **`Default_Ignorable_Code_Point`.** Only `ZWJ` and `ZWNJ` are deleted, by
+  `Indic_Syllabic_Category`, which this crate already parses. The wider
+  property — soft hyphen, word joiner, the Mongolian free variation selectors
+  and some seventy more — is not vendored, because no case in either corpus
+  reaches a default-ignorable character that is not one of those two, and a
+  table nothing here could adjudicate is worth less than a predicate named as
+  narrow. The variation selectors are the exception and are already handled:
+  `Shaper::map` *consumes* one, because a selector chooses a glyph.
 
 Two capabilities are refused rather than absent, and both are in
 `tinker-pdf-font` rather than here: a `cmap` of format 13, and a Macintosh
