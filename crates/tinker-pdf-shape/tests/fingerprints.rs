@@ -117,6 +117,15 @@ fn face_bytes(name: &str) -> Option<&'static [u8]> {
         "TestShapeLana.ttf" => {
             include_bytes!("../data/text-rendering-tests/fonts/TestShapeLana.ttf").as_slice()
         }
+        // Kannada, added after milestone 5's last commits found this corpus
+        // blind to three of its own behaviours: the reph, the joiner deleted
+        // after `GSUB`, and a syllable-final base plus halant appear in no
+        // other section here. A fingerprint that cannot see a behaviour cannot
+        // report that two targets disagree about it.
+        "NotoSansKannada-Regular.ttf" => {
+            include_bytes!("../data/text-rendering-tests/fonts/NotoSansKannada-Regular.ttf")
+                .as_slice()
+        }
         // The declined sections' faces, and the billion-laughs one, are not
         // fingerprinted: two of them shape to `.notdef` today and one is a
         // budget test whose output is a refusal.
@@ -137,6 +146,8 @@ const FIXTURES: &[&str] = &[
     include_str!("../data/text-rendering-tests/testcases/SHARAN-1.html"),
     include_str!("../data/text-rendering-tests/testcases/SHBALI-1.html"),
     include_str!("../data/text-rendering-tests/testcases/SHLANA-3.html"),
+    include_str!("../data/text-rendering-tests/testcases/SHKNDA-2.html"),
+    include_str!("../data/text-rendering-tests/testcases/SHKNDA-3.html"),
 ];
 
 /// The paragraphs the bidi corpus resolves.
@@ -294,14 +305,35 @@ fn unescape(text: &str) -> String {
 ///
 /// `BIDI` did not move again, for the same reason as before: the answer is in
 /// the plan the run gets, not in how its levels resolve.
-const SHAPING: &str = "0ccea87096a94a78";
+///
+/// # The third move is not a behaviour change, and that is the point
+///
+/// It moved a third time because the **corpus grew**, not because shaping did.
+/// Milestone 5's last three commits — the joiner deleted after `GSUB`, `rphf`
+/// offered only where a base follows, the reph moved to the end of its
+/// syllable — changed the shaper and moved this number **not at all**, because
+/// no case here contained a joiner, a reph, or a syllable-final base and
+/// halant. Three behaviours this file exists to pin were invisible to it.
+///
+/// A fingerprint that cannot see a behaviour cannot report that two targets
+/// disagree about it, so SHKNDA-2 and SHKNDA-3 and their face joined the
+/// corpus and the number moved once, deliberately, for that reason alone. The
+/// glyph floor went 230 to 480 against a measured 493 in the same commit,
+/// which is the other half of the claim: a corpus that grew and a floor that
+/// did not would be a corpus that could quietly shrink back.
+///
+/// The general lesson, since this is the second shape of it in this
+/// repository: ask what a check actually covers, not what its name says it
+/// covers. Two tests named `..._on_every_target` had exactly one target for
+/// the same class of reason.
+const SHAPING: &str = "d07a70e4ccd9c31c";
 const BIDI: &str = "d77c9e938eb9c996";
 
 /// The least each corpus may produce before its fingerprint means anything.
 ///
 /// `determinism.rs`'s `least_ink`, transposed: a corpus that shaped nothing
 /// hashes perfectly stably on every target and proves nothing at all.
-const LEAST_GLYPHS: usize = 230;
+const LEAST_GLYPHS: usize = 480;
 const LEAST_CHARACTERS: usize = 240;
 
 #[test]
