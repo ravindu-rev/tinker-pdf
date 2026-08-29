@@ -542,6 +542,25 @@ pub enum ArchiveWarning {
     /// What EPUB 3.3 §5.5.3.1 and §5.6.1 tolerated about a book's package
     /// document (gap 31, milestone 4).
     Package(crate::epub::package::PackageDefect),
+    /// A shaped text run could not be written into a page's content stream,
+    /// so the words it carried are on no page (milestone 6 of
+    /// `docs/design/shaping.md`).
+    ///
+    /// `DocumentBuilder::glyph_run` refuses a run whose font is not a
+    /// registered composite one, whose size is not a number a content stream
+    /// can carry, or whose placements are not finite — and a writer that
+    /// refused in silence would leave a page short of a word with nothing
+    /// anywhere saying so, which is ruling 10's whole subject. Counted rather
+    /// than reported once per run, for
+    /// [`ArchiveWarning::UnimplementedFeature`]'s reason.
+    ///
+    /// **Distinct from [`ArchiveWarning::UnrepresentedCharacters`]**: that one
+    /// says a character had no code in any font, and this one says the code
+    /// existed and the operators did not reach the page.
+    UnwritableTextRun {
+        /// How many shaped runs were refused.
+        runs: usize,
+    },
     /// A synthesised **spine page** is a placeholder rather than the chapter it
     /// stands for (gap 31, milestone 4).
     ///

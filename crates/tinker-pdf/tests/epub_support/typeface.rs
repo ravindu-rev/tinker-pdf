@@ -111,6 +111,41 @@ pub struct Face {
     /// measured a joined word by summing its unjoined letters gets the right
     /// answer by arithmetic and nothing can see the mistake.
     pub joined_advance: Option<u16>,
+    /// A `GPOS` `SinglePos` that displaces one character's glyph from where
+    /// its advance would put it.
+    ///
+    /// `None` — the default — is a face with no `GPOS` at all, which is every
+    /// fixture that came before this one and is why nothing in this repository
+    /// could tell a build that carried positioning offsets onto the page from
+    /// one that dropped them. `Some` is the smallest face that can tell them
+    /// apart.
+    pub placement: Option<Placement>,
+}
+
+/// One glyph displaced from its advance, by a `GPOS` `SinglePos`.
+///
+/// A whole struct for four values because three of them are numbers in
+/// different spaces — a character, two font-unit displacements and a feature
+/// tag — and positional arguments would let a caller swap the two
+/// displacements and still build a font.
+#[derive(Clone, Copy, Debug)]
+pub struct Placement {
+    /// The character whose glyph the lookup covers. **One and not all**: the
+    /// glyphs either side of it are what say the pen came back.
+    pub ch: char,
+    /// The script tag the lookup is declared under. `DFLT` reaches every run,
+    /// because a face that declares no script for a run's own tag falls back
+    /// to it.
+    pub script: [u8; 4],
+    /// The feature tag. It has to be one the default shaper turns on —
+    /// `tinker_pdf_shape::shape::DEFAULT_GPOS_FEATURES` — or the lookup is in
+    /// the file and never runs.
+    pub feature: [u8; 4],
+    /// `XPlacement`, in font units: how far along the baseline the glyph moves
+    /// **without** moving the pen.
+    pub x: i16,
+    /// `YPlacement`, in font units, positive away from the descenders.
+    pub y: i16,
 }
 
 /// A face whose letters take a different form by position.
@@ -195,7 +230,15 @@ impl Face {
             ligature: None,
             joining: None,
             joined_advance: None,
+            placement: None,
         }
+    }
+
+    /// The same face, displacing one character's glyph through `GPOS`.
+    #[must_use]
+    pub fn with_placement(mut self, placement: Placement) -> Face {
+        self.placement = Some(placement);
+        self
     }
 
     /// The same face, joining `first` and `second` into one glyph.
@@ -391,20 +434,22 @@ fn build(face: &Face) -> Vec<u8> {
         (None, Some(joining)) => Some(gsub_joining(face, joining)),
         (None, None) => None,
     };
-    let Some(gsub) = gsub else {
-        return assemble(&[
-            (b"cmap", &cmap),
-            (b"glyf", &glyf),
-            (b"head", &head),
-            (b"hhea", &hhea),
-            (b"hmtx", &hmtx),
-            (b"loca", &loca),
-            (b"maxp", &maxp),
-            (b"name", &name),
-        ]);
-    };
-    assemble(&[
-        (b"GSUB", &gsub),
+    let gpos = face
+        .placement
+        .map(|placement| gpos_placement(face, placement));
+
+    // Built as a list rather than as two hard-coded arrays, because `GPOS` and
+    // `GSUB` are independent: a face may have either, both or neither, and the
+    // four cases written out would be four places to forget a table.
+    // Alphabetical by tag, which is where the two upper-case ones sort.
+    let mut tables: Vec<(&[u8; 4], &Vec<u8>)> = Vec::with_capacity(10);
+    if let Some(gpos) = gpos.as_ref() {
+        tables.push((b"GPOS", gpos));
+    }
+    if let Some(gsub) = gsub.as_ref() {
+        tables.push((b"GSUB", gsub));
+    }
+    tables.extend([
         (b"cmap", &cmap),
         (b"glyf", &glyf),
         (b"head", &head),
@@ -413,7 +458,101 @@ fn build(face: &Face) -> Vec<u8> {
         (b"loca", &loca),
         (b"maxp", &maxp),
         (b"name", &name),
-    ])
+    ]);
+    assemble(&tables)
+}
+
+/// A `GPOS` with one `SinglePos` lookup that displaces one glyph.
+///
+/// # Why this is the smallest fixture that proves the offsets are carried
+///
+/// A mark-to-base fixture is what a *reader* pictures when it hears `GPOS`:
+/// an `Anchor` on the base, an `Anchor` on the mark, a `MarkArray`, two
+/// coverage tables and a class definition — around a hundred and fifty bytes
+/// of hand-written table, and every one of those bytes is arithmetic this
+/// repository already adjudicates. The aots corpus covers `GPOS` lookup types
+/// 1 through 9 case by case, and `text-rendering-tests`' GPOS-3 and GPOS-4
+/// sections settle mark-to-base and mark-to-mark against real faces with
+/// their expected positions inside them.
+///
+/// What **no** fixture in this repository said, until this one, is that the
+/// numbers those suites adjudicate survive the trip onto a page. So this
+/// fixture is deliberately not about anchor arithmetic: it is a
+/// `SinglePosFormat1` with an `XPlacement` and a `YPlacement`, about twenty
+/// bytes of table, whose only job is to put a non-zero offset on a glyph the
+/// EPUB writer will draw. If it reaches the content stream, every offset
+/// does.
+///
+/// The layout, with each offset written from the start of the table or of its
+/// own subtable as ISO/IEC 14496-22 requires:
+///
+/// | At | What |
+/// | --- | --- |
+/// | 0 | header: version 1.0, three offsets |
+/// | 10 | `ScriptList`: one record, one `Script`, one default `LangSys` |
+/// | 30 | `FeatureList`: one record, one `Feature`, one lookup index |
+/// | 44 | `LookupList`: one `Lookup` of type 1, one subtable |
+fn gpos_placement(face: &Face, placement: Placement) -> Vec<u8> {
+    let glyph = face.glyph_of(placement.ch).unwrap_or(0);
+
+    // ---- the subtable: `SinglePosFormat1` ----------------------------------
+    //
+    // `valueFormat` 0x0003 is `X_PLACEMENT | Y_PLACEMENT`, so the value record
+    // is two `int16`s and the header is six bytes — which is why the coverage
+    // begins at ten and not at eight.
+    let mut subtable = Vec::new();
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+    subtable.extend_from_slice(&10u16.to_be_bytes()); // coverage, from here
+    subtable.extend_from_slice(&0x0003u16.to_be_bytes()); // valueFormat
+    subtable.extend_from_slice(&placement.x.to_be_bytes()); // XPlacement
+    subtable.extend_from_slice(&placement.y.to_be_bytes()); // YPlacement
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+    subtable.extend_from_slice(&glyph.to_be_bytes());
+
+    let mut lookup_list = Vec::new();
+    lookup_list.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
+    lookup_list.extend_from_slice(&4u16.to_be_bytes()); // lookups[0]
+    lookup_list.extend_from_slice(&1u16.to_be_bytes()); // lookupType: single
+    lookup_list.extend_from_slice(&0u16.to_be_bytes()); // lookupFlag
+    lookup_list.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
+    lookup_list.extend_from_slice(&8u16.to_be_bytes()); // subtables[0]
+    lookup_list.extend_from_slice(&subtable);
+
+    // ---- one feature, holding that one lookup ------------------------------
+    let mut feature_list = Vec::new();
+    feature_list.extend_from_slice(&1u16.to_be_bytes()); // featureCount
+    feature_list.extend_from_slice(&placement.feature);
+    feature_list.extend_from_slice(&8u16.to_be_bytes()); // Feature, from here
+    feature_list.extend_from_slice(&0u16.to_be_bytes()); // featureParams
+    feature_list.extend_from_slice(&1u16.to_be_bytes()); // lookupIndexCount
+    feature_list.extend_from_slice(&0u16.to_be_bytes()); // lookupListIndices[0]
+
+    // ---- one script, one default language system, that one feature ---------
+    let mut script_list = Vec::new();
+    script_list.extend_from_slice(&1u16.to_be_bytes()); // scriptCount
+    script_list.extend_from_slice(&placement.script);
+    script_list.extend_from_slice(&8u16.to_be_bytes()); // Script, from the list
+    script_list.extend_from_slice(&4u16.to_be_bytes()); // defaultLangSys
+    script_list.extend_from_slice(&0u16.to_be_bytes()); // langSysCount
+    script_list.extend_from_slice(&0u16.to_be_bytes()); // lookupOrderOffset
+    script_list.extend_from_slice(&0xFFFFu16.to_be_bytes()); // requiredFeature
+    script_list.extend_from_slice(&1u16.to_be_bytes()); // featureIndexCount
+    script_list.extend_from_slice(&0u16.to_be_bytes()); // featureIndices[0]
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+    out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+    let script_at = 10usize;
+    let feature_at = script_at + script_list.len();
+    let lookup_at = feature_at + feature_list.len();
+    for at in [script_at, feature_at, lookup_at] {
+        out.extend_from_slice(&u16::try_from(at).expect("a small table").to_be_bytes());
+    }
+    out.extend_from_slice(&script_list);
+    out.extend_from_slice(&feature_list);
+    out.extend_from_slice(&lookup_list);
+    out
 }
 
 /// A `GSUB` with one single-substitution lookup per joining form.
@@ -832,6 +971,68 @@ pub fn boxy_font() -> Vec<u8> {
     out
 }
 
+/// Where one text object's `ET` operator starts, or `None` for an object that
+/// was never closed.
+///
+/// # Why this is a scan and not `find(" ET")`
+///
+/// It was `find(" ET")` and that was a **silent-pass hazard**, not a
+/// simplification. `DocumentBuilder::glyph_run` ends a run `] TJ\nET\n`, with
+/// a newline before the `ET` and none after — so every shaped text object was
+/// invisible to this helper, and a test that asserted something about the
+/// objects it found passed by finding none. The two callers that assert a
+/// *count* fail loudly; a `contains` over a resource name would not have.
+///
+/// The scan also steps over strings, which the substring search did not: a
+/// book with the word `GET` in it writes `(GET) Tj`, and a search for `" ET"`
+/// would have ended the object in the middle of its own text.
+fn end_of_text_object(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut at = 0usize;
+    // 7.3.4.2's literal strings nest, and a `\` escapes the next byte
+    // whatever it is.
+    let mut depth = 0u32;
+    let mut escaped = false;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if depth > 0 {
+            if escaped {
+                escaped = false;
+            } else {
+                match byte {
+                    b'\\' => escaped = true,
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            at += 1;
+            continue;
+        }
+        match byte {
+            b'(' => depth = 1,
+            // A hex string holds only hex digits and white space, so `ET`
+            // cannot appear in one — stepping over it is belt and braces
+            // rather than a fix.
+            b'<' if bytes.get(at + 1) != Some(&b'<') => {
+                while at < bytes.len() && bytes[at] != b'>' {
+                    at += 1;
+                }
+            }
+            b'E' if bytes.get(at + 1) == Some(&b'T') => {
+                let before = at == 0 || bytes[at - 1].is_ascii_whitespace();
+                let after = bytes.get(at + 2).is_none_or(u8::is_ascii_whitespace);
+                if before && after {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 /// Every `BT … ET` text object of a content stream, in the order they were
 /// written, as `(resource, operators)`.
 ///
@@ -845,31 +1046,59 @@ pub fn text_objects(content: &str) -> Vec<(String, String)> {
     let mut rest = content;
     while let Some(at) = rest.find("BT /") {
         let body = &rest[at + 4..];
-        let Some(end) = body.find(" ET") else { break };
-        let object = &body[..end];
+        let Some(end) = end_of_text_object(body) else {
+            break;
+        };
+        let object = body[..end].trim_end();
         let resource = object
             .split_whitespace()
             .next()
             .unwrap_or_default()
             .to_owned();
         out.push((resource, object.to_owned()));
-        rest = &body[end + 3..];
+        rest = &body[end + 2..];
     }
     out
 }
 
-/// The `x` and `y` of one text object's `Td`, which is where it starts.
+/// The `x` and `y` one text object starts at.
 ///
-/// `Td` is the only positioning operator this build writes into a text object,
-/// so the pair before it is the origin.
+/// `Td` and `Tm` are the two positioning operators this build writes into a
+/// text object — the coded path writes `Td` and the shaped path writes a whole
+/// `Tm`, because `DocumentBuilder::glyph_run` states the run's matrix — and in
+/// both the two operands before the operator are the translation. So the pair
+/// before whichever appears is the origin, and a helper that only knew `Td`
+/// would panic on every shaped object rather than answer about it.
 #[must_use]
 pub fn origin_of(object: &str) -> (f64, f64) {
     let words: Vec<&str> = object.split_whitespace().collect();
     let at = words
         .iter()
-        .position(|word| *word == "Td")
-        .unwrap_or_else(|| panic!("no Td in {object:?}"));
-    let x = words[at - 2].parse().expect("an x before Td");
-    let y = words[at - 1].parse().expect("a y before Td");
+        .position(|word| *word == "Td" || *word == "Tm")
+        .unwrap_or_else(|| panic!("no Td or Tm in {object:?}"));
+    let x = words[at - 2].parse().expect("an x before the operator");
+    let y = words[at - 1].parse().expect("a y before the operator");
     (x, y)
+}
+
+/// Every hex string one text object shows, concatenated — the glyph indices it
+/// draws, in the order it draws them.
+///
+/// **Every** one, and that is the point. A `PageBuilder::glyphs` object shows
+/// one hex string and a `glyph_run` object shows a `TJ` array of them broken
+/// wherever a glyph asked for a different position, so a reader that took the
+/// first would see the run up to its first `GPOS` offset and call it the run.
+/// A helper that is right for one writer and quietly short for the other is
+/// how a suite stops noticing.
+#[must_use]
+pub fn shown_glyphs(object: &str) -> String {
+    let mut out = String::new();
+    let mut rest = object;
+    while let Some(at) = rest.find('<') {
+        let body = &rest[at + 1..];
+        let Some(end) = body.find('>') else { break };
+        out.push_str(&body[..end]);
+        rest = &body[end + 1..];
+    }
+    out
 }

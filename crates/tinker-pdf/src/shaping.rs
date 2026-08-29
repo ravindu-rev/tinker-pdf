@@ -74,6 +74,46 @@ impl Placed {
     }
 }
 
+/// The text each glyph of one shaped run stands for, in the run's own
+/// **logical** order, one entry per glyph.
+///
+/// The two rules in this module's header, in one place. It is one place on
+/// purpose: `epub/paint.rs` draws shaped runs too, and a second copy of a rule
+/// this delicate is a copy that eventually learns something the first one did
+/// not — the "one extractor, not two" discipline that
+/// [`crate::epub::paint::face_runs`] applies to measurement, applied to the
+/// writer side.
+///
+/// The slices borrow `text`, which is the paragraph the run was shaped from,
+/// because a cluster is a byte offset into *that* and not into the run's own
+/// slice.
+#[must_use]
+pub fn cluster_texts<'a>(text: &'a str, run: &ShapedRun) -> Vec<&'a str> {
+    let glyphs = run.glyphs();
+    let mut out = Vec::with_capacity(glyphs.len());
+    for (at, glyph) in glyphs.iter().enumerate() {
+        // A glyph stands for the text from its own cluster to the next
+        // *different* one — a ligature's cluster is the smallest of the glyphs
+        // it replaced, so `ffi` comes back whole — and nothing at all if an
+        // earlier glyph of the same cluster already took it, which is what
+        // stops a decomposed `ï` from extracting as three characters.
+        let first = at == 0 || glyphs[at.saturating_sub(1)].cluster != glyph.cluster;
+        let from = usize::try_from(glyph.cluster).unwrap_or(0);
+        let to = glyphs[at.saturating_add(1)..]
+            .iter()
+            .find(|next| next.cluster != glyph.cluster)
+            .map_or(run.text().end, |next| {
+                usize::try_from(next.cluster).unwrap_or(from)
+            });
+        out.push(if first {
+            text.get(from..to.max(from)).unwrap_or("")
+        } else {
+            ""
+        });
+    }
+    out
+}
+
 /// The text each glyph of one shaped run stands for, and where it goes.
 ///
 /// `text` is the paragraph the run was shaped from, because a cluster is an
@@ -88,28 +128,13 @@ pub fn place(text: &str, run: &ShapedRun, size: f64) -> Vec<Placed> {
     let units = f64::from(run.units_per_em().max(1));
     let scale = |value: i32| f64::from(value) * size / units;
     let glyphs = run.glyphs();
+    let texts = cluster_texts(text, run);
     let mut out = Vec::with_capacity(glyphs.len());
     let mut pen = 0.0f64;
     for (at, glyph) in glyphs.iter().enumerate() {
-        // The text this glyph stands for: from its own cluster to the next
-        // different one, and nothing at all if an earlier glyph of the same
-        // cluster already took it.
-        let first = at == 0 || glyphs[at.saturating_sub(1)].cluster != glyph.cluster;
-        let from = usize::try_from(glyph.cluster).unwrap_or(0);
-        let to = glyphs[at.saturating_add(1)..]
-            .iter()
-            .find(|next| next.cluster != glyph.cluster)
-            .map_or(run.text().end, |next| {
-                usize::try_from(next.cluster).unwrap_or(from)
-            });
-        let stands_for = if first {
-            text.get(from..to.max(from)).unwrap_or("")
-        } else {
-            ""
-        };
         out.push(Placed {
             id: glyph.glyph,
-            text: stands_for.to_string(),
+            text: texts.get(at).copied().unwrap_or("").to_string(),
             x: pen + scale(glyph.x_offset),
             rise: scale(glyph.y_offset),
         });

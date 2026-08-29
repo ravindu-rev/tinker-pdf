@@ -20,22 +20,30 @@
 //! an embedded face's segment is shaped whole: `GSUB` runs, UAX #9's rule L2
 //! orders the runs, and a right-to-left run's glyphs are walked backwards.
 //!
-//! # Two limits this file does not hide
+//! # The limit this file does not hide
 //!
-//! - **Reordering is per face segment.** Fallback is resolved before shaping,
-//!   because a glyph index means nothing outside its own face, so a
-//!   right-to-left line whose characters need two faces is drawn in two
-//!   left-to-right pieces. The fixture face below covers its space for exactly
-//!   this reason, and `docs/features/fonts.md` records the limit.
-//! - **`GPOS` offsets are not carried.** `PageBuilder::glyphs` writes one hex
-//!   string at one origin, so a mark sits where its advance puts it rather
-//!   than where its anchor does. The fixture face has no marks; the limit is
-//!   recorded rather than demonstrated.
+//! **Reordering is per face segment.** Fallback is resolved before shaping,
+//! because a glyph index means nothing outside its own face, so a
+//! right-to-left line whose characters need two faces is drawn in two
+//! left-to-right pieces. The fixture face below covers its space for exactly
+//! this reason, and `docs/features/fonts.md` records the limit.
+//!
+//! # And the one that closed
+//!
+//! `GPOS` offsets were not carried: `PageBuilder::glyphs` writes one hex
+//! string at one origin, so a mark sat where its advance put it rather than
+//! where its anchor did — a vowelled Arabic or Devanagari book rendered wrong
+//! while every test here passed. Drawing goes through
+//! `DocumentBuilder::glyph_run` now, and
+//! [`a_positioned_glyph_is_drawn_where_its_anchor_puts_it`] is the
+//! demonstration. It needed a **new face**: the one above has no marks, so the
+//! fingerprint below did not move when the defect was fixed, which is exactly
+//! how a silent defect stays silent.
 
 mod epub_support;
 
 use epub_support::book::one_face_book;
-use epub_support::typeface::{text_objects, Face, Form, Joining};
+use epub_support::typeface::{shown_glyphs, text_objects, Face, Form, Joining, Placement};
 use tinker_pdf::{Document, OpenOptions, RenderOptions};
 
 /// Beh, hah and meem: three Arabic letters that join on both sides, and a
@@ -76,13 +84,6 @@ fn page_content(doc: &Document) -> String {
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
     String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned()
-}
-
-/// The hex string of glyph indices one text object shows.
-fn shown(object: &str) -> String {
-    let at = object.find('<').expect("a hex string");
-    let end = object[at..].find('>').expect("a closed hex string");
-    object[at + 1..at + end].to_owned()
 }
 
 /// **The headline: the letters are joined, and the line is drawn backwards.**
@@ -130,7 +131,7 @@ fn an_arabic_paragraph_is_drawn_joined_and_right_to_left() {
         .map(|glyph| format!("{glyph:04X}"))
         .collect();
     assert_eq!(
-        shown(&objects[0].1),
+        shown_glyphs(&objects[0].1),
         expected,
         "the paragraph is not drawn joined and reversed: {content}"
     );
@@ -140,7 +141,7 @@ fn an_arabic_paragraph_is_drawn_joined_and_right_to_left() {
     for ch in "\u{628}\u{62D}\u{645}".chars() {
         let plain = face.glyph_of(ch).expect("the face covers the letter");
         assert!(
-            !shown(&objects[0].1).contains(&format!("{plain:04X}")),
+            !shown_glyphs(&objects[0].1).contains(&format!("{plain:04X}")),
             "the unjoined form of {ch:?} reached the page: {content}"
         );
     }
@@ -189,6 +190,165 @@ fn the_arabic_book_paginates_and_its_text_extracts() {
             "{ch:?} did not survive into the page's text: {text:?}"
         );
     }
+}
+
+// ---- GPOS reaches the page --------------------------------------------------
+
+/// The three Latin letters the positioning fixture is written with.
+const MARKED_COVERS: &str = "ABC";
+
+/// The text it draws: an ordinary letter, a displaced one, an ordinary one.
+///
+/// Three and not two. The letter **before** the displaced one is what says the
+/// offset moved that glyph and not the whole run, and the letter **after** it
+/// is what says the pen came back — an offset that shifted everything from
+/// there on would satisfy a two-letter test perfectly.
+const MARKED_LINE: &str = "ABC";
+
+/// How far `B` is displaced along the baseline, in font units at 1000 to the
+/// em.
+const X_PLACEMENT: i16 = 250;
+
+/// And off it. Chosen **above half the font size** on purpose: text extraction
+/// treats a glyph half an em off the line's baseline as a new line, so a rise
+/// smaller than that would make
+/// [`the_positioned_page_still_extracts_as_one_line`] pass without saying
+/// anything. At 24px — 18pt — half an em is 9pt and this is 10.8.
+const Y_PLACEMENT: i16 = 600;
+
+/// A face covering [`MARKED_COVERS`] whose `B` is displaced by a `GPOS`
+/// `SinglePos`.
+///
+/// `DFLT` and `kern`: the script tag every run falls back to, and a feature
+/// the default shaper turns on. A `SinglePos` under `kern` is unusual and
+/// perfectly legal — a feature tag names an intention and a lookup type names
+/// a mechanism, and nothing binds one to the other.
+fn placed_face(x: i16, y: i16) -> Face {
+    Face::new("Fixture Marks", MARKED_COVERS).with_placement(Placement {
+        ch: 'B',
+        script: *b"DFLT",
+        feature: *b"kern",
+        x,
+        y,
+    })
+}
+
+fn placed_book(x: i16, y: i16) -> Vec<u8> {
+    one_face_book("Fixture Marks", &placed_face(x, y).build(), 24, MARKED_LINE)
+}
+
+/// **A `GPOS` offset reaches the page**, as 9.4.3's own arithmetic.
+///
+/// This is the demonstration the rest of this file could not give. The face
+/// above has no marks — nor has any other fixture in this repository — so a
+/// build that dropped every positioning offset on the floor drew exactly the
+/// bytes a build that carried them did, and
+/// [`SHAPED_PAGE`] did not move when the defect was fixed. That is what a
+/// silent correctness defect looks like from inside a green suite.
+///
+/// What this proves is the **transport**: that a non-zero `x_offset` a shaper
+/// produced becomes a number in the content stream that moves that glyph and
+/// leaves the pen where it was. It proves nothing about anchor arithmetic and
+/// does not try to — the aots corpus adjudicates `GPOS` lookup types 1 to 9
+/// case by case, and `text-rendering-tests`' GPOS-3 and GPOS-4 sections
+/// adjudicate mark-to-base and mark-to-mark against real faces carrying their
+/// own expected positions.
+///
+/// The numbers are exact and worked out here rather than read back:
+/// `X_PLACEMENT` is 250 units at 1000 to the em, and 9.4.3 measures a `TJ`
+/// adjustment in thousandths of the em, so the displacement is **−250 whatever
+/// the font size is** — the size cancels. The `+250` after it is the same
+/// number undone, which is what makes the pen the reader's pen.
+#[test]
+fn a_positioned_glyph_is_drawn_where_its_anchor_puts_it() {
+    let face = placed_face(X_PLACEMENT, 0);
+    let doc = Document::open(placed_book(X_PLACEMENT, 0)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(objects.len(), 1, "one face is one text object: {content}");
+
+    let glyph = |ch: char| face.glyph_of(ch).expect("the face covers the letter");
+    assert_eq!(
+        shown_glyphs(&objects[0].1),
+        format!("{:04X}{:04X}{:04X}", glyph('A'), glyph('B'), glyph('C')),
+        "the three letters are not drawn in order: {content}"
+    );
+    // One `TJ` array, because nothing asked to leave the baseline: the offset
+    // glyph is displaced by a number inside it and the one after it puts the
+    // pen back.
+    assert!(
+        objects[0].1.contains(&format!(
+            "[<{:04X}> -{X_PLACEMENT} <{:04X}> {X_PLACEMENT} <{:04X}>] TJ",
+            glyph('A'),
+            glyph('B'),
+            glyph('C')
+        )),
+        "the offset did not reach the page as a TJ adjustment: {content}"
+    );
+}
+
+/// **A vertical offset becomes a rise, and the rise is put back.**
+///
+/// `Ts` is text *state* and cannot go inside a `TJ` array, so a run that
+/// leaves the baseline is more than one array — and `Ts` outlives `ET`, so a
+/// run that set one and did not clear it would tilt whatever the page drew
+/// next. Both halves are asserted, because a build that wrote the rise and
+/// forgot the `0 Ts` produces a page whose *first* paragraph is right.
+#[test]
+fn a_vertical_offset_becomes_a_rise_and_is_put_back() {
+    let doc = Document::open(placed_book(X_PLACEMENT, Y_PLACEMENT)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(objects.len(), 1, "one face is one text object: {content}");
+
+    // 600 units at 1000 to the em, at 24px, which is 18pt: 600 × 18 / 1000.
+    let rise = f64::from(Y_PLACEMENT) * 18.0 / 1000.0;
+    assert!(
+        objects[0].1.contains(&format!("{rise} Ts")),
+        "the y offset did not become a rise: {content}"
+    );
+    assert!(
+        objects[0].1.contains("0 Ts"),
+        "the rise was never cleared, so it outlives this text object: {content}"
+    );
+    let last_set = objects[0]
+        .1
+        .rfind(&format!("{rise} Ts"))
+        .expect("a rise was set");
+    let cleared = objects[0].1.rfind("0 Ts").expect("a rise was cleared");
+    assert!(
+        cleared > last_set,
+        "the rise is cleared before it is set, so it survives the object: {content}"
+    );
+}
+
+/// **And the page is still one line.**
+///
+/// The rise is 10.8 points against a font size of 18, which is more than half
+/// an em — the distance text extraction reads as a different baseline. So a
+/// build that decided line membership from where the ink is would report three
+/// lines here: `A`, then `B` on a line of its own, then `C` on a third,
+/// because a line remembers the previous glyph's origin and the rise both
+/// starts and stops.
+///
+/// This is the other half of the same defect and it is why the extraction
+/// change came first: carrying the offsets onto the page without it would have
+/// traded a book that renders wrong for a book that renders right and extracts
+/// in pieces.
+#[test]
+fn the_positioned_page_still_extracts_as_one_line() {
+    let doc = Document::open(placed_book(X_PLACEMENT, Y_PLACEMENT)).expect("a book");
+    let text = doc.page(0).expect("a page").text();
+    assert_eq!(
+        text.lines().len(),
+        1,
+        "the rise split the line: {:?}",
+        text.plain_text()
+    );
+    // And the round trip is intact: `/ToUnicode` gives back what the book
+    // said, which a page of correctly placed glyphs that could not be read
+    // would not.
+    assert_eq!(text.plain_text(), format!("{MARKED_LINE}\n"));
 }
 
 /// The rendered page, hashed — ruling 4's contract over the shaped path.
