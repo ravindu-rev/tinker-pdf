@@ -13,7 +13,7 @@
 //! question about a font program and nothing else.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_font::cmap::CMap;
 use tinker_pdf_font::{base_char, base_glyph_name, glyph_name_to_char, BaseEncoding, Standard14};
@@ -148,6 +148,15 @@ pub struct Font {
     /// `None` covers `/Identity`, an absent entry, and anything unreadable —
     /// all three mean the CID is the glyph index.
     cid_to_gid: Option<Vec<u8>>,
+    /// `/CIDToGIDMap` inverted: the lowest CID reaching each glyph.
+    ///
+    /// Built on the first backwards lookup and never for a font nobody asks
+    /// one of. [`Font::cids_for_gid`] scans the whole table per glyph, which
+    /// is fine for the one-off question it was written for and quadratic for
+    /// a writer that asks it once per glyph of a shaped line: a 128 KB map
+    /// and a forty-character value is two and a half million comparisons for
+    /// forty answers.
+    gid_to_cid: OnceLock<HashMap<u16, u32>>,
     /// A standard face's built-in metrics, when the font names one and gives
     /// no widths of its own.
     standard: Option<Standard14>,
@@ -339,9 +348,62 @@ impl Font {
     /// `.notdef` is deliberately answerable: a caller that shaped a run and
     /// got glyph 0 back needs to be able to *write* the missing glyph, and
     /// under `/Identity` CID 0 is what draws it.
+    ///
+    /// Answers exactly what `self.cids_for_gid(glyph).first()` does, through
+    /// an index built once instead of a table scan per glyph. The index is
+    /// keyed by glyph and holds the *lowest* CID reaching it, which is what
+    /// ascending insertion with `or_insert` gives and what the scan's
+    /// `first()` gave.
     #[must_use]
     pub fn cid_for_gid(&self, glyph: u16) -> Option<u32> {
-        self.cids_for_gid(glyph).first().copied()
+        let Some(table) = self.cid_to_gid.as_ref() else {
+            // /Identity: no table to invert, and no index worth building.
+            return Some(u32::from(glyph));
+        };
+        self.gid_to_cid
+            .get_or_init(|| {
+                let mut out: HashMap<u16, u32> = HashMap::new();
+                for (cid, pair) in table.chunks_exact(2).enumerate() {
+                    let Ok(cid) = u32::try_from(cid) else {
+                        break;
+                    };
+                    out.entry(u16::from_be_bytes([pair[0], pair[1]]))
+                        .or_insert(cid);
+                }
+                out
+            })
+            .get(&glyph)
+            .copied()
+    }
+
+    /// Whether this font's `/Encoding` resolved to a CMap at all (9.7.5).
+    ///
+    /// False for a composite font whose `/Encoding` names something outside
+    /// 9.7.5.2's registry, or whose embedded CMap stream would not read. The
+    /// distinction matters to a *writer*: a font with no CMap has no codes to
+    /// write, and "the CMap says nothing about this CID" and "there is no
+    /// CMap" are different refusals with different fixes (ruling 10).
+    #[must_use]
+    pub fn has_encoding_cmap(&self) -> bool {
+        self.encoding_cmap.is_some()
+    }
+
+    /// The code that selects `cid` under this font's encoding CMap, and how
+    /// many bytes it occupies (9.7.4, read backwards).
+    ///
+    /// The inverse of [`Font::cid_of`], and the entry a producer needs:
+    /// shaping answers in glyphs, `/CIDToGIDMap` turns a glyph into a CID,
+    /// and a content stream carries neither — it carries a code.
+    ///
+    /// `None` is a refusal to write, never a licence to write the CID raw.
+    /// It covers a font with no encoding CMap, a CID the CMap cannot express,
+    /// and — the case a build has to be honest about — every registry CMap in
+    /// a build without `cmap-predefined`, where the code-to-CID tables that
+    /// would be inverted here were never compiled in and
+    /// [`Font::encoding_is_approximate`] says so.
+    #[must_use]
+    pub fn code_for_cid(&self, cid: u32) -> Option<(u32, u8)> {
+        self.encoding_cmap.as_ref()?.code_for_cid(cid)
     }
 
     /// The glyph name the *document* gives a code, where it gives one.
@@ -605,6 +667,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         // is a better answer there than a zero displacement.
         default_vertical: (880.0, -1000.0),
         cid_to_gid: None,
+        gid_to_cid: OnceLock::new(),
         standard: None,
         vertical: false,
         symbolic: false,

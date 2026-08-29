@@ -49,27 +49,58 @@ unblocked it was `tinker_pdf_cos::Font::program`, which walks
 `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`,
 or `/FontFile`) and returns the stream's *address* — not its bytes, which
 would put every embedded program in a document into memory the moment its
-resources were read. Where the `/DA` font is composite, under
-`/Identity-H`, and embeds a program `tinker_pdf_font::Sfnt` reads, the
-value is shaped through `tinker-pdf-shape` and written as a `TJ` run of
-two-byte codes: joining forms, marks positioned by `GPOS`, and UAX #9's
-rule L2 applied before anything is written, so a right-to-left value is
-drawn in the order a reader of it expects. The advances the run is
-measured at are the shaper's own, and the `TJ` numbers absorb the
-difference between those and the `/W` a viewer will advance by, glyph by
-glyph — one measurement path per run, which is the rule
-`tinker-pdf-layout`'s `metrics.rs` states.
+resources were read. Where the `/DA` font is composite, horizontal, and
+embeds a program `tinker_pdf_font::Sfnt` reads, the value is shaped
+through `tinker-pdf-shape` and written as a `TJ` run of codes: joining
+forms, marks positioned by `GPOS`, and UAX #9's rule L2 applied before
+anything is written, so a right-to-left value is drawn in the order a
+reader of it expects. The advances the run is measured at are the shaper's
+own, and the `TJ` numbers absorb the difference between those and the `/W`
+a viewer will advance by, glyph by glyph — one measurement path per run,
+which is the rule `tinker-pdf-layout`'s `metrics.rs` states.
 
-Anything else — a simple font, a composite one under another CMap, a
-program that is not an sfnt — keeps the single-byte path, still draws a
-`?`, and now emits
+**Which encodings.** Milestone 8 shipped `/Identity-H` and nothing else,
+because going from a glyph back to a *code* means reading an encoding CMap
+backwards and 9.7.5's are written to be read forwards. "Written to be read
+forwards" is not "not invertible": `tinker_pdf_font::CMap::code_for_cid`
+gathers every code a CMap's own tables could have meant by a CID, walks
+them in ascending order and returns the first that maps **back**, so the
+round trip is checked rather than assumed — a `cidchar` that overrode a
+`cidrange` cannot be inverted into a code that now means something else,
+and a CID nothing means any more is refused rather than guessed. The code
+comes back with its byte width, because 9.7.6.2's codespaces are what
+decide where one code ends and the next begins and `90ms-RKSJ-H` has both
+widths in one CMap. So four cases now fill: `/Identity-H`; an **embedded
+CMap stream**, whose tables are the document's own; a **predefined
+registry CMap** of 9.7.5.2, where this build compiled its table in; and
+any of those over a non-identity `/CIDToGIDMap`, which is what every
+subset font in the wild has. `Font::cid_for_gid` inverts that last step
+through an index built once per font rather than by scanning the table per
+glyph.
+
+Anything else keeps the single-byte path, still draws a `?`, and emits
 `WarningKind::FieldCharacterUnrepresentable { character }` against the
 field's own object for every character it could not write (rulings 2
-and 10). The `/Identity-H` condition is a refusal and not an oversight:
-going from a glyph back to a *code* means reading an encoding CMap
-backwards, 9.7.5's are written to be read forwards, and a build that
-guessed would draw a different wrong glyph, which is worse than a question
-mark that announces itself.
+and 10) — a simple font; a **vertical** CMap, because 9.7.4.3 advances the
+pen downward and this module places glyphs along a baseline, so drawing
+the right glyphs in a row a viewer will stack is worse than a mark that
+announces itself; a program that is not an sfnt, which is every bare CFF
+(`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`), because a CFF carries
+no `GSUB`/`GPOS` to execute.
+
+**The feature gate is declared, not silent.** The registry's code-to-CID
+tables are 1.19 MB behind the `cmap-predefined` cargo feature
+([fonts.md](fonts.md)), so a `--no-default-features` build reads a
+`UniJIS-UCS2-H` field's codespaces and widths and has nothing to invert.
+That build refuses the shaped path and emits
+`WarningKind::PredefinedCMapApproximate` **against the field**, naming the
+CMap whose table is missing, before the per-character warnings. The
+alternative — filling with `?` and saying only that the characters were
+undrawable — would make a capability's absence look like a document's
+defect, which is the failure PDF/A named once already: a verdict that
+depends on a feature is not a verdict, and neither is a fill. The two
+paths that need no table at all — `/Identity-H` and an embedded CMap
+stream — work in either build, and `shaped_forms.rs` asserts both legs.
 
 A value
 the field refuses — over `/MaxLen`, not among a non-editable list's
@@ -185,7 +216,9 @@ let bytes = editor.save(&WriteOptions::default());
 | More than 4 096 calculating fields in one pass | `CalcError::TooManyFields` | refused rather than truncated, for the same reason a failing script refuses the pass | — |
 | A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
-| Shaping a value against a composite `/DA` font under any CMap but `/Identity-H`, or against a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | glyph-to-code needs the encoding CMap read backwards, and a guess draws a *different* wrong glyph | [design/shaping.md](../design/shaping.md) |
+| Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
+| Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
+| A CID no code means any more — a `cidchar` took the code its `cidrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
 | Keystroke and validate actions; document-level and catalog scripts | surfaced (`FieldScripts`, `DocumentScript`) and never run — nothing is attempted, so nothing errors | events need an interactive host; a document-level script is arbitrary program text with no field to write | [ROADMAP](../ROADMAP.md) Tier 4 |
 | A format action's display string reaching `/V` | none offered — `formatted_value` returns the string and writes nothing | 12.7.3.3 keeps value and appearance apart | [ROADMAP](../ROADMAP.md) Tier 4 |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
@@ -214,6 +247,19 @@ invoice fixture end to end — `/CO` order honoured, a failing script
 leaving the editor byte-identical, ReadOnly totals written by the
 calculation and refused to the user, cascades cut and reported, and the
 format string never landing in `/V`.
+
+`crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
+`--no-default-features` build — the registry pair swap places) holds up the
+shaped half against a face the file synthesises, so the expected glyph
+indices are ones the test names rather than reads back out of the engine.
+It asserts joined Arabic in visual order under `/Identity-H`, under an
+embedded CMap stream, under a one-byte codespace, under a registry CMap —
+where the codes are checked *forwards* through `CMap::cid`, which is what
+makes it a round trip rather than a restatement — and over a non-identity
+`/CIDToGIDMap`; and it asserts each refusal by name: the vertical CMap, the
+bare CFF, the CID whose code a `cidchar` took, and the registry CMap whose
+table a `cmap-predefined`-off build left out. Its module header carries the
+nine reintroduced defects and how many assertions each one fired.
 
 `form_script` is one of the 24 fuzz targets, with a committed seed corpus:
 it drives the lexer, parser and evaluator with arbitrary text against a
