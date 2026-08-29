@@ -697,8 +697,18 @@ impl Coverage {
 
     /// The syntax group alone.
     ///
-    /// The sweep the design doc requires to be cheap: no XMP packet parsed,
-    /// no font program read, nothing but the COS document.
+    /// The sweep the design doc requires to be cheap: no font program parsed,
+    /// no ICC profile read, nothing but the COS document and the rules that
+    /// need only it.
+    ///
+    /// The **flavour claim is still read**, and that is not an exception to
+    /// the rule so much as a statement of what the rule is about. Which part
+    /// a file claims decides which syntax rules apply and what clause number
+    /// each finding cites, so a syntax sweep that skipped it would be
+    /// enforcing no particular standard. It costs one pull-parse of a packet
+    /// measured in kilobytes; a font program is what the requirement is
+    /// about, and the counter behind [`Machinery`] is what proves the
+    /// difference rather than asserting it.
     pub const SYNTAX: Coverage = Coverage {
         metadata: false,
         syntax: true,
@@ -768,6 +778,10 @@ pub(crate) fn validate_counting(
     let machinery = Machinery::new(groups);
     let mut raw: Vec<Raw> = Vec::new();
 
+    // The claim is read whatever was asked for, and the ask is counted: it is
+    // an XML parse of a small packet, and a counter that did not record it
+    // would be telling a comfortable story rather than what happened.
+    machinery.reach(RuleGroup::Metadata);
     let mut claim = Vec::new();
     let flavour = flavour_of(document, &mut claim);
     if groups.metadata {
@@ -782,9 +796,12 @@ pub(crate) fn validate_counting(
     if groups.syntax && document.is_encrypted() {
         raw.push(Raw::file(clauses::ENCRYPTION, FindingKind::Encrypted));
     }
-    if groups.syntax {
-        syntax::rules(&document.inner, flavour.map(|f| f.part), &mut raw);
-    }
+    syntax::rules(
+        &document.inner,
+        &machinery,
+        flavour.map(|f| f.part),
+        &mut raw,
+    );
     if groups.metadata {
         xmp::rules(document, &machinery, flavour, &mut raw);
     }
@@ -1068,5 +1085,164 @@ mod tests {
             colour: true
         }
         .is_complete());
+    }
+
+    // ---- the laziness requirement, counted -------------------------------
+
+    /// A document that embeds a font program, an ICC profile and an XMP
+    /// packet, so a rule that reached for any of the three would have
+    /// something to reach for.
+    ///
+    /// The font bytes are a real `sfnt` header — the four-byte tag, the table
+    /// count and a directory entry — rather than filler, because a parser that
+    /// rejected them at the first byte would not have been reached far enough
+    /// to count as having been reached.
+    fn document_with_a_font_program() -> crate::Document {
+        let packet = br#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
+ pdfaid:part="2" pdfaid:conformance="B"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+        let sfnt: &[u8] = &[
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x03, 0x00, 0x04, b'h', b'e',
+            b'a', b'd', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C, 0x00, 0x00, 0x00, 0x36,
+        ];
+
+        let mut objects: Vec<(u32, Vec<u8>)> = vec![
+            (
+                1,
+                b"<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_vec(),
+            ),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+                   /Resources << /Font << /F1 5 0 R >> >> >>"
+                    .to_vec(),
+            ),
+        ];
+        let mut metadata = format!(
+            "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n",
+            packet.len()
+        )
+        .into_bytes();
+        metadata.extend_from_slice(packet);
+        metadata.extend_from_slice(b"\nendstream");
+        objects.push((4, metadata));
+        objects.push((
+            5,
+            b"<< /Type /Font /Subtype /TrueType /BaseFont /Acme \
+               /FontDescriptor 6 0 R >>"
+                .to_vec(),
+        ));
+        objects.push((
+            6,
+            b"<< /Type /FontDescriptor /FontName /Acme /Flags 4 /FontFile2 7 0 R >>".to_vec(),
+        ));
+        let mut program = format!(
+            "<< /Length {} /Length1 {} >>\nstream\n",
+            sfnt.len(),
+            sfnt.len()
+        )
+        .into_bytes();
+        program.extend_from_slice(sfnt);
+        program.extend_from_slice(b"\nendstream");
+        objects.push((7, program));
+
+        let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        let mut offsets = vec![0u64; objects.len() + 1];
+        for (num, body) in &objects {
+            offsets[*num as usize] = out.len() as u64;
+            out.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_at = out.len() as u64;
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for entry in offsets.iter().skip(1) {
+            out.extend_from_slice(format!("{entry:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R /ID [<0102> <0304>] >>\nstartxref\n\
+                 {xref_at}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        crate::Document::open(out).expect("the fixture opens")
+    }
+
+    /// The design doc's laziness requirement, as a measurement.
+    ///
+    /// *"Machinery is built lazily per group, so a syntax-only sweep over
+    /// 2 907 files never parses a font program it does not need."* Every reach
+    /// past the COS document is counted, so the requirement is the font and
+    /// colour counters staying at zero on a document that has both a font
+    /// program and a resource dictionary pointing at it.
+    ///
+    /// **Injection, counted.** A rule was added to `syntax::dictionary` that
+    /// reaches for [`RuleGroup::Fonts`] on any dictionary carrying a
+    /// `/FontFile2` and calls `tinker_pdf_font::Sfnt::parse`. It fails
+    /// **four of the workspace's 3 375 tests** and no others: this one,
+    /// [`the_full_request_reaches_no_further_than_the_short_one`],
+    /// [`asking_for_a_group_with_no_rules_does_not_make_it_have_run`], and
+    /// `pdfa_syntax.rs`'s
+    /// `the_syntax_group_names_no_font_or_colour_machinery`, which catches the
+    /// import rather than the call and so fires even for a reach that is never
+    /// executed.
+    ///
+    /// The first attempt at that injection fired **nothing**, and the reason is
+    /// worth keeping: it tested `is_stream && dict.contains_key(FontFile2)`,
+    /// and a `/FontFile2` lives in the font *descriptor*, which is a plain
+    /// dictionary. An injection that misses is not evidence the guard works —
+    /// it is evidence the injection was wrong — and the difference is only
+    /// visible because the count was taken rather than assumed.
+    #[test]
+    fn a_syntax_only_sweep_never_reaches_for_a_font_program() {
+        let document = document_with_a_font_program();
+        let (verdict, (metadata, fonts, colour)) = validate_counting(&document, Coverage::SYNTAX);
+
+        assert_eq!(fonts, 0, "the syntax group parsed a font program");
+        assert_eq!(colour, 0, "the syntax group read a colour profile");
+        // Not vacuous: the counter does move, for the one parse a syntax sweep
+        // genuinely needs — the flavour claim, which decides which rules apply.
+        assert_eq!(metadata, 1, "the flavour claim is read, and counted");
+        assert!(verdict.coverage.syntax);
+        assert!(!verdict.coverage.fonts);
+    }
+
+    /// And the full request reaches for the metadata group's machinery once
+    /// more — for the properties — and still never for a font.
+    #[test]
+    fn the_full_request_reaches_no_further_than_the_short_one() {
+        let document = document_with_a_font_program();
+        let (_, (metadata, fonts, colour)) = validate_counting(&document, Coverage::IMPLEMENTED);
+        assert_eq!(
+            metadata, 2,
+            "once for the claim and once for the properties"
+        );
+        assert_eq!(fonts, 0);
+        assert_eq!(colour, 0);
+    }
+
+    /// Asking for a group with no rules costs the ask and nothing else, and
+    /// the verdict does not claim it ran.
+    #[test]
+    fn asking_for_a_group_with_no_rules_does_not_make_it_have_run() {
+        let document = document_with_a_font_program();
+        let everything = Coverage {
+            metadata: true,
+            syntax: true,
+            fonts: true,
+            colour: true,
+        };
+        let (verdict, (_, fonts, colour)) = validate_counting(&document, everything);
+        assert_eq!((fonts, colour), (0, 0));
+        assert!(!verdict.coverage.fonts);
+        assert!(!verdict.coverage.colour);
+        assert!(!verdict.coverage.is_complete());
     }
 }

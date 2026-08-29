@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 use tinker_pdf_cos::{CosDocument, Dict, Name, ObjRef, Object, XrefEntry};
 
-use super::{clauses, FindingKind, Part, Raw};
+use super::{clauses, FindingKind, Machinery, Part, Raw, RuleGroup};
 
 /// How deep a directly nested array or dictionary is walked.
 ///
@@ -108,7 +108,15 @@ const STANDARD_FILTERS: &[&[u8]] = &[
 /// rules still run — a file with no claim can still carry an `/Encrypt` — and
 /// the part-specific ones do not, because a rule that does not know which
 /// standard it is enforcing is not enforcing one.
-pub(super) fn rules(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) {
+pub(super) fn rules(
+    doc: &CosDocument,
+    machinery: &Machinery,
+    part: Option<Part>,
+    out: &mut Vec<Raw>,
+) {
+    if !machinery.reach(RuleGroup::Syntax) {
+        return;
+    }
     header(doc, part, out);
     trailer(doc, part, out);
     catalog(doc, part, out);
