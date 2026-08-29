@@ -76,6 +76,51 @@ pub const STARTXREF_SCAN: usize = 1024;
 /// and dropping to a full rescan. Trailing junk after `%%EOF` is routine.
 pub const STARTXREF_SCAN_MAX: usize = 64 * 1024;
 
+/// Bytes fetched for one indirect object before the window doubles.
+///
+/// Only a streamed document pays this. The window grows until the object
+/// demonstrably ends inside it, because a window that cut an object short
+/// would parse to a different value than the same bytes in one buffer, and
+/// ruling 4 does not allow the two to differ.
+///
+/// A quarter of a chunk rather than a whole one, so that reading an object
+/// near the end of the head of a small linearized file does not pull the
+/// chunk after it. Doubling costs no transport -- the chunk cache holds what
+/// the shorter attempt read -- so the small first window is close to free,
+/// and a stream's data is fetched by its declared length rather than by
+/// doubling anyway.
+pub const OBJECT_WINDOW: u64 = 1024;
+
+/// How far past a cross-reference section a streamed reader looks for the
+/// `%%EOF` that ends its revision (7.5.5).
+///
+/// A generic file puts them within a few hundred bytes of each other. A
+/// linearized one does not: its first-page section is at the front and the
+/// only `%%EOF` is at the very end (Annex F part 11), so an unbounded forward
+/// search would read the whole document to answer a question the head-only
+/// open exists to avoid asking. Past this the revision is taken to end at the
+/// document, which is where it ends -- give or take the bytes after the
+/// marker, and `Revision::byte_range` on a streamed document says so.
+pub const REVISION_END_SCAN: u64 = 8192;
+
+/// Bytes fetched for the first-page cross-reference section of a linearized
+/// file before the window doubles (Annex F part 3).
+///
+/// Smaller than a generic section's window on purpose. That table describes
+/// one page, so it is short; and a linearized file can be small enough that
+/// `/E` is under a single chunk, where an over-eager first window would read
+/// the tail of the file to parse the front of it.
+pub const HEAD_SECTION_WINDOW: u64 = 1024;
+
+/// Bytes fetched for one cross-reference section before the window doubles.
+///
+/// Only a streamed document pays this: a document opened from a buffer hands
+/// the walker the whole buffer for every window, so the constant is what a
+/// *fetch* costs rather than what a section may be. It doubles until the
+/// section parses, and doubling is free in fetched bytes because the chunk
+/// cache already holds what the shorter attempt read.
+pub const XREF_SECTION_WINDOW: u64 = 8192;
+
 /// Bytes at the start of the buffer searched for the `%PDF-` header (7.5.2).
 /// A header found past byte 0 means every stored offset is short by exactly
 /// that much, which is the most common corruption in the wild.

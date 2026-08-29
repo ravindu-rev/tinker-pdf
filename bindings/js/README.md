@@ -77,6 +77,45 @@ So: **draw from the view immediately and drop it.** If the pixels must outlive
 the next engine call, use `data()`. The safe call has the short name; the
 dangerous one has the warning in its name, its doc comment and here.
 
+## Opening by ranges
+
+A host that has the whole file hands it over. A host that has to fetch it —
+over HTTP range requests, out of a `File` it does not want to read whole —
+opens the document by feeding the ranges the engine asks for:
+
+```js
+const source = new PdfSource(file.size);
+let doc = null;
+while (doc === null) {
+  try {
+    doc = PdfDocument.openStreaming(source);
+  } catch (e) {
+    const needed = source.takeNeeded();      // [start, end, start, end, ...]
+    for (let i = 0; i < needed.length; i += 2) {
+      source.feed(needed[i], await fetchRange(needed[i], needed[i + 1]));
+    }
+  }
+}
+```
+
+**The engine performs no transport.** It never fetches, never blocks and has
+no runtime; it asks for a range and, if the host has not fed it, refuses with
+that range named. The loop terminates because every refusal names a range, the
+host feeds exactly that, and the engine's caches keep what they have already
+parsed — so each turn strictly increases what is readable and no work is
+repeated. There is no async here and there will not be: it would need a
+runtime this workspace does not have, would colour every function down to the
+device, and would make output depend on when bytes arrived
+(`docs/rulings.md`, ruling 4).
+
+The document that comes out is the document the whole-buffer open would have
+produced. `node_smoke.mjs` drives the loop, caps the turns so a loop that could
+not finish fails rather than hangs, and asserts the streamed render is
+**byte-identical** to the buffered one.
+
+A linearized file (ISO 32000-1 Annex F) pays for this the least: its first page
+is at the front, and page one renders without a byte of the tail being fetched.
+
 ## The browser demo
 
 Plan 13's exit criterion for this binding: a page that renders an uploaded PDF.

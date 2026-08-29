@@ -27,7 +27,7 @@
 use core::fmt;
 use core::ops::Range;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tinker_pdf_crypto::handler::FileKey;
 use tinker_pdf_crypto::Permissions;
@@ -37,9 +37,10 @@ use crate::decrypt::{self, Decryptor, EncryptParams, IdentityDecryptor};
 use crate::limits;
 use crate::name::{Name, NameTable};
 use crate::objstm::{self, ObjStm, ObjStmCache};
-use crate::parse::{parse_indirect_at, parse_object_at};
-use crate::repair::ScanIndex;
+use crate::parse::{parse_indirect_at, parse_object_at, ParsedIndirect};
+use crate::repair::{find_from, next_object_header, rfind_from, ScanIndex};
 use crate::security::{AuthError, AuthLevel};
+use crate::source::{Backing, ByteSource, Bytes};
 use crate::store::{LockExt, MutexExt, ResolveCtx, SlotStore};
 use crate::warn::{Warning, WarningKind, WarningSink};
 use crate::xref::{self, Revision, XrefBuild, XrefEntry, XrefTable};
@@ -264,14 +265,27 @@ impl DocNames {
 
 /// A PDF file's object layer.
 pub struct CosDocument {
-    pub(crate) buffer: Arc<[u8]>,
+    pub(crate) buffer: Backing,
     pub(crate) names: DocNames,
     xref: XrefTable,
+    /// Annex F's head-only open, when it engaged. `None` for every document
+    /// opened from a buffer.
+    linearized: Option<Linearized>,
+    /// The first-page table merged with the main one, once a read has left
+    /// page one and paid for it.
+    completed: OnceLock<XrefTable>,
     trailer: Dict,
     revisions: Vec<Revision>,
     store: SlotStore,
     objstm: ObjStmCache,
-    scan: Option<Arc<ScanIndex>>,
+    /// The repair scanner's index, when the ladder needed one.
+    ///
+    /// Behind a lock because a streamed document builds it *lazily*: the
+    /// eager validation that decides on one at open is the step a streaming
+    /// open defers, so the decision moves to the first read that finds an
+    /// entry lying. The values a caller sees are the same either way, which is
+    /// the property that matters; what differs is when the fetch happens.
+    scan: RwLock<Option<Arc<ScanIndex>>>,
     warnings: Mutex<WarningSink>,
     pub(crate) stream_ranges: RwLock<HashMap<u32, Range<u64>>>,
     /// Everything authentication installs, behind a lock.
@@ -318,15 +332,73 @@ impl CosDocument {
     /// degraded content — check [`CosDocument::ladder_level`] and
     /// [`CosDocument::warnings`] to see what had to be repaired.
     pub fn open(bytes: impl Into<Arc<[u8]>>) -> Result<CosDocument, OpenError> {
-        let buffer: Arc<[u8]> = bytes.into();
+        CosDocument::open_backing(Backing::whole_buffer(bytes.into()))
+    }
+
+    /// Opens a document whose bytes are fetched from `source` as they are
+    /// needed.
+    ///
+    /// The same engine and the same answers: `source` is where bytes come
+    /// from, never what they mean. A document opened here and the same
+    /// document opened from a buffer produce the same objects, the same
+    /// warnings, the same ladder level and the same pixels, whatever order or
+    /// size the source answered in -- see `docs/design/streaming-open.md`, and
+    /// `ShreddedSource` for the instrument that proves it.
+    ///
+    /// # Errors
+    /// [`OpenError::NoObjects`] as [`CosDocument::open`], and for a source
+    /// that could not supply the bytes the open path needed.
+    pub fn open_source(source: Arc<dyn ByteSource>) -> Result<CosDocument, OpenError> {
+        CosDocument::open_backing(Backing::chunked(source))
+    }
+
+    fn open_backing(backing: Backing) -> Result<CosDocument, OpenError> {
         let names = DocNames::new();
         let mut sink = WarningSink::new();
+        let streamed = backing.is_streamed();
 
-        // 7.5.2: bytes before %PDF- shift every offset the file stores.
-        let shift = xref::header_shift(&buffer, &mut sink);
-        let built = match xref::startxref(&buffer, &mut sink) {
-            Some(start) => xref::build(&buffer, start, shift, &names, &mut sink),
-            None => XrefBuild::default(),
+        // 7.5.2: bytes before %PDF- shift every offset the file stores. One
+        // head window covers the scan limit the clause sets, which on a
+        // streamed source is exactly one chunk.
+        let Ok(head) = backing.window(0..limits::MAX_HEADER_SCAN as u64) else {
+            return Err(OpenError::NoObjects);
+        };
+        let shift = xref::header_shift(&head, &mut sink);
+        drop(head);
+
+        // The walk reads windows: the tail for `startxref` (7.5.5), then each
+        // section of the `/Prev` chain (7.5.4, 7.5.6, 7.5.8) as its own. A
+        // document already in hand hands the walker the whole buffer for every
+        // window, so it takes the path it always took at the cost it always
+        // had.
+        let held = if streamed {
+            None
+        } else {
+            backing.materialise().ok()
+        };
+        let view = match &held {
+            Some(buffer) => Bytes::Whole(buffer),
+            None => backing.view(),
+        };
+        // Annex F's fast path first, and only for a streamed document: a
+        // buffer already holds every byte, so there is nothing for a head-only
+        // open to save and every reason not to take a second route through the
+        // same clauses.
+        let mut linearized = None;
+        let fast = if streamed {
+            linearized_open(&backing, &names, &mut sink)
+        } else {
+            None
+        };
+        let built = match fast {
+            Some((built, params)) => {
+                linearized = Some(params);
+                built
+            }
+            None => match xref::startxref(&view, &mut sink) {
+                Some(start) => xref::build(view, start, shift, &names, &mut sink),
+                None => XrefBuild::default(),
+            },
         };
 
         let mut table = built.table;
@@ -338,10 +410,24 @@ impl CosDocument {
         let usable = built.sections > 0 && !table.is_empty() && root_locatable(&table, &trailer);
         let mut failures = Vec::new();
         let mut offset_entries = 0usize;
-        if usable {
-            let validation = validate(&buffer, &mut table, shift);
-            failures = validation.failures;
-            offset_entries = validation.offsets;
+        match (&held, usable) {
+            (Some(buffer), true) => {
+                let validation = validate(buffer, &mut table, shift);
+                failures = validation.failures;
+                offset_entries = validation.offsets;
+            }
+            // Deferred on a streamed source, and only there. The eager pass
+            // probes every type-1 offset against its `N G obj` header, which
+            // means reading a byte near every object in the file -- the one
+            // open-time step that touches everywhere, and the one thing a
+            // streaming open cannot afford. Nothing is lost from safety:
+            // `parse_at` re-checks the header of every object at load, so an
+            // entry that lies is still caught, at first use rather than at
+            // open. What is lost is that `ladder_level` starts out provisional,
+            // which `CosDocument::complete_validation` is how a caller gets
+            // back the eager answer.
+            (None, _) => {}
+            (Some(_), false) => {}
         }
 
         // Level 3 when the tables never worked, or when so many entries lie
@@ -353,6 +439,12 @@ impl CosDocument {
         if rescan {
             ladder = LadderLevel::Rescan;
             sink.warn(0, WarningKind::DocumentRescanned);
+            // One forward pass over everything, which is the point of it. A
+            // streamed document therefore fetches the whole source, and says
+            // so first (ruling 10).
+            let Some(buffer) = fetch_whole(&backing, &mut sink) else {
+                return Err(OpenError::NoObjects);
+            };
             let index = ScanIndex::build(&buffer, &names);
             if index.is_empty() {
                 return Err(OpenError::NoObjects);
@@ -371,7 +463,7 @@ impl CosDocument {
             trailer = index.synthesized_trailer(trailer, &mut sink);
             if revisions.is_empty() {
                 revisions.push(Revision {
-                    byte_range: 0..buffer.len() as u64,
+                    byte_range: 0..backing.len(),
                     // Nothing readable to chain to: the tables were discarded.
                     xref_at: 0,
                     trailer: trailer.clone(),
@@ -380,6 +472,9 @@ impl CosDocument {
             scan = Some(Arc::new(index));
         } else if !failures.is_empty() {
             ladder = LadderLevel::Patch;
+            let Some(buffer) = fetch_whole(&backing, &mut sink) else {
+                return Err(OpenError::NoObjects);
+            };
             let index = Arc::new(ScanIndex::build(&buffer, &names));
             for num in failures {
                 let offset = match table.get(num) {
@@ -413,14 +508,16 @@ impl CosDocument {
         }
 
         let mut doc = CosDocument {
-            buffer,
+            buffer: backing,
             names,
             xref: table,
             trailer,
             revisions,
+            linearized,
+            completed: OnceLock::new(),
             store: SlotStore::new(),
             objstm: ObjStmCache::new(),
-            scan,
+            scan: RwLock::new(scan),
             warnings: Mutex::new(WarningSink::new()),
             stream_ranges: RwLock::new(HashMap::new()),
             security: RwLock::new(Security {
@@ -450,7 +547,16 @@ impl CosDocument {
     }
 
     /// The merged cross-reference table.
+    ///
+    /// On Annex F's fast path this is the whole of it: asking for the table is
+    /// asking about every object, so the main table at `/T` is fetched here if
+    /// a read has not already paid for it. A caller that wants page one and
+    /// nothing else never calls this, which is why a page-one render still
+    /// touches no byte of the tail.
     pub fn xref(&self) -> &XrefTable {
+        if self.linearized.is_some() {
+            return self.merged_xref();
+        }
         &self.xref
     }
 
@@ -483,9 +589,93 @@ impl CosDocument {
             .is_none_or(|params| params.encrypt_metadata)
     }
 
+    /// Whether this document's bytes are fetched from a [`ByteSource`] rather
+    /// than held in one buffer.
+    ///
+    /// An observable rather than a mood: a caller deciding whether an
+    /// operation is about to pull the whole file needs to be able to ask.
+    pub fn is_streamed(&self) -> bool {
+        self.buffer.is_streamed()
+    }
+
+    /// Where the first page's objects end (Annex F `/E`), when this document
+    /// was opened on the linearized fast path.
+    ///
+    /// `None` for every other document, which is how a caller tells that the
+    /// head-only open engaged rather than assuming it from the file. Every
+    /// byte from here to the end is the tail, and rendering page one touches
+    /// none of it.
+    pub fn first_page_end(&self) -> Option<u64> {
+        self.linearized.as_ref().map(|l| l.end_of_first_page)
+    }
+
+    /// The object number of the first page (Annex F `/O`), when this document
+    /// was opened on the linearized fast path.
+    ///
+    /// `None` for every other document. Annex F names it so that a reader
+    /// holding only the head can reach page one without walking the page
+    /// tree, whose root the layout is free to leave in the tail.
+    pub fn first_page_object(&self) -> Option<u32> {
+        self.linearized.as_ref().map(|l| l.first_page_object)
+    }
+
+    /// Whether every byte of the document has been fetched.
+    ///
+    /// Always true for a document opened from a buffer. For a streamed one it
+    /// answers whether some whole-file operation -- a repair rescan, a save,
+    /// a signature byte range -- has already pulled everything.
+    pub fn whole_file_fetched(&self) -> bool {
+        self.buffer.whole_fetched()
+    }
+
     /// Which rung of the ladder this document opened on.
     pub fn ladder_level(&self) -> LadderLevel {
         self.ladder
+    }
+
+    /// Runs the eager offset probe that a streamed open deferred, and reports
+    /// the ladder level it decides.
+    ///
+    /// [`CosDocument::ladder_level`] on a streamed document is **provisional**:
+    /// it reflects the bytes read so far, because the pass that probes every
+    /// type-1 entry against its `N G obj` header is the one open-time step
+    /// that touches everywhere. This fetches the whole source, runs exactly
+    /// that pass, and returns the answer a buffered open would have given.
+    /// Both are documented observables rather than moods.
+    ///
+    /// Reads nothing and returns [`CosDocument::ladder_level`] for a document
+    /// opened from a buffer, where the eager pass already ran.
+    ///
+    /// The values a caller reads do not depend on whether this was called: an
+    /// entry that lies is repaired at first use either way. What this decides
+    /// is the *verdict*, which a caller checking "did it open cleanly" needs
+    /// and a caller rendering a page does not.
+    pub fn complete_validation(&self) -> LadderLevel {
+        if !self.buffer.is_streamed() {
+            return self.ladder;
+        }
+        let mut sink = WarningSink::new();
+        let Some(buffer) = fetch_whole(&self.buffer, &mut sink) else {
+            self.absorb(sink);
+            return self.ladder;
+        };
+        self.absorb(sink);
+        // The header scan warned at open if it had anything to say; a second
+        // sink keeps it from saying it twice.
+        let mut scratch = WarningSink::new();
+        let shift = xref::header_shift(&buffer, &mut scratch);
+        let mut table = self.xref.clone();
+        let validation = validate(&buffer, &mut table, shift);
+        if validation.failures.is_empty() {
+            return self.ladder;
+        }
+        if validation.failures.len() >= limits::LADDER_RESCAN_MIN_FAILURES
+            && validation.failures.len() * 2 > validation.offsets
+        {
+            LadderLevel::Rescan
+        } else {
+            self.ladder.max(LadderLevel::Patch)
+        }
     }
 
     /// Everything this layer had to tolerate, in the order it happened.
@@ -556,16 +746,16 @@ impl CosDocument {
     /// with junk before its header has one at a shifted offset and the scan
     /// that found it is cheap.
     pub fn header_version(&self) -> Option<String> {
-        let window = self
-            .buffer
-            .get(..limits::MAX_HEADER_SCAN.min(self.buffer.len()))?;
+        // One head window, which on a streamed document is one chunk and on
+        // a buffer is a copy of its first page. Both the keyword and the
+        // digits after it lie inside it by 7.5.2's own scan limit.
+        let window = self.buffer.window(0..limits::MAX_HEADER_SCAN as u64).ok()?;
         let at = window
             .windows(5)
             .position(|w| w == b"%PDF-")
             .map(|p| p + 5)?;
-        let digits: Vec<u8> = self
-            .buffer
-            .get(at..(at + 8).min(self.buffer.len()))?
+        let digits: Vec<u8> = window
+            .get(at..(at + 8).min(window.len()))?
             .iter()
             .copied()
             .take_while(|b| b.is_ascii_digit() || *b == b'.')
@@ -578,7 +768,7 @@ impl CosDocument {
     /// An incremental update must reproduce them exactly as its prefix, which
     /// is what keeps a signature over the original valid.
     pub fn bytes(&self) -> &[u8] {
-        &self.buffer
+        self.buffer.whole()
     }
 
     /// The highest object number the cross-reference table knows.
@@ -767,11 +957,80 @@ impl CosDocument {
         Arc::clone(&self.security.read_lock().decryptor)
     }
 
+    /// The cross-reference entry for `num`.
+    ///
+    /// On Annex F's fast path the first-page table is consulted first and the
+    /// main table at `/T` is fetched only when a read leaves page one -- which
+    /// is what makes "not one read touches the tail" true of a page-one render
+    /// and false of anything more.
+    fn entry(&self, num: u32) -> Option<XrefEntry> {
+        if let Some(entry) = self.xref.get(num) {
+            return Some(entry);
+        }
+        self.linearized.as_ref()?;
+        self.merged_xref().get(num)
+    }
+
+    /// The first-page table merged with the main one, fetched once.
+    ///
+    /// `/T` names the byte before the main table's first *entry* (F.2.2 item
+    /// 5) rather than the `xref` keyword, so the keyword is looked for just
+    /// behind it; a cross-reference stream has its object header there
+    /// instead, and both are offered to the same walker. A file whose `/T`
+    /// leads nowhere falls back to `startxref`, which by then costs nothing
+    /// it has not already decided to spend.
+    fn merged_xref(&self) -> &XrefTable {
+        if let Some(table) = self.completed.get() {
+            return table;
+        }
+        let mut sink = WarningSink::new();
+        let mut merged = self.xref.clone();
+        if let Some(params) = &self.linearized {
+            let view = self.buffer.view();
+            let back = params
+                .main_table_at
+                .saturating_sub(limits::XREF_SECTION_WINDOW);
+            let keyword = view
+                .window(back, params.main_table_at.saturating_sub(back) + 16)
+                .and_then(|w| rfind_from(w.bytes(), b"xref", 0).map(|at| w.abs(at as u64)));
+            let mut starts: Vec<u64> = keyword
+                .into_iter()
+                .chain(std::iter::once(params.main_table_at))
+                .collect();
+            let mut found = false;
+            for start in starts.drain(..) {
+                let built = xref::build(self.buffer.view(), start, 0, &self.names, &mut sink);
+                if built.sections > 0 {
+                    for (num, entry) in built.table.iter() {
+                        merged.insert_new(num, entry);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            // `startxref` is the last resort and is asked for only when the
+            // two candidates derived from `/T` came to nothing -- computing it
+            // eagerly would read the tail even on the path that did not need
+            // it, which is a byte budget telling a lie about itself.
+            if !found {
+                if let Some(start) = xref::startxref(&self.buffer.view(), &mut sink) {
+                    let built = xref::build(self.buffer.view(), start, 0, &self.names, &mut sink);
+                    for (num, entry) in built.table.iter() {
+                        merged.insert_new(num, entry);
+                    }
+                }
+            }
+        }
+        self.absorb(sink);
+        let _ = self.completed.set(merged);
+        self.completed.get().unwrap_or(&self.xref)
+    }
+
     /// The reference for an object number, taking the generation from the
     /// table, which validation has already reconciled with the file's own
     /// `N G obj` header.
     fn ref_of(&self, num: u32) -> ObjRef {
-        let gen = match self.xref.get(num) {
+        let gen = match self.entry(num) {
             Some(XrefEntry::Offset { gen, .. }) | Some(XrefEntry::Free { gen, .. }) => gen,
             // 7.5.7: objects in an object stream always have generation 0.
             Some(XrefEntry::InStream { .. }) | None => 0,
@@ -780,7 +1039,7 @@ impl CosDocument {
     }
 
     fn entry_offset(&self, num: u32) -> u64 {
-        match self.xref.get(num) {
+        match self.entry(num) {
             Some(XrefEntry::Offset { offset, .. }) => offset,
             _ => 0,
         }
@@ -842,12 +1101,20 @@ impl CosDocument {
         }
         // No lock is held here: two threads racing on the same object both
         // parse it and one wins the swap.
+        let missed_before = ctx.missed();
         let object = ctx.enter(num, |ctx| self.load_uncached(num, ctx, sink));
+        if ctx.missed() && !missed_before {
+            // A miss never publishes. This load reads as null because the
+            // bytes were absent, not because the object is; publishing it
+            // would give every later read the miss's answer forever, and the
+            // host that goes and fetches the range would never see it change.
+            return Arc::new(object);
+        }
         self.store.publish(num, Arc::new(object))
     }
 
     fn load_uncached(&self, num: u32, ctx: &mut ResolveCtx, sink: &mut WarningSink) -> Object {
-        let entry = self.xref.get(num);
+        let entry = self.entry(num);
         if let Some(XrefEntry::InStream { stream_num, idx }) = entry {
             return self.load_from_objstm(num, stream_num, idx, ctx, sink);
         }
@@ -859,7 +1126,7 @@ impl CosDocument {
         }
         // Level 2 at read time: an entry that was good at open but is not the
         // object it claimed, or a type-2 entry whose container fell over.
-        if let Some(hit) = self.scan.as_ref().and_then(|scan| scan.get(num)) {
+        if let Some(hit) = self.repair_index(sink).and_then(|scan| scan.get(num)) {
             if let Some(object) = self.parse_at(num, hit.offset, ctx, sink) {
                 sink.warn_at(
                     hit.offset,
@@ -876,6 +1143,119 @@ impl CosDocument {
         Object::Null
     }
 
+    /// How far a read that begins inside the first page may reach, on Annex
+    /// F's head-only path.
+    ///
+    /// An object that ends at `/E` needs no byte past it -- but a window sized
+    /// by a guess asks for more, and on a fixed granularity that guess pulls
+    /// the first chunk of the tail for the sake of a few bytes it will not
+    /// use. So the first attempt is clamped to `/E`, and only a parse that
+    /// genuinely comes up short is allowed past it. Nothing is refused: the
+    /// ceiling changes which bytes are fetched first, never which are
+    /// readable.
+    pub(crate) fn head_ceiling(&self, offset: u64) -> Option<u64> {
+        let end = self.linearized.as_ref()?.end_of_first_page;
+        (offset < end).then_some(end)
+    }
+
+    /// The repair scanner's index, built on first need for a streamed
+    /// document.
+    ///
+    /// A document opened from a buffer decided at open whether it needed one,
+    /// because the eager offset probe ran then. A streamed document deferred
+    /// that probe, so the same decision is made here, at the first read that
+    /// finds an entry lying about its object -- which is exactly the condition
+    /// the eager pass was looking for. The values a caller reads are therefore
+    /// the same on both paths; what differs is when the whole source is
+    /// fetched, and that is warned about rather than hidden (ruling 10).
+    ///
+    /// Never built for a buffered document: one that reached here with no
+    /// index is one the eager pass found nothing wrong with, and inventing a
+    /// scan for it would repair objects the buffered path reads as null.
+    fn repair_index(&self, sink: &mut WarningSink) -> Option<Arc<ScanIndex>> {
+        if let Some(scan) = self.scan.read_lock().clone() {
+            return Some(scan);
+        }
+        if !self.buffer.is_streamed() {
+            return None;
+        }
+        let buffer = fetch_whole(&self.buffer, sink)?;
+        let index = Arc::new(ScanIndex::build(&buffer, &self.names));
+        let mut slot = self.scan.write_lock();
+        // Another thread may have built the same index meanwhile; it read the
+        // same bytes, so whichever is there wins and this one is dropped.
+        Some(Arc::clone(slot.get_or_insert(index)))
+    }
+
+    /// Parses the indirect object at `offset` out of a window, growing it
+    /// until the object demonstrably ends inside it.
+    ///
+    /// A window that cut an object short would parse to a *different value*
+    /// than the same bytes in one buffer, and ruling 4 does not allow the two
+    /// to differ -- so the test is where the parse stopped, not whether it
+    /// returned something. A stream is judged on where its data begins rather
+    /// than on where its declared length ends: the dictionary and the `stream`
+    /// keyword are all this parse has to contain, and the data extent is the
+    /// document layer's own question (7.3.8.2).
+    ///
+    /// A document opened from a buffer gets the whole buffer as its window and
+    /// takes one pass, exactly as it always did.
+    fn parse_windowed(
+        &self,
+        offset: u64,
+        ctx: &mut ResolveCtx,
+    ) -> Option<(ParsedIndirect, Vec<Warning>)> {
+        let view = self.buffer.view();
+        let mut want = limits::OBJECT_WINDOW;
+        let mut ceiling = self.head_ceiling(offset);
+        loop {
+            let asked = match ceiling {
+                Some(end) => want.min(end.saturating_sub(offset)).max(1),
+                None => want,
+            };
+            let Some(window) = view.window(offset, asked) else {
+                // The bytes are not here yet. Recorded rather than swallowed,
+                // so nothing publishes a null the host could still fix.
+                ctx.note_miss();
+                return None;
+            };
+            let reaches_end = window.end() >= self.buffer.len();
+            let local_at = window.local(offset)?;
+            let mut local = WarningSink::new();
+            let mut parsed =
+                parse_indirect_at(window.bytes(), local_at, &self.names.table, &mut local)?;
+            let consumed = match &parsed.object {
+                Object::Stream(stream) => stream.data_start,
+                _ => parsed.end_offset,
+            };
+            if !reaches_end && consumed >= window.bytes().len() as u64 {
+                // The ceiling was a guess about where the head ends; a parse
+                // that ran into it is the object saying otherwise, and the
+                // object wins.
+                ceiling = None;
+                want = want.saturating_mul(2);
+                continue;
+            }
+            // Window offsets become document offsets. A stream records where
+            // its data starts and that number is read against the document
+            // afterwards, so leaving it window-relative would point every
+            // later read at the wrong bytes.
+            if let Object::Stream(stream) = &mut parsed.object {
+                stream.data_start = window.abs(stream.data_start);
+            }
+            parsed.end_offset = window.abs(parsed.end_offset);
+            let warnings = local
+                .take()
+                .into_iter()
+                .map(|mut warning| {
+                    warning.offset = window.abs(warning.offset);
+                    warning
+                })
+                .collect();
+            return Some((parsed, warnings));
+        }
+    }
+
     /// Parses the object whose header sits at `offset`, if that header names
     /// `num`. The header check is what makes level 1 of the ladder safe.
     fn parse_at(
@@ -885,12 +1265,11 @@ impl CosDocument {
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
     ) -> Option<Object> {
-        let mut local = WarningSink::new();
-        let parsed = parse_indirect_at(&self.buffer, offset, &self.names.table, &mut local)?;
+        let (parsed, warnings) = self.parse_windowed(offset, ctx)?;
         if parsed.reference.num != num {
             return None;
         }
-        sink.extend(local.take());
+        sink.extend(warnings);
         let mut object = parsed.object;
 
         // 7.3.8.2: an indirect /Length is resolved on the load path, inside
@@ -1030,7 +1409,7 @@ impl CosDocument {
     }
 
     fn expand_object_streams(&mut self) {
-        let Some(scan) = self.scan.clone() else {
+        let Some(scan) = self.scan.read_lock().clone() else {
             return;
         };
         let mut sink = WarningSink::new();
@@ -1050,6 +1429,162 @@ impl CosDocument {
             self.xref.insert_new(num, entry);
         }
         self.absorb(sink);
+    }
+}
+
+/// Every byte of a document, fetching them when it is a streamed one and
+/// saying so first.
+///
+/// The declaration is the point (ruling 10). A streamed open that quietly
+/// pulled the whole source would satisfy every functional test and destroy the
+/// only thing streaming is for, and the byte budgets could not tell the two
+/// apart. Warned once: a second whole-file operation on the same document
+/// fetches nothing, so warning again would report an operation that did not
+/// happen.
+fn fetch_whole(backing: &Backing, sink: &mut WarningSink) -> Option<Arc<[u8]>> {
+    let declare = backing.is_streamed() && !backing.whole_fetched();
+    // The fetch is attempted before it is declared, because a declaration of
+    // something that did not happen is worse than none: a host reading the
+    // warnings would see a whole-file read it was never asked for.
+    let all = backing.materialise().ok()?;
+    if declare {
+        sink.warn(0, WarningKind::WholeFileFetched);
+    }
+    Some(all)
+}
+
+/// What a linearized file (Annex F) promises about its own head.
+///
+/// Held only when the fast path engaged, which is only for a streamed
+/// document: a buffer already has every byte, so there is nothing for a fast
+/// path to save and every reason not to take a second route through the same
+/// clauses.
+pub(crate) struct Linearized {
+    /// F.2.2 item 6, `/E`: the last byte of the first page's objects.
+    ///
+    /// Everything past it is the tail, and page one is rendered without
+    /// touching a byte of it.
+    end_of_first_page: u64,
+    /// Item 5, `/T`: where the main cross-reference table begins. Fetched only
+    /// when a read leaves page one.
+    main_table_at: u64,
+    /// Item 3, `/O`: the object number of the first page's page object.
+    ///
+    /// Annex F names it so that a reader holding only the head can reach page
+    /// one **without the page tree**, whose root a linearized file is free to
+    /// leave in the tail -- and which qpdf's linearizer does leave there, so
+    /// this is not a nicety.
+    first_page_object: u32,
+}
+
+/// The head-only open of a linearized file (Annex F).
+///
+/// Hints accelerate, they never decide. Nothing here is trusted further than
+/// it can be checked: `/L` is held to the source's own length, which is Annex
+/// F's own rule for spotting a linearized file that was incrementally updated
+/// and must be read as an ordinary one; the first-page section is parsed by
+/// the same walker every other section goes through; and every object it
+/// names still passes `parse_at`'s `N G obj` check at load. A file whose head
+/// does not hold up falls back to the generic path with a typed warning
+/// rather than failing (rulings 1 and 2).
+fn linearized_open(
+    backing: &Backing,
+    names: &DocNames,
+    sink: &mut WarningSink,
+) -> Option<(XrefBuild, Linearized)> {
+    let view = backing.view();
+    let len = backing.len();
+    let mut want = limits::MAX_HEADER_SCAN as u64;
+    loop {
+        let head = view.window(0, want)?;
+        let reaches_end = head.end() >= len;
+        let mut scratch = WarningSink::new();
+
+        // F.2.2: the parameter dictionary is the first object in the file, and
+        // a file whose first object is anything else is simply not linearized.
+        let at = next_object_header(head.bytes(), 0)?;
+        let Some(first) = parse_indirect_at(head.bytes(), at, &names.table, &mut scratch) else {
+            if reaches_end {
+                return None;
+            }
+            want = want.saturating_mul(2);
+            continue;
+        };
+        let linearized = names.table.intern(b"Linearized");
+        let dict = first
+            .object
+            .as_dict()
+            .filter(|d| d.contains_key(linearized))?;
+        let number = |key: &[u8]| {
+            dict.get_int(names.table.intern(key))
+                .and_then(|v| u64::try_from(v).ok())
+        };
+
+        // Annex F's own rule for a linearized file that was incrementally
+        // updated: `/L` is the length of the whole file as it was linearized,
+        // so a file that has grown since is read as an ordinary one.
+        if number(b"L") != Some(len) {
+            sink.warn(head.abs(at), WarningKind::LinearizedLengthMismatch);
+            return None;
+        }
+        let (Some(end_of_first_page), Some(main_table_at), Some(first_page_object)) = (
+            number(b"E"),
+            number(b"T"),
+            number(b"O").and_then(|v| u32::try_from(v).ok()),
+        ) else {
+            sink.warn(head.abs(at), WarningKind::LinearizedParametersUnusable);
+            return None;
+        };
+
+        // The first-page cross-reference section follows part 2 immediately.
+        // Both spellings are tried, because 7.5.8 lets it be a stream.
+        let from = first.end_offset;
+        let classic = find_from(
+            head.bytes(),
+            b"xref",
+            usize::try_from(from).unwrap_or(usize::MAX),
+        );
+        let streamed = next_object_header(head.bytes(), from);
+        let candidates: Vec<u64> = classic
+            .map(|at| at as u64)
+            .into_iter()
+            .chain(streamed)
+            .map(|local| head.abs(local))
+            .collect();
+        if candidates.is_empty() {
+            if !reaches_end {
+                want = want.saturating_mul(2);
+                continue;
+            }
+            sink.warn(head.abs(at), WarningKind::LinearizedParametersUnusable);
+            return None;
+        }
+        drop(head);
+
+        for section in candidates {
+            let mut scratch = WarningSink::new();
+            // One section, never the `/Prev` it carries: that link is what
+            // points at the main table at the end of the file, and following
+            // it is the one thing that would put a tail read in a head-only
+            // open.
+            let built = xref::build_head(backing.view(), section, names, &mut scratch);
+            if built.sections > 0
+                && !built.table.is_empty()
+                && root_locatable(&built.table, &built.trailer)
+            {
+                sink.extend(scratch.take());
+                return Some((
+                    built,
+                    Linearized {
+                        end_of_first_page,
+                        main_table_at,
+                        first_page_object,
+                    },
+                ));
+            }
+        }
+        sink.warn(0, WarningKind::LinearizedParametersUnusable);
+        return None;
     }
 }
 

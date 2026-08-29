@@ -108,6 +108,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "cff_subset"
+path = "fuzz_targets/cff_subset.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "content_tokenizer"
 path = "fuzz_targets/content_tokenizer.rs"
 test = false

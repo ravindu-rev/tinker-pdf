@@ -3,19 +3,21 @@
   "corpora": [
     {
       "capabilities": {
+        "iccbased": 80,
         "jbig2": 103,
         "jpx": 12,
-        "mesh-shading": 10
+        "mesh-shading": 10,
+        "signature": 9
       },
-      "degraded": 199,
+      "degraded": 155,
       "metamorphic": {
         "crop": {
           "compared": 829,
-          "held": 791
+          "held": 792
         },
         "dpi": {
           "compared": 944,
-          "held": 908
+          "held": 915
         },
         "rotate": {
           "compared": 838,
@@ -32,11 +34,19 @@
       "passed": 963,
       "strict_clean": 841,
       "strict_eligible": 841,
+      "tagged": {
+        "elements": 37000,
+        "files": 90,
+        "matched": 31213,
+        "orphans": 6
+      },
       "total": 974
     },
     {
       "capabilities": {
-        "jpx": 7
+        "iccbased": 366,
+        "jpx": 7,
+        "signature": 6
       },
       "degraded": 39,
       "metamorphic": {
@@ -63,10 +73,19 @@
       "passed": 2906,
       "strict_clean": 2890,
       "strict_eligible": 2890,
+      "tagged": {
+        "elements": 3521,
+        "files": 589,
+        "matched": 90841,
+        "orphans": 0
+      },
       "total": 2907
     },
     {
-      "capabilities": {},
+      "capabilities": {
+        "iccbased": 3,
+        "signature": 2
+      },
       "degraded": 132,
       "metamorphic": {
         "crop": {
@@ -75,7 +94,7 @@
         },
         "dpi": {
           "compared": 580,
-          "held": 577
+          "held": 580
         },
         "rotate": {
           "compared": 477,
@@ -86,12 +105,18 @@
       "outcomes": {
         "crashed": 0,
         "failed": 29,
-        "passed": 606,
-        "timed_out": 2
+        "passed": 608,
+        "timed_out": 0
       },
-      "passed": 606,
-      "strict_clean": 485,
-      "strict_eligible": 485,
+      "passed": 608,
+      "strict_clean": 487,
+      "strict_eligible": 487,
+      "tagged": {
+        "elements": 1830,
+        "files": 37,
+        "matched": 5510,
+        "orphans": 0
+      },
       "total": 637
     },
     {
@@ -121,6 +146,12 @@
       "passed": 7,
       "strict_clean": 6,
       "strict_eligible": 6,
+      "tagged": {
+        "elements": 6,
+        "files": 1,
+        "matched": 107,
+        "orphans": 0
+      },
       "total": 7
     }
   ],

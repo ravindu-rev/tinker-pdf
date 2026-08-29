@@ -263,6 +263,28 @@ pub enum WarningKind {
     /// Ladder level 3: the cross-reference tables were discarded and the whole
     /// buffer was scanned for objects.
     DocumentRescanned,
+    /// Annex F: a file declares itself linearized and its `/L` is not the
+    /// length of the file, so it was updated after it was linearized and must
+    /// be read as an ordinary one. The head-only fast path stands down.
+    LinearizedLengthMismatch,
+    /// Annex F: the linearization parameter dictionary is there and does not
+    /// describe a file this reader can open from its head alone. The generic
+    /// path reads it instead, which is what every other reader would have
+    /// done anyway.
+    LinearizedParametersUnusable,
+    /// A streamed document needed every byte and fetched them.
+    ///
+    /// The repair rescan is one forward pass over everything, a container is
+    /// synthesised whole, and an incremental save must reproduce the original
+    /// bytes exactly as its prefix. Each of those is whole-file by contract
+    /// rather than by accident, and this is how it says so before it happens
+    /// (ruling 10): "it opened by streaming" and "it opened by streaming and
+    /// then pulled the file anyway" are different facts, and a byte budget
+    /// that could not tell them apart would measure nothing.
+    ///
+    /// Never emitted for a document opened from a buffer, which had them all
+    /// from the start.
+    WholeFileFetched,
 }
 
 impl WarningKind {
@@ -347,6 +369,9 @@ impl WarningKind {
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
             WarningKind::DocumentRescanned => "document-rescanned",
+            WarningKind::LinearizedLengthMismatch => "linearized-length-mismatch",
+            WarningKind::LinearizedParametersUnusable => "linearized-parameters-unusable",
+            WarningKind::WholeFileFetched => "whole-file-fetched",
         }
     }
 }

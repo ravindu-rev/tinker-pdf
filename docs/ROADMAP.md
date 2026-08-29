@@ -142,21 +142,58 @@ same clause by the same author. That catches a transcription slip and cannot
 catch a misreading. [design/pubsec.md](design/pubsec.md) carries it as an open
 risk, and it closes the day a real public-key-encrypted document arrives.
 
-- **Text shaping — a non-goal, overturned.** The docs long stated shaping
-  as permanent non-goal, and for *rendering existing PDFs* the reasoning
-  holds: the producer positioned every glyph. It fails wherever this
-  engine is the producer — `DocumentBuilder`, form-fill appearances, EPUB
-  layout — none of which can set Arabic, Indic or ligature-dependent text
-  correctly today. Overturned here, staged: a shaping leaf crate
-  (OpenType GSUB/GPOS, bidi; bytes and a face in, positioned glyphs out),
-  consumed first by `tinker-pdf-layout`, then creation, then forms. Exit:
-  an Arabic EPUB paginates legibly; a shaped glyph run round-trips through
-  `DocumentBuilder`. (XL, [design/shaping.md](design/shaping.md))
-- **Tagged PDF and accessibility.** No structure tree, `/StructParents`,
-  `/MarkInfo` or role map is read anywhere. Reading order, alt text,
-  PDF/UA checks — the veraPDF corpus already carries the cases. Exit:
-  structure-aware text extraction; PDF/UA rows measured. (L,
-  [design/tagged-pdf.md](design/tagged-pdf.md))
+**Tagged PDF has left this list.** All six milestones of
+[design/tagged-pdf.md](design/tagged-pdf.md) are green. `Document::structure()`
+walks `/StructTreeRoot`, `/K`, `/RoleMap` and `/MarkInfo`; MCIDs and the 14.9
+properties cross the `Device` seam in both their inline and `/Properties`
+forms; `Page::structured_text()` joins them to the *same* `TextPage` the flat
+extraction produces, so there is one extractor and not two; the corpus carries
+ratchet bars over 717 files with structure trees; PDF/UA is measured; and
+`PageBuilder::tagged` writes a tree that reads back with no orphans.
+
+Three things worth carrying forward:
+
+- **A written decision was overturned, and the reason was written first.**
+  `interpret.rs` argued against reassembling the inline `<< … >>` property
+  list, recording that a defect injection could not make the deleted scan
+  change an answer. That was true when only `/OC` was read from the list and
+  stopped being true the moment `/MCID` was. Reassembling it also fixed a
+  defect the two-token peek carried: the tag sits *before* the `<<`, so
+  `/Artifact << /Type /Pagination >> BDC` reported its tag as `Pagination`,
+  and the text device extracted running heads as author content.
+- **The writer is checked by the reader, and it caught what bytes could not.**
+  The first version wrote `/Kids` and `/Parent` on its structure elements —
+  the page tree's keys, not 14.7.2 Table 323's `/K` and `/P`. The file parsed
+  cleanly, validated cleanly, and had every marked-content id orphaned with no
+  error anywhere. A byte-level test would have asserted the bytes it wrote.
+- **PDF/UA abstains out loud.** 29 of 239 non-conforming fixtures are caught
+  with **zero false alarms**, and 210 are abstentions printed as abstentions.
+  Most of ISO 14289 is a judgement about meaning that no reader makes, and a
+  census reporting "agreement" over all 434 would have counted those silences
+  as successes.
+
+**CFF subsetting has left this list.** A CFF face embeds subset rather than
+whole, CID-keyed included — 144 of the 241 corpus `/FontFile3` programs are
+`CIDFontType0C`, so FDArray and FDSelect subsetting were in scope from the
+first commit rather than deferred. Glyph ids never move, which is why
+`/Widths`, `/W`, `/CIDToGIDMap` and `/ToUnicode` need no rewriting. And the
+defect found on the way was a ruling 10 violation: `subset()` answering `None`
+was swallowed at both call sites and the whole face embedded with **no warning
+at all**, observable only as a missing `ABCDEF+` tag. `EmbeddedWhole` and
+`SubsetRefusal` now say so.
+
+- **Text shaping — a non-goal, overturned; partly landed.** The docs long
+  stated shaping as a permanent non-goal, and for *rendering existing PDFs*
+  the reasoning holds: the producer positioned every glyph. It fails
+  wherever this engine is the producer. `tinker-pdf-shape` now exists —
+  GSUB/GPOS/GDEF, UAX #9 bidi gated on 770 241 `BidiTest` resolutions and
+  91 707 `BidiCharacterTest` cases, and 48 of the 77 text-rendering-tests
+  cases with the other 29 declined by name. **Not finished**: Arabic
+  joining, USE/Indic/SEA, re-shaping, and the three consumers
+  (`tinker-pdf-layout`, `DocumentBuilder`, form-fill appearances) are
+  milestones 4–8. Exit unchanged: an Arabic EPUB paginates legibly; a
+  shaped glyph run round-trips through `DocumentBuilder`. (XL,
+  [design/shaping.md](design/shaping.md))
 - **PDF/A validation and writing.** No `/OutputIntent` handling and no
   conformance machinery; the 2 907-file veraPDF corpus — the largest in
   the harness — is used purely as a never-crash bar. It graduates to a
@@ -176,8 +213,6 @@ risk, and it closes the day a real public-key-encrypted document arrives.
   bindings under ruling 11 — the facade shape is already the design. Exit:
   fill-and-save and build-a-document demonstrated from all four. (M–L,
   [design/bindings-write.md](design/bindings-write.md))
-- **CFF subsetting.** Embedding subsets TrueType only; a CFF face embeds
-  whole. Charstring subsetting with subroutine renumbering. (M)
 
 Decision items, not commitments: **OCR** (if ever, as a host seam like
 `FontProvider`, not an in-engine engine) and **container writing** (CBZ,

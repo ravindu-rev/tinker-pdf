@@ -14,6 +14,10 @@
 
 #![allow(clippy::new_without_default)]
 
+use core::ops::Range;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use wasm_bindgen::prelude::*;
 
 /// An open PDF document.
@@ -35,6 +39,132 @@ pub fn version() -> String {
     tinker_pdf::VERSION.to_string()
 }
 
+/// Bytes the host has fetched, for a document opened by ranges.
+///
+/// **Transport, not engine.** The engine defines `ByteSource` and never
+/// performs any I/O; this is the host side of that seam, exactly as a
+/// `FontProvider` is the host side of the font seam. It holds what
+/// JavaScript has handed it and answers from that; a range it has not been
+/// given is a refusal, and the host is told which one so it can go and fetch
+/// it.
+///
+/// # The loop
+///
+/// ```js
+/// const source = new PdfSource(file.size);
+/// let doc = null;
+/// while (doc === null) {
+///   try {
+///     doc = PdfDocument.openStreaming(source);
+///   } catch (e) {
+///     for (const [start, end] of source.takeNeeded()) {
+///       source.feed(start, await fetchRange(start, end));
+///     }
+///   }
+/// }
+/// ```
+///
+/// It terminates because every refusal names a range, the host feeds exactly
+/// that, and the engine's caches keep what they have already parsed -- so
+/// each turn strictly increases what is readable and no work is repeated.
+#[wasm_bindgen]
+pub struct PdfSource {
+    inner: Arc<HostBytes>,
+}
+
+/// What the host has fed, and what it was asked for and could not answer.
+struct HostBytes {
+    len: u64,
+    fed: Mutex<BTreeMap<u64, Vec<u8>>>,
+    needed: Mutex<Vec<(u64, u64)>>,
+}
+
+impl tinker_pdf::ByteSource for HostBytes {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, tinker_pdf::SourceMiss> {
+        let end = range.end.min(self.len);
+        if range.start >= end {
+            return Ok(Arc::from(&[][..]));
+        }
+        let fed = self.fed.lock().unwrap_or_else(|e| e.into_inner());
+        // The block that starts at or before the wanted byte, which is the
+        // only one that can answer it.
+        if let Some((start, bytes)) = fed.range(..=range.start).next_back() {
+            let offset = (range.start - start) as usize;
+            if offset < bytes.len() {
+                let take = bytes.len() - offset;
+                let take = take.min((end - range.start) as usize);
+                return Ok(Arc::from(&bytes[offset..offset + take]));
+            }
+        }
+        drop(fed);
+        self.needed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((range.start, end));
+        Err(tinker_pdf::SourceMiss::at(range.start..end))
+    }
+}
+
+#[wasm_bindgen]
+impl PdfSource {
+    /// A source for a document of `length` bytes, with nothing fetched yet.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(length: f64) -> PdfSource {
+        PdfSource {
+            inner: Arc::new(HostBytes {
+                len: length.max(0.0) as u64,
+                fed: Mutex::new(BTreeMap::new()),
+                needed: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Supplies `bytes` as the document's content starting at `offset`.
+    pub fn feed(&self, offset: f64, bytes: &[u8]) {
+        self.inner
+            .fed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(offset.max(0.0) as u64, bytes.to_vec());
+    }
+
+    /// The ranges refused since this was last called, as `[start, end, ...]`,
+    /// and forgets them.
+    ///
+    /// A flat array of pairs rather than objects: it crosses the boundary as
+    /// one `Float64Array` and needs no allocation per range on either side.
+    #[wasm_bindgen(js_name = takeNeeded)]
+    #[must_use]
+    pub fn take_needed(&self) -> Vec<f64> {
+        let mut needed = self.inner.needed.lock().unwrap_or_else(|e| e.into_inner());
+        let taken = std::mem::take(&mut *needed);
+        let mut out = Vec::with_capacity(taken.len() * 2);
+        for (start, end) in taken {
+            out.push(start as f64);
+            out.push(end as f64);
+        }
+        out
+    }
+
+    /// How many bytes the host has fed so far.
+    #[wasm_bindgen(getter, js_name = bytesFed)]
+    #[must_use]
+    pub fn bytes_fed(&self) -> f64 {
+        self.inner
+            .fed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|b| b.len() as f64)
+            .sum()
+    }
+}
+
 #[wasm_bindgen]
 impl PdfDocument {
     /// Opens a document from bytes.
@@ -44,6 +174,23 @@ impl PdfDocument {
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: &[u8]) -> Result<PdfDocument, JsError> {
         tinker_pdf::Document::open(bytes.to_vec())
+            .map(|inner| PdfDocument { inner })
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Opens a document whose bytes the host supplies by range.
+    ///
+    /// Throws when a range the open path needs has not been fed. That is not
+    /// a failure: call [`PdfSource::take_needed`], feed what it names, and
+    /// call this again. See [`PdfSource`] for the loop and why it terminates.
+    ///
+    /// The document that comes out is the same document `new PdfDocument(all
+    /// the bytes)` would have produced -- same pages, same warnings, same
+    /// pixels. Where the bytes came from is not an input to what they mean.
+    #[wasm_bindgen(js_name = openStreaming)]
+    pub fn open_streaming(source: &PdfSource) -> Result<PdfDocument, JsError> {
+        let handle: Arc<dyn tinker_pdf::ByteSource> = Arc::clone(&source.inner) as _;
+        tinker_pdf::Document::open_streaming(handle)
             .map(|inner| PdfDocument { inner })
             .map_err(|e| JsError::new(&e.to_string()))
     }

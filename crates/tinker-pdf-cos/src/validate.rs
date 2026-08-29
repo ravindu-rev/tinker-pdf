@@ -38,7 +38,7 @@
 //! writer agrees with itself. `docs/verification.md` states that in its own
 //! voice; it is the property that left with the oracles.
 
-mod hints;
+pub(crate) mod hints;
 
 use std::collections::{BTreeMap, BTreeSet};
 

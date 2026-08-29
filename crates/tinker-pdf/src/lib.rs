@@ -76,6 +76,25 @@ pub use tinker_pdf_cos::{
     BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PlacedGlyph,
     Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
+/// Streaming open: where a document's bytes come from when they are not all
+/// in hand (`docs/design/streaming-open.md`).
+///
+/// [`ByteSource`] is the seam a host implements to supply ranges — a mapping,
+/// a file handle, an HTTP server answering range requests. It is on this
+/// facade rather than left in the crate underneath because ruling 11 makes
+/// this the only public surface: a host that cannot name the trait cannot
+/// implement it. [`SliceSource`] is the degenerate case every existing caller
+/// already uses without knowing it, which is why [`Document::open`] keeps its
+/// exact signature.
+pub use tinker_pdf_cos::{
+    ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE,
+};
+
+/// How many bytes are read to decide whether a source holds a container.
+///
+/// `cbz::container` tests fixed positions and reads no further than byte 262;
+/// one kilobyte is that with room, and it is one head read either way.
+const CONTAINER_SNIFF: u64 = 1024;
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
@@ -601,6 +620,100 @@ impl Document {
         })
     }
 
+    /// Opens a document whose bytes are fetched from `source` as they are
+    /// needed (`docs/design/streaming-open.md`).
+    ///
+    /// The same document as [`Document::open`] over the same bytes: the same
+    /// pages, the same warnings, the same ladder level and the same pixels.
+    /// A source is where bytes come from, never what they mean, and ruling 4
+    /// makes that a contract rather than an intention -- the determinism
+    /// fingerprints are run over a source that answers one byte at a time and
+    /// must come out bit-identical.
+    ///
+    /// # Containers are whole-file, and say so
+    ///
+    /// A ZIP's central directory is at its end and synthesising a document
+    /// from one rewrites the whole thing, so a recognised container fetches
+    /// every byte before it is opened. That is declared rather than hidden:
+    /// [`Document::whole_file_fetched`] answers true afterwards.
+    ///
+    /// # Errors
+    /// The same three as [`Document::open`]. A source that cannot supply the
+    /// bytes the open path needs is [`OpenError::NotAPdf`], because a document
+    /// nobody could read is not one this call can return.
+    pub fn open_streaming(source: Arc<dyn ByteSource>) -> Result<Document, OpenError> {
+        Document::open_streaming_with(source, &OpenOptions::default())
+    }
+
+    /// [`Document::open_streaming`], stating what a reflowable document needs
+    /// decided before it has any pages.
+    ///
+    /// # Errors
+    /// The same three as [`Document::open`].
+    pub fn open_streaming_with(
+        source: Arc<dyn ByteSource>,
+        options: &OpenOptions,
+    ) -> Result<Document, OpenError> {
+        if source.is_empty() {
+            return Err(OpenError::Empty);
+        }
+        // The signatures are tested at a fixed position and nowhere else, so
+        // one head window answers the question for every container this build
+        // recognises -- `cbz::container` reads no further than byte 262.
+        let head = source
+            .read(0..CONTAINER_SNIFF)
+            .map_err(|_| OpenError::NotAPdf)?;
+        if cbz::container(&head).is_some() {
+            // Whole-file by contract, and the only honest way to read one.
+            let mut bytes = Vec::with_capacity(source.len() as usize);
+            let mut at = 0u64;
+            while at < source.len() {
+                let got = source
+                    .read(at..source.len())
+                    .map_err(|_| OpenError::NotAPdf)?;
+                if got.is_empty() {
+                    return Err(OpenError::NotAPdf);
+                }
+                at += got.len() as u64;
+                bytes.extend_from_slice(&got);
+            }
+            return Document::open_with(bytes, options);
+        }
+
+        let inner = CosDocument::open_source(source).map_err(|_| OpenError::NotAPdf)?;
+        Ok(Document {
+            inner: Arc::new(inner),
+            fonts: fonts::effective(options.fonts.clone()),
+            archive: None,
+        })
+    }
+
+    /// Whether this document's bytes are fetched from a [`ByteSource`].
+    #[must_use]
+    pub fn is_streamed(&self) -> bool {
+        self.inner.is_streamed()
+    }
+
+    /// Where the first page's objects end (Annex F `/E`), when this document
+    /// was opened on the linearized fast path.
+    ///
+    /// `None` for every other document. A caller measuring what a page-one
+    /// render cost asks this for where the tail starts, rather than assuming
+    /// a fraction of the file.
+    #[must_use]
+    pub fn first_page_end(&self) -> Option<u64> {
+        self.inner.first_page_end()
+    }
+
+    /// Whether every byte of the document has been fetched.
+    ///
+    /// Always true for one opened from a buffer. For a streamed one it is how
+    /// a caller sees that a whole-file operation has happened.
+    #[must_use]
+    pub fn whole_file_fetched(&self) -> bool {
+        self.inner.whole_file_fetched()
+    }
+
     /// Where this document's pages came from, when it was synthesised from a
     /// container rather than parsed from a PDF.
     ///
@@ -773,7 +886,16 @@ impl Document {
     /// One page by zero-based index.
     #[must_use]
     pub fn page(&self, index: u32) -> Option<Page> {
-        self.pages().into_iter().nth(index as usize)
+        // Through the bounded walk rather than `pages()`, which collects every
+        // page: on a streamed document opened through Annex F's head-only
+        // path, the rest of the page tree is the rest of the file, and asking
+        // for page one would spend all of it.
+        let inner = cos_pages::at(&self.inner, index)?;
+        Some(Page {
+            doc: Arc::clone(&self.inner),
+            inner,
+            fonts: self.fonts.clone(),
+        })
     }
 
     /// The document's logical structure tree (14.7.2).
