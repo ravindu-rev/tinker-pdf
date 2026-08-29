@@ -16,15 +16,28 @@ matching `tpdf_*_free` releases; nothing crosses the boundary as a
 caller-freed buffer, and a pointer into a handle's storage borrows it until
 the handle is freed. Every call returns a `TpdfStatus` (`Ok`, `BadArgument`,
 `NotAPdf`, `NeedsPassword`, `WrongPassword`, `NoSuchPage`, `NotEncrypted`,
-`UnsupportedHandler`, `NoSuchSignature`) and `tpdf_last_error_message`
-carries the detail. Those numbers *are* the ABI — a C caller compares them
-against literals and the .NET binding against an `int` — so 0–7 are frozen
-and `NoSuchSignature` was **appended** at 8 rather than inserted; a unit
-test pins all nine one by one, and another pins every discriminant of the
-six signature enums, because those are transcribed by hand into
-`bindings/dotnet/TinkerPdf.cs`.
+`UnsupportedHandler`, `NoSuchSignature`, `NoSuchField`, `ValueRefused`,
+`FieldUnreadable`, `SpentHandle`, `EditRefused`) and
+`tpdf_last_error_message` carries the detail. Those numbers *are* the ABI —
+a C caller compares them against literals and the .NET binding against an
+`int` — so 0–7 are frozen, `NoSuchSignature` was **appended** at 8 rather
+than inserted, and the write surface's five were appended at 9–13. Two unit
+tests pin them: one names all fourteen individually, and one holds the list
+and its length, so a variant added without a line is caught by the count
+rather than by somebody remembering. A third pins every discriminant of the
+six signature enums and the three write ones, because those are transcribed
+by hand into `bindings/dotnet/TinkerPdf.cs`.
 
-**Forty-eight functions.** Eighteen open and render: `tpdf_version`,
+The threading rule differs on the two halves, and it is not a caveat but a
+consequence. A `TpdfDocument` may be used from any thread because every read
+borrows an immutable, shared `Document`. A `TpdfEditor`, `TpdfBuilder` or
+`TpdfPageBuilder` is **mutable state**: the calls take `&mut`, so two threads
+in one handle is the same data race it would be in Rust, and no C ABI can
+stop it. One handle per thread, or the caller's own lock; freeing stays safe
+from any thread.
+
+**One hundred and three functions**, of which fifty-five are the write
+surface below. Eighteen open and render: `tpdf_version`,
 `tpdf_last_error_message`, `tpdf_document_open` / `_free` / `_page_count` /
 `_is_encrypted` / `_authenticate` (returning a `TpdfAuthLevel` of `None`,
 `User` or `Owner`) / `_may_print` / `_set_fonts`, `tpdf_page_size` /
@@ -55,6 +68,99 @@ because the facade's `Option<i64>` has no C spelling — and returns
 `_signer_issuer`, `_signer_validity`, `_weakness_count` and `_weakness`.
 There is no `is_valid` and there will not be one: the four questions are
 four `#[repr(C)]` enums, and `NotChecked` is not `Differs`.
+
+**The write surface: fifty-five functions, and the shape they had to be
+given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
+gap 26, so what stood between the read surface and this one was never
+capability. It was *shape*: `DocumentEditor::transaction(|tx| ..)` and
+`DocumentBuilder::add_page(w, h, |page| ..)` take closures, and a closure does
+not cross this boundary. Ruling 11 answers that — the facade grows the
+closure-free equivalent first, and then the C ABI is a mechanical wrapping of
+a Rust API that already exists. So the facade gained
+`DocumentEditor::checkpoint` / `restore` and `DocumentBuilder::begin_page` /
+`push_page`, with both closure APIs reimplemented as callers of them
+([design/bindings-write.md](../design/bindings-write.md)).
+
+*A checkpoint is a value, not an open transaction.* That is what makes it safe
+to hand across an ABI where a `begin`/`commit`/`rollback` triple would not be:
+taking one changes nothing, freeing one commits nothing because nothing was
+pending, and `tpdf_editor_restore` is **idempotent** — restoring twice is
+restoring once, which is what a host language's `finally` running after its own
+`catch` needs. The checkpoint is borrowed rather than consumed, so one can
+undo several attempts: the retry loop a closure cannot express.
+
+*Five handles.* `TpdfEditor` (`tpdf_document_editor` / `_free`, and
+`tpdf_editor_is_dirty` / `_page_count` / `_delete_page` / `_move_page` /
+`_rotate_page` / `_insert_page` / `_set_crop_box` / `_append_content` /
+`_field_count` / `_field_name` / `_field_value` / `_fill_field` /
+`_set_checkbox` / `_select_radio` / `_checkpoint` / `_restore` / `_save`);
+`TpdfCheckpoint` (`_free`); `TpdfBuffer` (`tpdf_buffer_data` / `_len` /
+`_free`, borrowing until freed on the `TpdfBitmap` pattern exactly);
+`TpdfBuilder` (`tpdf_builder_new` / `_free` / `_add_base_font` /
+`_add_embedded_font` / `_set_subset_fonts` / `_add_image` / `_set_info` /
+`_begin_page` / `_push_page` / `_set_outline` / `_finish`); and
+`TpdfPageBuilder` (`tpdf_page_builder_text` / `_fill_rect` / `_image` /
+`_set_fill_rgb` / `_set_stroke_rgb` / `_set_crop_box` / `_raw` / `_link` /
+`_free`). An editor is independent of the document it came from —
+`Document::editor()` clones the shared `Arc<CosDocument>` — so freeing the
+document first is legal and the .NET `SafeHandle`s need no parent-child
+keep-alive; a test asserts exactly that rather than leaving it inferred.
+
+*Consuming calls are a double-free factory,* and that is the design problem
+this surface actually had. `DocumentBuilder::finish(self)` and `push_page` and
+the outline's `add_child` consume in Rust; a C caller has a pointer, and a
+pointer that has been "consumed" is one the caller will still free and may
+still use. So a consumable handle boxes an `Option`: the consuming call takes
+the value and **records which call took it**, the handle stays live and stays
+the caller's to free, and any later call on it is `SpentHandle` with a message
+naming the call that spent it. Free therefore stays symmetric with allocation
+and stays null-tolerant, exactly as everywhere else on this boundary. A page
+begun and never pushed is simply freed, and the document is byte-for-byte what
+it would have been — asserted, because that is the property that makes
+abandoning a handle safe rather than merely non-fatal.
+
+*`SkippedWidget` is a fourth outcome and does not flatten into failure.* A
+fill has three answers, not two: a non-`Ok` status means **nothing was
+written** (`NoSuchField`, `ValueRefused`, `FieldUnreadable` — 12.7.4.3, refusal
+over truncation, because truncating hides a data error inside a file that then
+looks correctly filled); `Ok` with an empty `TpdfFillReport` means the value
+was written and every widget drawn; `Ok` with a non-empty one means the value
+was written and those widgets were left showing whatever they showed before,
+because 12.5.2's required `/Rect` is missing from them. Ruling 2 degrades
+rather than failing; ruling 10 makes the degradation name its object, so
+`tpdf_fill_report_widget` hands back the `ObjRef` as a number and generation
+and `tpdf_fill_report_defect` the `TpdfWidgetDefect` — not only
+`tpdf_fill_report_message`'s sentence about them.
+
+*Two flat `#[repr(C)]` option structs.* `TpdfWriteOptions` maps `WriteOptions`
+field for field, with the booleans and the version pair widened to integers so
+a hand-written P/Invoke has no packing to guess at, and
+`tpdf_write_options_init` fills it with **the facade's own defaults** — because
+a C caller who guesses them writes a different file than a Rust caller with the
+same intent, which is the whole failure the parity suite exists to catch.
+`TpdfEncryption` hangs off it or is null. **No binding invents entropy**: the
+48 bytes are the caller's, and a length that is not 48 is `BadArgument` rather
+than a buffer read to 48 out of whatever followed it in the caller's address
+space. `TpdfDestination` carries all eight of `DestKind`'s arms rather than a
+convenient subset, and spells `Option<f64>` as **NaN meaning null** (12.3.2.2's
+"retain the current value") — unambiguous because the writer refuses a
+non-finite number as a coordinate anywhere else, and cheaper than a presence
+mask that can fall out of step with the values it describes.
+`tpdf_destination_init_fit` exists because a *zeroed* `TpdfDestination` is
+`/XYZ 0 0 0`, which is a different destination that merely looks like a
+default.
+
+*`EditRefused` is one status and not four,* on purpose. `delete_page`,
+`move_page`, `rotate_page`, `insert_page`, `set_crop_box`, `set_checkbox`,
+`select_radio` and `append_content` answer `bool` or `Option` on the facade and
+name no reason: an index that does not exist and a page object that is not a
+dictionary are the same `false` there. A C ABI that split them would be
+guessing, and a caller would believe the guess — the same argument that keeps
+the signature enums' payloads from crossing. What crosses instead is
+provenance: the message names the call and the argument it refused
+(`delete_page refused: index 99`), and `tpdf_editor_page_count` /
+`tpdf_editor_field_count` let a caller tell the bounds case apart *before* the
+call rather than after.
 
 `#![forbid(unsafe_code)]` does not apply here — this is the one crate whose
 job is the boundary — and `#![warn(missing_docs)]` does.
@@ -227,10 +333,60 @@ if (tpdf_document_open(bytes, len, &doc) == 0 /* TpdfStatus::Ok */) {
 }
 ```
 
-(The crate ships no generated header; the `#[repr(C)]` enums and the
-`extern "C"` signatures in `crates/tinker-pdf-ffi/src/lib.rs` are the
-contract, and the .NET binding's P/Invoke declarations are a worked
-transcription of them.)
+```c
+/* Fill a form and save incrementally. */
+TpdfEditor *ed = NULL;
+tpdf_document_editor(doc, &ed);
+tpdf_document_free(doc);              /* legal: the editor holds its own */
+
+TpdfFillReport *report = NULL;
+if (tpdf_editor_fill_field(ed, "name", "Ada Lovelace", &report) == 0) {
+    /* Ok, and the report may still be non-empty: value written, some
+       widget not drawable. That is a fourth outcome, not a failure. */
+    for (uint32_t i = 0; i < tpdf_fill_report_count(report); i++) {
+        uint32_t num = 0; uint16_t gen = 0;
+        tpdf_fill_report_widget(report, i, &num, &gen);
+    }
+    tpdf_fill_report_free(report);
+}
+
+TpdfWriteOptions options;
+tpdf_write_options_init(&options);    /* the facade's defaults, not zeros */
+options.mode = 1;                     /* TpdfWriteMode::Incremental */
+
+TpdfBuffer *out = NULL;
+tpdf_editor_save(ed, &options, &out);
+/* tpdf_buffer_data(out, &len) borrows until tpdf_buffer_free */
+tpdf_buffer_free(out);
+tpdf_editor_free(ed);
+
+/* Build a document. begin_page/push_page, because closures do not cross. */
+TpdfBuilder *b = NULL;
+tpdf_builder_new(&b);
+tpdf_builder_add_base_font(b, (const uint8_t *)"F1", 2,
+                           (const uint8_t *)"Helvetica", 9);
+
+TpdfPageBuilder *page = NULL;
+tpdf_builder_begin_page(b, 200.0, 200.0, &page);
+tpdf_page_builder_text(page, (const uint8_t *)"F1", 2, 14.0, 20.0, 170.0,
+                       "Page one");
+tpdf_builder_push_page(b, page);      /* consumes the drawing */
+tpdf_page_builder_free(page);         /* the handle is still yours */
+
+TpdfBuffer *pdf = NULL;
+tpdf_builder_finish(b, &pdf);         /* consumes the document */
+/* a second finish here is TpdfStatus::SpentHandle (12), never a double free */
+tpdf_buffer_free(pdf);
+tpdf_builder_free(b);
+```
+
+(The crate ships no generated header; the `#[repr(C)]` enums and structs —
+`TpdfStatus`, `TpdfAuthLevel`, `TpdfPixelFormat`, the six signature enums,
+`TpdfWidgetDefect`, `TpdfWriteMode`, `TpdfDestKind`, `TpdfTargetKind`,
+`TpdfImageKind`, `TpdfWriteOptions`, `TpdfEncryption`, `TpdfDestination`,
+`TpdfTarget`, `TpdfImage` — and the `extern "C"` signatures in
+`crates/tinker-pdf-ffi/src/lib.rs` are the contract, and the .NET binding's
+P/Invoke declarations are a worked transcription of them.)
 
 Each binding's README ([js](../../bindings/js/README.md),
 [python](../../bindings/python/README.md),
@@ -241,7 +397,10 @@ packaging commands.
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Editing, forms, creation, saving | not present on any binding — the surface is open, page count, encryption/auth, permissions, page size, text, render, `set_fonts`, and (C ABI and .NET only) signature reading | the write surface has not been projected; the facade shape is already the design | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
+| `ImageData::Compressed` | `TpdfImageKind` has `Jpeg`, `Rgb8` and `Gray8` and no fourth arm | it carries a `CompressedImage` whose colour space holds a palette slice and whose filter holds its own parameters, so projecting it is a sub-surface rather than a struct. It exists for the CBZ synthesiser, which must not decode 200 pages at open — an engine-internal path with no host at the other end. A host holding already-compressed bytes has `Jpeg`, which is the same idea for the one codec hosts actually hold bytes in | [creation](creation.md) |
+| `PageBuilder::tagged` | not projected; a page is drawn untagged through the C ABI | it nests *within* one page and takes a closure whose scope is the structure element's extent, so the closure-free spelling is an `open_tag`/`close_tag` pair on the page handle — a separate question with a separate answer, and neither parity script tags anything. `begin_page`/`push_page` compose with it, which is asserted, so nothing here has to be undone to add it | [tagged-pdf](tagged-pdf.md) |
+| The rest of `PageBuilder` — `encoded_text`, `glyphs`, `form`, `shading`, `set_fill_pattern`, `set_stroke_pattern`, `set_ext_gstate`, `set_bleed_box` — and `DocumentBuilder`'s `add_named_font`, `add_cid_font`, `glyph_run`, `add_ext_gstate`, `add_form`, `add_shading`, `add_tiling_pattern`, `clear_image_resources` | not projected | owed rather than refused: each takes an argument type of its own (`ExtGState`, `Shading`, `TilingPattern`, `Glyph`) that would need its own flat `#[repr(C)]` spelling, and none is named by the write milestones. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
+| `DocumentEditor`'s `import_page`, `keep_pages`, `flatten_annotations`, `add_annotation`, `reset_form`, `recalculate`, `set_field_values`, `set_calculated_values` | not projected | the same: owed, each with a shape of its own — a second document, a slice of indices, a `Dict`, a `Recalculation` — and none named by the milestones | [ROADMAP.md](../ROADMAP.md) |
 | Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback, and callbacks across the C ABI are an explicit non-goal of the write design, which owns them | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
 | A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter`, its lenient-read warnings, and `Signature::modifications` | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum, and none is named by the milestone | [signatures](../design/signatures.md) |
@@ -261,6 +420,26 @@ packaging commands.
   past the end is reported, the version string is readable, and a supplied
   face reaches the C ABI (with the no-regular-face and null-document
   refusals).
+- **The write surface is pinned by the same equality with the facade** that
+  the signature surface is, and for the same reason: it is what makes it a
+  projection rather than a second writer. The fill-and-save script and the
+  build-a-document script are each written twice, once through the C ABI and
+  once against the facade in Rust, and the two must produce **the same
+  bytes** — not a valid document, not a similar one. Around them: the
+  incremental save's original-bytes prefix (7.5.6) asserted on the C ABI's own
+  output and the result re-opened through the strict validator (ruling 13);
+  the fill report's widget `ObjRef` and defect, with the undamaged control
+  field proving an empty report is reachable; each `FillError` variant
+  arriving as its own status; a checkpoint round trip with three redundant
+  restores to show idempotence; an editor outliving its document; a refusal
+  naming the call and argument; `tpdf_write_options_init` equalling
+  `WriteOptions::default()` *and* being what the save uses; encryption
+  byte-equal with fixed entropy and refused with 47 bytes; all eight
+  destination kinds with NaN as null; a double `finish` and a double
+  `push_page` returning `SpentHandle` and naming the call that spent the
+  handle; an abandoned page leaving the document byte-identical; and a null on
+  every one of the fifty-five entry points with every new `tpdf_*_free`
+  accepting null.
 - The signature surface is pinned by an **equality with the facade**, which
   is what makes it a projection rather than a second implementation: a
   fixture signed twice through `DocumentEditor::save_signed` with a stub

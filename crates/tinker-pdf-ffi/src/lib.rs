@@ -21,10 +21,10 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 
 use tinker_pdf::{
-    AuthLevel, Bitmap, Chain, CmsState, Coverage, Document, DocumentDigest, DocumentEditor,
-    EditCheckpoint, Encryption, FillError, PixelFormat, RenderOptions, Signature, SignatureCheck,
-    SimpleFontProvider, SkippedWidget, TrustAnchors, Verdict, Weakness, WidgetDefect, WriteMode,
-    WriteOptions,
+    AuthLevel, Bitmap, Chain, CmsState, Coverage, DestKind, Document, DocumentBuilder,
+    DocumentDigest, DocumentEditor, EditCheckpoint, Encryption, FillError, ImageData, OutlineEntry,
+    PageBuilder, PixelFormat, RenderOptions, Signature, SignatureCheck, SimpleFontProvider,
+    SkippedWidget, Target, TrustAnchors, Verdict, Weakness, WidgetDefect, WriteMode, WriteOptions,
 };
 
 /// How a call went.
@@ -2509,6 +2509,1086 @@ pub unsafe extern "C" fn tpdf_fill_report_free(report: *mut TpdfFillReport) {
     }
 }
 
+// ---- writing: the builder (gap 32 milestone 3) ----------------------------
+//
+// **Consuming calls are a double-free factory**, and this is the whole design
+// problem of this section. `DocumentBuilder::finish(self)` and
+// `push_page(page)` consume in Rust; a C caller has a pointer, and a pointer
+// that has been "consumed" is one the caller will still pass to free, and may
+// still pass to another call.
+//
+// So a consumable handle boxes an `Option`. The consuming call `take()`s the
+// value and records which call took it. The handle stays live and stays the
+// caller's to free -- so free remains symmetric with allocation and remains
+// null-tolerant, exactly as it is everywhere else on this boundary -- and a
+// second call on a spent handle is `TpdfStatus::SpentHandle` with a message
+// naming the call that spent it, rather than undefined behaviour.
+
+/// A handle that a call may consume.
+///
+/// Written once rather than three times, because the failure this prevents is
+/// the same failure in each: a `take()` without a record of who took it gives
+/// a caller "spent" with no way to find out where.
+struct Consumable<T> {
+    inner: Option<T>,
+    /// The call that took the value, for the error message. Empty until then.
+    spent_by: &'static str,
+}
+
+impl<T> Consumable<T> {
+    fn new(value: T) -> Consumable<T> {
+        Consumable {
+            inner: Some(value),
+            spent_by: "",
+        }
+    }
+
+    /// The value, still in place, or a refusal naming who took it.
+    fn borrow_mut(&mut self, what: &str) -> Result<&mut T, TpdfStatus> {
+        if self.inner.is_none() {
+            set_error(&format!(
+                "{what}: this handle was consumed by {}",
+                self.spent_by
+            ));
+            return Err(TpdfStatus::SpentHandle);
+        }
+        Ok(self.inner.as_mut().expect("just checked"))
+    }
+
+    /// The value, taken. A second take is refused rather than repeated.
+    fn take(&mut self, by: &'static str) -> Result<T, TpdfStatus> {
+        match self.inner.take() {
+            Some(value) => {
+                self.spent_by = by;
+                Ok(value)
+            }
+            None => {
+                set_error(&format!(
+                    "{by}: this handle was already consumed by {}",
+                    self.spent_by
+                ));
+                Err(TpdfStatus::SpentHandle)
+            }
+        }
+    }
+}
+
+/// A document being assembled. Opaque to callers.
+///
+/// Spent by [`tpdf_builder_finish`], which is the only call that consumes it.
+pub struct TpdfBuilder {
+    inner: Consumable<DocumentBuilder>,
+}
+
+/// A page being drawn, owned by the caller until it is pushed. Opaque.
+///
+/// Spent by [`tpdf_builder_push_page`]. A page begun and never pushed is
+/// simply freed and the document is what it would have been -- there is no
+/// half-added page and no counter to unwind, which is the property that makes
+/// abandoning a handle safe.
+pub struct TpdfPageBuilder {
+    inner: Consumable<PageBuilder>,
+}
+
+/// One outline entry under construction. Opaque.
+///
+/// Spent by [`tpdf_outline_entry_add_child`] or [`tpdf_builder_set_outline`],
+/// each of which takes it into the tree it is joining.
+pub struct TpdfOutlineEntry {
+    inner: Consumable<OutlineEntry>,
+}
+
+/// How a destination positions the page it names (12.3.2.2 Table 151).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpdfDestKind {
+    /// `/XYZ left top zoom`.
+    Xyz = 0,
+    /// `/Fit`: fit the whole page.
+    Fit = 1,
+    /// `/FitH top`: fit the width.
+    FitH = 2,
+    /// `/FitV left`: fit the height.
+    FitV = 3,
+    /// `/FitR left bottom right top`: fit a rectangle.
+    FitR = 4,
+    /// `/FitB`: fit the bounding box of the page's contents.
+    FitB = 5,
+    /// `/FitBH top`: fit the bounding box's width.
+    FitBH = 6,
+    /// `/FitBV left`: fit the bounding box's height.
+    FitBV = 7,
+}
+
+/// A destination, as C sees `DestKind`.
+///
+/// All eight arms cross, rather than a convenient subset, because 12.3.2.2
+/// gives them different meanings and a binding that could only write `/Fit`
+/// would make every other one unreachable from three languages.
+///
+/// **A component that is NaN is `null`** -- 12.3.2.2's "retain the current
+/// value" -- which is how `Option<f64>` crosses without a parallel presence
+/// mask to fall out of step with the values it describes. It is unambiguous
+/// because the writer refuses a non-finite number anywhere else: there is no
+/// legitimate destination in which NaN means a coordinate. Fields the named
+/// kind does not use are ignored, so a caller may leave them at anything.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TpdfDestination {
+    /// Which of the eight.
+    pub kind: TpdfDestKind,
+    /// `/XYZ`'s and `/FitV`'s and `/FitBV`'s left edge.
+    pub left: f64,
+    /// `/FitR`'s bottom edge.
+    pub bottom: f64,
+    /// `/FitR`'s right edge.
+    pub right: f64,
+    /// `/XYZ`'s, `/FitH`'s, `/FitBH`'s and `/FitR`'s top edge.
+    pub top: f64,
+    /// `/XYZ`'s magnification.
+    pub zoom: f64,
+}
+
+/// `Some` unless the value is NaN, which is this ABI's spelling of `null`.
+fn optional_number(value: f64) -> Option<f64> {
+    if value.is_nan() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+impl TpdfDestination {
+    /// The facade's own destination.
+    fn to_facade(self) -> DestKind {
+        match self.kind {
+            TpdfDestKind::Xyz => DestKind::Xyz {
+                left: optional_number(self.left),
+                top: optional_number(self.top),
+                zoom: optional_number(self.zoom),
+            },
+            TpdfDestKind::Fit => DestKind::Fit,
+            TpdfDestKind::FitH => DestKind::FitH {
+                top: optional_number(self.top),
+            },
+            TpdfDestKind::FitV => DestKind::FitV {
+                left: optional_number(self.left),
+            },
+            TpdfDestKind::FitR => DestKind::FitR {
+                left: self.left,
+                bottom: self.bottom,
+                right: self.right,
+                top: self.top,
+            },
+            TpdfDestKind::FitB => DestKind::FitB,
+            TpdfDestKind::FitBH => DestKind::FitBH {
+                top: optional_number(self.top),
+            },
+            TpdfDestKind::FitBV => DestKind::FitBV {
+                left: optional_number(self.left),
+            },
+        }
+    }
+}
+
+/// Fills a [`TpdfDestination`] with `/Fit`, which is the one that needs no
+/// numbers.
+///
+/// Here for the reason [`tpdf_write_options_init`] is: a caller who zeroes the
+/// struct instead gets `/XYZ 0 0 0`, which is a *different* destination that
+/// happens to look like a default.
+///
+/// # Safety
+///
+/// `out` must be a valid pointer to a `TpdfDestination` to write.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_destination_init_fit(out: *mut TpdfDestination) -> TpdfStatus {
+    let Some(slot) = (unsafe { out.as_mut() }) else {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    };
+    *slot = TpdfDestination {
+        kind: TpdfDestKind::Fit,
+        left: f64::NAN,
+        bottom: f64::NAN,
+        right: f64::NAN,
+        top: f64::NAN,
+        zoom: f64::NAN,
+    };
+    TpdfStatus::Ok
+}
+
+/// Where a link or an outline entry goes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpdfTargetKind {
+    /// A page in this document, positioned as `view` says.
+    Page = 0,
+    /// A URI, written as the `/URI` action of 12.6.4.7. 7-bit ASCII per that
+    /// clause; anything else is refused by the writer rather than mangled.
+    Uri = 1,
+}
+
+/// A target, as C sees `Target`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TpdfTarget {
+    /// Which of the two.
+    pub kind: TpdfTargetKind,
+    /// The zero-based page index, for [`TpdfTargetKind::Page`].
+    pub page_index: u32,
+    /// How that page is positioned, for [`TpdfTargetKind::Page`].
+    pub view: TpdfDestination,
+    /// The URI as a null-terminated UTF-8 string, for
+    /// [`TpdfTargetKind::Uri`].
+    pub uri: *const c_char,
+}
+
+impl TpdfTarget {
+    /// The facade's own target, or a refusal.
+    ///
+    /// # Safety
+    ///
+    /// `self.uri` must be a null-terminated string when `kind` is `Uri`.
+    unsafe fn to_facade(self) -> Result<Target, TpdfStatus> {
+        match self.kind {
+            TpdfTargetKind::Page => Ok(Target::Page {
+                index: self.page_index,
+                view: self.view.to_facade(),
+            }),
+            TpdfTargetKind::Uri => Ok(Target::Uri(unsafe { required_str(self.uri, "uri") }?)),
+        }
+    }
+}
+
+/// Which of `ImageData`'s arms a [`TpdfImage`] carries.
+///
+/// `ImageData::Compressed` does **not** cross, and that is a decision rather
+/// than an omission: it carries a `CompressedImage` with a nested colour space
+/// that itself holds a palette slice and a filter with its own parameters, so
+/// projecting it is a sub-surface rather than a struct. It exists because a
+/// CBZ synthesises every page at open and must not decode each one
+/// (`docs/features/*`, gap 29); that is an engine-internal path with no host
+/// on the other end. A host with already-compressed bytes has
+/// [`TpdfImageKind::Jpeg`], which is the same idea for the one codec hosts
+/// actually hold bytes in.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpdfImageKind {
+    /// JPEG bytes, placed **as they are** and never re-encoded, because
+    /// recompression is generational quality loss the caller cannot undo.
+    /// `width` and `height` are read from the bytes and the struct's are
+    /// ignored.
+    Jpeg = 0,
+    /// Eight-bit RGB, three bytes per pixel, row-major from the top.
+    Rgb8 = 1,
+    /// Eight-bit greyscale, one byte per pixel.
+    Gray8 = 2,
+}
+
+/// An image to register, as C sees `ImageData`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TpdfImage {
+    /// Which arm.
+    pub kind: TpdfImageKind,
+    /// Width in pixels; ignored for [`TpdfImageKind::Jpeg`].
+    pub width: u32,
+    /// Height in pixels; ignored for [`TpdfImageKind::Jpeg`].
+    pub height: u32,
+    /// The bytes, borrowed for the duration of the call and copied into the
+    /// document before it returns.
+    pub data: *const u8,
+    /// How many bytes `data` points at.
+    pub data_len: usize,
+}
+
+/// A borrowed byte slice from C, or a refusal.
+///
+/// # Safety
+///
+/// `data` must point to at least `len` readable bytes that outlive the
+/// returned slice's use, which at every call site here is the current call.
+unsafe fn required_bytes<'a>(
+    data: *const u8,
+    len: usize,
+    what: &str,
+) -> Result<&'a [u8], TpdfStatus> {
+    if data.is_null() {
+        set_error(&format!("{what} is null"));
+        return Err(TpdfStatus::BadArgument);
+    }
+    Ok(unsafe { std::slice::from_raw_parts(data, len) })
+}
+
+/// Starts a document.
+///
+/// The caller frees the result with [`tpdf_builder_free`], whether or not it
+/// was finished.
+///
+/// # Safety
+///
+/// `out` must be a valid pointer to write a handle to.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_new(out: *mut *mut TpdfBuilder) -> TpdfStatus {
+    if out.is_null() {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    }
+    let handle = Box::new(TpdfBuilder {
+        inner: Consumable::new(DocumentBuilder::new()),
+    });
+    unsafe { *out = Box::into_raw(handle) };
+    TpdfStatus::Ok
+}
+
+/// Frees a builder. Null is accepted and does nothing.
+///
+/// Required whether or not [`tpdf_builder_finish`] was called: finishing takes
+/// the *document* out of the handle and leaves the handle, which is what makes
+/// free symmetric with allocation here as everywhere else.
+///
+/// # Safety
+///
+/// `builder` must have come from [`tpdf_builder_new`] and must not be used
+/// afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_free(builder: *mut TpdfBuilder) {
+    if !builder.is_null() {
+        drop(unsafe { Box::from_raw(builder) });
+    }
+}
+
+/// The builder behind a handle, or a refusal.
+///
+/// # Safety
+///
+/// `builder` must be a live handle or null.
+unsafe fn builder_mut<'a>(
+    builder: *mut TpdfBuilder,
+    what: &str,
+) -> Result<&'a mut DocumentBuilder, TpdfStatus> {
+    let Some(handle) = (unsafe { builder.as_mut() }) else {
+        set_error("null builder");
+        return Err(TpdfStatus::BadArgument);
+    };
+    handle.inner.borrow_mut(what)
+}
+
+/// The page behind a handle, or a refusal.
+///
+/// # Safety
+///
+/// `page` must be a live handle or null.
+unsafe fn page_mut<'a>(
+    page: *mut TpdfPageBuilder,
+    what: &str,
+) -> Result<&'a mut PageBuilder, TpdfStatus> {
+    let Some(handle) = (unsafe { page.as_mut() }) else {
+        set_error("null page builder");
+        return Err(TpdfStatus::BadArgument);
+    };
+    handle.inner.borrow_mut(what)
+}
+
+/// Registers one of the standard 14 fonts under a resource name (9.6.2.2).
+///
+/// # Safety
+///
+/// `builder` must be a live handle, and each pointer must be valid for its
+/// stated length.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_add_base_font(
+    builder: *mut TpdfBuilder,
+    resource: *const u8,
+    resource_len: usize,
+    base_font: *const u8,
+    base_font_len: usize,
+) -> TpdfStatus {
+    let builder = match unsafe { builder_mut(builder, "add_base_font") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    let (Ok(resource), Ok(base_font)) = (
+        unsafe { required_bytes(resource, resource_len, "resource name") },
+        unsafe { required_bytes(base_font, base_font_len, "base font name") },
+    ) else {
+        return TpdfStatus::BadArgument;
+    };
+    builder.add_base_font(resource, base_font);
+    TpdfStatus::Ok
+}
+
+/// Embeds a TrueType or CFF font program under a resource name.
+///
+/// # Safety
+///
+/// `builder` must be a live handle, and each pointer must be valid for its
+/// stated length.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_add_embedded_font(
+    builder: *mut TpdfBuilder,
+    resource: *const u8,
+    resource_len: usize,
+    base_font: *const u8,
+    base_font_len: usize,
+    program: *const u8,
+    program_len: usize,
+) -> TpdfStatus {
+    let builder = match unsafe { builder_mut(builder, "add_embedded_font") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    let (Ok(resource), Ok(base_font), Ok(program)) = (
+        unsafe { required_bytes(resource, resource_len, "resource name") },
+        unsafe { required_bytes(base_font, base_font_len, "base font name") },
+        unsafe { required_bytes(program, program_len, "font program") },
+    ) else {
+        return TpdfStatus::BadArgument;
+    };
+    if builder.add_embedded_font(resource, base_font, program) {
+        TpdfStatus::Ok
+    } else {
+        refused("add_embedded_font", "the font program was not usable")
+    }
+}
+
+/// Whether embedded fonts are subsetted to the glyphs actually drawn.
+///
+/// # Safety
+///
+/// `builder` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_set_subset_fonts(
+    builder: *mut TpdfBuilder,
+    subset: c_int,
+) -> TpdfStatus {
+    let builder = match unsafe { builder_mut(builder, "set_subset_fonts") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    builder.set_subset_fonts(subset != 0);
+    TpdfStatus::Ok
+}
+
+/// Registers an image under a resource name, for a page to draw.
+///
+/// # Safety
+///
+/// `builder` must be a live handle, `image` a valid pointer, and the image's
+/// `data` valid for `data_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_add_image(
+    builder: *mut TpdfBuilder,
+    resource: *const u8,
+    resource_len: usize,
+    image: *const TpdfImage,
+) -> TpdfStatus {
+    let builder = match unsafe { builder_mut(builder, "add_image") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    let Ok(resource) = (unsafe { required_bytes(resource, resource_len, "resource name") }) else {
+        return TpdfStatus::BadArgument;
+    };
+    let Some(image) = (unsafe { image.as_ref() }) else {
+        set_error("null image");
+        return TpdfStatus::BadArgument;
+    };
+    let Ok(data) = (unsafe { required_bytes(image.data, image.data_len, "image data") }) else {
+        return TpdfStatus::BadArgument;
+    };
+
+    let described = match image.kind {
+        TpdfImageKind::Jpeg => ImageData::Jpeg(data),
+        TpdfImageKind::Rgb8 => ImageData::Rgb8 {
+            width: image.width,
+            height: image.height,
+            data,
+        },
+        TpdfImageKind::Gray8 => ImageData::Gray8 {
+            width: image.width,
+            height: image.height,
+            data,
+        },
+    };
+    if builder.add_image(resource, &described) {
+        TpdfStatus::Ok
+    } else {
+        refused(
+            "add_image",
+            &format!(
+                "{:?}, {} by {}, {} bytes",
+                image.kind,
+                image.width,
+                image.height,
+                data.len()
+            ),
+        )
+    }
+}
+
+/// Sets an `/Info` field, such as `Title` or `Author`.
+///
+/// # Safety
+///
+/// `builder` must be a live handle, `key` valid for `key_len` bytes, and
+/// `value` a null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_set_info(
+    builder: *mut TpdfBuilder,
+    key: *const u8,
+    key_len: usize,
+    value: *const c_char,
+) -> TpdfStatus {
+    let builder = match unsafe { builder_mut(builder, "set_info") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    let Ok(key) = (unsafe { required_bytes(key, key_len, "info key") }) else {
+        return TpdfStatus::BadArgument;
+    };
+    let value = match unsafe { required_str(value, "info value") } {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    builder.set_info(key, &value);
+    TpdfStatus::Ok
+}
+
+/// Starts a page, owned by the caller until [`tpdf_builder_push_page`] takes
+/// it.
+///
+/// **The resource snapshot happens here.** A font or image registered on the
+/// builder after this call is invisible to this page -- the same timing the
+/// closure form imposes, because `add_page` calls this. A caller that wants a
+/// late resource on a page must begin that page after registering it.
+///
+/// The caller frees the result with [`tpdf_page_builder_free`], whether or not
+/// it was pushed.
+///
+/// # Safety
+///
+/// `builder` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_begin_page(
+    builder: *mut TpdfBuilder,
+    width: f64,
+    height: f64,
+    out: *mut *mut TpdfPageBuilder,
+) -> TpdfStatus {
+    if out.is_null() {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    }
+    let builder = match unsafe { builder_mut(builder, "begin_page") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    let handle = Box::new(TpdfPageBuilder {
+        inner: Consumable::new(builder.begin_page(width, height)),
+    });
+    unsafe { *out = Box::into_raw(handle) };
+    TpdfStatus::Ok
+}
+
+/// Adds a page the caller has finished drawing.
+///
+/// **Consumes the page**: the drawing is taken out of the handle and into the
+/// document. The handle stays live and stays the caller's to free, and a
+/// second push of the same page is [`TpdfStatus::SpentHandle`] rather than a
+/// second page or a double free.
+///
+/// Pages arrive in the order they are pushed, which is the order they are
+/// numbered.
+///
+/// # Safety
+///
+/// `builder` and `page` must be live handles.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_push_page(
+    builder: *mut TpdfBuilder,
+    page: *mut TpdfPageBuilder,
+) -> TpdfStatus {
+    let Some(page_handle) = (unsafe { page.as_mut() }) else {
+        set_error("null page builder");
+        return TpdfStatus::BadArgument;
+    };
+    // The builder is checked before the page is taken, so a push into a spent
+    // builder does not swallow the page on the way to refusing.
+    if let Err(status) = unsafe { builder_mut(builder, "push_page") } {
+        return status;
+    }
+    let drawn = match page_handle.inner.take("tpdf_builder_push_page") {
+        Ok(drawn) => drawn,
+        Err(status) => return status,
+    };
+    let builder = match unsafe { builder_mut(builder, "push_page") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    builder.push_page(drawn);
+    TpdfStatus::Ok
+}
+
+/// Frees a page builder. Null is accepted and does nothing.
+///
+/// A page begun and never pushed is simply dropped and the document is what it
+/// would have been.
+///
+/// # Safety
+///
+/// `page` must have come from [`tpdf_builder_begin_page`] and must not be used
+/// afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_free(page: *mut TpdfPageBuilder) {
+    if !page.is_null() {
+        drop(unsafe { Box::from_raw(page) });
+    }
+}
+
+/// Draws text with a registered font.
+///
+/// # Safety
+///
+/// `page` must be a live handle, `font` valid for `font_len` bytes, and `text`
+/// a null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_text(
+    page: *mut TpdfPageBuilder,
+    font: *const u8,
+    font_len: usize,
+    size: f64,
+    x: f64,
+    y: f64,
+    text: *const c_char,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "text") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    let Ok(font) = (unsafe { required_bytes(font, font_len, "font resource name") }) else {
+        return TpdfStatus::BadArgument;
+    };
+    let text = match unsafe { required_str(text, "text") } {
+        Ok(text) => text,
+        Err(status) => return status,
+    };
+    page.text(font, size, x, y, &text);
+    TpdfStatus::Ok
+}
+
+/// Fills a rectangle in device grey, from black (0) to white (1).
+///
+/// # Safety
+///
+/// `page` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_fill_rect(
+    page: *mut TpdfPageBuilder,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    grey: f64,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "fill_rect") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    page.fill_rect(x, y, w, h, grey);
+    TpdfStatus::Ok
+}
+
+/// Draws a registered image into the given rectangle.
+///
+/// # Safety
+///
+/// `page` must be a live handle and `resource` valid for `resource_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_image(
+    page: *mut TpdfPageBuilder,
+    resource: *const u8,
+    resource_len: usize,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "image") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    let Ok(resource) = (unsafe { required_bytes(resource, resource_len, "resource name") }) else {
+        return TpdfStatus::BadArgument;
+    };
+    page.image(resource, x, y, w, h);
+    TpdfStatus::Ok
+}
+
+/// Sets the non-stroking colour, as red, green and blue from zero to one.
+///
+/// # Safety
+///
+/// `page` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_set_fill_rgb(
+    page: *mut TpdfPageBuilder,
+    r: f64,
+    g: f64,
+    b: f64,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "set_fill_rgb") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    page.set_fill_rgb(r, g, b);
+    TpdfStatus::Ok
+}
+
+/// Sets the **stroking** colour. `RG`, not `rg`: the two are different
+/// parameters of the graphics state.
+///
+/// # Safety
+///
+/// `page` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_set_stroke_rgb(
+    page: *mut TpdfPageBuilder,
+    r: f64,
+    g: f64,
+    b: f64,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "set_stroke_rgb") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    page.set_stroke_rgb(r, g, b);
+    TpdfStatus::Ok
+}
+
+/// Sets `/CropBox` for this page, as `[x0 y0 x1 y1]` in points (7.7.3.3).
+///
+/// # Safety
+///
+/// `page` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_set_crop_box(
+    page: *mut TpdfPageBuilder,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "set_crop_box") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    page.set_crop_box(x0, y0, x1, y1);
+    TpdfStatus::Ok
+}
+
+/// Appends content-stream operators verbatim.
+///
+/// # Safety
+///
+/// `page` must be a live handle and `operators` valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_raw(
+    page: *mut TpdfPageBuilder,
+    operators: *const u8,
+    len: usize,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "raw") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    let Ok(operators) = (unsafe { required_bytes(operators, len, "operators") }) else {
+        return TpdfStatus::BadArgument;
+    };
+    page.raw(operators);
+    TpdfStatus::Ok
+}
+
+/// Adds a link annotation over a rectangle (12.5.6.5).
+///
+/// # Safety
+///
+/// `page` must be a live handle and `target` a valid pointer whose `uri` is a
+/// null-terminated string when its kind says so.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_builder_link(
+    page: *mut TpdfPageBuilder,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    target: *const TpdfTarget,
+) -> TpdfStatus {
+    let page = match unsafe { page_mut(page, "link") } {
+        Ok(page) => page,
+        Err(status) => return status,
+    };
+    let Some(target) = (unsafe { target.as_ref() }) else {
+        set_error("null target");
+        return TpdfStatus::BadArgument;
+    };
+    let facade = match unsafe { target.to_facade() } {
+        Ok(target) => target,
+        Err(status) => return status,
+    };
+    if page.link(x0, y0, x1, y1, &facade) {
+        TpdfStatus::Ok
+    } else {
+        refused("link", &format!("[{x0} {y0} {x1} {y1}]"))
+    }
+}
+
+/// Starts an outline entry with a title and no destination (12.3.3).
+///
+/// An entry without a destination is a real shape rather than a degraded one:
+/// a part title above three chapters often points nowhere itself.
+///
+/// The caller frees it with [`tpdf_outline_entry_free`], whether or not it was
+/// added to anything.
+///
+/// # Safety
+///
+/// `title` must be a null-terminated UTF-8 string and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_outline_entry_new(
+    title: *const c_char,
+    out: *mut *mut TpdfOutlineEntry,
+) -> TpdfStatus {
+    if out.is_null() {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    }
+    let title = match unsafe { required_str(title, "outline title") } {
+        Ok(title) => title,
+        Err(status) => return status,
+    };
+    let handle = Box::new(TpdfOutlineEntry {
+        inner: Consumable::new(OutlineEntry {
+            title,
+            target: None,
+            open: false,
+            children: Vec::new(),
+        }),
+    });
+    unsafe { *out = Box::into_raw(handle) };
+    TpdfStatus::Ok
+}
+
+/// The entry behind a handle, or a refusal.
+///
+/// # Safety
+///
+/// `entry` must be a live handle or null.
+unsafe fn entry_mut<'a>(
+    entry: *mut TpdfOutlineEntry,
+    what: &str,
+) -> Result<&'a mut OutlineEntry, TpdfStatus> {
+    let Some(handle) = (unsafe { entry.as_mut() }) else {
+        set_error("null outline entry");
+        return Err(TpdfStatus::BadArgument);
+    };
+    handle.inner.borrow_mut(what)
+}
+
+/// Points an outline entry somewhere.
+///
+/// # Safety
+///
+/// `entry` must be a live handle and `target` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_outline_entry_set_target(
+    entry: *mut TpdfOutlineEntry,
+    target: *const TpdfTarget,
+) -> TpdfStatus {
+    let entry = match unsafe { entry_mut(entry, "set_target") } {
+        Ok(entry) => entry,
+        Err(status) => return status,
+    };
+    let Some(target) = (unsafe { target.as_ref() }) else {
+        set_error("null target");
+        return TpdfStatus::BadArgument;
+    };
+    entry.target = Some(match unsafe { target.to_facade() } {
+        Ok(target) => target,
+        Err(status) => return status,
+    });
+    TpdfStatus::Ok
+}
+
+/// Whether the entry is shown expanded when the document is opened.
+///
+/// 12.3.3 spells this as the *sign* of `/Count` and only for an entry that has
+/// descendants, so it is ignored for an entry with no children: one with
+/// nothing beneath it is neither open nor closed.
+///
+/// # Safety
+///
+/// `entry` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_outline_entry_set_open(
+    entry: *mut TpdfOutlineEntry,
+    open: c_int,
+) -> TpdfStatus {
+    let entry = match unsafe { entry_mut(entry, "set_open") } {
+        Ok(entry) => entry,
+        Err(status) => return status,
+    };
+    entry.open = open != 0;
+    TpdfStatus::Ok
+}
+
+/// Nests one entry under another.
+///
+/// **Consumes `child`**: it moves into the parent's list, the child handle
+/// stays live and stays the caller's to free, and adding it a second time is
+/// [`TpdfStatus::SpentHandle`] rather than two copies of one entry.
+///
+/// # Safety
+///
+/// `parent` and `child` must be live handles, and must not be the same handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_outline_entry_add_child(
+    parent: *mut TpdfOutlineEntry,
+    child: *mut TpdfOutlineEntry,
+) -> TpdfStatus {
+    if parent.is_null() || child.is_null() {
+        set_error("null outline entry");
+        return TpdfStatus::BadArgument;
+    }
+    if std::ptr::eq(parent, child) {
+        set_error("an outline entry cannot be its own child");
+        return TpdfStatus::BadArgument;
+    }
+    // The parent is checked before the child is taken, so a failed add does
+    // not swallow the child.
+    if let Err(status) = unsafe { entry_mut(parent, "add_child") } {
+        return status;
+    }
+    let Some(child_handle) = (unsafe { child.as_mut() }) else {
+        set_error("null outline entry");
+        return TpdfStatus::BadArgument;
+    };
+    let taken = match child_handle.inner.take("tpdf_outline_entry_add_child") {
+        Ok(taken) => taken,
+        Err(status) => return status,
+    };
+    let parent = match unsafe { entry_mut(parent, "add_child") } {
+        Ok(parent) => parent,
+        Err(status) => return status,
+    };
+    parent.children.push(taken);
+    TpdfStatus::Ok
+}
+
+/// Frees an outline entry. Null is accepted and does nothing.
+///
+/// # Safety
+///
+/// `entry` must have come from [`tpdf_outline_entry_new`] and must not be used
+/// afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_outline_entry_free(entry: *mut TpdfOutlineEntry) {
+    if !entry.is_null() {
+        drop(unsafe { Box::from_raw(entry) });
+    }
+}
+
+/// Sets the document outline from an array of top-level entries (12.3.3).
+///
+/// **Consumes every entry in `entries`**, in order. Each handle stays live and
+/// stays the caller's to free.
+///
+/// Refused as a whole when the tree is one this repository could not read back
+/// -- deeper than the reader's own nesting limit, or wider than its sibling
+/// limit -- because a writer whose output its own reader silently truncates is
+/// not a writer. Entries taken before the refusal stay taken; the outline is
+/// simply not set.
+///
+/// # Safety
+///
+/// `builder` must be a live handle and `entries` must point to `count` live
+/// entry handles.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_set_outline(
+    builder: *mut TpdfBuilder,
+    entries: *const *mut TpdfOutlineEntry,
+    count: usize,
+) -> TpdfStatus {
+    if let Err(status) = unsafe { builder_mut(builder, "set_outline") } {
+        return status;
+    }
+    if entries.is_null() && count != 0 {
+        set_error("null outline entry array");
+        return TpdfStatus::BadArgument;
+    }
+
+    let mut taken = Vec::with_capacity(count);
+    for index in 0..count {
+        let handle = unsafe { *entries.add(index) };
+        let Some(handle) = (unsafe { handle.as_mut() }) else {
+            set_error(&format!("outline entry {index} is null"));
+            return TpdfStatus::BadArgument;
+        };
+        match handle.inner.take("tpdf_builder_set_outline") {
+            Ok(entry) => taken.push(entry),
+            Err(status) => return status,
+        }
+    }
+
+    let builder = match unsafe { builder_mut(builder, "set_outline") } {
+        Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    if builder.set_outline(taken) {
+        TpdfStatus::Ok
+    } else {
+        refused(
+            "set_outline",
+            "the tree is deeper or wider than this engine's own reader walks",
+        )
+    }
+}
+
+/// Finishes the document and hands back its bytes.
+///
+/// **Consumes the builder**: the document is taken out of the handle, so a
+/// second finish is [`TpdfStatus::SpentHandle`] rather than a second document
+/// or a double free. The handle stays live and must still be freed with
+/// [`tpdf_builder_free`].
+///
+/// The caller frees the result with [`tpdf_buffer_free`].
+///
+/// # Safety
+///
+/// `builder` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_builder_finish(
+    builder: *mut TpdfBuilder,
+    out: *mut *mut TpdfBuffer,
+) -> TpdfStatus {
+    if out.is_null() {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
+    }
+    let Some(handle) = (unsafe { builder.as_mut() }) else {
+        set_error("null builder");
+        return TpdfStatus::BadArgument;
+    };
+    let document = match handle.inner.take("tpdf_builder_finish") {
+        Ok(document) => document,
+        Err(status) => return status,
+    };
+    let bytes = document.finish();
+    unsafe { *out = Box::into_raw(Box::new(TpdfBuffer { inner: bytes })) };
+    TpdfStatus::Ok
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -4416,5 +5496,799 @@ endobj
         unsafe { tpdf_checkpoint_free(ptr::null_mut()) };
         unsafe { tpdf_buffer_free(ptr::null_mut()) };
         unsafe { tpdf_fill_report_free(ptr::null_mut()) };
+    }
+
+    // -- writing: the builder surface (gap 32 milestone 3) ------------------
+
+    /// The image the build-a-document script draws: eight by eight grey,
+    /// generated from a formula so that four languages can produce the same 64
+    /// bytes without a fixture file between them.
+    ///
+    /// That is not a convenience. A parity suite whose four surfaces read the
+    /// same image *file* proves they can read a file; one whose four surfaces
+    /// compute the same bytes proves the bytes are the same, which is what the
+    /// hash is about.
+    fn parity_image() -> Vec<u8> {
+        (0..64u32).map(|i| ((i * 7) % 256) as u8).collect()
+    }
+
+    /// The build-a-document script, driven entirely through the C ABI.
+    fn build_through_the_abi() -> Vec<u8> {
+        let samples = parity_image();
+        let mut builder: *mut TpdfBuilder = ptr::null_mut();
+        assert_eq!(unsafe { tpdf_builder_new(&mut builder) }, TpdfStatus::Ok);
+
+        let font = b"F1";
+        let helvetica = b"Helvetica";
+        assert_eq!(
+            unsafe {
+                tpdf_builder_add_base_font(
+                    builder,
+                    font.as_ptr(),
+                    font.len(),
+                    helvetica.as_ptr(),
+                    helvetica.len(),
+                )
+            },
+            TpdfStatus::Ok
+        );
+
+        let resource = b"Im1";
+        let image = TpdfImage {
+            kind: TpdfImageKind::Gray8,
+            width: 8,
+            height: 8,
+            data: samples.as_ptr(),
+            data_len: samples.len(),
+        };
+        assert_eq!(
+            unsafe { tpdf_builder_add_image(builder, resource.as_ptr(), resource.len(), &image) },
+            TpdfStatus::Ok
+        );
+
+        let mut one: *mut TpdfPageBuilder = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_begin_page(builder, 200.0, 200.0, &mut one) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_page_builder_text(
+                    one,
+                    font.as_ptr(),
+                    font.len(),
+                    14.0,
+                    20.0,
+                    170.0,
+                    c("Page one").as_ptr(),
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_fill_rect(one, 20.0, 40.0, 60.0, 60.0, 0.25) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_page_builder_image(
+                    one,
+                    resource.as_ptr(),
+                    resource.len(),
+                    100.0,
+                    40.0,
+                    60.0,
+                    60.0,
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_push_page(builder, one) },
+            TpdfStatus::Ok
+        );
+        unsafe { tpdf_page_builder_free(one) };
+
+        let mut two: *mut TpdfPageBuilder = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_begin_page(builder, 200.0, 200.0, &mut two) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_page_builder_text(
+                    two,
+                    font.as_ptr(),
+                    font.len(),
+                    14.0,
+                    20.0,
+                    170.0,
+                    c("Page two").as_ptr(),
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_push_page(builder, two) },
+            TpdfStatus::Ok
+        );
+        unsafe { tpdf_page_builder_free(two) };
+
+        let title = b"Title";
+        assert_eq!(
+            unsafe {
+                tpdf_builder_set_info(
+                    builder,
+                    title.as_ptr(),
+                    title.len(),
+                    c("tinker-pdf write parity").as_ptr(),
+                )
+            },
+            TpdfStatus::Ok
+        );
+
+        let mut fit = TpdfDestination {
+            kind: TpdfDestKind::Fit,
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
+            top: 0.0,
+            zoom: 0.0,
+        };
+        assert_eq!(
+            unsafe { tpdf_destination_init_fit(&mut fit) },
+            TpdfStatus::Ok
+        );
+
+        let mut entries: Vec<*mut TpdfOutlineEntry> = Vec::new();
+        for (index, label) in [(0u32, "Page one"), (1, "Page two")] {
+            let mut entry: *mut TpdfOutlineEntry = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_outline_entry_new(c(label).as_ptr(), &mut entry) },
+                TpdfStatus::Ok
+            );
+            let target = TpdfTarget {
+                kind: TpdfTargetKind::Page,
+                page_index: index,
+                view: fit,
+                uri: ptr::null(),
+            };
+            assert_eq!(
+                unsafe { tpdf_outline_entry_set_target(entry, &target) },
+                TpdfStatus::Ok
+            );
+            entries.push(entry);
+        }
+        assert_eq!(
+            unsafe { tpdf_builder_set_outline(builder, entries.as_ptr(), entries.len()) },
+            TpdfStatus::Ok
+        );
+        for entry in entries {
+            unsafe { tpdf_outline_entry_free(entry) };
+        }
+
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_finish(builder, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let bytes = take_buffer(buffer);
+        unsafe { tpdf_builder_free(builder) };
+        bytes
+    }
+
+    /// The same script against the facade, in Rust.
+    fn build_through_the_facade() -> Vec<u8> {
+        let samples = parity_image();
+        let mut builder = tinker_pdf::DocumentBuilder::new();
+        builder.add_base_font(b"F1", b"Helvetica");
+        assert!(builder.add_image(
+            b"Im1",
+            &ImageData::Gray8 {
+                width: 8,
+                height: 8,
+                data: &samples,
+            }
+        ));
+
+        let mut one = builder.begin_page(200.0, 200.0);
+        one.text(b"F1", 14.0, 20.0, 170.0, "Page one");
+        one.fill_rect(20.0, 40.0, 60.0, 60.0, 0.25);
+        one.image(b"Im1", 100.0, 40.0, 60.0, 60.0);
+        builder.push_page(one);
+
+        let mut two = builder.begin_page(200.0, 200.0);
+        two.text(b"F1", 14.0, 20.0, 170.0, "Page two");
+        builder.push_page(two);
+
+        builder.set_info(b"Title", "tinker-pdf write parity");
+        assert!(builder.set_outline(
+            [(0u32, "Page one"), (1, "Page two")]
+                .into_iter()
+                .map(|(index, title)| OutlineEntry {
+                    title: title.to_string(),
+                    target: Some(Target::Page {
+                        index,
+                        view: DestKind::Fit,
+                    }),
+                    open: false,
+                    children: Vec::new(),
+                })
+                .collect()
+        ));
+        builder.finish()
+    }
+
+    /// The milestone's own exit criterion: **byte-equal**.
+    #[test]
+    fn building_a_document_through_the_abi_is_byte_equal_to_the_facade() {
+        let through_abi = build_through_the_abi();
+        let through_facade = build_through_the_facade();
+        assert_eq!(
+            through_abi.len(),
+            through_facade.len(),
+            "the two documents are not even the same length"
+        );
+        assert_eq!(through_abi, through_facade);
+
+        // And it is a document rather than merely a matching pile of bytes.
+        // Ruling 13: the check that the output is right is this engine's own.
+        let document = Document::open(through_abi).expect("the built document opens");
+        assert_eq!(document.page_count(), 2);
+        assert!(
+            document.validate().is_empty(),
+            "the strict validator finds nothing: {:?}",
+            document.validate()
+        );
+    }
+
+    /// A consuming call takes the value and leaves the handle, so free stays
+    /// symmetric -- and a second call says which call spent it.
+    #[test]
+    fn a_spent_builder_refuses_and_names_the_call_that_spent_it() {
+        let mut builder: *mut TpdfBuilder = ptr::null_mut();
+        assert_eq!(unsafe { tpdf_builder_new(&mut builder) }, TpdfStatus::Ok);
+        let font = b"F1";
+        let helvetica = b"Helvetica";
+        assert_eq!(
+            unsafe {
+                tpdf_builder_add_base_font(
+                    builder,
+                    font.as_ptr(),
+                    font.len(),
+                    helvetica.as_ptr(),
+                    helvetica.len(),
+                )
+            },
+            TpdfStatus::Ok
+        );
+
+        let mut first: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_finish(builder, &mut first) },
+            TpdfStatus::Ok
+        );
+        assert!(!first.is_null());
+        drop(take_buffer(first));
+
+        // The second finish is refused rather than producing a second
+        // document or freeing the first one again.
+        let mut second: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_finish(builder, &mut second) },
+            TpdfStatus::SpentHandle
+        );
+        assert!(second.is_null(), "and nothing was written to the out slot");
+        assert_eq!(
+            unsafe { CStr::from_ptr(tpdf_last_error_message()) }.to_string_lossy(),
+            "tpdf_builder_finish: this handle was already consumed by \
+             tpdf_builder_finish"
+        );
+
+        // Every other call on the spent handle refuses the same way, naming
+        // the call that spent it rather than the call that failed.
+        assert_eq!(
+            unsafe {
+                tpdf_builder_add_base_font(
+                    builder,
+                    font.as_ptr(),
+                    font.len(),
+                    helvetica.as_ptr(),
+                    helvetica.len(),
+                )
+            },
+            TpdfStatus::SpentHandle
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(tpdf_last_error_message()) }.to_string_lossy(),
+            "add_base_font: this handle was consumed by tpdf_builder_finish"
+        );
+
+        let mut page: *mut TpdfPageBuilder = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_begin_page(builder, 10.0, 10.0, &mut page) },
+            TpdfStatus::SpentHandle
+        );
+        assert!(page.is_null());
+
+        // And free is still required, still safe, and still the caller's job.
+        unsafe { tpdf_builder_free(builder) };
+    }
+
+    /// Pushing a page twice is refused rather than duplicating it.
+    #[test]
+    fn a_spent_page_refuses_a_second_push() {
+        let mut builder: *mut TpdfBuilder = ptr::null_mut();
+        assert_eq!(unsafe { tpdf_builder_new(&mut builder) }, TpdfStatus::Ok);
+        let font = b"F1";
+        let helvetica = b"Helvetica";
+        unsafe {
+            tpdf_builder_add_base_font(
+                builder,
+                font.as_ptr(),
+                font.len(),
+                helvetica.as_ptr(),
+                helvetica.len(),
+            )
+        };
+
+        let mut page: *mut TpdfPageBuilder = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_begin_page(builder, 100.0, 100.0, &mut page) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_fill_rect(page, 0.0, 0.0, 10.0, 10.0, 0.5) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_push_page(builder, page) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_push_page(builder, page) },
+            TpdfStatus::SpentHandle
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(tpdf_last_error_message()) }.to_string_lossy(),
+            "tpdf_builder_push_page: this handle was already consumed by \
+             tpdf_builder_push_page"
+        );
+        // Drawing on a pushed page is refused too: the drawing is in the
+        // document now, and a call that appeared to work would silently write
+        // into nothing.
+        assert_eq!(
+            unsafe { tpdf_page_builder_fill_rect(page, 0.0, 0.0, 1.0, 1.0, 0.0) },
+            TpdfStatus::SpentHandle
+        );
+
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_finish(builder, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let bytes = take_buffer(buffer);
+        unsafe { tpdf_page_builder_free(page) };
+        unsafe { tpdf_builder_free(builder) };
+
+        let document = Document::open(bytes).expect("it opens");
+        assert_eq!(document.page_count(), 1, "one page, not two");
+    }
+
+    /// A page begun and never pushed leaves no trace, so abandoning a handle
+    /// is safe rather than merely non-fatal.
+    #[test]
+    fn a_page_that_is_never_pushed_leaves_no_trace_through_the_abi() {
+        let build = |abandon: bool| {
+            let mut builder: *mut TpdfBuilder = ptr::null_mut();
+            assert_eq!(unsafe { tpdf_builder_new(&mut builder) }, TpdfStatus::Ok);
+            let font = b"F1";
+            let helvetica = b"Helvetica";
+            unsafe {
+                tpdf_builder_add_base_font(
+                    builder,
+                    font.as_ptr(),
+                    font.len(),
+                    helvetica.as_ptr(),
+                    helvetica.len(),
+                )
+            };
+
+            let mut kept: *mut TpdfPageBuilder = ptr::null_mut();
+            unsafe { tpdf_builder_begin_page(builder, 100.0, 100.0, &mut kept) };
+            unsafe {
+                tpdf_page_builder_text(
+                    kept,
+                    font.as_ptr(),
+                    font.len(),
+                    12.0,
+                    10.0,
+                    50.0,
+                    c("kept").as_ptr(),
+                )
+            };
+            unsafe { tpdf_builder_push_page(builder, kept) };
+            unsafe { tpdf_page_builder_free(kept) };
+
+            if abandon {
+                let mut lost: *mut TpdfPageBuilder = ptr::null_mut();
+                unsafe { tpdf_builder_begin_page(builder, 400.0, 400.0, &mut lost) };
+                unsafe {
+                    tpdf_page_builder_text(
+                        lost,
+                        font.as_ptr(),
+                        font.len(),
+                        12.0,
+                        10.0,
+                        50.0,
+                        c("abandoned").as_ptr(),
+                    )
+                };
+                unsafe { tpdf_page_builder_free(lost) };
+            }
+
+            let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_builder_finish(builder, &mut buffer) },
+                TpdfStatus::Ok
+            );
+            let bytes = take_buffer(buffer);
+            unsafe { tpdf_builder_free(builder) };
+            bytes
+        };
+
+        let with = build(true);
+        let without = build(false);
+        assert_eq!(with, without, "byte for byte, as if it had never begun");
+        assert!(!String::from_utf8_lossy(&with).contains("abandoned"));
+    }
+
+    /// An outline entry is consumed by whichever call takes it into a tree,
+    /// and the nesting the facade allows is the nesting that crosses.
+    #[test]
+    fn outline_entries_nest_and_are_consumed_once() {
+        let mut builder: *mut TpdfBuilder = ptr::null_mut();
+        assert_eq!(unsafe { tpdf_builder_new(&mut builder) }, TpdfStatus::Ok);
+        let font = b"F1";
+        let helvetica = b"Helvetica";
+        unsafe {
+            tpdf_builder_add_base_font(
+                builder,
+                font.as_ptr(),
+                font.len(),
+                helvetica.as_ptr(),
+                helvetica.len(),
+            )
+        };
+        let mut page: *mut TpdfPageBuilder = ptr::null_mut();
+        unsafe { tpdf_builder_begin_page(builder, 100.0, 100.0, &mut page) };
+        unsafe { tpdf_builder_push_page(builder, page) };
+        unsafe { tpdf_page_builder_free(page) };
+
+        let new = |title: &str| {
+            let mut entry: *mut TpdfOutlineEntry = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_outline_entry_new(c(title).as_ptr(), &mut entry) },
+                TpdfStatus::Ok
+            );
+            entry
+        };
+
+        let parent = new("Part one");
+        let child = new("Chapter one");
+        assert_eq!(
+            unsafe { tpdf_outline_entry_set_open(parent, 1) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_outline_entry_add_child(parent, child) },
+            TpdfStatus::Ok
+        );
+        // Adding it again is refused rather than making two of it.
+        assert_eq!(
+            unsafe { tpdf_outline_entry_add_child(parent, child) },
+            TpdfStatus::SpentHandle
+        );
+        // And an entry cannot be its own child, which would otherwise be a
+        // take from a handle that is being borrowed.
+        assert_eq!(
+            unsafe { tpdf_outline_entry_add_child(parent, parent) },
+            TpdfStatus::BadArgument
+        );
+
+        let tops = [parent];
+        assert_eq!(
+            unsafe { tpdf_builder_set_outline(builder, tops.as_ptr(), tops.len()) },
+            TpdfStatus::Ok
+        );
+        unsafe { tpdf_outline_entry_free(parent) };
+        unsafe { tpdf_outline_entry_free(child) };
+
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_builder_finish(builder, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let bytes = take_buffer(buffer);
+        unsafe { tpdf_builder_free(builder) };
+
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("(Part one)"), "the parent is in the outline");
+        assert!(text.contains("(Chapter one)"), "and so is the child");
+    }
+
+    /// All eight destination kinds cross, and NaN is `null` -- 12.3.2.2's
+    /// "retain the current value" -- rather than a coordinate.
+    #[test]
+    fn every_destination_kind_crosses_and_nan_means_null() {
+        let each = [
+            (TpdfDestKind::Xyz, 0),
+            (TpdfDestKind::Fit, 1),
+            (TpdfDestKind::FitH, 2),
+            (TpdfDestKind::FitV, 3),
+            (TpdfDestKind::FitR, 4),
+            (TpdfDestKind::FitB, 5),
+            (TpdfDestKind::FitBH, 6),
+            (TpdfDestKind::FitBV, 7),
+        ];
+        for (kind, number) in each {
+            assert_eq!(kind as i32, number, "{kind:?}");
+        }
+
+        let with = |kind, left: f64, top: f64, zoom: f64| {
+            TpdfDestination {
+                kind,
+                left,
+                bottom: 1.0,
+                right: 2.0,
+                top,
+                zoom,
+            }
+            .to_facade()
+        };
+
+        assert_eq!(
+            with(TpdfDestKind::Xyz, 10.0, 20.0, f64::NAN),
+            DestKind::Xyz {
+                left: Some(10.0),
+                top: Some(20.0),
+                zoom: None,
+            },
+            "a NaN zoom is /XYZ's null, which is not the same as a zoom of 0"
+        );
+        assert_eq!(
+            with(TpdfDestKind::Xyz, f64::NAN, f64::NAN, f64::NAN),
+            DestKind::Xyz {
+                left: None,
+                top: None,
+                zoom: None,
+            }
+        );
+        assert_eq!(
+            with(TpdfDestKind::Fit, f64::NAN, f64::NAN, f64::NAN),
+            DestKind::Fit
+        );
+        assert_eq!(
+            with(TpdfDestKind::FitH, f64::NAN, 5.0, f64::NAN),
+            DestKind::FitH { top: Some(5.0) }
+        );
+        assert_eq!(
+            with(TpdfDestKind::FitV, 5.0, f64::NAN, f64::NAN),
+            DestKind::FitV { left: Some(5.0) }
+        );
+        assert_eq!(
+            with(TpdfDestKind::FitR, 3.0, 4.0, f64::NAN),
+            DestKind::FitR {
+                left: 3.0,
+                bottom: 1.0,
+                right: 2.0,
+                top: 4.0,
+            }
+        );
+        assert_eq!(
+            with(TpdfDestKind::FitB, f64::NAN, f64::NAN, f64::NAN),
+            DestKind::FitB
+        );
+        assert_eq!(
+            with(TpdfDestKind::FitBH, f64::NAN, 7.0, f64::NAN),
+            DestKind::FitBH { top: Some(7.0) }
+        );
+        assert_eq!(
+            with(TpdfDestKind::FitBV, 7.0, f64::NAN, f64::NAN),
+            DestKind::FitBV { left: Some(7.0) }
+        );
+
+        // And the initialiser is /Fit rather than a zeroed struct, which would
+        // be /XYZ 0 0 0 -- a different destination that merely looks default.
+        let mut fit = TpdfDestination {
+            kind: TpdfDestKind::Xyz,
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
+            top: 0.0,
+            zoom: 0.0,
+        };
+        assert_eq!(
+            unsafe { tpdf_destination_init_fit(&mut fit) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(fit.to_facade(), DestKind::Fit);
+    }
+
+    /// Null handles across the builder surface, and every new free taking
+    /// null.
+    #[test]
+    fn null_handles_across_the_builder_surface_are_refused() {
+        let name = b"F1";
+        let target = TpdfTarget {
+            kind: TpdfTargetKind::Page,
+            page_index: 0,
+            view: TpdfDestination {
+                kind: TpdfDestKind::Fit,
+                left: f64::NAN,
+                bottom: f64::NAN,
+                right: f64::NAN,
+                top: f64::NAN,
+                zoom: f64::NAN,
+            },
+            uri: ptr::null(),
+        };
+        let image = TpdfImage {
+            kind: TpdfImageKind::Gray8,
+            width: 1,
+            height: 1,
+            data: ptr::null(),
+            data_len: 1,
+        };
+
+        assert_eq!(
+            unsafe { tpdf_builder_new(ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_builder_add_base_font(
+                    ptr::null_mut(),
+                    name.as_ptr(),
+                    name.len(),
+                    name.as_ptr(),
+                    name.len(),
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_builder_add_embedded_font(
+                    ptr::null_mut(),
+                    name.as_ptr(),
+                    name.len(),
+                    name.as_ptr(),
+                    name.len(),
+                    name.as_ptr(),
+                    name.len(),
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_set_subset_fonts(ptr::null_mut(), 1) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_add_image(ptr::null_mut(), name.as_ptr(), name.len(), &image) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_builder_set_info(ptr::null_mut(), name.as_ptr(), name.len(), ptr::null())
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_begin_page(ptr::null_mut(), 1.0, 1.0, ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_push_page(ptr::null_mut(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_set_outline(ptr::null_mut(), ptr::null(), 0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_finish(ptr::null_mut(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_page_builder_text(
+                    ptr::null_mut(),
+                    name.as_ptr(),
+                    name.len(),
+                    1.0,
+                    0.0,
+                    0.0,
+                    ptr::null(),
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_fill_rect(ptr::null_mut(), 0.0, 0.0, 1.0, 1.0, 0.5) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_page_builder_image(
+                    ptr::null_mut(),
+                    name.as_ptr(),
+                    name.len(),
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_set_fill_rgb(ptr::null_mut(), 0.0, 0.0, 0.0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_set_stroke_rgb(ptr::null_mut(), 0.0, 0.0, 0.0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_set_crop_box(ptr::null_mut(), 0.0, 0.0, 1.0, 1.0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_raw(ptr::null_mut(), ptr::null(), 0) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_page_builder_link(ptr::null_mut(), 0.0, 0.0, 1.0, 1.0, &target) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_outline_entry_new(ptr::null(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_outline_entry_set_target(ptr::null_mut(), &target) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_outline_entry_set_open(ptr::null_mut(), 1) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_outline_entry_add_child(ptr::null_mut(), ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_destination_init_fit(ptr::null_mut()) },
+            TpdfStatus::BadArgument
+        );
+
+        // A null image payload is refused rather than read.
+        let mut builder: *mut TpdfBuilder = ptr::null_mut();
+        assert_eq!(unsafe { tpdf_builder_new(&mut builder) }, TpdfStatus::Ok);
+        assert_eq!(
+            unsafe { tpdf_builder_add_image(builder, name.as_ptr(), name.len(), &image) },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe { tpdf_builder_add_image(builder, name.as_ptr(), name.len(), ptr::null()) },
+            TpdfStatus::BadArgument
+        );
+        unsafe { tpdf_builder_free(builder) };
+
+        unsafe { tpdf_builder_free(ptr::null_mut()) };
+        unsafe { tpdf_page_builder_free(ptr::null_mut()) };
+        unsafe { tpdf_outline_entry_free(ptr::null_mut()) };
     }
 }
