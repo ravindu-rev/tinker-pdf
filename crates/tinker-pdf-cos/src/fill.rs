@@ -147,10 +147,13 @@ fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) {
 ///    the CMap's own tables could have meant by a CID and returns the first that maps
 ///    **back**, so the round trip is checked rather than assumed and a
 ///    `cidchar` override cannot be inverted into a code that now means
-///    something else. That covers `/Identity-H` and `/Identity-V` (where the
-///    code is the CID outright), every embedded CMap stream, and — where this
-///    build compiled the tables in — every registry CMap of 9.7.5.2.
+///    something else. That covers `/Identity-H` (where the code is the CID
+///    outright), every embedded CMap stream, and — where this build compiled
+///    the tables in — every horizontal registry CMap of 9.7.5.2.
 ///    [`Font::cid_for_gid`] inverts the remaining step, `/CIDToGIDMap`.
+///    Inversion is what condition 2 leaves on the table: `/Identity-V` is
+///    just as invertible and is still refused, because the refusal there is
+///    about where the glyph is *drawn* rather than about which one it is.
 /// 4. **The descriptor embeds a program `tinker_pdf_font::Sfnt` reads.** A
 ///    bare CFF (`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`) is not an
 ///    sfnt and carries no `GSUB`/`GPOS` for this crate to execute, so a
