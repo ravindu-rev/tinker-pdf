@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
-use xtask::{corpus, fetch, release, repo_root, version};
+use xtask::{corpus, fetch, parity, release, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -42,6 +42,21 @@ release options:
 
   cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
                                  bindings/dotnet/runtimes/<rid>/native/
+
+  cargo xtask bindings-parity [options]
+                  run both write-parity scripts on all four surfaces and
+                  require byte-identical output. Non-zero on a mismatch OR on
+                  a surface that ran and printed no `WROTE sha256=` line at
+                  all, which is the failure that gets shipped. A surface whose
+                  artefact is not installed here is SKIPPED, by name and with
+                  the reason -- never silently
+
+bindings-parity options:
+  --require-all   a skipped surface is a failure. What CI passes
+  --python P      the interpreter that has the wheel installed (default:
+                  python; skipped when `import tinker_pdf` fails in it)
+  --node-dir D    a directory where the npm tarball has been installed
+                  (default: target/js-parity)
 
   cargo xtask synth-face [--out PATH]    write the synthetic face `--fonts
                                  synthetic` measures with, so it can be looked at
@@ -115,6 +130,7 @@ fn main() -> ExitCode {
                 );
             }),
         ),
+        "bindings-parity" => one("bindings-parity", parity::run(&repo_root(), rest)),
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
@@ -761,6 +777,18 @@ const SPAWNERS: &[(&str, &str)] = &[
          once, before a run spawns it per file. It adjudicates nothing about a \
          document — the question is what this repository's own binary is, and \
          the answer only decides whether to refuse the run",
+    ),
+    (
+        "xtask/src/parity.rs",
+        "PERMANENT: spawns `cargo`, `python`, `node` and `dotnet` as *hosts* \
+         for this repository's own code. Each loads this engine — as a cargo \
+         example, an installed wheel, an installed npm package, an installed \
+         NuGet package — and runs a script this repository wrote. Ruling 13's \
+         line is between hosting and adjudicating, and every judgement here is \
+         first-party: the bytes are hashed against a number recorded in \
+         parity.rs, and each surface re-opens its own artefact through this \
+         engine's strict structural validator before reporting one. No \
+         third-party program reads, writes or judges a document",
     ),
 ];
 

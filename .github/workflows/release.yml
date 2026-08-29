@@ -170,6 +170,14 @@ jobs:
             "$py" bindings/python/tests/wheel_smoke.py \
               testdata/simple-text.pdf auto 2>&1 | tee "smoke$version.log"
             grep -q 'WHEEL-SMOKE: RAN' "smoke$version.log"
+            # The write leg (gap 32). A package that shipped a read-only
+            # engine would pass every line above and fail here, which is the
+            # point of running it inside the release pipeline rather than
+            # only in CI.
+            "$py" bindings/python/tests/write_parity.py \
+              testdata/form-fields.pdf 2>&1 | tee "write$version.log"
+            grep -q 'PYTHON-PARITY: RAN' "write$version.log"
+            grep -q 'WROTE sha256=' "write$version.log"
             echo "::endgroup::"
           done
       - uses: actions/upload-artifact@v4
@@ -227,6 +235,11 @@ jobs:
             "$GITHUB_WORKSPACE/testdata/simple-text.pdf" \
             /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee node-smoke.log
           grep -q 'NODE-SMOKE: RAN' node-smoke.log
+          # The write leg (gap 32), from the same installed package.
+          node "$GITHUB_WORKSPACE/bindings/js/tests/write_parity.mjs" \
+            "$GITHUB_WORKSPACE/testdata/form-fields.pdf" 2>&1 | tee js-write.log
+          grep -q 'JS-PARITY: RAN' js-write.log
+          grep -q 'WROTE sha256=' js-write.log
       - uses: actions/upload-artifact@v4
         with:
           name: npm-package
@@ -323,9 +336,15 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # The third argument is the write leg's fixture (gap 32): the same
+          # program does both, so a package that shipped a read-only engine
+          # fails its own release pipeline rather than passing it.
           dotnet run --project bindings/dotnet/tests/Smoke -c Release -- \
-            testdata/simple-text.pdf C:/Windows/Fonts/arial.ttf 2>&1 | tee dotnet-smoke.log
+            testdata/simple-text.pdf C:/Windows/Fonts/arial.ttf \
+            testdata/form-fields.pdf 2>&1 | tee dotnet-smoke.log
           grep -q 'DOTNET-SMOKE: RAN' dotnet-smoke.log
+          grep -q 'DOTNET-PARITY: RAN' dotnet-smoke.log
+          grep -q 'DOTNET-SMOKE: WROTE sha256=' dotnet-smoke.log
       - uses: actions/upload-artifact@v4
         with:
           name: nuget-package

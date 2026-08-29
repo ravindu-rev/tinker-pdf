@@ -241,6 +241,54 @@ jobs:
           dotnet-version: '8.0'
       - run: dotnet build bindings/dotnet/TinkerPdf.csproj
 
+  bindings-parity:
+    # Gap 32: the four write surfaces must produce byte-identical output, which
+    # is what makes ruling 11 ("a binding adds no logic of its own") a check
+    # rather than a claim. `--require-all` is what turns a missing artefact
+    # from a quiet skip into a failure here — the task prints SKIPPED with a
+    # reason either way, but a CI job that skipped three of four and went green
+    # would be exactly the silent pass it exists to prevent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      # The wheel, installed rather than imported from the source tree.
+      - run: pip install maturin
+      - run: maturin build --release --out dist
+        working-directory: bindings/python
+      - run: pip install bindings/python/dist/*.whl
+      # The npm package, installed into the directory the task looks in.
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - run: wasm-pack build --target web --release
+        working-directory: bindings/js
+      - name: Install the npm package where bindings-parity looks
+        run: |
+          set -euo pipefail
+          mkdir -p target/js-parity
+          tarball=$(cd bindings/js/pkg && npm pack --pack-destination "$PWD/../../../target/js-parity" | tail -1)
+          cd target/js-parity
+          npm init -y > /dev/null
+          npm pkg set type=module > /dev/null
+          npm install "./$tarball"
+      # The NuGet package, staged and packed as the release pipeline does.
+      - run: cargo build -p tinker-pdf-ffi --release
+      - run: cargo run -p xtask -- nuget-stage
+      - run: dotnet pack bindings/dotnet/TinkerPdf.csproj -c Release -o target/nuget
+      - name: All four surfaces, byte-identical
+        run: |
+          set -o pipefail
+          cargo run -p xtask -- bindings-parity --require-all 2>&1 | tee parity.log
+          grep -q 'bindings-parity: all four surfaces wrote the same bytes' parity.log
+          grep -q 'SKIPPED 0 (none)' parity.log
+
   wasm:
     # wasm32-unknown-unknown is a first-class target from day one. The ffi crate
     # (cdylib for native bindings) and the CLI tools are excluded; the engine

@@ -217,6 +217,56 @@ across all four surfaces, and every smoke test renders *twice* — blank
 without a face, inked with one — because "a bitmap of the right size came
 back" passes on a build whose renderer does nothing at all.
 
+**Write parity is byte identity, and it is measured.** Two scripts with every
+input pinned — *fill-and-save* opens `testdata/form-fields.pdf`, fills its
+damaged field, its undamaged control field, a checkbox and a radio group and
+saves incrementally; *build-a-document* registers a base font and an image,
+draws two pages through `begin_page`/`push_page`, sets `/Info` and an outline
+and finishes — run on all four surfaces. On windows/x86_64, August 2026, all
+four printed the same two hashes:
+
+```text
+fill-and-save    59f1efce6e4e5bfa8915fdee31e43f629e6373512de8040bf8e6404b7fe78af3
+build-a-document 1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac62
+```
+
+That is the write-side analogue of the read side's 1 190 inked pixels, and it
+is the evidence for ruling 11: four surfaces disagreeing would mean one of them
+added something. The image both scripts draw is computed from a formula rather
+than read from a file, so the four languages produce the same 64 bytes with no
+fixture between them — a parity suite whose surfaces read the same *file*
+proves only that they can read a file.
+
+`cargo xtask bindings-parity` is the gate, and it is built around two different
+failures. A **mismatch** is the one everybody thinks of. An **absent line** —
+a surface that ran, exited zero and printed no `WROTE sha256=` at all — is the
+one that gets shipped, because a script that silently does nothing looks
+exactly like a passing one; both exit non-zero. A surface whose artefact is not
+installed on the machine is **SKIPPED**, by name and with the reason, and the
+run says how many ran and how many did not: retired ruling 9 left that
+discipline behind it and ruling 13 restates it, so a job that quietly found no
+interpreter cannot pass. `--require-all` turns every skip into a failure, and
+that is what `ci.yml`'s `bindings-parity` job passes after building and
+installing all four artefacts.
+
+**Agreement is not enough, and this is what makes it enough.** Four
+byte-identical outputs tell you nothing if all four are wrong. So every surface
+re-opens its own artefact through this engine's strict structural validator and
+refuses to print a hash for a file that is not clean — which is why `validate()`
+is now projected on all four surfaces (`tpdf_document_validate` and the
+`TpdfDefects` handle on the C ABI, `Document.validate()` in Python and
+JavaScript, `Document.Validate()` in .NET). Under ruling 13 that validator is
+first-party, and that is precisely why it can be a gate here rather than an
+external step somebody might not have installed.
+
+The recorded hashes live in `xtask/src/parity.rs` rather than beside the three
+synthesised-document hashes in `crates/tinker-pdf/tests/determinism.rs`. Those
+are a *rendering* claim's fingerprints, moved only by the renderer or the
+synthesiser, and interleaving a bindings hash among them would make a writer
+change read as a determinism regression to whoever opened that file next. One
+place, and the four surfaces compared to *it* rather than to each other, so a
+legitimate writer change is one recorded update instead of four flaky suites.
+
 **Packaging, built and dry-run, nothing published.** `cargo run -p xtask --
 release` walks wheel, npm package, NuGet package and crates in an order
 computed from the manifests. The dry run is the default and `--execute` is
@@ -279,14 +329,54 @@ doc = tinker_pdf.Document(open("file.pdf", "rb").read())
 doc.set_fonts(open("DejaVuSans.ttf", "rb").read())
 bitmap = doc.render(0, dpi=150.0)
 memoryview(bitmap.data)
+
+editor = doc.editor()
+# Three outcomes, not two: this raises when nothing was written, and returns
+# a list — empty or not — when the value was written.
+for widget in editor.fill_field("name", "Ada Lovelace"):
+    print(f"not drawn: {widget}")          # 7 0 R: no usable /Rect (12.5.2)
+
+with editor.transaction():                 # checkpoint, `with`, restore
+    editor.set_checkbox("agree", True)
+    editor.select_radio("colour", "red")
+
+data = editor.save(mode="incremental")     # bytes; the original is a prefix
+assert tinker_pdf.Document(data).validate() == []
+
+builder = tinker_pdf.DocumentBuilder()
+builder.add_base_font(b"F1", b"Helvetica")
+page = builder.begin_page(200.0, 200.0)    # the resource snapshot is *here*
+page.text(b"F1", 14.0, 20.0, 170.0, "Page one")
+builder.push_page(page)                    # consumes the page
+builder.set_outline([tinker_pdf.OutlineEntry("Page one", page=0)])
+pdf = builder.finish()                     # consumes the builder
 ```
 
 ```js
-import init, { PdfDocument } from 'tinker-pdf-js';
+import init, { PdfDocument, PdfWriteOptions } from 'tinker-pdf-js';
 await init();
 const doc = new PdfDocument(bytes);
 const bitmap = doc.renderPage(0, 1.0);
 const pixels = bitmap.data();          // a copy; safe to keep
+
+// There is no editor.transaction(callback): an exported method borrows its
+// `this` for the whole call, so JavaScript running inside one that touched the
+// same editor would hit wasm-bindgen's "recursive use of an object detected".
+// Checkpoint, host control flow, restore — three lines, in the host.
+const editor = doc.editor();
+const mark = editor.checkpoint();
+try {
+  editor.fillField('name', 'Ada Lovelace');
+} catch (e) {
+  editor.restore(mark);
+  throw e;
+} finally {
+  mark.free();
+}
+
+const options = new PdfWriteOptions();   // the engine's defaults, not zeros
+options.setMode('incremental');
+const saved = editor.save(options);      // a copy, never a view into wasm
 ```
 
 ```csharp
@@ -305,6 +395,29 @@ for (uint i = 0; i < signatures.Count; i++)
     _ = (signatures.CoverageOf(i), verdicts.DocumentDigestOf(i),
          verdicts.SignatureCheckOf(i), verdicts.ChainOf(i));
 }
+
+using var editor = document.CreateEditor();   // outlives `document`
+foreach (var widget in editor.FillField("name", "Ada Lovelace"))
+{
+    Console.WriteLine($"not drawn: {widget}");  // 7 0 R: no usable /Rect (12.5.2)
+}
+
+editor.Transaction(() =>                      // checkpoint, try, restore
+{
+    editor.SetCheckbox("agree", true);
+    editor.SelectRadio("colour", "red");
+});
+
+var saved = editor.Save(new WriteOptions { Mode = WriteMode.Incremental });
+
+using var builder = new DocumentBuilder();
+builder.AddBaseFont("F1"u8.ToArray(), "Helvetica"u8.ToArray());
+using (var page = builder.BeginPage(200.0, 200.0))   // snapshot is *here*
+{
+    page.Text("F1"u8.ToArray(), 14.0, 20.0, 170.0, "Page one");
+    builder.PushPage(page);                          // consumes the drawing
+}
+var pdf = builder.Finish();  // a second Finish is Status.SpentHandle
 ```
 
 ```c
@@ -465,6 +578,30 @@ packaging commands.
   `bindings/dotnet/tests/Smoke` against a local folder feed with the source
   list cleared so a missing package fails rather than resolving from
   nuget.org. Each asserts the blank-then-inked render.
+- The **write** legs run beside them, from the same installed artefacts:
+  `write_parity.py`, `write_parity.mjs` and the Smoke program's third
+  argument, each printing `WROTE sha256=<hex>` per script, and
+  `crates/tinker-pdf/examples/write_parity.rs` doing the same against the
+  facade. `release.yml` greps for those lines on every platform its smoke jobs
+  already cover, so a package that shipped a read-only `cdylib` fails its own
+  release pipeline. Each also asserts the leg its language can express and the
+  others cannot: the Python context manager and the .NET
+  callback-`Transaction` restore on an exception, and the JavaScript three
+  liner restores on a throw — every one of them checked by saving before and
+  after and comparing hashes, which is the only form of that assertion that
+  cannot be faked, and every one of them requiring the exception to *still
+  escape*, because a rollback that also hid the reason would be the worst of
+  both.
+- `cargo xtask bindings-parity` compares all four against the recorded answer
+  in `xtask/src/parity.rs`. Its counted injections, run August 2026: a wrong
+  recorded hash is reported by **all four** surfaces with both the written and
+  the expected value; a surface whose print statement is disabled — so it runs,
+  exits zero and produces no evidence — fails on **2 assertions**, one per
+  script, with the "printed no `WROTE sha256=` line" message rather than
+  passing quietly. Skips were exercised too: pointing it at a missing
+  interpreter and a missing `node_modules` reports both by name with the
+  command that would fix each, exits 0 without them, and exits non-zero under
+  `--require-all`.
 - `bindings/js/demo/verify.mjs` drives the browser demo in headless
   Chromium and checks the ink's bounding box is the shape of a line of
   text rather than a smear or a stray pixel.

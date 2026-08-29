@@ -16,6 +16,7 @@ pub mod face;
 pub mod fetch;
 pub mod json;
 pub mod lock;
+pub mod parity;
 pub mod ratchet;
 pub mod release;
 pub mod report;
