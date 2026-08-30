@@ -214,6 +214,43 @@ pub struct ComputedStyle {
     pub align_content: AlignContent,
     /// `order`, §5.4.
     pub order: i32,
+    /// `min-width`, CSS 2.2 §10.4.
+    pub min_width: MinSize,
+    /// `max-width`, §10.4.
+    pub max_width: MaxSize,
+    /// `min-height`, §10.7.
+    pub min_height: MinSize,
+    /// `max-height`, §10.7.
+    pub max_height: MaxSize,
+    /// `vertical-align`, §10.8.1 and §17.5.4. A percentage is still a
+    /// percentage: it is a percentage of the element's **own** used
+    /// `line-height`, which is not a number until `line-height: normal` has met
+    /// a face.
+    pub vertical_align: VerticalAlign,
+    /// `position`, §9.3.1.
+    pub position: Position,
+    /// `top`, `right`, `bottom` and `left`, §9.3.2.
+    pub inset: Sides<Inset>,
+    /// `z-index`, §9.9.1.
+    pub z_index: ZIndex,
+    /// `column-count`, `css-multicol-1` §3.2.
+    pub column_count: ColumnCount,
+    /// `column-width`, §3.1, in CSS pixels.
+    pub column_width: ColumnWidth,
+    /// `column-gap`, `css-align-3` §8.1.
+    pub column_gap: Gap,
+    /// `row-gap`, §8.1.
+    pub row_gap: Gap,
+    /// `column-rule-width`, `css-multicol-1` §5.1, in CSS pixels.
+    pub column_rule_width: f64,
+    /// `column-rule-style`, §5.2.
+    pub column_rule_style: BorderStyle,
+    /// `column-rule-color`, §5.3.
+    pub column_rule_color: Color,
+    /// `column-span`, §6.
+    pub column_span: ColumnSpan,
+    /// `column-fill`, §4.
+    pub column_fill: ColumnFill,
     // <<< the layout proof injects a field directly above this line >>>
 }
 
@@ -281,6 +318,33 @@ impl ComputedStyle {
             align_self: AlignSelf::Auto,
             align_content: AlignContent::Stretch,
             order: 0,
+            // CSS 2.2 §10.4 gives `min-width` the initial value `0` and
+            // `css-sizing-3` §5.1 replaced it with `auto`, which is the value
+            // taken here: the two agree everywhere but on a flex item, where
+            // `auto` is §4.5's automatic minimum and `0` is not. Taking the
+            // older number would let every flex item in every book shrink below
+            // its own longest word.
+            min_width: MinSize::Auto,
+            max_width: MaxSize::None,
+            min_height: MinSize::Auto,
+            max_height: MaxSize::None,
+            vertical_align: VerticalAlign::Baseline,
+            position: Position::Static,
+            inset: Sides::all(Inset::Auto),
+            z_index: ZIndex::Auto,
+            column_count: ColumnCount::Auto,
+            column_width: ColumnWidth::Auto,
+            column_gap: Gap::Normal,
+            row_gap: Gap::Normal,
+            // §5.1's initial value is `medium`, which is `border-width`'s
+            // `medium` and therefore the same three pixels — §5.1 defines the
+            // property *"as for `border-width`"* and a second number here would
+            // be a second answer to one question.
+            column_rule_width: 3.0,
+            column_rule_style: BorderStyle::None,
+            column_rule_color: Color::BLACK,
+            column_span: ColumnSpan::None,
+            column_fill: ColumnFill::Balance,
             // <<< the layout proof's initial value goes here >>>
         }
     }
@@ -473,6 +537,79 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::AlignItems(value) => style.align_items = *value,
         Property::AlignSelf(value) => style.align_self = *value,
         Property::AlignContent(value) => style.align_content = *value,
+        // CSS 2.2 §10.4 and §10.7. The parser already refuses a negative one,
+        // so the clamp is `border-spacing`'s: a computed style is not the place
+        // to discover that a grammar changed.
+        Property::MinWidth(value) => {
+            style.min_width = min_size(value, font_size, root_font_size);
+        }
+        Property::MinHeight(value) => {
+            style.min_height = min_size(value, font_size, root_font_size);
+        }
+        Property::MaxWidth(value) => {
+            style.max_width = max_size(value, font_size, root_font_size);
+        }
+        Property::MaxHeight(value) => {
+            style.max_height = max_size(value, font_size, root_font_size);
+        }
+        // §10.8.1: *"percentages refer to the `line-height` of the element
+        // itself"*, which is the one length in this function that cannot be
+        // resolved here — `line-height: normal` is a face's answer and this
+        // crate has no face. So a percentage survives computation, and
+        // `tinker_pdf_layout::style::consume` resolves it where the used
+        // `line-height` already is.
+        Property::VerticalAlign(value) => {
+            style.vertical_align = match value {
+                SpecifiedVerticalAlign::Baseline => VerticalAlign::Baseline,
+                SpecifiedVerticalAlign::Sub => VerticalAlign::Sub,
+                SpecifiedVerticalAlign::Super => VerticalAlign::Super,
+                SpecifiedVerticalAlign::Top => VerticalAlign::Top,
+                SpecifiedVerticalAlign::Middle => VerticalAlign::Middle,
+                SpecifiedVerticalAlign::Bottom => VerticalAlign::Bottom,
+                SpecifiedVerticalAlign::TextTop => VerticalAlign::TextTop,
+                SpecifiedVerticalAlign::TextBottom => VerticalAlign::TextBottom,
+                SpecifiedVerticalAlign::Length(len) => {
+                    VerticalAlign::Length(len.compute(font_size, root_font_size))
+                }
+            }
+        }
+        Property::Position(value) => style.position = *value,
+        Property::Inset(side, value) => {
+            let computed = match value {
+                SpecifiedInset::Auto => Inset::Auto,
+                SpecifiedInset::Length(len) => {
+                    Inset::Length(len.compute(font_size, root_font_size))
+                }
+            };
+            style.inset.set(*side, computed);
+        }
+        Property::ZIndex(value) => style.z_index = *value,
+        Property::ColumnCount(value) => style.column_count = *value,
+        // §3.1's grammar has no percentage in it, so the `Percent` arm is
+        // unreachable from the parser and resolves to `auto` rather than
+        // panicking — `px`'s reasoning, one property over.
+        Property::ColumnWidth(value) => {
+            style.column_width = match value {
+                SpecifiedColumnWidth::Auto => ColumnWidth::Auto,
+                SpecifiedColumnWidth::Length(len) => match len.compute(font_size, root_font_size) {
+                    LengthPercentage::Px(px) => ColumnWidth::Px(px.max(0.0)),
+                    LengthPercentage::Percent(_) => ColumnWidth::Auto,
+                },
+            }
+        }
+        Property::ColumnGap(value) => {
+            style.column_gap = gap(value, font_size, root_font_size);
+        }
+        Property::RowGap(value) => {
+            style.row_gap = gap(value, font_size, root_font_size);
+        }
+        Property::ColumnRuleWidth(value) => {
+            style.column_rule_width = px(*value, font_size, root_font_size).max(0.0);
+        }
+        Property::ColumnRuleStyle(value) => style.column_rule_style = *value,
+        Property::ColumnRuleColor(value) => style.column_rule_color = *value,
+        Property::ColumnSpan(value) => style.column_span = *value,
+        Property::ColumnFill(value) => style.column_fill = *value,
         Property::Order(value) => style.order = *value,
         // <<< the compile-time proof's fourth arm goes here >>>
     }
@@ -488,6 +625,45 @@ fn px(len: Len, font_size: f64, root_font_size: f64) -> f64 {
     match len.compute(font_size, root_font_size) {
         LengthPercentage::Px(value) => value,
         LengthPercentage::Percent(_) => 0.0,
+    }
+}
+
+/// A specified `min-width`/`min-height` to a computed one.
+fn min_size(value: &SpecifiedMinSize, font_size: f64, root_font_size: f64) -> MinSize {
+    match value {
+        SpecifiedMinSize::Auto => MinSize::Auto,
+        SpecifiedMinSize::Length(len) => {
+            MinSize::Length(clamp_zero(len.compute(font_size, root_font_size)))
+        }
+    }
+}
+
+/// A specified `max-width`/`max-height` to a computed one.
+fn max_size(value: &SpecifiedMaxSize, font_size: f64, root_font_size: f64) -> MaxSize {
+    match value {
+        SpecifiedMaxSize::None => MaxSize::None,
+        SpecifiedMaxSize::Length(len) => {
+            MaxSize::Length(clamp_zero(len.compute(font_size, root_font_size)))
+        }
+    }
+}
+
+/// A specified `column-gap`/`row-gap` to a computed one.
+fn gap(value: &SpecifiedGap, font_size: f64, root_font_size: f64) -> Gap {
+    match value {
+        SpecifiedGap::Normal => Gap::Normal,
+        SpecifiedGap::Length(len) => {
+            Gap::Length(clamp_zero(len.compute(font_size, root_font_size)))
+        }
+    }
+}
+
+/// A computed length floored at zero, for the grammars that have no negative
+/// value in them.
+fn clamp_zero(value: LengthPercentage) -> LengthPercentage {
+    match value {
+        LengthPercentage::Px(px) => LengthPercentage::Px(px.max(0.0)),
+        LengthPercentage::Percent(percent) => LengthPercentage::Percent(percent.max(0.0)),
     }
 }
 

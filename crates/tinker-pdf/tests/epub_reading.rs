@@ -798,7 +798,10 @@ fn a_same_document_reference_reaches_the_page_it_points_at() {
 /// for that this build does not implement, counted by the elements it reached.
 /// It is written down in `tests/epub/CENSUS.tsv` rather than listed here, so a
 /// milestone that implements `float` or `vertical-align` has to re-measure
-/// rather than argue — the same ratchet `CONSERVATION.tsv` is.
+/// rather than argue — the same ratchet `CONSERVATION.tsv` is. Tier 4 did
+/// exactly that: `vertical-align` was 101, 96, 92, 49, 18 and 18 across the six
+/// books and is 0, 0, 0, 0, 16 and 16, and `max-width` was 3 on
+/// `pandoc-plates.epub` and is gone.
 #[test]
 fn the_unsupported_census_is_the_one_the_record_states() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -873,16 +876,20 @@ fn the_unsupported_census_is_the_one_the_record_states() {
 ///
 /// The two differ by a factor of a hundred on a real book and only one of them
 /// is a fact about the book: a `float: left` in a rule that matches nothing is
-/// not a gap the book noticed, and `.calibre13 { vertical-align: top }`
-/// matching eighteen cells is eighteen and not one. A build that counted at
-/// parse time would report 1 for each.
+/// not a gap the book noticed, and `.calibre15 { vertical-align: inherit }`
+/// matching nine cells is nine and not one. A build that counted at parse time
+/// would report 1 for each.
 ///
 /// **The property this asserts on used to be `display`**, and milestone 11 took
-/// it away by implementing every `display: table*` value calibre writes. The
-/// same eighteen cells still carry a `vertical-align`, which is §17.5.4's and
-/// is not in this build, so the fixture is the same eighteen elements under a
-/// different name — and the fact that it had to move is the census reporting a
-/// gap that closed.
+/// it away by implementing every `display: table*` value calibre writes. It
+/// became `vertical-align`, at eighteen elements, and tier 4 took **two** of
+/// those away — `.calibre11` and `.calibre14` write `vertical-align: middle`,
+/// which §17.5.4 now aligns. Sixteen are left and they are all one value:
+/// calibre writes `vertical-align: inherit` on its rows, its header cells and
+/// its data cells, and `inherit` is a `css-cascade-5` §7.1 explicit-defaulting
+/// keyword that this build implements on no property at all. So the fixture
+/// survives a milestone that implemented the property whole, and what it is now
+/// a fixture for is the (property, **value**) key rather than the property.
 #[test]
 fn the_census_counts_elements_and_not_declarations() {
     let doc = Document::open(corpus_book("calibre-book-cover.epub")).expect("a book");
@@ -890,9 +897,9 @@ fn the_census_counts_elements_and_not_declarations() {
     let aligned = entries
         .iter()
         .find(|(property, _)| property == "vertical-align")
-        .expect("this book sets vertical-align on its cells");
-    assert!(
-        aligned.1 > 10,
+        .expect("this book sets vertical-align: inherit on its cells");
+    assert_eq!(
+        aligned.1, 16,
         "vertical-align was counted per declaration rather than per element: {aligned:?}"
     );
     // And the ranking is by count, which is what makes the first line of a

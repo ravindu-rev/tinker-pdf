@@ -37,10 +37,11 @@
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderCollapse, BorderSpacing, BorderStyle, BoxSizing,
-    Clear, Color, Display, FlexDirection, FlexWrap, Float, FontFamily, FontStyle, FontVariant,
-    JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, OverflowWrap,
-    PageBreak, PageBreakInside, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration,
-    Visibility, WhiteSpace,
+    Clear, Color, ColumnCount, ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection,
+    FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
+    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
+    PageBreak, PageBreakInside, Position, Side, Sides, Size, Spacing, TableLayout, TextAlign,
+    TextDecoration, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -163,6 +164,60 @@ pub struct Consumed {
     pub align_content: AlignContent,
     /// `order`, §5.4.
     pub order: i32,
+    /// `min-width`, CSS 2.2 §10.4. Read by [`crate::flow`] and by
+    /// [`crate::flex`], which are the two places §10.4's clamp and
+    /// `css-flexbox-1` §4.5's automatic minimum meet.
+    pub min_width: MinSize,
+    /// `max-width`, §10.4.
+    pub max_width: MaxSize,
+    /// `min-height`, §10.7.
+    pub min_height: MinSize,
+    /// `max-height`, §10.7.
+    pub max_height: MaxSize,
+    /// `vertical-align`, §10.8.1 for an inline box and §17.5.4 for a table
+    /// cell, **with any percentage already resolved to points**.
+    ///
+    /// §10.8.1 makes a percentage a percentage of *"the `line-height` of the
+    /// element itself"*, and the used `line-height` is resolved eleven fields
+    /// up rather than in the cascade — because `normal` is a face's answer. So
+    /// the resolution belongs here, at the one door, on `border-width`'s and
+    /// `border-spacing`'s precedent: no reader can forget it, and no reader
+    /// needs to know that the value ever was a percentage.
+    pub vertical_align: VerticalAlign,
+    /// `position`, §9.3.1. Read by [`crate::flow`], which lays every box out in
+    /// the normal flow and says so by name.
+    pub position: Position,
+    /// `top`, `right`, `bottom` and `left`, §9.3.2.
+    pub inset: Sides<Inset>,
+    /// `z-index`, §9.9.1.
+    pub z_index: ZIndex,
+    /// `column-count`, `css-multicol-1` §3.2.
+    pub column_count: ColumnCount,
+    /// `column-width`, §3.1.
+    pub column_width: ColumnWidth,
+    /// `column-gap`, `css-align-3` §8.1, **unresolved**, for
+    /// [`Consumed::align_self`]'s reason two fields up.
+    ///
+    /// §8.1 makes `normal` mean `1em` in a multi-column container and `0`
+    /// everywhere else, and a percentage a percentage of the container's own
+    /// content-box size in that axis — so both halves of the value need
+    /// something this struct is not: the formatting context the box turns out
+    /// to establish, and a measure. [`Consumed::gap_px`] is where the two meet.
+    pub column_gap: Gap,
+    /// `row-gap`, §8.1, unresolved for the same reason.
+    pub row_gap: Gap,
+    /// `column-rule-width`, `css-multicol-1` §5.1, already zero where the style
+    /// is `none` or `hidden` — §5.1's own rule and `border-width`'s twenty
+    /// fields up.
+    pub column_rule_width: f64,
+    /// `column-rule-style`, §5.2.
+    pub column_rule_style: BorderStyle,
+    /// `column-rule-color`, §5.3.
+    pub column_rule_color: Color,
+    /// `column-span`, §6.
+    pub column_span: ColumnSpan,
+    /// `column-fill`, §4.
+    pub column_fill: ColumnFill,
 }
 
 /// Reads a computed style, exhaustively.
@@ -221,6 +276,23 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         align_self,
         align_content,
         order,
+        min_width,
+        max_width,
+        min_height,
+        max_height,
+        vertical_align,
+        position,
+        inset,
+        z_index,
+        column_count,
+        column_width,
+        column_gap,
+        row_gap,
+        column_rule_width,
+        column_rule_style,
+        column_rule_color,
+        column_span,
+        column_fill,
         // <<< the layout proof's binding goes here >>>
     } = style;
 
@@ -244,18 +316,24 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
     // rather than at every reader is what stops `border: 4px` with no style
     // from moving the whole page four points.
     let mut used_border = Sides::all(0.0);
-    for side in [
-        tinker_pdf_css::property::Side::Top,
-        tinker_pdf_css::property::Side::Right,
-        tinker_pdf_css::property::Side::Bottom,
-        tinker_pdf_css::property::Side::Left,
-    ] {
+    for side in [Side::Top, Side::Right, Side::Bottom, Side::Left] {
         let width = match border_style.get(side) {
             BorderStyle::None | BorderStyle::Hidden => 0.0,
             _ => border_width.get(side).max(0.0),
         };
         used_border.set(side, width);
     }
+    // §10.8.1: *"percentages refer to the `line-height` of the element
+    // itself"*, and `line_height` above is that number. The cascade could not
+    // do it — `line-height: normal` is 1.2 of a font size no CSS crate has a
+    // face for — so it is done here, once, and no reader of `vertical_align`
+    // has to know the value ever was a percentage.
+    let vertical_align = match vertical_align {
+        VerticalAlign::Length(LengthPercentage::Percent(percent)) => {
+            VerticalAlign::Length(LengthPercentage::Px(line_height * percent / 100.0))
+        }
+        other => *other,
+    };
 
     Consumed {
         display: *display,
@@ -314,6 +392,31 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         align_self: *align_self,
         align_content: *align_content,
         order: *order,
+        min_width: *min_width,
+        max_width: *max_width,
+        min_height: *min_height,
+        max_height: *max_height,
+        vertical_align,
+        position: *position,
+        inset: *inset,
+        z_index: *z_index,
+        column_count: *column_count,
+        column_width: *column_width,
+        column_gap: *column_gap,
+        row_gap: *row_gap,
+        // §5.1 defines `column-rule-width` *"as for `border-width`"*, and
+        // §5.2's `column-rule-style: none` forces the used width to zero
+        // exactly as CSS 2.2 §8.5.3 does for a border. Resolved at the door for
+        // the same reason: a rule declared `4px` with no style would otherwise
+        // move a column boundary four points in every reader that forgot.
+        column_rule_width: match column_rule_style {
+            BorderStyle::None | BorderStyle::Hidden => 0.0,
+            _ => column_rule_width.max(0.0),
+        },
+        column_rule_style: *column_rule_style,
+        column_rule_color: *column_rule_color,
+        column_span: *column_span,
+        column_fill: *column_fill,
     }
 }
 
@@ -399,6 +502,43 @@ impl Consumed {
             MarginValue::Auto => 0.0,
             MarginValue::Length(LengthPercentage::Px(px)) => px,
             MarginValue::Length(LengthPercentage::Percent(percent)) => containing * percent / 100.0,
+        }
+    }
+
+    /// Whether this box establishes a **multi-column formatting context**,
+    /// `css-multicol-1` §3.
+    ///
+    /// §3's own condition, which is neither property alone: a container is
+    /// multi-column when `column-count` or `column-width` is anything but
+    /// `auto`. `column-gap`, `column-rule-*`, `column-span` and `column-fill`
+    /// declared on a box that is not one of these do nothing, which is why they
+    /// are not part of the test — a book that writes `column-gap: 2em` on every
+    /// `<div>` has no multi-column container in it.
+    #[must_use]
+    pub fn is_multicol(&self) -> bool {
+        self.column_count != ColumnCount::Auto || self.column_width != ColumnWidth::Auto
+    }
+
+    /// `css-align-3` §8.1's used gap in one axis, in points.
+    ///
+    /// `normal` is `1em` in a multi-column container and zero everywhere else,
+    /// which is §8.1's own answer and the reason [`Consumed::column_gap`] is
+    /// carried unresolved: the same declaration is two different numbers
+    /// depending on what the box turned out to be.
+    #[must_use]
+    pub fn gap_px(&self, gap: Gap, containing: f64) -> f64 {
+        match gap {
+            Gap::Normal => {
+                if self.is_multicol() {
+                    self.font_size
+                } else {
+                    0.0
+                }
+            }
+            Gap::Length(LengthPercentage::Px(px)) => px.max(0.0),
+            Gap::Length(LengthPercentage::Percent(percent)) => {
+                (containing * percent / 100.0).max(0.0)
+            }
         }
     }
 

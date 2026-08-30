@@ -24,8 +24,9 @@
 use super::{sheet, tree, Node};
 use crate::cascade::{cascade, cascade_from, rank, resolve_lazily, ComputedStyle, Origin};
 use crate::property::{
-    Color, Display, Float, FontStyle, LengthPercentage, LineHeight, MarginValue, Side, Size,
-    Spacing, TextAlign, Visibility,
+    Color, ColumnCount, Display, Float, FontStyle, Gap, Inset, LengthPercentage, LineHeight,
+    MarginValue, MaxSize, MinSize, Position, Side, Size, Spacing, TextAlign, VerticalAlign,
+    Visibility, ZIndex,
 };
 use crate::{Budget, Limits, Refusal, Stylesheet};
 
@@ -852,12 +853,12 @@ fn every_implemented_property_reaches_the_computed_style() {
 #[test]
 fn the_unsupported_census_counts_elements_reached() {
     let nodes = tree(&[("p", None), ("p", Some(0)), ("p", Some(0))]);
-    let parsed = sheet("p { column-count: 2 } span { column-gap: 1em }");
+    let parsed = sheet("p { box-shadow: 0 0 2px #000 } span { text-shadow: 1px 1px red }");
     let limits = Limits::DEFAULT;
     let mut budget = Budget::new(&limits);
     let tree_styles = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
         .expect("under every cap");
-    assert_eq!(tree_styles.report.unsupported, vec![("column-count", 3)]);
+    assert_eq!(tree_styles.report.unsupported, vec![("box-shadow", 3)]);
 }
 
 /// A caller that hands elements out of document order is refused **by name**.
@@ -981,4 +982,99 @@ fn the_initial_font_size_is_the_callers_and_rem_follows_it() {
         .expect("under every cap")
         .styles;
     assert_eq!(default[0].font_size, crate::cascade::INITIAL_FONT_SIZE);
+}
+
+/// **None of tier 4's seventeen properties inherits**, and the one to check is
+/// `vertical-align`.
+///
+/// It reads like a text property and is not one: CSS 2.2 §10.8.1's own table
+/// says *inherited: no*, because the value aligns **this** box against its
+/// parent's baseline. A build that inherited it would apply the offset again at
+/// every level, so a `<sup>` inside a `<sup>` would climb off the line and the
+/// paragraph would still look like a paragraph. calibre writing
+/// `vertical-align: inherit` on four of its five table classes is the same fact
+/// from the other side: a producer that wanted inheritance had to ask for it.
+///
+/// The other sixteen are asserted here too rather than in sixteen tests,
+/// because they are one claim — `css-cascade-5` §7.2 is per property and every
+/// one of these tables says the same thing — and because a child that kept its
+/// parent's `position: absolute` or `column-count: 3` is the same bug wearing a
+/// different name.
+#[test]
+fn none_of_the_tier_four_properties_is_inherited() {
+    let nodes = tree(&[("div", None), ("p", Some(0))]);
+    let styled = styles(
+        "div {
+            vertical-align: super;
+            min-width: 10px;
+            max-width: 20px;
+            min-height: 30px;
+            max-height: 40px;
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            z-index: 7;
+            column-count: 3;
+            column-width: 20em;
+            column-gap: 2em;
+            row-gap: 2em;
+            column-rule: 2px solid red;
+            column-span: all;
+            column-fill: auto;
+         }",
+        &nodes,
+    );
+    // The element that wrote them has them.
+    assert_eq!(styled[0].vertical_align, VerticalAlign::Super);
+    assert_eq!(styled[0].position, Position::Absolute);
+    assert_eq!(styled[0].column_count, ColumnCount::Count(3));
+    assert_eq!(styled[0].column_rule_width, 2.0);
+
+    // Its child has the initial value of every one of them.
+    let child = &styled[1];
+    let initial = ComputedStyle::initial();
+    assert_eq!(child.vertical_align, VerticalAlign::Baseline);
+    assert_eq!(child.min_width, MinSize::Auto);
+    assert_eq!(child.max_width, MaxSize::None);
+    assert_eq!(child.min_height, MinSize::Auto);
+    assert_eq!(child.max_height, MaxSize::None);
+    assert_eq!(child.position, Position::Static);
+    assert_eq!(child.inset.get(Side::Top), Inset::Auto);
+    assert_eq!(child.inset.get(Side::Left), Inset::Auto);
+    assert_eq!(child.z_index, ZIndex::Auto);
+    assert_eq!(child.column_count, ColumnCount::Auto);
+    assert_eq!(child.column_width, initial.column_width);
+    assert_eq!(child.column_gap, Gap::Normal);
+    assert_eq!(child.row_gap, Gap::Normal);
+    assert_eq!(child.column_rule_width, initial.column_rule_width);
+    assert_eq!(child.column_rule_style, initial.column_rule_style);
+    assert_eq!(child.column_rule_color, initial.column_rule_color);
+    assert_eq!(child.column_span, initial.column_span);
+    assert_eq!(child.column_fill, initial.column_fill);
+}
+
+/// A `vertical-align` percentage **survives the cascade as a percentage**.
+///
+/// §10.8.1: *"percentages refer to the `line-height` of the element itself"*,
+/// and the used `line-height` is not a number this crate can produce —
+/// `line-height: normal` is a face's answer and ruling 8 keeps every face out
+/// of here. So the percentage is computed nowhere and resolved in
+/// `tinker_pdf_layout::style::consume`, where the used `line-height` already
+/// is. A build that resolved it here would have to invent a font.
+///
+/// The `em` beside it is the control: **that** one is resolved, against this
+/// element's own computed `font-size`, which the cascade does know.
+#[test]
+fn a_vertical_align_percentage_survives_and_an_em_does_not() {
+    let nodes = one("sup");
+    let styled = styles("sup { font-size: 20px; vertical-align: 30% }", &nodes);
+    assert_eq!(
+        styled[0].vertical_align,
+        VerticalAlign::Length(LengthPercentage::Percent(30.0))
+    );
+    let styled = styles("sup { font-size: 20px; vertical-align: 0.5em }", &nodes);
+    assert_eq!(
+        styled[0].vertical_align,
+        VerticalAlign::Length(LengthPercentage::Px(10.0))
+    );
 }

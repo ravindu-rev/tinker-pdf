@@ -65,20 +65,43 @@ const VARIANT_ANCHOR: &str =
 ///
 /// `border-collapse` was the successor and milestone 11 implemented it, on
 /// exactly the schedule the paragraph above predicted — *"when that milestone
-/// lands this constant moves again"*. It has now moved twice, which is the
-/// second piece of evidence that the choice is the right kind: a name that
-/// never had to move would be a name nobody was ever going to implement.
+/// lands this constant moves again"*. `vertical-align` was the third and tier
+/// 4 implemented it, in the same commit as this line. It has now moved three
+/// times, which is the standing evidence that the choice is the right kind: a
+/// name that never had to move would be a name nobody was ever going to
+/// implement, and a proof injecting one would be asserting something about a
+/// property this build had decided never to have.
 ///
-/// `vertical-align` is the successor and it is chosen the same way: CSS 2.2
-/// §10.8 and §17.5.4, in `UNSUPPORTED_PROPERTIES` today, and **the largest
-/// single gap the committed corpus measures** at thirty-four elements — larger
-/// now than `display`'s was before milestone 11 emptied it. It is genuinely not
-/// implemented: nothing here aligns a cell's content within its row, and every
-/// cell in this build is set from its top.
-const VARIANT: &str = "    VerticalAlign(bool),";
-const APPLY_ARM: &str = "        Property::VerticalAlign(_) => {}";
-const NAME_ARM: &str = "            Property::VerticalAlign(_) => \"vertical-align\",";
-const INHERITED_ARM: &str = "            Property::VerticalAlign(_) => true,";
+/// `text-transform` is the successor and it is chosen the same way, on the
+/// three tests the moves above have settled between them.
+///
+/// **It is in `UNSUPPORTED_PROPERTIES` and stays there.** Tier 4 consumes
+/// `content` and `gap`, so neither could have been picked without this constant
+/// moving again inside the same tier.
+///
+/// **It is genuinely unimplemented, for a reason that can be stated.**
+/// `css-text-4` §2.1's `uppercase` and `lowercase` are not a `char::to_uppercase`
+/// away: the mapping is locale-dependent (Turkish `i` uppercases to `İ` and
+/// dotless `ı` lowercases from `I`), context-dependent (a Greek final sigma is
+/// `ς` at the end of a word and `σ` inside it), and not length-preserving (`ß`
+/// uppercases to `SS`, so a transformed run measures differently from the one
+/// the source wrote). All three need Unicode's `SpecialCasing.txt`, which is
+/// **not** among the files vendored at `crates/tinker-pdf-layout/data/ucd` —
+/// that directory holds `DerivedGeneralCategory.txt`, `EastAsianWidth.txt`,
+/// `LineBreak.txt`, `LineBreakTest.txt` and `emoji-data.txt`, all of them
+/// UAX #14's. A build that reached for the ASCII answer would set a Turkish
+/// book's headings wrong and nothing would look broken.
+///
+/// **And it is a name somebody will implement one day**, which is the test the
+/// three moves above have made the important one. `writing-mode` would have
+/// been the easy wrong answer here: it is unimplemented, it is in the same
+/// list, and it is refused *permanently* by the vertical-text non-goal in
+/// `docs/design/shaping.md` — so it would never move, and a constant that never
+/// moves is one nobody ever re-reads.
+const VARIANT: &str = "    TextTransform(bool),";
+const APPLY_ARM: &str = "        Property::TextTransform(_) => {}";
+const NAME_ARM: &str = "            Property::TextTransform(_) => \"text-transform\",";
+const INHERITED_ARM: &str = "            Property::TextTransform(_) => true,";
 
 struct Source {
     lib: String,
@@ -238,7 +261,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
         "the build failed for some other reason than a non-exhaustive match:\n{stderr}"
     );
     assert!(
-        stderr.contains("VerticalAlign"),
+        stderr.contains("TextTransform"),
         "the error does not name the variant that was added:\n{stderr}"
     );
 }

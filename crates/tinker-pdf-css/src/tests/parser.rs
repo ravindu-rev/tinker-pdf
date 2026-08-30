@@ -5,9 +5,11 @@ use super::sheet;
 use crate::media::{MediaContext, MediaType};
 use crate::parser::{parse, Declared, LayerName, LayerPart};
 use crate::property::{
-    AlignContent, AlignItems, AlignSelf, BorderStyle, Color, Declaration, Display, FlexDirection,
-    FlexWrap, Float, JustifyContent, Len, LengthPercentage, MarginValue, Property, Side, Size,
-    SpecifiedMargin, SpecifiedSize, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
+    AlignContent, AlignItems, AlignSelf, BorderStyle, Color, ColumnCount, ColumnFill, ColumnSpan,
+    Declaration, Display, FlexDirection, FlexWrap, Float, JustifyContent, Len, LengthPercentage,
+    MarginValue, Position, Property, Side, Size, SpecifiedColumnWidth, SpecifiedGap,
+    SpecifiedInset, SpecifiedMargin, SpecifiedMaxSize, SpecifiedMinSize, SpecifiedSize,
+    SpecifiedVerticalAlign, ZIndex, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
 };
 use crate::{Budget, ImportResolver, Limits, NoImports, Warning};
 
@@ -707,8 +709,8 @@ fn a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour() {
 fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
     let parsed = sheet(
         "p {
-            column-count: 2;
-            -webkit-column-count: 2;
+            box-shadow: 0 0 2px #000;
+            -webkit-box-shadow: 0 0 2px #000;
             -epub-text-emphasis-style: dot;
             -ah-margin-start: 1em;
             --brand: #333;
@@ -718,7 +720,7 @@ fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
     );
     assert_eq!(
         parsed.report.unsupported,
-        vec![("column-count", 1), ("hyphens", 1)]
+        vec![("box-shadow", 1), ("hyphens", 1)]
     );
     let unknown: Vec<&str> = parsed
         .report
@@ -729,7 +731,7 @@ fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
     assert_eq!(
         unknown,
         vec![
-            "-webkit-column-count",
+            "-webkit-box-shadow",
             "-epub-text-emphasis-style",
             "-ah-margin-start",
             "--brand",
@@ -835,10 +837,10 @@ fn a_value_that_is_not_css_is_discarded_rather_than_counted_as_a_gap() {
 fn the_report_deduplicates_with_counts() {
     let mut source = String::new();
     for index in 0..400 {
-        source.push_str(&format!(".c{index} {{ column-count: 2 }}\n"));
+        source.push_str(&format!(".c{index} {{ box-shadow: 0 0 2px #000 }}\n"));
     }
     let parsed = sheet(&source);
-    assert_eq!(parsed.report.unsupported, vec![("column-count", 400)]);
+    assert_eq!(parsed.report.unsupported, vec![("box-shadow", 400)]);
 }
 
 /// The two name tables are disjoint.
@@ -1259,4 +1261,212 @@ fn flex_basis_computes_to_a_size_and_auto_stays_auto() {
         super::cascade::styles("p { color: red }", &tree)[0].flex_basis,
         Size::Auto
     );
+}
+
+/// CSS 2.2 §10.4 and §10.7's four, and the three answers a length can get.
+///
+/// A **negative** minimum or maximum is `Malformed` and the author's, because
+/// both grammars are `<length-percentage [0,inf]>` and a negative number is not
+/// a value of the property at all. `min-content` is `BadValue` and this
+/// build's, because `css-sizing-3` §5.1 defines it and this build has not
+/// implemented it. Putting the second in the author's column is the mistake
+/// this split exists to prevent: it is the one figure the census is judged on,
+/// and it would move in the flattering direction.
+#[test]
+fn min_and_max_sizing_tell_the_authors_mistake_from_this_builds_gap() {
+    assert_eq!(
+        known("p { min-width: 0 }"),
+        vec![Property::MinWidth(SpecifiedMinSize::Length(Len::Px(0.0)))]
+    );
+    assert_eq!(
+        known("p { min-width: auto }"),
+        vec![Property::MinWidth(SpecifiedMinSize::Auto)]
+    );
+    assert_eq!(
+        known("img { max-width: 100% }"),
+        vec![Property::MaxWidth(SpecifiedMaxSize::Length(Len::Percent(
+            100.0
+        )))]
+    );
+    assert_eq!(
+        known("p { max-height: none }"),
+        vec![Property::MaxHeight(SpecifiedMaxSize::None)]
+    );
+    assert_eq!(
+        known("p { min-height: 2em }"),
+        vec![Property::MinHeight(SpecifiedMinSize::Length(Len::Em(2.0)))]
+    );
+    // The author's: discarded by §5.4.4, counted nowhere as a gap.
+    for source in ["p { min-width: -1px }", "p { max-width: -3em }"] {
+        let parsed = sheet(source);
+        assert!(parsed.report.unsupported.is_empty(), "{source}");
+        assert_eq!(parsed.report.discarded_declarations, 1, "{source}");
+    }
+    // This build's: named, with the value beside it.
+    let parsed = sheet("p { min-width: min-content }");
+    assert_eq!(parsed.report.unsupported, vec![("min-width", 1)]);
+}
+
+/// §10.8.1's ten values, and the two things a first implementation folds.
+///
+/// `sub` and `super` are keywords rather than lengths, `text-top` is not `top`,
+/// and a **negative** length is valid where a negative `min-width` is not --
+/// `vertical-align: -0.4em` is how a book sets a chemical subscript, so the
+/// absence of a non-negative check here is the grammar rather than an omission.
+#[test]
+fn vertical_align_takes_ten_values_and_a_negative_length_is_one_of_them() {
+    for (source, expected) in [
+        ("baseline", SpecifiedVerticalAlign::Baseline),
+        ("sub", SpecifiedVerticalAlign::Sub),
+        ("super", SpecifiedVerticalAlign::Super),
+        ("top", SpecifiedVerticalAlign::Top),
+        ("middle", SpecifiedVerticalAlign::Middle),
+        ("bottom", SpecifiedVerticalAlign::Bottom),
+        ("text-top", SpecifiedVerticalAlign::TextTop),
+        ("text-bottom", SpecifiedVerticalAlign::TextBottom),
+    ] {
+        assert_eq!(
+            known(&format!("sup {{ vertical-align: {source} }}")),
+            vec![Property::VerticalAlign(expected)],
+            "{source}"
+        );
+    }
+    assert_eq!(
+        known("sub { vertical-align: -0.4em }"),
+        vec![Property::VerticalAlign(SpecifiedVerticalAlign::Length(
+            Len::Em(-0.4)
+        ))]
+    );
+    assert_eq!(
+        known("sup { vertical-align: 30% }"),
+        vec![Property::VerticalAlign(SpecifiedVerticalAlign::Length(
+            Len::Percent(30.0)
+        ))]
+    );
+    // `css-inline-3`'s keyword, which this build does not have.
+    let parsed = sheet("sup { vertical-align: first }");
+    assert_eq!(parsed.report.unsupported, vec![("vertical-align", 1)]);
+}
+
+/// §9.3.1's five, §9.3.2's four insets and §9.9.1's `z-index`.
+///
+/// **All five `position` values are `Known`**, including the three no box in
+/// this build is placed by. The alternative -- reporting `absolute` as a value
+/// gap -- would have had to refuse the five longhands with it, and then the
+/// report could say nothing about the box at all; cascading it lets
+/// `tinker_pdf_layout` count it per **box** instead of per declaration.
+#[test]
+fn position_its_insets_and_z_index() {
+    for (source, expected) in [
+        ("static", Position::Static),
+        ("relative", Position::Relative),
+        ("absolute", Position::Absolute),
+        ("fixed", Position::Fixed),
+        ("sticky", Position::Sticky),
+    ] {
+        assert_eq!(
+            known(&format!("figure {{ position: {source} }}")),
+            vec![Property::Position(expected)],
+            "{source}"
+        );
+    }
+    assert_eq!(
+        known("figure { top: 0; right: auto; bottom: -2px; left: 50% }"),
+        vec![
+            Property::Inset(Side::Top, SpecifiedInset::Length(Len::Px(0.0))),
+            Property::Inset(Side::Right, SpecifiedInset::Auto),
+            Property::Inset(Side::Bottom, SpecifiedInset::Length(Len::Px(-2.0))),
+            Property::Inset(Side::Left, SpecifiedInset::Length(Len::Percent(50.0))),
+        ]
+    );
+    assert_eq!(
+        known("figure { z-index: auto }"),
+        vec![Property::ZIndex(ZIndex::Auto)]
+    );
+    assert_eq!(
+        known("figure { z-index: -1 }"),
+        vec![Property::ZIndex(ZIndex::Layer(-1))]
+    );
+    // §9.9.1's grammar is `<integer>`; `2.5` is not one.
+    assert!(known("figure { z-index: 2.5 }").is_empty());
+}
+
+/// `css-multicol-1`'s longhands and its two shorthands, and `css-align-3`'s
+/// `gap`.
+///
+/// Three separate claims, and the third is the one to get wrong. §3.3's
+/// `columns` **resets the omitted longhand**, so both come out of it whatever
+/// the author wrote; §5.4's `column-rule` is `border`'s three-in-any-order; and
+/// §8.2's `gap` is **row first**, which is the opposite of every
+/// `<length> <length>?` in CSS 2.2 and would look entirely reasonable read the
+/// other way round.
+#[test]
+fn the_multi_column_longhands_and_the_three_shorthands() {
+    assert_eq!(
+        known("div { column-count: 3 }"),
+        vec![Property::ColumnCount(ColumnCount::Count(3))]
+    );
+    assert_eq!(
+        known("div { column-width: 20em }"),
+        vec![Property::ColumnWidth(SpecifiedColumnWidth::Length(
+            Len::Em(20.0)
+        ))]
+    );
+    // §3.1's grammar has no percentage in it: the author's, not this build's.
+    assert!(known("div { column-width: 40% }").is_empty());
+    assert_eq!(
+        known("div { columns: 20em 3 }"),
+        vec![
+            Property::ColumnWidth(SpecifiedColumnWidth::Length(Len::Em(20.0))),
+            Property::ColumnCount(ColumnCount::Count(3)),
+        ]
+    );
+    // §3.3 resets the omitted one, so a bare count still says `auto` out loud.
+    assert_eq!(
+        known("div { columns: 2 }"),
+        vec![
+            Property::ColumnWidth(SpecifiedColumnWidth::Auto),
+            Property::ColumnCount(ColumnCount::Count(2)),
+        ]
+    );
+    assert_eq!(
+        known("div { column-rule: 2px solid red }"),
+        vec![
+            Property::ColumnRuleWidth(Len::Px(2.0)),
+            Property::ColumnRuleStyle(BorderStyle::Solid),
+            Property::ColumnRuleColor(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }),
+        ]
+    );
+    assert_eq!(
+        known("div { column-span: all; column-fill: auto }"),
+        vec![
+            Property::ColumnSpan(ColumnSpan::All),
+            Property::ColumnFill(ColumnFill::Auto),
+        ]
+    );
+    // §8.2: `<'row-gap'> <'column-gap'>?`, and the order is the assertion.
+    assert_eq!(
+        known("div { gap: 1em 2em }"),
+        vec![
+            Property::RowGap(SpecifiedGap::Length(Len::Em(1.0))),
+            Property::ColumnGap(SpecifiedGap::Length(Len::Em(2.0))),
+        ]
+    );
+    assert_eq!(
+        known("div { gap: 4px }"),
+        vec![
+            Property::RowGap(SpecifiedGap::Length(Len::Px(4.0))),
+            Property::ColumnGap(SpecifiedGap::Length(Len::Px(4.0))),
+        ]
+    );
+    assert_eq!(
+        known("div { column-gap: normal }"),
+        vec![Property::ColumnGap(SpecifiedGap::Normal)]
+    );
+    assert!(known("div { gap: -1px }").is_empty());
 }
