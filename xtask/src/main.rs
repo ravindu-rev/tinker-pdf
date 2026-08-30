@@ -19,9 +19,10 @@ usage:
   cargo xtask oracles   check that every program this repository spawns is
                         written down with a reason (ruling 13)
   cargo xtask vendor    check vendored data against THIRDPARTY.md and deny.toml
+  cargo xtask conflicts check that no unresolved merge marker is committed
   cargo xtask versions  check every manifest against the workspace version, and
                         `publish = false` where publishing would be wrong
-  cargo xtask check     all five of the above
+  cargo xtask check     all six of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -98,6 +99,7 @@ fn main() -> ExitCode {
         "libm" => report("libm", check_libm()),
         "oracles" => report("oracles", check_oracles()),
         "vendor" => report("vendor", check_vendor()),
+        "conflicts" => report("conflicts", check_conflicts()),
         "versions" => report("versions", version::check(&repo_root())),
         "check" => {
             let dag = check_dag();
@@ -105,11 +107,13 @@ fn main() -> ExitCode {
             let oracles = check_oracles();
             let vendor = check_vendor();
             let versions = version::check(&repo_root());
+            let conflicts = check_conflicts();
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
             problems.extend(vendor.err().unwrap_or_default());
             problems.extend(versions.err().unwrap_or_default());
+            problems.extend(conflicts.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
@@ -1133,6 +1137,107 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every directory a conflict marker could hide in.
+///
+/// The tree rather than a crate list, because the file that got through was a
+/// feature doc: a marker in prose compiles perfectly and reads as a paragraph
+/// somebody meant to write.
+const CONFLICT_ROOTS: [&str; 7] = [
+    "crates", "docs", "fuzz", "xtask", "tools", "bindings", "corpus",
+];
+
+/// `cargo xtask conflicts` — no unresolved merge marker is committed.
+///
+/// This exists because one was. A merge printed four conflicts, the command
+/// that ran it truncated the output, two were resolved and two were not, and
+/// `git add -A` staged the rest; `crates/tinker-pdf-filters/src/lib.rs` stopped
+/// compiling and `docs/features/cbz.md` grew a marker in the middle of a
+/// sentence. The compiler caught the first within the minute. **Nothing at all
+/// would have caught the second** — `check` does not read prose, and a marker
+/// in a paragraph is a paragraph.
+///
+/// Only `<<<<<<<` and `>>>>>>>` are looked for, each with the space git writes
+/// after it. A bare `=======` is deliberately not a marker here: seven equals
+/// signs under a line is Markdown's setext H1, and this file's own docs use it.
+fn check_conflicts() -> Result<(), Vec<String>> {
+    let root = repo_root();
+    let mut problems = Vec::new();
+
+    for dir in CONFLICT_ROOTS {
+        let mut files = Vec::new();
+        collect_text_files(&root.join(dir), &mut files);
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for (number, line) in text.lines().enumerate() {
+                if is_conflict_marker(line) {
+                    let shown = file
+                        .strip_prefix(&root)
+                        .unwrap_or(&file)
+                        .display()
+                        .to_string();
+                    problems.push(format!(
+                        "{shown}:{}: an unresolved merge marker",
+                        number + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// Whether a line is one of git's conflict markers.
+///
+/// The space is load-bearing on both. Git writes `<<<<<<< ` and `>>>>>>> `
+/// with a label after them, so the space is always there — and requiring it is
+/// what keeps a row of seven angle brackets in an ASCII diagram from being a
+/// merge conflict. A bare `=======` is deliberately not a marker: seven equals
+/// signs under a line is Markdown's setext H1 and this repository's docs use
+/// it, so flagging it would fail on prose that is exactly right.
+fn is_conflict_marker(line: &str) -> bool {
+    line.starts_with("<<<<<<< ") || line.starts_with(">>>>>>> ")
+}
+
+/// Every file worth reading as text, for [`check_conflicts`].
+///
+/// Extension-led rather than exhaustive: a marker inside a `.png` is not a
+/// marker, and reading every byte of the vendored trees to find out would cost
+/// more than the check is worth.
+fn collect_text_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    const TEXT: [&str; 9] = [
+        "rs", "toml", "md", "yml", "yaml", "json", "css", "sh", "ps1",
+    ];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // `target` is build output and `corpus/cache` is fetched bytes;
+            // neither is committed and both are enormous.
+            let skip = path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "cache" || n == ".git");
+            if !skip {
+                collect_text_files(&path, out);
+            }
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| TEXT.contains(&e))
+        {
+            out.push(path);
+        }
+    }
+}
+
 fn check_dag() -> Result<(), Vec<String>> {
     let root = repo_root();
     let crates_dir = root.join("crates");
@@ -1343,5 +1448,26 @@ allow = [
         if let Err(problems) = check_vendor() {
             panic!("vendored data and THIRDPARTY.md disagree:\n{problems:#?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::is_conflict_marker;
+
+    /// The two shapes git writes, and the four that are prose.
+    #[test]
+    fn a_marker_is_a_marker_and_a_setext_heading_is_not() {
+        assert!(is_conflict_marker("<<<<<<< HEAD"));
+        assert!(is_conflict_marker(">>>>>>> worktree-agent-abc123"));
+
+        // Markdown's setext H1, which `docs/` uses and which shares the middle
+        // marker's bytes exactly. Flagging it would fail on correct prose.
+        assert!(!is_conflict_marker("======="));
+        assert!(!is_conflict_marker("======================"));
+        // No label, so not something git wrote.
+        assert!(!is_conflict_marker("<<<<<<<"));
+        // Not at the start of the line.
+        assert!(!is_conflict_marker("    <<<<<<< HEAD"));
     }
 }
