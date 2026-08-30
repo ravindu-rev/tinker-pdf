@@ -57,6 +57,7 @@ pub(crate) mod colour;
 pub(crate) mod container;
 pub(crate) mod headers;
 pub(crate) mod overlap;
+pub(crate) mod tables;
 pub(crate) mod transform;
 
 use crate::Limits;
@@ -208,11 +209,14 @@ pub enum JxrRefusal {
     /// right margins are the ordinary padding to a multiple of 16 and are
     /// always handled; a top or left margin shifts the whole sample grid.
     WindowedOrigin,
-    /// The coefficient layers of 8.7 below the tile headers. Present while
-    /// the milestones that decode them are outstanding, so that a build that
-    /// reads headers and nothing else says so rather than returning a blank
-    /// raster that reads as a successful decode of a blank image.
-    CoefficientLayers,
+    /// 9.9's sample reconstruction: the two levels of inverse transform and
+    /// the overlap filter. Present while the milestones that implement them
+    /// are outstanding, so that a build which decodes every transform
+    /// coefficient and cannot yet turn them into samples **says so** rather
+    /// than returning the coefficients as a picture. It would be a picture:
+    /// the inverse transform is a smoothing operator over a lapped basis, so
+    /// its input is a plausible-looking image rather than noise.
+    SampleReconstruction,
 }
 
 impl core::fmt::Display for JxrError {
