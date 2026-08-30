@@ -75,6 +75,39 @@ deny = [
   { name = "image" },
   { name = "png" },
   { name = "fax" },
+  # JPEG XR (ITU-T T.832), landing in the milestone that writes the decoder.
+  # The rule gap 30 wrote three blocks below this one holds here too -- these
+  # names arrive with the milestone that writes the parser rather than the one
+  # that finishes the plan, because that is the window in which the temptation
+  # exists -- and the window is unusually wide for this format.
+  #
+  # JPEG XR is the one codec in this engine with a *system* decoder sitting
+  # right there: `WmpBitmapEncoder` and its decoding twin ship with Windows,
+  # this repository already drives the encoder to build its fixtures, and
+  # calling the decoder instead of writing one would have been four lines.
+  # That is exactly the trade CONTRIBUTING rule 1 exists to refuse, and here
+  # it is worse than the usual case rather than better: a platform codec is
+  # not portable, so it would make the crate decode on Windows and refuse
+  # everywhere else -- a behaviour difference that no entry in this file can
+  # express and that ruling 4's four-target contract forbids outright.
+  #
+  # That route is therefore closed by policy rather than by a crate name, and
+  # deliberately so: the binding a contributor would reach for is `windows` or
+  # `windows-sys`, and `windows-sys` is already in the graph honestly, pulled
+  # in by `tempfile` under `proptest`. Denying it would fail this check over a
+  # dev dependency that implements nothing. What is denied below is every
+  # crate that would supply the *codec itself*.
+  #
+  # `image` is deliberately NOT repeated here: it is already denied nine lines
+  # above, for this same reason, and a second row for one crate would make the
+  # list read as though the two entries meant different things.
+  { name = "jpegxr" },
+  { name = "jxrlib-sys" },
+  { name = "jpegxr-sys" },
+  { name = "libjxl-sys" },
+  { name = "jpegxl-sys" },
+  { name = "jpegxl-rs" },
+  { name = "zune-jpegxl" },
   # Archive containers and checksums. `zip` is the one CONTRIBUTING rule 1
   # would have been most quietly broken by: gap 29 reads comic archives, and
   # reaching for the obvious crate would have added a third-party format

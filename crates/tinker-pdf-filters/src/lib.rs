@@ -35,6 +35,7 @@ mod inflate;
 mod jbig2;
 mod jpeg;
 mod jpx;
+mod jxr;
 mod lzw;
 pub mod mq;
 mod png;
@@ -50,6 +51,9 @@ pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{decode as jbig2_decode, Jbig2Params};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use jpx::{jpx_decode, JpxColour, JpxImage};
+pub use jxr::{
+    jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
+};
 pub use mq::{MqContext, MqContexts, MqDecoder};
 pub use png::{
     colour_type_depth_is_legal, png_decode, png_scan, ChunkType, PngColour, PngError, PngHeader,
