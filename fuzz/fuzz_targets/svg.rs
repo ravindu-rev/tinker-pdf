@@ -39,11 +39,32 @@
 //! - **An unreadable transform is `None` rather than an identity.** That is the
 //!   difference between a caller that can name the defect and a shape drawn
 //!   somewhere the file did not put it.
+//!
+//! # The document surface, from milestone 1
+//!
+//! The same bytes are also read as **markup**, through
+//! [`tinker_pdf_svg::read`], which is the whole crate end to end: the XML
+//! reader, the element tree, and the walk that composes transforms into a
+//! scene. That half is where a mutator finds the things a grammar fuzzer
+//! cannot — a `<!DOCTYPE` with an internal subset, an element nested past the
+//! cap, a `viewBox` with no area, a `<use>` that reaches its own ancestor.
+//!
+//! What is asserted over a scene:
+//!
+//! - **Every number in it is finite**, for the reason a coordinate is: an
+//!   infinity reaches a page and the file that produced it looked ordinary.
+//! - **Reading is deterministic**, ruling 4 over the whole crate rather than
+//!   over one parser.
+//! - **The warning list is deduplicated and inside its cap**, so a document
+//!   cannot choose how much memory its own diagnostics cost.
+//! - **Nothing is past a limit that refused nothing.** A scene came back, so
+//!   every ceiling held; the node count is checked against the one that bounds
+//!   it rather than assumed.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_svg::path::{self, Segment};
-use tinker_pdf_svg::transform;
+use tinker_pdf_svg::{transform, Limits, Node, Paint, Scene};
 
 /// Every point a segment carries.
 fn points(segment: &Segment) -> Vec<[f64; 2]> {
@@ -66,9 +87,128 @@ fn kind(segment: &Segment) -> u8 {
     }
 }
 
+/// Every number a scene carries, so one assertion can sweep all of them.
+fn numbers(scene: &Scene) -> Vec<f64> {
+    let mut out = vec![scene.size.0, scene.size.1];
+    let mut paint = |paint: &Paint| match paint {
+        Paint::None | Paint::Solid(_) => {}
+        Paint::Linear { from, to, stops } => {
+            out.extend_from_slice(&[from[0], from[1], to[0], to[1]]);
+            out.extend(stops.iter().flat_map(|s| [s.offset, s.opacity]));
+        }
+        Paint::Radial {
+            centre,
+            radius,
+            focus,
+            stops,
+        } => {
+            out.extend_from_slice(&[centre[0], centre[1], *radius, focus[0], focus[1]]);
+            out.extend(stops.iter().flat_map(|s| [s.offset, s.opacity]));
+        }
+    };
+    for node in &scene.nodes {
+        match node {
+            Node::Path {
+                outline,
+                fill,
+                fill_opacity,
+                stroke,
+                ..
+            } => {
+                for segment in &outline.segments {
+                    match *segment {
+                        Segment::Move(p) | Segment::Line(p) => out.extend_from_slice(&p),
+                        Segment::Cubic(a, b, c) => {
+                            out.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
+                        }
+                        Segment::Close => {}
+                        _ => {}
+                    }
+                }
+                paint(fill);
+                out.push(*fill_opacity);
+                if let Some(stroke) = stroke {
+                    paint(&stroke.paint);
+                    out.extend_from_slice(&[
+                        stroke.width,
+                        stroke.miter_limit,
+                        stroke.dash_offset,
+                        stroke.opacity,
+                    ]);
+                    out.extend_from_slice(&stroke.dashes);
+                }
+            }
+            Node::Image { rect, matrix, .. } => {
+                out.extend_from_slice(rect);
+                out.extend_from_slice(matrix);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fuzz_target!(|data: &[u8]| {
     let (control, body) = data.split_at(data.len().min(1));
     let knobs = control.first().copied().unwrap_or(0);
+
+    // ---- the whole crate, over the same bytes -------------------------------
+    //
+    // Before the UTF-8 gate below, deliberately: `tinker_pdf_svg::read` takes
+    // bytes and decides the encoding itself, so gating it on `from_utf8` would
+    // hide every UTF-16 document and every byte sequence the decoder refuses.
+    let mut limits = Limits::DEFAULT;
+    // Small enough that the caps are crossable inside one iteration. The
+    // shipped values are exercised by the `3` arm.
+    match (knobs >> 2) & 3 {
+        0 => {
+            limits.max_depth = 4;
+            limits.max_nodes = 8;
+            limits.max_uses = 2;
+            limits.max_warnings = 2;
+        }
+        1 => {
+            limits.max_depth = 16;
+            limits.max_nodes = 64;
+            limits.max_uses = 8;
+            limits.max_warnings = 8;
+        }
+        2 => limits.max_segments = 32,
+        _ => {}
+    }
+    let viewport = if knobs & 0x80 == 0 {
+        None
+    } else {
+        Some((100.0, 50.0))
+    };
+    if let Ok(scene) = tinker_pdf_svg::read(body, viewport, &limits) {
+        for number in numbers(&scene) {
+            assert!(
+                number.is_finite(),
+                "a scene carries something that is not a number: {number}"
+            );
+        }
+        assert!(
+            scene.nodes.len() <= limits.max_nodes,
+            "{} nodes came out of a cap of {}",
+            scene.nodes.len(),
+            limits.max_nodes
+        );
+        assert!(
+            scene.warnings.len() <= limits.max_warnings,
+            "the warning cap did not hold"
+        );
+        for (index, warning) in scene.warnings.iter().enumerate() {
+            assert!(
+                !scene.warnings[..index].contains(warning),
+                "a warning was reported twice: {warning:?}"
+            );
+        }
+        let again = tinker_pdf_svg::read(body, viewport, &limits)
+            .expect("the same bytes refused on a second run");
+        assert!(again == scene, "reading a document is not deterministic");
+    }
+
     let Ok(text) = core::str::from_utf8(body) else {
         return;
     };

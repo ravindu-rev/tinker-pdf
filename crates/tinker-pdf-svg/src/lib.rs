@@ -38,11 +38,27 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod document;
 pub mod path;
+pub mod scene;
 pub mod transform;
 
 #[cfg(test)]
 mod tests;
+
+/// Reads a document: bytes and a viewport in, a [`Scene`] out.
+///
+/// `viewport` is the box the document is being placed in, in user units. It is
+/// what a percentage on the root resolves against and what a root that states
+/// no size of its own falls back to; `None` is [`scene::DEFAULT_VIEWPORT`].
+///
+/// # Errors
+/// [`Refusal`], whose six variants are the whole of what produces no picture
+/// at all. Everything else is a [`Scene`] with [`Scene::warnings`] on it.
+pub fn read(bytes: &[u8], viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
+    let tree = document::read(bytes, limits)?;
+    scene::build(&tree, viewport, limits)
+}
 
 /// How much work one document may cost.
 ///
@@ -54,7 +70,14 @@ mod tests;
 pub struct Limits {
     /// Element nesting, which `<g>` and `<svg>` both add to.
     pub max_depth: usize,
-    /// Nodes in the finished scene.
+    /// Elements read, **and** nodes in the finished scene.
+    ///
+    /// One number for two things that a `<use>` makes different — an expansion
+    /// draws an element that is already in the tree, so a scene may hold more
+    /// nodes than the document has elements. They share a cap because a caller
+    /// tuning one and not the other would be tuning half a bound, and because
+    /// what the number stands for is the same either way: how much of one
+    /// picture a consumer has agreed to hold.
     pub max_nodes: usize,
     /// Path commands across the whole document, so that one `d` attribute
     /// cannot be the document.
@@ -62,6 +85,14 @@ pub struct Limits {
     /// `<use>` expansions, which are the one place an SVG can grow
     /// multiplicatively.
     pub max_uses: usize,
+    /// Distinct [`Warning`]s one scene may carry.
+    ///
+    /// Warnings are deduplicated, so this fires only on a document with that
+    /// many **different** things to say — which one with half a million
+    /// distinct unknown element names has, and which no drawing does. Without
+    /// it, [`Warning::ElementUnknown`] would let a file choose how much memory
+    /// its own diagnostics cost.
+    pub max_warnings: usize,
 }
 
 impl Limits {
@@ -71,6 +102,7 @@ impl Limits {
         max_nodes: 65_536,
         max_segments: 1 << 20,
         max_uses: 4_096,
+        max_warnings: 256,
     };
 }
 
@@ -118,6 +150,15 @@ pub enum Warning {
     ClipPathUnsupported,
     /// `<pattern>` used as a paint.
     PatternUnsupported,
+    /// `<marker>`, and the three properties that name one.
+    ///
+    /// §11.6's vertex decorations: an arrowhead is a whole second rendering of
+    /// a referenced subtree at every vertex, rotated to the path's tangent
+    /// there. Named rather than folded into [`Warning::ElementUnknown`],
+    /// because a `<marker>` is SVG this build declines rather than a
+    /// vocabulary it does not read — and thirty-two of them are in the fetched
+    /// corpus, every one on a path that also fills.
+    MarkerUnsupported,
     /// `<foreignObject>`, whose content is a different document language.
     ForeignObjectUnsupported,
     /// SMIL — `<animate>`, `<set>`, `<animateTransform>` and relatives. A
