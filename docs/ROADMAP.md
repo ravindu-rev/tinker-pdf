@@ -347,10 +347,11 @@ refusal table.
   built); the pinned float reading-order defect; multi-column; non-static
   `position`; `min`/`max` sizing; `vertical-align`; SVG content
   documents; pseudo-elements (parsed, no box generated).
-- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR,
-  which is 9.1.5.1's recommended format and has no decoder here — TIFF
-  now reaches the page; remote resource-dictionary parts; `IsSideways`
-  and odd `BidiLevel`; `OpacityMask`.
+- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR
+  **reaching the page** — the decoder is built and `xps/image.rs` still
+  refuses the format at the element, which is the same shape TIFF was in
+  before it was wired; remote resource-dictionary parts; `IsSideways` and
+  odd `BidiLevel`.
 - **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
   honestly — each means a hand-rolled decompressor, and **RAR 4 has no
   fixture this machine can produce**, so it closes as decoded-but-
