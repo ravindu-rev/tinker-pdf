@@ -41,11 +41,12 @@
 //! entirely fine, and one that discards silently cannot say how much it
 //! discarded.
 //!
-//! **The cascade is `css-cascade-5` §6.1 whole, including the `!important`
-//! origin reversal.** An `!important` author rule **loses** to an `!important`
-//! UA rule. That is backwards from the normal case, it is how a reading system
-//! keeps control of what it must, and it is the half a first implementation
-//! drops.
+//! **The cascade is `css-cascade-5` §6.1 whole, including the two reversals.**
+//! An `!important` author rule **loses** to an `!important` UA rule, and an
+//! `!important` declaration in the *first* `@layer` beats one in the last.
+//! Both are backwards from their normal cases, both are how a reading system
+//! and an author keep control of what they must, and they are the halves a
+//! first implementation drops.
 //!
 //! **`@media` is evaluated as `screen`.** The argument is in
 //! [`media`]'s header and it is a decision rather than a default: an EPUB is
@@ -505,10 +506,12 @@ impl std::error::Error for Refusal {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Warning {
-    /// `@layer`, refused by name. `css-cascade-5` §6.1 sorts layers above
-    /// specificity, so reading the block as ordinary rules would invert the
-    /// cascade and dropping it silently would lose the rules inside.
-    LayerRefused,
+    /// An at-rule block nested deeper than this build reads, or a `@layer`
+    /// name with more parts than it orders. The construct is dropped rather
+    /// than flattened into the block around it, because a layer merged into its
+    /// parent inverts `css-cascade-5` §6.1's fourth criterion exactly as
+    /// reading its block as ordinary rules would.
+    AtRuleTooDeep,
     /// An at-rule this build does not implement, by name.
     AtRuleUnsupported(String),
     /// An `@import` chain that comes back to a sheet already on the stack.
@@ -545,7 +548,7 @@ pub enum Warning {
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Warning::LayerRefused => f.write_str("@layer is refused by name"),
+            Warning::AtRuleTooDeep => f.write_str("an at-rule block is nested past the cap"),
             Warning::AtRuleUnsupported(name) => write!(f, "@{name} is not implemented"),
             Warning::ImportCycle => f.write_str("an @import chain returns to a sheet it came from"),
             Warning::ImportTooDeep => f.write_str("an @import chain is past the depth cap"),

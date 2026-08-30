@@ -1,5 +1,25 @@
 //! `css-cascade-5` §6.1's sorting order, a fixture per criterion, and §7.2's
 //! inheritance against the quadratic alternative.
+//!
+//! # The counted injection: `CascadeKey`'s field order **is** the algorithm
+//!
+//! `Ord` is derived on `cascade::CascadeKey`, so moving a field moves a
+//! criterion, and the edit a reader is most likely to make is the tidy one: put
+//! `layer` next to `specificity`, because the two look related. It was made —
+//! `layer` moved from between `attached` and `specificity` to after
+//! `specificity` — and **8 of the 25 assertions in the layer fixtures below
+//! fired**, in five of their seven tests.
+//!
+//! The seventeen that did not are why the number recorded is assertions rather
+//! than failing tests: a fixture whose two rules have the **same** specificity
+//! cannot tell the two field orders apart at all, and that is what
+//! `criterion_four_important_reverses_the_layer_order`,
+//! `criterion_four_a_layer_statement_fixes_the_order_before_the_blocks` and the
+//! per-origin fixture are made of — they are about the `!important` reversal,
+//! first mention, and whose layer table is whose, none of which this injection
+//! touches. What the eight say is that every fixture which *is* about the
+//! position hands the layered rule the winning specificity and the later source
+//! position, so the only thing left that can decide it is where the field sits.
 
 use super::{sheet, tree, Node};
 use crate::cascade::{cascade, cascade_from, rank, resolve_lazily, ComputedStyle, Origin};
@@ -218,6 +238,325 @@ fn criterion_three_an_inline_declaration_beats_every_selector() {
     assert_eq!(
         styles("#top { color: red !important }", &nodes)[0].color,
         blue()
+    );
+}
+
+// ---- §6.1 criterion 4: layers -------------------------------------------
+//
+// Every fixture here is written so that **the other criteria all point the
+// other way**: the rule that must lose is given the higher specificity, or the
+// later position, or both. A layered rule that wins on specificity anyway
+// proves nothing about the layer.
+
+/// A layered rule **loses to an unlayered one of lower specificity**, which is
+/// the sentence criterion 4 exists to make true.
+///
+/// The unlayered rule here is a type selector written *before* a layered id
+/// selector, so it loses on criterion 5 and on criterion 6 and wins on this
+/// one. Both twins are asserted: the same pair with neither rule in a layer,
+/// and the same pair with **both** in one — because "everything in a layer
+/// loses" is a different rule from this one and passes half of it.
+#[test]
+fn criterion_four_a_layer_loses_to_a_lower_specificity_unlayered_rule() {
+    let mut nodes = one("p");
+    nodes[0].id = Some("top".to_string());
+    assert_eq!(
+        styles(
+            "p { color: blue } @layer base { #top { color: red } }",
+            &nodes
+        )[0]
+        .color,
+        blue(),
+        "unlayered styles are §6.4.2's implicit final layer, so they beat every layer"
+    );
+    assert_eq!(
+        styles("p { color: blue } #top { color: red }", &nodes)[0].color,
+        red(),
+        "with neither in a layer, criterion 5 decides and the id wins"
+    );
+    assert_eq!(
+        styles(
+            "@layer base { p { color: blue } #top { color: red } }",
+            &nodes
+        )[0]
+        .color,
+        red(),
+        "and inside one layer criterion 5 decides again — a layer is not a penalty"
+    );
+    // Criterion 3 still sorts above criterion 4: a `style=""` attribute beats
+    // a layered rule as it beats an unlayered one.
+    nodes[0].style = Some("color: #00ff00".to_string());
+    assert_eq!(
+        styles("@layer base { #top { color: red } }", &nodes)[0].color,
+        Color {
+            r: 0,
+            g: 255,
+            b: 0,
+            a: 255
+        }
+    );
+}
+
+/// **`!important` reverses the layer order**, and it is the mirror image of the
+/// origin reversal one criterion up.
+///
+/// An important declaration in the **first** layer beats an important one in
+/// the last, and an important *unlayered* declaration loses to every layer —
+/// the same clause one step further out, and the one a build that reversed only
+/// the origins gets exactly backwards. Every claim is asserted in both
+/// directions, because "the first layer always wins" passes half of each.
+#[test]
+fn criterion_four_important_reverses_the_layer_order() {
+    let nodes = one("p");
+    let normal = "@layer a, b;
+         @layer a { p { color: red } }
+         @layer b { p { color: blue } }";
+    assert_eq!(
+        styles(normal, &nodes)[0].color,
+        blue(),
+        "normally the later layer wins"
+    );
+
+    let important = "@layer a, b;
+         @layer a { p { color: red !important } }
+         @layer b { p { color: blue !important } }";
+    assert_eq!(
+        styles(important, &nodes)[0].color,
+        red(),
+        "and with both important the **first** layer wins — the reversal"
+    );
+
+    // Only one of them important is criterion 1 deciding, not criterion 4, and
+    // it is asserted so that the pair above cannot be passed by a build that
+    // sorts important declarations by nothing at all.
+    let mixed = "@layer a, b;
+         @layer a { p { color: red !important } }
+         @layer b { p { color: blue } }";
+    assert_eq!(styles(mixed, &nodes)[0].color, red());
+
+    // And the unlayered half of the same reversal.
+    assert_eq!(
+        styles("p { color: blue } @layer a { p { color: red } }", &nodes)[0].color,
+        blue(),
+        "normal: unlayered beats every layer"
+    );
+    assert_eq!(
+        styles(
+            "p { color: blue !important } @layer a { p { color: red !important } }",
+            &nodes
+        )[0]
+        .color,
+        red(),
+        "important: unlayered loses to every layer"
+    );
+}
+
+/// `@layer a, b;` **fixes the order before either block arrives**.
+///
+/// The two sources below differ by one line — the statement — and give opposite
+/// answers, which is what says the statement is read rather than skipped. A
+/// build that ordered layers by their blocks passes the second and fails the
+/// first, and every stylesheet that declares its order at the top is the shape
+/// that finds it.
+#[test]
+fn criterion_four_a_layer_statement_fixes_the_order_before_the_blocks() {
+    let nodes = one("p");
+    let declared = "@layer a, b;
+         @layer b { p { color: blue } }
+         @layer a { p { color: red } }";
+    assert_eq!(
+        styles(declared, &nodes)[0].color,
+        blue(),
+        "the statement made `b` the later layer, whatever order the blocks come in"
+    );
+    let undeclared = "@layer b { p { color: blue } }
+         @layer a { p { color: red } }";
+    assert_eq!(
+        styles(undeclared, &nodes)[0].color,
+        red(),
+        "without it the blocks declare the order, so `a` is the later layer"
+    );
+}
+
+/// **A layer re-opened later keeps its first position.**
+///
+/// The third block below re-opens `a`, is the last rule in the sheet, and is
+/// written with an id selector — so it wins on criterion 5 *and* criterion 6.
+/// It still loses, because `a` is where its first mention put it. The twin
+/// names the third block `c` instead: one character, and the answer flips.
+#[test]
+fn criterion_four_a_reopened_layer_keeps_its_first_position() {
+    let mut nodes = one("p");
+    nodes[0].id = Some("top".to_string());
+    let reopened = "@layer a { p { color: blue } }
+         @layer b { p { color: blue } }
+         @layer a { #top { color: red } }";
+    assert_eq!(
+        styles(reopened, &nodes)[0].color,
+        blue(),
+        "`a` did not move to the end by being written again"
+    );
+    let fresh = "@layer a { p { color: blue } }
+         @layer b { p { color: blue } }
+         @layer c { #top { color: red } }";
+    assert_eq!(
+        styles(fresh, &nodes)[0].color,
+        red(),
+        "and a genuinely new layer at the end does win"
+    );
+}
+
+/// An anonymous layer is **a fresh layer every time and unreachable by name**.
+///
+/// Three claims and three ways to get it wrong: a build that gave every
+/// anonymous block one identity merges the last pair, one that gave it the
+/// enclosing name lets `@layer a` reach into it, and one that treated it as
+/// unlayered would let it beat every named layer.
+#[test]
+fn criterion_four_an_anonymous_layer_is_unreachable_by_name() {
+    let mut nodes = one("p");
+    nodes[0].id = Some("top".to_string());
+    assert_eq!(
+        styles(
+            "@layer { p { color: red } } @layer a { p { color: blue } }",
+            &nodes
+        )[0]
+        .color,
+        blue(),
+        "the named layer is the later one"
+    );
+    assert_eq!(
+        styles(
+            "@layer a { p { color: blue } } @layer { p { color: red } }",
+            &nodes
+        )[0]
+        .color,
+        red(),
+        "and reversed, the anonymous one is — so they are two layers, not a rule about names"
+    );
+    assert_eq!(
+        styles(
+            "@layer { #top { color: red } } @layer { p { color: blue } }",
+            &nodes
+        )[0]
+        .color,
+        blue(),
+        "two anonymous blocks are two layers: if they were one, the id would decide"
+    );
+    // And it is unlayered styles, not anonymous layers, that beat every layer.
+    assert_eq!(
+        styles("p { color: blue } @layer { #top { color: red } }", &nodes)[0].color,
+        blue()
+    );
+}
+
+/// A nested layer **is** its dotted name, and a sub-layer sorts inside its
+/// parent rather than where it was written.
+///
+/// `@layer a { @layer b { … } }` and `@layer a.b { … }` are one layer, so the
+/// second re-opens the first and criterion 5 decides between them. And `a.b`
+/// stays below `c` however late it is written, because `a` is.
+#[test]
+fn criterion_four_a_nested_layer_is_its_dotted_name() {
+    let mut nodes = one("p");
+    nodes[0].id = Some("top".to_string());
+    assert_eq!(
+        styles(
+            "@layer a { @layer b { #top { color: red } } } @layer a.b { p { color: blue } }",
+            &nodes
+        )[0]
+        .color,
+        red(),
+        "one layer re-opened, so the id wins on criterion 5"
+    );
+    assert_eq!(
+        styles(
+            "@layer a { @layer b { #top { color: red } } } @layer a.c { p { color: blue } }",
+            &nodes
+        )[0]
+        .color,
+        blue(),
+        "and a different sub-layer really is a later layer"
+    );
+    assert_eq!(
+        styles(
+            "@layer a, c; @layer c { p { color: blue } } @layer a.b { #top { color: red } }",
+            &nodes
+        )[0]
+        .color,
+        blue(),
+        "`a.b` sorts inside `a`, which is below `c`, however late it was written"
+    );
+    // §6.4.2 one level down: a layer's own rules are the implicit final
+    // sub-layer of it, exactly as unlayered rules are the implicit final layer
+    // of the origin. So `a` beats `a.b` — and a build that walked the tree
+    // parent-first would answer the other way round on every nested sheet.
+    assert_eq!(
+        styles(
+            "@layer a { @layer b { #top { color: red } } p { color: blue } }",
+            &nodes
+        )[0]
+        .color,
+        blue()
+    );
+}
+
+/// **Layers are per origin**, and two sheets at one origin share them.
+///
+/// The first claim is what keeps a book from reordering this engine's own
+/// sheet; the second is what makes a layer a property of the origin rather than
+/// of the file, which is the whole reason the tree is not built per sheet.
+#[test]
+fn criterion_four_layers_are_per_origin_and_shared_across_a_sheets_origin() {
+    let mut nodes = one("p");
+    nodes[0].id = Some("top".to_string());
+
+    // One origin, two sheets: the first orders `a` before `b` and writes `b`;
+    // the second writes into `a` with an id selector and still loses. A build
+    // with a table per sheet has no number to compare these two with.
+    let first = sheet("@layer a, b; @layer b { p { color: blue } }");
+    let second = sheet("@layer a { #top { color: red } }");
+    assert_eq!(
+        styles_from(
+            &[(Origin::Author, &first), (Origin::Author, &second)],
+            &nodes
+        )[0]
+        .color,
+        blue()
+    );
+    // The twin: the second sheet writing into `b` instead wins, on order.
+    let into_b = sheet("@layer b { #top { color: red } }");
+    assert_eq!(
+        styles_from(
+            &[(Origin::Author, &first), (Origin::Author, &into_b)],
+            &nodes
+        )[0]
+        .color,
+        red()
+    );
+
+    // **And across origins the name means nothing**, which is asserted with the
+    // one fixture that can tell a per-origin table from a global one: the UA
+    // sheet mentions `a` first, and the author then declares `b, a`. Per origin
+    // the author's order is `b` then `a`, so `a` wins. With one global table the
+    // UA's mention would have placed `a` first, `b` would be the later layer,
+    // and the answer would flip — the book's own stylesheet reordered by this
+    // engine's.
+    let ua = sheet("@layer a;");
+    let author = sheet("@layer b, a; @layer a { p { color: red } } @layer b { p { color: blue } }");
+    assert_eq!(
+        styles_from(
+            &[(Origin::UserAgent, &ua), (Origin::Author, &author)],
+            &nodes
+        )[0]
+        .color,
+        red()
+    );
+    // The twin: the author alone gives the same answer, so the assertion above
+    // is about the UA sheet not interfering rather than about `a` beating `b`.
+    assert_eq!(
+        styles_from(&[(Origin::Author, &author)], &nodes)[0].color,
+        red()
     );
 }
 

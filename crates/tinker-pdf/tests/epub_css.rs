@@ -93,6 +93,7 @@ fn the_committed_corpus_spends_what_the_ledger_says() {
     let mut longest_selector = 0usize;
     let mut discarded_declarations = 0usize;
     let mut discarded_rules = 0usize;
+    let mut layers = 0usize;
 
     for name in BOOKS {
         let bytes = book(name);
@@ -134,6 +135,7 @@ fn the_committed_corpus_spends_what_the_ledger_says() {
                     .any(|(w, _)| *w == tinker_pdf_css::Warning::ImportUnresolved),
                 "{name}!{entry} uses @import, which the import-depth ledger says none does"
             );
+            layers += sheet.layers.len();
         }
     }
 
@@ -143,6 +145,19 @@ fn the_committed_corpus_spends_what_the_ledger_says() {
     println!("  most rules           {most_rules}");
     println!("  most declarations    {most_declarations}");
     println!("  longest selector     {longest_selector} compounds");
+    println!("  layers declared      {layers}");
+
+    // **No committed book uses `@layer`, and that is measured rather than
+    // assumed.** The exit criterion for reading it asked for a case over a real
+    // producer's stylesheet with layers in it; neither pandoc 3.10.2 nor
+    // calibre 9.13.0 writes one, so this is the case there is — the number,
+    // asserted exactly, so the day a producer starts writing them this test
+    // says so instead of quietly still passing. The corpus caveat below the
+    // refusal table in `docs/features/epub.md` is this line's prose.
+    assert_eq!(
+        layers, 0,
+        "a committed book declares a cascade layer, which this ledger says none does"
+    );
 
     assert_eq!(sheets, 8, "milestone 1 committed eight stylesheets");
     assert_eq!(largest_sheet, 5_009);

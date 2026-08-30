@@ -3,7 +3,7 @@
 
 use super::sheet;
 use crate::media::{MediaContext, MediaType};
-use crate::parser::{parse, Declared};
+use crate::parser::{parse, Declared, LayerName, LayerPart};
 use crate::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, Color, Declaration, Display, FlexDirection,
     FlexWrap, Float, JustifyContent, Len, LengthPercentage, MarginValue, Property, Side, Size,
@@ -207,20 +207,219 @@ fn an_unreadable_media_query_is_false_and_does_not_spread() {
     );
 }
 
-/// `@layer` is refused **by name** rather than ignored.
+/// A layer name, spelled out, for the fixtures below.
+fn named(parts: &[&str]) -> LayerName {
+    parts
+        .iter()
+        .map(|part| LayerPart::Named((*part).to_string()))
+        .collect()
+}
+
+/// `@layer name { … }`: the rules inside are **kept**, and each carries the
+/// layer it was written in.
 ///
-/// `css-cascade-5` §6.1 sorts layers above specificity, so reading the block as
-/// ordinary rules would invert the cascade for a book that uses one — and
-/// dropping it silently would lose the rules with no number saying how many.
+/// This is the whole of what the parser owes the cascade. `css-cascade-5` §6.1
+/// sorts on a position and the position is computed from the layer *tree* of a
+/// whole origin, which one sheet cannot see — so what a sheet records is which
+/// layer, and `cascade.rs` decides what that is worth.
 #[test]
-fn layer_is_refused_by_name() {
+fn a_layer_block_keeps_its_rules_and_names_their_layer() {
     let parsed = sheet("@layer base { p { float: left } } p { float: right }");
-    assert_eq!(parsed.report.warnings, vec![(Warning::LayerRefused, 1)]);
-    assert_eq!(parsed.rules.len(), 1);
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert_eq!(parsed.layers, vec![named(&["base"])]);
+    assert_eq!(parsed.rules.len(), 2);
+    assert_eq!(parsed.rules[0].layer, Some(0));
     assert_eq!(
         parsed.rules[0].declarations[0].declaration,
-        Declaration::Known(Property::Float(Float::Right))
+        Declaration::Known(Property::Float(Float::Left))
     );
+    // And the rule after the block is unlayered, which is a different fact
+    // from "in the last layer": §6.4.2 puts it in the implicit final layer,
+    // and `None` is how that is spelled here.
+    assert_eq!(parsed.rules[1].layer, None);
+}
+
+/// `@layer a, b, c;` declares the order and produces no rules at all.
+///
+/// The statement form exists so a sheet can fix its layer order at the top and
+/// then write the blocks in whatever order suits it, which is exactly the case
+/// a build that ordered layers by their *blocks* gets backwards.
+#[test]
+fn a_layer_statement_declares_order_and_no_rules() {
+    let parsed = sheet("@layer a, b, c;");
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert!(parsed.rules.is_empty());
+    assert_eq!(
+        parsed.layers,
+        vec![named(&["a"]), named(&["b"]), named(&["c"])]
+    );
+
+    // And a block that follows it re-opens the layer that is already there
+    // rather than declaring a second one — **first mention wins**, so the list
+    // does not grow and `b` does not move.
+    let reopened =
+        sheet("@layer a, b; @layer b { p { float: left } } @layer a { p { float: right } }");
+    assert_eq!(reopened.layers, vec![named(&["a"]), named(&["b"])]);
+    assert_eq!(reopened.rules[0].layer, Some(1), "the `b` block is layer b");
+    assert_eq!(reopened.rules[1].layer, Some(0), "the `a` block is layer a");
+}
+
+/// `@layer { … }` is a fresh layer every time, and **two of them are two
+/// layers**.
+///
+/// A build that gave every anonymous layer the same identity would merge the
+/// two blocks below into one, which is not a subtle wrong answer: it makes the
+/// second block's rules lose to the first's on order alone.
+#[test]
+fn an_anonymous_layer_is_a_fresh_one_every_time() {
+    let parsed = sheet("@layer { p { float: left } } @layer { p { float: right } }");
+    assert_eq!(
+        parsed.layers,
+        vec![vec![LayerPart::Anonymous(0)], vec![LayerPart::Anonymous(1)]]
+    );
+    assert_eq!(parsed.rules[0].layer, Some(0));
+    assert_eq!(parsed.rules[1].layer, Some(1));
+}
+
+/// A nested block and the dotted spelling are **the same layer**.
+///
+/// `@layer a { @layer b { … } }` is `a.b`, so a sheet that opens `a.b` later by
+/// its dotted name adds to the layer the nesting already made rather than
+/// making a second one beside it.
+#[test]
+fn a_nested_layer_resolves_to_its_dotted_name() {
+    let parsed = sheet(
+        "@layer a { @layer b { p { float: left } } }
+         @layer a.b { p { float: right } }",
+    );
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert_eq!(parsed.layers, vec![named(&["a"]), named(&["a", "b"])]);
+    assert_eq!(parsed.rules[0].layer, Some(1));
+    assert_eq!(
+        parsed.rules[1].layer,
+        Some(1),
+        "the same layer, not a second"
+    );
+}
+
+/// `@media` and `@layer` nest **both ways round**, because both are books
+/// somebody writes.
+///
+/// The at-rules inside a block used to be a second, shorter list than the one
+/// at the top level, and a second list is how the two come to disagree: this
+/// fixture is one construct from each direction, and the `@font-face` is there
+/// because it is the at-rule that was already special-cased inside `@media`.
+#[test]
+fn media_and_layer_nest_in_either_order() {
+    let parsed = sheet(
+        "@layer a { @media screen { p { float: left } } }
+         @media screen { @layer b { p { float: right } } }
+         @layer c { @media print { p { float: left } } }
+         @media screen { @font-face { font-family: X; src: url(x.ttf) } }",
+    );
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert_eq!(
+        parsed.layers,
+        vec![named(&["a"]), named(&["b"]), named(&["c"])]
+    );
+    assert_eq!(parsed.rules.len(), 2, "the print block does not match");
+    assert_eq!(parsed.rules[0].layer, Some(0));
+    assert_eq!(parsed.rules[1].layer, Some(1));
+    assert_eq!(parsed.font_faces.len(), 1, "and @font-face still survives");
+}
+
+/// An `@layer` prelude the grammar does not admit discards the rule, and
+/// **§6.4.1's no-whitespace clause is why one of these is not two layers**.
+///
+/// `@layer a b` is two names with no comma: invalid. A reader that skipped
+/// whitespace would take it for `a.b` — a layer the author never wrote, holding
+/// the rules that were meant for two.
+#[test]
+fn an_invalid_layer_prelude_discards_the_rule() {
+    for source in [
+        "@layer a b { p { float: left } }",
+        "@layer a . b { p { float: left } }",
+        "@layer a, b { p { float: left } }",
+        "@layer 3 { p { float: left } }",
+        "@layer a. { p { float: left } }",
+        "@layer;",
+    ] {
+        let parsed = sheet(source);
+        assert!(parsed.layers.is_empty(), "{source}");
+        assert!(parsed.rules.is_empty(), "{source}");
+        assert_eq!(parsed.report.discarded_rules, 1, "{source}");
+    }
+}
+
+/// §6.4.1: an `@import` may name the layer its sheet lands in, and the clause
+/// is taken off **before** the media query list is read.
+///
+/// A build that left it in hands `layer(a)` to the media evaluator, which
+/// cannot read it, calls that query false and drops the whole sheet — a book
+/// that layers its imports arriving unstyled with nothing anywhere saying why.
+#[test]
+fn an_import_may_name_the_layer_it_lands_in() {
+    let table = Table(&[("one.css", "p { float: left }")]);
+
+    let into_named = parse_with("@import url(one.css) layer(a);", &table);
+    assert!(
+        into_named.report.warnings.is_empty(),
+        "{:?}",
+        into_named.report
+    );
+    assert_eq!(into_named.layers, vec![named(&["a"])]);
+    assert_eq!(into_named.rules.len(), 1);
+    assert_eq!(into_named.rules[0].layer, Some(0));
+
+    // Bare `layer` is the anonymous form, exactly as `@layer { … }` is.
+    let anonymous = parse_with("@import url(one.css) layer;", &table);
+    assert_eq!(anonymous.layers, vec![vec![LayerPart::Anonymous(0)]]);
+    assert_eq!(anonymous.rules[0].layer, Some(0));
+
+    // The media query list after the clause is still read — this is the pair
+    // that says the clause was removed rather than the query skipped.
+    let unmatched = parse_with("@import url(one.css) layer(a) print;", &table);
+    assert!(unmatched.rules.is_empty(), "print does not match");
+    let matched = parse_with("@import url(one.css) layer(a) screen;", &table);
+    assert_eq!(matched.rules.len(), 1);
+    assert_eq!(matched.rules[0].layer, Some(0));
+
+    // And an unlayered `@import` is unchanged.
+    let plain = parse_with("@import url(one.css);", &table);
+    assert!(plain.layers.is_empty());
+    assert_eq!(plain.rules[0].layer, None);
+}
+
+/// §3.3: a `@layer` **statement** does not close the `@import` window and a
+/// `@layer` **block** does.
+///
+/// The clause names `@charset` and `@layer` as the two an `@import` may follow,
+/// and it means the statement form — a block holds rules, and a rule is what
+/// the window closes on. A build that closed the window on both would refuse
+/// the `@import` in exactly the sheet that ordered its layers first, which is
+/// the sheet most likely to have been written by somebody who read the spec.
+#[test]
+fn a_layer_statement_leaves_the_import_window_open() {
+    let after_statement = parse_with(
+        "@layer a, b; @import url(one.css);",
+        &Table(&[("one.css", "p { float: left }")]),
+    );
+    assert!(
+        after_statement.report.warnings.is_empty(),
+        "{:?}",
+        after_statement.report
+    );
+    assert_eq!(after_statement.rules.len(), 1);
+
+    let after_block = parse_with(
+        "@layer a { } @import url(one.css);",
+        &Table(&[("one.css", "p { float: left }")]),
+    );
+    assert_eq!(
+        after_block.report.warnings,
+        vec![(Warning::ImportOutOfOrder, 1)]
+    );
+    assert!(after_block.rules.is_empty());
 }
 
 /// Every other at-rule is dropped **with its name**, which is decision 5's
