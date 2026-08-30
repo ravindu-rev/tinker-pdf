@@ -352,9 +352,10 @@ refusal table.
   now reaches the page; remote resource-dictionary parts; `IsSideways`
   and odd `BidiLevel`; `OpacityMask`.
 - **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
-  honestly in [design/comic-archives.md](design/comic-archives.md) — each
-  means a hand-rolled decompressor, and RAR 4 has no fixture this machine
-  can produce.
+  honestly — each means a hand-rolled decompressor, and **RAR 4 has no
+  fixture this machine can produce**, so it closes as decoded-but-
+  unadjudicated by name or not at all. A design doc is owed with the
+  decoders.
 
 ## How this file changes
 
