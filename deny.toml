@@ -87,6 +87,22 @@ deny = [
   # is the reason somebody would add it. `tiff` is the one `image` itself uses.
   { name = "tiff" },
   { name = "tiff-decoder" },
+  # Brotli, and the WOFF containers that are the only reason this engine needs
+  # it. Gap 31's Tier 4 writes an RFC 7932 decoder so a book's `@font-face` can
+  # name a WOFF2, and these land in the milestone that writes the decoder
+  # rather than the one that finishes the plan -- the rule gap 30 wrote for XML
+  # and gap 31 repeated for CSS: the milestone that writes the parser is the
+  # window in which the temptation exists, and it is a wide window here.
+  # `brotli` is MIT/Apache-2.0 and `ttf-parser` (already denied below, for
+  # fonts) is MIT, so the licence gate would have waved every one of them
+  # through. The **data** is the opposite case and has the opposite answer:
+  # RFC 7932's static dictionary is vendored under THIRDPARTY.md and checked
+  # against this allowlist by `cargo xtask vendor`, because a table of
+  # published values is not an implementation.
+  { name = "brotli" },
+  { name = "brotli-decompressor" },
+  { name = "woff2" },
+  { name = "woff2-patched" },
   # Archive containers and checksums. `zip` is the one CONTRIBUTING rule 1
   # would have been most quietly broken by: gap 29 reads comic archives, and
   # reaching for the obvious crate would have added a third-party format

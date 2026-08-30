@@ -1,0 +1,73 @@
+dictionary.bin is the DICT array of RFC 7932 (Brotli Compressed Data Format),
+Appendix A, "Static Dictionary Data" -- 122 784 bytes whose CRC-32 the RFC
+publishes as 0x5136cb04.
+
+RFC 7932 is an IETF-stream document ("Internet Engineering Task Force (IETF)",
+approved for publication by the IESG), so section 4 of the IETF Trust's Legal
+Provisions Relating to IETF Documents applies to it in full. Appendix A is a
+Code Component: TLP 4.a defines Code Components by reference to the Trust's
+published list, and "tables of values" is an entry on that list (Code
+Components 3.0, 23 April 2009). RFC 7932's own Copyright Notice says so
+directly:
+
+   Copyright (c) 2016 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents
+   (http://trustee.ietf.org/license-info) in effect on the date of
+   publication of this document.  Please review these documents
+   carefully, as they describe your rights and restrictions with respect
+   to this document.  Code Components extracted from this document must
+   include Simplified BSD License text as described in Section 4.e of
+   the Trust Legal Provisions and are provided without warranty as
+   described in the Simplified BSD License.
+
+The Legal Provisions in effect on that date are TLP 5.0 (effective 25 March
+2015). Its section 4.c carries the licence text below and states that it "is
+intended to be compatible with the Revised BSD License template published at
+https://opensource.org/licenses/BSD-3-Clause" -- three clauses, not two, so the
+SPDX identifier is BSD-3-Clause. (TLP 5.0 renamed what RFC 7932's boilerplate
+calls the "Simplified BSD License" to the "Revised BSD License"; the text is
+unchanged and is reproduced here in full, as TLP 4.e option (1) permits.)
+
+Attribution, as TLP 4.d requests: this data was taken from IETF RFC 7932.
+
+   Copyright (c) 2016 IETF Trust and the persons identified as authors
+   of the code. All rights reserved.
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   - Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+
+   - Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the
+     distribution.
+
+   - Neither the name of Internet Society, IETF or IETF Trust, nor the
+     names of specific contributors, may be used to endorse or promote
+     products derived from this software without specific prior written
+     permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+   FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+   COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+   INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+   BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+   LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+   ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+   POSSIBILITY OF SUCH DAMAGE.
+
+The same licence covers the other tables this crate transcribed out of the
+same RFC and keeps in `src/brotli.rs` rather than here, because they are small
+enough to read: Appendix B's 121 word transformations, section 7.1's Lut0,
+Lut1 and Lut2 context tables, and the length and count tables of sections 5
+and 6. Each carries the RFC's own published CRC-32 as a unit test.
