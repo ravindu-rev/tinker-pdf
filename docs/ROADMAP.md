@@ -347,9 +347,9 @@ refusal table.
   defect; multi-column; non-static `position`; `min`/`max` sizing;
   `vertical-align`; SVG content documents; pseudo-elements (parsed, no
   box generated).
-- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; TIFF and
-  JPEG XR reaching the page — the TIFF decoder is built and the XPS image
-  path still refuses both; remote resource-dictionary parts; `IsSideways`
+- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR,
+  which is 9.1.5.1's recommended format and has no decoder here — TIFF
+  now reaches the page; remote resource-dictionary parts; `IsSideways`
   and odd `BidiLevel`; `OpacityMask`.
 - **CBZ** ([features/cbz.md](features/cbz.md)): CBR/CB7/CBT, sized
   honestly — CBR means a hand-rolled RAR decoder, and RAR 4 cannot be
