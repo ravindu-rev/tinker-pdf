@@ -57,10 +57,17 @@
 //! holds 100, every page correct, and the story jumping in the middle with
 //! nothing anywhere saying so.
 //!
-//! Entries that are not images at all — `ComicInfo.xml`, `Thumbs.db`,
-//! `__MACOSX/`, directory records — are neither pages nor warnings. Skipping
-//! them is correct rather than lenient, and warning about them would bury the
-//! warnings that matter.
+//! Entries that are not images at all — `Thumbs.db`, `__MACOSX/`, directory
+//! records — are neither pages nor warnings. Skipping them is correct rather
+//! than lenient, and warning about them would bury the warnings that matter.
+//!
+//! **`ComicInfo.xml` is the one exception, and it is a third thing rather than
+//! a page.** Tier 4 gave it a reader ([`comic_info`]): it produces no page, no
+//! [`PageOrigin`] and no page number, and it writes the archive's title,
+//! series, credits and summary into the synthesised document's `/Info`. The
+//! distinction the change must not blur is that *not a page* and *not read* are
+//! different sentences — `extension_claims_image("ComicInfo.xml")` is still
+//! false and is still asserted to be.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -75,6 +82,10 @@ pub use tinker_pdf_zip::{
     limits as zip_limits, EntryError as ZipEntryError, InflateWarning, Limits as ZipLimits,
     Warning as ZipWarning,
 };
+
+pub mod comic_info;
+
+pub use comic_info::{ComicInfo, ComicInfoDefect, MAX_COMIC_INFO_BYTES};
 
 // ---- Bounds -----------------------------------------------------------------
 
@@ -176,6 +187,17 @@ pub struct Limits {
     pub max_synthesised: usize,
     /// What the archive reader is allowed to spend.
     pub zip: ZipLimits,
+    /// What reading one `ComicInfo.xml` is allowed to spend (tier 4,
+    /// W-ARCHIVE milestone 1).
+    ///
+    /// The comic path's only markup, and it carries the *same* four caps the
+    /// XPS and EPUB paths pass rather than a fifth set of numbers: a metadata
+    /// file two orders of magnitude smaller than either does not need its own
+    /// ceilings, and a second copy of four constants is how two readers of one
+    /// format start disagreeing. What is comic-specific is
+    /// [`MAX_COMIC_INFO_BYTES`], which is a cap on the entry rather than on
+    /// the parse.
+    pub xml: tinker_pdf_xml::Limits,
 }
 
 impl Limits {
@@ -184,6 +206,7 @@ impl Limits {
         max_pages: MAX_CBZ_PAGES,
         max_synthesised: MAX_SYNTHESISED_PDF,
         zip: ZipLimits::DEFAULT,
+        xml: tinker_pdf_xml::Limits::DEFAULT,
     };
 }
 
@@ -508,6 +531,16 @@ pub enum ArchiveWarning {
         /// Zero-based page index.
         page: u32,
     },
+    /// A `ComicInfo.xml` is present and did not become the document's `/Info`
+    /// (tier 4, W-ARCHIVE milestone 1).
+    ///
+    /// **No page is affected**, which is what separates this from every other
+    /// variant here: the document is every page the archive holds either way,
+    /// and this says only that it opened without the title it was carrying.
+    /// Warned rather than silent for ruling 10's reason — an archive with no
+    /// `ComicInfo.xml` at all produces no warning, so "no title" and "a title
+    /// this build could not read" stay distinguishable.
+    ComicInfo(ComicInfoDefect),
     /// A synthesised **fixed page** is a placeholder rather than the picture
     /// the package holds (gap 30, milestone 3).
     ///
@@ -779,6 +812,13 @@ pub struct ArchiveReport {
     parsed_parts: usize,
     layout: Option<crate::epub::BookLayout>,
     cost: Option<crate::epub::BookCost>,
+    /// Boxed, and the reason is measured rather than stylistic: six
+    /// `Option<String>`s inline push this struct past the point where
+    /// `clippy::large_enum_variant` fires on `xps::Routing` and
+    /// `epub::Routing`, which carry it by value and are returned from every
+    /// route decision. One allocation on the rare path is the cheaper half of
+    /// that trade — an XPS package and a book never build one at all.
+    info: Option<Box<ComicInfo>>,
 }
 
 impl ArchiveReport {
@@ -799,7 +839,21 @@ impl ArchiveReport {
             parsed_parts,
             layout: None,
             cost: None,
+            info: None,
         }
+    }
+
+    /// Records what a comic archive's `ComicInfo.xml` said (tier 4, W-ARCHIVE
+    /// milestone 1).
+    ///
+    /// A setter rather than a sixth parameter on [`ArchiveReport::synthesised`],
+    /// because that constructor is the *fixed document* path's too and an XPS
+    /// package holds no such file: a parameter every XPS call site had to pass
+    /// `None` for would be a field pretending to be a question both formats
+    /// answer.
+    pub(crate) fn with_comic_info(mut self, info: Option<ComicInfo>) -> ArchiveReport {
+        self.info = info.map(Box::new);
+        self
     }
 
     /// Builds a report for a **reflowable book** (gap 31, milestone 4).
@@ -828,6 +882,7 @@ impl ArchiveReport {
             // acquiring a second meaning.
             parsed_parts: 0,
             layout: Some(layout),
+            info: None,
         }
     }
 
@@ -878,8 +933,13 @@ impl ArchiveReport {
     /// (gap 30, milestone 4).
     ///
     /// **Zero for a comic archive**, and that is a real answer rather than a
-    /// placeholder: the comic path reads magic bytes and image headers and
-    /// parses no markup at all — `ComicInfo.xml` is deliberately nobody's scope.
+    /// placeholder: this counts the parts a *fixed document*'s payload cache
+    /// was asked for, and the comic path has no such cache. A comic archive
+    /// does now parse markup — one entry of it, through
+    /// [`comic_info::parse`] — and it is deliberately not counted here, because
+    /// a second meaning on a counter is how a number stops answering the
+    /// question it was published for. [`ArchiveReport::comic_info`] is where
+    /// that read comes out.
     ///
     /// For an XPS this is the count of **distinct parts**, not of references to
     /// them, and it is published for the same reason
@@ -892,6 +952,21 @@ impl ArchiveReport {
     #[must_use]
     pub fn parsed_parts(&self) -> usize {
         self.parsed_parts
+    }
+
+    /// What a comic archive's `ComicInfo.xml` said, or `None` when it held
+    /// none, held one this build could not read, or is not a comic archive
+    /// (tier 4, W-ARCHIVE milestone 1).
+    ///
+    /// Published for [`ArchiveReport::synthesised_bytes`]'s reason: the fields
+    /// reach the document's `/Info` and a caller that wanted to know *which*
+    /// of them did would otherwise have to re-derive the mapping from the
+    /// dictionary it produced. The three ways to get `None` are told apart by
+    /// [`ArchiveWarning::ComicInfo`], which names the last two and is absent
+    /// for the first.
+    #[must_use]
+    pub fn comic_info(&self) -> Option<&ComicInfo> {
+        self.info.as_deref()
     }
 
     /// The page box and base font size a **reflowable** book was laid out at,
@@ -1046,9 +1121,16 @@ fn reading_order(entries: &[Entry]) -> Vec<usize> {
 /// What the first bytes of an entry say it is.
 ///
 /// Magic bytes and nothing else. An entry matching none of these is not an
-/// image, is not a page and is not a warning — `ComicInfo.xml`, `Thumbs.db`,
-/// `.DS_Store` and the `__MACOSX/` AppleDouble files all land here, and warning
-/// about each of them would bury the warnings that matter.
+/// image and is not a page — `Thumbs.db`, `.DS_Store` and the `__MACOSX/`
+/// AppleDouble files all land here, and warning about each of them would bury
+/// the warnings that matter.
+///
+/// `ComicInfo.xml` lands here too and is **not** decided by this function: the
+/// synthesiser takes it by name before classification is reached
+/// ([`comic_info::is_comic_info`]), because it is the one entry whose meaning
+/// is its stored path rather than its first bytes. That is the narrow exception
+/// [`extension_claims_image`] already argues for, read the other way round —
+/// and it is still not a page.
 #[must_use]
 pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -1224,6 +1306,10 @@ pub fn pages_from_archive(
     let order = reading_order(archive.entries());
     let mut plans: Vec<Plan<'_>> = Vec::new();
     let mut spent = DOCUMENT_OVERHEAD;
+    // Read before the pages, and its outcome kept until after them, because a
+    // refusal below (`NoImages`, a bound) means there is no document for a
+    // title to be on. Nothing here can refuse the archive.
+    let (info, info_defect) = read_comic_info(&mut archive, limits);
 
     for index in order {
         let Some(entry) = archive.entries().get(index).cloned() else {
@@ -1232,6 +1318,13 @@ pub fn pages_from_archive(
         // 4.4.17.1: a stored path ending in `/` is a directory record, which
         // holds no bytes and is not a page.
         if entry.is_directory() {
+            continue;
+        }
+        // Not a page, and — since tier 4 — not ignored either. It was read
+        // above; `plan_entry` would classify it by magic bytes, find no image
+        // and skip it anyway, and this makes that an intention rather than a
+        // coincidence two readers of the same entry happen to share.
+        if comic_info::is_comic_info(&entry.name) {
             continue;
         }
         let Some(plan) = plan_entry(&mut archive, index, &entry, limits) else {
@@ -1269,6 +1362,20 @@ pub fn pages_from_archive(
     let mut builder = DocumentBuilder::new();
     let mut warnings: Vec<ArchiveWarning> = Vec::new();
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(plans.len());
+
+    // §14.3.3's document information dictionary, filled from the archive's own
+    // `ComicInfo.xml`. The mapping lives in `comic_info::ComicInfo::info_entries`
+    // and not here, so a test reading the finished `/Info` and a caller reading
+    // the report are looking at one decision. `set_info` answers false only
+    // under an archival profile, which a synthesised comic never has.
+    if let Some(info) = &info {
+        for (key, value) in info.info_entries() {
+            builder.set_info(key, &value);
+        }
+    }
+    if let Some(defect) = info_defect {
+        warnings.push(ArchiveWarning::ComicInfo(defect));
+    }
 
     for (number, plan) in plans.iter().enumerate() {
         // Each page names its own image and no other. Without this every page
@@ -1322,12 +1429,48 @@ pub fn pages_from_archive(
 
     let pdf = builder.finish();
     let synthesised_bytes = pdf.len();
-    // No markup: the comic path reads magic bytes and image headers, and
-    // `ComicInfo.xml` is gap 29's named non-goal rather than an omission.
+    // `parsed_parts` stays zero: it counts a *fixed document*'s payload cache,
+    // which the comic path does not have. The one entry of markup this path
+    // does read comes out through `ArchiveReport::comic_info`.
     Ok((
         pdf,
-        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None, 0),
+        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None, 0)
+            .with_comic_info(info),
     ))
+}
+
+/// Reads the archive's `ComicInfo.xml`, if it holds one.
+///
+/// Returns what it said and what went wrong, and **never both**: a defect means
+/// there is nothing to write, and a value means there was nothing to warn
+/// about. An archive with no such entry returns neither, which is what makes
+/// "no metadata" and "metadata this build could not read" different states a
+/// host can show differently (ruling 10).
+///
+/// The entry is charged against the archive reader's own inflation budget like
+/// any other, so a `ComicInfo.xml` that inflates to gigabytes is refused by
+/// `tinker-pdf-zip` before this sees a byte — and by
+/// [`MAX_COMIC_INFO_BYTES`] if it fits inside that and is still not a
+/// plausible metadata file.
+fn read_comic_info(
+    archive: &mut Archive<'_>,
+    limits: &Limits,
+) -> (Option<ComicInfo>, Option<ComicInfoDefect>) {
+    let Some(index) = archive
+        .entries()
+        .iter()
+        .position(|entry| comic_info::is_comic_info(&entry.name))
+    else {
+        return (None, None);
+    };
+    let data = match archive.read(index) {
+        Ok(data) => data,
+        Err(e) => return (None, Some(ComicInfoDefect::EntryRefused(e))),
+    };
+    match comic_info::parse(&data, &limits.xml) {
+        Ok(info) => (Some(info), None),
+        Err(defect) => (None, Some(defect)),
+    }
 }
 
 /// The resource name every synthesised page gives its own image.

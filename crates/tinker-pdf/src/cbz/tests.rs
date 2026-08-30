@@ -369,3 +369,204 @@ fn the_synthesis_cap_has_room_for_a_two_hundred_page_comic() {
     // And not so much room that it is decoration: the margin is under two.
     assert!(MAX_SYNTHESISED_PDF < comic * 2);
 }
+
+// ---- ComicInfo.xml -----------------------------------------------------
+
+/// The six elements this build maps, and the `/Info` keys they become.
+///
+/// Written out from the table in [`comic_info`]'s own header rather than read
+/// back from what the code emitted: the mapping is a decision, and a test that
+/// records the decision is the only thing that would notice it changing.
+#[test]
+fn the_six_mapped_elements_become_four_info_keys() {
+    let xml = br#"<?xml version="1.0"?>
+        <ComicInfo>
+          <Title>The Long Hallway</Title>
+          <Series>Nightwatch</Series>
+          <Number>12</Number>
+          <Writer>A. Writer</Writer>
+          <Penciller>B. Penciller</Penciller>
+          <Summary>Somebody walks down a hallway.</Summary>
+          <Publisher>Not mapped, deliberately</Publisher>
+        </ComicInfo>"#;
+    let info = comic_info::parse(xml, &tinker_pdf_xml::Limits::DEFAULT).expect("a ComicInfo");
+    assert_eq!(info.title(), Some("The Long Hallway"));
+    assert_eq!(info.series(), Some("Nightwatch"));
+    assert_eq!(info.number(), Some("12"));
+    assert_eq!(info.writer(), Some("A. Writer"));
+    assert_eq!(info.penciller(), Some("B. Penciller"));
+    assert_eq!(info.summary(), Some("Somebody walks down a hallway."));
+
+    let entries: Vec<(&str, String)> = info
+        .info_entries()
+        .into_iter()
+        .map(|(key, value)| (core::str::from_utf8(key).expect("ASCII"), value))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            ("Title", "The Long Hallway".to_owned()),
+            ("Author", "A. Writer, B. Penciller".to_owned()),
+            ("Subject", "Somebody walks down a hallway.".to_owned()),
+            ("Keywords", "Nightwatch #12".to_owned()),
+        ],
+        "the mapping in comic_info's header, as the builder is handed it"
+    );
+}
+
+/// **The branch most real issues take.** No `<Title>`, so the series and the
+/// number are the name of the book.
+///
+/// A viewer with an empty title bar falls back to the filename, which is the
+/// one thing a synthesised document has no good answer for.
+#[test]
+fn an_issue_with_no_title_is_named_by_its_series_and_number() {
+    let xml = b"<ComicInfo><Series>Nightwatch</Series><Number>12</Number></ComicInfo>";
+    let info = comic_info::parse(xml, &tinker_pdf_xml::Limits::DEFAULT).expect("a ComicInfo");
+    assert_eq!(info.title(), None);
+    let entries = info.info_entries();
+    assert_eq!(entries.first().map(|(k, _)| *k), Some(b"Title".as_slice()));
+    assert_eq!(
+        entries.first().map(|(_, v)| v.as_str()),
+        Some("Nightwatch #12")
+    );
+    // And the same string still reaches `/Keywords`, so the two branches
+    // differ in what `/Title` says and in nothing else.
+    assert!(entries
+        .iter()
+        .any(|(k, v)| *k == b"Keywords" && v == "Nightwatch #12"));
+}
+
+/// A number with no series names nothing, so it names nothing.
+///
+/// `#7` in a title bar is worse than the filename it replaced, which is the
+/// only reason this case is written down at all.
+#[test]
+fn a_number_with_no_series_titles_nothing() {
+    let xml = b"<ComicInfo><Number>7</Number></ComicInfo>";
+    let info = comic_info::parse(xml, &tinker_pdf_xml::Limits::DEFAULT).expect("a ComicInfo");
+    assert_eq!(info.number(), Some("7"));
+    assert!(info.info_entries().is_empty());
+}
+
+/// One person credited twice is one name, not two.
+#[test]
+fn a_writer_who_is_also_the_penciller_is_named_once() {
+    let xml = b"<ComicInfo><Writer>C. Both</Writer><Penciller>C. Both</Penciller></ComicInfo>";
+    let info = comic_info::parse(xml, &tinker_pdf_xml::Limits::DEFAULT).expect("a ComicInfo");
+    assert_eq!(
+        info.info_entries(),
+        vec![(b"Author".as_slice(), "C. Both".to_owned())]
+    );
+}
+
+/// Text arrives in as many pieces as the reader chooses, and a reference is
+/// its own piece.
+#[test]
+fn an_entity_reference_inside_a_field_is_one_value() {
+    let xml = b"<ComicInfo><Title>Tom &amp; Jerry</Title></ComicInfo>";
+    let info = comic_info::parse(xml, &tinker_pdf_xml::Limits::DEFAULT).expect("a ComicInfo");
+    assert_eq!(info.title(), Some("Tom & Jerry"));
+}
+
+/// The schema allows one of each, and a file with two has not said which.
+/// Document order, first — the rule `epub::package` already takes for
+/// `dc:title`.
+#[test]
+fn the_first_of_two_titles_wins() {
+    let xml = b"<ComicInfo><Title>First</Title><Title>Second</Title></ComicInfo>";
+    let info = comic_info::parse(xml, &tinker_pdf_xml::Limits::DEFAULT).expect("a ComicInfo");
+    assert_eq!(info.title(), Some("First"));
+}
+
+/// Every way it does not become metadata, each by its own name.
+///
+/// Collapsing these would tell a host that an archive carrying a title it
+/// could not read is the same as one carrying no title, and those are the two
+/// states ruling 10 exists to keep apart.
+#[test]
+fn each_way_a_comic_info_fails_is_its_own_defect() {
+    let limits = tinker_pdf_xml::Limits::DEFAULT;
+    assert_eq!(
+        comic_info::parse(b"<ComicInfo><Title>unclosed", &limits),
+        Err(ComicInfoDefect::Unreadable)
+    );
+    assert_eq!(
+        comic_info::parse(b"<comic-info><Title>x</Title></comic-info>", &limits),
+        Err(ComicInfoDefect::NotComicInfo),
+        "XML names are case sensitive and this is not the root the schema names"
+    );
+    // A document type declaration, refused before one byte past it is read.
+    assert_eq!(
+        comic_info::parse(b"<!DOCTYPE ComicInfo><ComicInfo/>", &limits),
+        Err(ComicInfoDefect::Unreadable)
+    );
+    let big = vec![b' '; MAX_COMIC_INFO_BYTES + 1];
+    assert_eq!(
+        comic_info::parse(&big, &limits),
+        Err(ComicInfoDefect::TooLarge),
+        "the entry cap is decided before the parser sees a byte"
+    );
+}
+
+/// **A `ComicInfo.xml` that names nothing is not a defect**, and this is the
+/// distinction that decides whether ruling 10's warning fires.
+///
+/// Nothing was tolerated, repaired or lost — the file was read exactly as
+/// written and it said nothing this build maps. Warning about it would be the
+/// failure gap 29 named when it decided metadata entries are not warnings.
+/// What the empty *value* buys is that a caller can still tell an empty
+/// `ComicInfo.xml` from an archive that carries none.
+#[test]
+fn a_comic_info_that_names_nothing_is_read_and_is_not_a_defect() {
+    let limits = tinker_pdf_xml::Limits::DEFAULT;
+    let empty = comic_info::parse(b"<ComicInfo/>", &limits).expect("read, and empty");
+    assert!(empty.is_empty());
+    assert!(empty.info_entries().is_empty());
+    let unmapped = comic_info::parse(b"<ComicInfo><Publisher>x</Publisher></ComicInfo>", &limits)
+        .expect("forty-odd elements this build does not map are the same answer as none");
+    assert!(unmapped.is_empty());
+}
+
+/// The entry cap fires one byte past itself and not at itself.
+#[test]
+fn the_comic_info_cap_admits_exactly_its_own_size() {
+    let mut xml = b"<ComicInfo><Title>x</Title></ComicInfo>".to_vec();
+    xml.resize(MAX_COMIC_INFO_BYTES, b' ');
+    assert!(comic_info::parse(&xml, &tinker_pdf_xml::Limits::DEFAULT).is_ok());
+    xml.push(b' ');
+    assert_eq!(
+        comic_info::parse(&xml, &tinker_pdf_xml::Limits::DEFAULT),
+        Err(ComicInfoDefect::TooLarge)
+    );
+}
+
+/// The name that is read, and the names that are not.
+///
+/// Narrow on purpose: a nested copy describes something that is not this
+/// document, and picking one of several by directory order would make the
+/// document's title depend on what a packing tool happened to walk first.
+#[test]
+fn only_the_archive_root_names_the_metadata() {
+    assert!(comic_info::is_comic_info("ComicInfo.xml"));
+    assert!(comic_info::is_comic_info("comicinfo.xml"));
+    assert!(comic_info::is_comic_info("COMICINFO.XML"));
+    assert!(!comic_info::is_comic_info("chapter1/ComicInfo.xml"));
+    assert!(!comic_info::is_comic_info("./ComicInfo.xml"));
+    assert!(!comic_info::is_comic_info("ComicInfo.xml.bak"));
+    assert!(!comic_info::is_comic_info("ComicInfo"));
+}
+
+/// **And it is still not a page**, which is the distinction this milestone had
+/// to add a reader without blurring.
+///
+/// Three separate claims, and the middle one is the one that would have gone
+/// quietly: the name answers the metadata question, the *extension* still
+/// answers `false` to the image question, and the bytes are not an image
+/// either.
+#[test]
+fn the_metadata_entry_is_read_and_is_still_not_a_page() {
+    assert!(comic_info::is_comic_info("ComicInfo.xml"));
+    assert!(!extension_claims_image("ComicInfo.xml"));
+    assert_eq!(image_format(b"<?xml version=\"1.0\"?><ComicInfo/>"), None);
+}

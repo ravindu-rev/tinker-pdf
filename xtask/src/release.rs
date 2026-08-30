@@ -1321,12 +1321,18 @@ mod tests {
     /// dry-run, and the other twelve never had been. The five with none are
     /// `math`, `filters`, `crypto`, `xml` and `css`.
     ///
-    /// It was ten before this tier: `tinker-pdf-pki` added one with its
+    /// It was ten before the shaping tier: `tinker-pdf-pki` added one with its
     /// `pki → crypto` edge and `tinker-pdf-shape` another with `shape → font`.
     /// The number moves whenever a crate gains its first internal dependency,
     /// and moving it is the deliberate act this assertion exists to force —
     /// both of those arrived on separate branches, each reading it as ten and
     /// each setting it to eleven, and only running them together gives twelve.
+    ///
+    /// Thirteen since `tinker-pdf-svg`, which arrived with three edges at once
+    /// (`xml`, `css`, `math`) and is still one crate. It is worth saying which
+    /// way this assertion is meant to fail: a new crate with no internal
+    /// dependency does **not** move it, so a number that did not need changing
+    /// is evidence about the crate rather than about the test.
     #[test]
     fn the_flag_is_what_makes_the_non_leaf_crates_provable() {
         let notes = |local: bool| -> usize {
@@ -1340,7 +1346,7 @@ mod tests {
                 .filter(|step| step.stage == Stage::Crates && step.registry_note.is_some())
                 .count()
         };
-        assert_eq!(notes(false), 12, "the crates a plain dry run cannot reach");
+        assert_eq!(notes(false), 13, "the crates a plain dry run cannot reach");
         assert_eq!(notes(true), 0, "and none of them once it can");
     }
 

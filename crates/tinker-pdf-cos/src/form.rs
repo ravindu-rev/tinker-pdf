@@ -99,6 +99,68 @@ pub enum Script {
     Oversize(usize),
 }
 
+/// How much script source **one read of a document** may surface, in decoded
+/// bytes ([`limits::MAX_SCRIPT_TOTAL`]).
+///
+/// It is a value the caller carries rather than a constant each walk helps
+/// itself to, and that is the whole point. A document's scripts live in three
+/// places — the field tree's `/AA`, `/Names /JavaScript` (7.7.4) and the
+/// catalog's `/AA` (12.6.3 table 200) — and each of the three used to start
+/// from the full total, so a file that filled all three surfaced three times
+/// what the cap says. A per-item cap is not a total cap when the item count is
+/// document-controlled, and neither is a total that is handed out once per
+/// walk.
+///
+/// Bytes are taken in the order the walks run: fields, then document-level,
+/// then catalog. The order is fixed because the answer depends on it — which
+/// scripts came back as source and which as [`Script::Oversize`] would
+/// otherwise vary run to run, and determinism is a contract (ruling 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptBudget {
+    left: usize,
+}
+
+impl Default for ScriptBudget {
+    fn default() -> ScriptBudget {
+        ScriptBudget {
+            left: limits::MAX_SCRIPT_TOTAL,
+        }
+    }
+}
+
+impl ScriptBudget {
+    /// A document's whole allowance, unspent.
+    #[must_use]
+    pub fn new() -> ScriptBudget {
+        ScriptBudget::default()
+    }
+
+    /// How many bytes are left to surface.
+    #[must_use]
+    pub fn left(self) -> usize {
+        self.left
+    }
+
+    /// How many bytes have been surfaced so far.
+    #[must_use]
+    pub fn spent(self) -> usize {
+        limits::MAX_SCRIPT_TOTAL.saturating_sub(self.left)
+    }
+
+    /// Takes `len` bytes, or refuses and takes none.
+    ///
+    /// All or nothing: taking part of a script's length would leave the
+    /// budget claiming to have surfaced source that was reported as
+    /// [`Script::Oversize`] instead.
+    fn take(&mut self, len: usize) -> bool {
+        if len > self.left {
+            return false;
+        }
+        self.left -= len;
+        true
+    }
+}
+
 impl Script {
     /// The source, when there is all of it.
     #[must_use]
@@ -233,8 +295,18 @@ pub fn default_resources(doc: &CosDocument) -> Option<Dict> {
 }
 
 /// Every terminal field, in the order the form declares them.
+///
+/// Reads the field tree under a [`ScriptBudget`] of its own. A caller that
+/// also reads [`document_scripts`] or [`catalog_scripts`] wants
+/// [`fields_within`] and its siblings, which share one.
 #[must_use]
 pub fn fields(doc: &CosDocument) -> Vec<Field> {
+    fields_within(doc, &mut ScriptBudget::new())
+}
+
+/// The same walk, spending a budget the caller owns.
+#[must_use]
+pub fn fields_within(doc: &CosDocument, budget: &mut ScriptBudget) -> Vec<Field> {
     let Some(form) = acro_form(doc) else {
         return Vec::new();
     };
@@ -258,9 +330,6 @@ pub fn fields(doc: &CosDocument) -> Vec<Field> {
 
     let mut out = Vec::new();
     let mut visited = HashSet::new();
-    // Script source is document-controlled and per-field, so it needs a total
-    // as well as a per-item cap.
-    let mut budget = limits::MAX_SCRIPT_TOTAL;
     for entry in roots {
         if let Some(reference) = entry.as_objref() {
             walk(
@@ -270,7 +339,7 @@ pub fn fields(doc: &CosDocument) -> Vec<Field> {
                 &inherited,
                 0,
                 &mut visited,
-                &mut budget,
+                budget,
                 &mut out,
             );
         }
@@ -296,7 +365,7 @@ fn walk(
     inherited: &Inherited,
     depth: u32,
     visited: &mut HashSet<u32>,
-    budget: &mut usize,
+    budget: &mut ScriptBudget,
     out: &mut Vec<Field>,
 ) {
     if depth > limits::MAX_NEST_DEPTH || out.len() >= limits::MAX_PAGES {
@@ -513,7 +582,7 @@ fn options(doc: &CosDocument, dict: &Dict) -> Vec<String> {
 /// `/JS` is a text string or a stream holding one — a producer writes the
 /// stream form as soon as the script is longer than a line, so reading only
 /// the string form finds almost none of the scripts that matter.
-fn read_js(doc: &CosDocument, action: &Dict, budget: &mut usize) -> Option<Script> {
+fn read_js(doc: &CosDocument, action: &Dict, budget: &mut ScriptBudget) -> Option<Script> {
     let js = action.get(doc.intern(b"JS"))?;
     let bytes: Vec<u8> = match js {
         Object::String(text) => text.bytes.clone(),
@@ -531,21 +600,25 @@ fn read_js(doc: &CosDocument, action: &Dict, budget: &mut usize) -> Option<Scrip
     };
 
     let len = bytes.len();
-    if len > limits::MAX_SCRIPT_LEN || len > *budget {
+    if len > limits::MAX_SCRIPT_LEN || !budget.take(len) {
         return Some(Script::Oversize(len));
     }
-    *budget -= len;
     Some(Script::Source(decode_text_string(&bytes)))
 }
 
 /// One entry of an additional-actions dictionary.
-fn action_js(doc: &CosDocument, aa: &Dict, key: &[u8], budget: &mut usize) -> Option<Script> {
+fn action_js(
+    doc: &CosDocument,
+    aa: &Dict,
+    key: &[u8],
+    budget: &mut ScriptBudget,
+) -> Option<Script> {
     let action = doc.resolve_key(aa, doc.intern(key));
     read_js(doc, action.as_dict()?, budget)
 }
 
 /// A field's `/AA` scripts (12.6.3, table 198).
-fn field_scripts(doc: &CosDocument, dict: &Dict, budget: &mut usize) -> FieldScripts {
+fn field_scripts(doc: &CosDocument, dict: &Dict, budget: &mut ScriptBudget) -> FieldScripts {
     let aa = doc.resolve_key(dict, doc.intern(b"AA"));
     let Some(aa) = aa.as_dict() else {
         return FieldScripts::default();
@@ -597,6 +670,15 @@ pub fn calculation_order(doc: &CosDocument) -> Vec<ObjRef> {
 /// which is a different problem from a calculation.
 #[must_use]
 pub fn document_scripts(doc: &CosDocument) -> Vec<DocumentScript> {
+    document_scripts_within(doc, &mut ScriptBudget::new())
+}
+
+/// The same tree, spending a budget the caller owns.
+#[must_use]
+pub fn document_scripts_within(
+    doc: &CosDocument,
+    budget: &mut ScriptBudget,
+) -> Vec<DocumentScript> {
     let Some(catalog) = doc.catalog() else {
         return Vec::new();
     };
@@ -608,14 +690,13 @@ pub fn document_scripts(doc: &CosDocument) -> Vec<DocumentScript> {
         return Vec::new();
     };
 
-    let mut budget = limits::MAX_SCRIPT_TOTAL;
     let mut out = Vec::new();
     for (name, value) in crate::trees::name_tree(doc, root) {
         let resolved = doc.resolve(&value);
         let Some(action) = resolved.as_dict() else {
             continue;
         };
-        if let Some(script) = read_js(doc, action, &mut budget) {
+        if let Some(script) = read_js(doc, action, budget) {
             out.push(DocumentScript {
                 name: decode_text_string(&name),
                 script,
@@ -631,6 +712,12 @@ const CATALOG_TRIGGERS: [&[u8]; 5] = [b"WC", b"WS", b"DS", b"WP", b"DP"];
 /// The document catalog's `/AA` scripts (12.6.3, table 200).
 #[must_use]
 pub fn catalog_scripts(doc: &CosDocument) -> Vec<DocumentScript> {
+    catalog_scripts_within(doc, &mut ScriptBudget::new())
+}
+
+/// The same five triggers, spending a budget the caller owns.
+#[must_use]
+pub fn catalog_scripts_within(doc: &CosDocument, budget: &mut ScriptBudget) -> Vec<DocumentScript> {
     let Some(catalog) = doc.catalog() else {
         return Vec::new();
     };
@@ -639,10 +726,9 @@ pub fn catalog_scripts(doc: &CosDocument) -> Vec<DocumentScript> {
         return Vec::new();
     };
 
-    let mut budget = limits::MAX_SCRIPT_TOTAL;
     let mut out = Vec::new();
     for key in CATALOG_TRIGGERS {
-        if let Some(script) = action_js(doc, aa, key, &mut budget) {
+        if let Some(script) = action_js(doc, aa, key, budget) {
             out.push(DocumentScript {
                 name: String::from_utf8_lossy(key).into_owned(),
                 script,
@@ -705,9 +791,14 @@ impl ScriptSummary {
 /// Counts every script the document carries (12.6.3, 12.7.2).
 #[must_use]
 pub fn script_summary(doc: &CosDocument) -> ScriptSummary {
-    let fields = fields(doc);
-    let document = document_scripts(doc);
-    let catalog = catalog_scripts(doc);
+    // One budget across all three, which is the whole reason `ScriptBudget`
+    // is a value: this is the call that reads every script a document
+    // carries, and three separate totals would let one document surface three
+    // times the cap.
+    let mut budget = ScriptBudget::new();
+    let fields = fields_within(doc, &mut budget);
+    let document = document_scripts_within(doc, &mut budget);
+    let catalog = catalog_scripts_within(doc, &mut budget);
 
     let mut summary = ScriptSummary {
         calculation_order: calculation_order(doc).len(),

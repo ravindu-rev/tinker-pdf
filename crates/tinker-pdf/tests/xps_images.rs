@@ -630,15 +630,137 @@ fn a_rectangle_with_no_extent_is_refused_at_the_brush() {
 
 // ---- the two ways to know a part is a TIFF -------------------------------
 
-/// A TIFF **the content type names** is refused, and the rest of the page still
-/// draws.
+/// A minimal baseline TIFF, written from TIFF 6.0's own field layouts.
 ///
-/// Two assertions and they are two consequences of one refusal: the picture is
-/// named, and the `Path` that wanted it is still on the page in the placeholder
-/// grey. Gap 30 milestone 3's survivor was a clause with two consequences
-/// tested on one side, so both are here.
+/// Little-endian, 2 x 2, 8 bits, three samples, `PhotometricInterpretation` 2,
+/// `Compression` 1, one strip. Uncompressed on purpose: it is the one coding
+/// with no `/Filter` name, so it takes the **decoded** route and this fixture
+/// exercises the arm a placed strip skips.
+fn baseline_tiff() -> Vec<u8> {
+    // Header 0..8, directory 8..122 (nine entries), BitsPerSample 122..128,
+    // pixels at 128.
+    const BITS_AT: u32 = 122;
+    const PIXELS_AT: u32 = 128;
+
+    /// One twelve-byte directory entry. A SHORT sits in the first two bytes of
+    /// the four-byte value field and a LONG fills it, so little-endian makes
+    /// both the same write.
+    fn entry(tag: u16, kind: u16, count: u32, value: u32) -> [u8; 12] {
+        let mut field = [0u8; 12];
+        field[0..2].copy_from_slice(&tag.to_le_bytes());
+        field[2..4].copy_from_slice(&kind.to_le_bytes());
+        field[4..8].copy_from_slice(&count.to_le_bytes());
+        field[8..12].copy_from_slice(&value.to_le_bytes());
+        field
+    }
+
+    let mut out = b"II\x2A\x00".to_vec();
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&9u16.to_le_bytes());
+    for field in [
+        entry(256, 3, 1, 2),         // ImageWidth
+        entry(257, 3, 1, 2),         // ImageLength
+        entry(258, 3, 3, BITS_AT),   // BitsPerSample, three shorts, out of line
+        entry(259, 3, 1, 1),         // Compression: none
+        entry(262, 3, 1, 2),         // PhotometricInterpretation: RGB
+        entry(273, 4, 1, PIXELS_AT), // StripOffsets
+        entry(277, 3, 1, 3),         // SamplesPerPixel
+        entry(278, 3, 1, 2),         // RowsPerStrip
+        entry(279, 4, 1, 12),        // StripByteCounts
+    ] {
+        out.extend_from_slice(&field);
+    }
+    out.extend_from_slice(&0u32.to_le_bytes()); // no next directory
+
+    assert_eq!(
+        out.len(),
+        BITS_AT as usize,
+        "the directory ends where it says"
+    );
+    for _ in 0..3 {
+        out.extend_from_slice(&8u16.to_le_bytes());
+    }
+    assert_eq!(
+        out.len(),
+        PIXELS_AT as usize,
+        "the pixels start where it says"
+    );
+    out.extend_from_slice(&[
+        0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, // red, green
+        0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, // blue, yellow
+    ]);
+    out
+}
+
+/// A TIFF **the bytes say** reaches the page as a picture.
+///
+/// This test asserted a refusal until a TIFF decoder existed. It is rewritten
+/// rather than deleted, because what it is *for* has not changed: a part whose
+/// format only the magic bytes name has to be classified from them, and the
+/// only thing that moved is what classification then does.
 #[test]
-fn a_tiff_named_by_its_content_type_is_refused_and_the_page_draws() {
+fn a_tiff_named_by_its_magic_bytes_is_drawn() {
+    // The content type says PNG; only the bytes say TIFF.
+    let bytes = package_with(
+        binary_part("Resources/i.png", baseline_tiff()),
+        r#"Viewbox="0,0,2,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    assert_eq!(defects(&bytes), [], "a TIFF this build reads owes nothing");
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the shape is not the placeholder grey: {content}"
+    );
+    assert!(
+        content.contains("/Pattern cs"),
+        "the picture reached the page through a tiling pattern: {content}"
+    );
+}
+
+/// A TIFF whose bytes are a header and nothing else is **unreadable**, which is
+/// a different sentence from a format this build does not read.
+///
+/// The distinction is the whole of what the decoder bought. Before it existed
+/// both answered `ImageFormatUnsupported`, and a caller could not tell "this
+/// engine has no TIFF decoder" from "this TIFF is broken".
+#[test]
+fn a_tiff_that_is_only_a_header_is_unreadable_rather_than_unsupported() {
+    let mut stub = b"II\x2A\x00".to_vec();
+    stub.extend_from_slice(&[0u8; 32]);
+    let bytes = package_with(
+        binary_part("Resources/i.png", stub),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageUnreadable]);
+    let content = stream(&bytes);
+    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
+    assert!(
+        content.contains("200 0 l"),
+        "and the shape still draws: {content}"
+    );
+}
+
+/// **A content type and magic bytes that disagree draw the bytes, and nothing
+/// says so.** Pinned because it is a hole, not because it is right.
+///
+/// `Images::place_one` resolves the disagreement in favour of the bytes — a
+/// decoder reads bytes — and its comment has always claimed the leniency is
+/// named. It is not: `Images::get` returns `Result<&Image, XpsElementDefect>`,
+/// so the only channel out of that function is a *refusal*, and a leniency has
+/// nowhere to go. Ruling 10 wants it named.
+///
+/// It mattered less when the arm was nearly unreachable: TIFF and JPEG XR were
+/// refused before the two rules were compared, so only a PNG-versus-JPEG
+/// disagreement could reach it. Wiring the TIFF decoder made it ordinary, which
+/// is why the gap is pinned here rather than left in a comment.
+#[test]
+fn a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing() {
     // The bytes say PNG; only the content type says TIFF.
     let types =
         content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="image/tiff" />"#);
@@ -649,39 +771,21 @@ fn a_tiff_named_by_its_content_type_is_refused_and_the_page_draws() {
         Some(&types),
     );
 
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
+    assert_eq!(
+        defects(&bytes),
+        [],
+        "the disagreement is not reported, and it should be — see this test's name"
+    );
     let content = stream(&bytes);
     assert!(
-        content.contains("0.749 0.749 0.749 rg"),
-        "the shape is grey: {content}"
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the PNG the bytes describe is drawn: {content}"
     );
-    assert!(
-        content.contains("200 0 l"),
-        "and the shape is still drawn: {content}"
-    );
-}
-
-/// A TIFF **the bytes say** is refused, whatever the content type claims.
-#[test]
-fn a_tiff_named_by_its_magic_bytes_is_refused_and_the_page_draws() {
-    // The content type says PNG; only the bytes say TIFF.
-    let mut tiff = b"II\x2A\x00".to_vec();
-    tiff.extend_from_slice(&[0u8; 32]);
-    let bytes = package_with(
-        binary_part("Resources/i.png", tiff),
-        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
-           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
-        None,
-    );
-
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
-    let content = stream(&bytes);
-    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
-    assert!(content.contains("200 0 l"), "{content}");
 }
 
 /// A JPEG XR, which 9.1.5.1 recommends and nothing outside Microsoft's stack
-/// implements, is refused by the same name.
+/// implements, is refused by name — and refused **before** either rule decides
+/// which format the part is, which is what the pre-emptive loop is for.
 #[test]
 fn a_jpeg_xr_is_refused_by_name() {
     let mut jxr = vec![0x49, 0x49, 0xBC, 0x01];

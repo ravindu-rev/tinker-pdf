@@ -67,7 +67,13 @@ Bold and italic simulation (`StyleSimulations`) is reported, not applied.
 **Images** pass through. A PNG or JPEG resource part reaches the page as
 the bytes it is ([creation](creation.md), `ImageData::Compressed`); a page
 whose decoded raster would be 17.2 MB costs 0.2 MB above baseline to
-synthesise, measured rather than argued.
+synthesise, measured rather than argued. **9.1.5's TIFF joins them**, and
+mostly passes through as well: four of TIFF 6.0's codings already have a
+`/Filter` name, so a single-strip file of any of them is placed rather than
+decoded ([filters](filters.md)). A resolution stated in the directory's
+`XResolution`, `YResolution` and `ResolutionUnit` becomes the part's dpi,
+where 13.4.1's 96 stands in when the file states none — which is the first
+consumer those three tags have had.
 
 **Everything owed is owed at the element.** A page that cannot be read is a
 placeholder page that keeps its number, carrying an `XpsPageDefect`; an
@@ -100,7 +106,8 @@ the page synthesis.
 | `VisualBrush`, a `ContextColor` naming an ICC profile, a gradient used to stroke | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
 | `OpacityMask` | `XpsElementDefect::OpacityMaskUnsupported` | not mapped to a PDF soft mask yet | [ROADMAP.md](../ROADMAP.md) |
 | Remote resource dictionary (`Source=` a separate part) | `XpsElementDefect::ResourceDictionaryRemote` | only in-page dictionaries are resolved | [ROADMAP.md](../ROADMAP.md) |
-| TIFF, JPEG XR, any non-PNG/JPEG image part | `XpsElementDefect::ImageFormatUnsupported` | no decoder for either; named at the element | [ROADMAP.md](../ROADMAP.md) |
+| JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
+| A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |
 | `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | no ICC pipeline, and the syntax has nowhere to put an sRGB fallback, so the picture is refused rather than drawn in colours the file did not ask for | [rendering](rendering.md) |
 | `IsSideways` glyph runs | `XpsElementDefect::GlyphsSidewaysUnsupported` | vertical-rotated runs not laid out | — |
 | Odd `BidiLevel` (right-to-left runs) | `XpsElementDefect::GlyphsBidiUnsupported` | no bidi reordering | [ROADMAP.md](../ROADMAP.md) (shaping) |

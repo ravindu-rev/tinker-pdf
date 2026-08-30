@@ -204,3 +204,12 @@ pub const MAX_SCRIPT_VARS: usize = 256;
 
 /// Fields whose calculation action one recalculation pass will run.
 pub const MAX_CALC_FIELDS: usize = 4096;
+
+/// Distinct functions one document's `/Names /JavaScript` scripts may define
+/// for its field scripts to call (7.7.4).
+///
+/// The same number as [`MAX_SCRIPT_VARS`] and for the same reason: a name
+/// table is a lookup the interpreter scans per unknown name, so a
+/// document-controlled count of them is document-controlled work. Real forms
+/// define a handful; the largest generated ones a corpus shows define tens.
+pub const MAX_SCRIPT_FUNCTIONS: usize = 256;

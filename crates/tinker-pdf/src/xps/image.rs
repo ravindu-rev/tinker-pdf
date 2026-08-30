@@ -44,7 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tinker_pdf_cos::{jpeg_shape, png_image, DocumentBuilder, ImageData, PngRoute};
+use tinker_pdf_cos::{jpeg_shape, png_image, tiff_image, DocumentBuilder, ImageData, PngRoute};
 use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_xml::{Doctype, Event, Source};
 
@@ -240,11 +240,18 @@ impl Images {
         let actual = Kind::from_magic(bytes);
 
         // The two rules, and either one refusing is a refusal. A part whose
-        // content type says PNG and whose bytes say TIFF is not a PNG, and a
-        // part whose bytes say PNG and whose content type says TIFF is a
+        // content type says PNG and whose bytes say JPEG XR is not a PNG, and
+        // a part whose bytes say PNG and whose content type says JPEG XR is a
         // package this build declines to guess about.
+        //
+        // **TIFF left this loop when a TIFF decoder arrived**, and the
+        // asymmetry is the point: the loop refuses a format *before* either
+        // rule has decided which one the part is, so it can only hold formats
+        // nothing here draws. A format that is drawn belongs in the ordinary
+        // agreement below, where a content type and magic bytes that disagree
+        // is a named leniency rather than a refusal.
         for kind in [declared, actual].into_iter().flatten() {
-            if matches!(kind, Kind::Tiff | Kind::JpegXr) {
+            if matches!(kind, Kind::JpegXr) {
                 return Err(XpsElementDefect::ImageFormatUnsupported);
             }
         }
@@ -254,8 +261,22 @@ impl Images {
             (Some(a), None) => a,
             (None, Some(b)) => b,
             // They disagree about two formats this build *can* draw. The bytes
-            // win, because a decoder reads bytes — but it is a leniency and it
-            // is named, so "it opened" and "it opened cleanly" stay apart.
+            // win, because a decoder reads bytes.
+            //
+            // **And nothing says so, which ruling 10 wants and this does not
+            // give.** The channel is the problem rather than the will: this
+            // function returns `Result<Image, XpsElementDefect>`, so the only
+            // thing it can report is a *refusal*, and a leniency has nowhere
+            // to go. The comment here used to claim the disagreement was named;
+            // it never was.
+            //
+            // It mattered less while the arm was nearly unreachable — TIFF and
+            // JPEG XR were refused above before the two rules were compared, so
+            // only a PNG-versus-JPEG disagreement could arrive. Wiring the TIFF
+            // decoder made it ordinary. Pinned by
+            // `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing`
+            // in `tests/xps_images.rs`, and carried as a row in
+            // `docs/features/xps.md`.
             (Some(_), Some(b)) => b,
             (None, None) => return Err(XpsElementDefect::ImageFormatUnsupported),
         };
@@ -288,17 +309,41 @@ impl Images {
                     dpi: phys_dpi(bytes).unwrap_or((DEFAULT_DPI, DEFAULT_DPI)),
                 }
             }
-            // Refused above, before either decoder was reached — so this arm
-            // is unreachable, and it is here because the alternative is a
-            // `match` that does not cover its own type.
+            // 9.1.5's TIFF. Most of one reaches the page as its own bytes:
+            // four of TIFF 6.0's codings already have a `/Filter` name, so a
+            // single-strip file of any of them is placed rather than decoded
+            // ([`tinker_pdf_cos::tiff_image`]).
+            Kind::Tiff => {
+                let tiff = tiff_image(bytes, &FilterLimits::new(limits.max_synthesised))
+                    .map_err(|_| XpsElementDefect::ImageUnreadable)?;
+                let data = tiff.image();
+                let (w, h) = (tiff.width(), tiff.height());
+                // A resolution the file states, in the units it states them
+                // in; 13.4.1's 96 where it states none. The other two formats
+                // read their own headers for this and TIFF's is read off the
+                // directory, which is why all three defaults sit here rather
+                // than in the decoders.
+                let dpi = tiff.dpi().unwrap_or((DEFAULT_DPI, DEFAULT_DPI));
+                if !builder.add_image(&resource, &data) {
+                    return Err(XpsElementDefect::ImageUnreadable);
+                }
+                Image {
+                    resource,
+                    px: (f64::from(w), f64::from(h)),
+                    dpi,
+                }
+            }
+            // 9.1.5.1's JPEG XR, refused above before either decoder was
+            // reached — so this arm is unreachable, and it is here because the
+            // alternative is a `match` that does not cover its own type.
             //
             // The redundancy is measured rather than assumed: the injection
-            // matrix's "a TIFF the magic bytes say is drawn" removes the loop's
-            // `actual` and **survives**, because this arm refuses the same file
-            // a line later. That is the one injection of twenty-eight that
-            // changes no answer, and it says the rule is enforced twice rather
-            // than that a test is missing.
-            Kind::Tiff | Kind::JpegXr => return Err(XpsElementDefect::ImageFormatUnsupported),
+            // matrix's "a picture the magic bytes say is drawn" removes the
+            // loop's `actual` and **survives**, because this arm refuses the
+            // same file a line later. That is the one injection of twenty-eight
+            // that changes no answer, and it says the rule is enforced twice
+            // rather than that a test is missing.
+            Kind::JpegXr => return Err(XpsElementDefect::ImageFormatUnsupported),
         };
         self.next += 1;
         Ok(image)

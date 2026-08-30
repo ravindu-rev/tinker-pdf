@@ -22,10 +22,11 @@ use std::ptr;
 use std::sync::Arc;
 
 use tinker_pdf::{
-    AuthLevel, Bitmap, Chain, CmsState, Coverage, DestKind, Document, DocumentBuilder,
-    DocumentDigest, DocumentEditor, EditCheckpoint, Encryption, FillError, ImageData, OutlineEntry,
-    PageBuilder, PixelFormat, RenderOptions, Signature, SignatureCheck, SimpleFontProvider,
-    SkippedWidget, Target, TrustAnchors, Verdict, Weakness, WidgetDefect, WriteMode, WriteOptions,
+    AuthLevel, Bitmap, CalcError, Chain, CmsState, Coverage, DestKind, Document, DocumentBuilder,
+    DocumentDigest, DocumentEditor, EditCheckpoint, Encryption, EventVerdict, FillError, ImageData,
+    Keystroke, OutlineEntry, PageBuilder, PixelFormat, Recalculation, RenderOptions, ScriptPolicy,
+    Signature, SignatureCheck, SimpleFontProvider, SkippedWidget, Target, Trigger, TrustAnchors,
+    Verdict, Weakness, WidgetDefect, WriteMode, WriteOptions,
 };
 
 /// How a call went.
@@ -112,6 +113,18 @@ pub enum TpdfStatus {
     /// distinct from [`TpdfStatus::NotAPdf`], where calling again would be
     /// pointless.
     SourceMiss = 14,
+
+    // ---- the script policy, appended at 15 ---------------------------------
+    /// A form script would not run, or the policy would not let it.
+    ///
+    /// One status for both, deliberately: from a caller's side the answer is
+    /// the same, which is that **nothing was written** and the document is
+    /// exactly as it was. Which script and why crosses through
+    /// [`tpdf_last_error_message`], which is where a `CalcError`'s own
+    /// sentence lands (ruling 10) — a status code cannot carry a field name,
+    /// and inventing seven codes for seven refusals would be this crate
+    /// growing a vocabulary the facade does not have (ruling 11).
+    ScriptRefused = 15,
 }
 
 /// A document's bytes, as ranges the host answers (7.5.6, Annex F).
@@ -3384,6 +3397,458 @@ pub unsafe extern "C" fn tpdf_builder_set_info(
     TpdfStatus::Ok
 }
 
+// ---------------------------------------------------------------------------
+// Form scripts: the policy, the pass, and the two events
+// ---------------------------------------------------------------------------
+
+/// `/AA /C` -- recalculate a field when another changes.
+pub const TPDF_SCRIPT_CALCULATE: u32 = 1;
+/// `/AA /F` -- produce what a viewer displays, without touching `/V`.
+pub const TPDF_SCRIPT_FORMAT: u32 = 1 << 1;
+/// `/AA /K` -- a keystroke, a paste, or the commit at the end of one.
+pub const TPDF_SCRIPT_KEYSTROKE: u32 = 1 << 2;
+/// `/AA /V` -- validate a value the user committed.
+pub const TPDF_SCRIPT_VALIDATE: u32 = 1 << 3;
+/// `/Names /JavaScript` (7.7.4) -- the helpers a form's field scripts call.
+pub const TPDF_SCRIPT_DOCUMENT: u32 = 1 << 4;
+/// The catalog's `/AA` (12.6.3 table 200).
+///
+/// Declarable and inert: **nothing in this build runs a catalog action**,
+/// because every one of `WC`, `WS`, `DS`, `WP` and `DP` names an event a
+/// reader has no notion of. The bit exists so a host can deny it and so this
+/// projection stays 1:1 with `ScriptPolicy`, not because setting it does
+/// anything.
+pub const TPDF_SCRIPT_CATALOG: u32 = 1 << 5;
+/// What `ScriptPolicy::default()` is: the two triggers that were already
+/// running before the policy type existed.
+pub const TPDF_SCRIPT_DEFAULT: u32 = TPDF_SCRIPT_CALCULATE | TPDF_SCRIPT_FORMAT;
+
+/// A [`ScriptPolicy`] as a C caller can carry one.
+///
+/// A bitmask rather than a struct of six `int`s, because a struct would be
+/// ABI a later trigger class could not be added to without breaking it, and
+/// the append rule this crate's status enum follows would then have nowhere
+/// to append. Bits nothing defines are ignored rather than refused: a host
+/// compiled against a later header that sets a bit this build has never heard
+/// of gets this build's answer, which is the one it can give.
+fn policy_of(bits: u32) -> ScriptPolicy {
+    let mut policy = ScriptPolicy::nothing();
+    for (bit, trigger) in [
+        (TPDF_SCRIPT_CALCULATE, Trigger::Calculate),
+        (TPDF_SCRIPT_FORMAT, Trigger::Format),
+        (TPDF_SCRIPT_KEYSTROKE, Trigger::Keystroke),
+        (TPDF_SCRIPT_VALIDATE, Trigger::Validate),
+        (TPDF_SCRIPT_DOCUMENT, Trigger::Document),
+        (TPDF_SCRIPT_CATALOG, Trigger::Catalog),
+    ] {
+        if bits & bit != 0 {
+            policy = policy.allow(trigger);
+        }
+    }
+    policy
+}
+
+/// A `CalcError`, as far as a status code can carry one.
+///
+/// Everything else it says goes to [`tpdf_last_error_message`], which is
+/// where the field name lives.
+fn calc_status(error: &CalcError) -> TpdfStatus {
+    match error {
+        CalcError::NoSuchField => TpdfStatus::NoSuchField,
+        _ => TpdfStatus::ScriptRefused,
+    }
+}
+
+/// What one recalculation pass did.
+///
+/// A handle rather than four out-parameters, because `Recalculation` has four
+/// lists and a C signature that took them all would be unreadable and
+/// unextendable. Freed with [`tpdf_recalculation_free`].
+pub struct TpdfRecalculation {
+    inner: Recalculation,
+}
+
+/// Runs the form's `/AA /C` calculate actions under `policy` and applies what
+/// they produced (12.7.2 table 218).
+///
+/// **All or nothing.** A non-`Ok` status means nothing was written and the
+/// editor is exactly as it was; [`tpdf_last_error_message`] names the field
+/// and why. Running nine scripts and skipping the tenth would give a document
+/// whose totals disagree with its inputs, which is the outcome this whole
+/// surface exists to prevent.
+///
+/// `policy` is a bitmask of the `TPDF_SCRIPT_*` constants;
+/// [`TPDF_SCRIPT_DEFAULT`] is what a Rust caller gets from
+/// `ScriptPolicy::default()`.
+///
+/// `out_report` may be null, in which case the report is dropped -- but a
+/// caller that does that has chosen not to know which validations did not run
+/// (see [`tpdf_recalculation_refused_count`]), which is the silence ruling 10
+/// is against.
+///
+/// # Safety
+///
+/// `editor` must be a live handle and `out_report` a valid pointer or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_recalculate(
+    editor: *mut TpdfEditor,
+    policy: u32,
+    out_report: *mut *mut TpdfRecalculation,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_mut() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    match editor.inner.recalculate_under(policy_of(policy)) {
+        Ok(pass) => {
+            if let Some(slot) = unsafe { out_report.as_mut() } {
+                *slot = Box::into_raw(Box::new(TpdfRecalculation { inner: pass }));
+            }
+            TpdfStatus::Ok
+        }
+        Err(error) => {
+            set_error(&format!("{error}"));
+            calc_status(&error)
+        }
+    }
+}
+
+/// Releases a recalculation report.
+///
+/// # Safety
+///
+/// `report` must have come from [`tpdf_editor_recalculate`] and must not be
+/// used afterwards. Null is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_free(report: *mut TpdfRecalculation) {
+    if report.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(report) });
+}
+
+/// How many fields the pass gave a new `/V`.
+///
+/// # Safety
+///
+/// `report` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_changed_count(report: *const TpdfRecalculation) -> u32 {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return 0;
+    };
+    count(report.inner.changed.len())
+}
+
+/// The fully qualified name of the `index`th changed field (12.7.3.2), as a
+/// string the caller frees with [`tpdf_string_free`].
+///
+/// # Safety
+///
+/// `report` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_changed_name(
+    report: *const TpdfRecalculation,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some((name, _)) = report.inner.changed.get(index as usize) else {
+        set_error("no such changed field");
+        return TpdfStatus::NoSuchField;
+    };
+    unsafe { hand_over_string(out, Some(name)) }
+}
+
+/// The value the pass computed for the `index`th changed field.
+///
+/// # Safety
+///
+/// `report` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_changed_value(
+    report: *const TpdfRecalculation,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some((_, value)) = report.inner.changed.get(index as usize) else {
+        set_error("no such changed field");
+        return TpdfStatus::NoSuchField;
+    };
+    unsafe { hand_over_string(out, Some(value)) }
+}
+
+/// How many widgets the pass could not draw, because 12.5.2 table 164's
+/// required `/Rect` is missing from them.
+///
+/// The value was still written; the widget was left showing what it was
+/// showing. Ruling 2 degrades and ruling 10 forbids that being silent, which
+/// is what this count is for.
+///
+/// # Safety
+///
+/// `report` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_skipped_count(report: *const TpdfRecalculation) -> u32 {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return 0;
+    };
+    count(report.inner.skipped.len())
+}
+
+/// How many fields a later script wrote *after* their own calculation had
+/// already run in this pass.
+///
+/// The one case where one pass and a full fixed-point disagree, reported
+/// rather than iterated on.
+///
+/// # Safety
+///
+/// `report` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_cascades_cut_count(
+    report: *const TpdfRecalculation,
+) -> u32 {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return 0;
+    };
+    count(report.inner.cascades_cut.len())
+}
+
+/// The name of the `index`th cut cascade.
+///
+/// # Safety
+///
+/// `report` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_cascades_cut_name(
+    report: *const TpdfRecalculation,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(name) = report.inner.cascades_cut.get(index as usize) else {
+        set_error("no such cut cascade");
+        return TpdfStatus::NoSuchField;
+    };
+    unsafe { hand_over_string(out, Some(name)) }
+}
+
+/// How many fields were written **without** their own `/AA /V` validate
+/// action being consulted, because the policy denied
+/// [`TPDF_SCRIPT_VALIDATE`].
+///
+/// A count that is not zero says the numbers now in the document were never
+/// checked by the form's own validation. Ruling 10 applied to a check rather
+/// than a repair: a pass that silently skipped one would read exactly like a
+/// pass over a form that has none.
+///
+/// # Safety
+///
+/// `report` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_refused_count(report: *const TpdfRecalculation) -> u32 {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return 0;
+    };
+    count(report.inner.refused.len())
+}
+
+/// The name of the `index`th field whose validation did not run.
+///
+/// # Safety
+///
+/// `report` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_recalculation_refused_name(
+    report: *const TpdfRecalculation,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(report) = (unsafe { report.as_ref() }) else {
+        set_error("null report");
+        return TpdfStatus::BadArgument;
+    };
+    let Some(name) = report.inner.refused.get(index as usize) else {
+        set_error("no such refused validation");
+        return TpdfStatus::NoSuchField;
+    };
+    unsafe { hand_over_string(out, Some(name)) }
+}
+
+/// The text a field's `/AA /F` format action would display (12.7.3.3).
+///
+/// **This is not the field's value and must not be written back as one.** A
+/// `/V` of "GBP 1,234.00" is a form whose export is unusable, which is why in
+/// Rust this comes back as a `DisplayString` no write door will accept. A C
+/// ABI has no such type, so the rule crosses as this sentence and as the fact
+/// that the string is handed over separately from
+/// [`tpdf_editor_field_value`] rather than instead of it.
+///
+/// `*out` is null when the field carries no format action, which is most
+/// fields. Freed with [`tpdf_string_free`].
+///
+/// # Safety
+///
+/// `editor` must be a live handle, `name` null-terminated UTF-8, and `out` a
+/// valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_formatted_value(
+    editor: *const TpdfEditor,
+    name: *const c_char,
+    policy: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_ref() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let name = match unsafe { required_str(name, "field name") } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    match editor.inner.formatted_value(&name, policy_of(policy)) {
+        Ok(shown) => unsafe { hand_over_string(out, shown.as_ref().map(|s| s.text())) },
+        Err(error) => {
+            set_error(&format!("{error}"));
+            calc_status(&error)
+        }
+    }
+}
+
+/// Offers a keystroke to a field's `/AA /K` action (12.6.4.16 table 196).
+///
+/// It takes an event because it has to: what is being typed, where, and
+/// whether this is the commit are facts a host has and a document reader does
+/// not. Nothing is written either way.
+///
+/// `out_accepted` receives 1 when the action accepted and 0 when it set
+/// `event.rc = false`. **A refusal is the form working, not an error**: the
+/// status is `Ok` in both cases, and a non-`Ok` status means the script could
+/// not run at all.
+///
+/// `out_change` receives `event.change` as the action left it, which for the
+/// commonest keystroke scripts is the text the field should insert -- a
+/// keystroke action rewriting what is being typed is how every upper-casing
+/// field in the wild works. It is null when the action refused. Both
+/// out-parameters may be null.
+///
+/// # Safety
+///
+/// `editor` must be a live handle, `name` and `change` null-terminated UTF-8,
+/// and the out-parameters valid pointers or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_keystroke(
+    editor: *const TpdfEditor,
+    name: *const c_char,
+    change: *const c_char,
+    sel_start: i64,
+    sel_end: i64,
+    will_commit: c_int,
+    policy: u32,
+    out_accepted: *mut c_int,
+    out_change: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_ref() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let name = match unsafe { required_str(name, "field name") } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    let change = match unsafe { required_str(change, "keystroke change") } {
+        Ok(change) => change,
+        Err(status) => return status,
+    };
+    let event = Keystroke {
+        change,
+        selection: (sel_start, sel_end),
+        will_commit: will_commit != 0,
+    };
+    match editor.inner.keystroke(&name, &event, policy_of(policy)) {
+        Ok(verdict) => unsafe { hand_over_verdict(&verdict, out_accepted, out_change) },
+        Err(error) => {
+            set_error(&format!("{error}"));
+            calc_status(&error)
+        }
+    }
+}
+
+/// Offers a committed value to a field's `/AA /V` validate action
+/// (12.6.4.16 table 196).
+///
+/// Nothing is written: this answers whether the form would take the value,
+/// and applying it is still [`tpdf_editor_fill_field`]'s job. As with
+/// [`tpdf_editor_keystroke`], a refusal is `Ok` with `*out_accepted` zero.
+///
+/// # Safety
+///
+/// `editor` must be a live handle, `name` and `value` null-terminated UTF-8,
+/// and the out-parameters valid pointers or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_editor_validate(
+    editor: *const TpdfEditor,
+    name: *const c_char,
+    value: *const c_char,
+    policy: u32,
+    out_accepted: *mut c_int,
+    out_value: *mut *mut c_char,
+) -> TpdfStatus {
+    let Some(editor) = (unsafe { editor.as_ref() }) else {
+        set_error("null editor");
+        return TpdfStatus::BadArgument;
+    };
+    let name = match unsafe { required_str(name, "field name") } {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+    let value = match unsafe { required_str(value, "field value") } {
+        Ok(value) => value,
+        Err(status) => return status,
+    };
+    match editor.inner.validate(&name, &value, policy_of(policy)) {
+        Ok(verdict) => unsafe { hand_over_verdict(&verdict, out_accepted, out_value) },
+        Err(error) => {
+            set_error(&format!("{error}"));
+            calc_status(&error)
+        }
+    }
+}
+
+/// Splits an [`EventVerdict`] into the two out-parameters a C caller reads.
+///
+/// # Safety
+///
+/// Both out-parameters must be valid pointers or null.
+unsafe fn hand_over_verdict(
+    verdict: &EventVerdict,
+    out_accepted: *mut c_int,
+    out_text: *mut *mut c_char,
+) -> TpdfStatus {
+    if let Some(slot) = unsafe { out_accepted.as_mut() } {
+        *slot = c_int::from(verdict.is_accepted());
+    }
+    if out_text.is_null() {
+        return TpdfStatus::Ok;
+    }
+    unsafe { hand_over_string(out_text, verdict.text()) }
+}
+
 /// Starts a page, owned by the caller until [`tpdf_builder_push_page`] takes
 /// it.
 ///
@@ -4422,6 +4887,10 @@ endobj
         assert_eq!(TpdfStatus::FieldUnreadable as i32, 11);
         assert_eq!(TpdfStatus::SpentHandle as i32, 12);
         assert_eq!(TpdfStatus::EditRefused as i32, 13);
+
+        // Streaming's one, and the script policy's one, appended in turn.
+        assert_eq!(TpdfStatus::SourceMiss as i32, 14);
+        assert_eq!(TpdfStatus::ScriptRefused as i32, 15);
     }
 
     /// A `TpdfStatus` crosses as an `int`, and the three hand-written bindings
@@ -4432,7 +4901,7 @@ endobj
     #[test]
     fn every_status_the_abi_carries_is_pinned_by_number() {
         // Nothing in Rust enumerates a `#[repr(C)]` enum's variants, so this
-        // is the list, written out. It is exactly the fifteen pinned above.
+        // is the list, written out. It is exactly the sixteen pinned above.
         const EVERY: &[(TpdfStatus, i32)] = &[
             (TpdfStatus::Ok, 0),
             (TpdfStatus::BadArgument, 1),
@@ -4449,11 +4918,12 @@ endobj
             (TpdfStatus::SpentHandle, 12),
             (TpdfStatus::EditRefused, 13),
             (TpdfStatus::SourceMiss, 14),
+            (TpdfStatus::ScriptRefused, 15),
         ];
         for (status, number) in EVERY {
             assert_eq!(*status as i32, *number, "{status:?}");
         }
-        assert_eq!(EVERY.len(), 15, "append only, and say how many there are");
+        assert_eq!(EVERY.len(), 16, "append only, and say how many there are");
     }
 
     /// The write surface's other two enums, pinned for the reason
@@ -6793,5 +7263,370 @@ endobj
         let status =
             unsafe { tpdf_document_open_streaming(vtable(), ptr::null_mut(), ptr::null_mut()) };
         assert_eq!(status, TpdfStatus::BadArgument);
+    }
+
+    // -----------------------------------------------------------------------
+    // Form scripts across the ABI
+    // -----------------------------------------------------------------------
+
+    /// A calculating form with every trigger class on one field, so one
+    /// fixture answers every question below.
+    ///
+    /// `total` is `net * 2`, formats as currency, refuses a keystroke that is
+    /// not a digit and validates against a ceiling. A helper the document
+    /// defines is what the calculate action calls, which is the shape a real
+    /// generated form has.
+    fn scripted_form() -> Vec<u8> {
+        const BYTES: &str = "%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R
+   /AcroForm << /Fields [10 0 R 11 0 R] /CO [11 0 R] >>
+   /Names << /JavaScript 20 0 R >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Annots [10 0 R 11 0 R] >>
+endobj
+10 0 obj
+<< /FT /Tx /T (net) /V (100) /Rect [10 250 290 270] /Subtype /Widget /Type /Annot >>
+endobj
+11 0 obj
+<< /FT /Tx /T (total) /V (0) /Rect [10 190 290 210] /Subtype /Widget /Type /Annot
+   /AA << /C << /S /JavaScript /JS (event.value = twice\\(getField\\('net'\\).value\\);) >>
+          /F << /S /JavaScript /JS (AFNumber_Format\\(2, 0, 0, 0, \"GBP \", true\\);) >>
+          /K << /S /JavaScript /JS (if \\(event.change < '0' || event.change > '9'\\) \
+{ event.rc = false; }) >>
+          /V << /S /JavaScript /JS (if \\(event.value > 500\\) { event.rc = false; }) >> >> >>
+endobj
+20 0 obj
+<< /Names [(helpers) 21 0 R] >>
+endobj
+21 0 obj
+<< /S /JavaScript /JS (function twice\\(n\\) { return n * 2; }) >>
+endobj
+trailer
+<< /Size 22 /Root 1 0 R >>
+%%EOF
+";
+        BYTES.as_bytes().to_vec()
+    }
+
+    /// Takes a string out-parameter, or `None` when the call left it null.
+    fn taken(text: *mut c_char) -> Option<String> {
+        if text.is_null() {
+            return None;
+        }
+        let value = unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { tpdf_string_free(text) };
+        Some(value)
+    }
+
+    /// Ruling 11 as an equality, for the pass: the C ABI computes what the
+    /// facade computes over the same bytes, under the same policy.
+    #[test]
+    fn a_pass_across_the_abi_computes_what_the_facade_computes() {
+        let bytes = scripted_form();
+        let facade = Document::open(bytes.clone()).expect("the fixture opens");
+        let mut expected = facade.editor();
+        let expected = expected
+            .recalculate_under(ScriptPolicy::default().allow(Trigger::Document))
+            .expect("the helper is in scope");
+
+        let doc = open_bytes(&bytes);
+        let editor = editor_over(doc);
+        let mut report: *mut TpdfRecalculation = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_recalculate(
+                    editor,
+                    TPDF_SCRIPT_DEFAULT | TPDF_SCRIPT_DOCUMENT,
+                    &mut report,
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_recalculation_changed_count(report) } as usize,
+            expected.changed.len()
+        );
+        let mut name: *mut c_char = ptr::null_mut();
+        let mut value: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_recalculation_changed_name(report, 0, &mut name) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(
+            unsafe { tpdf_recalculation_changed_value(report, 0, &mut value) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(taken(name).as_deref(), Some("total"));
+        assert_eq!(taken(value).as_deref(), Some("200"));
+
+        // The validate action was not run, and the report says which field
+        // that was (ruling 10) rather than leaving it to be assumed.
+        assert_eq!(unsafe { tpdf_recalculation_refused_count(report) }, 1);
+        let mut refused: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_recalculation_refused_name(report, 0, &mut refused) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(taken(refused).as_deref(), Some("total"));
+        // Every widget in this fixture carries 12.5.2 table 164's `/Rect`, so
+        // nothing was left showing what it was showing, and no cascade was
+        // cut. Both are asserted rather than assumed: a report whose only
+        // non-zero count is the one the test looked at would pass while the
+        // other two answered anything at all.
+        assert_eq!(unsafe { tpdf_recalculation_skipped_count(report) }, 0);
+        assert_eq!(unsafe { tpdf_recalculation_cascades_cut_count(report) }, 0);
+
+        unsafe { tpdf_recalculation_free(report) };
+        unsafe { tpdf_editor_free(editor) };
+        unsafe { tpdf_document_free(doc) };
+    }
+
+    /// Without the document trigger the helper is not in scope, the pass
+    /// refuses, and nothing was written — the same answer the facade gives.
+    #[test]
+    fn a_pass_without_the_document_trigger_refuses_and_writes_nothing() {
+        let bytes = scripted_form();
+        let doc = open_bytes(&bytes);
+        let editor = editor_over(doc);
+        let mut report: *mut TpdfRecalculation = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_recalculate(editor, TPDF_SCRIPT_DEFAULT, &mut report) },
+            TpdfStatus::ScriptRefused
+        );
+        assert!(report.is_null(), "nothing to free on a refusal");
+        assert_eq!(unsafe { tpdf_editor_is_dirty(editor) }, 0);
+        let message = last_error();
+        assert!(
+            message.contains("total"),
+            "the refusal names the field: {message}"
+        );
+        unsafe { tpdf_editor_free(editor) };
+        unsafe { tpdf_document_free(doc) };
+    }
+
+    /// The format action's display string crosses as a string of its own, and
+    /// `/V` is untouched. A C ABI has no `DisplayString`, so what stops the
+    /// mistake there is that the two are separate calls with separate names.
+    #[test]
+    fn a_format_action_hands_over_a_display_string_and_leaves_the_value() {
+        let bytes = scripted_form();
+        let doc = open_bytes(&bytes);
+        let editor = editor_over(doc);
+
+        let mut shown: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_formatted_value(
+                    editor,
+                    c("total").as_ptr(),
+                    TPDF_SCRIPT_DEFAULT,
+                    &mut shown,
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert_eq!(taken(shown).as_deref(), Some("GBP 0.00"));
+
+        let mut value: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_field_value(editor, 1, &mut value) },
+            TpdfStatus::Ok
+        );
+        assert_eq!(taken(value).as_deref(), Some("0"), "/V is untouched");
+
+        // A field with no format action hands back null rather than empty.
+        let mut none: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_formatted_value(
+                    editor,
+                    c("net").as_ptr(),
+                    TPDF_SCRIPT_DEFAULT,
+                    &mut none,
+                )
+            },
+            TpdfStatus::Ok
+        );
+        assert!(none.is_null());
+
+        unsafe { tpdf_editor_free(editor) };
+        unsafe { tpdf_document_free(doc) };
+    }
+
+    /// Both events, both directions. A refusal is `Ok` with `accepted` zero,
+    /// because a form saying no is the form working.
+    #[test]
+    fn the_two_events_cross_with_their_verdicts() {
+        let bytes = scripted_form();
+        let doc = open_bytes(&bytes);
+        let editor = editor_over(doc);
+        let policy = TPDF_SCRIPT_DEFAULT | TPDF_SCRIPT_KEYSTROKE | TPDF_SCRIPT_VALIDATE;
+
+        for (change, accepted) in [("7", 1), ("!", 0)] {
+            let mut yes: c_int = -1;
+            let mut out: *mut c_char = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    tpdf_editor_keystroke(
+                        editor,
+                        c("total").as_ptr(),
+                        c(change).as_ptr(),
+                        0,
+                        0,
+                        0,
+                        policy,
+                        &mut yes,
+                        &mut out,
+                    )
+                },
+                TpdfStatus::Ok,
+                "a refusal is not an error"
+            );
+            assert_eq!(yes, accepted, "keystroke {change}");
+            assert_eq!(
+                taken(out).as_deref(),
+                if accepted == 1 { Some(change) } else { None }
+            );
+        }
+
+        for (value, accepted) in [("120", 1), ("900", 0)] {
+            let mut yes: c_int = -1;
+            let mut out: *mut c_char = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    tpdf_editor_validate(
+                        editor,
+                        c("total").as_ptr(),
+                        c(value).as_ptr(),
+                        policy,
+                        &mut yes,
+                        &mut out,
+                    )
+                },
+                TpdfStatus::Ok
+            );
+            assert_eq!(yes, accepted, "validate {value}");
+            assert_eq!(
+                taken(out).as_deref(),
+                if accepted == 1 { Some(value) } else { None }
+            );
+        }
+
+        // Under the default policy the same two calls refuse by name, and
+        // asking changed nothing either way.
+        let mut yes: c_int = -1;
+        assert_eq!(
+            unsafe {
+                tpdf_editor_validate(
+                    editor,
+                    c("total").as_ptr(),
+                    c("120").as_ptr(),
+                    TPDF_SCRIPT_DEFAULT,
+                    &mut yes,
+                    ptr::null_mut(),
+                )
+            },
+            TpdfStatus::ScriptRefused
+        );
+        assert_eq!(unsafe { tpdf_editor_is_dirty(editor) }, 0);
+
+        unsafe { tpdf_editor_free(editor) };
+        unsafe { tpdf_document_free(doc) };
+    }
+
+    /// The bitmask is the policy, bit for bit, and a bit this build does not
+    /// know is ignored rather than refused.
+    #[test]
+    fn the_policy_bits_are_the_policy() {
+        assert_eq!(policy_of(TPDF_SCRIPT_DEFAULT), ScriptPolicy::default());
+        assert_eq!(policy_of(0), ScriptPolicy::nothing());
+        assert_eq!(
+            policy_of(
+                TPDF_SCRIPT_CALCULATE
+                    | TPDF_SCRIPT_FORMAT
+                    | TPDF_SCRIPT_KEYSTROKE
+                    | TPDF_SCRIPT_VALIDATE
+                    | TPDF_SCRIPT_DOCUMENT
+                    | TPDF_SCRIPT_CATALOG
+            ),
+            ScriptPolicy::everything()
+        );
+        // A host compiled against a later header gets this build's answer.
+        assert_eq!(
+            policy_of(TPDF_SCRIPT_DEFAULT | 1 << 20),
+            ScriptPolicy::default()
+        );
+        assert_eq!(
+            policy_of(TPDF_SCRIPT_KEYSTROKE),
+            ScriptPolicy::nothing().allow(Trigger::Keystroke)
+        );
+    }
+
+    /// Null handles are refused rather than dereferenced, on every one of the
+    /// new entry points (ruling 1 does not stop at the ABI).
+    #[test]
+    fn the_script_entry_points_refuse_a_null_handle() {
+        let mut report: *mut TpdfRecalculation = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_recalculate(ptr::null_mut(), TPDF_SCRIPT_DEFAULT, &mut report) },
+            TpdfStatus::BadArgument
+        );
+        let mut out: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                tpdf_editor_formatted_value(
+                    ptr::null(),
+                    c("a").as_ptr(),
+                    TPDF_SCRIPT_DEFAULT,
+                    &mut out,
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_editor_keystroke(
+                    ptr::null(),
+                    c("a").as_ptr(),
+                    c("b").as_ptr(),
+                    0,
+                    0,
+                    0,
+                    TPDF_SCRIPT_DEFAULT,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(
+            unsafe {
+                tpdf_editor_validate(
+                    ptr::null(),
+                    c("a").as_ptr(),
+                    c("b").as_ptr(),
+                    TPDF_SCRIPT_DEFAULT,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(unsafe { tpdf_recalculation_changed_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { tpdf_recalculation_refused_count(ptr::null()) }, 0);
+        assert_eq!(unsafe { tpdf_recalculation_skipped_count(ptr::null()) }, 0);
+        assert_eq!(
+            unsafe { tpdf_recalculation_cascades_cut_count(ptr::null()) },
+            0
+        );
+        // Freeing null is the no-op every other free on this surface is.
+        unsafe { tpdf_recalculation_free(ptr::null_mut()) };
     }
 }

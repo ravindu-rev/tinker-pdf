@@ -13,6 +13,7 @@ members = [
   "crates/tinker-pdf-filters",
   "crates/tinker-pdf-zip",
   "crates/tinker-pdf-xml",
+  "crates/tinker-pdf-svg",
   "crates/tinker-pdf-css",
   "crates/tinker-pdf-layout",
   "crates/tinker-pdf-crypto",
