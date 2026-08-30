@@ -953,8 +953,20 @@ impl<'a> Decoder<'a> {
                 break;
             }
 
-            let distance = if implicit_zero {
-                self.last[0]
+            // Two things come back, and the second is not a detail. §4: "When
+            // a distance symbol 0 appears, the distance it represents ... is
+            // **not** pushed to the ring buffer of last distances; in other
+            // words, the expression 'second-to-last distance' means the
+            // second-to-last distance that was not represented by a 0 distance
+            // symbol". A decoder that pushes it keeps decoding — every byte of
+            // that command is right — and every later short code from 4 up
+            // reads the wrong slot. So the symbol has to leave this block
+            // alongside the distance it produced.
+            let (distance, repeats_last) = if implicit_zero {
+                // The insert-and-copy code implied the distance rather than
+                // coding one, which §4 makes the same case: it *is* the last
+                // distance, so it is not pushed either.
+                (self.last[0], true)
             } else {
                 distance_blocks.step(&mut self.bits)?;
                 // §7.2: the distance context is the copy length, saturated at
@@ -974,7 +986,10 @@ impl<'a> Decoder<'a> {
                     .ok_or(BrotliError::Malformed("a distance context map entry"))?;
                 let symbol = usize::from(code.decode(&mut self.bits)?);
                 let last = self.last;
-                distance_from_symbol(&mut self.bits, &last, symbol, npostfix, ndirect)?
+                (
+                    distance_from_symbol(&mut self.bits, &last, symbol, npostfix, ndirect)?,
+                    symbol == 0,
+                )
             };
 
             let max_backward = self.window.min(self.out.len()) as i64;
@@ -984,7 +999,12 @@ impl<'a> Decoder<'a> {
                     // negative value, the stream should be rejected".
                     return Err(BrotliError::Malformed("a distance of zero or less"));
                 }
-                if !implicit_zero {
+                // §4, and the pseudo-code in §9.3 says it the same way: "if
+                // distance code is not zero, and distance is not a static
+                // dictionary reference, push distance to the ring buffer of
+                // last distances". The dictionary half is the `else` arm
+                // below, which reaches no push at all.
+                if !repeats_last {
                     self.push_distance(distance);
                 }
                 if copy > mlen - (self.out.len() - start) {
