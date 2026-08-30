@@ -491,6 +491,46 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 ///
 /// It points downward from a non-leaf to a leaf and cannot cycle, because
 /// `pki` depends only on `crypto` and `crypto` on nothing.
+/// **`svg -> xml`, `svg -> css` and `svg -> math` are the tenth amendment**,
+/// and it is the first entry here with three edges. Each one answers a
+/// question the others do not, which is why none of them collapses into
+/// another.
+///
+/// `xml`, because an SVG *is* XML and there is one XML parser in this tree.
+/// Taking it also inherits what that parser refuses by name — `<!DOCTYPE` with
+/// an internal subset, before one byte past it is read — and an SVG is the
+/// document type in this repository a caller is most likely to be handed by a
+/// stranger, since a book's cover page is somebody else's file. A second
+/// parser here would be a second answer to the entity-expansion question, and
+/// `deny.toml` already records that reasoning against `html5ever`.
+///
+/// `css`, for the tokenizer and the colour grammar. An SVG carries
+/// presentation attributes, `style=""` and `<style>` elements, and all three
+/// are CSS values. What is deliberately **not** taken is `ComputedStyle`: its
+/// forty-seven fields are HTML's property set and an SVG wants a different
+/// dozen, so this crate resolves its own. The edge buys the parsing and not
+/// the model, which is the distinction the sixth amendment drew when
+/// `tinker-pdf-layout` took the same edge for the opposite half.
+///
+/// `math`, and this one is ruling 4 rather than convenience. SVG 1.1 F.6.5's
+/// endpoint-to-centre conversion for the elliptical-arc command needs `cos`,
+/// `sin` and an `atan2`, and a platform transcendental on a path that decides
+/// where ink lands is exactly what `cargo xtask libm` fails a build over. The
+/// alternative considered and rejected was refusing `A` with a non-zero
+/// x-axis-rotation, which avoids the edge at the price of being unable to read
+/// a rotated ellipse that every drawing program emits. **The sixth amendment
+/// predicted this edge for `tinker-pdf-layout` and was wrong there** — nothing
+/// in a box model is transcendental — so it is worth saying why it is right
+/// here: a box has axes and an arc has an angle.
+///
+/// It is a leaf on ruling 8's definition rather than on its shape: bytes and a
+/// plain limits struct in, a display list of plain structs out. Markup in,
+/// geometry out, with no PDF vocabulary anywhere — the caller that turns a
+/// `Scene` into content-stream operators is the facade.
+///
+/// The direction is safe for the third amendment's reasons. All three edges
+/// point **down to leaves**, and none of `xml`, `css` or `math` has any reason
+/// to know that SVG exists, so there is no path back.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -518,6 +558,12 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // rather than in `font` because that crate's charter is the tables
     // metrics need. See the eighth amendment above.
     ("tinker-pdf-shape", &["tinker-pdf-font"]),
+    // The thirteenth leaf, and the only one here with three edges. See the
+    // tenth amendment above.
+    (
+        "tinker-pdf-svg",
+        &["tinker-pdf-xml", "tinker-pdf-css", "tinker-pdf-math"],
+    ),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
     ("tinker-pdf-raster", &["tinker-pdf-math"]),
     // File syntax and the object model.

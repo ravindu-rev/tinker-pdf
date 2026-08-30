@@ -150,6 +150,19 @@ deny = [
   # subset. An HTML5 tree builder is a *different* parser with a different
   # error-recovery model and a different threat surface, and adopting one would
   # quietly undo gap 30's whole defence against entity expansion.
+  # SVG, denied in the milestone that writes the parser -- this file's own rule
+  # about when the temptation exists. `usvg` and `resvg` are the obvious two and
+  # are excellent; `svgtypes` is the path and transform grammars alone, which is
+  # exactly the part `tinker-pdf-svg/src/path.rs` transcribes and therefore the
+  # most tempting of the four. `librsvg` is GPL and would not clear the licence
+  # gate anyway, which is not the reason it is here: the reason is rule 1.
+  { name = "usvg" },
+  { name = "resvg" },
+  { name = "svgtypes" },
+  { name = "svgfilters" },
+  { name = "librsvg" },
+  { name = "nsvg" },
+  { name = "svg" },
   { name = "cssparser" },
   { name = "lightningcss" },
   { name = "selectors" },

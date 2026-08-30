@@ -45,13 +45,15 @@ tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-cont
 tinker-pdf-font ────→ tinker-pdf-shape    (no consumer yet: milestone 6 of design/shaping.md)
 tinker-pdf-xml ───────────────────────────────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-css ─────→ tinker-pdf-layout ──────────────────────────────────────────────→ tinker-pdf
+tinker-pdf-svg ─────→ tinker-pdf-xml, tinker-pdf-css, tinker-pdf-math ─────────────────→ tinker-pdf
 
 tools: pdfcmp (no engine deps) · tpdf (depends on facade)
 ```
 
-**Twelve leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
-`math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape` — are bytes-in/values-out with zero
-PDF types (ruling 8 defines a leaf; the definition binds, not the list).
+**Thirteen leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
+`math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg` — are
+bytes-in/values-out with zero PDF types (ruling 8 defines a leaf; the
+definition binds, not the list).
 This is the property that makes each one independently fuzzable: a fuzz
 target hands `tinker-pdf-font` a byte slice and expects a value or a
 structured error, with no COS machinery in the corpus or the crash triage.
@@ -154,6 +156,7 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-zip` | ZIP reader | 3 000 | [cbz](features/cbz.md) | `zip_archive` |
 | `tinker-pdf-xml` | XML pull parser | 4 100 | [xps](features/xps.md) | `xml` |
 | `tinker-pdf-css` | CSS engine | 10 800 | [epub](features/epub.md) | `css` |
+| `tinker-pdf-svg` | SVG geometry and paint | 1 500 | [epub](features/epub.md) | `svg` |
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
