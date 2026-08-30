@@ -245,12 +245,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   drives both parsers over the same bytes and asserts, beyond "no panic", that
   a successful read produced exactly the declared length, spent no more than
   the archive's total, and that every entry is either checksummed or refused;
-  `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take.
-  Two of the 24 targets.
-<<<<<<< HEAD
-- The whole workspace: `cargo test --workspace` is 2 963 passed, 0 failed,
-  8 ignored (Windows x86_64, as of August 2026).
-=======
+  `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take,
+  and `fuzz_targets/tiff.rs` the one a scanned comic reaches. Three of the 32
+  targets.
 - The whole workspace: `cargo test --workspace` is 3 024 passed, 0 failed,
   9 ignored across 123 suites (Windows x86_64, as of August 2026).
->>>>>>> worktree-agent-a7a43abb09bfb795e

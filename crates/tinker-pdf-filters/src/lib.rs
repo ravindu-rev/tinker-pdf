@@ -356,10 +356,8 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
-<<<<<<< HEAD
             Self::Jbig2VariantSkipped => "jbig2-variant-skipped",
             Self::Jbig2SymbolLimitHit => "jbig2-symbol-limit-hit",
-=======
             Self::PackBitsNoOp => "packbits-no-op",
             Self::PackBitsRunOverruns => "packbits-run-overruns",
             Self::TiffOldStyleLzw => "tiff-old-style-lzw",
@@ -369,7 +367,6 @@ impl Warning {
             Self::TiffFillOrderIgnored => "tiff-fill-order-ignored",
             Self::TiffColorMapIsEightBit => "tiff-color-map-is-eight-bit",
             Self::TiffExtraPagesIgnored => "tiff-extra-pages-ignored",
->>>>>>> worktree-agent-a7a43abb09bfb795e
             Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
             Self::JpxMarkerUnknown => "jpx-marker-unknown",
             Self::JpxStructureInvalid => "jpx-structure-invalid",
@@ -411,10 +408,8 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
-<<<<<<< HEAD
             Self::Jbig2VariantSkipped => "JBIG2 coding variant not decoded here",
             Self::Jbig2SymbolLimitHit => "JBIG2 symbol dictionary past its bounds",
-=======
             Self::PackBitsNoOp => "PackBits no-op tag skipped",
             Self::PackBitsRunOverruns => "PackBits run past the expected byte count",
             Self::TiffOldStyleLzw => "TIFF LZW strip in the pre-1993 bit order, repacked",
@@ -424,7 +419,6 @@ impl fmt::Display for Warning {
             Self::TiffFillOrderIgnored => "TIFF FillOrder 2 on a byte-oriented coding, ignored",
             Self::TiffColorMapIsEightBit => "TIFF ColorMap written at 8 bits rather than 16",
             Self::TiffExtraPagesIgnored => "TIFF directories after the first are not read",
->>>>>>> worktree-agent-a7a43abb09bfb795e
             Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
             Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
             Self::JpxStructureInvalid => "JPX codestream or box structure invalid",
