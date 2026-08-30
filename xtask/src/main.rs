@@ -850,6 +850,15 @@ const SPAWNERS: &[(&str, &str)] = &[
         "PERMANENT: the same compile-refusal proof for a layout field",
     ),
     (
+        "crates/tinker-pdf-cos/tests/display_string_does_not_reach_v.rs",
+        "PERMANENT: spawns `rustc` to ask this repository's own compiler \
+         whether this repository's own type refuses a state; it adjudicates \
+         nothing about a document. The state is a format action's display \
+         string reaching `/V` (12.7.3.3), and the four write doors are \
+         injected one at a time against the real rlib rather than a copy of \
+         the type",
+    ),
+    (
         "xtask/src/fetch.rs",
         "PERMANENT: `curl` and `tar` fetch and unpack the pinned corpora. \
          Supplying, not adjudicating — and nothing fetched is trusted: the \

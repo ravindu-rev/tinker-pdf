@@ -1045,7 +1045,17 @@ impl DocumentEditor {
     /// rather than blanking it and "absent" is an answer.
     #[must_use]
     pub fn fields(&self) -> Vec<form::Field> {
-        let mut fields = form::fields(&self.doc);
+        self.fields_within(&mut form::ScriptBudget::new())
+    }
+
+    /// The same field list, spending a script budget the caller owns.
+    ///
+    /// The recalculation pass uses this so that the field tree's `/AA` and
+    /// `/Names /JavaScript` share one [`form::ScriptBudget`] rather than
+    /// starting from the total apiece.
+    #[must_use]
+    pub fn fields_within(&self, budget: &mut form::ScriptBudget) -> Vec<form::Field> {
+        let mut fields = form::fields_within(&self.doc, budget);
         if self.overlay.is_empty() && self.deleted.is_empty() {
             return fields;
         }
@@ -1210,6 +1220,82 @@ impl DocumentEditor {
     /// is written.
     pub fn recalculate(&mut self) -> Result<crate::calc::Recalculation, crate::calc::CalcError> {
         crate::calc::recalculate(self)
+    }
+
+    /// The same pass, under a [`crate::script::ScriptPolicy`] the host chose.
+    ///
+    /// # Errors
+    ///
+    /// `CalcError::Refused` when the policy denies a trigger class this form
+    /// carries; otherwise exactly what [`DocumentEditor::recalculate`]
+    /// returns. Nothing is written in either case.
+    pub fn recalculate_under(
+        &mut self,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::Recalculation, crate::calc::CalcError> {
+        crate::calc::recalculate_under(self, policy)
+    }
+
+    /// The text a field's format action would display (12.7.3.3).
+    ///
+    /// `Ok(None)` for a field with no format action, which is most fields.
+    /// The answer is a [`crate::calc::DisplayString`] and not a `String`,
+    /// because a display string that reached `/V` would give a form whose
+    /// export reads "GBP 1,234.00" where a consumer expects 1234 — see the
+    /// type, and the compile-refusal proof beside it.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::formatted_value_under`].
+    pub fn formatted_value(
+        &self,
+        name: &str,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<Option<crate::calc::DisplayString>, crate::calc::CalcError> {
+        crate::calc::formatted_value_under(self, name, policy)
+    }
+
+    /// Offers a keystroke to a field's `/AA /K` action (12.6.4.16 table 196).
+    ///
+    /// It takes an event because it has to: what is being typed, where, and
+    /// whether this is the commit are facts a host has and a reader does not,
+    /// which is exactly why keystroke actions could never run implicitly.
+    /// Nothing in a recalculation reaches this.
+    ///
+    /// Under the default [`crate::script::ScriptPolicy`] a field that carries
+    /// a keystroke action answers `CalcError::Refused`; one that carries none
+    /// accepts the keystroke as offered.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::keystroke`]. A script that refuses the keystroke is
+    /// not an error — that is `EventVerdict::Refused`.
+    pub fn keystroke(
+        &self,
+        name: &str,
+        event: &crate::calc::Keystroke,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::EventVerdict, crate::calc::CalcError> {
+        crate::calc::keystroke(self, name, event, policy)
+    }
+
+    /// Offers a committed value to a field's `/AA /V` action (12.6.4.16
+    /// table 196).
+    ///
+    /// Nothing is written either way: this answers whether the form would
+    /// take the value, and applying it is still
+    /// [`DocumentEditor::fill_field`]'s job.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::validate`].
+    pub fn validate(
+        &self,
+        name: &str,
+        value: &str,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::EventVerdict, crate::calc::CalcError> {
+        crate::calc::validate(self, name, value, policy)
     }
 
     /// Turns a checkbox on or off.
