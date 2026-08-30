@@ -125,6 +125,41 @@ const BOOKS: &[Book] = &[
         epub: "2.0",
         demonstrates: "the second producer with no image entry, and an NCX with no nav",
     },
+    // ---- tier 4: the two rows milestone 1 could not fill ---------------------
+    //
+    // Produced 29 August 2026, against producers a year newer than the six
+    // above. The versions differ from the originals on purpose: nothing here
+    // re-ran `make-corpus.ps1` over the committed books, because they are not
+    // byte-reproducible and a regeneration would have replaced six files to
+    // add three.
+    Book {
+        file: "kcc-fixed-layout.epub",
+        producer: "kcc",
+        version: "11.0.1",
+        epub: "3.0",
+        demonstrates: "a third producer, and the only pre-paginated book here: \
+                       rendition:layout on the package with no prefix declaration, \
+                       a per-item viewport on every one of six spine items, and \
+                       page-spread-left/right in the itemref properties",
+    },
+    Book {
+        file: "calibre-embedded-font.epub",
+        producer: "calibre",
+        version: "9.14.0",
+        epub: "3.0",
+        demonstrates: "two @font-face rules for one family told apart by their \
+                       weight descriptor, and the deprecated \
+                       application/vnd.ms-opentype media type",
+    },
+    Book {
+        file: "pandoc-embedded-font.epub",
+        producer: "pandoc",
+        version: "3.11",
+        epub: "3.0",
+        demonstrates: "the same face through a second producer, declared font/ttf, \
+                       reached through a two-entry src list whose first entry is a \
+                       local() this reading system cannot satisfy",
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -423,20 +458,49 @@ fn a_committed_book_puts_a_file_in_meta_inf_that_is_not_one_of_the_six() {
     );
     assert_eq!(
         unreserved["META-INF/com.apple.ibooks.display-options.xml"].len(),
-        4,
-        "pandoc wrote it into a different number of books than the four it produced"
+        BOOKS.iter().filter(|b| b.producer == "pandoc").count(),
+        "pandoc wrote it into a different number of books than it produced"
+    );
+    // And it is still **only** pandoc. Two more producers have been through
+    // this directory since, and neither writes anything into `META-INF` that
+    // §4.2.6.3 does not name — so the habit is one program's, which is what
+    // makes it worth a test rather than a footnote.
+    let mut producers: Vec<&str> = unreserved
+        .values()
+        .flatten()
+        .map(|file| {
+            BOOKS
+                .iter()
+                .find(|b| b.file == *file)
+                .expect("a book in the table")
+                .producer
+        })
+        .collect();
+    producers.sort_unstable();
+    producers.dedup();
+    assert_eq!(
+        producers,
+        ["pandoc"],
+        "a second producer started writing unreserved META-INF entries"
     );
 }
 
-/// One producer writes a **directory entry** for `META-INF/`, deflated, zero
-/// bytes long; the other writes none.
+/// Two producers write a **directory entry** for `META-INF/`, zero bytes long;
+/// the third writes none.
 ///
 /// A ZIP directory entry is a name that ends in `/` and holds nothing
 /// (APPNOTE 4.4.17.1). Milestone 3 walks `META-INF` looking for reserved names
 /// and will meet one, and a walk that treated every `META-INF/*` entry as a
 /// file would meet an empty one first.
+///
+/// **Milestone 1 read this as one producer's quirk and tier 4 says it is the
+/// majority habit.** calibre deflates its empty entry and KCC stores its own,
+/// so the two are not even the same kind of nothing — and KCC writes four of
+/// them, one per directory in the container, where calibre writes two. Only
+/// pandoc writes none. A build that inferred "unusual" from the six-book corpus
+/// inferred it from the wrong six books.
 #[test]
-fn one_producer_writes_a_meta_inf_directory_entry_and_the_other_does_not() {
+fn two_producers_write_a_meta_inf_directory_entry_and_the_third_does_not() {
     let mut with: Vec<&str> = Vec::new();
     let mut without: Vec<&str> = Vec::new();
     for entry in BOOKS {
@@ -450,8 +514,32 @@ fn one_producer_writes_a_meta_inf_directory_entry_and_the_other_does_not() {
     with.dedup();
     without.sort_unstable();
     without.dedup();
-    assert_eq!(with, ["calibre"], "the producers that write one changed");
+    assert_eq!(
+        with,
+        ["calibre", "kcc"],
+        "the producers that write one changed"
+    );
     assert_eq!(without, ["pandoc"], "the producers that write none changed");
+
+    // And they disagree about how to write nothing: calibre deflates its empty
+    // entry to two bytes and KCC stores its own at zero. A reader that assumed
+    // a directory entry is stored because it is empty is wrong about one of
+    // them.
+    let methods = |file: &str| -> Vec<String> {
+        entries(&book(file))
+            .iter()
+            .filter(|e| e.is_directory())
+            .map(|e| method_name(e.method))
+            .collect()
+    };
+    assert_eq!(
+        methods("calibre-embedded-font.epub"),
+        ["deflate", "deflate"]
+    );
+    assert_eq!(
+        methods("kcc-fixed-layout.epub"),
+        ["stored", "stored", "stored", "stored"]
+    );
 }
 
 // ---- the inventory ----------------------------------------------------------
@@ -462,7 +550,7 @@ fn one_producer_writes_a_meta_inf_directory_entry_and_the_other_does_not() {
 /// walk, and this recomputes name, method, header offset and both sizes through
 /// `tinker-pdf-zip` and compares every row. So the inventory cannot drift from
 /// the books, and two independent ZIP readers have to agree about all
-/// seventy-two entries.
+/// one hundred and eighteen entries.
 ///
 /// **The media-type column is deliberately not checked**, for gap 30's reason
 /// in a different format: resolving one means following `container.xml` to the
@@ -542,7 +630,7 @@ fn inventory_matches_the_books() {
         }
     }
     assert_eq!(
-        rows, 72,
+        rows, 118,
         "the inventory covers a different number of entries"
     );
     println!("  {rows} entries agreed on by two independent ZIP readers");
@@ -610,16 +698,56 @@ fn the_plates_are_written_in_reverse_of_the_order_the_book_names_them() {
 // corpus to having a verdict for every book and to the *set* of books the tool
 // was unhappy with. A book added without one is a gap in the record, and a
 // corpus quietly reshuffled is a different corpus.
+//
+// **And a book added after the tool left says so, in the file, with a `-`.**
+// Tier 4's three books arrived on 2026-08-29, when epubcheck was no longer
+// installed and ruling 13 forbade installing it to find out. A row of zeroes
+// for them would read exactly like the five clean verdicts above, which is the
+// one thing this record must never do: the whole value of a dated measurement
+// is knowing which rows are dated. So a count is `u32` **or** `-`, and
+// `no_book_is_quietly_unmeasured` below holds the unmeasured set to the list
+// this comment names rather than letting it grow in silence.
 
 /// One row of `EPUBCHECK.tsv`.
+///
+/// `None` in a count is a `-` in the file: **not measured**, which is a
+/// different fact from zero and is stored as a different value so that no
+/// arithmetic can confuse the two.
 #[derive(Debug, PartialEq, Eq)]
 struct Verdict {
-    fatal: u32,
-    error: u32,
-    warning: u32,
-    usage: u32,
+    fatal: Option<u32>,
+    error: Option<u32>,
+    warning: Option<u32>,
+    usage: Option<u32>,
     /// `SEVERITY:CODE`, sorted and deduplicated.
     messages: Vec<String>,
+}
+
+impl Verdict {
+    /// Whether epubcheck ever saw this book.
+    fn measured(&self) -> bool {
+        self.fatal.is_some()
+    }
+
+    /// Whether the tool reported anything at all. A book it never saw is not
+    /// unhappy and is not clean either, so this is `false` for it and
+    /// [`Verdict::measured`] is what tells the two apart.
+    fn unhappy(&self) -> bool {
+        [self.fatal, self.error, self.warning]
+            .iter()
+            .any(|count| count.is_some_and(|n| n > 0))
+    }
+}
+
+/// One count cell: a number, or `-` for a book the tool never saw.
+fn verdict_count(cell: &str) -> Option<u32> {
+    if cell == "-" {
+        None
+    } else {
+        Some(cell.parse().unwrap_or_else(|_| {
+            panic!("EPUBCHECK.tsv has a count that is neither a number nor `-`: {cell:?}")
+        }))
+    }
 }
 
 fn recorded_verdicts() -> BTreeMap<String, Verdict> {
@@ -647,10 +775,10 @@ fn recorded_verdicts() -> BTreeMap<String, Verdict> {
             (
                 f[0].to_owned(),
                 Verdict {
-                    fatal: f[1].parse().expect("fatal count"),
-                    error: f[2].parse().expect("error count"),
-                    warning: f[3].parse().expect("warning count"),
-                    usage: f[4].parse().expect("usage count"),
+                    fatal: verdict_count(f[1]),
+                    error: verdict_count(f[2]),
+                    warning: verdict_count(f[3]),
+                    usage: verdict_count(f[4]),
                     messages,
                 },
             )
@@ -684,7 +812,7 @@ fn every_book_has_a_recorded_epubcheck_verdict() {
     // is clean would be a corpus that had not met calibre's.
     let warned: Vec<&str> = recorded
         .iter()
-        .filter(|(_, v)| v.warning > 0 || v.error > 0 || v.fatal > 0)
+        .filter(|(_, v)| v.unhappy())
         .map(|(k, _)| k.as_str())
         .collect();
     assert_eq!(
@@ -692,6 +820,47 @@ fn every_book_has_a_recorded_epubcheck_verdict() {
         ["calibre-book-cover.epub"],
         "the set of books epubcheck is unhappy with changed"
     );
+}
+
+/// **The books epubcheck never saw are named, and they are these three.**
+///
+/// The record's value is knowing which rows are dated, and the failure this
+/// guards against is a row of zeroes that reads like a clean verdict. Two
+/// assertions, because they fail for different reasons: the set is the one tier
+/// 4 added, and every unmeasured row is unmeasured in **all four** columns —
+/// a half-filled row would be a verdict this repository cannot support.
+#[test]
+fn no_book_is_quietly_unmeasured() {
+    let recorded = recorded_verdicts();
+    let unmeasured: Vec<&str> = recorded
+        .iter()
+        .filter(|(_, v)| !v.measured())
+        .map(|(k, _)| k.as_str())
+        .collect();
+    assert_eq!(
+        unmeasured,
+        [
+            "calibre-embedded-font.epub",
+            "kcc-fixed-layout.epub",
+            "pandoc-embedded-font.epub"
+        ],
+        "the set of books with no epubcheck verdict changed"
+    );
+    for (name, verdict) in &recorded {
+        if verdict.measured() {
+            continue;
+        }
+        assert_eq!(
+            (
+                verdict.error,
+                verdict.warning,
+                verdict.usage,
+                &verdict.messages
+            ),
+            (None, None, None, &Vec::new()),
+            "{name} is unmeasured in one column and measured in another"
+        );
+    }
 }
 
 // ---- the doctype census -----------------------------------------------------
@@ -704,13 +873,18 @@ fn every_book_has_a_recorded_epubcheck_verdict() {
 /// committed bombs behind the refusal — so the census decides whether
 /// milestone 2 is a nicety or a blocker.
 ///
-/// **It is a blocker, and the two producers disagree about why.** pandoc writes
+/// **It is a blocker, and the producers disagree about why.** pandoc writes
 /// `<!DOCTYPE html>` on every EPUB 3 content document and the XHTML 1.1 public
 /// identifier on every EPUB 2 one; calibre writes **no declaration at all**, in
 /// either version. So a reader built on the parser as it stands reads every
 /// calibre book and refuses every pandoc one — which is a sharper statement
 /// than the plan's, and it is the corpus that supplies it rather than the
 /// specification.
+///
+/// **Tier 4's third producer broke the tie two-to-one.** KCC writes
+/// `<!DOCTYPE html>` on all six of its content documents, so calibre is the
+/// only producer here whose books a doctype-refusing parser could read, and
+/// milestone 2 stops being one program's problem.
 ///
 /// **And the quote character is the finding this corpus alone has.** The plan
 /// measured the XHTML 1.1 identifier **single-quoted**, on Project Gutenberg's
@@ -756,7 +930,7 @@ fn the_committed_doctype_census() {
     assert!(documents > 0, "the census read no content document at all");
     assert_eq!(
         producers_with_a_doctype,
-        ["pandoc"],
+        ["kcc", "pandoc"],
         "the set of producers whose books milestone 2 is required for changed"
     );
     assert_eq!(

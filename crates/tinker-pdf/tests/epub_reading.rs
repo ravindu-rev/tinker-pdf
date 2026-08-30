@@ -40,9 +40,12 @@ use tinker_pdf::{ArchiveWarning, Document, OpenOptions};
 const COMMITTED: &[&str] = &[
     "calibre-book-cover.epub",
     "calibre-book-nocover.epub",
+    "calibre-embedded-font.epub",
+    "kcc-fixed-layout.epub",
     "pandoc-book-cover.epub",
     "pandoc-book-epub2.epub",
     "pandoc-book-nocover.epub",
+    "pandoc-embedded-font.epub",
     "pandoc-plates.epub",
 ];
 
@@ -819,13 +822,51 @@ fn the_unsupported_census_is_the_one_the_record_states() {
             println!("      {property:20} {elements:5} elements");
             measured.push(format!("{name}\t{property}\t{elements}"));
         }
-        assert!(
-            !entries.is_empty(),
-            "{name} reports no unimplemented property at all, which no book in \
-             this corpus can honestly say"
-        );
+        if entries.is_empty() {
+            println!("      (nothing unimplemented)");
+        }
     }
     assert_eq!(measured, recorded, "tests/epub/CENSUS.tsv is out of date");
+
+    // **The guard this replaced said every book reports something, and tier 4
+    // proved that wrong rather than the build.** It held for six books because
+    // every one of them carries a table, a picture or pandoc's own default
+    // stylesheet, and each of those brings a property this build does not
+    // implement — `vertical-align` on eighteen table cells, `max-width` on a
+    // figure, `color-scheme` in pandoc's boilerplate.
+    //
+    // All three tier-4 books report **nothing**, for three different reasons
+    // worth keeping apart. `calibre-embedded-font.epub` is calibre over prose
+    // with no table and no picture. `pandoc-embedded-font.epub` passes `--css`,
+    // which *replaces* pandoc's default sheet rather than adding to it, so the
+    // boilerplate that supplied `hyphens` and `color-scheme` is simply not
+    // there. `kcc-fixed-layout.epub` has a seven-line stylesheet and six
+    // one-character documents.
+    //
+    // So "no real book is fully implemented" was a claim about six books that
+    // happened to share a shape. What the guard was for survives as a total: a
+    // build that measured nothing could still not pass by committing an empty
+    // file.
+    assert!(
+        measured.len() > 20,
+        "the census collapsed to {} rows, which is a build that stopped \
+         counting rather than a corpus that stopped asking",
+        measured.len()
+    );
+    let silent: Vec<&str> = COMMITTED
+        .iter()
+        .copied()
+        .filter(|name| !measured.iter().any(|row| row.starts_with(name)))
+        .collect();
+    assert_eq!(
+        silent,
+        [
+            "calibre-embedded-font.epub",
+            "kcc-fixed-layout.epub",
+            "pandoc-embedded-font.epub"
+        ],
+        "the set of books with nothing unimplemented in them changed"
+    );
 }
 
 /// The census counts **elements reached** and not declarations written.
