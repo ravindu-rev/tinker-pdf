@@ -343,10 +343,9 @@ refusal table.
 - **EPUB** ([features/epub.md](features/epub.md)): WOFF/WOFF2, refused
   by name and with **no committed file behind the row** — no producer
   here emits one and OFL-1.1's reserved-name clause bars repacking a
-  vendored face; table-row and flex-line fragmentation (staged, not
-  built); the pinned float reading-order defect; multi-column; non-static
-  `position`; `min`/`max` sizing; `vertical-align`; SVG content
-  documents; pseudo-elements (parsed, no box generated).
+  vendored face; the pinned float reading-order defect; multi-column;
+  non-static `position`; `min`/`max` sizing; `vertical-align`; SVG
+  content documents; pseudo-elements (parsed, no box generated).
 - **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR
   **reaching the page** — the decoder is built and `xps/image.rs` still
   refuses the format at the element, which is the same shape TIFF was in

@@ -3004,25 +3004,124 @@ fn a_rowspan_keeps_its_rows_on_one_page() {
     assert_eq!(laid.text(), "abcde");
 }
 
-/// A band taller than a page is drawn where it is and **says so**, which is
-/// the staged half of table fragmentation named rather than left silent.
+/// `css-break-3` §3.1's class-3 break: a band taller than a page is **cut**,
+/// and every cell of it continues on the next page at the same height.
+///
+/// The arithmetic is the file's own. A forty-point line holds four ten-point
+/// characters and breaks at a space, so `"a b c d ..."` wraps to `"a b"`,
+/// `"c d"`, ... — thirteen lines of twelve points, a hundred and fifty-six
+/// points of cell against a thirty-point page. That is seven pages, and what
+/// this asserts is that it is more than one and that the twenty-six letters
+/// are still all there, in order, once.
 #[test]
-fn a_row_taller_than_a_page_is_drawn_and_says_so() {
-    let tall = cell_of("a b c d e f g h i j k l m n o p q r s t u v w x y z");
-    let tree = table_of(vec![row_of(vec![tall])]);
+fn a_band_taller_than_a_page_is_cut_at_a_line_box() {
+    let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let tree = table_of(vec![row_of(vec![cell_of(body)])]);
     let laid = run(&tree, 40.0, 30.0);
     assert!(
-        laid.warnings
-            .iter()
-            .any(|(warning, _)| *warning == Warning::TableRowTallerThanPage),
-        "{:?}",
-        laid.warnings
+        laid.pages.len() > 1,
+        "the band was drawn on one page rather than cut: {} pages",
+        laid.pages.len()
     );
     assert_eq!(
         conservable(&laid.text()),
-        conservable("a b c d e f g h i j k l m n o p q r s t u v w x y z"),
-        "and nothing was lost by overflowing"
+        conservable(body),
+        "the cut lost or repeated a character"
     );
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::TableRowTallerThanPage),
+        "a band that was cut is not a band that overflowed: {:?}",
+        laid.warnings
+    );
+    // No line box straddles a page: every line of a page is inside it. A cut
+    // taken anywhere but the top of an item that did not fit would put half a
+    // line on each of two pages, which reads as a page of text either way.
+    for (at, page) in laid.pages.iter().enumerate() {
+        for glyph in &page.runs {
+            assert!(
+                glyph.y >= 0.0 && glyph.y <= 30.0,
+                "a run of page {at} sits at {} on a thirty-point page",
+                glyph.y
+            );
+        }
+    }
+}
+
+/// And the row's own background is cut with it: one fragment per page, each
+/// no taller than the page, and the heights add up to the row.
+///
+/// CSS 2.2 §17.5.1's row layer, `css-break-3` §4's fragment. A build that cut
+/// the text and not the decoration draws the whole row's background on **every**
+/// page of it, starting above the top margin on all but the first.
+#[test]
+fn a_cut_band_paints_one_row_fragment_per_page() {
+    let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let mut row = styled(Display::TableRow);
+    row.background_color = Color {
+        r: 9,
+        g: 9,
+        b: 9,
+        a: 255,
+    };
+    let tree = table_of(vec![BoxNode::element(row, vec![cell_of(body)])]);
+    let laid = run(&tree, 40.0, 30.0);
+    let mut total = 0.0;
+    let mut fragments = 0usize;
+    for (at, page) in laid.pages.iter().enumerate() {
+        for fragment in &page.boxes {
+            if fragment.background.r != 9 {
+                continue;
+            }
+            fragments += 1;
+            total += fragment.height;
+            assert!(
+                fragment.y >= -1e-9,
+                "page {at} paints the row from {}, above its own top edge",
+                fragment.y
+            );
+            assert!(
+                fragment.y + fragment.height <= 30.0 + 1e-9,
+                "page {at} paints the row to {}, past its own bottom edge",
+                fragment.y + fragment.height
+            );
+        }
+    }
+    assert!(
+        fragments > 1,
+        "the row was painted as one fragment rather than one per page"
+    );
+    assert!(
+        close(total, 13.0 * 12.0),
+        "the fragments come to {total} and the row is {} tall",
+        13.0 * 12.0
+    );
+}
+
+/// The narrowed warning: what overflows a page now is one box **inside** a
+/// band that is itself taller than a page, which no cut can avoid.
+///
+/// A line box is atomic, so a font big enough that one line is taller than the
+/// page has no cut position anywhere. The band is drawn, the page overflows,
+/// and `TableRowTallerThanPage` is what says so — the same variant, a smaller
+/// claim.
+#[test]
+fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
+    let mut huge = base();
+    huge.font_size = 60.0;
+    let cell = BoxNode::element(styled(Display::TableCell), vec![BoxNode::text(huge, "x")]);
+    let tree = table_of(vec![row_of(vec![cell])]);
+    let laid = run(&tree, 400.0, 30.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::TableRowTallerThanPage),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "x", "and the letter is still on a page");
 }
 
 // ---- nesting, and the work cap it multiplies -------------------------------
@@ -3873,10 +3972,14 @@ fn a_flex_container_conserves_its_text() {
     assert_eq!(laid.text(), "onetwothreefour");
 }
 
-/// A flex container taller than a page is drawn where it is and **says so**,
-/// which is the same staged half a table row has.
+/// A flex line taller than a page is **cut**, which is the same class-3 break
+/// a table band gets and the reason the two are one payload.
+///
+/// Six paragraphs of one twelve-point line each is seventy-two points of
+/// column container against a thirty-point page: two lines a page, three
+/// pages, and the letters in order.
 #[test]
-fn a_flex_line_taller_than_a_page_is_named() {
+fn a_flex_line_taller_than_a_page_is_cut() {
     let tree = BoxNode::element(
         flex_container(FlexDirection::Column, FlexWrap::NoWrap),
         vec![
@@ -3890,12 +3993,26 @@ fn a_flex_line_taller_than_a_page_is_named() {
     );
     let laid = run(&tree, 200.0, 30.0);
     assert!(
-        laid.warnings
-            .contains(&(Warning::FlexLineTallerThanPage, 1)),
-        "{:?}",
+        laid.pages.len() > 1,
+        "the line was drawn on one page rather than cut: {} pages",
+        laid.pages.len()
+    );
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::FlexLineTallerThanPage),
+        "a line that was cut is not a line that overflowed: {:?}",
         laid.warnings
     );
     assert_eq!(laid.text(), "abcdef");
+    let per_page: Vec<String> = (0..laid.pages.len())
+        .map(|at| page_text(&laid, at))
+        .collect();
+    assert!(
+        per_page.iter().all(|page| !page.is_empty()),
+        "the cut left a page with nothing on it: {per_page:?}"
+    );
 }
 
 /// A row container of several lines **can** be broken between two of them,
