@@ -351,13 +351,10 @@ refusal table.
   which is 9.1.5.1's recommended format and has no decoder here — TIFF
   now reaches the page; remote resource-dictionary parts; `IsSideways`
   and odd `BidiLevel`; `OpacityMask`.
-- **CBZ** ([features/cbz.md](features/cbz.md)): CBR/CB7/CBT, sized
-  honestly — CBR means a hand-rolled RAR decoder, and RAR 4 cannot be
-  produced on this machine at all, so it would have no first-party
-  fixture; `ComicInfo.xml` metadata.
-- **Forms** ([features/forms.md](features/forms.md)): an execution policy
-  for the surfaced-but-never-run keystroke, validate and document-level
-  scripts; whether a format action's display string may ever reach `/V`.
+- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
+  honestly in [design/comic-archives.md](design/comic-archives.md) — each
+  means a hand-rolled decompressor, and RAR 4 has no fixture this machine
+  can produce.
 
 ## How this file changes
 

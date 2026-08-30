@@ -1527,7 +1527,12 @@ trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n",
 ///   than none";
 /// - `page10.jpg` is a baseline JPEG, placed verbatim. No other fixture in this
 ///   file embeds one at all;
-/// - `ComicInfo.xml` is metadata: not a page, not a warning.
+/// - `ComicInfo.xml` is metadata: not a page and not a warning, and **since
+///   tier 4's W-ARCHIVE milestone 1 it is read**. Its `<Title>None</Title>`
+///   reaches the synthesised document's `/Info`, which is why the document
+///   hash below moved in that commit and the render fingerprint above did
+///   not — the attribution this test's own doc comment asks for, made in the
+///   direction it describes.
 ///
 /// The names are **unpadded** on purpose. `page001` and `page010` sort
 /// identically under lexicographic and natural order, so a padded fixture
@@ -2478,7 +2483,7 @@ fn the_synthesised_document_is_the_same_bytes_on_every_target() {
         .collect();
     assert_eq!(
         hash,
-        "775c5c8126e1e566df503cad9086292563302d499951ed1d76b22ec95e9858db",
+        "c72d64d37f0f087f5cd5b51404304c82a1493e539018ce67bd8723917a74008e",
         "the synthesised document is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",

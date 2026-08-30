@@ -271,7 +271,9 @@
 //! repository spends against *that* bound is the cap itself — far more than a
 //! comic. A relation that six rows satisfy and one does not is not a relation.
 
-use tinker_pdf::cbz::{zip_limits, MAX_CBZ_PAGES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD};
+use tinker_pdf::cbz::{
+    zip_limits, MAX_CBZ_PAGES, MAX_COMIC_INFO_BYTES, MAX_SYNTHESISED_PDF, PAGE_OVERHEAD,
+};
 use tinker_pdf::epub::{
     MAX_EPUB_FALLBACK_DEPTH, MAX_EPUB_MANIFEST_ITEMS, MAX_EPUB_SPINE_ITEMS, MAX_OCF_PATH_LEN,
 };
@@ -292,6 +294,8 @@ const PNG: &str = include_str!("../../tinker-pdf-filters/src/png.rs");
 const PNG_TESTS: &str = include_str!("../../tinker-pdf-filters/src/png/tests.rs");
 const CBZ: &str = include_str!("../src/cbz.rs");
 const CBZ_TESTS: &str = include_str!("cbz.rs");
+const CBZ_UNIT_TESTS: &str = include_str!("../src/cbz/tests.rs");
+const CBZ_COMIC_INFO: &str = include_str!("../src/cbz/comic_info.rs");
 const XML_LIMITS: &str = include_str!("../../tinker-pdf-xml/src/limits.rs");
 const XML_TESTS: &str = include_str!("../../tinker-pdf-xml/src/tests.rs");
 const EPUB: &str = include_str!("../src/epub.rs");
@@ -526,11 +530,17 @@ fn ledger() -> Vec<Bound> {
             fixtures: 4_096,
             comic: 200,
             // Zero, and it is an answer rather than a blank: a fixed document
-            // has no comic pages at all, exactly as a comic archive has no XML
-            // and every gap 30 row above says `comic: 0`. The symmetry is the
-            // check — a yardstick that measured something here would mean the
-            // two paths had been confused, which is the defect this whole gap
-            // exists to fix.
+            // has no comic pages at all. The symmetry is the check — a
+            // yardstick that measured something here would mean the two paths
+            // had been confused, which is the defect this whole gap exists to
+            // fix.
+            //
+            // *Amended in tier 4.* The old wording read "exactly as a comic
+            // archive has no XML", and that half stopped being true when
+            // `ComicInfo.xml` got a reader: the four `MAX_XML_*` rows below
+            // carry a measured comic figure now instead of a zero. The
+            // symmetry this row rests on is the *page* one, which is
+            // unchanged.
             document: 0,
             // **Zero, measured rather than assumed.** `epub::route` runs
             // before `cbz::pages_from_archive` in `open_container`, so a book
@@ -569,6 +579,33 @@ fn ledger() -> Vec<Bound> {
                 CBZ_TESTS,
             ),
         },
+        // ---- tier 4, W-ARCHIVE milestone 1 -----------------------------
+        Bound {
+            name: "MAX_COMIC_INFO_BYTES",
+            cap: MAX_COMIC_INFO_BYTES as u128,
+            published: "64 KiB",
+            fixtures: 88,
+            // A 200-page comic's own metadata file: a few hundred bytes of
+            // credits, and a `<Pages>` list of one `<Page/>` element of about
+            // sixty bytes per page.
+            comic: 16_384,
+            // An XPS package holds no `ComicInfo.xml`, and this is the one
+            // format-specific direction that stayed a zero when the four
+            // `MAX_XML_*` rows above stopped being zeros: those are the *XML
+            // reader's* caps and every format here now spends against them,
+            // where this is the comic path's own cap on one named entry.
+            document: 0,
+            // And a book does not reach the comic path at all, which is
+            // `MAX_CBZ_PAGES`'s measured zero for the same reason.
+            book: 0,
+            reachable: zip_limits::MAX_ZIP_ENTRY_BYTES as u128,
+            reachable_because: "the entry is a ZIP entry, capped at MAX_ZIP_ENTRY_BYTES",
+            declared_in: CBZ_COMIC_INFO,
+            fires_in: (
+                "the_comic_info_cap_admits_exactly_its_own_size",
+                CBZ_UNIT_TESTS,
+            ),
+        },
         // ---- gap 30, milestone 2 ---------------------------------------
         //
         // The ceiling in front of all four is the same and it is worth stating
@@ -584,9 +621,11 @@ fn ledger() -> Vec<Bound> {
             // the most any fixture *spends* is the cap. Real markup reaches 6,
             // measured by `xml_real_packages.rs`.
             fixtures: xml_limits::MAX_XML_DEPTH as u128,
-            // A comic archive holds no XML at all: gap 29's `ComicInfo.xml` is
-            // still nobody's scope and gap 30 says so in as many words.
-            comic: 0,
+            // **A comic archive holds one XML entry since tier 4**, and this
+            // is what it nests: `ComicInfo` > `Pages` > `Page`, which is three,
+            // with room for the wrapper elements a tool might add around a
+            // summary. The schema defines no deeper structure than that.
+            comic: 8,
             // ECMA-388 18.2 recommends 16 canvases; a path geometry adds four
             // and a resource dictionary two.
             document: 24,
@@ -604,7 +643,12 @@ fn ledger() -> Vec<Bound> {
             cap: xml_limits::MAX_XML_ATTRIBUTES as u128,
             published: "256",
             fixtures: xml_limits::MAX_XML_ATTRIBUTES as u128,
-            comic: 0,
+            // `ComicInfo.xsd`'s `<Page>` carries eight — `Image`, `ImageSize`,
+            // `ImageWidth`, `ImageHeight`, `Type`, `DoublePage`, `Key` and
+            // `Bookmark` — and the root carries the two `xmlns:xsi`/`xsd`
+            // declarations every real file writes. Doubled, because a
+            // yardstick is a plausible file rather than the schema.
+            comic: 16,
             // A `Glyphs` with every optional attribute ECMA-388 12.1 gives it.
             document: 24,
             // Attributes on one element. The most any real book puts on one is
@@ -621,7 +665,11 @@ fn ledger() -> Vec<Bound> {
             cap: xml_limits::MAX_XML_NAME_LEN as u128,
             published: "1 024",
             fixtures: xml_limits::MAX_XML_NAME_LEN as u128,
-            comic: 0,
+            // The longest name in `ComicInfo.xsd` is `MainCharacterOrTeam` at
+            // 19; the longest *qualified* name a real file writes is
+            // `xsi:noNamespaceSchemaLocation` at 29. Rounded up, and neither is
+            // one this build maps.
+            comic: 32,
             // `LinearGradientBrush.GradientStops` is 33, plus room for a prefix.
             document: 48,
             // The longest element or attribute name. The longest in either
@@ -642,7 +690,13 @@ fn ledger() -> Vec<Bound> {
             cap: xml_limits::MAX_XML_TOKENS as u128,
             published: "1 048 576",
             fixtures: xml_limits::MAX_XML_TOKENS as u128,
-            comic: 0,
+            // A 200-page comic's own `ComicInfo.xml`: about fifty metadata
+            // elements and a `<Pages>` list of 200 `<Page/>`s, at two events an
+            // element and one text event apiece. `MAX_COMIC_INFO_BYTES` stands
+            // in front of this on the comic path anyway — 64 KiB of `<a/>` is
+            // 32 768 events — so the yardstick is far under a ceiling that is
+            // itself far under the cap.
+            comic: 1_024,
             // 2 000 drawable elements at three elements of markup each, plus
             // 40 000 path segments as `PolyLineSegment` children, at two events
             // an element.
@@ -1253,8 +1307,9 @@ fn ledger() -> Vec<Bound> {
 /// Gap 30's milestone 2 adds four, its milestone 3 adds two and its milestone
 /// 6 adds three; gap 31's milestone 3 adds one, its milestone 4 adds three, its
 /// milestone 6 adds eight, its milestone 7 adds four and its milestone 10 adds
-/// the one milestone 7 argued would arrive with the multi-pass layout. All
-/// thirty-four are here, and a bound added without a row fails this.
+/// the one milestone 7 argued would arrive with the multi-pass layout; tier 4's
+/// W-ARCHIVE milestone 1 adds the one `ComicInfo.xml` needs. All thirty-five
+/// are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -1268,6 +1323,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_PNG_SAMPLES",
             "MAX_CBZ_PAGES",
             "MAX_SYNTHESISED_PDF",
+            "MAX_COMIC_INFO_BYTES",
             "MAX_XML_DEPTH",
             "MAX_XML_ATTRIBUTES",
             "MAX_XML_NAME_LEN",
@@ -1400,7 +1456,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 34, "the ledger is thirty-four rows");
+    assert_eq!(measured, 35, "the ledger is thirty-five rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -1432,7 +1488,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 34, "the ledger is thirty-four rows");
+    assert_eq!(ledger().len(), 35, "the ledger is thirty-five rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -1629,11 +1685,18 @@ fn every_bound_publishes_the_number_it_is() {
     // them parses back to the constant it names.
     for bound in ledger() {
         let published = bound.published.replace(' ', "");
-        let value = match published.strip_suffix("MiB") {
-            Some(n) => n.parse::<u128>().expect("a number") * (1 << 20),
-            None => match published.strip_suffix("GiB") {
-                Some(n) => n.parse::<u128>().expect("a number") * (1 << 30),
-                None => published.parse::<u128>().expect("a number"),
+        // `KiB` joined `MiB` and `GiB` in tier 4: `MAX_COMIC_INFO_BYTES` is the
+        // first cap here small enough to be published in kibibytes, and a
+        // ledger that had to write `65 536` to satisfy this check would be
+        // less readable for the check's benefit.
+        let value = match published.strip_suffix("KiB") {
+            Some(n) => n.parse::<u128>().expect("a number") * (1 << 10),
+            None => match published.strip_suffix("MiB") {
+                Some(n) => n.parse::<u128>().expect("a number") * (1 << 20),
+                None => match published.strip_suffix("GiB") {
+                    Some(n) => n.parse::<u128>().expect("a number") * (1 << 30),
+                    None => published.parse::<u128>().expect("a number"),
+                },
             },
         };
         assert_eq!(
