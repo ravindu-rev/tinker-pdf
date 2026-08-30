@@ -624,10 +624,6 @@ pub enum XpsElementDefect {
     ClipUnreadable,
     /// An `Opacity` that is not a number in `[0, 1]`. **Refused.**
     OpacityUnreadable,
-    /// An `OpacityMask`, which this build does not apply (14.3). **Refused**,
-    /// for `OpacityUnreadable`'s reason: a mask ignored draws a whole shape
-    /// where a sliver was meant.
-    OpacityMaskUnsupported,
     /// A `{StaticResource}` naming a key no dictionary in scope holds.
     /// **Painted grey.**
     BrushUnresolved,
@@ -727,7 +723,6 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::TransformUnreadable => "a transform that is not six numbers",
             XpsElementDefect::ClipUnreadable => "a `Clip` that is not 11.2's geometry",
             XpsElementDefect::OpacityUnreadable => "an `Opacity` that is not a number in [0, 1]",
-            XpsElementDefect::OpacityMaskUnsupported => "an `OpacityMask` this build cannot apply",
             XpsElementDefect::BrushUnresolved => "a `{StaticResource}` naming no resource",
             XpsElementDefect::BrushCyclic => "a `{StaticResource}` chain that returns to itself",
             XpsElementDefect::BrushTooDeep => "a `{StaticResource}` chain past the depth cap",

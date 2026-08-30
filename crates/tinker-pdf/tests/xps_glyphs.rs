@@ -1304,9 +1304,21 @@ fn a_transform_or_a_clip_that_will_not_read_refuses_the_run() {
         run_defects(r#"Opacity="2" UnicodeString="A""#),
         [XpsElementDefect::OpacityUnreadable]
     );
+    // 14.3's mask reaches a run as it reaches a shape, and an opaque one is an
+    // alpha of one: nothing is owed and the run draws.
     assert_eq!(
         run_defects(r##"OpacityMask="#FF000000" UnicodeString="A""##),
-        [XpsElementDefect::OpacityMaskUnsupported]
+        []
+    );
+    assert_eq!(
+        array(&drawn(r##"OpacityMask="#FF000000" UnicodeString="A""##)),
+        "[<0001>]"
+    );
+    // And one that is not a brush refuses the run, which is the rule an
+    // unreadable `Opacity` gets and for the same reason.
+    assert_eq!(
+        run_defects(r##"OpacityMask="#ZZZ" UnicodeString="A""##),
+        [XpsElementDefect::BrushUnreadable]
     );
 
     // And a transform that *does* read reaches the page as its own six

@@ -394,6 +394,121 @@ fn a_gradient_stroke_becomes_a_shading_pattern_that_validates() {
     );
 }
 
+/// **A varying `OpacityMask` becomes a soft mask over a transparency group**,
+/// and the two brush families reach two different `/S` values.
+///
+/// 14.3's mask is a brush used as an alpha channel and PDF keeps an alpha in
+/// two different places, so which one is right depends on the brush: a
+/// gradient's alphas have to be *painted* as a grey for `/Luminosity` to read
+/// them back, because 8.7.4.5's shading has no alpha at all; a picture's alpha
+/// is already in the picture, so `/Alpha` reads what painting it produced. A
+/// build that took one `/S` for both would be exactly wrong about one of them,
+/// and the failure is invisible in a content stream — both spellings are one
+/// `gs`.
+///
+/// # The counted injection
+///
+/// `add_ext_gstate` refuses an `/SMask` naming a form registered without a
+/// `/Group`, because 11.6.5.2 requires one. Removing `group` from the mask
+/// form and running `cargo test -p tinker-pdf --no-fail-fast` was caught by
+/// **3 of 910**: this test, `xps_markup.rs`'s
+/// `an_opacity_mask_is_applied_rather_than_taking_its_element_with_it`, and
+/// `xps_images.rs`'s
+/// `an_image_brush_opacity_mask_reads_the_pictures_alpha_and_not_its_colours`
+/// — one per brush family, which is the shape three constructions ask for.
+/// Nothing outside this lane fired, and that is the honest reading rather
+/// than a complaint: the writer's own validation is what turns the defect
+/// into a refusal, and only a mask fixture reaches it.
+#[test]
+fn an_opacity_mask_becomes_a_soft_mask_over_a_group_of_the_brushs_own_kind() {
+    let masked = |mask: &str, data: &str| {
+        let body = format!(
+            r##"<Path Fill="#FF0000" Data="{data}"><Path.OpacityMask>{mask}</Path.OpacityMask></Path>"##
+        );
+        let markup = format!(
+            r#"<FixedPage xmlns="http://schemas.microsoft.com/xps/2005/06" Width="816" Height="1056">{body}</FixedPage>"#
+        );
+        archive(with(
+            one_page_package(),
+            "Documents/1/Pages/1.fpage",
+            &markup,
+        ))
+    };
+
+    let gradient = concat!(
+        r##"<LinearGradientBrush StartPoint="0,0" EndPoint="200,0" MappingMode="Absolute">"##,
+        r##"<LinearGradientBrush.GradientStops>"##,
+        r##"<GradientStop Color="#FFFFFFFF" Offset="0" />"##,
+        r##"<GradientStop Color="#00FFFFFF" Offset="1" />"##,
+        r##"</LinearGradientBrush.GradientStops></LinearGradientBrush>"##,
+    );
+    let package = masked(gradient, "M0,0L200,0 200,200 0,200Z");
+    let doc = valid("a gradient opacity mask", &synthesise(&package));
+    let (_, page) = pages(&doc).into_iter().next().expect("one page");
+
+    let states = category(&doc, &page, b"ExtGState");
+    let mask = states
+        .iter()
+        .filter_map(|(_, state)| state.as_dict())
+        .find_map(|state| value(&doc, state, b"SMask").as_dict().cloned())
+        .unwrap_or_else(|| {
+            panic!(
+                "no graphics state names a soft mask: {}",
+                flat(&doc, &value(&doc, &page, b"Resources"))
+            )
+        });
+    assert_eq!(
+        name(&doc, &mask, b"S").as_deref(),
+        Some(&b"Luminosity"[..]),
+        "a gradient's alphas are painted as a grey and read back as luminosity"
+    );
+    // 11.6.5.2 requires `/G` to be a **transparency group** XObject, and the
+    // writer refuses a mask over a form that is not one. Read back here rather
+    // than trusted, because a form with no `/Group` is a mask no reader can
+    // evaluate and a page that silently failed to be masked looks exactly like
+    // a page nobody meant to mask.
+    let form = value(&doc, &mask, b"G");
+    let form = form.as_dict().expect("the mask names a form");
+    assert_eq!(name(&doc, form, b"Subtype").as_deref(), Some(&b"Form"[..]));
+    let group = value(&doc, form, b"Group");
+    let group = group.as_dict().expect("the form is a transparency group");
+    assert_eq!(
+        name(&doc, group, b"S").as_deref(),
+        Some(&b"Transparency"[..])
+    );
+    assert_eq!(
+        name(&doc, group, b"CS").as_deref(),
+        Some(&b"DeviceGray"[..]),
+        "the grey a luminosity mask is read out of is one component"
+    );
+    assert_eq!(
+        numbers(&doc, form, b"BBox"),
+        Some(vec![0.0, 0.0, 200.0, 200.0]),
+        "the mask covers the element it masks"
+    );
+
+    // A `SolidColorBrush` mask is one alpha over the whole element, which
+    // 11.6.4.4 already says: no soft mask, and no group.
+    let package = masked(
+        r##"<SolidColorBrush Color="#80000000" />"##,
+        "M0,0L200,0 200,200 0,200Z",
+    );
+    let doc = valid("a solid opacity mask", &synthesise(&package));
+    let (_, page) = pages(&doc).into_iter().next().expect("one page");
+    let states = category(&doc, &page, b"ExtGState");
+    assert!(
+        states
+            .iter()
+            .filter_map(|(_, state)| state.as_dict())
+            .all(|state| !has(&doc, state, b"SMask")),
+        "a uniform mask is a constant alpha and not a form XObject"
+    );
+    assert!(
+        category(&doc, &page, b"XObject").is_empty(),
+        "and nothing was built to hold a flat grey"
+    );
+}
+
 /// A `Canvas` `Opacity` over overlapping children becomes a transparency
 /// group, and the alpha is on the form rather than in the colours.
 #[test]

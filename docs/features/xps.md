@@ -52,8 +52,15 @@ in both spellings real producers emit (`M0,0L200,0` and `M 0,0 L 200,0`);
 dictionaries with `{StaticResource}` lookup bounded against cycles and
 depth; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
 `RadialGradientBrush`, `ImageBrush` with `TileMode` (through a PDF tiling
-pattern) — with colours in both the eight- and six-digit spellings.
-`ContentBox` and `BleedBox` (10.3) survive as `/CropBox` and `/BleedBox`.
+pattern) — with colours in both the eight- and six-digit spellings. A
+gradient strokes and sets text through a `/PatternType 2` shading pattern,
+because 8.7.4.1's `sh` floods a clip and neither a stroke nor a glyph
+outline is one. 14.3's `OpacityMask` is a brush used as an **alpha
+channel**, and the three brushes it can be are three constructions: a
+uniform alpha is 11.6.4.4's `/ca`, a gradient whose stops' alphas differ is
+painted as a grey for a `/Luminosity` soft mask, and a picture's own alpha
+is read by an `/Alpha` one. `ContentBox` and `BleedBox` (10.3) survive as
+`/CropBox` and `/BleedBox`.
 
 **Glyphs** (`glyphs`, `font`). A `<Glyphs>` run carries `Indices` (12.1.3)
 — glyph index, advance and offsets per cluster, including the empty-index
@@ -98,7 +105,6 @@ the page synthesis.
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
 | `VisualBrush`, a `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
-| `OpacityMask` | `XpsElementDefect::OpacityMaskUnsupported` | not mapped to a PDF soft mask yet | [ROADMAP.md](../ROADMAP.md) |
 | Remote resource dictionary (`Source=` a separate part) | `XpsElementDefect::ResourceDictionaryRemote` | only in-page dictionaries are resolved | [ROADMAP.md](../ROADMAP.md) |
 | TIFF, JPEG XR, any non-PNG/JPEG image part | `XpsElementDefect::ImageFormatUnsupported` | no decoder for either; named at the element | [ROADMAP.md](../ROADMAP.md) |
 | `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | no ICC pipeline, and the syntax has nowhere to put an sRGB fallback, so the picture is refused rather than drawn in colours the file did not ask for | [rendering](rendering.md) |

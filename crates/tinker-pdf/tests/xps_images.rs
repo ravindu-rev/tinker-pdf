@@ -747,6 +747,33 @@ fn an_image_brush_stroke_is_the_tiling_pattern_a_fill_would_take() {
     assert!(content.contains("4 w"), "the width is still the file's");
 }
 
+/// An `ImageBrush` used as an **opacity mask** is an `/Alpha` soft mask, not a
+/// `/Luminosity` one.
+///
+/// 14.3's mask is the brush's alpha channel, and a picture keeps its alpha in
+/// the picture. A `/Luminosity` mask would read the *colours* instead — a
+/// plausible, wrong picture that no content stream can tell apart from the
+/// right one, since both are one `gs`.
+#[test]
+fn an_image_brush_opacity_mask_reads_the_pictures_alpha_and_not_its_colours() {
+    let bytes = package_body(
+        r##"<Path Fill="#FF0000" Data="M0,0L200,0 200,100 0,100Z"><Path.OpacityMask>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.OpacityMask></Path>"##,
+    );
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(content.contains(" gs"), "a state is set: {content}");
+    let text = saved(&bytes);
+    assert!(text.contains("/S /Alpha"), "the mask reads the alpha");
+    assert!(
+        !text.contains("/S /Luminosity"),
+        "and not the picture's colours"
+    );
+}
+
 // ---- the page still renders ----------------------------------------------
 
 /// And the whole of it reaches a raster: the shape is painted, not blank.
