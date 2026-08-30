@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 mod ascii;
+mod brotli;
 mod ccitt;
 mod crc32;
 pub mod deflate;
@@ -43,6 +44,7 @@ mod runlength;
 
 use core::fmt;
 
+pub use brotli::{brotli_decode, BrotliError};
 pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
 pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};

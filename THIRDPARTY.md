@@ -24,6 +24,7 @@ fails the same allowlist a crate licence would.
 | Path | Upstream | SPDX |
 | --- | --- | --- |
 | `crates/tinker-pdf-font/data/cmap-resources` | [adobe-type-tools/cmap-resources](https://github.com/adobe-type-tools/cmap-resources) at `f5cf3bc` (2023-11-15) | `BSD-3-Clause` |
+| `crates/tinker-pdf-filters/data/brotli` | [RFC 7932](https://www.rfc-editor.org/rfc/rfc7932.txt), Appendix A, "Static Dictionary Data" (July 2016) | `BSD-3-Clause` |
 | `crates/tinker-pdf-layout/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-font/data/liberation` | [liberationfonts/liberation-fonts](https://github.com/liberationfonts/liberation-fonts), release `2.1.5` (2021-10-01) | `OFL-1.1` |
 
@@ -77,6 +78,79 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+### `crates/tinker-pdf-filters/data/brotli`
+
+RFC 7932 Appendix A's `DICT` array: the 122 784-byte static dictionary every
+Brotli stream may reference, which is what makes WOFF2 readable here at all.
+§8 is unambiguous that it is not optional — a backward distance that reaches
+past the start of the output *is* a dictionary reference, not an error — so a
+decoder without these bytes is one that works until it meets a real font.
+
+The bytes are published in the RFC as a hexadecimal dump; `dictionary.bin` is
+that dump decoded, which is the form §8's `DOFFSET` arithmetic indexes. Nothing
+is paraphrased and nothing is regenerated: the RFC states the length and the
+CRC-32 of the array in the sentence that introduces it, and
+`the_dictionary_matches_the_published_crc32` checks both against this
+repository's own `crc32`, so the specification is what says the copy is right.
+
+```text
+122 784 bytes, CRC-32 0x5136cb04
+```
+
+**Why this clears the licence gate, checked at the source on 2026-08-30.**
+The gate is real: `cargo xtask vendor` requires an SPDX identifier `deny.toml`
+already allows, and a dictionary that could not be shipped would have meant
+landing WOFF 1.0 and refusing WOFF2 by name. The chain is four links, and each
+was read rather than assumed:
+
+1. RFC 7932 is an **IETF-stream** document — its masthead reads "Internet
+   Engineering Task Force (IETF)" and its Status section says it "is a product
+   of the Internet Engineering Task Force (IETF)" and "has been approved for
+   publication by the IESG". This matters because TLP §8.e, §8.f and §8.g
+   disapply section 4 entirely for the IAB, Independent Submission and IRTF
+   streams. An Independent Submission of the same document would **not** have
+   cleared this gate.
+2. The Trust Legal Provisions in effect on its publication date are TLP 5.0,
+   effective 25 March 2015.
+3. TLP §4.a defines Code Components by reference to the Trust's published
+   list, and **"tables of values" is an entry on that list** (Code Components
+   3.0, 23 April 2009). Appendix A is a named array of 122 784 byte values;
+   the RFC calls it "the DICT array".
+4. TLP §4.c licenses Code Components under the "Revised BSD License", whose
+   text it reproduces and which it states "is intended to be compatible with
+   the Revised BSD License template published at
+   https://opensource.org/licenses/BSD-3-Clause". Three clauses, so the SPDX
+   identifier is `BSD-3-Clause` — which `deny.toml` **already allowed** before
+   this tree arrived, for Adobe's cmap-resources. No allowlist edit was needed,
+   which was checked rather than assumed.
+
+One wrinkle is recorded rather than smoothed over: RFC 7932's own boilerplate
+says "Simplified BSD License", which in SPDX terms would be `BSD-2-Clause`.
+That is the Trust's older name for the same clause, not a different licence —
+TLP 5.0 renamed it to "Revised BSD License" and the text under both names is
+the three-clause one reproduced in §4.c. `BSD-3-Clause` is the stricter of the
+two readings and both are on the allowlist, so the identifier here is the one
+that is true under either.
+
+`LICENSE.txt` beside the data carries that reasoning and the full licence text,
+as TLP §4.e option (1) permits, along with the attribution §4.d requests: this
+data was taken from IETF RFC 7932.
+
+Unlike Adobe's CMaps and the UCD, nothing here is compiled by a build script.
+A dictionary is already the form the decoder wants, so `include_bytes!` embeds
+it as it is — the Liberation faces' case rather than the other two. That puts
+120 KiB in every binary that links `tinker-pdf-filters`, unconditionally and
+including the wasm one. It is not behind a feature because there is no safe way
+to turn it off: a build without it would decode most streams and silently fail
+on the ones that reach Appendix A, which is the worst of the three options.
+
+Four smaller tables out of the same RFC are transcribed into
+`crates/tinker-pdf-filters/src/brotli.rs` rather than vendored here, because
+they are short enough to read in a diff: Appendix B's 121 word
+transformations, and §7.1's `Lut0`, `Lut1` and `Lut2`. They ride under the same
+licence, and each is checked against **its own published CRC-32** by a unit
+test, which is the same evidence the dictionary has.
 
 ### `crates/tinker-pdf-font/data/liberation`
 

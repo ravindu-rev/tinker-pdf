@@ -49,3 +49,16 @@ crates/tinker-pdf-font/data/** -text linguist-vendored
 # still a modification. `linguist-vendored` keeps four megabytes of Unicode
 # out of the diff a reviewer reads and out of the language statistics.
 crates/tinker-pdf-layout/data/** -text linguist-vendored
+
+# RFC 7932's static dictionary (THIRDPARTY.md). `-text` because it is binary --
+# the RFC publishes it as hexadecimal and this is that dump decoded, so it is
+# 122 784 bytes of arbitrary values with no line structure to normalise, and
+# the CRC-32 the RFC publishes is what a test checks it against.
+# `linguist-vendored` keeps it out of the diff a reviewer reads and out of the
+# repository's language statistics.
+crates/tinker-pdf-filters/data/** -text linguist-vendored
+
+# The committed Brotli reference streams (`tests/brotli_vectors.rs`). Bytes an
+# encoder emitted once, on a named day; a normalised line ending inside one is
+# a different stream, and several have no structure that would survive it.
+crates/tinker-pdf-filters/tests/brotli/** binary
