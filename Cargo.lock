@@ -658,6 +658,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinker-pdf-svg"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-css",
+ "tinker-pdf-math",
+ "tinker-pdf-xml",
+]
+
+[[package]]
 name = "tinker-pdf-xml"
 version = "0.0.1"
 

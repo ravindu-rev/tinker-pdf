@@ -24,6 +24,7 @@ tinker-pdf-zip = { path = "../crates/tinker-pdf-zip" }
 tinker-pdf-xml = { path = "../crates/tinker-pdf-xml" }
 tinker-pdf-color = { path = "../crates/tinker-pdf-color" }
 tinker-pdf-css = { path = "../crates/tinker-pdf-css" }
+tinker-pdf-svg = { path = "../crates/tinker-pdf-svg" }
 tinker-pdf-layout = { path = "../crates/tinker-pdf-layout" }
 tinker-pdf-shape = { path = "../crates/tinker-pdf-shape" }
 
@@ -224,5 +225,11 @@ doc = false
 [[bin]]
 name = "tiff"
 path = "fuzz_targets/tiff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "svg"
+path = "fuzz_targets/svg.rs"
 test = false
 doc = false

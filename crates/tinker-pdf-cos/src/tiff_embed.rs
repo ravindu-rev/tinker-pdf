@@ -75,7 +75,8 @@
 
 use tinker_pdf_filters::{
     tiff_scan, zlib_compress, CcittParams, Limits, TiffColour, TiffCompression, TiffError,
-    TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffScan, Warning as FilterWarning,
+    TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan,
+    Warning as FilterWarning,
 };
 
 use crate::build::{
@@ -138,6 +139,7 @@ pub struct TiffImageData {
     route: TiffRoute,
     complete: bool,
     warnings: Vec<FilterWarning>,
+    resolution: Option<TiffResolution>,
 }
 
 impl TiffImageData {
@@ -204,6 +206,36 @@ impl TiffImageData {
         self.complete
     }
 
+    /// Dots per inch, from `XResolution`, `YResolution` and `ResolutionUnit`.
+    ///
+    /// `None` when the file states none, when it states `ResolutionUnit` 1 —
+    /// p.38's "no absolute unit", which makes the numbers an aspect ratio and
+    /// not a density — or when a denominator is zero, which is the file's
+    /// business to have written and not this module's to divide by.
+    ///
+    /// A centimetre is 2.54 to the inch exactly, so the conversion is a
+    /// multiplication and not an approximation. Nothing here defaults to 72 or
+    /// to 96: what an absent resolution means is the caller's question, and
+    /// XPS answers it with 13.4.1's 96 where a comic answers it by ignoring
+    /// the tag entirely.
+    #[must_use]
+    pub fn dpi(&self) -> Option<(f64, f64)> {
+        let resolution = self.resolution?;
+        let per_inch = match resolution.unit {
+            2 => 1.0,
+            3 => 2.54,
+            // 1 is "no absolute unit"; anything else is not p.38's.
+            _ => return None,
+        };
+        let value = |(numerator, denominator): (u32, u32)| -> Option<f64> {
+            if denominator == 0 {
+                return None;
+            }
+            Some(f64::from(numerator) / f64::from(denominator) * per_inch)
+        };
+        Some((value(resolution.x)?, value(resolution.y)?))
+    }
+
     /// Typed leniency records (ruling 10), from the directory walk and, on the
     /// decoded route, from the decode.
     #[must_use]
@@ -224,10 +256,15 @@ impl TiffImageData {
 /// [`tiff_scan`] already names.
 pub fn tiff_image(bytes: &[u8], limits: &Limits) -> Result<TiffImageData, TiffError> {
     let scan = tiff_scan(bytes)?;
-    match choose(&scan) {
-        Some(placed) => Ok(place(&scan, placed)),
-        None => decode(&scan, limits),
-    }
+    let mut image = match choose(&scan) {
+        Some(placed) => place(&scan, placed),
+        None => decode(&scan, limits)?,
+    };
+    // Set here rather than in either constructor, because it is the one field
+    // that is the same on both routes: a resolution is read off the directory
+    // and never touched by whether the strip was placed or decoded.
+    image.resolution = scan.resolution;
+    Ok(image)
 }
 
 /// What a placed strip needs beyond its own bytes.
@@ -411,6 +448,7 @@ fn place(scan: &TiffScan<'_>, placed: Placed) -> TiffImageData {
         data,
         soft_mask: None,
         route,
+        resolution: None,
         // Everything a directory walk can know. See the module note: there is
         // no checksum in a TIFF to compare, so this is a claim about the file's
         // structure and not about its bytes.
@@ -448,6 +486,7 @@ fn decode(scan: &TiffScan<'_>, limits: &Limits) -> Result<TiffImageData, TiffErr
             data: zlib_compress(&a),
         }),
         route: TiffRoute::Decoded,
+        resolution: None,
         complete: image.complete,
         warnings: image.warnings,
     })

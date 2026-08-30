@@ -345,17 +345,16 @@ refusal table.
   path (WOFF/WOFF2 are refused by name); table-row and flex-line
   fragmentation (staged, not built); the pinned float reading-order
   defect; multi-column; non-static `position`; `min`/`max` sizing;
-  `vertical-align`; SVG content documents; pseudo-classes and
-  pseudo-elements (parsed, never matched / no box generated).
-- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; TIFF and
-  JPEG XR decoders; remote resource-dictionary parts; `IsSideways` and
-  odd `BidiLevel`; `OpacityMask`; and a corpus from more than one
-  producer — every committed package is from a single vendor's two
-  serialisers, and the doc says so.
-- **CBZ** ([features/cbz.md](features/cbz.md)): open archives real
-  archivers wrote (none has been — every fixture is hand-built, and the
-  doc says so); CBR/CB7/CBT, sized honestly — CBR means a hand-rolled RAR
-  decoder; `ComicInfo.xml` metadata.
+  `vertical-align`; SVG content documents; pseudo-elements (parsed, no
+  box generated).
+- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR,
+  which is 9.1.5.1's recommended format and has no decoder here — TIFF
+  now reaches the page; remote resource-dictionary parts; `IsSideways`
+  and odd `BidiLevel`; `OpacityMask`.
+- **CBZ** ([features/cbz.md](features/cbz.md)): CBR/CB7/CBT, sized
+  honestly — CBR means a hand-rolled RAR decoder, and RAR 4 cannot be
+  produced on this machine at all, so it would have no first-party
+  fixture; `ComicInfo.xml` metadata.
 - **Forms** ([features/forms.md](features/forms.md)): an execution policy
   for the surfaced-but-never-run keystroke, validate and document-level
   scripts; whether a format action's display string may ever reach `/V`.
