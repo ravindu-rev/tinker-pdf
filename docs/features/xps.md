@@ -52,8 +52,15 @@ in both spellings real producers emit (`M0,0L200,0` and `M 0,0 L 200,0`);
 dictionaries with `{StaticResource}` lookup bounded against cycles and
 depth; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
 `RadialGradientBrush`, `ImageBrush` with `TileMode` (through a PDF tiling
-pattern) — with colours in both the eight- and six-digit spellings.
-`ContentBox` and `BleedBox` (10.3) survive as `/CropBox` and `/BleedBox`.
+pattern) — with colours in both the eight- and six-digit spellings. A
+gradient strokes and sets text through a `/PatternType 2` shading pattern,
+because 8.7.4.1's `sh` floods a clip and neither a stroke nor a glyph
+outline is one. 14.3's `OpacityMask` is a brush used as an **alpha
+channel**, and the three brushes it can be are three constructions: a
+uniform alpha is 11.6.4.4's `/ca`, a gradient whose stops' alphas differ is
+painted as a grey for a `/Luminosity` soft mask, and a picture's own alpha
+is read by an `/Alpha` one. `ContentBox` and `BleedBox` (10.3) survive as
+`/CropBox` and `/BleedBox`.
 
 **Glyphs** (`glyphs`, `font`). A `<Glyphs>` run carries `Indices` (12.1.3)
 — glyph index, advance and offsets per cluster, including the empty-index
@@ -103,8 +110,7 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| `VisualBrush`, a `ContextColor` naming an ICC profile, a gradient used to stroke | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
-| `OpacityMask` | `XpsElementDefect::OpacityMaskUnsupported` | not mapped to a PDF soft mask yet | [ROADMAP.md](../ROADMAP.md) |
+| `VisualBrush`, a `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
 | Remote resource dictionary (`Source=` a separate part) | `XpsElementDefect::ResourceDictionaryRemote` | only in-page dictionaries are resolved | [ROADMAP.md](../ROADMAP.md) |
 | JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
 | A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |

@@ -1236,24 +1236,33 @@ fn both_dialects_resolve_the_same_font_and_draw_the_same_run() {
 
 // ---- the element rules, on a `Glyphs` -----------------------------------
 
-/// A gradient over text takes the placeholder grey and is named, which is the
-/// answer a gradient **stroke** already gets and for the same reason: a
-/// shading pattern is what one needs, and gap 30's milestone 5 records that it
-/// writes none.
+/// A gradient over text is 8.7.4.5.5's shading **pattern**, set as a colour —
+/// and nothing about it is owed.
+///
+/// 9.4 fills a glyph with whatever the non-stroking colour is when the run is
+/// shown, and a glyph outline is not a clip a content stream can state, so
+/// `sh` over a clip — the move a `Path` fill makes — has no analogue here. The
+/// placeholder grey this used to take was the writer having no pattern to
+/// offer rather than XPS having nothing to say.
 #[test]
-fn a_gradient_over_text_is_the_placeholder_grey_and_named() {
+fn a_gradient_over_text_is_a_shading_pattern_rather_than_the_placeholder_grey() {
     let body = format!(
         r##"<Glyphs OriginX="10" OriginY="100" FontRenderingEmSize="100" FontUri="{}" UnicodeString="A"><Glyphs.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="100,0"><LinearGradientBrush.GradientStops><GradientStop Color="#FF0000" Offset="0" /><GradientStop Color="#0000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Glyphs.Fill></Glyphs>"##,
         font_uri("odttf")
     );
-    assert_eq!(
-        defects(&obfuscated(&body)),
-        [XpsElementDefect::BrushUnsupported]
-    );
+    assert_eq!(defects(&obfuscated(&body)), []);
     let content = stream(&open(&obfuscated(&body)).expect("an XPS"));
     assert!(
-        content.contains("0.749 0.749 0.749 rg"),
-        "the placeholder grey rather than the gradient's first stop: {content}"
+        content.contains("/Pattern cs /"),
+        "the gradient is the fill colour: {content}"
+    );
+    assert!(
+        content.contains(" scn"),
+        "and it is set as a non-stroking colour: {content}"
+    );
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "not the placeholder grey: {content}"
     );
     assert!(
         content.contains("<0001>"),
@@ -1295,9 +1304,21 @@ fn a_transform_or_a_clip_that_will_not_read_refuses_the_run() {
         run_defects(r#"Opacity="2" UnicodeString="A""#),
         [XpsElementDefect::OpacityUnreadable]
     );
+    // 14.3's mask reaches a run as it reaches a shape, and an opaque one is an
+    // alpha of one: nothing is owed and the run draws.
     assert_eq!(
         run_defects(r##"OpacityMask="#FF000000" UnicodeString="A""##),
-        [XpsElementDefect::OpacityMaskUnsupported]
+        []
+    );
+    assert_eq!(
+        array(&drawn(r##"OpacityMask="#FF000000" UnicodeString="A""##)),
+        "[<0001>]"
+    );
+    // And one that is not a brush refuses the run, which is the rule an
+    // unreadable `Opacity` gets and for the same reason.
+    assert_eq!(
+        run_defects(r##"OpacityMask="#ZZZ" UnicodeString="A""##),
+        [XpsElementDefect::BrushUnreadable]
     );
 
     // And a transform that *does* read reaches the page as its own six

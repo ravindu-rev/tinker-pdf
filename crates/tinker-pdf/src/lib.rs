@@ -78,7 +78,7 @@ pub use tinker_pdf_cos::{
 };
 pub use tinker_pdf_cos::{
     BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PlacedGlyph,
-    Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
+    Shading, ShadingPattern, StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
 /// Streaming open: where a document's bytes come from when they are not all
 /// in hand (`docs/design/streaming-open.md`).

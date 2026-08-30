@@ -624,10 +624,6 @@ pub enum XpsElementDefect {
     ClipUnreadable,
     /// An `Opacity` that is not a number in `[0, 1]`. **Refused.**
     OpacityUnreadable,
-    /// An `OpacityMask`, which this build does not apply (14.3). **Refused**,
-    /// for `OpacityUnreadable`'s reason: a mask ignored draws a whole shape
-    /// where a sliver was meant.
-    OpacityMaskUnsupported,
     /// A `{StaticResource}` naming a key no dictionary in scope holds.
     /// **Painted grey.**
     BrushUnresolved,
@@ -637,9 +633,13 @@ pub enum XpsElementDefect {
     /// A `{StaticResource}` chain longer than [`MAX_XPS_RESOURCE_DEPTH`].
     /// **Painted grey.** Not the same as a cycle and never reported as one.
     BrushTooDeep,
-    /// A brush this milestone does not paint: an `ImageBrush` or a
-    /// `VisualBrush` (gap 30, milestone 8), a `ContextColor` naming an ICC
-    /// profile, or a gradient asked to stroke. **Painted grey.**
+    /// A brush this build does not paint: a `VisualBrush` (15.4), or a
+    /// `ContextColor` naming an ICC profile. **Painted grey.**
+    ///
+    /// Two things this used to name and no longer does, because both are
+    /// painted now: an `ImageBrush`, and a gradient asked to stroke or to fill
+    /// text — the second needed 8.7.4.5.5's shading pattern, which the writer
+    /// had no API for.
     BrushUnsupported,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
@@ -723,7 +723,6 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::TransformUnreadable => "a transform that is not six numbers",
             XpsElementDefect::ClipUnreadable => "a `Clip` that is not 11.2's geometry",
             XpsElementDefect::OpacityUnreadable => "an `Opacity` that is not a number in [0, 1]",
-            XpsElementDefect::OpacityMaskUnsupported => "an `OpacityMask` this build cannot apply",
             XpsElementDefect::BrushUnresolved => "a `{StaticResource}` naming no resource",
             XpsElementDefect::BrushCyclic => "a `{StaticResource}` chain that returns to itself",
             XpsElementDefect::BrushTooDeep => "a `{StaticResource}` chain past the depth cap",

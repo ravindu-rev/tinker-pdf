@@ -59,6 +59,15 @@ fn package_with(image: Part, attributes: &str, types: Option<&str>) -> Vec<u8> {
     archive(before_content_types(parts, image))
 }
 
+/// A package whose one page carries `body` verbatim, with the 4 x 2 PNG in it.
+fn package_body(body: &str) -> Vec<u8> {
+    let markup = format!(
+        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+    archive(before_content_types(parts, png_part()))
+}
+
 /// A 4 × 2 PNG, which passes through, and its part.
 fn png_part() -> Part {
     let pixels: Vec<u8> = (0..4 * 2 * 3).map(|i| i as u8).collect();
@@ -816,6 +825,56 @@ fn a_jpeg_part_is_placed_verbatim() {
     assert!(
         saved(&bytes).contains("/DCTDecode"),
         "the JPEG's own bytes are the stream"
+    );
+}
+
+/// An `ImageBrush` asked to **stroke** takes the tiling pattern a fill takes.
+///
+/// 8.7.3.2 makes a pattern a *colour* and `SCN` takes one, so a picture reaches
+/// a stroke through the same pattern a fill reaches it through and neither
+/// needs a second implementation. Written down as its own fixture because the
+/// two brushes that can now stroke are independent: a build that wired the
+/// gradient into `SCN` and left the picture grey passes every gradient test.
+#[test]
+fn an_image_brush_stroke_is_the_tiling_pattern_a_fill_would_take() {
+    let bytes = package_body(
+        r#"<Path Data="M0,0L200,0" StrokeThickness="4"><Path.Stroke>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.Stroke></Path>"#,
+    );
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(content.contains("/Pattern CS /"), "{content}");
+    assert!(content.contains(" SCN"), "{content}");
+    assert!(!content.contains("0.749 G"), "{content}");
+    assert!(content.contains("4 w"), "the width is still the file's");
+}
+
+/// An `ImageBrush` used as an **opacity mask** is an `/Alpha` soft mask, not a
+/// `/Luminosity` one.
+///
+/// 14.3's mask is the brush's alpha channel, and a picture keeps its alpha in
+/// the picture. A `/Luminosity` mask would read the *colours* instead — a
+/// plausible, wrong picture that no content stream can tell apart from the
+/// right one, since both are one `gs`.
+#[test]
+fn an_image_brush_opacity_mask_reads_the_pictures_alpha_and_not_its_colours() {
+    let bytes = package_body(
+        r##"<Path Fill="#FF0000" Data="M0,0L200,0 200,100 0,100Z"><Path.OpacityMask>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.OpacityMask></Path>"##,
+    );
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(content.contains(" gs"), "a state is set: {content}");
+    let text = saved(&bytes);
+    assert!(text.contains("/S /Alpha"), "the mask reads the alpha");
+    assert!(
+        !text.contains("/S /Luminosity"),
+        "and not the picture's colours"
     );
 }
 

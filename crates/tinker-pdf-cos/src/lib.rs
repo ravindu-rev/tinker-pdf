@@ -87,8 +87,8 @@ pub use build::{
     jpeg_shape, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode,
     CompressedImage, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState, FormXObject, Function,
     Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry, PageBuilder,
-    PlacedGlyph, Shading, SoftMask, StateMask, SubsetRefusal, Target, TilingPattern, TilingType,
-    TransparencyGroup,
+    PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask, SubsetRefusal, Target,
+    TilingPattern, TilingType, TransparencyGroup,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
 // here: this root already has a `validate`, which is the strict structural

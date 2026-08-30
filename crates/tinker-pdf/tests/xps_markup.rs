@@ -682,19 +682,52 @@ fn an_opacity_that_is_not_a_number_refuses_its_element() {
     assert!(content.contains(" gs\n"), "{content}");
 }
 
-/// An `OpacityMask` is refused rather than ignored (gap 30 milestone 8 owns
-/// the brush that would apply it).
+/// **An `OpacityMask` is applied, and the three brushes it can be are three
+/// constructions.**
 ///
-/// Ignoring a mask draws a whole shape where a sliver was meant, which is the
-/// opacity case exactly.
+/// 14.3 makes the mask a brush used as an *alpha channel*, and where a brush
+/// keeps its alpha is different in each of them — so one construction would be
+/// right about one and wrong about the other two:
+///
+/// - a `SolidColorBrush` is one alpha over the whole element, which 11.6.4.4's
+///   `/ca` already says, so no form XObject is built at all;
+/// - a gradient whose stops' alphas differ varies across the element and
+///   8.7.4.5's shading carries no alpha, so the alphas are painted as a grey
+///   and read back by a `/Luminosity` soft mask;
+/// - an `ImageBrush`'s alpha is the picture's own, so the brush is painted as
+///   it stands and an `/Alpha` soft mask reads what the painting produced.
+///
+/// The dictionaries the last two produce are read back in `xps_validated.rs`;
+/// what is asserted here is the half this test had before and lost — the shape
+/// is on the page. A refused mask took the whole element with it.
 #[test]
-fn an_opacity_mask_refuses_its_element_rather_than_being_ignored() {
-    let body = r##"<Path Fill="#000000" Data="M0,0L10,0Z"><Path.OpacityMask><SolidColorBrush Color="#80000000" /></Path.OpacityMask></Path>"##;
-    assert_eq!(
-        body_defects(body),
-        [XpsElementDefect::OpacityMaskUnsupported]
+fn an_opacity_mask_is_applied_rather_than_taking_its_element_with_it() {
+    // A solid mask is a constant alpha rather than a soft mask, and 0.5 is the
+    // `#80` the mask states: a form XObject holding a flat grey would say the
+    // same thing at the cost of an object.
+    let solid = r##"<Path Fill="#000000" Data="M0,0L10,0 10,10Z"><Path.OpacityMask><SolidColorBrush Color="#80000000" /></Path.OpacityMask></Path>"##;
+    assert_eq!(body_defects(solid), []);
+    let content = drawn(solid);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(
+        content.contains(" gs"),
+        "and its alpha is a graphics state: {content}"
     );
-    assert!(!drawn(body).contains("0 0 m"), "{}", drawn(body));
+
+    // A gradient whose stops differ in alpha is not one number, so it becomes a
+    // soft mask — a second `gs` beside whatever alpha was already in force.
+    let gradient = r##"<Path Fill="#000000" Data="M0,0L100,0 100,100 0,100Z"><Path.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute"><LinearGradientBrush.GradientStops><GradientStop Color="#FFFFFFFF" Offset="0" /><GradientStop Color="#00FFFFFF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.OpacityMask></Path>"##;
+    assert_eq!(body_defects(gradient), []);
+    let content = drawn(gradient);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(content.contains(" gs"), "a state is set: {content}");
+
+    // A mask brush that is not 15's syntax still refuses the element, which is
+    // the rule that did not change: a mask ignored draws a whole shape where a
+    // sliver was meant.
+    let broken = r##"<Path Fill="#000000" Data="M0,0L10,0 10,10Z"><Path.OpacityMask><SolidColorBrush Color="#ZZZ" /></Path.OpacityMask></Path>"##;
+    assert_eq!(body_defects(broken), [XpsElementDefect::BrushUnreadable]);
+    assert!(!drawn(broken).contains("0 0 m"), "{}", drawn(broken));
 }
 
 // ---- 15, brushes --------------------------------------------------------
@@ -990,18 +1023,24 @@ fn an_image_brush_whose_picture_is_missing_is_grey_and_named() {
     assert!(drawn(body).contains("0.749 0.749 0.749 rg"));
 }
 
-/// A gradient asked to **stroke** is grey, not the gradient's first colour.
+/// A gradient asked to **stroke** is a shading pattern, set as the stroking
+/// colour.
 ///
-/// Gap 07's defect said the other way round: a shading pattern is what a
-/// gradient stroke needs, milestone 5 deliberately writes none, and taking the
-/// first stop would produce a plausible solid rule where a gradient was asked
-/// for.
+/// Gap 07's headline defect was a gradient-stroked rule painting solid black
+/// silently, and the two answers this test has had are the two halves of
+/// getting it right: the placeholder grey while the writer had no
+/// `/PatternType 2` to offer, and the gradient itself now that it has. What is
+/// still asserted is the half that was never about the milestone — the width is
+/// the file's, and nothing paints the first stop as though it were the whole
+/// brush.
 #[test]
-fn a_gradient_stroke_is_grey_rather_than_its_first_colour() {
+fn a_gradient_stroke_is_a_shading_pattern_rather_than_its_first_colour() {
     let body = r##"<Path Data="M0,0L10,0" StrokeThickness="4"><Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="10,0"><LinearGradientBrush.GradientStops><GradientStop Color="#FF0000" Offset="0" /><GradientStop Color="#0000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Stroke></Path>"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushUnsupported]);
+    assert_eq!(body_defects(body), []);
     let content = drawn(body);
-    assert!(content.contains("0.749 G"), "{content}");
+    assert!(content.contains("/Pattern CS /"), "{content}");
+    assert!(content.contains(" SCN"), "{content}");
+    assert!(!content.contains("0.749 G"), "{content}");
     assert!(!content.contains("1 0 0 RG"), "{content}");
     assert!(content.contains("4 w"), "the width is still the file's");
 }

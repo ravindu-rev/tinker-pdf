@@ -63,10 +63,12 @@ pub struct Colour {
 pub enum BrushError {
     /// The markup is not 15's brush syntax.
     Syntax,
-    /// It is a brush and this milestone does not paint it: an `ImageBrush` or
-    /// a `VisualBrush` (both gap 30 milestone 8), or a `ContextColor` naming
-    /// an ICC profile (a non-goal of the whole plan, because 15.2.5's syntax
-    /// has nowhere to put an sRGB fallback).
+    /// It is a brush and this build does not paint it: a `VisualBrush` (15.4),
+    /// or a `ContextColor` naming an ICC profile (a non-goal of the whole
+    /// plan, because 15.2.5's syntax has nowhere to put an sRGB fallback).
+    ///
+    /// An `ImageBrush` was here and is not: it is painted, through a tiling
+    /// pattern.
     Unsupported,
 }
 
@@ -299,7 +301,7 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
             brush.alpha *= opacity_of(node)?;
             Ok(brush)
         }
-        "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox),
+        "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox, Channel::Colour),
         "ImageBrush" => image_brush(node, bbox),
         // `VisualBrush` is row 8's and is not built. Its cell is a *subtree* of
         // markup rather than a part, so painting one means re-entering the
@@ -307,6 +309,129 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
         // carry -- and this module is deliberately pure. Refused by name rather
         // than drawn as its first child, which would be a picture the file
         // never described. See the plan's amended row 8.
+        "VisualBrush" => Err(BrushError::Unsupported),
+        _ => Err(BrushError::Syntax),
+    }
+}
+
+// ---- 14.3, a brush used as an alpha channel ---------------------------------
+
+/// Which of a gradient's two channels a shading is built from.
+///
+/// 15.4's `GradientStop` states a colour *and* an alpha, and PDF's 8.7.4.5
+/// shading states colour only — there is no alpha shading. So the two channels
+/// of one gradient become two shadings, and which one is wanted is the
+/// caller's question rather than the gradient's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    /// The stops' colours, in `/DeviceRGB`.
+    Colour,
+    /// The stops' **alphas**, as a grey in `/DeviceGray`. 14.3's opacity mask
+    /// is a brush used as an alpha channel, and a `/Luminosity` soft mask
+    /// (11.6.5.2) is where PDF keeps one — so an alpha of 0.4 is painted as
+    /// the grey 0.4 and read back as its own luminosity.
+    Alpha,
+}
+
+impl Channel {
+    fn space(self) -> DeviceSpace {
+        match self {
+            Channel::Colour => DeviceSpace::Rgb,
+            Channel::Alpha => DeviceSpace::Gray,
+        }
+    }
+
+    fn components(self, colour: Colour) -> Vec<f64> {
+        match self {
+            Channel::Colour => colour.rgb.to_vec(),
+            Channel::Alpha => vec![colour.alpha],
+        }
+    }
+}
+
+/// 14.3's `OpacityMask`, read as the alpha it states.
+///
+/// **Three shapes and not one**, because the alpha a brush carries lives
+/// somewhere different in each of them and PDF has a different construction for
+/// each place. Collapsing them would mean picking one and being wrong about the
+/// other two: a luminosity mask over a picture reads its *colours*, and an
+/// alpha mask over a gradient reads the one constant alpha a shading can carry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mask {
+    /// The alpha is one number over the whole element: a `SolidColorBrush`, or
+    /// a gradient every one of whose stops carries the same alpha.
+    ///
+    /// No soft mask at all. 11.6.4.4's `/ca` and `/CA` say exactly this, and a
+    /// form XObject carrying a flat grey would say it again at the cost of an
+    /// object — which is the same argument [`super::paint`] makes about a
+    /// `Canvas` opacity over children that do not overlap.
+    Uniform(f64),
+    /// The alpha varies across the element, and is painted as a grey for
+    /// 11.6.5.2's `/Luminosity` to read back.
+    Luminosity {
+        /// The shading, over `/DeviceGray`, whose one output is the alpha.
+        shading: Shading,
+        /// Shading space into the space the element draws in.
+        matrix: [f64; 6],
+        /// The brush's own `Opacity`, which multiplies every stop's alpha.
+        opacity: f64,
+    },
+    /// The alpha is a picture's own, which only the picture can supply — so
+    /// the brush is painted normally and 11.6.5.2's `/Alpha` reads the alpha
+    /// the painting produced.
+    Alpha {
+        /// The tile, carried unresolved for [`Paint::Image`]'s reason.
+        tile: Box<ImageTile>,
+        /// The brush's own `Opacity`.
+        opacity: f64,
+    },
+}
+
+/// Reads a brush as 14.3's opacity mask.
+///
+/// # Errors
+/// As [`from_node`].
+pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, BrushError> {
+    if !node.xps {
+        return Err(BrushError::Syntax);
+    }
+    match node.local.as_str() {
+        "SolidColorBrush" => {
+            let colour = colour(node.attr("Color").ok_or(BrushError::Syntax)?)?;
+            Ok(Mask::Uniform(colour.alpha * opacity_of(node)?))
+        }
+        "LinearGradientBrush" | "RadialGradientBrush" => {
+            let stops = stops_of(node)?;
+            let opacity = opacity_of(node)?;
+            // Every stop carrying one alpha is a gradient that does not vary
+            // where a mask reads it, whatever it does with colour — so it is
+            // the uniform case, and building a shading for it would be a form
+            // XObject holding a flat grey.
+            if stops
+                .iter()
+                .all(|stop| stop.colour.alpha == stops[0].colour.alpha)
+            {
+                return Ok(Mask::Uniform(stops[0].colour.alpha * opacity));
+            }
+            let brush = gradient(node, bbox, Channel::Alpha)?;
+            match brush.paint {
+                Paint::Gradient { shading, matrix } => Ok(Mask::Luminosity {
+                    shading,
+                    matrix,
+                    opacity,
+                }),
+                // `gradient` answers a gradient element with a gradient.
+                _ => Err(BrushError::Syntax),
+            }
+        }
+        "ImageBrush" => {
+            let opacity = opacity_of(node)?;
+            let brush = image_brush(node, bbox)?;
+            match brush.paint {
+                Paint::Image(tile) => Ok(Mask::Alpha { tile, opacity }),
+                _ => Err(BrushError::Syntax),
+            }
+        }
         "VisualBrush" => Err(BrushError::Unsupported),
         _ => Err(BrushError::Syntax),
     }
@@ -480,7 +605,7 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
     Ok(out)
 }
 
-fn gradient(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Brush, BrushError> {
     let stops = stops_of(node)?;
     let spread = spread_of(node)?;
     let approximated = stops
@@ -517,8 +642,8 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
         .unwrap_or(markup::IDENTITY);
 
     let (shading, inner) = match node.local.as_str() {
-        "LinearGradientBrush" => linear(node, &stops, spread)?,
-        _ => radial(node, &stops, spread)?,
+        "LinearGradientBrush" => linear(node, &stops, spread, channel)?,
+        _ => radial(node, &stops, spread, channel)?,
     };
     let matrix = markup::concat(inner, markup::concat(unit, brush_transform));
     if !matrix.iter().all(|v| markup::usable(*v)) {
@@ -533,7 +658,12 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
 }
 
 /// 15.4.3's `LinearGradientBrush`, as a type 2 shading.
-fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64; 6]), BrushError> {
+fn linear(
+    node: &Node,
+    stops: &[Stop],
+    spread: Spread,
+    channel: Channel,
+) -> Result<(Shading, [f64; 6]), BrushError> {
     let start = node
         .attr("StartPoint")
         .and_then(markup::pair)
@@ -546,7 +676,7 @@ fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
         return Err(BrushError::Syntax);
     }
 
-    let base = ramp(stops);
+    let base = ramp(stops, channel);
     let (function, coords) = match spread {
         Spread::Pad => (base, [start.0, start.1, end.0, end.1]),
         _ => {
@@ -577,7 +707,7 @@ fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
     }
     Ok((
         Shading::Axial {
-            color_space: DeviceSpace::Rgb,
+            color_space: channel.space(),
             coords,
             function,
             extend: (true, true),
@@ -595,7 +725,12 @@ fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
 /// and the space it lives in is scaled about the centre so that circle becomes
 /// the ellipse the file stated. The focal point is un-scaled on the way in for
 /// the same reason.
-fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64; 6]), BrushError> {
+fn radial(
+    node: &Node,
+    stops: &[Stop],
+    spread: Spread,
+    channel: Channel,
+) -> Result<(Shading, [f64; 6]), BrushError> {
     let centre = node
         .attr("Center")
         .and_then(markup::pair)
@@ -631,7 +766,7 @@ fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
         ),
     );
 
-    let base = ramp(stops);
+    let base = ramp(stops, channel);
     let (function, coords) = match spread {
         Spread::Pad => (base, [focal.0, focal.1, 0.0, centre.0, centre.1, rx]),
         _ => {
@@ -655,7 +790,7 @@ fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
     }
     Ok((
         Shading::Radial {
-            color_space: DeviceSpace::Rgb,
+            color_space: channel.space(),
             coords,
             function,
             extend: (true, true),
@@ -669,21 +804,21 @@ fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
 /// Stops that do not reach the ends are extended flat, because 15.4.2 makes
 /// the colour before the first stop and after the last one that stop's own —
 /// which is a statement about the gradient and not about `/Extend`.
-fn ramp(stops: &[Stop]) -> Function {
+fn ramp(stops: &[Stop], channel: Channel) -> Function {
     let mut offsets: Vec<f64> = Vec::with_capacity(stops.len() + 2);
-    let mut colours: Vec<[f64; 3]> = Vec::with_capacity(stops.len() + 2);
+    let mut colours: Vec<Vec<f64>> = Vec::with_capacity(stops.len() + 2);
     if stops[0].offset > 0.0 {
         offsets.push(0.0);
-        colours.push(stops[0].colour.rgb);
+        colours.push(channel.components(stops[0].colour));
     }
     for stop in stops {
         offsets.push(stop.offset);
-        colours.push(stop.colour.rgb);
+        colours.push(channel.components(stop.colour));
     }
     let last = stops[stops.len() - 1];
     if last.offset < 1.0 {
         offsets.push(1.0);
-        colours.push(last.colour.rgb);
+        colours.push(channel.components(last.colour));
     }
 
     // 7.10.4 wants `/Bounds` strictly increasing and strictly inside the
@@ -704,8 +839,8 @@ fn ramp(stops: &[Stop]) -> Function {
     for at in 1..offsets.len() {
         pieces.push(Function::Exponential {
             domain: [0.0, 1.0],
-            c0: colours[at - 1].to_vec(),
-            c1: colours[at].to_vec(),
+            c0: colours[at - 1].clone(),
+            c1: colours[at].clone(),
             n: 1.0,
         });
         if at + 1 < offsets.len() {
@@ -720,8 +855,8 @@ fn ramp(stops: &[Stop]) -> Function {
         // flat colour, which is what 15.4.2 makes it.
         return Function::Exponential {
             domain: [0.0, 1.0],
-            c0: colours[0].to_vec(),
-            c1: colours[0].to_vec(),
+            c0: colours[0].clone(),
+            c1: colours[0].clone(),
             n: 1.0,
         };
     }
