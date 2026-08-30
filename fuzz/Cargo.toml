@@ -235,6 +235,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "jxr"
+path = "fuzz_targets/jxr.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "svg"
 path = "fuzz_targets/svg.rs"
 test = false

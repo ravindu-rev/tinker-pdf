@@ -61,3 +61,8 @@ bindings/js/demo/package-lock.json
 
 # Claude Code scratch: agent worktrees and tool results.
 .claude/
+# JPEG XR fixture sources. The raster is defined once, by `raster()` in
+# `crates/tinker-pdf-filters/tests/jxr_fixtures.rs`; the `.raw` files are what
+# the `#[ignore]`d writer hands `make-fixtures.ps1`, and committing a second
+# copy of a value that already has one definition is what lets the two drift.
+crates/tinker-pdf-filters/tests/jxr/*.raw
