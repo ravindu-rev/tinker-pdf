@@ -153,8 +153,19 @@ pub use tinker_pdf_cos::{
 /// [`ScriptPolicy`] and [`Trigger`] are here for the reason `ExtGState` is:
 /// they are the argument to [`DocumentEditor::recalculate_under`], so without
 /// them on this facade the method is callable by nobody outside this
-/// workspace (ruling 11).
-pub use tinker_pdf_cos::{CalcError, Recalculation, ScriptError, ScriptPolicy, Trigger};
+/// workspace (ruling 11). The same argument brings [`Keystroke`], which is
+/// what [`DocumentEditor::keystroke`] takes, and [`EventVerdict`],
+/// [`DisplayString`], [`ScriptScope`] and [`ScriptBudget`], which are what
+/// the methods hand back or what a host builds to ask a question with.
+///
+/// [`DisplayString`] is worth one more sentence, because its whole job is to
+/// be a type: it is what a format action produces, it has no `Deref` and no
+/// `Into<String>`, and none of the write doors will take one — which is how
+/// 12.7.3.3 stopped being a convention and became a guarantee.
+pub use tinker_pdf_cos::{
+    CalcError, DisplayString, EventVerdict, Keystroke, Recalculation, ScriptBudget, ScriptError,
+    ScriptPolicy, ScriptScope, Trigger,
+};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///

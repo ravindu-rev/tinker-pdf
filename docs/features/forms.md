@@ -2,10 +2,11 @@
 
 Interactive forms, three layers deep: the AcroForm field tree read into a
 typed model (12.7), fills that rewrite the widget's appearance rather than
-hoping a viewer will, and the form's own `/AA` calculate actions run through
-a bounded ECMAScript subset the engine wrote for the purpose. One contract
-holds the layers together: **a partial application never reaches the
-document**. A multi-field fill lands whole or not at all, a recalculation
+hoping a viewer will, and the form's own `/AA` scripts run through a bounded
+ECMAScript subset the engine wrote for the purpose — calculate and format
+by default, keystroke, validate and the document's own helpers under a
+`ScriptPolicy` a host sets. One contract holds the layers together: **a
+partial application never reaches the document**. A multi-field fill lands whole or not at all, a recalculation
 that cannot run one script writes nothing, and the one degradation the
 damage model allows — a widget with no `/Rect` to draw into — is named
 rather than silent (rulings 2 and 10, [rulings](../rulings.md)).
@@ -21,7 +22,8 @@ child field, anything else is a widget of its parent, and a field merged
 with its single widget (12.7.3.3) is modelled as a field that lists itself.
 `FieldKind` classifies by `/FT` and the flags of 12.7.4.2 Table 228 —
 `Text`, `Checkbox`, `Radio`, `PushButton`, `ComboBox`, `ListBox`,
-`Signature` (recognised, not verified), and `Unknown` for an `/FT` this
+`Signature` — which this module recognises and neither fills nor signs;
+reading one is [signatures](signatures.md) — and `Unknown` for an `/FT` this
 build does not know. A button's on state is discovered from its `/AP` `/N`
 dictionary, never assumed to be `/Yes`. Values decode per type
 (`Text`/`State`/`Many`/`None` — a button with no `/V` is `Off`, which is a
@@ -264,7 +266,9 @@ rather than a coercion: a caller who wants the characters writes `.text()`,
 and one who writes `.text()` into `/V` has made a decision a reviewer can
 see. What the type removes is the mistake nobody makes on purpose.
 
-**Which scripts run is a policy, and it is a type.** `ScriptPolicy` names
+**Which scripts run is a policy, and it is a type**
+([design/form-script-policy.md](../design/form-script-policy.md) carries the
+reasoning and the alternatives that were rejected). `ScriptPolicy` names
 the six trigger classes a document's scripts arrive under — `Calculate`
 (`/AA` `/C`), `Format` (`/F`), `Keystroke` (`/K`), `Validate` (`/V`),
 `Document` (`/Names /JavaScript`, 7.7.4) and `Catalog` (12.6.3 Table 200's
@@ -291,9 +295,30 @@ absent script would collapse "this host does not run calculations" into
 `ScriptPolicy::default()`; `recalculate_under()` and
 `formatted_value_under()` take one. Nothing recalculates automatically —
 when a calculation runs is host policy, so `recalculate()` is an explicit
-call. Format actions produce a display string that deliberately never
-becomes `/V`: 12.7.3.3 keeps a field's value and its appearance apart, and a
-`/V` of "GBP 1,234.00" is a form whose export is unusable.
+call.
+
+**The policy, in full.** What each trigger gates, what it is by default, and
+what a host gets by changing it.
+
+| Trigger | Where the script lives | Default | Allowed | Denied |
+| --- | --- | --- | --- | --- |
+| `Calculate` | a field's `/AA /C` (12.6.3 Table 198) | **allowed** | `recalculate()` runs the `/CO` order and applies the result, all or nothing | `CalcError::Refused`, naming the first calculating field — nothing is written |
+| `Format` | a field's `/AA /F` | **allowed** | `formatted_value()` answers a `DisplayString` no write door will take | `CalcError::Refused`, naming the field |
+| `Keystroke` | a field's `/AA /K` | denied | `DocumentEditor::keystroke(field, event)` answers an `EventVerdict` for an event the host built | `CalcError::Refused` — there is no implicit path to reach it, so nothing else changes |
+| `Validate` | a field's `/AA /V` | denied | `DocumentEditor::validate(field, value)`; and a computed value is checked before it is committed (12.7.2), a refusal aborting the whole pass as `CalcError::Invalid` | the pass still runs, and `Recalculation::refused` names every field it wrote unchecked |
+| `Document` | `/Names /JavaScript` (7.7.4) | denied | the sources are read into a `ScriptScope` of **function definitions only**, and a field script calling one resolves | the table is empty, so a call to a helper is the `ScriptError::UnknownName` it always was — a refusal here would make every form carrying such a block uncomputable |
+| `Catalog` | the catalog's `/AA` (12.6.3 Table 200) | denied | **nothing**. No entry point in this build runs a catalog action | nothing. Declarable and inert — see below |
+
+`Trigger::Catalog` is the one row with no consumer, and it is written down
+rather than left to be discovered. `WC`, `WS`, `DS`, `WP` and `DP` are
+will-close, will-save, did-save, will-print and did-print; every one needs an
+event a document reader has no notion of, and none of them is document-open,
+which is the one `/Names /JavaScript` covers. The bit exists because it names
+a real trigger class a host has to be able to deny and because the projection
+onto the C ABI is 1:1 (ruling 11). `form_document_scripts.rs`'s
+`allowing_the_catalog_trigger_changes_no_answer` is the assertion that says
+so, so that a guard holding nothing is a measured fact rather than an
+assumption.
 
 ## API
 
@@ -312,13 +337,34 @@ Mutation goes through `Document::editor()`, a `DocumentEditor`:
 `fill_field`, `set_field_values`, `set_field_value`, `set_checkbox`,
 `select_radio`, `reset_form`, `transaction`, `recalculate`, and
 `set_calculated_values` for a host that computes values itself.
-`recalculate_under` takes a `ScriptPolicy`, and `keystroke` and `validate`
-are the two event entry points. The format event is
-`tinker_pdf_cos::calc::formatted_value`, with `formatted_value_under`
-beside it. The facade re-exports
-`FillError`, `FillRejection`, `SkippedWidget`, `WidgetDefect`, `CalcError`,
-`Recalculation`, `ScriptError`, `ScriptPolicy`, `Trigger`, `ScriptScope`,
-`ScriptBudget`, `Keystroke` and `EventVerdict` (ruling 11).
+`recalculate_under` takes a `ScriptPolicy`; `formatted_value`, `keystroke`
+and `validate` take one too, and are the format event and the two event entry
+points. The free functions behind them are
+`tinker_pdf_cos::calc::{formatted_value, formatted_value_under, keystroke,
+validate}` — the last two are reached module-qualified rather than from the
+crate root, because that root already has a `validate` and it is the strict
+structural validator. The facade re-exports `FillError`, `FillRejection`,
+`SkippedWidget`, `WidgetDefect`, `CalcError`, `Recalculation`, `ScriptError`,
+`ScriptPolicy`, `Trigger`, `ScriptScope`, `ScriptBudget`, `Keystroke`,
+`EventVerdict` and `DisplayString` (ruling 11).
+
+**Across the C ABI** ([bindings](bindings.md)), 1:1 and with no logic of its
+own: `tpdf_editor_recalculate`, `tpdf_editor_formatted_value`,
+`tpdf_editor_keystroke` and `tpdf_editor_validate`, with the pass's four
+lists behind `tpdf_recalculation_*` and freed by
+`tpdf_recalculation_free`. The policy crosses as a bitmask of the
+`TPDF_SCRIPT_*` constants — a bitmask rather than a struct of six `int`s,
+because a struct is ABI a later trigger class could not be appended to.
+Bits this build does not define are ignored rather than refused, so a host
+compiled against a later header gets this build's answer. A script that
+would not run, and a policy that would not let it, are one status:
+`TpdfStatus::ScriptRefused` (15), because from a caller's side both mean
+nothing was written; which script and why crosses through
+`tpdf_last_error_message`, since a status code cannot carry a field name and
+inventing seven codes for seven refusals would be a vocabulary the facade
+does not have. **A refusal from a keystroke or validate action is not one of
+them**: that is `Ok` with `*out_accepted` zero, because a form saying no is
+the form working.
 
 ```rust
 let doc = Document::open(bytes)?;
@@ -374,7 +420,7 @@ helpers, each excluded construct refused by name, the inert `app.*` stubs,
 the policy defaults, and the document-level name table — arity, frames,
 recursion, the function cap and a hostile document scope that never panics).
 
-`crates/tinker-pdf-cos/tests/form_transactions.rs` (15 tests) holds up the
+`crates/tinker-pdf-cos/tests/form_transactions.rs` (20 tests) holds up the
 atomicity claims against hand-written fixtures: a successful fill produces
 the bytes it always did, rollback restores objects, deletions, page order
 and the object-number counter, abandoned edits do not grow the next saved
@@ -440,10 +486,18 @@ with the `DisplayString` handed straight over, each asserted to fail with
 whether this repository's own type refuses a state, and adjudicates nothing
 about a document (ruling 13).
 
-`form_script` is one of the 24 fuzz targets, with a committed seed corpus:
-it drives the lexer, parser and evaluator with arbitrary text against a
-live `Host` and asserts two properties — no panic (ruling 1), and that a
-run never spends more budget than it was given, which is how a bounded
-interpreter is kept bounded rather than believed bounded. All of it rides
-in the workspace suite: 2 963 passed, 0 failed, 8 ignored (Windows x86_64,
-August 2026) — [verification](../verification.md).
+`form_script` is one of the 31 fuzz targets, with a committed seed corpus.
+It drives every entry point the policy gates from one input, split at the
+first NUL byte: the prefix is offered to `ScriptScope::define` as document
+scope, and the suffix is run as a field script with whatever that produced
+in scope, then twice more as each event — because a keystroke action reads
+members no calculate action ever touches and a bound that holds for `run`
+and not for a helper's body is not a bound. A seed with no NUL defines
+nothing and runs whole, which is what every committed seed already did. Two
+properties are asserted on each: no panic (ruling 1), and that a run never
+spends more budget than it was given, which is how a bounded interpreter is
+kept bounded rather than believed bounded.
+
+All of it rides in the workspace suite: 3 851 passed, 0 failed, 35 ignored across 156 suites
+(`x86_64-pc-windows-msvc`, 30 August 2026) —
+[verification](../verification.md).

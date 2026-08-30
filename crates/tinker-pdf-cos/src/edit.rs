@@ -1236,6 +1236,25 @@ impl DocumentEditor {
         crate::calc::recalculate_under(self, policy)
     }
 
+    /// The text a field's format action would display (12.7.3.3).
+    ///
+    /// `Ok(None)` for a field with no format action, which is most fields.
+    /// The answer is a [`crate::calc::DisplayString`] and not a `String`,
+    /// because a display string that reached `/V` would give a form whose
+    /// export reads "GBP 1,234.00" where a consumer expects 1234 — see the
+    /// type, and the compile-refusal proof beside it.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::formatted_value_under`].
+    pub fn formatted_value(
+        &self,
+        name: &str,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<Option<crate::calc::DisplayString>, crate::calc::CalcError> {
+        crate::calc::formatted_value_under(self, name, policy)
+    }
+
     /// Offers a keystroke to a field's `/AA /K` action (12.6.4.16 table 196).
     ///
     /// It takes an event because it has to: what is being typed, where, and
