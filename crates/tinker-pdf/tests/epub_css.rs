@@ -234,7 +234,10 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // fourteen to thirteen and nobody would have known which one went.
             "hyphens",
             "list-style",
-            "max-width",
+            // **`max-width` used to be here and tier 4 removed it**, the same
+            // way `display` left one milestone earlier: pandoc's whole count
+            // over this corpus was `img { max-width: 100% }`, and CSS 2.2
+            // §10.4's clamp is now applied rather than reported.
             "overflow",
             "overflow-x",
             "quotes",
@@ -244,6 +247,15 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // property whose own keywords are `left`, `right`, `center` and
             // `justify`.
             "text-align",
+            // **And the fourth, which is the one tier 4 expected to remove and
+            // did not.** §10.8.1's `vertical-align` is implemented at every one
+            // of its ten values; what is left here is calibre writing
+            // `vertical-align: inherit` on four of its five table classes,
+            // which is `text-align: inherit` four lines up — a `css-cascade-5`
+            // §7.1 explicit-defaulting keyword, valid on every property and
+            // implemented on none. So this row survives a milestone that
+            // implemented the property whole, and the set is what says which of
+            // the two facts it is reporting.
             "vertical-align",
         ]
     );

@@ -144,6 +144,55 @@ pub enum SpecifiedSize {
     Length(Len),
 }
 
+/// `min-width` and `min-height`, CSS 2.2 §10.4 and §10.7.
+///
+/// **`auto` is a value and not a synonym for zero**, and keeping the two apart
+/// is the whole reason this is not a [`LengthPercentage`]. `css-sizing-3` §5.1
+/// makes `auto` the initial value; it resolves to zero in a block formatting
+/// context, which is CSS 2.2's own initial value read forward, and to
+/// `css-flexbox-1` §4.5's **automatic minimum main size** on a flex item —
+/// which is the item's min-content size and is nothing like zero. A build that
+/// computed `auto` to zero here would let every flex item shrink below its
+/// longest word, and the page would look like a page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MinSize {
+    /// `auto`
+    Auto,
+    /// A length or a percentage.
+    Length(LengthPercentage),
+}
+
+/// A specified `min-width`/`min-height`, before `em` is resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedMinSize {
+    /// `auto`
+    Auto,
+    /// A length.
+    Length(Len),
+}
+
+/// `max-width` and `max-height`, CSS 2.2 §10.4 and §10.7.
+///
+/// `none` and not `auto`: §10.4's own grammar, and the two are different words
+/// for a reason — there is no maximum at all, rather than one the layout works
+/// out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MaxSize {
+    /// `none`
+    None,
+    /// A length or a percentage.
+    Length(LengthPercentage),
+}
+
+/// A specified `max-width`/`max-height`, before `em` is resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedMaxSize {
+    /// `none`
+    None,
+    /// A length.
+    Length(Len),
+}
+
 /// A margin, which may be `auto` where padding may not.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MarginValue {
@@ -558,6 +607,205 @@ pub enum BoxSizing {
     BorderBox,
 }
 
+/// `position`, CSS 2.2 §9.3.1 and `css-position-3` §2.
+///
+/// **All five values, including the three this build does not place.** The
+/// (property, value) key would allow `absolute` to be reported as a value of an
+/// implemented property instead, and that is the wrong shape here for a reason
+/// the rest of this file does not meet: `position` is the property whose
+/// *other* longhands — `top`, `right`, `bottom`, `left` and `z-index` — mean
+/// nothing without it. A build that refused the value would have to refuse the
+/// five longhands with it and could then say nothing at all about the box; a
+/// build that cascades the value can say, by name and per box,
+/// `tinker_pdf_layout::Warning::PositionedAsStatic`. Which is the difference
+/// between a gap counted at the stylesheet and a gap counted on the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Position {
+    /// `static`. The initial value: the box is in the normal flow and the
+    /// inset properties do not apply to it.
+    Static,
+    /// `relative`, §9.4.3: laid out in the normal flow, then offset.
+    Relative,
+    /// `absolute`, §9.6.1: out of flow, against the nearest positioned
+    /// ancestor.
+    Absolute,
+    /// `fixed`, §9.6.1: out of flow, against the viewport.
+    Fixed,
+    /// `sticky`, `css-position-3` §3.4.
+    Sticky,
+}
+
+/// `top`, `right`, `bottom` and `left`, CSS 2.2 §9.3.2.
+///
+/// `auto` is *"the position the box would have had"*, which is a different
+/// fact from a zero offset and is why this is not a [`LengthPercentage`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Inset {
+    /// `auto`
+    Auto,
+    /// A length or a percentage — of the containing block's **width** for
+    /// `left`/`right` and of its **height** for `top`/`bottom`, §9.3.2.
+    Length(LengthPercentage),
+}
+
+/// A specified inset, before `em` is resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedInset {
+    /// `auto`
+    Auto,
+    /// A length.
+    Length(Len),
+}
+
+/// `z-index`, CSS 2.2 §9.9.1.
+///
+/// `auto` and an integer are not the same fact: §9.9.1 gives `auto` *"the same
+/// stack level as the parent"* and **no new stacking context**, where `0` is
+/// the same stack level *and* a new stacking context. Folding them would put
+/// every `z-index: 0` box's descendants in the wrong order relative to their
+/// uncles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZIndex {
+    /// `auto`
+    Auto,
+    /// An integer, which may be negative.
+    Layer(i32),
+}
+
+/// `column-count`, `css-multicol-1` §3.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnCount {
+    /// `auto`. The initial value: the count comes from `column-width`.
+    Auto,
+    /// A positive integer.
+    Count(u16),
+}
+
+/// `column-width`, `css-multicol-1` §3.1, computed to CSS pixels.
+///
+/// **No percentage**, which is §3.1's own grammar: the property is
+/// `auto | <length [0,∞]>`, and a percentage of a width that the column count
+/// then decides is circular. A percentage here is therefore the author's
+/// mistake rather than this build's gap, the same answer `border-spacing` gets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColumnWidth {
+    /// `auto`
+    Auto,
+    /// A length in CSS pixels.
+    Px(f64),
+}
+
+/// A specified `column-width`, before `em` is resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedColumnWidth {
+    /// `auto`
+    Auto,
+    /// A length.
+    Length(Len),
+}
+
+/// `column-gap` and `row-gap`, `css-align-3` §8.1.
+///
+/// **`normal` is not zero and it is not one number either**, which is why it
+/// survives to the consumer rather than being computed away here: §8.1 makes it
+/// `1em` in a multi-column container and `0` everywhere else, so the value a
+/// flex container reads and the value a multi-column container reads are
+/// different numbers from the same declaration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gap {
+    /// `normal`
+    Normal,
+    /// A length or a percentage of the container's own content-box size in
+    /// that axis.
+    Length(LengthPercentage),
+}
+
+/// A specified gap, before `em` is resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedGap {
+    /// `normal`
+    Normal,
+    /// A length.
+    Length(Len),
+}
+
+/// `column-span`, `css-multicol-1` §6.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnSpan {
+    /// `none`. The initial value.
+    None,
+    /// `all`: the box spans every column of the container.
+    All,
+}
+
+/// `column-fill`, `css-multicol-1` §4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnFill {
+    /// `balance`. The initial value.
+    Balance,
+    /// `auto`: fill each column in turn.
+    Auto,
+}
+
+/// `vertical-align`, CSS 2.2 §10.8.1 and — for a table cell — §17.5.4.
+///
+/// **One property, two specifications, and they do not take the same values.**
+/// §10.8.1 defines all ten for an inline-level box; §17.5.4 defines four of
+/// them for a `table-cell` and says the rest *"are treated as `baseline`"*.
+/// Both readings are kept here because the value is a fact about the
+/// declaration and which of the two rules applies is a fact about the box,
+/// which the cascade does not know and layout does.
+///
+/// A **percentage** is a percentage of the element's own `line-height` — not of
+/// the parent's, and not of anything the containing block owns — so it survives
+/// computation and is resolved where the used `line-height` is, which is
+/// `tinker_pdf_layout::style::consume`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VerticalAlign {
+    /// `baseline`. The initial value.
+    Baseline,
+    /// `sub`
+    Sub,
+    /// `super`
+    Super,
+    /// `top`: the top of the box is the top of the line box.
+    Top,
+    /// `middle`
+    Middle,
+    /// `bottom`
+    Bottom,
+    /// `text-top`: the top of the box is the top of the parent's content area.
+    TextTop,
+    /// `text-bottom`
+    TextBottom,
+    /// A length, or a percentage of this element's own `line-height`. Positive
+    /// raises the box.
+    Length(LengthPercentage),
+}
+
+/// A specified `vertical-align`, before `em` is resolved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedVerticalAlign {
+    /// `baseline`
+    Baseline,
+    /// `sub`
+    Sub,
+    /// `super`
+    Super,
+    /// `top`
+    Top,
+    /// `middle`
+    Middle,
+    /// `bottom`
+    Bottom,
+    /// `text-top`
+    TextTop,
+    /// `text-bottom`
+    TextBottom,
+    /// A length or a percentage.
+    Length(Len),
+}
+
 /// `font-style`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontStyle {
@@ -938,6 +1186,40 @@ pub enum Property {
     AlignContent(AlignContent),
     /// `order`, `css-flexbox-1` §5.4, a signed `<integer>`.
     Order(i32),
+    /// `min-width`, CSS 2.2 §10.4.
+    MinWidth(SpecifiedMinSize),
+    /// `max-width`, §10.4.
+    MaxWidth(SpecifiedMaxSize),
+    /// `min-height`, §10.7.
+    MinHeight(SpecifiedMinSize),
+    /// `max-height`, §10.7.
+    MaxHeight(SpecifiedMaxSize),
+    /// `vertical-align`, §10.8.1 and §17.5.4.
+    VerticalAlign(SpecifiedVerticalAlign),
+    /// `position`, §9.3.1.
+    Position(Position),
+    /// `top`, `right`, `bottom`, `left`, §9.3.2.
+    Inset(Side, SpecifiedInset),
+    /// `z-index`, §9.9.1.
+    ZIndex(ZIndex),
+    /// `column-count`, `css-multicol-1` §3.2.
+    ColumnCount(ColumnCount),
+    /// `column-width`, §3.1.
+    ColumnWidth(SpecifiedColumnWidth),
+    /// `column-gap`, `css-align-3` §8.1.
+    ColumnGap(SpecifiedGap),
+    /// `row-gap`, §8.1.
+    RowGap(SpecifiedGap),
+    /// `column-rule-width`, `css-multicol-1` §5.1.
+    ColumnRuleWidth(Len),
+    /// `column-rule-style`, §5.2.
+    ColumnRuleStyle(BorderStyle),
+    /// `column-rule-color`, §5.3.
+    ColumnRuleColor(Color),
+    /// `column-span`, §6.
+    ColumnSpan(ColumnSpan),
+    /// `column-fill`, §4.
+    ColumnFill(ColumnFill),
     // <<< the compile-time proof injects a variant directly above this line >>>
 }
 
@@ -1024,6 +1306,28 @@ impl Property {
             Property::AlignSelf(_) => "align-self",
             Property::AlignContent(_) => "align-content",
             Property::Order(_) => "order",
+            Property::MinWidth(_) => "min-width",
+            Property::MaxWidth(_) => "max-width",
+            Property::MinHeight(_) => "min-height",
+            Property::MaxHeight(_) => "max-height",
+            Property::VerticalAlign(_) => "vertical-align",
+            Property::Position(_) => "position",
+            Property::Inset(side, _) => match side {
+                Side::Top => "top",
+                Side::Right => "right",
+                Side::Bottom => "bottom",
+                Side::Left => "left",
+            },
+            Property::ZIndex(_) => "z-index",
+            Property::ColumnCount(_) => "column-count",
+            Property::ColumnWidth(_) => "column-width",
+            Property::ColumnGap(_) => "column-gap",
+            Property::RowGap(_) => "row-gap",
+            Property::ColumnRuleWidth(_) => "column-rule-width",
+            Property::ColumnRuleStyle(_) => "column-rule-style",
+            Property::ColumnRuleColor(_) => "column-rule-color",
+            Property::ColumnSpan(_) => "column-span",
+            Property::ColumnFill(_) => "column-fill",
             // <<< the compile-time proof's second arm goes here >>>
         }
     }
@@ -1117,7 +1421,47 @@ impl Property {
             | Property::AlignItems(_)
             | Property::AlignSelf(_)
             | Property::AlignContent(_)
-            | Property::Order(_) => false,
+            | Property::Order(_)
+            // CSS 2.2 §10.4's and §10.7's own tables say *inherited: no* for
+            // all four, and it is the answer that keeps them consistent with
+            // `width` and `height` three families up: a maximum is a constraint
+            // on **one** box's used size, and an inherited `max-width: 100%`
+            // would re-clamp at every descendant against a containing block
+            // that has already been clamped once.
+            | Property::MinWidth(_)
+            | Property::MaxWidth(_)
+            | Property::MinHeight(_)
+            | Property::MaxHeight(_)
+            // §10.8.1's own table says *inherited: no*, and this is the row
+            // most often got wrong -- `vertical-align` reads like a text
+            // property and is not one. It aligns **this** box against its
+            // parent's baseline, so inheriting it would apply the offset again
+            // at every level and a `<sup>` inside a `<sup>` would climb off the
+            // line. §17.5.4's table cell is the same answer for the same
+            // reason, which is why calibre writes `vertical-align: inherit` on
+            // every cell rather than relying on the cascade.
+            | Property::VerticalAlign(_)
+            // §9.3.1, §9.3.2 and §9.9.1: all three tables say *inherited: no*.
+            // A box's position is a fact about that box's relationship to its
+            // containing block, and an inherited `position: absolute` would
+            // take every descendant out of the flow as well.
+            | Property::Position(_)
+            | Property::Inset(_, _)
+            | Property::ZIndex(_)
+            // `css-multicol-1`'s five and `css-align-3` §8.1's two: every one
+            // of the seven property tables says *inherited: no*. They describe
+            // a box's own **multi-column formatting context**, which is
+            // `display`'s answer again -- a paragraph inside a two-column
+            // container is not itself a two-column container.
+            | Property::ColumnCount(_)
+            | Property::ColumnWidth(_)
+            | Property::ColumnGap(_)
+            | Property::RowGap(_)
+            | Property::ColumnRuleWidth(_)
+            | Property::ColumnRuleStyle(_)
+            | Property::ColumnRuleColor(_)
+            | Property::ColumnSpan(_)
+            | Property::ColumnFill(_) => false,
             // <<< the compile-time proof's third arm goes here >>>
         }
     }
@@ -1195,7 +1539,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "background-size",
     "border-image",
     "border-radius",
-    "bottom",
     "box-shadow",
     "break-after",
     "break-before",
@@ -1204,13 +1547,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "clip",
     "clip-path",
     "color-scheme",
-    "column-count",
-    "column-fill",
-    "column-gap",
-    "column-rule",
-    "column-span",
-    "column-width",
-    "columns",
     "content",
     "counter-increment",
     "counter-reset",
@@ -1224,7 +1560,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "font-kerning",
     "font-stretch",
     "font-variant-numeric",
-    "gap",
     "grid",
     "grid-area",
     "grid-column",
@@ -1236,14 +1571,9 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "hyphens",
     "justify-items",
     "justify-self",
-    "left",
     "list-style",
     "list-style-image",
     "list-style-position",
-    "max-height",
-    "max-width",
-    "min-height",
-    "min-width",
     "mix-blend-mode",
     "opacity",
     "outline",
@@ -1255,11 +1585,8 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "overflow-x",
     "overflow-y",
     "page",
-    "position",
     "quotes",
     "resize",
-    "right",
-    "row-gap",
     "speak",
     "src",
     "tab-size",
@@ -1268,16 +1595,13 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "text-overflow",
     "text-shadow",
     "text-transform",
-    "top",
     "transform",
     "transform-origin",
     "transition",
     "unicode-bidi",
     "unicode-range",
-    "vertical-align",
     "word-wrap",
     "writing-mode",
-    "z-index",
 ];
 
 // ---- parsing ----------------------------------------------------------------
@@ -1450,6 +1774,225 @@ fn length_property(
     }
 }
 
+/// One keyword **or** one `<length-percentage>`, where an identifier the
+/// keyword closure declines is this build's gap rather than the author's.
+///
+/// The difference from [`length_property`] is one line and it is the whole
+/// reason this exists: that helper reports an unrecognised identifier as
+/// `Malformed`, which is right for `width: red` and wrong for
+/// `min-width: min-content` — a value `css-sizing-3` defines and this build has
+/// not implemented. Putting it in the author's column instead of this build's
+/// would flatter the one figure the census is judged on. `flex-basis` met the
+/// same problem one property family earlier and was written out longhand for
+/// it; this is that reasoning as a helper, because five properties now need it.
+fn keyword_or_length(
+    value: Option<&ComponentValue>,
+    single: bool,
+    keyword: impl Fn(&str) -> Option<Property>,
+    build: impl Fn(Len) -> Property,
+) -> Implemented {
+    let Some(value) = value else {
+        return Implemented::Malformed;
+    };
+    if !single {
+        return Implemented::Malformed;
+    }
+    if let ComponentValue::Token(Token::Ident(word)) = value {
+        return match keyword(&word.to_ascii_lowercase()) {
+            Some(property) => Implemented::Known(vec![property]),
+            None => Implemented::BadValue,
+        };
+    }
+    match length_outcome(value) {
+        LenOutcome::Ok(len) => Implemented::Known(vec![build(len)]),
+        LenOutcome::Unsupported => Implemented::BadValue,
+        LenOutcome::Invalid => Implemented::Malformed,
+    }
+}
+
+/// Refuses a negative length for a grammar that has none.
+///
+/// `Malformed` and not `BadValue`, on `border-width`'s precedent: a
+/// `min-width: -1px` is not a value this build declined to implement, it is not
+/// a value of the property, and §5.4.4 discards it exactly as it discards
+/// `min-width: red`.
+fn non_negative(outcome: Implemented) -> Implemented {
+    let Implemented::Known(properties) = &outcome else {
+        return outcome;
+    };
+    for property in properties {
+        let len = match property {
+            Property::MinWidth(SpecifiedMinSize::Length(len))
+            | Property::MinHeight(SpecifiedMinSize::Length(len))
+            | Property::MaxWidth(SpecifiedMaxSize::Length(len))
+            | Property::MaxHeight(SpecifiedMaxSize::Length(len))
+            | Property::ColumnGap(SpecifiedGap::Length(len))
+            | Property::RowGap(SpecifiedGap::Length(len)) => *len,
+            _ => continue,
+        };
+        let value = match len {
+            Len::Px(value) | Len::Em(value) | Len::Rem(value) | Len::Percent(value) => value,
+        };
+        if value < 0.0 {
+            return Implemented::Malformed;
+        }
+    }
+    outcome
+}
+
+/// `column-count`, `css-multicol-1` §3.2: `auto | <integer [1,∞]>`.
+fn column_count(value: Option<&ComponentValue>, single: bool) -> Implemented {
+    match (single, value) {
+        (true, Some(ComponentValue::Token(Token::Ident(word)))) => {
+            if word.eq_ignore_ascii_case("auto") {
+                Implemented::Known(vec![Property::ColumnCount(ColumnCount::Auto)])
+            } else {
+                Implemented::BadValue
+            }
+        }
+        (
+            true,
+            Some(ComponentValue::Token(Token::Number {
+                value,
+                integer: true,
+            })),
+        ) if *value >= 1.0 && *value <= f64::from(u16::MAX) => {
+            Implemented::Known(vec![Property::ColumnCount(ColumnCount::Count(
+                *value as u16,
+            ))])
+        }
+        _ => Implemented::Malformed,
+    }
+}
+
+/// `column-width`, §3.1: `auto | <length [0,∞]>`, and **no percentage**.
+fn column_width(value: Option<&ComponentValue>, single: bool) -> Implemented {
+    match (single, value) {
+        (true, Some(ComponentValue::Token(Token::Ident(word)))) => {
+            if word.eq_ignore_ascii_case("auto") {
+                Implemented::Known(vec![Property::ColumnWidth(SpecifiedColumnWidth::Auto)])
+            } else {
+                Implemented::BadValue
+            }
+        }
+        (true, Some(value)) => match length_outcome(value) {
+            LenOutcome::Ok(Len::Percent(_)) => Implemented::Malformed,
+            LenOutcome::Ok(Len::Px(px)) if px < 0.0 => Implemented::Malformed,
+            LenOutcome::Ok(len) => Implemented::Known(vec![Property::ColumnWidth(
+                SpecifiedColumnWidth::Length(len),
+            )]),
+            LenOutcome::Unsupported => Implemented::BadValue,
+            LenOutcome::Invalid => Implemented::Malformed,
+        },
+        _ => Implemented::Malformed,
+    }
+}
+
+/// One `column-gap`/`row-gap` value, for the `gap` shorthand to read twice.
+fn gap_value(value: Option<&ComponentValue>, single: bool) -> Implemented {
+    non_negative(keyword_or_length(
+        value,
+        single,
+        |word| (word == "normal").then_some(Property::RowGap(SpecifiedGap::Normal)),
+        |len| Property::RowGap(SpecifiedGap::Length(len)),
+    ))
+}
+
+/// `columns`, §3.3: `<'column-width'> || <'column-count'>`.
+fn columns_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() || significant.len() > 2 {
+        return Implemented::Malformed;
+    }
+    let mut width: Option<SpecifiedColumnWidth> = None;
+    let mut count: Option<ColumnCount> = None;
+    let mut autos = 0usize;
+    for value in significant {
+        // A bare `auto` fits either slot and §3.3 says so; it is counted and
+        // spent below, because `columns: auto` sets **both** longhands and
+        // `columns: auto 3` sets the width.
+        if let ComponentValue::Token(Token::Ident(word)) = value {
+            if word.eq_ignore_ascii_case("auto") {
+                autos += 1;
+                continue;
+            }
+            return Implemented::BadValue;
+        }
+        if let ComponentValue::Token(Token::Number { integer: true, .. }) = value {
+            if count.is_some() {
+                return Implemented::Malformed;
+            }
+            match column_count(Some(value), true) {
+                Implemented::Known(mut one) => match one.remove(0) {
+                    Property::ColumnCount(value) => count = Some(value),
+                    _ => return Implemented::Malformed,
+                },
+                other => return other,
+            }
+            continue;
+        }
+        if width.is_some() {
+            return Implemented::Malformed;
+        }
+        match column_width(Some(value), true) {
+            Implemented::Known(mut one) => match one.remove(0) {
+                Property::ColumnWidth(value) => width = Some(value),
+                _ => return Implemented::Malformed,
+            },
+            other => return other,
+        }
+    }
+    if autos > 2 - usize::from(width.is_some()) - usize::from(count.is_some()) {
+        return Implemented::Malformed;
+    }
+    Implemented::Known(vec![
+        Property::ColumnWidth(width.unwrap_or(SpecifiedColumnWidth::Auto)),
+        Property::ColumnCount(count.unwrap_or(ColumnCount::Auto)),
+    ])
+}
+
+/// `column-rule`, §5.4: width, style and colour in any order, each optional,
+/// and the absent ones reset to their initial values.
+///
+/// [`border_shorthand`]'s shape and its `currentColor` simplification, one
+/// property family over: §5.3 gives `column-rule-color` the initial value
+/// `currentColor`, this build has no such keyword, and an omitted colour
+/// therefore takes the initial computed `color` rather than the element's.
+fn column_rule_shorthand(values: &[ComponentValue]) -> Implemented {
+    let significant: Vec<&ComponentValue> = values.iter().filter(|v| !v.is_whitespace()).collect();
+    if significant.is_empty() || significant.len() > 3 {
+        return Implemented::Malformed;
+    }
+    let mut width: Option<Len> = None;
+    let mut style: Option<BorderStyle> = None;
+    let mut paint: Option<Color> = None;
+    for value in &significant {
+        if style.is_none() {
+            if let Some(found) = border_style(Some(value), true) {
+                style = Some(found);
+                continue;
+            }
+        }
+        if width.is_none() {
+            if let Some(found) = border_width(Some(value), true) {
+                width = Some(found);
+                continue;
+            }
+        }
+        if paint.is_none() {
+            if let Some(found) = color(value) {
+                paint = Some(found);
+                continue;
+            }
+        }
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![
+        Property::ColumnRuleWidth(width.unwrap_or(Len::Px(3.0))),
+        Property::ColumnRuleStyle(style.unwrap_or(BorderStyle::None)),
+        Property::ColumnRuleColor(paint.unwrap_or(Color::BLACK)),
+    ])
+}
+
 /// The outcome of trying to read a value for a property this build implements.
 enum Implemented {
     /// One or more longhands.
@@ -1500,9 +2043,20 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-top-style",
     "border-top-width",
     "border-width",
+    "bottom",
     "box-sizing",
     "clear",
     "color",
+    "column-count",
+    "column-fill",
+    "column-gap",
+    "column-rule",
+    "column-rule-color",
+    "column-rule-style",
+    "column-rule-width",
+    "column-span",
+    "column-width",
+    "columns",
     "display",
     "flex",
     "flex-basis",
@@ -1517,8 +2071,10 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "font-style",
     "font-variant",
     "font-weight",
+    "gap",
     "height",
     "justify-content",
+    "left",
     "letter-spacing",
     "line-break",
     "line-height",
@@ -1528,6 +2084,10 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "margin-left",
     "margin-right",
     "margin-top",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
     "order",
     "orphans",
     "overflow-wrap",
@@ -1539,16 +2099,22 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "page-break-after",
     "page-break-before",
     "page-break-inside",
+    "position",
+    "right",
+    "row-gap",
     "table-layout",
     "text-align",
     "text-decoration",
     "text-indent",
+    "top",
+    "vertical-align",
     "visibility",
     "white-space",
     "widows",
     "width",
     "word-break",
     "word-spacing",
+    "z-index",
 ];
 
 fn implemented(
@@ -2037,6 +2603,183 @@ fn implemented(
             let side = side_of(name);
             colour_property(one, single, move |c| Property::BorderColor(side, c))
         }
+        // CSS 2.2 §10.4 and §10.7. A **negative** minimum or maximum is not a
+        // value of the property at all — both grammars are
+        // `<length-percentage [0,∞]>` — so it is `Malformed` and the author's,
+        // where `min-content` is a real value this build has not implemented
+        // and is `BadValue` and this build's.
+        "min-width" | "min-height" => {
+            let width = name == "min-width";
+            let build = move |size: SpecifiedMinSize| {
+                if width {
+                    Property::MinWidth(size)
+                } else {
+                    Property::MinHeight(size)
+                }
+            };
+            non_negative(keyword_or_length(
+                one,
+                single,
+                |word| (word == "auto").then(|| build(SpecifiedMinSize::Auto)),
+                |len| build(SpecifiedMinSize::Length(len)),
+            ))
+        }
+        "max-width" | "max-height" => {
+            let width = name == "max-width";
+            let build = move |size: SpecifiedMaxSize| {
+                if width {
+                    Property::MaxWidth(size)
+                } else {
+                    Property::MaxHeight(size)
+                }
+            };
+            non_negative(keyword_or_length(
+                one,
+                single,
+                |word| (word == "none").then(|| build(SpecifiedMaxSize::None)),
+                |len| build(SpecifiedMaxSize::Length(len)),
+            ))
+        }
+        // §10.8.1's ten values. A length or a percentage may be negative —
+        // `vertical-align: -0.4em` is how a book sets a chemical subscript —
+        // so there is no `non_negative` here and its absence is the property's
+        // grammar rather than an omission.
+        "vertical-align" => keyword_or_length(
+            one,
+            single,
+            |word| {
+                Some(Property::VerticalAlign(match word {
+                    "baseline" => SpecifiedVerticalAlign::Baseline,
+                    "sub" => SpecifiedVerticalAlign::Sub,
+                    "super" => SpecifiedVerticalAlign::Super,
+                    "top" => SpecifiedVerticalAlign::Top,
+                    "middle" => SpecifiedVerticalAlign::Middle,
+                    "bottom" => SpecifiedVerticalAlign::Bottom,
+                    "text-top" => SpecifiedVerticalAlign::TextTop,
+                    "text-bottom" => SpecifiedVerticalAlign::TextBottom,
+                    _ => return None,
+                }))
+            },
+            |len| Property::VerticalAlign(SpecifiedVerticalAlign::Length(len)),
+        ),
+        "position" => keyword(one, single, |word| {
+            Some(Property::Position(match word {
+                "static" => Position::Static,
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
+                "sticky" => Position::Sticky,
+                _ => return None,
+            }))
+        }),
+        "top" | "right" | "bottom" | "left" => {
+            let side = match name {
+                "top" => Side::Top,
+                "right" => Side::Right,
+                "bottom" => Side::Bottom,
+                _ => Side::Left,
+            };
+            keyword_or_length(
+                one,
+                single,
+                move |word| (word == "auto").then_some(Property::Inset(side, SpecifiedInset::Auto)),
+                move |len| Property::Inset(side, SpecifiedInset::Length(len)),
+            )
+        }
+        // §9.9.1's `<integer>`, signed for `order`'s reason: a negative
+        // `z-index` puts a box behind its parent's background, which is what a
+        // watermark is.
+        "z-index" => match (single, one) {
+            (true, Some(ComponentValue::Token(Token::Ident(word))))
+                if word.eq_ignore_ascii_case("auto") =>
+            {
+                Implemented::Known(vec![Property::ZIndex(ZIndex::Auto)])
+            }
+            (
+                true,
+                Some(ComponentValue::Token(Token::Number {
+                    value,
+                    integer: true,
+                })),
+            ) if *value >= f64::from(i32::MIN) && *value <= f64::from(i32::MAX) => {
+                Implemented::Known(vec![Property::ZIndex(ZIndex::Layer(*value as i32))])
+            }
+            _ => Implemented::Malformed,
+        },
+        "column-count" => column_count(one, single),
+        "column-width" => column_width(one, single),
+        // `css-multicol-1` §3.3: `<'column-width'> || <'column-count'>`, and
+        // **both longhands are always emitted** for `flex-flow`'s reason —
+        // §3.3 resets the omitted one to `auto`, so a build that emitted only
+        // what was written would leave an earlier `column-count: 3` standing
+        // under a later `columns: 20em`.
+        "columns" => columns_shorthand(significant),
+        "column-gap" | "row-gap" => {
+            let column = name == "column-gap";
+            let build = move |gap: SpecifiedGap| {
+                if column {
+                    Property::ColumnGap(gap)
+                } else {
+                    Property::RowGap(gap)
+                }
+            };
+            non_negative(keyword_or_length(
+                one,
+                single,
+                |word| (word == "normal").then(|| build(SpecifiedGap::Normal)),
+                |len| build(SpecifiedGap::Length(len)),
+            ))
+        }
+        // `css-align-3` §8.2: `<'row-gap'> <'column-gap'>?`, **row first**.
+        // The order is the one to get wrong: it is the opposite of every
+        // `<length> <length>?` in CSS 2.2, where the horizontal value leads,
+        // and a build that read it the other way round would space a two-column
+        // figure by its row gap and look entirely reasonable.
+        "gap" => match significant.len() {
+            1 | 2 => {
+                let mut gaps: Vec<SpecifiedGap> = Vec::with_capacity(2);
+                for value in significant {
+                    match gap_value(Some(value), true) {
+                        Implemented::Known(one) => match one.first() {
+                            Some(Property::RowGap(gap)) => gaps.push(*gap),
+                            _ => return Some(Implemented::Malformed),
+                        },
+                        other => return Some(other),
+                    }
+                }
+                let row = gaps[0];
+                let column = *gaps.get(1).unwrap_or(&row);
+                Implemented::Known(vec![Property::RowGap(row), Property::ColumnGap(column)])
+            }
+            _ => Implemented::Malformed,
+        },
+        // §5.1 to §5.3, and each borrows the `border-*` longhand it is defined
+        // in terms of: §5.1 is *"as for `border-width`"*, so `thin`, `medium`
+        // and `thick` are its keywords too.
+        "column-rule-width" => match border_width_outcome(one, single) {
+            LenOutcome::Ok(len) => Implemented::Known(vec![Property::ColumnRuleWidth(len)]),
+            LenOutcome::Unsupported => Implemented::BadValue,
+            LenOutcome::Invalid => Implemented::Malformed,
+        },
+        "column-rule-style" => keyword(one, single, |word| {
+            border_style_named(word).map(Property::ColumnRuleStyle)
+        }),
+        "column-rule-color" => colour_property(one, single, Property::ColumnRuleColor),
+        "column-rule" => column_rule_shorthand(values),
+        "column-span" => keyword(one, single, |word| {
+            Some(Property::ColumnSpan(match word {
+                "none" => ColumnSpan::None,
+                "all" => ColumnSpan::All,
+                _ => return None,
+            }))
+        }),
+        "column-fill" => keyword(one, single, |word| {
+            Some(Property::ColumnFill(match word {
+                "balance" => ColumnFill::Balance,
+                "auto" => ColumnFill::Auto,
+                _ => return None,
+            }))
+        }),
         "margin" => expand_box(values, |side, value| {
             margin_value(Some(value), true).map(|m| Property::Margin(side, m))
         }),
