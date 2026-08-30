@@ -1483,12 +1483,15 @@ fn the_three_generic_families_measure_at_their_own_published_advances() {
 // ---- the font census, per book ---------------------------------------------------
 
 /// The committed corpus, in the order `tests/epub/FONTS.tsv` records it.
-const COMMITTED: [&str; 6] = [
+const COMMITTED: [&str; 9] = [
     "calibre-book-cover.epub",
     "calibre-book-nocover.epub",
+    "calibre-embedded-font.epub",
+    "kcc-fixed-layout.epub",
     "pandoc-book-cover.epub",
     "pandoc-book-epub2.epub",
     "pandoc-book-nocover.epub",
+    "pandoc-embedded-font.epub",
     "pandoc-plates.epub",
 ];
 
@@ -1608,4 +1611,374 @@ fn the_notdef_count_is_a_property_of_the_book_and_not_a_constant() {
         "two producers' books of the same text report the same number, which \
          would make this a constant rather than a measurement"
     );
+}
+
+// ---- the books that brought their own face ----------------------------------
+//
+// Everything above this line runs on a face `epub_support::typeface` builds:
+// twelve bytes of `head`, a `cmap` that says exactly what the test wants it to
+// say, and a `glyf` of one box repeated. That is the right shape for asserting
+// what §5.3 does per character, and the wrong shape for asserting that **a real
+// font file reaches a page** — a fixture face is a font this repository knows
+// how to write, which is a weaker claim than a font somebody else wrote.
+//
+// `calibre-embedded-font.epub` and `pandoc-embedded-font.epub` carry
+// `LiberationSerif-Regular.ttf` and, in calibre's case, its bold — the **same
+// bytes** as `crates/tinker-pdf-font/data/liberation`, which
+// `the_face_in_both_books_is_the_vendored_file` is what establishes. Two
+// producers, because `tests/epub/README.md` argues at length that one is not a
+// corpus, and here the second earns it three times over: the two disagree about
+// the media type, about the `src` grammar and about how many faces of a family
+// to embed.
+
+/// The two books that embed a face, and the container path each puts it at.
+const WITH_A_FACE: [(&str, &str); 2] = [
+    ("calibre-embedded-font.epub", "fonts/Liberation-Serif.ttf"),
+    (
+        "pandoc-embedded-font.epub",
+        "EPUB/fonts/LiberationSerif-Regular.ttf",
+    ),
+];
+
+/// The vendored face both books turn out to be carrying.
+fn vendored_face() -> Vec<u8> {
+    std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("tinker-pdf-font")
+            .join("data")
+            .join("liberation")
+            .join("LiberationSerif-Regular.ttf"),
+    )
+    .expect("the vendored regular face")
+}
+
+/// One entry of a committed book, inflated.
+fn corpus_entry(name: &str, path: &str) -> Vec<u8> {
+    let bytes = corpus_book(name);
+    let mut archive = Archive::open(&bytes, &tinker_pdf_zip::Limits::DEFAULT)
+        .unwrap_or_else(|e| panic!("{name} is not a ZIP: {e:?}"));
+    let index = archive
+        .entries()
+        .iter()
+        .position(|entry| entry.name == path)
+        .unwrap_or_else(|| panic!("{name} has no entry {path}"));
+    archive
+        .read(index)
+        .unwrap_or_else(|e| panic!("{name}/{path} will not inflate: {e:?}"))
+        .into_owned()
+}
+
+/// **The face both books embed is the file already in this tree**, byte for
+/// byte.
+///
+/// It is not a coincidence and it is not a convenience: calibre ships the
+/// Liberation 2.1.5 release in `app/resources/fonts/liberation` and the machine
+/// this corpus was produced on has no Liberation in `C:\Windows\Fonts`, so
+/// `--embed-all-fonts` found calibre's copy; `make-corpus.ps1` hands pandoc this
+/// repository's copy by path. The two are the same release and the bytes agree.
+///
+/// What that buys is the licence question already answered:
+/// `crates/tinker-pdf-font/data/liberation` is `OFL-1.1`, on `deny.toml`'s
+/// allowlist and declared in `THIRDPARTY.md`, and nothing enters the tree here
+/// that row does not already cover. `tests/epub/README.md` records the reading,
+/// including why neither book may be subsetted.
+#[test]
+fn the_face_in_both_books_is_the_vendored_file() {
+    let vendored = vendored_face();
+    for (name, path) in WITH_A_FACE {
+        let embedded = corpus_entry(name, path);
+        assert_eq!(
+            embedded.len(),
+            vendored.len(),
+            "{name} embeds a face of a different length from the vendored one"
+        );
+        assert!(
+            embedded == vendored,
+            "{name}'s embedded face is not the vendored file byte for byte"
+        );
+    }
+
+    // And it is unmodified in the sense the licence cares about. OFL-1.1
+    // clause 2 requires every redistributed copy to carry the notice, and this
+    // face carries it in `name` IDs 13 and 14 — the machine-readable form the
+    // clause names. A subsetter that dropped them would leave a file this
+    // repository may not ship, so it is measured rather than trusted. The zero
+    // bytes are stripped because the `name` table stores these as UTF-16.
+    let text = String::from_utf8_lossy(
+        &vendored
+            .iter()
+            .copied()
+            .filter(|byte| *byte != 0)
+            .collect::<Vec<u8>>(),
+    )
+    .into_owned();
+    assert!(
+        text.contains("Licensed under the SIL Open Font License, Version 1.1"),
+        "the embedded face no longer carries its own licence grant"
+    );
+    assert!(
+        text.contains("http://scripts.sil.org/OFL"),
+        "the embedded face no longer carries its licence URL"
+    );
+}
+
+/// **calibre writes two `@font-face` rules for one family, and this build tells
+/// them apart by the weight descriptor** — on a real book, and visibly.
+///
+/// The heading is an `<h1>`, which the user-agent sheet makes bold; the
+/// paragraphs are not. calibre embedded exactly the two faces the document
+/// reaches and wrote `font-weight`, `font-style` and `font-stretch` on each
+/// rule. So the page's text objects must use **two different** `Bf` resources,
+/// and a build that resolved the family once per book would use one for both
+/// and lose every bold word in every book that embeds a family.
+///
+/// The claim is the *inequality* rather than which resource is which: the order
+/// they are registered in is `@font-face` order, which is calibre's to change.
+#[test]
+fn the_real_books_bold_heading_and_prose_use_two_different_embedded_faces() {
+    let doc = Document::open(corpus_book("calibre-embedded-font.epub")).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert!(
+        objects.len() > 3,
+        "the first page has too little on it to say anything: {objects:?}"
+    );
+
+    let mut heading: Option<String> = None;
+    let mut prose: Option<String> = None;
+    for (resource, object) in &objects {
+        let size = object
+            .split_whitespace()
+            .nth(1)
+            .expect("a size after the resource");
+        let slot = match size {
+            "24" => &mut heading,
+            "12" => &mut prose,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = Some(resource.clone());
+        }
+    }
+    let heading = heading.expect("a 24-point text object, which is the h1");
+    let prose = prose.expect("a 12-point text object, which is a paragraph");
+    assert!(
+        heading.starts_with("Bf") && prose.starts_with("Bf"),
+        "the book's own faces did not draw its text: heading {heading}, prose {prose}"
+    );
+    assert_ne!(
+        heading, prose,
+        "the bold heading and the regular prose came out of one face, so the \
+         weight descriptor decided nothing"
+    );
+
+    // Both of the book's faces are used, and there are exactly two of them.
+    let mut used: Vec<&str> = objects
+        .iter()
+        .map(|(resource, _)| resource.as_str())
+        .filter(|resource| resource.starts_with("Bf"))
+        .collect();
+    used.sort_unstable();
+    used.dedup();
+    assert_eq!(used, ["Bf0", "Bf1"], "the faces the page uses changed");
+}
+
+/// **The prose really is set in Liberation**, asserted against the face's own
+/// `cmap` rather than against a resource name.
+///
+/// A resource called `Bf0` proves a face was registered; it does not prove the
+/// glyphs on the page came out of it. The codes this build writes for an
+/// embedded face are **glyph indices**, so `A` is Liberation's glyph 36 —
+/// `<0024>` — where a standard-14 fallback writes `WinAnsiEncoding`'s `A`,
+/// which is `0x41`. The two cannot be confused and only one of them is the
+/// book's own file.
+///
+/// Both books, because the fact is about the face and not about the producer.
+#[test]
+fn the_glyphs_on_the_page_are_the_embedded_faces_own() {
+    let vendored = vendored_face();
+    let sfnt = tinker_pdf_font::Sfnt::parse(&vendored).expect("an sfnt");
+    let glyph = |ch: char| -> u16 {
+        sfnt.glyph_for_char(ch)
+            .unwrap_or_else(|| panic!("Liberation has no glyph for {ch:?}"))
+    };
+    // The premise, said out loud: these are not the codes a standard-14
+    // fallback would write, so finding them says which file was read.
+    assert_eq!(glyph('A'), 36);
+    assert_ne!(u32::from(glyph('A')), 'A' as u32);
+
+    for (name, _) in WITH_A_FACE {
+        let doc = Document::open(corpus_book(name)).expect(name);
+        let content = page_content(&doc);
+        let drawn: String = text_objects(&content)
+            .iter()
+            .filter(|(resource, _)| resource.starts_with("Bf"))
+            .map(|(_, object)| shown_glyphs(object))
+            .collect();
+        assert!(
+            !drawn.is_empty(),
+            "{name}: no text object used one of the book's own faces"
+        );
+        for ch in ['A', 'f', 'a', 'c', 'e'] {
+            assert!(
+                drawn.contains(&format!("{:04X}", glyph(ch))),
+                "{name}: the page never draws Liberation's glyph {} for {ch:?}",
+                glyph(ch)
+            );
+        }
+    }
+}
+
+/// **A real book's `src` list has more than one entry, and this build walks past
+/// the one it cannot use.**
+///
+/// `epub::typeface::load_one`'s own documentation says the list is walked to the
+/// end because §4.3 makes it a preference order, and every fixture that
+/// exercises it above is one this file wrote. `pandoc-embedded-font.epub`'s rule
+/// is `local("Liberation Serif"), url(…) format("truetype")`, which is the shape
+/// a rule out in the world has: a name the reading system might have installed,
+/// then the file the book brought. This reading system has no installed faces,
+/// so the first entry cannot be satisfied and the second has to be reached.
+///
+/// Three assertions, each failing on a different build. The defect is reported
+/// with the entry that caused it; `NoUsableSource` is **not** reported, which is
+/// what says the rule as a whole succeeded; and the face is on the page anyway.
+#[test]
+fn the_real_books_second_src_entry_is_reached_after_the_first_fails() {
+    let doc = Document::open(corpus_book("pandoc-embedded-font.epub")).expect("a book");
+    let defects = face_warnings(&doc);
+    assert_eq!(
+        defects,
+        vec![(
+            "liberation serif".to_owned(),
+            FaceDefect::LocalUnavailable,
+            1
+        )],
+        "the defects the two-entry src list produces changed"
+    );
+    assert!(
+        !defects
+            .iter()
+            .any(|(_, defect, _)| *defect == FaceDefect::NoUsableSource),
+        "the rule reported that no entry produced a face, but one did"
+    );
+    assert!(
+        page_content(&doc).contains("BT /Bf0"),
+        "the second src entry never became a face on the page"
+    );
+
+    // The control, and it is the half that makes the test say something: the
+    // other book's rules have one entry each and report **nothing**. A build
+    // that reported `LocalUnavailable` for every rule would pass the assertion
+    // above and fail this one.
+    let calibre = Document::open(corpus_book("calibre-embedded-font.epub")).expect("a book");
+    assert_eq!(
+        face_warnings(&calibre),
+        vec![],
+        "calibre's single-entry src rules reported a defect"
+    );
+}
+
+/// **The two producers declare the same bytes under two different media
+/// types**, and neither is wrong.
+///
+/// calibre writes `application/vnd.ms-opentype`, which OCF 3.0 named and
+/// EPUB 3.3 dropped; pandoc writes `font/ttf`, which is RFC 8081's. The file is
+/// byte-identical in both. A build that decided what a manifest item is from its
+/// declared media type would read one of these books and not the other, and a
+/// build that decided from the extension would read both and be right by
+/// accident — the same lesson `.html` content documents taught this corpus at
+/// milestone 1, one item type further out.
+#[test]
+fn the_two_producers_declare_the_same_face_under_two_media_types() {
+    let declared = |name: &str, opf_path: &str, href: &str| -> String {
+        let opf = corpus_entry(name, opf_path);
+        let text = String::from_utf8_lossy(&opf).into_owned();
+        let element = text
+            .split("<item")
+            .find(|item| item.contains(href))
+            .unwrap_or_else(|| panic!("{name}'s manifest does not name {href}"));
+        let at = element
+            .find("media-type=\"")
+            .expect("a media-type attribute");
+        let value = &element[at + "media-type=\"".len()..];
+        value[..value.find('"').expect("a closing quote")].to_owned()
+    };
+    assert_eq!(
+        declared(
+            "calibre-embedded-font.epub",
+            "content.opf",
+            "fonts/Liberation-Serif.ttf"
+        ),
+        "application/vnd.ms-opentype"
+    );
+    assert_eq!(
+        declared(
+            "pandoc-embedded-font.epub",
+            "EPUB/content.opf",
+            "fonts/LiberationSerif-Regular.ttf"
+        ),
+        "font/ttf"
+    );
+    // And both faces still reach a page, which is the point: the media type is
+    // a declaration and the bytes are the fact.
+    for (name, _) in WITH_A_FACE {
+        let doc = Document::open(corpus_book(name)).expect(name);
+        assert!(
+            page_content(&doc).contains("BT /Bf"),
+            "{name}: the declared face did not draw anything"
+        );
+    }
+}
+
+/// **The six characters neither book covers are the six the face has no glyph
+/// for**, and they still reach `Page::text()`.
+///
+/// `FONTS.tsv` records `6` uncovered for both books against `24` and `25` for
+/// the ones that embed nothing. The number is smaller because Liberation covers
+/// far more of `source/typeface.md` than the standard 14 cover of
+/// `source/book.md`, and what is left is the one Japanese phrase — which is in
+/// that file precisely so a real face's coverage has an edge.
+///
+/// The pair matters more than the number: a character with no glyph is drawn as
+/// a notdef and **is** in the extracted text, and a character with no code at
+/// all is not. `unrepresented` is `0` for both, so nothing was lost, and
+/// conservation over both is total in `CONSERVATION.tsv`.
+#[test]
+fn the_uncovered_characters_are_the_japanese_and_the_text_still_holds_them() {
+    const LINE: &str = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{7d44}\u{7248}";
+    for (name, _) in WITH_A_FACE {
+        let doc = Document::open(corpus_book(name)).expect(name);
+        let reported = doc.archive().expect("a report").warnings().to_vec();
+        let uncovered: usize = reported
+            .iter()
+            .filter_map(|w| match w {
+                ArchiveWarning::UncoveredCharacters { characters } => Some(*characters),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            uncovered,
+            LINE.chars().count(),
+            "{name}: a different number of characters went uncovered than the \
+             phrase this book carries has"
+        );
+        assert!(
+            !reported
+                .iter()
+                .any(|w| matches!(w, ArchiveWarning::UnrepresentedCharacters { .. })),
+            "{name}: a character got no code at all"
+        );
+
+        let text: String = (0..doc.page_count())
+            .map(|at| doc.page(at).expect("a page").text().plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let squashed: String = text.split_whitespace().collect();
+        assert!(
+            squashed.contains(LINE),
+            "{name}: the uncovered phrase is not in the extracted text"
+        );
+    }
 }

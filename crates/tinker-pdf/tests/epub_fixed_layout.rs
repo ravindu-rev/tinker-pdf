@@ -613,3 +613,287 @@ fn a_fixed_page_still_names_the_item_it_came_from() {
         vec!["EPUB/ch1.xhtml", "EPUB/ch2.xhtml", "EPUB/ch3.xhtml"]
     );
 }
+
+// ---- the real book -----------------------------------------------------------
+//
+// Everything above is a fixture this repository wrote, and every one of them
+// was built from §8.2's own sentences. `kcc-fixed-layout.epub` is the first
+// pre-paginated book here that a producer wrote, and `tests/epub/README.md`
+// records what it does that none of the fixtures did. These are the assertions
+// behind that list.
+//
+// The producer is Kindle Comic Converter 11.0.1 and the pictures are the four
+// PNGs `make-corpus.ps1` writes byte by byte from the PNG specification, so the
+// book is our input through their tool in exactly the sense the other eight
+// are.
+
+/// The committed pre-paginated book.
+fn real_book() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("epub")
+        .join("kcc-fixed-layout.epub");
+    std::fs::read(&path).expect("kcc-fixed-layout.epub is committed beside the books")
+}
+
+fn real_package() -> package::Package {
+    let bytes = real_book();
+    let opf =
+        epub_support::read(&bytes, "OEBPS/content.opf").expect("the package document is in there");
+    package::parse(&opf, "OEBPS/content.opf", &Limits::DEFAULT).expect("it parses")
+}
+
+/// **A real producer declares `rendition:layout` with no `prefix` attribute at
+/// all**, and every fixture above declares one.
+///
+/// EPUB 3.3 §5.4.3 makes `rendition:` a *reserved* prefix — a package document
+/// may use it without declaring it, and KCC does. `package_opf` above writes
+/// `prefix="rendition: http://www.idpf.org/vocab/rendition/#"` on every fixture
+/// because that is what the specification's own example shows, so a build that
+/// required the declaration would have passed all thirteen tests in this file
+/// and reflowed every fixed-layout book in circulation.
+///
+/// The assertion is in two halves for that reason: the package really does omit
+/// the declaration, and it is really read as pre-paginated anyway. Either alone
+/// would pass on a build with the bug.
+#[test]
+fn the_real_book_declares_the_layout_with_no_prefix_declaration() {
+    let bytes = real_book();
+    let opf = epub_support::read(&bytes, "OEBPS/content.opf").expect("the package document");
+    let text = String::from_utf8_lossy(&opf);
+    assert!(
+        !text.contains("prefix="),
+        "the real book grew a prefix declaration, so this test stopped saying anything"
+    );
+    assert!(
+        text.contains(r#"<meta property="rendition:layout">pre-paginated</meta>"#),
+        "the spelling this test is about is no longer in the book"
+    );
+    assert_eq!(
+        real_package().rendition_layout(),
+        RenditionLayout::PrePaginated
+    );
+}
+
+/// **The layout is on the package and on no itemref**, and what the itemrefs
+/// carry instead is a *different* rendition property in the same attribute.
+///
+/// Every fixture above that exercises §8.2.2's override puts
+/// `rendition:layout-pre-paginated` in `itemref/@properties`. The real book
+/// puts `page-spread-left` and `page-spread-right` there — six of them, one per
+/// item, alternating — and nothing about the layout. So a build that read that
+/// attribute by prefix match, or that treated an unrecognised token there as a
+/// defect, meets six unrecognised tokens on the first real book it opens.
+///
+/// `SpineItem::layout` is asked directly rather than inferred from page sizes,
+/// because the answer this is about is *per item* and a page size is the
+/// viewport's.
+#[test]
+fn the_real_books_itemref_properties_are_spreads_and_not_layouts() {
+    let package = real_package();
+    let spine = package.spine();
+    assert_eq!(spine.len(), 6, "six itemrefs");
+
+    let properties: Vec<&str> = spine
+        .iter()
+        .flat_map(|item| item.properties.iter().map(String::as_str))
+        .collect();
+    assert_eq!(
+        properties,
+        [
+            "page-spread-right",
+            "page-spread-left",
+            "page-spread-right",
+            "page-spread-left",
+            "page-spread-right",
+            "page-spread-left",
+        ],
+        "the properties the real book writes on its itemrefs changed"
+    );
+    assert!(
+        properties
+            .iter()
+            .all(|token| RenditionLayout::from_itemref_property(token).is_none()),
+        "a spread token was read as a layout: {properties:?}"
+    );
+
+    // And every item is still pre-paginated, because the book said so once.
+    for item in spine {
+        assert_eq!(
+            item.layout(package.rendition_layout()),
+            RenditionLayout::PrePaginated,
+            "{} is not pre-paginated",
+            item.idref
+        );
+    }
+    assert_eq!(
+        package.defects(),
+        [],
+        "the real book's package document reports a defect"
+    );
+}
+
+/// **Six viewports, six different sizes, and not one of them is the size of the
+/// picture that produced it.**
+///
+/// `two_fixed_chapters_may_be_two_different_page_sizes` above makes this claim
+/// on three hand-built documents. This is the same claim on a book nobody here
+/// wrote — and it is a stronger version of it, because the producer chose the
+/// numbers: KCC resized the cover from 120 × 180 to 117 × 177 to fit its device
+/// profile's aspect ratio, and **split the two landscape plates in half**, so
+/// four pictures became six pages at six sizes.
+///
+/// The sizes are points: a CSS pixel is three quarters of a point, so
+/// `width=117` is 87.75.
+#[test]
+fn the_real_book_is_one_page_per_itemref_at_six_different_sizes() {
+    let bytes = real_book();
+    let doc = open_at(&bytes, DEFAULT_PAGE);
+    assert_eq!(doc.page_count(), 6, "one page per spine itemref");
+
+    let sizes: Vec<(f64, f64)> = (0..doc.page_count())
+        .map(|at| doc.page(at).expect("a page").size())
+        .collect();
+    assert_eq!(
+        sizes,
+        vec![
+            (87.75, 132.75),
+            (22.5, 30.0),
+            (21.75, 27.0),
+            (30.0, 37.5),
+            (29.25, 33.75),
+            (30.0, 66.0),
+        ]
+    );
+
+    // Six distinct sizes, which is what makes the per-item viewport visible
+    // rather than merely present. A build that read one viewport and used it
+    // for the book would give six equal pages and the count above would not
+    // notice.
+    let mut distinct = sizes.clone();
+    distinct.sort_unstable_by(|a, b| a.partial_cmp(b).expect("no NaN in a page size"));
+    distinct.dedup();
+    assert_eq!(distinct.len(), 6, "two pages came out the same size");
+
+    // And the caller's box changes none of it, which is RS §8.1's rule over a
+    // real file rather than over a fixture built to state it.
+    let wide = open_at(&bytes, (900.0, 1200.0));
+    let wide_sizes: Vec<(f64, f64)> = (0..wide.page_count())
+        .map(|at| wide.page(at).expect("a page").size())
+        .collect();
+    assert_eq!(wide_sizes, sizes);
+}
+
+/// **A real producer's book trips neither warning**, which is the half a
+/// corpus of fixtures cannot supply.
+///
+/// Every fixture that produces `FixedLayoutWithoutViewport` or
+/// `FixedLayoutContentClipped` above was built to produce it. The question those
+/// tests cannot answer is whether an ordinary book trips them anyway — a
+/// viewport grammar read too strictly, or an initial containing block computed
+/// a fraction of a point too small, would warn on every page of every real book
+/// and every fixture here would still pass.
+#[test]
+fn the_real_book_trips_neither_fixed_layout_warning() {
+    let doc = open_at(&real_book(), DEFAULT_PAGE);
+    let reported = warnings(&doc);
+    assert!(
+        !reported.iter().any(|w| matches!(
+            w,
+            ArchiveWarning::FixedLayoutWithoutViewport { .. }
+                | ArchiveWarning::FixedLayoutContentClipped { .. }
+        )),
+        "a real producer's fixed-layout book tripped a fixed-layout warning: {reported:?}"
+    );
+    // And nothing else either. Stated as the whole list rather than as the two
+    // variants above, because the useful fact is that this build has *nothing*
+    // to say about an ordinary pre-paginated book, and a warning added later
+    // that fires on every comic should come here first.
+    assert_eq!(reported, [], "the real fixed-layout book reports something");
+}
+
+/// **Every page of the real book is its clip and nothing else**, and that is
+/// this build's largest gap in this format written down as a test.
+///
+/// A fixed-layout comic is six pictures. This build paginates it correctly, at
+/// the right count, at the right six sizes, with §8.1.2's clip on each — and
+/// **draws none of the pictures**, because no path in `epub::` turns an `<img>`
+/// into a box. Six blank pages of exactly the right dimensions is a
+/// complete-looking book of the wrong contents, which is the failure this whole
+/// gap is organised around, and it took a real fixed-layout book to make it
+/// visible: the other eight books are text, and text arrives.
+///
+/// Written as an assertion rather than a comment so that the milestone which
+/// paints a replaced element **has to come here and delete it**. `q … re W n …
+/// Q` and nothing between is the whole content stream today.
+#[test]
+fn today_every_page_of_the_real_book_is_empty_inside_its_clip() {
+    let doc = open_at(&real_book(), DEFAULT_PAGE);
+    for at in 0..doc.page_count() {
+        let content = page_content(&doc, at as usize);
+        let (width, height) = doc.page(at).expect("a page").size();
+        let expected = format!("q 0 0 {width} {height} re W n Q");
+        assert_eq!(
+            content.split_whitespace().collect::<Vec<_>>().join(" "),
+            expected,
+            "page {at} draws something, so this test is out of date and the \
+             README's finding about it needs re-measuring"
+        );
+    }
+    // The pictures really are in the container, so the emptiness is the
+    // painter's and not the archive's.
+    let bytes = real_book();
+    for name in [
+        "OEBPS/Images/kcc-0001-kcc-x.jpg",
+        "OEBPS/Images/kcc-0004-kcc-x.jpg",
+    ] {
+        let picture = epub_support::read(&bytes, name).unwrap_or_else(|| panic!("{name}"));
+        assert!(
+            picture.starts_with(&[0xFF, 0xD8]),
+            "{name} is not a JPEG in the container"
+        );
+    }
+}
+
+/// **The real book's pages carry no text either, and the six characters it does
+/// have are ones it means to hide.**
+///
+/// `CONSERVATION.tsv` records `0` of `6` conserved for this book, which is the
+/// only row in that file where the two numbers differ, and it would read as a
+/// text-conservation failure without this. KCC writes
+/// `<div style="display:none;">.</div>` into every one of its six content
+/// documents — a Kindle workaround for a page with no text at all — and a full
+/// stop that is `display: none` is a character this build is right to drop.
+///
+/// So the conservation record's exception is a producer's habit rather than a
+/// defect, and this is where that is established rather than asserted in a
+/// comment.
+#[test]
+fn the_real_books_six_lost_characters_are_six_hidden_full_stops() {
+    let bytes = real_book();
+    let mut hidden = 0usize;
+    for at in 1..=4u32 {
+        for suffix in ["x", "b", "c"] {
+            let name = format!("OEBPS/Text/kcc-000{at}-kcc-{suffix}.xhtml");
+            let Some(document) = epub_support::read(&bytes, &name) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&document).into_owned();
+            assert!(
+                text.contains(r#"<div style="display:none;">.</div>"#),
+                "{name} does not carry the hidden full stop this test is about"
+            );
+            hidden += 1;
+        }
+    }
+    assert_eq!(hidden, 6, "six content documents, six hidden full stops");
+
+    let doc = open_at(&bytes, DEFAULT_PAGE);
+    for at in 0..doc.page_count() {
+        assert_eq!(
+            doc.page(at).expect("a page").text().plain_text().trim(),
+            "",
+            "page {at} shows the character the book hid"
+        );
+    }
+}

@@ -509,6 +509,18 @@ fn the_source_side_decodes_and_does_not_transliterate() {
 ///   milestone that changes it has to update that file in the same commit,
 ///   which is what makes this a ratchet rather than a test written to pass —
 ///   and now that the figure is total, any regression at all moves it.
+///
+/// **Tier 4 broke "every character of every book", and the exception is worth
+/// more than the rule was.** `kcc-fixed-layout.epub` conserves **0 of 6**: KCC
+/// puts a `<div style="display:none;">.</div>` in every one of its six content
+/// documents, and a full stop that is `display: none` is a source character
+/// this build is *right* not to paint. So the invariant as milestone 8 stated
+/// it — every character of every content document reaches a page — was never
+/// quite the invariant; it was that plus an assumption that no producer writes
+/// text it does not mean to show. The first real fixed-layout book in this
+/// corpus writes six of them. The two assertions this test actually makes are
+/// untouched: nothing extra is on a page, and every character is conserved or
+/// missing and nothing else.
 #[test]
 fn every_committed_book_conserves_the_figure_the_record_states() {
     let recorded = record();
@@ -553,7 +565,7 @@ fn every_committed_book_conserves_the_figure_the_record_states() {
         measured, recorded,
         "tests/epub/CONSERVATION.tsv is out of date"
     );
-    assert_eq!(recorded.len(), 6, "the committed corpus is six books");
+    assert_eq!(recorded.len(), 9, "the committed corpus is nine books");
 }
 
 /// The committed corpus, which is the list of books rather than the record of
@@ -561,9 +573,12 @@ fn every_committed_book_conserves_the_figure_the_record_states() {
 const COMMITTED: &[&str] = &[
     "calibre-book-cover.epub",
     "calibre-book-nocover.epub",
+    "calibre-embedded-font.epub",
+    "kcc-fixed-layout.epub",
     "pandoc-book-cover.epub",
     "pandoc-book-epub2.epub",
     "pandoc-book-nocover.epub",
+    "pandoc-embedded-font.epub",
     "pandoc-plates.epub",
 ];
 

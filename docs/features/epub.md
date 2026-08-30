@@ -153,23 +153,37 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | Encrypted resources, missing rootfile, unreadable package document, unsupported package version, empty spine, a book that could not be paginated | `ArchiveRefusal::{EncryptedResources, RootfileMissing, UnreadablePackageDocument, UnsupportedPackageVersion, EmptySpine, UnpaginatedBook, UnreadableContainer}` | refused at open, by name | [cbz](cbz.md) |
 | Scripting, MathML layout, media overlays | `ArchiveWarning::UnimplementedFeature` | declared in `properties`, reported, content rendered as its fallback text | — |
 
-**Corpus caveats, stated**: no fixed-layout book from a real producer, no
-real producer's font through the `@font-face` path, and **no stylesheet
-declaring a cascade layer** are in the committed set — `epub_css.rs` asserts
-the layer count is zero rather than assuming it, so `@layer` is verified
-against this engine's own reading of `css-cascade-5` §6.4.2 and against no
-producer at all ([ROADMAP.md](../ROADMAP.md) Tier 4).
+**Corpus caveats, stated**: the committed set now holds a fixed-layout book
+from a real producer (KCC 11.0.1, `rendition:layout: pre-paginated`) and two
+books carrying a real producer's font through the `@font-face` path
+(Liberation Serif, unmodified, from calibre and from pandoc). Three things are
+**still owed**. **No stylesheet in the corpus declares a cascade layer** —
+`epub_css.rs` asserts the layer count is zero rather than assuming it, and the
+three books added since do not change it, so `@layer` is verified against this
+engine's own reading of `css-cascade-5` §6.4.2 and against no producer at all.
+**No WOFF or WOFF2 file** is committed: no producer available emits one, and
+repacking a vendored face is barred by OFL-1.1's reserved-name clause, so the
+refusal row above has no committed file behind it. And three books carry **no
+epubcheck verdict** — they postdate the tool's removal under ruling 13, so
+`EPUBCHECK.tsv` marks them `-` rather than zero
+([ROADMAP.md](../ROADMAP.md) Tier 4).
 
 ## Verified
 
-- **Six committed books from two real producers** (pandoc 3.10.2, calibre
-  9.13.0) over text authored here, in `crates/tinker-pdf/tests/epub/`,
-  with epubcheck 5.3.0 verdicts recorded in `EPUBCHECK.tsv`. Those verdicts
-  are now a **dated measurement and not a check** — ruling 13 ended the
-  re-run, so when this engine and a book disagree there is no arbiter. What
-  the record still holds is that every book has a verdict and that the set of
-  books the tool was unhappy with is the one recorded. **Twenty more are
-  fetched**,
+- **Nine committed books from three real producers** (pandoc 3.10.2 and 3.11,
+  calibre 9.13.0 and 9.14.0, KCC 11.0.1) over text authored here, in
+  `crates/tinker-pdf/tests/epub/`, with epubcheck 5.3.0 verdicts recorded in
+  `EPUBCHECK.tsv` for the six that predate ruling 13. Those verdicts are a
+  **dated measurement and not a check** — ruling 13 ended the re-run, so when
+  this engine and a book disagree there is no arbiter, and for the three books
+  with no verdict at all there never was one. What the record still holds is
+  that every book has a *row*, that a count is a number or an explicit `-`, and
+  that the sets of books the tool was unhappy with and never saw are the ones
+  recorded. The three tier-4 books closed the roadmap's fixed-layout and
+  `@font-face` rows and found **eleven things** the first six could not, listed
+  in `tests/epub/README.md` — including that a fixed-layout comic reaches this
+  build as correctly-sized, correctly-clipped, entirely blank pages, because no
+  path here paints a replaced element. **Twenty more are fetched**,
   never committed (Project Gutenberg's trademark licence and `epub3-samples`'
   CC-BY-SA are both barred by this repository's own no-copyleft gate), and
   `epub_fetched.rs` prints `epub-corpus: RAN` / `SKIPPED` so the CI job goes

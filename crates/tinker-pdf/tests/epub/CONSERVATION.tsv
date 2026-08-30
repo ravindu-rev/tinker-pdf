@@ -1,7 +1,10 @@
 book	spine_items	source_characters	conserved_characters	pages
 calibre-book-cover.epub	5	2958	2958	5
 calibre-book-nocover.epub	4	2958	2958	4
+calibre-embedded-font.epub	2	985	985	2
+kcc-fixed-layout.epub	6	6	0	6
 pandoc-book-cover.epub	5	3156	3156	7
 pandoc-book-epub2.epub	5	3156	3156	7
 pandoc-book-nocover.epub	4	3156	3156	6
+pandoc-embedded-font.epub	4	1157	1157	4
 pandoc-plates.epub	5	749	749	5

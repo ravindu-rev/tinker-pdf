@@ -1,0 +1,35 @@
+/* The stylesheet `pandoc-embedded-font.epub` is built with.
+ *
+ * pandoc embeds the file `--epub-embed-font` names and writes its manifest
+ * entry, and its own documentation says the `@font-face` rule is the author's
+ * to write. So this rule is ours and the container around it is pandoc's,
+ * which is the same division of labour as every other book in this corpus:
+ * our input through their tool.
+ *
+ * The `src` list has two entries because EPUB 3.3 s4.3 makes it a preference
+ * order and this build's `epub::typeface::load_one` walks it to the end. The
+ * first entry is a `local()`, which is what a real rule writes first and which
+ * a reading system with no installed faces -- this one -- cannot satisfy; the
+ * second is the file pandoc embedded. A book whose first entry failed and
+ * whose second worked is the case a build that stopped at the first failure
+ * would lose, and it is now a committed file rather than a fixture.
+ *
+ * The `../` is pandoc's layout and not a flourish: pandoc copies this file to
+ * `EPUB/styles/stylesheet1.css` and the embedded face to
+ * `EPUB/fonts/`, and it does **not** rewrite the author's `url()`. So the
+ * reference is resolved against the stylesheet that holds it, which is s4.2.5's
+ * rule, and a rule written as though the two sat in one directory finds
+ * nothing.
+ */
+
+@font-face {
+  font-family: "Liberation Serif";
+  font-weight: normal;
+  font-style: normal;
+  src: local("Liberation Serif"),
+       url("../fonts/LiberationSerif-Regular.ttf") format("truetype");
+}
+
+body {
+  font-family: "Liberation Serif", serif;
+}

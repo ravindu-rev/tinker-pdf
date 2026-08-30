@@ -1445,13 +1445,20 @@ fn no_bound_refuses_a_real_book() {
 /// above, and the archive carries five more.
 ///
 /// So every book in both corpora is opened here and measured against the row
-/// that bounds it. The committed six always; the fetched twenty when
+/// that bounds it. The committed nine always; the fetched twenty when
 /// `TINKER_EPUB_CORPUS` names the directory `fetch-corpus.sh` filled — and the
 /// difference between the two is the finding rather than a detail. **The
-/// committed six are a hundred times smaller than the fetched twenty on every
+/// committed books are a hundred times smaller than the fetched twenty on every
 /// row that matters**: they spend 326 boxes against 993 349 and 39 float
 /// examinations against 4 233 567. A yardstick calibrated on the corpus this
 /// repository commissioned would have agreed with the caps that were wrong.
+///
+/// *Amended by tier 4:* the committed corpus is nine books rather than six, and
+/// the three that joined it do not move that conclusion — a pre-paginated comic
+/// is six one-element documents and the two font books are prose. What they do
+/// add is the first committed entry large enough to be interesting to
+/// `MAX_ZIP_ENTRY_BYTES`: a 393 576-byte font program, against a previous
+/// largest of a few kilobytes.
 ///
 /// Printed as well as asserted, because the figure a partial build is judged on
 /// is the margin rather than the boolean.
@@ -1463,7 +1470,10 @@ fn the_book_yardstick_is_not_below_a_real_book() {
             .join("epub"),
     );
     let committed = books.len();
-    assert_eq!(committed, 6, "milestone 1 committed six books");
+    assert_eq!(
+        committed, 9,
+        "milestone 1 committed six books and tier 4 added three"
+    );
     match std::env::var("TINKER_EPUB_CORPUS") {
         Ok(dir) => books.extend(corpus_books(std::path::Path::new(&dir))),
         Err(_) => println!(
