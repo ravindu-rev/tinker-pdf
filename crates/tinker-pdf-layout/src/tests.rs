@@ -11,10 +11,11 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, Display,
-    FlexDirection, FlexWrap, Float, JustifyContent, LengthPercentage, LineHeight, ListStyleType,
-    MarginValue, MaxSize, MinSize, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size,
-    TextAlign, VerticalAlign, Visibility, WhiteSpace,
+    AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
+    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, JustifyContent,
+    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
+    PageBreak, PageBreakInside, Side, Sides, Size, TextAlign, VerticalAlign, Visibility,
+    WhiteSpace,
 };
 
 use crate::flex;
@@ -3122,6 +3123,276 @@ fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
         laid.warnings
     );
     assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- `css-multicol-1`, the multi-column container --------------------------
+//
+// Two hundred points of container, ten-point text, twelve-point lines
+// throughout. A paragraph of one word is one line and twelve points tall.
+
+/// A multi-column container at a stated count, width and gap.
+fn multicol(count: Option<u16>, width: Option<f64>, gap: Option<f64>) -> ComputedStyle {
+    let mut style = block();
+    style.column_count = match count {
+        Some(count) => ColumnCount::Count(count),
+        None => ColumnCount::Auto,
+    };
+    style.column_width = match width {
+        Some(width) => ColumnWidth::Px(width),
+        None => ColumnWidth::Auto,
+    };
+    if let Some(gap) = gap {
+        style.column_gap = tinker_pdf_css::property::Gap::Length(LengthPercentage::Px(gap));
+    }
+    style
+}
+
+/// Four one-line paragraphs, which is forty-eight points of content.
+fn four_paragraphs() -> Vec<BoxNode> {
+    vec![para("a"), para("b"), para("c"), para("d")]
+}
+
+/// §3.4 and §4 together: two columns of a two-hundred-point box with no gap
+/// are a hundred points each, and forty-eight points of content is balanced
+/// twenty-four and twenty-four.
+///
+/// Both halves in one fixture on purpose — the geometry and the balance are
+/// separately asserted below, and what this one holds is that they agree.
+#[test]
+fn two_columns_split_the_box_and_the_content_evenly() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            four_paragraphs(),
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 0.0, 100.0, 100.0]);
+    assert_eq!(baselines(&laid, 0), vec![9.0, 21.0, 9.0, 21.0]);
+    // And the text still reads in document order, which is the whole reason a
+    // container is one item rather than its columns spliced into the flow.
+    assert_eq!(laid.text(), "abcd");
+}
+
+/// §3.4: `column-width` alone decides the **count**, and the used width is the
+/// box's share rather than the length that was asked for.
+///
+/// Sixty points into two hundred with no gap is three columns, and three
+/// columns of two hundred points is sixty-six and two thirds each — not sixty
+/// with twenty left over. A build that used the stated width leaves a ragged
+/// right edge on every book that writes `column-width`.
+#[test]
+fn a_column_width_decides_the_count_and_not_the_used_width() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(None, Some(60.0), Some(0.0)),
+            vec![para("a"), para("b"), para("c")],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 3, "{x:?}");
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(close(x[1], 200.0 / 3.0), "{x:?}");
+    assert!(close(x[2], 400.0 / 3.0), "{x:?}");
+}
+
+/// §3.4's fit counts the gaps **between** the columns and not after the last
+/// one, which is what the `+ gap` in `floor((available + gap) / (width + gap))`
+/// is for.
+///
+/// A hundred and sixty points, forty-point columns, twenty-point gaps: three
+/// columns and two gaps is a hundred and sixty exactly, so three fit. A build
+/// that divided by the step without adding the gap back finds two — and the
+/// book gets two seventy-point columns where its stylesheet asked for three of
+/// forty. The fixture is the boundary case because the boundary is the whole
+/// of what the term does.
+#[test]
+fn the_column_fit_counts_the_gaps_between_the_columns() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(None, Some(40.0), Some(20.0)),
+            vec![para("a"), para("b"), para("c")],
+        )],
+    );
+    let laid = run(&tree, 160.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 60.0, 120.0]);
+}
+
+/// §3.4: with **both** stated the count is the smaller of the two answers, and
+/// the width is still the box's share.
+///
+/// Three columns would fit and two were asked for, so it is two of a hundred —
+/// not two of sixty, and not three.
+#[test]
+fn both_column_properties_take_the_smaller_count() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), Some(60.0), Some(0.0)),
+            four_paragraphs(),
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 0.0, 100.0, 100.0]);
+}
+
+/// `css-align-3` §8.1: `column-gap: normal` is **one em in a multi-column
+/// container** and zero everywhere else, which is why the value is carried to
+/// layout unresolved.
+///
+/// Ten-point text, so ten points of gap: two columns of ninety-five, and the
+/// second starts at a hundred and five.
+#[test]
+fn a_normal_column_gap_is_one_em() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, None),
+            four_paragraphs(),
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x, vec![0.0, 0.0, 105.0, 105.0], "{x:?}");
+}
+
+/// §4: `column-fill: auto` fills each column in turn, so a container with no
+/// stated height puts all of it in the first.
+///
+/// The other value is the initial one and is asserted above; this is the half
+/// that says the property is read at all.
+#[test]
+fn column_fill_auto_puts_everything_in_the_first_column() {
+    let mut style = multicol(Some(2), None, Some(0.0));
+    style.column_fill = ColumnFill::Auto;
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, four_paragraphs())]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(baselines(&laid, 0), vec![9.0, 21.0, 33.0, 45.0]);
+}
+
+/// §4's balance is a **search and not a division**: five lines into two columns
+/// is three and two, because thirty is the shortest height that fits.
+///
+/// `total / count` is thirty-six halved, which is thirty — and here the two
+/// agree. What a division cannot do is the case where the even share lands
+/// inside a line box: seven lines is eighty-four, half is forty-two, and
+/// forty-two points of column holds three lines and a half. The search returns
+/// forty-eight, which is four lines and three.
+#[test]
+fn the_balance_is_a_search_and_lands_on_a_line_boundary() {
+    let seven = vec![
+        para("a"),
+        para("b"),
+        para("c"),
+        para("d"),
+        para("e"),
+        para("f"),
+        para("g"),
+    ];
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(multicol(Some(2), None, Some(0.0)), seven)],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    let first: usize = x.iter().filter(|at| close(**at, 0.0)).count();
+    assert_eq!(first, 4, "the first column does not hold four lines: {x:?}");
+    assert_eq!(x.len(), 7, "{x:?}");
+    assert_eq!(laid.text(), "abcdefg");
+}
+
+/// §5.1: the column rule is drawn **in the middle of the gap**, at the height
+/// of the columns.
+///
+/// Twenty points of gap between two ninety-point columns, and a four-point
+/// rule: the gap runs from ninety to a hundred and ten and the rule from
+/// ninety-eight.
+#[test]
+fn a_column_rule_is_drawn_down_the_middle_of_the_gap() {
+    let mut style = multicol(Some(2), None, Some(20.0));
+    style.column_rule_width = 4.0;
+    style.column_rule_style = BorderStyle::Solid;
+    style.column_rule_color = Color {
+        r: 7,
+        g: 7,
+        b: 7,
+        a: 255,
+    };
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, four_paragraphs())]);
+    let laid = run(&tree, 200.0, 400.0);
+    let rule = laid.pages[0]
+        .boxes
+        .iter()
+        .find(|fragment| fragment.background.r == 7)
+        .expect("the rule was not drawn");
+    assert!(close(rule.x, 98.0), "{rule:?}");
+    assert!(close(rule.width, 4.0), "{rule:?}");
+    assert!(close(rule.height, 24.0), "{rule:?}");
+    // And there is exactly one, because one gap has one rule in it.
+    assert_eq!(
+        laid.pages[0]
+            .boxes
+            .iter()
+            .filter(|fragment| fragment.background.r == 7)
+            .count(),
+        1
+    );
+}
+
+/// §6: `column-span: all` is read on the **child** and named, because a
+/// spanning box makes three column sets where this build has one.
+#[test]
+fn column_span_all_is_named_on_the_child_that_asked_for_it() {
+    let mut spanning = block();
+    spanning.column_span = ColumnSpan::All;
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            vec![
+                para("a"),
+                BoxNode::element(spanning, vec![text("b")]),
+                para("c"),
+            ],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert!(
+        laid.warnings.contains(&(Warning::ColumnSpanAsNone, 1)),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "abc", "and it is still on the page");
+}
+
+/// A container taller than a page is **cut**, which it gets for nothing: it is
+/// an `Abreast` and the page cutter already cuts those at one height across
+/// every column.
+#[test]
+fn a_multi_column_container_taller_than_a_page_is_cut() {
+    let many: Vec<BoxNode> = "abcdefghij".chars().map(|c| para(&c.to_string())).collect();
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(multicol(Some(2), None, Some(0.0)), many)],
+    );
+    // Ten lines balanced into two columns is sixty points; a thirty-point page
+    // takes two of them.
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(laid.pages.len() > 1, "{} pages", laid.pages.len());
+    assert_eq!(conservable(&laid.text()), conservable("abcdefghij"));
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::ColumnTallerThanPage),
+        "a container that was cut is not one that overflowed: {:?}",
+        laid.warnings
+    );
 }
 
 // ---- CSS 2.2 §10.8.1 and §17.5.3, `vertical-align` -------------------------

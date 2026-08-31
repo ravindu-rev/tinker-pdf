@@ -182,7 +182,10 @@ fn slice(band: &Abreast, from: f64, available: f64) -> (f64, bool) {
     let mut forced = false;
     for item in &band.items {
         match item.kind {
-            ItemKind::Line(_) | ItemKind::Rows(_) | ItemKind::FlexLine(_) => {}
+            ItemKind::Line(_)
+            | ItemKind::Rows(_)
+            | ItemKind::FlexLine(_)
+            | ItemKind::Columns(_) => {}
             ItemKind::Margin(_) | ItemKind::Edge => continue,
         }
         if item.y + item.height <= limit + EPSILON {
@@ -262,7 +265,9 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
         // anyway leaves the page it came from empty and then overflows the
         // next one.
         let overflowing = overflow_at.and_then(|at| match &flow.items[at].kind {
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => Some((at, &**band)),
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                Some((at, &**band))
+            }
             ItemKind::Line(_) | ItemKind::Margin(_) | ItemKind::Edge => None,
         });
         if let Some((at, band)) = overflowing {
@@ -286,6 +291,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                         &mut warnings,
                         match &flow.items[at].kind {
                             ItemKind::FlexLine(_) => Warning::FlexLineTallerThanPage,
+                            ItemKind::Columns(_) => Warning::ColumnTallerThanPage,
                             _ => Warning::TableRowTallerThanPage,
                         },
                     );
@@ -561,11 +567,12 @@ fn permitted(flow: &Flow, index: usize, tier: Tier) -> Option<Cut> {
         // anyway -- when the choice is a crossed `rowspan` or a page drawn
         // over its own bottom edge -- and never when moving the band whole to
         // the next page would do.
-        ItemKind::Edge | ItemKind::Rows(_) | ItemKind::FlexLine(_) => (tier == Tier::WithoutAc)
-            .then_some(Cut {
+        ItemKind::Edge | ItemKind::Rows(_) | ItemKind::FlexLine(_) | ItemKind::Columns(_) => {
+            (tier == Tier::WithoutAc).then_some(Cut {
                 end: index,
                 next: index,
-            }),
+            })
+        }
     }
 }
 
@@ -659,7 +666,7 @@ fn emit(
             // [`draw_band`], nested or not and cut or not, so a nested table's
             // backgrounds cannot quietly stop being drawn and a cut band's
             // cannot quietly stop being clipped.
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                 draw_band(band, item.y + offset, cutting.of(start + at), out);
             }
             ItemKind::Margin(_) | ItemKind::Edge => {}
@@ -723,7 +730,7 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
             // not cut in the same places. It is drawn whole on the page its
             // top is on -- and if that overflows, [`slice`] has already said
             // so by name.
-            ItemKind::Rows(inner) | ItemKind::FlexLine(inner) => {
+            ItemKind::Rows(inner) | ItemKind::FlexLine(inner) | ItemKind::Columns(inner) => {
                 draw_band(inner, item.y + offset, Slice::WHOLE, out);
             }
             ItemKind::Margin(_) | ItemKind::Edge => {}

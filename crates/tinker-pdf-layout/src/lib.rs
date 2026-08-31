@@ -743,6 +743,23 @@ pub enum Warning {
     /// which is `InlineBlockAsInline`'s shape: what was done, named, rather
     /// than a property quietly half-honoured.
     MaxHeightAsAuto,
+    /// A column of a multi-column container that is taller than a page.
+    ///
+    /// The third of `Abreast`'s three shapes and the same sentence the other
+    /// two carry: the container is cut across pages like any band, and this is
+    /// raised only when one **atomic** box inside a column -- a line box, or a
+    /// band inside it -- is itself taller than a whole page, which no cut can
+    /// halve.
+    ColumnTallerThanPage,
+    /// `column-span: all`, laid out in its column.
+    ///
+    /// `css-multicol-1` §6: a spanning box interrupts the columns, is laid out
+    /// across the full width of the container, and the columns resume beneath
+    /// it. That is three column sets where this build has one, so the box is
+    /// laid out in the column it fell in and the fact is named. Counted per
+    /// box, for `UnimplementedProperty`'s reason: the same declaration on four
+    /// hundred figures is four hundred.
+    ColumnSpanAsNone,
     /// `display: table-column` or `table-column-group` carrying a `width`,
     /// which this build reads, beside anything else on it, which it does not:
     /// a column box's background and borders are §17.5.1's two rendering
@@ -772,6 +789,12 @@ impl fmt::Display for Warning {
             }
             Warning::RowspanPastTheRowGroup => {
                 f.write_str("a rowspan reaches past its row group and was clamped")
+            }
+            Warning::ColumnTallerThanPage => {
+                f.write_str("a multi-column container holds a box taller than a page")
+            }
+            Warning::ColumnSpanAsNone => {
+                f.write_str("column-span: all is laid out in its own column")
             }
             Warning::ColumnBoxNotPainted => {
                 f.write_str("a table column box's background and borders are not painted")
