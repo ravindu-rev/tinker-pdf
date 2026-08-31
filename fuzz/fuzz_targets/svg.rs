@@ -63,7 +63,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_svg::path::{self, Segment};
+use tinker_pdf_svg::path::{self, Outline, Segment};
 use tinker_pdf_svg::{transform, Limits, Node, Paint, Scene};
 
 /// Every point a segment carries.
@@ -87,25 +87,52 @@ fn kind(segment: &Segment) -> u8 {
     }
 }
 
-/// Every number a scene carries, so one assertion can sweep all of them.
-fn numbers(scene: &Scene) -> Vec<f64> {
-    let mut out = vec![scene.size.0, scene.size.1];
-    let mut paint = |paint: &Paint| match paint {
+/// Every coordinate an outline carries, appended.
+fn sweep(outline: &Outline, out: &mut Vec<f64>) {
+    for segment in &outline.segments {
+        for point in points(segment) {
+            out.extend_from_slice(&point);
+        }
+    }
+}
+
+/// Every number a paint carries, appended.
+fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
+    match paint {
         Paint::None | Paint::Solid(_) => {}
-        Paint::Linear { from, to, stops } => {
+        Paint::Linear {
+            from,
+            to,
+            matrix,
+            stops,
+        } => {
             out.extend_from_slice(&[from[0], from[1], to[0], to[1]]);
-            out.extend(stops.iter().flat_map(|s| [s.offset, s.opacity]));
+            out.extend_from_slice(matrix);
+            out.extend(stops.iter().flat_map(|stop| [stop.offset, stop.opacity]));
         }
         Paint::Radial {
             centre,
             radius,
             focus,
+            matrix,
             stops,
         } => {
             out.extend_from_slice(&[centre[0], centre[1], *radius, focus[0], focus[1]]);
-            out.extend(stops.iter().flat_map(|s| [s.offset, s.opacity]));
+            out.extend_from_slice(matrix);
+            out.extend(stops.iter().flat_map(|stop| [stop.offset, stop.opacity]));
         }
-    };
+        _ => {}
+    }
+}
+
+/// Every number a scene carries, so one assertion can sweep all of them.
+///
+/// **Every field, not the interesting ones.** A gradient's `/Matrix` and a
+/// clip's outline reach a page exactly as a coordinate does, and an infinity
+/// in either is the same failure: a rasterizer with nothing to draw and a file
+/// that looked ordinary.
+fn numbers(scene: &Scene) -> Vec<f64> {
+    let mut out = vec![scene.size.0, scene.size.1];
     for node in &scene.nodes {
         match node {
             Node::Path {
@@ -113,22 +140,17 @@ fn numbers(scene: &Scene) -> Vec<f64> {
                 fill,
                 fill_opacity,
                 stroke,
+                clip,
                 ..
             } => {
-                for segment in &outline.segments {
-                    match *segment {
-                        Segment::Move(p) | Segment::Line(p) => out.extend_from_slice(&p),
-                        Segment::Cubic(a, b, c) => {
-                            out.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
-                        }
-                        Segment::Close => {}
-                        _ => {}
-                    }
+                sweep(outline, &mut out);
+                if let Some(clip) = clip {
+                    sweep(&clip.outline, &mut out);
                 }
-                paint(fill);
+                sweep_paint(fill, &mut out);
                 out.push(*fill_opacity);
                 if let Some(stroke) = stroke {
-                    paint(&stroke.paint);
+                    sweep_paint(&stroke.paint, &mut out);
                     out.extend_from_slice(&[
                         stroke.width,
                         stroke.miter_limit,

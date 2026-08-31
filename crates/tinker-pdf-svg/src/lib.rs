@@ -39,6 +39,7 @@
 #![deny(missing_docs)]
 
 pub mod document;
+pub mod gradient;
 pub mod path;
 pub mod scene;
 pub mod shape;
@@ -156,7 +157,14 @@ pub enum Warning {
     FilterUnsupported,
     /// `<mask>` and `mask=`.
     MaskUnsupported,
-    /// `<clipPath>` and `clip-path=`.
+    /// A `clip-path` naming something this build cannot turn into an outline.
+    ///
+    /// **Not the element**: a `<clipPath>` full of shapes is drawn as a clip
+    /// since milestone 4. This is the reference that names no `<clipPath>` at
+    /// all, or one whose children are `<use>` or `<text>` — geometry that
+    /// exists somewhere else. The element is drawn **unclipped**, which is
+    /// ruling 2's answer and the one that keeps a picture rather than losing
+    /// it; the alternative reading of §14.3.1 would clip everything away.
     ClipPathUnsupported,
     /// `<pattern>` used as a paint.
     PatternUnsupported,
@@ -202,6 +210,15 @@ pub enum Warning {
     /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
     /// Skipped by the CSS specification's own recovery, and named.
     AtRuleIgnored,
+    /// §13.2.3's `spreadMethod` of `reflect` or `repeat`.
+    ///
+    /// `pad` is drawn instead, which is the initial value and the one every
+    /// gradient in the fetched corpus uses. The other two tile the stop list
+    /// outside the axis, and doing it honestly means a stitching function over
+    /// a repeated domain rather than a wider axis with more stops on it — an
+    /// approximation with a chosen number of repeats would be a gradient that
+    /// is right in the middle and wrong at the edges.
+    SpreadMethodUnsupported,
 }
 
 /// A colour, as three components in `[0, 1]`.
@@ -234,27 +251,61 @@ pub enum Paint {
     None,
     /// A flat colour.
     Solid(Colour),
-    /// `<linearGradient>`, with its coordinates already resolved into the
-    /// space the path is stated in.
+    /// `<linearGradient>`.
+    ///
+    /// The geometry is in **gradient space** and `matrix` maps that space into
+    /// the scene's. It is not baked into the two points, and the reason is a
+    /// skew: a linear gradient's iso-lines are perpendicular to its axis *in
+    /// its own space*, and an affine transform that is not a similarity does
+    /// not keep them perpendicular. Two transformed endpoints cannot say that,
+    /// and neither can PDF's axial shading — which is why 8.7.4.5.5 puts a
+    /// `/Matrix` on the pattern rather than on the shading's coordinates.
+    /// §13.2.3's `gradientUnits` and `gradientTransform` both land here.
     Linear {
-        /// Start point.
+        /// Start point, in gradient space.
         from: [f64; 2],
-        /// End point.
+        /// End point, in gradient space.
         to: [f64; 2],
+        /// Gradient space to the scene's.
+        matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
     },
-    /// `<radialGradient>`, likewise resolved.
+    /// `<radialGradient>`, on the same terms.
+    ///
+    /// One circle and a focal point, which is §13.2.3's shape and maps onto
+    /// 8.7.4.5.4's two circles with the first one's radius at zero. An
+    /// `objectBoundingBox` gradient on a shape that is not square is an
+    /// **ellipse**, and it is `matrix` that makes it one.
     Radial {
-        /// Centre.
+        /// Centre, in gradient space.
         centre: [f64; 2],
-        /// Radius.
+        /// Radius, in gradient space.
         radius: f64,
         /// Focal point, which SVG allows to differ from the centre.
         focus: [f64; 2],
+        /// Gradient space to the scene's.
+        matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
     },
+}
+
+/// §14.3's clipping path, as geometry.
+///
+/// The **union** of the shapes a `<clipPath>` holds, as one outline of several
+/// subpaths, already in the scene's space. A union rather than a list because
+/// §14.3.5 says a clipping path is *"the union of the silhouettes"* of its
+/// children — a consumer handed a list would have to intersect them, which is
+/// the opposite operation and would clip away everything two children did not
+/// share.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clip {
+    /// The outline.
+    pub outline: path::Outline,
+    /// `clip-rule`, which is a **separate property** from `fill-rule`: one
+    /// shape used as a clip and as a fill can want two different rules.
+    pub rule: FillRule,
 }
 
 /// SVG 1.1 §11.3's `fill-rule`.
@@ -327,7 +378,16 @@ pub enum Node {
         /// `fill-opacity`, in `[0, 1]`.
         fill_opacity: f64,
         /// How the outline is drawn, if at all.
-        stroke: Option<Stroke>,
+        ///
+        /// **Boxed**, and it is a size decision rather than a taste one: a
+        /// [`Stroke`] carries its own [`Paint`], which for a gradient is a
+        /// `Vec` of stops and a matrix, and most shapes in a real drawing only
+        /// fill. Inline it made this variant three times the size of
+        /// [`Node::Image`] and every node in a ten-thousand-node scene paid
+        /// for it.
+        stroke: Option<Box<Stroke>>,
+        /// §14.3's clip, or `None` for a node that is not clipped.
+        clip: Option<Clip>,
     },
     /// An `<image>`, carried **unresolved**.
     ///

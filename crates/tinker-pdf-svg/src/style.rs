@@ -217,6 +217,16 @@ fn strip_important(values: &mut Vec<ComponentValue>) -> bool {
     }
 }
 
+/// One `style=""` attribute's declarations.
+///
+/// Public because a `<stop>`'s `stop-color` is as likely to be there as in an
+/// attribute, and [`resolve`] is the wrong tool for one: a `<stop>` inherits
+/// from the *gradient*, not from wherever the gradient is referenced.
+#[must_use]
+pub fn inline_declarations(text: &str) -> Vec<Declaration> {
+    declarations(&component_values(tokenize(&format!("{text};"))))
+}
+
 /// Reads every `<style>` element in a tree into one sheet.
 ///
 /// **One sheet for the document, not one per element.** §6.2 lets a `<style>`
@@ -366,6 +376,12 @@ pub struct Style {
     /// **A product rather than a group**, and the flattening is named where it
     /// is observable — see [`crate::Warning::GroupOpacityFlattened`].
     pub opacity: f64,
+    /// §13.2.4's `stop-color`, which only a `<stop>` reads.
+    pub stop_colour: Colour,
+    /// §13.2.4's `stop-opacity`.
+    pub stop_opacity: f64,
+    /// §14.3's `clip-path`, as the bare fragment name it referenced.
+    pub clip_path: Option<String>,
 }
 
 impl Default for Style {
@@ -391,13 +407,18 @@ impl Default for Style {
             clip_rule: FillRule::NonZero,
             visible: true,
             opacity: 1.0,
+            stop_colour: Colour {
+                rgb: [0.0, 0.0, 0.0],
+            },
+            stop_opacity: 1.0,
+            clip_path: None,
         }
     }
 }
 
 /// The properties this build reads, so a presentation attribute that is not one
 /// is left alone rather than read as a property nobody consumes.
-pub const PROPERTIES: [&str; 15] = [
+pub const PROPERTIES: [&str; 18] = [
     "fill",
     "fill-rule",
     "fill-opacity",
@@ -413,6 +434,9 @@ pub const PROPERTIES: [&str; 15] = [
     "clip-rule",
     "visibility",
     "opacity",
+    "stop-color",
+    "stop-opacity",
+    "clip-path",
 ];
 
 /// What resolving one declaration did.
@@ -428,18 +452,32 @@ pub enum Applied {
 impl Style {
     /// This style as a child's starting point.
     ///
-    /// **Every field carries, and the split §11 draws is structural rather
-    /// than a list.** SVG's painting properties are all inherited, and the one
-    /// that is not — `opacity` — is held here as the *product* from the root
-    /// down, which carries for a different reason: §14.5 composes a group's
-    /// opacity with everything under it, so a child that states none still
-    /// paints at its parent's. A build with a `fn inherited(name) -> bool`
-    /// beside this would be the same rule written twice, and the injection
-    /// matrix's standing complaint is that a rule enforced twice hides the
-    /// reachable half.
+    /// **The whole of §11's inheritance split lives in this function**, and it
+    /// is written as the exceptions rather than as a `fn inherited(name)`
+    /// consulted from somewhere else — a rule enforced in two places hides the
+    /// reachable half, which is the injection matrix's standing complaint.
+    ///
+    /// Every painting property inherits. Three do not, and each for its own
+    /// reason:
+    ///
+    /// - `stop-color` and `stop-opacity` describe a `<stop>` and nothing else,
+    ///   so a `<g stop-color="red">` around a gradient must not colour it.
+    /// - `clip-path` clips **the element that states it**; inherited, every
+    ///   descendant would be clipped again by the same path, which is the same
+    ///   picture until a descendant moves.
+    ///
+    /// `opacity` is the fourth exception and it is not reset either: it is held
+    /// here as the *product* from the root down, because §14.5 composes a
+    /// group's opacity with everything under it.
     #[must_use]
     pub fn inherit(&self) -> Style {
-        self.clone()
+        let initial = Style::default();
+        Style {
+            stop_colour: initial.stop_colour,
+            stop_opacity: initial.stop_opacity,
+            clip_path: None,
+            ..self.clone()
+        }
     }
 
     /// Applies one declaration.
@@ -471,6 +509,47 @@ impl Style {
                     }
                     true
                 }
+                None => false,
+            },
+            "stop-color" => match colour(values) {
+                Some(read) => {
+                    self.stop_colour = read;
+                    true
+                }
+                // §13.2.4 allows `currentColor` here too, and it means the
+                // `color` in force on the `<stop>` — which is the one the
+                // gradient element inherited, since a `<stop>` sets none.
+                None => match significant.first() {
+                    Some(ComponentValue::Token(Token::Ident(word)))
+                        if word.eq_ignore_ascii_case("currentColor") =>
+                    {
+                        self.stop_colour = self.colour;
+                        true
+                    }
+                    _ => false,
+                },
+            },
+            "stop-opacity" => match alpha(&significant) {
+                Some(value) => {
+                    self.stop_opacity = value;
+                    true
+                }
+                None => false,
+            },
+            "clip-path" => match significant.first() {
+                Some(ComponentValue::Token(Token::Ident(word)))
+                    if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
+                {
+                    self.clip_path = None;
+                    true
+                }
+                Some(value) => match reference(value) {
+                    Some(name) => {
+                        self.clip_path = Some(name);
+                        true
+                    }
+                    None => false,
+                },
                 None => false,
             },
             "color" => match colour(values) {

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §13.2's gradients, each on a rectangle whose bounding box is ten by twenty
+     so that a bounding-box gradient and a user-space one cannot be confused:
+     the box is not square and it does not start at the origin.
+
+     `#ramp` is the ramp every other server borrows, which is how the fetched
+     corpus writes a gradient it uses twice -- stops and geometry once, then an
+     empty element with an `xlink:href` and a transform of its own. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="100" height="100">
+  <defs>
+    <linearGradient id="ramp">
+      <stop offset="0" stop-color="#ff0000"/>
+      <stop offset="0.5" stop-color="#00ff00" stop-opacity="0.25"/>
+      <!-- §13.2.4: an offset smaller than the one before it is *adjusted* to
+           equal it, which keeps its place in the list. -->
+      <stop offset="0.25" stop-color="#0000ff"/>
+    </linearGradient>
+    <!-- Stops from `#ramp`, geometry from here. -->
+    <linearGradient id="borrowed" xlink:href="#ramp"
+                    gradientUnits="userSpaceOnUse" x1="2" y1="3" x2="4" y2="5"/>
+    <!-- The cycle: well-formed XML, and a walk that did not guard would not
+         return. -->
+    <linearGradient id="loop-a" xlink:href="#loop-b"/>
+    <linearGradient id="loop-b" xlink:href="#loop-a"/>
+    <!-- Two hops: the stops are on `#ramp`, the geometry and the units are on
+         `#borrowed`, and this element states neither. Every attribute is
+         looked up along the same chain. -->
+    <linearGradient id="twice-removed" xlink:href="#borrowed"/>
+    <radialGradient id="round" xlink:href="#ramp" cx="25%" cy="75%" r="50%"/>
+    <linearGradient id="spread" xlink:href="#ramp" spreadMethod="reflect"/>
+    <linearGradient id="empty"/>
+    <linearGradient id="one-stop">
+      <stop offset="0.5" stop-color="#123456"/>
+    </linearGradient>
+  </defs>
+
+  <rect id="box"      fill="url(#ramp)"     x="10" y="20" width="10" height="20"/>
+  <rect id="user"     fill="url(#borrowed)" x="10" y="20" width="10" height="20"/>
+  <rect id="circle"   fill="url(#round)"    x="10" y="20" width="10" height="20"/>
+  <rect id="cycle"    fill="url(#loop-a) teal" x="10" y="20" width="10" height="20"/>
+  <rect id="reflect"  fill="url(#spread)"   x="10" y="20" width="10" height="20"/>
+  <rect id="nostops"  fill="url(#empty) teal" x="10" y="20" width="10" height="20"/>
+  <rect id="flat"     fill="url(#one-stop)"  x="10" y="20" width="10" height="20"/>
+  <rect id="twohop"   fill="url(#twice-removed)" x="10" y="20" width="10" height="20"/>
+</svg>

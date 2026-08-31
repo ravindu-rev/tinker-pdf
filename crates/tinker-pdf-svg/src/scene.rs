@@ -28,6 +28,7 @@
 use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits};
 
 use crate::document::{self, Node, Tree};
+use crate::gradient;
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
@@ -253,10 +254,12 @@ impl Walk<'_> {
                 self.warn(Warning::MaskUnsupported);
                 Ok(())
             }
-            "clipPath" => {
-                self.warn(Warning::ClipPathUnsupported);
-                Ok(())
-            }
+            // §14.3: a `<clipPath>` is never rendered where it stands — it
+            // is reached by a `clip-path` reference and nowhere else, so
+            // walking into it here would draw every clip's own geometry as
+            // though it were a shape. `<defs>`'s reason exactly, and the
+            // reason `<linearGradient>` is beside it.
+            "clipPath" | "linearGradient" | "radialGradient" | "symbol" => Ok(()),
             "pattern" => {
                 self.warn(Warning::PatternUnsupported);
                 Ok(())
@@ -309,7 +312,12 @@ impl Walk<'_> {
             }
         };
         self.spend(outline.segments.len())?;
-        let style = &frame.style;
+        let style = frame.style.clone();
+        let style = &style;
+        // §7.11's object bounding box, in the element's **own** user space —
+        // which is what `objectBoundingBox` units are a fraction of, and why
+        // it is taken before the matrix rather than after.
+        let bounds = gradient::bounds(&outline);
         // §11.5: a hidden element is laid out and not painted, which for a
         // display list means it is not in it. Distinct from `display: none`
         // only in that a descendant could have turned it back on, and a
@@ -317,15 +325,29 @@ impl Walk<'_> {
         if !style.visible {
             return Ok(());
         }
-        let fill = self.paint(&style.fill, style);
-        let stroke_paint = self.paint(&style.stroke, style);
+        let fill = self.paint(&style.fill, style, matrix, bounds);
+        let stroke_paint = self.paint(&style.stroke, style, matrix, bounds);
+        // §14.3's clip, resolved against the same two numbers a gradient uses.
+        // A `clip-path` naming nothing is **not** a clip: §14.3.1 makes a
+        // reference to a non-existent element an error, and ruling 2 draws the
+        // element rather than losing it.
+        let clip = match &style.clip_path {
+            None => None,
+            Some(name) => match gradient::clip(self.tree, name, matrix, bounds, style) {
+                Some(clip) => Some(clip),
+                None => {
+                    self.warn(Warning::ClipPathUnsupported);
+                    None
+                }
+            },
+        };
         // §11.4: a stroke with no paint, no width or a zero width puts no ink
         // on the page. Answered here rather than carried, so a consumer never
         // has to decide whether a `Stroke` of width zero draws.
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {
-            Some(Stroke {
+            Some(Box::new(Stroke {
                 paint: stroke_paint,
                 width: style.stroke_width,
                 cap: style.cap,
@@ -334,7 +356,7 @@ impl Walk<'_> {
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
                 opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
-            })
+            }))
         };
         // §14.5's group opacity, flattened into each descendant's own alpha.
         // Named where it is observable: a shape painted **twice** — once
@@ -350,6 +372,7 @@ impl Walk<'_> {
             rule: style.fill_rule,
             fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
             stroke,
+            clip,
         })
     }
 
@@ -360,21 +383,38 @@ impl Walk<'_> {
     /// invention: a file that wrote `fill="url(#g) red"` said what to do when
     /// the server is missing, and a build that drew nothing would be ignoring
     /// the half of the value that was for exactly this.
-    fn paint(&mut self, spec: &PaintSpec, style: &Style) -> Paint {
+    fn paint(
+        &mut self,
+        spec: &PaintSpec,
+        style: &Style,
+        matrix: [f64; 6],
+        bounds: [f64; 4],
+    ) -> Paint {
         match spec {
             PaintSpec::None => Paint::None,
             PaintSpec::Solid(colour) => Paint::Solid(*colour),
             PaintSpec::Current => Paint::Solid(style.colour),
             PaintSpec::Reference(name, fallback) => {
-                let target = self
-                    .tree
-                    .by_id(name)
-                    .map(|at| self.tree.nodes[at].name.clone());
-                match target.as_deref() {
+                let target = self.tree.by_id(name);
+                let kind = target.map(|at| self.tree.nodes[at].name.as_str());
+                if let (Some(at), Some("linearGradient" | "radialGradient")) = (target, kind) {
+                    if let Some(resolved) = gradient::resolve(self.tree, at, matrix, bounds, style)
+                    {
+                        if resolved.spread_unsupported {
+                            self.warn(Warning::SpreadMethodUnsupported);
+                        }
+                        return resolved.paint;
+                    }
+                    // §13.2.4: a gradient with no stops paints **as if `none`
+                    // were specified** — which is not the same as falling
+                    // through to the fallback, because the server was found.
+                    return Paint::None;
+                }
+                match kind {
                     Some("pattern") => self.warn(Warning::PatternUnsupported),
                     _ => self.warn(Warning::PaintServerUnresolved),
                 }
-                self.paint(fallback, style)
+                self.paint(fallback, style, matrix, bounds)
             }
         }
     }

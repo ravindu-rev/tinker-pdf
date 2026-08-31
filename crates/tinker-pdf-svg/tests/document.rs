@@ -333,13 +333,17 @@ fn a_root_with_no_size_takes_the_viewport_it_was_given() {
 /// Asserted as a **set with a length**, so an element quietly added to the
 /// refused list without a warning fails here rather than passing a test about
 /// the ones that are left.
+///
+/// **`<clipPath>` left this list at milestone 4** and the fixture still holds
+/// one, which is the point: it is now reached by reference like a `<defs>`
+/// child and draws nothing where it stands, so an element that produced a
+/// warning here again would mean the walk had started rendering it.
 #[test]
 fn every_named_non_goal_is_a_warning_that_says_which() {
     let scene = scene(NON_GOALS, Some((100.0, 100.0)));
     let expected = [
         Warning::FilterUnsupported,
         Warning::MaskUnsupported,
-        Warning::ClipPathUnsupported,
         Warning::PatternUnsupported,
         Warning::ForeignObjectUnsupported,
         Warning::AnimationIgnored,
