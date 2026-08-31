@@ -108,14 +108,14 @@ const ZIPS: &[&str] = &[
 /// check of their own: what is worth asserting about a `.cbt` is not that it
 /// opens, it is that it opens as *the same five pictures* a `.cbz` of the same
 /// pages does.
-const READ_CONTAINERS: &[(&str, Container)] = &[("7z-tar.cbt", Container::Tar)];
+const READ_CONTAINERS: &[(&str, Container)] = &[
+    ("7z-tar.cbt", Container::Tar),
+    ("7z-lzma2.cb7", Container::SevenZip),
+];
 
 /// The containers this build recognises and still does not read, each refused
 /// by name.
-const NOT_READ: &[(&str, Container)] = &[
-    ("7z-lzma2.cb7", Container::SevenZip),
-    ("winrar-rar5.cbr", Container::Rar),
-];
+const NOT_READ: &[(&str, Container)] = &[("winrar-rar5.cbr", Container::Rar)];
 
 fn read(name: &str) -> Vec<u8> {
     let path = corpus().join(name);
@@ -289,9 +289,9 @@ fn five_zip_writers_produce_the_same_five_pictures() {
 /// They hold the same five pages as the five ZIPs beside them, and that is why
 /// they are committed before any decoder exists: when one arrives, the pictures
 /// it produces have something already in the tree to be compared against, put
-/// there by a different program. `7z-tar.cbt` left this list in the commit that
-/// gave it a reader and joined `READ_CONTAINERS`, which is the only way a row
-/// here is allowed to move.
+/// there by a different program. `7z-tar.cbt` and then `7z-lzma2.cb7` left this
+/// list in the commit that gave each a reader and joined `READ_CONTAINERS`,
+/// which is the only way a row here is allowed to move.
 #[test]
 fn the_containers_this_build_does_not_read_are_refused_by_name() {
     assert!(
@@ -339,6 +339,45 @@ fn the_tar_a_real_archiver_wrote_pages_in_natural_order() {
         report.warnings().is_empty(),
         "7-Zip's tar is not a damaged one: {:?}",
         report.warnings()
+    );
+    for (index, (page, width, height)) in PAGES.iter().enumerate() {
+        let bitmap = document
+            .page(index as u32)
+            .unwrap_or_else(|| panic!("page {index}"))
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (*width, *height),
+            "{page} is one image pixel to one PDF point"
+        );
+    }
+}
+
+/// **The `.cb7` a real archiver wrote opens, and the archive's own CRC-32 is
+/// what says its decompressor is right.**
+///
+/// This is the assertion tier 4's largest piece rests on. `7z-lzma2.cb7` was
+/// written by 7-Zip with `-m0=LZMA2` before this engine had an LZMA decoder,
+/// and it records a CRC-32 per file in its own header. So a wrong window, a
+/// mis-set probability array or an ignored LZMA2 dictionary reset fails the
+/// *format's* check inside `sevenz::Archive::read` and becomes a placeholder
+/// page — which means "every page is its entry's own picture" below is a
+/// statement about the decompressor and not only about the container.
+///
+/// It also exercises the part of the format that surprises: this archive's
+/// **header is itself compressed**, with plain LZMA rather than the LZMA2 its
+/// data uses, so listing these five names at all requires the other decoder.
+#[test]
+fn the_7z_a_real_archiver_wrote_pages_in_natural_order() {
+    let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
+    let document = Document::open(read("7z-lzma2.cb7")).expect("the .cb7 opens");
+    let report = document.archive().expect("a synthesised document");
+    let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(order, want, "the .cb7's page order");
+    assert!(
+        report.pages().iter().all(|page| page.defect.is_none()),
+        "every page is its entry's own picture rather than a placeholder: {:?}",
+        report.pages().iter().map(|p| p.defect).collect::<Vec<_>>()
     );
     for (index, (page, width, height)) in PAGES.iter().enumerate() {
         let bitmap = document

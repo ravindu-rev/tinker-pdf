@@ -194,6 +194,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "sevenz"
+path = "fuzz_targets/sevenz.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "png"
 path = "fuzz_targets/png.rs"
 test = false

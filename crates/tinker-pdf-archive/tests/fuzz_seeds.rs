@@ -1,7 +1,8 @@
-//! The committed `tar` fuzz seeds, replayed on stable.
+//! The committed `tar` and `sevenz` fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/tar/` is seven inputs written by this crate's own
-//! `write_the_fuzz_seeds`, and the target that consumes them needs nightly and
+//! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each, written
+//! by this crate's own `write_the_fuzz_seeds` tests, and the targets that
+//! consume them need nightly and
 //! a sanitizer runtime. So the seeds were only ever exercised when somebody
 //! ran `cargo fuzz`, which is not on every commit — and a seed corpus nothing
 //! reads is a corpus that stops describing the parser without anybody
@@ -30,7 +31,9 @@
 
 use std::path::{Path, PathBuf};
 
+use tinker_pdf_archive::sevenz;
 use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
+use tinker_pdf_filters::crc32;
 
 /// Every seed, by name, sorted so a failure names the same file on every
 /// machine (ruling 4).
@@ -39,7 +42,13 @@ use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
 /// without `fuzz/` looks like — the difference between "the corpus is empty"
 /// and "there is no corpus" is the one this returns.
 fn seeds() -> Option<Vec<(String, Vec<u8>)>> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/tar");
+    corpus("tar")
+}
+
+fn corpus(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus")
+        .join(target);
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -258,4 +267,143 @@ fn the_target_and_this_file_pick_the_same_bounds() {
         "if these ever coincide, the target stops exercising anything but the \
          shipped build under its own widest control byte"
     );
+}
+
+// ---- 7z ---------------------------------------------------------------------
+
+/// `fuzz_targets/sevenz.rs`'s own control-byte table, restated. See this
+/// file's header for why it is restated rather than shared.
+fn sevenz_bounds(knobs: u8) -> sevenz::Limits {
+    sevenz::Limits {
+        max_entries: match knobs & 3 {
+            0 => 1,
+            1 => 4,
+            2 => 64,
+            _ => 4096,
+        },
+        max_folders: match (knobs >> 2) & 3 {
+            0 => 1,
+            1 => 2,
+            2 => 16,
+            _ => 256,
+        },
+        max_coders: match (knobs >> 4) & 3 {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => 32,
+        },
+        max_unpacked: match (knobs >> 6) & 3 {
+            0 => 1 << 8,
+            1 => 1 << 12,
+            2 => 1 << 16,
+            _ => 1 << 22,
+        },
+        max_name_len: 1024,
+    }
+}
+
+/// Every committed 7z seed replays without a panic and with the target's
+/// invariants intact — including the one the whole container rests on, that a
+/// read which succeeds has the CRC-32 the archive recorded.
+#[test]
+fn the_committed_sevenz_seeds_replay() {
+    let Some(seeds) = corpus("sevenz") else {
+        println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
+        return;
+    };
+    let mut read_ok = 0usize;
+    let mut refused = 0usize;
+    let mut crc_checked = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = sevenz_bounds(control.first().copied().unwrap_or(0));
+        let Ok(mut archive) = sevenz::Archive::open(body, &limits) else {
+            refused += 1;
+            continue;
+        };
+        let listed: Vec<(String, u64, sevenz::Kind, Option<u32>)> = archive
+            .entries()
+            .iter()
+            .map(|e| (e.name.clone(), e.size, e.kind, e.crc))
+            .collect();
+        assert!(
+            listed.len() <= limits.max_entries,
+            "{name}: the entry cap was exceeded rather than refused"
+        );
+        let mut first: Vec<Option<Vec<u8>>> = vec![None; listed.len()];
+        for index in (0..listed.len()).rev() {
+            match archive.read(index) {
+                Ok(bytes) => {
+                    assert_eq!(
+                        bytes.len() as u64,
+                        listed[index].1,
+                        "{name}: a read returned a length other than the declared one"
+                    );
+                    if let Some(want) = listed[index].3 {
+                        assert_eq!(
+                            crc32(&bytes),
+                            want,
+                            "{name}: a read returned bytes whose CRC-32 is not the                              one the archive recorded"
+                        );
+                        crc_checked += 1;
+                    }
+                    first[index] = Some(bytes);
+                    read_ok += 1;
+                }
+                Err(sevenz::EntryError::NoSuchEntry) => {
+                    panic!("{name}: an index taken from the entry list was not an entry")
+                }
+                Err(_) => {}
+            }
+        }
+        // Forwards, so the folder cache is refilled in the other order. A
+        // cache that returned a stale block shows up here and nowhere else.
+        for (index, want) in first.iter().enumerate() {
+            assert_eq!(
+                &archive.read(index).ok(),
+                want,
+                "{name}: reading entry {index} twice gave two different answers"
+            );
+        }
+    }
+    println!("RAN: {} sevenz seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright", seeds.len());
+    assert_eq!(
+        seeds.len(),
+        7,
+        "the seed count changed; `write_the_fuzz_seeds` is what should have          changed it, and the new file needs a reason in that test's comment"
+    );
+    assert!(
+        crc_checked > 0,
+        "no seed reached a CRC check, so the corpus never exercises the one          assertion this container's verification argument rests on"
+    );
+    assert!(
+        refused > 0,
+        "no seed reaches a refusal, so the corpus never exercises the bounds"
+    );
+}
+
+/// The `crc-mismatch` seed **is** a mismatch.
+///
+/// A seed named for a defect that no longer carries it is worse than no seed:
+/// the corpus keeps its size and quietly stops covering the branch. This is
+/// the assertion that notices.
+#[test]
+fn the_crc_mismatch_seed_still_mismatches() {
+    let Some(seeds) = corpus("sevenz") else {
+        println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
+        return;
+    };
+    let Some((_, data)) = seeds.iter().find(|(name, _)| name == "crc-mismatch") else {
+        panic!("the crc-mismatch seed is missing");
+    };
+    let (_, body) = data.split_at(data.len().min(1));
+    let mut archive =
+        sevenz::Archive::open(body, &sevenz::Limits::DEFAULT).expect("the seed opens");
+    assert_eq!(
+        archive.read(0),
+        Err(sevenz::EntryError::CrcMismatch),
+        "the seed that exists to carry a flipped bit no longer carries one"
+    );
+    println!("RAN: the crc-mismatch seed refuses entry 0 by name");
 }

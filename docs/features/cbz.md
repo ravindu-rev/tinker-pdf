@@ -16,8 +16,8 @@ leaf crate that knows APPNOTE 6.3.10 and nothing else (ruling 8,
 PDF that happens to carry those four bytes inside a stream — an attachment, a
 compressed object, a font program — stays an ordinary PDF. RAR
 (`Rar!\x1A\x07`), 7z and tar (`ustar` at offset 257, where POSIX 1003.1 puts
-it) are recognised at fixed positions too. **A `.cbt` is read**; a `.cbr` and a
-`.cb7` are still refused by name, and by name matters: "this is a CBR and I do
+it) are recognised at fixed positions too. **A `.cbt` and a `.cb7` are read**;
+a `.cbr` is still refused by name, and by name matters: "this is a CBR and I do
 not read CBR" is a different sentence from "this is not a PDF". A ZIP
 is one signature over several formats, so the archive is opened **once** and
 asked what it is: ECMA-388 E.3's three-step test routes an XPS package first
@@ -58,6 +58,34 @@ multi-volume continuations are listed, so the page count stays honest, and
 refused at read. **Every tar entry is a contiguous byte range of the input**,
 so its `read` returns a plain borrow rather than a `Cow` — the strongest form
 of the no-copy property the whole design rests on.
+
+**A `.cb7` is a 7z of page images**, read by `tinker-pdf-archive`'s `sevenz`
+module over a hand-rolled LZMA and LZMA2 decoder — no `lzma-rs`, no
+`sevenz-rust`, and `deny.toml` names both so that reaching for one is a build
+failure rather than a judgement call (CONTRIBUTING rule 1).
+
+Two things about 7z are not like the other containers and both shape the API.
+A **folder** is the unit of decompression — a chain of coders turning packed
+bytes into one output stream — and a "solid" archive is one folder holding
+every file, so *there is no range of the input that is any one file*.
+`sevenz::Archive::read` therefore returns owned bytes and takes `&mut self`,
+and caches the block it last decompressed so a whole comic out of one solid
+block decompresses once rather than once per page. And **the header is itself
+compressed**: `kEncodedHeader` is a packed stream whose contents are the real
+header, so listing an archive requires decompressing first. 7-Zip writes that
+header with plain LZMA and the file data with LZMA2, which is why both front
+ends exist.
+
+**The archive's own CRC-32 is what adjudicates the decompressor.** 7z records
+one per file in its header, checked in `read` before any bytes are handed over,
+so a wrong window or an ignored LZMA2 dictionary reset fails the *format's*
+check and becomes a placeholder page rather than a picture with the wrong
+pixels in it. That is what let a hand-rolled LZMA decoder be written with no
+oracle to check it against (ruling 13); `docs/design/comic-archives.md` carries
+the argument. Coders read: Copy, LZMA, LZMA2 and Deflate — 7z method `040108`
+is RFC 1951 with no wrapper, exactly as ZIP method 8 is. Every other method is
+refused **by its own method id**, and a folder whose coder graph is not a chain
+(BCJ2 takes four input streams) is refused as that.
 
 **Pass-through is the design.** A non-interlaced PNG of colour type 0, 2 or 3
 passes through verbatim: its IDAT *is* a `/FlateDecode` stream with
@@ -218,12 +246,20 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 - `cbz::open_tar` and `cbz::pages_from_tar`, the same two halves for a `.cbt`,
   over `tinker_pdf_archive::tar::Archive` — `open`, `entries()`,
   `read(index)` (a plain borrow), `warnings()`.
+- `cbz::open_sevenz` and `cbz::pages_from_sevenz`, the same two halves for a
+  `.cb7`, over `tinker_pdf_archive::sevenz::Archive` — `open`, `entries()`,
+  `read(&mut self, index)` (**owned bytes**, with the recorded CRC-32 already
+  checked), `warnings()`.
 
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| CBR, CB7 | `ArchiveRefusal::NotAZip` | two more decompressors and neither of them a page *yet* — staged in [design/comic-archives.md](../design/comic-archives.md) | [roadmap](../ROADMAP.md) |
+| CBR | `ArchiveRefusal::NotAZip` | one more decompressor and it is not a page *yet* — staged in [design/comic-archives.md](../design/comic-archives.md) | [roadmap](../ROADMAP.md) |
+| A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd — so a host can say what to re-pack without | — |
+| A 7z folder that is not a chain of coders | `ArchiveRefusal::NotAZip` | BCJ2 takes four input streams; a reader that walked it as a chain would hand back a quarter of a file | — |
+| An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 is a named non-goal, as it is for ZIP | — |
+| A 7z entry whose recorded CRC-32 does not match | `PageDefect::SevenZipEntryRefused` | placeholder page; **this is the check that adjudicates the LZMA decoder**, so it is never tolerated | — |
 | A sparse or multi-volume tar entry | `PageDefect::TarEntryRefused(TarEntryError)` | placeholder page; a reader that ignored the flag hands back bytes in the wrong places, which is worse than a page that failed | — |
 | A tar with no `ustar` magic | `ArchiveRefusal::NotAZip` | the magic is the only signature tar has, so a reader that did not require it accepts anything | — |
 | Archive damaged past recovery | `ArchiveRefusal::Damaged` | structure present, nothing recoverable from either route | — |

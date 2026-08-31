@@ -587,7 +587,8 @@ impl Document {
     /// # Containers
     ///
     /// Bytes that **begin** with a container signature are not read as a PDF.
-    /// RAR, 7z and tar are refused by name. A ZIP is **one signature over five
+    /// A tar and a 7z become comic documents through `tinker-pdf-archive`
+    /// (tier 4); RAR is refused by name. A ZIP is **one signature over five
     /// formats**, so it is opened once and then asked what it is: an XPS
     /// package becomes a document whose pages are its fixed pages (gap 30), an
     /// EPUB becomes a document whose pages are its spine (gap 31), and anything
