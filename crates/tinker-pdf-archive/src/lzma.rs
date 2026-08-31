@@ -437,8 +437,8 @@ impl State {
                 } else {
                     out.last().copied().unwrap_or(0)
                 };
-                let context = (((total & lp_mask) << lc)
-                    + (u32::from(prev) >> (8 - lc).min(8))) as usize;
+                let context =
+                    (((total & lp_mask) << lc) + (u32::from(prev) >> (8 - lc).min(8))) as usize;
                 let base = context.saturating_mul(0x300);
                 let Some(probs) = self.literal.get_mut(base..base + 0x300) else {
                     return Err(Error::BadProperties);
@@ -594,12 +594,7 @@ impl State {
 ///
 /// # Errors
 /// [`Error`], one variant per way the input is not this.
-pub fn decode(
-    input: &[u8],
-    props: u8,
-    unpacked: usize,
-    limits: &Limits,
-) -> Result<Vec<u8>, Error> {
+pub fn decode(input: &[u8], props: u8, unpacked: usize, limits: &Limits) -> Result<Vec<u8>, Error> {
     if unpacked > limits.max_unpacked {
         return Err(Error::TooLarge);
     }

@@ -161,8 +161,8 @@ fn the_range_coder_round_trips_through_an_encoder_written_from_the_format() {
         ("a ramp", ramp.as_slice()),
     ] {
         let encoded = encode_literals(data);
-        let decoded = decode(&encoded, 0x5D, data.len(), &LIMITS)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let decoded =
+            decode(&encoded, 0x5D, data.len(), &LIMITS).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(decoded, data, "{name} did not survive the round trip");
     }
 }
@@ -204,7 +204,10 @@ fn properties_unpack_the_way_the_format_packs_them() {
         }),
         "0x5D is lc=3 lp=0 pb=2, which is what every 7z in this corpus carries"
     );
-    assert_eq!(accepted, 180, "the property bytes that are legal");
+    // 75 of the 256, which is worth pinning as a number: 225 encode at all,
+    // and the `lc + lp <= 4` rule throws away two thirds of those. A decoder
+    // that dropped the rule would allocate a 3 MiB literal table from one byte.
+    assert_eq!(accepted, 75, "the property bytes that are legal");
 }
 
 /// **An LZMA2 stream of uncompressed chunks is its own bytes**, which is the
@@ -264,7 +267,11 @@ fn an_lzma2_control_byte_the_format_does_not_define_is_refused() {
     // An LZMA chunk that asks to continue a stream whose properties were never
     // given. `0x80` is reset mode 0: no reset, no property byte.
     assert_eq!(
-        decode_lzma2(&[0x80, 0x00, 0x07, 0x00, 0x05, 0, 0, 0, 0, 0, 0], 8, &LIMITS),
+        decode_lzma2(
+            &[0x80, 0x00, 0x07, 0x00, 0x05, 0, 0, 0, 0, 0, 0],
+            8,
+            &LIMITS
+        ),
         Err(Error::BadChunk),
         "a chunk continuing a stream that never started"
     );
@@ -283,7 +290,10 @@ fn a_declared_size_past_the_cap_is_refused_before_it_allocates() {
         decode(&[0, 0, 0, 0, 0], 0x5D, 1_000_000, &tiny),
         Err(Error::TooLarge)
     );
-    assert_eq!(decode_lzma2(&[0x00], 1_000_000, &tiny), Err(Error::TooLarge));
+    assert_eq!(
+        decode_lzma2(&[0x00], 1_000_000, &tiny),
+        Err(Error::TooLarge)
+    );
     // And through a chunk that fits the declared total but not the cap.
     let mut stream = vec![0x01u8];
     stream.extend_from_slice(&99u16.to_be_bytes());
@@ -365,4 +375,106 @@ fn hostile_bytes_produce_answers_rather_than_panics() {
         answered += 1;
     }
     assert_eq!(answered, 2048, "every hostile input returned");
+}
+
+/// **A mid-stream dictionary reset restarts the literal context**, and the
+/// byte before the reset is not reachable from after it.
+///
+/// This test exists because a counted injection said nothing existed: making
+/// the literal context reach back past a dictionary reset was caught by
+/// **zero** tests in the workspace. The one real `.cb7` in the corpus is a
+/// single solid block whose only reset is at position 0 — where a decoder that
+/// reaches back finds nothing and is accidentally right — so the defect was
+/// live and invisible.
+///
+/// The fixture is two LZMA2 chunks, each with control reset mode 3: reset the
+/// dictionary, reset the state, and take a new property byte. Each chunk is
+/// therefore a complete literal-only LZMA stream starting from a clean model,
+/// which is exactly what [`encode_literals`] produces. A decoder that carried
+/// the last byte of chunk one into chunk two's literal context picks a
+/// different probability slot from the one the encoder used, and every byte
+/// after that diverges — so the second chunk comes back wrong while the first
+/// is perfect, which is the signature of this class of bug.
+#[test]
+fn a_dictionary_reset_restarts_the_literal_context() {
+    // Chosen so the last byte of the first chunk is far from the first byte of
+    // the second in the `lc = 3` context: `0xF0 >> 5` is 7 and `0x11 >> 5` is
+    // 0, so the wrong context is a different slot rather than the same one by
+    // luck.
+    let first: Vec<u8> = std::iter::repeat_n(0xF0u8, 600).collect();
+    let second: Vec<u8> = (0..600u32).map(|i| 0x11u8.wrapping_add(i as u8)).collect();
+
+    let mut stream = Vec::new();
+    for (index, chunk) in [&first, &second].into_iter().enumerate() {
+        let packed = encode_literals(chunk);
+        // Control: 0x80 | (reset 3 << 5) | the top five bits of size - 1.
+        let unpacked = chunk.len() - 1;
+        stream.push(0x80 | (3 << 5) | ((unpacked >> 16) as u8 & 0x1F));
+        stream.extend_from_slice(&((unpacked & 0xFFFF) as u16).to_be_bytes());
+        stream.extend_from_slice(&((packed.len() - 1) as u16).to_be_bytes());
+        stream.push(0x5D); // lc = 3, lp = 0, pb = 2
+        stream.extend_from_slice(&packed);
+        assert!(index < 2);
+    }
+    stream.push(0x00);
+
+    let want: Vec<u8> = [first.as_slice(), second.as_slice()].concat();
+    let got = decode_lzma2(&stream, want.len(), &LIMITS);
+    assert_eq!(
+        got.as_deref(),
+        Ok(want.as_slice()),
+        "two dictionary-reset chunks did not decode to their own bytes"
+    );
+}
+
+/// A **state** reset is not a dictionary reset, and the two are different
+/// control values for a reason.
+///
+/// Control reset mode 1 resets the probability model and leaves the dictionary
+/// alone, so a match in the second chunk may still reach back into the first.
+/// A decoder that treated mode 1 as mode 3 would move `dict_start` forward and
+/// refuse that match as [`Error::DistanceTooFar`] — turning a legal archive
+/// into a damaged one. Literals-only chunks cannot show the match half, so
+/// what is asserted here is the half they can: the position counter keeps
+/// running across a state reset and restarts across a dictionary reset, which
+/// is what picks `pos_state` and therefore which probability slot every symbol
+/// uses.
+#[test]
+fn a_state_reset_and_a_dictionary_reset_are_not_the_same_control() {
+    let body: Vec<u8> = b"the quick brown fox jumps over the lazy dog. "
+        .iter()
+        .copied()
+        .cycle()
+        .take(700)
+        .collect();
+    let packed = encode_literals(&body);
+    let unpacked = body.len() - 1;
+
+    // The same chunk under both control values. Only mode 3 can decode here,
+    // because `encode_literals` always starts its position counter at zero --
+    // which *is* the difference the two modes name.
+    let framed = |mode: u8| {
+        let mut stream = vec![0x80 | (mode << 5) | ((unpacked >> 16) as u8 & 0x1F)];
+        stream.extend_from_slice(&((unpacked & 0xFFFF) as u16).to_be_bytes());
+        stream.extend_from_slice(&((packed.len() - 1) as u16).to_be_bytes());
+        stream.push(0x5D);
+        stream.extend_from_slice(&packed);
+        stream.push(0x00);
+        decode_lzma2(&stream, body.len(), &LIMITS)
+    };
+    assert_eq!(
+        framed(3).as_deref(),
+        Ok(body.as_slice()),
+        "a dictionary-reset chunk decodes to its own bytes"
+    );
+    // Mode 2 -- new properties, state reset, no dictionary reset -- is the same
+    // stream at the same position, because this is the first chunk and the
+    // dictionary is empty either way. The two agreeing *here* is what makes the
+    // disagreement in the test above a fact about the reset rather than about
+    // the framing.
+    assert_eq!(
+        framed(2).as_deref(),
+        Ok(body.as_slice()),
+        "the first chunk of a stream is at position zero under either reset"
+    );
 }

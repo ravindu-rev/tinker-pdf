@@ -11,17 +11,50 @@
 //!
 //! # Injection, counted
 //!
-//! Six defects were reintroduced across this module and [`crate::lzma`], and
-//! the suite run to see what caught them. The counts are of the 1 2xx tests in
+//! Eleven defects were reintroduced across this module and [`crate::lzma`] and
+//! the suite run to see what caught them. Counts are of the 1 2xx tests in
 //! `tinker-pdf-archive` and `tinker-pdf` together, which is every test in the
 //! workspace that can reach this code.
 //!
-//! The table lives in `docs/design/comic-archives.md` beside the tar one,
-//! because the interesting row is a comparison between them: the tar defects
-//! are caught by two or three assertions each and the 7z ones by a dozen,
-//! and the difference is entirely the CRC-32 — a container that checks itself
-//! catches its own decompressor's mistakes, and one that does not needs a
-//! test per property.
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the entry CRC-32 not checked before the bytes are handed over | **1** |
+//! | the start header's own CRC-32 not checked | **1** |
+//! | `NUMBER`'s high bits read as the *low* part of the value | **2** |
+//! | a substream's last size listed rather than inferred from the folder | **2** |
+//! | an empty stream always a directory, never an empty file | **1** |
+//! | the matched-literal path never taken (`state >= 7` ignored) | **2** |
+//! | the four remembered distances rotated the wrong way | **2** |
+//! | a match's length not offset by the two-byte minimum | **2** |
+//! | the distance model skipping its four alignment bits | **2** |
+//! | the probability adaptation rate 1/16 instead of 1/32 | **2** |
+//! | an LZMA2 dictionary reset not resetting the literal context | **0**, then **1** |
+//!
+//! **The five decoder rows are the argument for this whole lane.** Each of
+//! them — the matched literal, the rep rotation, the length offset, the
+//! alignment bits, the adaptation rate — is caught by exactly two tests, and
+//! in every case the two are `cbz_real.rs`'s `.cb7` checks and *no unit test
+//! at all*. Nothing in this file asserts anything about an LZMA distance. What
+//! catches them is `7z-lzma2.cb7`'s own recorded CRC-32, checked inside
+//! [`super::Archive::read`]: a decompressor that is wrong fails the format's
+//! check and the page becomes a placeholder. That is what let a hand-rolled
+//! LZMA decoder be written with no oracle to disagree with (ruling 13), and
+//! the table is the measurement of it rather than the claim.
+//!
+//! **The last row is why this practice is worth its cost.** Making the literal
+//! context reach back past an LZMA2 dictionary reset was caught by **zero**
+//! tests. The defect is real — the models diverge from that byte on — and it
+//! was invisible because the one `.cb7` here is a single solid block whose
+//! only reset is at position 0, where reaching back finds nothing and a wrong
+//! decoder is accidentally right. `a_dictionary_reset_restarts_the_literal_context`
+//! in `lzma/tests.rs` is the fixture that reaches it, written *because* the
+//! count came back zero, and the row's second number is that test.
+//!
+//! The two CRC rows being **1** is not a weakness and is worth reading
+//! correctly: removing a check cannot fail a decode that was already correct,
+//! so what catches it is the one test that hands it a deliberately wrong
+//! archive. Their value is measured by the five rows above them, not by their
+//! own.
 
 use super::*;
 
@@ -216,7 +249,11 @@ fn a_stored_archive_lists_its_files_and_hands_their_bytes_back() {
     let files: &[Line<'_>] = &[
         ("page1.png", b"the first page", As::File),
         ("page10.png", b"the tenth", As::File),
-        ("page2.png", b"the second page, longer than the others", As::File),
+        (
+            "page2.png",
+            b"the second page, longer than the others",
+            As::File,
+        ),
     ];
     let bytes = archive(files);
     let mut a = open(&bytes);
@@ -224,7 +261,7 @@ fn a_stored_archive_lists_its_files_and_hands_their_bytes_back() {
     let names: Vec<&str> = a.entries().iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["page1.png", "page10.png", "page2.png"]);
     let sizes: Vec<u64> = a.entries().iter().map(|e| e.size).collect();
-    assert_eq!(sizes, [14, 9, 38]);
+    assert_eq!(sizes, [14, 9, 39]);
     assert!(
         a.entries().iter().all(|e| e.crc.is_some()),
         "every entry carries the CRC the archive recorded"
@@ -237,7 +274,11 @@ fn a_stored_archive_lists_its_files_and_hands_their_bytes_back() {
     for (index, (_, want, _)) in files.iter().enumerate().rev() {
         assert_eq!(a.read(index).as_deref(), Ok(*want), "entry {index} again");
     }
-    assert_eq!(a.warnings(), &[], "a well-formed archive warns about nothing");
+    assert_eq!(
+        a.warnings(),
+        &[],
+        "a well-formed archive warns about nothing"
+    );
 }
 
 /// **An entry whose recorded CRC-32 does not match is refused, not returned.**
@@ -317,7 +358,12 @@ fn a_coder_this_build_does_not_read_is_refused_by_its_method_id() {
     let files: &[Line<'_>] = &[("page1.png", b"a page", As::File)];
     let packed = b"a page".to_vec();
 
-    let ppmd = archive_with(files, &[0x03, 0x04, 0x01], &[0x05, 0, 0, 0, 0], packed.clone());
+    let ppmd = archive_with(
+        files,
+        &[0x03, 0x04, 0x01],
+        &[0x05, 0, 0, 0, 0],
+        packed.clone(),
+    );
     assert_eq!(
         Archive::open(&ppmd, &Limits::DEFAULT).err(),
         Some(Error::UnsupportedCoder {
@@ -333,7 +379,12 @@ fn a_coder_this_build_does_not_read_is_refused_by_its_method_id() {
         "and in the sentence a host would show"
     );
 
-    let aes = archive_with(files, &[0x06, 0xF1, 0x07, 0x01], &[0x53, 0x07], packed.clone());
+    let aes = archive_with(
+        files,
+        &[0x06, 0xF1, 0x07, 0x01],
+        &[0x53, 0x07],
+        packed.clone(),
+    );
     assert_eq!(
         Archive::open(&aes, &Limits::DEFAULT).err(),
         Some(Error::Encrypted),
@@ -430,7 +481,10 @@ fn directories_and_empty_files_are_told_apart_and_neither_is_read() {
     let kinds: Vec<Kind> = a.entries().iter().map(|e| e.kind).collect();
     assert_eq!(kinds, [Kind::Directory, Kind::File, Kind::EmptyFile]);
     assert!(a.entries()[0].is_directory());
-    assert!(!a.entries()[2].is_directory(), "an empty file is not a folder");
+    assert!(
+        !a.entries()[2].is_directory(),
+        "an empty file is not a folder"
+    );
     assert_eq!(a.read(0), Err(EntryError::NotAFile));
     assert_eq!(a.read(1).as_deref(), Ok(&b"a page"[..]));
     assert_eq!(
@@ -475,17 +529,34 @@ fn every_cap_is_refused_by_name_and_can_actually_fire() {
         "three entries under a cap of two"
     );
 
+    // `max_unpacked` bounds two different things -- the compressed header and
+    // a folder's output -- so exercising the *folder* half needs an archive
+    // whose folder is bigger than its header, which the three-word one above
+    // is not. Hence a second fixture rather than a second cap.
+    let big: Vec<u8> = vec![b'x'; 4096];
+    let fat = archive(&[
+        ("page1.png", big.as_slice(), As::File),
+        ("page2.png", big.as_slice(), As::File),
+    ]);
     let tiny = Limits {
-        max_unpacked: 4,
+        max_unpacked: 1024,
         ..Limits::DEFAULT
     };
-    // Refused at open, because the header's own size is measured against the
-    // same cap, and a folder past it never reaches an allocation.
-    let mut a = Archive::open(&bytes, &tiny).expect("a small header still opens");
+    let mut a = Archive::open(&fat, &tiny).expect("a header under the cap still opens");
     assert_eq!(
         a.read(0),
         Err(EntryError::TooLarge),
-        "an 11-byte folder under a cap of 4"
+        "an 8 KiB folder under a cap of 1 KiB"
+    );
+    // And the header half: a cap below the header's own length refuses at open,
+    // before the two `u64`s in the start header are used to slice anything.
+    let no_header = Limits {
+        max_unpacked: 4,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        Archive::open(&bytes, &no_header).err(),
+        Some(Error::HeaderOutOfRange)
     );
 
     let one_coder = Limits {
@@ -546,8 +617,8 @@ fn an_entry_with_no_recorded_crc_is_warned_about() {
         .expect("the substream CRC record");
     bytes[at + 1] = 0x00; // not all defined
     bytes[at + 2] = 0x00; // the bit vector: one entry, not defined
-    // The four CRC bytes that followed are now two spare bytes plus `kEnd`,
-    // `kEnd`; rebuild the header CRC over whatever that leaves.
+                          // The four CRC bytes that followed are now two spare bytes plus `kEnd`,
+                          // `kEnd`; rebuild the header CRC over whatever that leaves.
     let header_at = SIGNATURE_HEADER + 6;
     let header = bytes[header_at..].to_vec();
     let crc = crc32(&header).to_le_bytes();
@@ -633,14 +704,11 @@ fn hostile_headers_produce_answers_rather_than_panics() {
         for mask in [0x01u8, 0x80, 0xFF] {
             let mut bytes = good.clone();
             bytes[at] ^= mask;
-            match Archive::open(&bytes, &Limits::DEFAULT) {
-                Ok(mut a) => {
-                    opened += 1;
-                    for index in 0..a.entries().len().min(16) {
-                        let _ = a.read(index);
-                    }
+            if let Ok(mut a) = Archive::open(&bytes, &Limits::DEFAULT) {
+                opened += 1;
+                for index in 0..a.entries().len().min(16) {
+                    let _ = a.read(index);
                 }
-                Err(_) => {}
             }
             answered += 1;
         }

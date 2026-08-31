@@ -352,13 +352,13 @@ refusal table.
   refuses the format at the element, which is the same shape TIFF was in
   before it was wired; remote resource-dictionary parts; `IsSideways` and
   odd `BidiLevel`.
-- **CBZ** ([features/cbz.md](features/cbz.md)): CBR and CB7, sized
-  honestly — each means a hand-rolled decompressor, and **RAR 4 has no
-  fixture this machine can produce**, so it closes as decoded-but-
-  unadjudicated by name or not at all. A design doc is owed with the
-  decoders. **CBT is done**: `7z-tar.cbt` joins the five ZIPs in
-  `cbz_real.rs`'s cross-producer identity and renders the same five
-  pictures, which is the exit criterion the whole lane is held to.
+- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, sized honestly — a
+  hand-rolled decompressor, and **RAR 4 has no fixture this machine can
+  produce**, so it closes as decoded-but-unadjudicated by name or not at
+  all. A design doc is owed with the decoders. **CBT and CB7 are done**:
+  `7z-tar.cbt` and `7z-lzma2.cb7` join the five ZIPs in `cbz_real.rs`'s
+  cross-producer identity and render the same five pictures, which is the
+  exit criterion the whole lane is held to.
 
 ## How this file changes
 

@@ -12,8 +12,14 @@
 //!
 //! # The rule this crate is organised by, written down because it is unusual
 //!
-//! **One crate, three modules, three error enums, three entry types, and no
-//! trait over them.**
+//! **One crate, three container modules, three error enums, three entry types,
+//! and no trait over them.**
+//!
+//! [`lzma`] is a fourth module and is not one of the three: it is the
+//! compression [`sevenz`] carries rather than a container, it has no `Archive`
+//! and no entries, and it is public because a `.7z`'s coder list names it and
+//! a caller reading a refusal deserves to reach the error type that refusal
+//! carries.
 //!
 //! What [`tar`], `sevenz` and `rar` have in common is a *negative* — they
 //! are the archive containers that are not ZIP — which is a weaker binding
@@ -72,4 +78,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod lzma;
+pub mod sevenz;
 pub mod tar;

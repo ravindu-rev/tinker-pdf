@@ -43,9 +43,15 @@
 //! fact about tar rather than about this file: the format has no checksum over
 //! file data at all — only one over each header — so there is nothing here
 //! that adjudicates a *name* or a *size* except an assertion that names it.
-//! `sevenz` and `rar` both record a per-entry CRC-32 and their tables are
-//! denser for exactly that reason; `docs/design/comic-archives.md` sets the
-//! three side by side.
+//!
+//! `sevenz`'s table is the comparison worth making, and the difference is not
+//! that its numbers are bigger — they are also mostly ones and twos. It is
+//! *which* defects the corpus catches. Five separate defects injected into the
+//! LZMA decoder are each caught by the two `.cb7` tests and by no unit test at
+//! all, because the archive's own CRC-32 rules on the decompressed bytes. tar
+//! has no equivalent: only the walk is corpus-visible, and everything a single
+//! header says has to be asserted by hand. `docs/design/comic-archives.md`
+//! sets the three containers side by side.
 
 use super::*;
 

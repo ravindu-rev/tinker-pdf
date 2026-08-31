@@ -411,8 +411,8 @@ impl<'a> Archive<'a> {
                 let mut at = 1usize;
                 let (folders, _) = streams_info(header, &mut at, bytes, limits, &mut warnings)?;
                 let folder = folders.first().ok_or(Error::BadHeader)?;
-                decoded = decode_folder(bytes, folder, limits)
-                    .map_err(|_| Error::HeaderNotDecodable)?;
+                decoded =
+                    decode_folder(bytes, folder, limits).map_err(|_| Error::HeaderNotDecodable)?;
                 if let Some(want) = folder.crc {
                     if crc32(&decoded) != want {
                         return Err(Error::HeaderCrcMismatch);
@@ -553,7 +553,11 @@ fn run_coder(
         [0x21] => lzma::decode_lzma2(input, out_size, &limits.lzma()).map_err(FolderError::Lzma),
         // LZMA.
         [0x03, 0x01, 0x01] => {
-            let props = coder.props.first().copied().ok_or(FolderError::Unsupported)?;
+            let props = coder
+                .props
+                .first()
+                .copied()
+                .ok_or(FolderError::Unsupported)?;
             lzma::decode(input, props, out_size, &limits.lzma()).map_err(FolderError::Lzma)
         }
         // Deflate: 7z method `040108` is RFC 1951 with no wrapper, exactly as
@@ -564,7 +568,10 @@ fn run_coder(
             if r.capped {
                 return Err(FolderError::TooLarge);
             }
-            Ok(r.bytes)
+            // A stream that ended early is still an answer here: the folder's
+            // own CRC-32 is checked one layer up, so short bytes fail the
+            // format's check rather than being handed over as a page.
+            Ok(r.data)
         }
         _ => Err(FolderError::Unsupported),
     }
@@ -741,8 +748,8 @@ fn unpack_info(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Vec<Folder>,
         return Err(Error::BadHeader);
     }
     *at += 1;
-    let count = usize::try_from(number(h, at).ok_or(Error::BadHeader)?)
-        .map_err(|_| Error::BadHeader)?;
+    let count =
+        usize::try_from(number(h, at).ok_or(Error::BadHeader)?).map_err(|_| Error::BadHeader)?;
     if count > limits.max_folders {
         return Err(Error::TooManyEntries);
     }
@@ -788,8 +795,8 @@ fn unpack_info(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Vec<Folder>,
 
 /// One folder's coder list and bind pairs.
 fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
-    let count = usize::try_from(number(h, at).ok_or(Error::BadHeader)?)
-        .map_err(|_| Error::BadHeader)?;
+    let count =
+        usize::try_from(number(h, at).ok_or(Error::BadHeader)?).map_err(|_| Error::BadHeader)?;
     if count == 0 || count > limits.max_coders {
         return Err(Error::TooManyEntries);
     }
@@ -1007,8 +1014,8 @@ fn files_info(
     limits: &Limits,
     warnings: &mut Vec<Warning>,
 ) -> Result<Vec<Entry>, Error> {
-    let count = usize::try_from(number(h, at).ok_or(Error::BadHeader)?)
-        .map_err(|_| Error::BadHeader)?;
+    let count =
+        usize::try_from(number(h, at).ok_or(Error::BadHeader)?).map_err(|_| Error::BadHeader)?;
     if count > limits.max_entries {
         return Err(Error::TooManyEntries);
     }
@@ -1029,7 +1036,9 @@ fn files_info(
         let body = h.get(*at..end).ok_or(Error::BadHeader)?;
         let mut inner = 0usize;
         match u8::try_from(kind).unwrap_or(0xFF) {
-            K_EMPTY_STREAM => empty_stream = bits(body, &mut inner, count).ok_or(Error::BadHeader)?,
+            K_EMPTY_STREAM => {
+                empty_stream = bits(body, &mut inner, count).ok_or(Error::BadHeader)?
+            }
             K_EMPTY_FILE => {
                 let n = empty_stream.iter().filter(|b| **b).count();
                 empty_file = bits(body, &mut inner, n).ok_or(Error::BadHeader)?;
@@ -1043,12 +1052,7 @@ fn files_info(
                 if external != 0 {
                     return Err(Error::BadHeader);
                 }
-                names = utf16_names(
-                    body.get(1..).unwrap_or_default(),
-                    count,
-                    limits,
-                    warnings,
-                );
+                names = utf16_names(body.get(1..).unwrap_or_default(), count, limits, warnings);
             }
             K_DUMMY => {}
             _ => ignored = true,
@@ -1147,7 +1151,11 @@ fn bits(input: &[u8], at: &mut usize, count: usize) -> Option<Vec<bool>> {
     *at += bytes;
     Some(
         (0..count)
-            .map(|i| slice.get(i / 8).is_some_and(|b| (b >> (7 - i % 8)) & 1 == 1))
+            .map(|i| {
+                slice
+                    .get(i / 8)
+                    .is_some_and(|b| (b >> (7 - i % 8)) & 1 == 1)
+            })
             .collect(),
     )
 }
