@@ -428,14 +428,14 @@ fn write_fuzz_seeds() {
     for spec in RASTERS {
         let from = dir.join(format!("{}.jxr", spec.name));
         if let Ok(bytes) = std::fs::read(&from) {
-            std::fs::write(corpus.join(format!("{}.jxr", spec.name)), &bytes)
+            std::fs::write(corpus.join(format!("{}.jxr", spec.name)), seed(&bytes))
                 .expect("writing a seed");
             written += 1;
             // The bare codestream is a second entry point (`jxr_decode`
             // accepts one without a container), and a fuzzer reaching it only
             // through the container would never explore clause 8 directly.
             if let Some(cs) = codestream_of(&bytes) {
-                std::fs::write(corpus.join(format!("{}.codestream", spec.name)), cs)
+                std::fs::write(corpus.join(format!("{}.codestream", spec.name)), seed(cs))
                     .expect("writing a codestream seed");
                 written += 1;
             }
@@ -449,6 +449,26 @@ fn write_fuzz_seeds() {
         written > 0,
         "no fixtures to seed from: run make-fixtures.ps1 first"
     );
+}
+
+/// Prefixes the knob byte `fuzz/fuzz_targets/jxr.rs` eats.
+///
+/// **This is not decoration and it was missing.** The target reads `data[0]`
+/// as knobs and decodes `data[1..]`, so a seed written as the raw file has
+/// its first byte swallowed and can never decode — the magic is broken before
+/// the decoder sees it. `tests/jxr_seeds.rs` measured exactly that: forty-two
+/// seeds, eighty-four decode attempts, **zero successes**. A corpus that only
+/// ever exercises the refusal paths is half a corpus, and the half it was
+/// missing is the one where the parsers actually run.
+///
+/// `0x03` selects the largest of the target's four output ceilings and leaves
+/// its two wrapping bits clear, so the body is handed to `jxr_decode` exactly
+/// as it is here — which is what makes an Annex A seed an Annex A file and a
+/// codestream seed a codestream.
+fn seed(body: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x03];
+    out.extend_from_slice(body);
+    out
 }
 
 /// Pulls the `CODED_IMAGE( )` out of an Annex A file by finding 8.3.2's
