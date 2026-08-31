@@ -644,7 +644,11 @@ fn emit(
                 let baseline = item.y + offset + line.baseline;
                 for run in &line.runs {
                     let mut run = run.clone();
-                    run.y = baseline;
+                    // **Added, not assigned.** A run's `y` inside a line box is
+                    // CSS 2.2 §10.8.1's shift from the baseline, which
+                    // [`LineBox`] documents and `vertical-align` is; this is
+                    // where the two become one number on a page.
+                    run.y += baseline;
                     out.runs.push(run);
                 }
             }
@@ -705,7 +709,11 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                 let baseline = item.y + offset + line.baseline;
                 for run in &line.runs {
                     let mut run = run.clone();
-                    run.y = baseline;
+                    // **Added, not assigned.** A run's `y` inside a line box is
+                    // CSS 2.2 §10.8.1's shift from the baseline, which
+                    // [`LineBox`] documents and `vertical-align` is; this is
+                    // where the two become one number on a page.
+                    run.y += baseline;
                     out.runs.push(run);
                 }
             }

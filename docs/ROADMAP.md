@@ -346,10 +346,12 @@ refusal table.
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
   the pinned float reading-order defect; multi-column; non-static
-  `position`; `vertical-align`; SVG content documents; pseudo-elements
-  (parsed, no box generated). `min`/`max` sizing is built, less one half
-  of §10.7: a `max-height` shorter than its content is named
-  (`MaxHeightAsAuto`) rather than obeyed.
+  `position`; SVG content documents; pseudo-elements (parsed, no box
+  generated); `css-cascade-5` §7.1's five explicit defaulting keywords,
+  on every property. `min`/`max` sizing is built, less one half of
+  §10.7: a `max-height` shorter than its content is named
+  (`MaxHeightAsAuto`) rather than obeyed. `vertical-align` is built,
+  §10.8.1 and §17.5.3 both.
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).

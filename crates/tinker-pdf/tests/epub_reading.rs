@@ -802,6 +802,15 @@ fn a_same_document_reference_reaches_the_page_it_points_at() {
 /// exactly that: `vertical-align` was 101, 96, 92, 49, 18 and 18 across the six
 /// books and is 0, 0, 0, 0, 16 and 16, and `max-width` was 3 on
 /// `pandoc-plates.epub` and is gone.
+///
+/// **The two sixteens are not `vertical-align` and no milestone that
+/// implements it will move them.** They are `vertical-align: inherit`, on
+/// calibre's table rows and cells: `css-cascade-5` §7.1's explicit defaulting
+/// keywords are unimplemented for every property, and decision 5 counts them
+/// against the property the keyword was written on. The milestone that built
+/// §10.8.1 and §17.5.3 left this file byte for byte unchanged, which is the
+/// census working rather than the census failing — a property gap and a value
+/// gap are two things, and this file has never distinguished them by name.
 #[test]
 fn the_unsupported_census_is_the_one_the_record_states() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

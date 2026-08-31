@@ -14,7 +14,7 @@ use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, Display,
     FlexDirection, FlexWrap, Float, JustifyContent, LengthPercentage, LineHeight, ListStyleType,
     MarginValue, MaxSize, MinSize, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size,
-    TextAlign, Visibility, WhiteSpace,
+    TextAlign, VerticalAlign, Visibility, WhiteSpace,
 };
 
 use crate::flex;
@@ -3122,6 +3122,281 @@ fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
         laid.warnings
     );
     assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- CSS 2.2 §10.8.1 and §17.5.3, `vertical-align` -------------------------
+//
+// The arithmetic throughout: a ten-point font is eight points of ascent and
+// two of descent, `line-height: normal` is 1.2, so the half-leading is one
+// point and an inline box is nine points over its baseline and three under.
+// A twenty-point font is eighteen and six.
+
+/// A run of text at its own size and alignment, which is what makes it a span
+/// of its own rather than part of the paragraph's.
+fn inline_at(body: &str, size: f64, align: VerticalAlign) -> BoxNode {
+    let mut style = base();
+    style.font_size = size;
+    style.vertical_align = align;
+    BoxNode::text(style, body)
+}
+
+/// One plain run and one aligned one, and the distance between their
+/// baselines, which is the whole of what `vertical-align` decides.
+fn shift_of(size: f64, align: VerticalAlign) -> f64 {
+    let tree = BoxNode::element(block(), vec![text("a"), inline_at("b", size, align)]);
+    let laid = run(&tree, 400.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert_eq!(ys.len(), 2, "{ys:?}");
+    ys[1] - ys[0]
+}
+
+/// §10.8.1: `super` raises the box and `sub` lowers it, and **not by the same
+/// amount** — a descender has less room under a baseline than an ascender has
+/// over it. Both offsets are undefined by §10.8.1 and named in `flow.rs`.
+#[test]
+fn super_raises_a_run_and_sub_lowers_it_by_a_different_amount() {
+    assert!(
+        close(shift_of(10.0, VerticalAlign::Super), -10.0 / 3.0),
+        "{}",
+        shift_of(10.0, VerticalAlign::Super)
+    );
+    assert!(
+        close(shift_of(10.0, VerticalAlign::Sub), 2.0),
+        "{}",
+        shift_of(10.0, VerticalAlign::Sub)
+    );
+}
+
+/// §10.8.1: a **positive** length raises the box, which is the one place this
+/// module's downward `y` and the specification's wording disagree in sign.
+///
+/// A build that dropped the flip puts every `vertical-align: 0.2em` marker
+/// below the line instead of above it, and the page still reads.
+#[test]
+fn a_positive_vertical_align_length_raises_the_box() {
+    assert!(
+        close(
+            shift_of(10.0, VerticalAlign::Length(LengthPercentage::Px(5.0))),
+            -5.0
+        ),
+        "{}",
+        shift_of(10.0, VerticalAlign::Length(LengthPercentage::Px(5.0)))
+    );
+}
+
+/// §10.8.1: `text-top` aligns the top of the box with the top of the
+/// **parent's content area**, and `text-bottom` the bottoms.
+///
+/// A five-point run in a ten-point paragraph: four points of ascent against
+/// eight, so its baseline rises four; one point of descent against two, so it
+/// falls one. Two different numbers from one fixture, which is what makes it a
+/// test of the clause rather than of a sign.
+#[test]
+fn text_top_and_text_bottom_are_the_parents_content_area() {
+    assert!(
+        close(shift_of(5.0, VerticalAlign::TextTop), -4.0),
+        "{}",
+        shift_of(5.0, VerticalAlign::TextTop)
+    );
+    assert!(
+        close(shift_of(5.0, VerticalAlign::TextBottom), 1.0),
+        "{}",
+        shift_of(5.0, VerticalAlign::TextBottom)
+    );
+}
+
+/// §10.8.1: `middle` puts the box's midpoint on the parent's baseline plus
+/// half the parent's x-height.
+///
+/// Half of ten points of font is five of x-height by this build's stated
+/// approximation, so two and a half above the baseline; a five-point run's
+/// midpoint is one and a half above its own. The difference is one point up.
+#[test]
+fn middle_is_the_parents_baseline_plus_half_an_x_height() {
+    assert!(
+        close(shift_of(5.0, VerticalAlign::Middle), -1.0),
+        "{}",
+        shift_of(5.0, VerticalAlign::Middle)
+    );
+}
+
+/// §10.8.1: `top` and `bottom` are aligned to the **line box**, which is why
+/// they cannot be decided when the box is met.
+///
+/// A five-point run is four and a half over its baseline and one and a half
+/// under; the line box is nine over and three under. `top` puts its top on the
+/// line's, so its baseline sits four and a half below the paragraph's; `bottom`
+/// puts its bottom on the line's, one and a half below.
+#[test]
+fn top_and_bottom_are_aligned_to_the_line_box() {
+    assert!(
+        close(shift_of(5.0, VerticalAlign::Top), -4.5),
+        "{}",
+        shift_of(5.0, VerticalAlign::Top)
+    );
+    assert!(
+        close(shift_of(5.0, VerticalAlign::Bottom), 1.5),
+        "{}",
+        shift_of(5.0, VerticalAlign::Bottom)
+    );
+}
+
+/// §10.8.1: a raised box **grows the line box**, because the line box is the
+/// extent of everything on it.
+///
+/// Without this the superscript is drawn over the line above and the paragraph
+/// is exactly as tall as it was, which is a page that looks right until two
+/// lines are close together.
+#[test]
+fn a_raised_box_makes_its_line_taller() {
+    let plain = BoxNode::element(tinted(block()), vec![text("a"), text("b")]);
+    let raised = BoxNode::element(
+        tinted(block()),
+        vec![text("a"), inline_at("b", 10.0, VerticalAlign::Super)],
+    );
+    let height = |tree: BoxNode| {
+        let laid = run(&BoxNode::element(block(), vec![tree]), 400.0, 400.0);
+        laid.pages[0].boxes[0].height
+    };
+    let flat = height(plain);
+    assert!(close(flat, 12.0), "{flat}");
+    // Nine over the baseline plus the three and a third the superscript rose,
+    // and three under it.
+    let tall = height(raised);
+    assert!(close(tall, 12.0 + 10.0 / 3.0), "{tall}");
+}
+
+/// And a `top`-aligned box taller than the line grows it **downward**, which
+/// is what keeps the edge it was aligned to where it was put.
+///
+/// A twenty-point run is eighteen over and six under, twenty-four in all,
+/// against a line that is nine over and three under. Aligned to the top, the
+/// nine over is kept and the three under becomes fifteen — and its own
+/// baseline lands nine below the paragraph's.
+#[test]
+fn a_tall_top_aligned_box_grows_the_line_downward() {
+    let tree = BoxNode::element(
+        tinted(block()),
+        vec![text("a"), inline_at("b", 20.0, VerticalAlign::Top)],
+    );
+    let laid = run(&BoxNode::element(block(), vec![tree]), 400.0, 400.0);
+    assert!(
+        close(laid.pages[0].boxes[0].height, 24.0),
+        "{}",
+        laid.pages[0].boxes[0].height
+    );
+    let ys = baselines(&laid, 0);
+    assert!(close(ys[1] - ys[0], 9.0), "{ys:?}");
+}
+
+// ---- §17.5.3, `vertical-align` on a table cell ------------------------------
+
+/// A cell at its own font size and alignment.
+fn cell_aligned(body: &str, size: f64, align: VerticalAlign) -> BoxNode {
+    let mut cell = styled(Display::TableCell);
+    cell.vertical_align = align;
+    cell.font_size = size;
+    let mut inner = base();
+    inner.font_size = size;
+    BoxNode::element(cell, vec![BoxNode::text(inner, body)])
+}
+
+/// The baselines of a two-cell row whose first cell is twenty-point and whose
+/// second is ten-point and aligned as stated.
+fn row_baselines(align: VerticalAlign) -> Vec<f64> {
+    let tree = table_of(vec![row_of(vec![
+        cell_aligned("A", 20.0, VerticalAlign::Baseline),
+        cell_aligned("b", 10.0, align),
+    ])]);
+    let laid = run(&tree, 400.0, 400.0);
+    baselines(&laid, 0)
+}
+
+/// §17.5.3: `baseline` is the initial value and it is **not** `top`.
+///
+/// A twenty-point cell is eighteen points over its baseline and a ten-point
+/// one is nine, so the small cell is pushed nine points down to sit on the
+/// row's baseline — and both first lines are on one line, which is what a row
+/// of a heading and its body is supposed to look like. `top` leaves the small
+/// one at nine and the two are nine points apart.
+#[test]
+fn a_cells_initial_vertical_align_is_baseline_and_not_top() {
+    let on_the_baseline = row_baselines(VerticalAlign::Baseline);
+    assert!(
+        close(on_the_baseline[0], on_the_baseline[1]),
+        "the two cells are not on one baseline: {on_the_baseline:?}"
+    );
+    let at_the_top = row_baselines(VerticalAlign::Top);
+    assert!(
+        close(at_the_top[0] - at_the_top[1], 9.0),
+        "`top` did not leave the small cell at the row's top edge: {at_the_top:?}"
+    );
+}
+
+/// §17.5.3's other two: `bottom` puts the content at the foot of the cell box
+/// and `middle` halfway.
+///
+/// The row is twenty-four points tall, which is the tall cell's line box. The
+/// short cell's own is twelve, so twelve points are free: `bottom` spends all
+/// of them and `middle` half.
+#[test]
+fn bottom_and_middle_spend_a_cells_free_height() {
+    let bottom = row_baselines(VerticalAlign::Bottom);
+    // Twelve points down, and nine more to its own baseline.
+    assert!(close(bottom[1], 21.0), "{bottom:?}");
+    let middle = row_baselines(VerticalAlign::Middle);
+    assert!(close(middle[1], 15.0), "{middle:?}");
+}
+
+/// §17.5.3: *"other values behave as `baseline`"* — the four §10.8.1 values a
+/// cell has no way to honour.
+///
+/// Read exactly, so a build cannot quietly treat `super` on a cell as a raise
+/// and put the cell's whole content three points above its own box.
+#[test]
+fn an_inline_only_value_on_a_cell_behaves_as_baseline() {
+    assert_eq!(
+        row_baselines(VerticalAlign::Super),
+        row_baselines(VerticalAlign::Baseline)
+    );
+    assert_eq!(
+        row_baselines(VerticalAlign::TextTop),
+        row_baselines(VerticalAlign::Baseline)
+    );
+}
+
+/// §17.5.3: a cell pushed down to reach its row's baseline needs the room it
+/// was pushed into, so the **row** is taller than its tallest cell.
+///
+/// A ten-point cell whose baseline is nine, beside a twenty-point one whose
+/// baseline is eighteen: the small one is pushed nine down and its twelve
+/// points of line now end at twenty-one, which fits the tall cell's
+/// twenty-four. Make the small cell two lines and it ends at thirty-three, and
+/// a build that sized the row from the cell heights alone draws its last line
+/// over the row below.
+#[test]
+fn a_row_is_tall_enough_for_the_baseline_it_imposed() {
+    let mut cell = styled(Display::TableCell);
+    cell.font_size = 10.0;
+    let mut inner = base();
+    inner.font_size = 10.0;
+    let tree = table_of(vec![
+        row_of(vec![
+            cell_aligned("A", 20.0, VerticalAlign::Baseline),
+            BoxNode::element(cell, vec![BoxNode::text(inner, "b b")]),
+        ]),
+        row_of(vec![cell_aligned("c", 10.0, VerticalAlign::Baseline)]),
+    ]);
+    let laid = run(&tree, 20.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // "b b" wraps to two lines at twenty points of column, so the second cell
+    // runs from nine to thirty-three and the row must be thirty-three tall.
+    // The next row's first baseline is thirty-three plus its own nine.
+    let last = ys.last().copied().expect("a run on the second row");
+    assert!(
+        close(last, 42.0),
+        "the second row started before the first one ended: {ys:?}"
+    );
 }
 
 // ---- CSS 2.2 §10.4 and §10.7, the min/max clamps ---------------------------
