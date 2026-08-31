@@ -149,6 +149,31 @@ deny = [
   { name = "rc-zip" },
   { name = "rawzip" },
   { name = "tar" },
+  # RAR, 7z and the LZMA family, denied in the milestone that writes the
+  # decoders rather than the one that finishes the plan -- this file's own rule,
+  # three paragraphs down, and the window is wider here than it was for XML.
+  # Every name below would have passed every other check in this file, and two
+  # of them are the obvious reach: `sevenz-rust2` is maintained and permissive,
+  # and `lzma-rs` is a clean pure-Rust range decoder that does exactly what
+  # `tinker-pdf-archive::sevenz` had to be written to do.
+  #
+  # The RAR names carry a second reason on top of rule 1. There is one RAR
+  # implementation in the world -- RARLAB's unrar -- and every binding wraps it;
+  # its licence forbids using the source to write a compatible compressor, which
+  # is a restriction this repository's dual MIT/Apache-2.0 grant cannot pass on
+  # and which the licence allowlist here would not have caught, because a `-sys`
+  # crate's own manifest says whatever its author typed. The RAR 5 decoder in
+  # `tinker-pdf-archive` is written from the published format note and from the
+  # committed fixture, and nothing of unrar is vendored, linked or read.
+  { name = "unrar" },
+  { name = "unrar_rs" },
+  { name = "sevenz-rust" },
+  { name = "sevenz-rust2" },
+  { name = "lzma-rs" },
+  { name = "xz2" },
+  { name = "liblzma" },
+  { name = "compress-tools" },
+  { name = "libarchive" },
   { name = "crc32fast" },
   { name = "crc" },
   { name = "crc-any" },

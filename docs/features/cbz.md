@@ -16,8 +16,9 @@ leaf crate that knows APPNOTE 6.3.10 and nothing else (ruling 8,
 PDF that happens to carry those four bytes inside a stream — an attachment, a
 compressed object, a font program — stays an ordinary PDF. RAR
 (`Rar!\x1A\x07`), 7z and tar (`ustar` at offset 257, where POSIX 1003.1 puts
-it) are recognised at fixed positions too, and refused by name: "this is a CBR
-and I do not read CBR" is a different sentence from "this is not a PDF". A ZIP
+it) are recognised at fixed positions too. **A `.cbt` is read**; a `.cbr` and a
+`.cb7` are still refused by name, and by name matters: "this is a CBR and I do
+not read CBR" is a different sentence from "this is not a PDF". A ZIP
 is one signature over several formats, so the archive is opened **once** and
 asked what it is: ECMA-388 E.3's three-step test routes an XPS package first
 ([xps](xps.md)), OCF's `META-INF/container.xml` routes an EPUB second
@@ -41,6 +42,22 @@ Everything is bounded: entries per archive, bytes per entry, an inflation
 total per archive that is charged on what an entry was *permitted* to produce
 and never refunded, and name length. Everything tolerated is recorded as a
 typed `ZipWarning`, at most once per archive (ruling 10).
+
+**A `.cbt` is a tar of page images**, read by `tinker-pdf-archive` — a second
+leaf beside `tinker-pdf-zip` rather than three modules inside it, because that
+crate's `Archive::read` hands a stored entry back *borrowed* and a 7z solid
+block cannot ([architecture](../architecture.md),
+[design/comic-archives.md](../design/comic-archives.md)). Everything above this
+paragraph and below it is the same for a `.cbt` as for a `.cbz`: the same
+natural order, the same magic-byte classification, the same pass-through, the
+same placeholder pages, the same `ComicInfo.xml`. The tar reader takes
+POSIX 1003.1 `ustar`, GNU's `L` long-name pseudo-entry and PAX's `x`/`g`
+extended headers; the original v7 format is refused because it carries no magic
+and a reader with no signature to check accepts anything. Sparse files and
+multi-volume continuations are listed, so the page count stays honest, and
+refused at read. **Every tar entry is a contiguous byte range of the input**,
+so its `read` returns a plain borrow rather than a `Cow` — the strongest form
+of the no-copy property the whole design rests on.
 
 **Pass-through is the design.** A non-interlaced PNG of colour type 0, 2 or 3
 passes through verbatim: its IDAT *is* a `/FlateDecode` stream with
@@ -198,12 +215,17 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 - `tinker_pdf_zip::Archive` — `open`, `entries()`, `read(index)` (checked;
   stored entries are handed back borrowed, copied nowhere), `route()`,
   `warnings()` and `inflated()`.
+- `cbz::open_tar` and `cbz::pages_from_tar`, the same two halves for a `.cbt`,
+  over `tinker_pdf_archive::tar::Archive` — `open`, `entries()`,
+  `read(index)` (a plain borrow), `warnings()`.
 
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| CBR, CB7, CBT | `ArchiveRefusal::NotAZip` | three more decompressors, two of them encumbered, and none of them a page | [roadmap](../ROADMAP.md) |
+| CBR, CB7 | `ArchiveRefusal::NotAZip` | two more decompressors and neither of them a page *yet* — staged in [design/comic-archives.md](../design/comic-archives.md) | [roadmap](../ROADMAP.md) |
+| A sparse or multi-volume tar entry | `PageDefect::TarEntryRefused(TarEntryError)` | placeholder page; a reader that ignored the flag hands back bytes in the wrong places, which is worse than a page that failed | — |
+| A tar with no `ustar` magic | `ArchiveRefusal::NotAZip` | the magic is the only signature tar has, so a reader that did not require it accepts anything | — |
 | Archive damaged past recovery | `ArchiveRefusal::Damaged` | structure present, nothing recoverable from either route | — |
 | Every page entry encrypted | `ArchiveRefusal::Encrypted` | ZipCrypto and the AES extensions are named non-goals; nothing is left to page | — |
 | Spanned / multi-disk archive | `ArchiveRefusal::MultiDisk` | the fragment that happens to be here is not the archive | — |

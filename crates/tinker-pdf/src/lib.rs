@@ -536,12 +536,20 @@ fn open_container(
     bytes: &[u8],
     options: &OpenOptions,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
-    if what != Container::Zip {
-        // Recognised and refused. RAR, 7z and tar are three more
-        // decompressors, two of them encumbered, and none of them a page.
-        return Err(ArchiveRefusal::NotAZip);
-    }
     let comic = cbz::Limits::DEFAULT;
+    if what != Container::Zip {
+        // **One routing table, and this is the delegation that keeps it one.**
+        // Before tier 4 this line was `Err(NotAZip)` and `cbz::synthesise`
+        // carried the same sentence a second time, so the two would have
+        // disagreed about which containers are readable the moment either
+        // gained a format — and the disagreement compiles.
+        //
+        // Only a ZIP can be an XPS or an EPUB: OPC and OCF are both ZIP by
+        // definition, so the three-step route below is a question about ZIPs.
+        // Every other container this build recognises is a comic archive and
+        // nothing else, which is why the delegation is safe as well as short.
+        return cbz::synthesise(what, bytes, &comic);
+    }
     let archive = cbz::open_archive(bytes, &comic.zip)?;
     let archive = match xps::route(archive, &xps::Limits::DEFAULT) {
         xps::Routing::Document(pdf, report) => return Ok((pdf, report)),

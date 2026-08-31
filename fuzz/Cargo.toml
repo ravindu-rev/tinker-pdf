@@ -21,6 +21,7 @@ tinker-pdf-content = { path = "../crates/tinker-pdf-content" }
 tinker-pdf-crypto = { path = "../crates/tinker-pdf-crypto" }
 tinker-pdf-pki = { path = "../crates/tinker-pdf-pki" }
 tinker-pdf-zip = { path = "../crates/tinker-pdf-zip" }
+tinker-pdf-archive = { path = "../crates/tinker-pdf-archive" }
 tinker-pdf-xml = { path = "../crates/tinker-pdf-xml" }
 tinker-pdf-color = { path = "../crates/tinker-pdf-color" }
 tinker-pdf-css = { path = "../crates/tinker-pdf-css" }
@@ -183,6 +184,12 @@ doc = false
 [[bin]]
 name = "zip_archive"
 path = "fuzz_targets/zip_archive.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tar"
+path = "fuzz_targets/tar.rs"
 test = false
 doc = false
 
