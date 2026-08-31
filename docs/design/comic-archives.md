@@ -201,25 +201,35 @@ is the honest one, and it is cheap: `.cbr` files in the wild have been RAR 5
 since 2013.
 
 **RAR 5's compression methods 1–5 are a page-level refusal, by method number**,
-and this one is more uncomfortable, so it is stated plainly rather than left to
-be discovered. The committed `winrar-rar5.cbr` **stores every one of its five
-entries** — WinRAR compresses a file only when compressing makes it smaller,
-and a PNG or a JPEG never is. So the fixture this repository can produce from
-its own five pages exercises the container completely and the algorithm not at
-all.
+and the honest version of this is not the one this document was first written
+with. The first draft said the committed `winrar-rar5.cbr` stores every entry,
+reasoning that WinRAR compresses only what gets smaller and an image never
+does. **That was wrong, and reading the fixture rather than reasoning about it
+is what found it.** What `winrar-rar5.cbr` actually holds is six records:
 
-What that means for the exit criterion is worth being exact about: the
-identical-payload property *is* green for `.cbr`, because the property is about
-those five pages and those five pages are stored. It is green for the RAR
-**container** and says nothing about RAR compression, which is why the refusal
-row does not disappear when RAR lands — it changes from an archive-level row to
-a page-level one naming the method. An archive that mixes stored and compressed
-entries pages the stored ones.
+| Record | Method | |
+| --- | --- | --- |
+| `page1.png`, `page10.png`, `page11.png`, `page2.png` | 0 (store) | read |
+| `page3.jpg` | **3 (normal)** | refused, by method number |
+| `QO` | — | a quick-open index service record, listed and never a page |
 
-The route to closing it is known and is not taken here: `rar a -m5` over
-compressible data this repository owns would produce a first-party fixture, and
-RAR's own per-file CRC-32 would adjudicate the decoder against it. That is a
-milestone, not a caveat, and it is listed as one below.
+So the reasoning was right about the four PNGs and wrong about the JPEG, and
+the consequence runs both ways.
+
+**The good half:** RAR 5's compression *does* have a first-party fixture here
+after all. `page3.jpg` is 169 bytes with its own recorded CRC-32, written by
+WinRAR before any decoder existed, and the ZIP corpus holds the same picture —
+so a decompressor can be adjudicated exactly, by the format's own checksum and
+by the cross-container identity. Milestone 5 is therefore a real, checkable
+piece of work rather than one blocked on a fixture nobody can make.
+
+**The costly half:** the identical-payload property is **not** green for
+`.cbr`, and this lane does not claim it is. Four of the five pages come back as
+the ZIP's own pictures; the fifth is a placeholder that names its method. So
+`winrar-rar5.cbr` does not join `READ_CONTAINERS`, the row does not close, and
+what lands is the container, the store path and a page-level refusal — which is
+ruling 2 working as intended (four readable pages beat a refused archive) and
+is not the same thing as the criterion being met.
 
 ## Milestones
 
@@ -241,22 +251,35 @@ checked inside `read` rather than asserted beside it. The archive's header is
 LZMA-compressed, so listing it at all exercises the second front end.
 *Row: loses CB7.*
 
-**3. RAR 5, container and store.**
-Exit criterion: the same sentence for `winrar-rar5.cbr`, with its five recorded
-CRC-32s matching, and every header's own CRC-32 checked before its fields are
-believed. RAR 4 refused by its own signature.
-*Row: CBR leaves the archive-level table and a page-level row naming the
-compression methods takes its place.*
+**3. RAR 5, container and store. Done, and it does not close the row.**
+Exit criterion, met: `winrar-rar5.cbr` opens, lists its six records in the
+order it holds them, and hands back the four stored pages with their recorded
+CRC-32s matching and their rasters identical to the ZIP's. Every header's own
+CRC-32 is checked before its fields are believed. RAR 4 is refused by its own
+signature.
+Exit criterion, **not** met and not claimed: `page3.jpg` is method 3, so the
+archive is not five pictures and does not join `READ_CONTAINERS`.
+*Row: CBR leaves the archive-level table; a page-level row naming the
+compression methods and a RAR 4 row take its place.*
 
 **4. This document.** Owed by the roadmap; lands with the decoders.
 
 **Not scheduled, and listed so it is a decision rather than a gap:**
 
-**5. RAR 5's compression algorithm.** Needs a first-party fixture, which
-`rar a -m5` over compressible content this repository owns can produce — the
-producer generates and the format's own CRC-32 adjudicates, which is the half
-of ruling 13 that a real archiver is allowed to fill. Until that fixture is
-committed, the decoder would be unadjudicated and is not written.
+**5. RAR 5's compression algorithm — LZSS, its Huffman tables and its filter
+chain.** This is what closes the CBR row, and it is the one piece of the lane
+that is scoped and unwritten.
+
+The fixture already exists and is committed: `page3.jpg` inside
+`winrar-rar5.cbr`, method 3, 169 bytes unpacked, with its own recorded CRC-32
+— and the same picture sits in five ZIPs beside it, so the decoder is
+adjudicated twice over, by the format's checksum and by the cross-container
+identity. No new corpus work is needed and no producer has to be run.
+
+Exit criterion: `winrar-rar5.cbr` joins `READ_CONTAINERS` and
+`five_zip_writers_produce_the_same_five_pictures` passes over it with no
+placeholder — at which point the compression row leaves
+[features/cbz.md](../features/cbz.md) and only the RAR 4 row remains.
 
 ## Risks
 
@@ -274,9 +297,22 @@ here rather than left implicit.
 `lzma/tests.rs`.** The round trip closes only over literals, and both halves
 are this repository's. They were transcribed separately — the carry chain in
 `shift_low` has no counterpart in the decoder at all — but a format read wrong
-in the same way twice would pass. The `.cb7`'s CRC is what actually rules on
-that, and it is why the round trip is described as covering the arithmetic
-coder rather than LZMA.
+in the same way twice would pass.
+
+**The injection campaign demonstrated this rather than leaving it as a worry,
+and the demonstration is worth keeping.** One of the eleven defects was
+`MOVE_BITS`, the probability adaptation rate, set to 1/16 instead of the
+format's 1/32. Both the decoder and the test encoder read that one constant, so
+the round trip closed perfectly on every input — and the defect was caught only
+by the two `.cb7` tests, through the archive's own CRC-32. Any property both
+halves share is invisible to the round trip *by construction*, which is why the
+round trip is described as covering the arithmetic coder's mechanics rather
+than LZMA, and why the fixture is the thing that rules.
+
+All five decoder defects landed the same way: `five_zip_writers_produce_the_same_five_pictures`
+and `the_7z_a_real_archiver_wrote_pages_in_natural_order`, twice each, and no
+unit test anywhere. The corpus is not a nice-to-have beside the unit tests here;
+for the decompressor it is the only instrument.
 
 **Hostile input, in three new parsers at once.** Every one of these formats is
 a length-prefixed structure walk over bytes a stranger wrote, and a comic

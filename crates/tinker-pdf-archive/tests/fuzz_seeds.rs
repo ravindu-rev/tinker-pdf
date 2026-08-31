@@ -1,4 +1,4 @@
-//! The committed `tar` and `sevenz` fuzz seeds, replayed on stable.
+//! The committed `tar`, `sevenz` and `rar` fuzz seeds, replayed on stable.
 //!
 //! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each, written
 //! by this crate's own `write_the_fuzz_seeds` tests, and the targets that
@@ -31,8 +31,8 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_archive::sevenz;
 use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
+use tinker_pdf_archive::{rar, sevenz};
 use tinker_pdf_filters::crc32;
 
 /// Every seed, by name, sorted so a failure names the same file on every
@@ -406,4 +406,166 @@ fn the_crc_mismatch_seed_still_mismatches() {
         "the seed that exists to carry a flipped bit no longer carries one"
     );
     println!("RAN: the crc-mismatch seed refuses entry 0 by name");
+}
+
+// ---- RAR --------------------------------------------------------------------
+
+/// `fuzz_targets/rar.rs`'s own control-byte table, restated. See this file's
+/// header for why it is restated rather than shared.
+fn rar_bounds(knobs: u8) -> rar::Limits {
+    rar::Limits {
+        max_entries: match knobs & 3 {
+            0 => 1,
+            1 => 4,
+            2 => 64,
+            _ => 4096,
+        },
+        max_header_bytes: match (knobs >> 2) & 3 {
+            0 => 8,
+            1 => 64,
+            2 => 4096,
+            _ => 65_536,
+        },
+        max_name_len: match (knobs >> 4) & 3 {
+            0 => 1,
+            1 => 16,
+            2 => 256,
+            _ => 1024,
+        },
+    }
+}
+
+/// Every committed RAR seed replays without a panic and with the target's
+/// invariants intact — the declared length, the recorded CRC-32, and the
+/// borrow.
+#[test]
+fn the_committed_rar_seeds_replay() {
+    let Some(seeds) = corpus("rar") else {
+        println!("SKIPPED: fuzz/corpus/rar is not in this tree");
+        return;
+    };
+    let mut read_ok = 0usize;
+    let mut refused = 0usize;
+    let mut crc_checked = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = rar_bounds(control.first().copied().unwrap_or(0));
+        let Ok(archive) = rar::Archive::open(body, &limits) else {
+            refused += 1;
+            continue;
+        };
+        let listed: Vec<(String, u64, rar::Kind, Option<u32>)> = archive
+            .entries()
+            .iter()
+            .map(|e| (e.name.clone(), e.size, e.kind, e.crc))
+            .collect();
+        assert!(
+            listed.len() <= limits.max_entries,
+            "{name}: the entry cap was exceeded rather than refused"
+        );
+        for (entry, _, _, _) in &listed {
+            assert!(
+                entry.len() <= limits.max_name_len,
+                "{name}: a name past the cap was kept at full length"
+            );
+        }
+        for index in (0..listed.len()).rev() {
+            match archive.read(index) {
+                Ok(bytes) => {
+                    assert_eq!(
+                        bytes.len() as u64,
+                        listed[index].1,
+                        "{name}: a read returned a length other than the declared one"
+                    );
+                    if let Some(want) = listed[index].3 {
+                        assert_eq!(
+                            crc32(&bytes),
+                            want,
+                            "{name}: a read returned bytes whose CRC-32 is not the \
+                             one the archive recorded"
+                        );
+                        crc_checked += 1;
+                    }
+                    // Every entry this build reads is stored, so a successful
+                    // read is a range of the input and never a copy.
+                    assert!(
+                        bytes.is_empty() || inside(body, &bytes),
+                        "{name}: a read returned bytes that are not inside the archive"
+                    );
+                    read_ok += 1;
+                }
+                Err(rar::EntryError::NoSuchEntry) => {
+                    panic!("{name}: an index taken from the entry list was not an entry")
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    println!(
+        "RAN: {} rar seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright",
+        seeds.len()
+    );
+    assert_eq!(
+        seeds.len(),
+        7,
+        "the seed count changed; `write_the_fuzz_seeds` is what should have \
+         changed it, and the new file needs a reason in that test's comment"
+    );
+    assert!(
+        crc_checked > 0,
+        "no seed reached a CRC check, so the corpus never exercises the \
+         assertion this container's extraction rests on"
+    );
+    assert!(
+        refused > 0,
+        "no seed reaches a refusal, so the corpus never exercises the bounds"
+    );
+}
+
+/// The `rar4-signature` and `crc-mismatch` seeds still carry what they are
+/// named for.
+///
+/// A seed named for a defect that no longer carries it is worse than no seed:
+/// the corpus keeps its size and quietly stops covering the branch.
+#[test]
+fn the_named_rar_seeds_still_carry_what_they_are_named_for() {
+    let Some(seeds) = corpus("rar") else {
+        println!("SKIPPED: fuzz/corpus/rar is not in this tree");
+        return;
+    };
+    let find = |want: &str| -> Vec<u8> {
+        seeds
+            .iter()
+            .find(|(name, _)| name == want)
+            .map(|(_, data)| data[1..].to_vec())
+            .unwrap_or_else(|| panic!("the {want} seed is missing"))
+    };
+
+    assert_eq!(
+        rar::Archive::open(&find("rar4-signature"), &rar::Limits::DEFAULT).err(),
+        Some(rar::Error::Rar4),
+        "the seed that exists to be a RAR 4 is no longer one"
+    );
+
+    let bad = find("crc-mismatch");
+    let archive = rar::Archive::open(&bad, &rar::Limits::DEFAULT).expect("the seed opens");
+    assert_eq!(
+        archive.read(0),
+        Err(rar::EntryError::CrcMismatch),
+        "the seed that exists to carry a wrong CRC no longer carries one"
+    );
+
+    // And the one that exists to carry every method this build refuses.
+    let methods = find("methods");
+    let archive = rar::Archive::open(&methods, &rar::Limits::DEFAULT).expect("the seed opens");
+    let refusals: Vec<rar::EntryError> = (0..archive.entries().len())
+        .filter_map(|i| archive.read(i).err())
+        .collect();
+    assert!(
+        refusals.contains(&rar::EntryError::Compressed { method: 3 })
+            && refusals.contains(&rar::EntryError::Solid)
+            && refusals.contains(&rar::EntryError::Encrypted),
+        "the methods seed no longer reaches all three entry refusals: {refusals:?}"
+    );
+    println!("RAN: the rar4, crc-mismatch and methods seeds all still carry their defects");
 }

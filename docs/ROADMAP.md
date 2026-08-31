@@ -352,13 +352,20 @@ refusal table.
   refuses the format at the element, which is the same shape TIFF was in
   before it was wired; remote resource-dictionary parts; `IsSideways` and
   odd `BidiLevel`.
-- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, sized honestly — a
-  hand-rolled decompressor, and **RAR 4 has no fixture this machine can
-  produce**, so it closes as decoded-but-unadjudicated by name or not at
-  all. A design doc is owed with the decoders. **CBT and CB7 are done**:
-  `7z-tar.cbt` and `7z-lzma2.cb7` join the five ZIPs in `cbz_real.rs`'s
-  cross-producer identity and render the same five pictures, which is the
-  exit criterion the whole lane is held to.
+- **CBZ** ([features/cbz.md](features/cbz.md)): **RAR 5's compression
+  algorithm**, and nothing else. CBT, CB7 and the CBR *container* are built,
+  and the design doc is written
+  ([design/comic-archives.md](design/comic-archives.md)). `7z-tar.cbt` and
+  `7z-lzma2.cb7` join the five ZIPs in `cbz_real.rs`'s cross-producer
+  identity and render the same five pictures, which is the exit criterion
+  the lane is held to. **`winrar-rar5.cbr` does not**, and the row stays
+  open for it: the fixture holds four stored PNGs and one JPEG compressed
+  with method 3, so a `.cbr` today is four pages and one placeholder naming
+  its method. The decompressor is scoped rather than blocked — that
+  `page3.jpg` is 169 bytes with its own CRC-32 and the same picture in five
+  ZIPs beside it, so it adjudicates a decoder twice over. **RAR 4 closes as
+  refused by name**: WinRAR 7.20 here has no `-ma` switch, no fixture is
+  producible, and ruling 13 makes a decoder unadjudicable.
 
 ## How this file changes
 

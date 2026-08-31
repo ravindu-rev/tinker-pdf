@@ -80,16 +80,23 @@ from a regeneration of it.
 | `winrar.cbz` | 19 039 | WinRAR `-afzip` | A second ZIP writer that makes the same per-entry store/deflate choices as 7-Zip and lays its central directory out differently | `1db56f83e8cac68e` |
 | `pwsh.cbz` | 18 879 | .NET `System.IO.Compression` | The second finding: **deflates every entry, including the three it makes larger** | `944a422eb61cd0fa` |
 | `python.cbz` | 18 879 | CPython 3.12 `zipfile` | A fourth implementation doing the same, so the finding is not one library's quirk | `48bd76da17bc6a61` |
-| `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages. Refused by name today | `f211476cb9b199d9` |
-| `7z-tar.cbt` | 23 552 | 7-Zip `-ttar` | A CBT holding the same five pages. Refused by name today | `97911001905ea8b5` |
-| `winrar-rar5.cbr` | 18 860 | `Rar.exe` (RAR 5) | A CBR holding the same five pages. Refused by name today | `b8f7d4de4b0933a1` |
+| `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages, in one solid LZMA2 block under an **LZMA-compressed header**. Read since tier 4 | `f211476cb9b199d9` |
+| `7z-tar.cbt` | 23 552 | 7-Zip `-ttar` | A CBT holding the same five pages, in GNU's tar dialect. Read since tier 4 | `97911001905ea8b5` |
+| `winrar-rar5.cbr` | 18 860 | `Rar.exe` (RAR 5) | A CBR holding the same five pages, and the fifth finding below: **four stored, one compressed with method 3**, plus a `QO` service record. Container read since tier 4; the compressed entry is a placeholder page | `b8f7d4de4b0933a1` |
 
-**The three that are refused are committed anyway, and on purpose.** They hold
-the *same five pages* as the five ZIPs. So the day a decoder for one of them
-exists, the pictures it produces have something already in the tree to be
-compared against — put there by a different program, before the decoder was
-written. That is gap 30's structural lesson applied one format further out: the
-fixture arrives before the reader, not after it.
+**The three non-ZIPs were committed while all three were still refused, and
+on purpose.** They hold the *same five pages* as the five ZIPs, so the day a
+decoder for one of them existed, the pictures it produced had something already
+in the tree to be compared against — put there by a different program, before
+the decoder was written. That is gap 30's structural lesson applied one format
+further out: the fixture arrives before the reader, not after it.
+
+It paid off exactly as intended. Tier 4's `tinker-pdf-archive` read all three
+containers against these files and nothing else, with no oracle anywhere: the
+`.cbt` and the `.cb7` now join the five ZIPs in
+`cbz_real.rs`'s cross-producer identity, and the `.cb7`'s own recorded CRC-32
+is what adjudicates a hand-rolled LZMA decoder. The `.cbr` is the one that has
+not closed, for the reason in finding 5 below.
 
 ## The pages
 
@@ -146,6 +153,23 @@ gap in coverage this corpus **does not** close and the doc says so.
    `make-corpus.ps1` renames afterwards, which changes no bytes — and that is
    the point worth keeping, because this reader decides what a file is from the
    bytes at offset zero and never from its name.
+
+5. **A real RAR mixes stored and compressed entries too, and the reasoning that
+   said it would not was wrong.** The plan for tier 4's RAR lane assumed
+   `winrar-rar5.cbr` would store every entry, on the argument that WinRAR
+   compresses only what gets smaller and an image never does. Reading the file
+   rather than reasoning about it found four stored PNGs, **`page3.jpg`
+   compressed with method 3**, and a `QO` quick-open index service record — a
+   record type nothing in this corpus had before, which is listed and is not a
+   page. The 169-byte JPEG *did* get smaller, because a JPEG of a flat
+   synthetic test image is not the incompressible thing a photograph is.
+
+   Both halves matter. It means a `.cbr` is four fifths of a comic until RAR 5's
+   compression is written, so the CBR row does not close. And it means that
+   decompressor **has a first-party fixture here after all** — 169 bytes with
+   its own recorded CRC-32, and the same picture in five ZIPs beside it — where
+   the plan had it blocked on a producer this machine cannot run. See
+   `docs/design/comic-archives.md`, milestone 5.
 
 5. **No real archiver tripped a single `ZipWarning`.** All five took
    `Route::CentralDirectory` with an empty warning list. The leniency ladder in

@@ -42,10 +42,7 @@
 mod cbz_support;
 
 use std::path::{Path, PathBuf};
-use tinker_pdf::{
-    cbz, ArchiveRefusal, ArchiveWarning, ComicInfoDefect, Container, Document, Name, OpenError,
-    RenderOptions,
-};
+use tinker_pdf::{cbz, ArchiveWarning, ComicInfoDefect, Container, Document, Name, RenderOptions};
 use tinker_pdf_zip::{Archive, Limits as ZipLimits, Method};
 
 /// The pages, in the order a reader of the comic should meet them, with the
@@ -113,9 +110,16 @@ const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-lzma2.cb7", Container::SevenZip),
 ];
 
-/// The containers this build recognises and still does not read, each refused
-/// by name.
-const NOT_READ: &[(&str, Container)] = &[("winrar-rar5.cbr", Container::Rar)];
+/// The containers that open but do **not** produce all five pages, and what
+/// stops each.
+///
+/// A third list, and it exists because a two-way split stopped describing the
+/// tree. `winrar-rar5.cbr` is not refused — it opens, walks its six records and
+/// hands back four of the five pictures — and it is not in `READ_CONTAINERS`
+/// either, because the fifth is a placeholder. Filing it under either would be
+/// a claim this lane has not earned: "refused" is false, and "read" is the
+/// sentence the exit criterion means.
+const PARTLY_READ: &[(&str, Container, usize)] = &[("winrar-rar5.cbr", Container::Rar, 1)];
 
 fn read(name: &str) -> Vec<u8> {
     let path = corpus().join(name);
@@ -283,33 +287,92 @@ fn five_zip_writers_produce_the_same_five_pictures() {
     }
 }
 
-/// The containers this build recognises and **still** does not read, each
-/// refused by name rather than as "this is not a PDF".
+/// **A `.cbr` opens, pages what it stored, and names what it did not.**
 ///
-/// They hold the same five pages as the five ZIPs beside them, and that is why
-/// they are committed before any decoder exists: when one arrives, the pictures
-/// it produces have something already in the tree to be compared against, put
-/// there by a different program. `7z-tar.cbt` and then `7z-lzma2.cb7` left this
-/// list in the commit that gave each a reader and joined `READ_CONTAINERS`,
-/// which is the only way a row here is allowed to move.
+/// The RAR fixture is the one archive in this corpus that does not produce
+/// five pictures, and the shape of what it *does* produce is the whole of
+/// ruling 2. `winrar-rar5.cbr` holds four PNGs WinRAR stored, one JPEG it
+/// compressed with method 3, and a `QO` quick-open service record. So:
+///
+/// - the archive **opens**, rather than being refused for the one entry;
+/// - it has **five pages**, in reading order, because the entry that could not
+///   be decompressed keeps its page number;
+/// - four of them are the ZIP's own pictures at the ZIP's own sizes;
+/// - the fifth carries `PageDefect::RarEntryRefused` naming **method 3**,
+///   which is a sentence a host can show and a user can act on.
+///
+/// This test is what stops the CBR row being quietly closed. The lane's exit
+/// criterion is `five_zip_writers_produce_the_same_five_pictures`, and this
+/// archive is deliberately not in it; if the decompressor lands, this test is
+/// what has to be deleted, and deleting it is a visible act.
 #[test]
-fn the_containers_this_build_does_not_read_are_refused_by_name() {
-    assert!(
-        !NOT_READ.is_empty(),
-        "a sweep with nothing to sweep is a sweep that does not run; when the \
-         last container gains a reader, delete this test rather than leaving it \
-         green over an empty list"
-    );
-    for (name, container) in NOT_READ {
+fn the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not() {
+    for (name, what, expected_defects) in PARTLY_READ {
         let bytes = read(name);
+        assert_eq!(cbz::container(&bytes), Some(*what), "{name}: the sniff");
+        let document = Document::open(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = document.archive().expect("a synthesised document");
+
+        let want: Vec<&str> = PAGES.iter().map(|(page, _, _)| *page).collect();
+        let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(order, want, "{name}: page order, placeholders included");
+
+        let defects: Vec<&str> = report
+            .pages()
+            .iter()
+            .filter(|p| p.defect.is_some())
+            .map(|p| p.name.as_str())
+            .collect();
         assert_eq!(
-            cbz::container(&bytes),
-            Some(*container),
-            "{name}: the fixed-position sniff"
+            defects.len(),
+            *expected_defects,
+            "{name}: pages that could not be built ({defects:?})"
         );
-        match Document::open(bytes) {
-            Err(OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)) => {}
-            other => panic!("{name}: expected NotAZip, got {other:?}"),
+        assert_eq!(
+            defects,
+            ["page3.jpg"],
+            "{name}: the entry WinRAR compressed is the one that is a placeholder"
+        );
+
+        // The defect names the method rather than saying "no". A host that
+        // shows "compressed with method 3" tells a user to re-pack with -m0;
+        // one that shows "could not read" tells them nothing.
+        let page3 = report
+            .pages()
+            .iter()
+            .find(|p| p.name == "page3.jpg")
+            .expect("page3");
+        assert_eq!(
+            page3.defect,
+            Some(cbz::PageDefect::RarEntryRefused(
+                cbz::RarEntryError::Compressed { method: 3 }
+            )),
+            "{name}: the placeholder names its method"
+        );
+
+        // And the four that are stored are the same pictures the ZIPs give.
+        let reference = Document::open(read(ZIPS[0])).expect("the reference archive");
+        for (index, (page, width, height)) in PAGES.iter().enumerate() {
+            if *page == "page3.jpg" {
+                continue;
+            }
+            let bitmap = document
+                .page(index as u32)
+                .unwrap_or_else(|| panic!("{name}: page {index}"))
+                .render(&RenderOptions::default());
+            assert_eq!(
+                (bitmap.width, bitmap.height),
+                (*width, *height),
+                "{name}: {page} is one image pixel to one PDF point"
+            );
+            let want = reference
+                .page(index as u32)
+                .unwrap_or_else(|| panic!("page {index} of the reference"))
+                .render(&RenderOptions::default());
+            assert_eq!(
+                bitmap.data, want.data,
+                "{name}: {page} is not the picture the ZIP gives"
+            );
         }
     }
 }

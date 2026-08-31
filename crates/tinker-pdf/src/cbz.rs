@@ -72,7 +72,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use tinker_pdf_archive::{sevenz, tar};
+use tinker_pdf_archive::{rar, sevenz, tar};
 use tinker_pdf_cos::{
     png_image, tiff_image, DocumentBuilder, ImageData, PngImageData, TiffImageData,
 };
@@ -87,6 +87,11 @@ pub use tinker_pdf_archive::tar::{
 pub use tinker_pdf_archive::sevenz::{
     limits as sevenz_limits, EntryError as SevenZipEntryError, Error as SevenZipError,
     Limits as SevenZipLimits, Warning as SevenZipWarning,
+};
+
+pub use tinker_pdf_archive::rar::{
+    limits as rar_limits, EntryError as RarEntryError, Error as RarError, Limits as RarLimits,
+    Warning as RarWarning,
 };
 
 pub use tinker_pdf_zip::{
@@ -198,6 +203,13 @@ pub struct Limits {
     pub max_synthesised: usize,
     /// What the archive reader is allowed to spend.
     pub zip: ZipLimits,
+    /// What the RAR reader is allowed to spend (tier 4, W-ARCHIVE milestone
+    /// 4).
+    ///
+    /// Three numbers. Like a tar and unlike a 7z, a **stored** RAR entry is a
+    /// byte range of the input; what RAR has that tar does not is a header
+    /// whose length the file chooses.
+    pub rar: RarLimits,
     /// What the 7z reader is allowed to spend (tier 4, W-ARCHIVE milestone
     /// 3).
     ///
@@ -235,6 +247,7 @@ impl Limits {
         zip: ZipLimits::DEFAULT,
         tar: TarLimits::DEFAULT,
         sevenz: SevenZipLimits::DEFAULT,
+        rar: RarLimits::DEFAULT,
         xml: tinker_pdf_xml::Limits::DEFAULT,
     };
 }
@@ -556,6 +569,18 @@ pub enum PageDefect {
     /// whole reason a hand-rolled decompressor could be written without an
     /// oracle to check it against.
     SevenZipEntryRefused(SevenZipEntryError),
+    /// The **RAR** would not hand the entry's bytes over (tier 4, W-ARCHIVE
+    /// milestone 4).
+    ///
+    /// [`RarEntryError::Compressed`] is the variant that matters and it is the
+    /// reason this is a page defect rather than an archive refusal: this build
+    /// reads RAR 5's method 0 and not its methods 1 to 5, so an archive that
+    /// mixes them pages the stored entries and puts a placeholder where the
+    /// others are (ruling 2). `docs/design/comic-archives.md` argues why the
+    /// algorithm is not written: the fixture this repository can produce
+    /// stores every entry, so a decoder for it would have nothing first-party
+    /// to be held to.
+    RarEntryRefused(RarEntryError),
     /// The bytes are a JPEG or a PNG and could not be made into an image —
     /// an unreadable header, a colour type outside Table 11.1, a raster past
     /// the ceiling.
@@ -579,6 +604,10 @@ pub enum ArchiveWarning {
     /// milestone 3): a name that is not valid UTF-16, a header property this
     /// build does not act on, an entry the archive recorded no CRC-32 for.
     SevenZip(SevenZipWarning),
+    /// What the **RAR** reader tolerated, carried verbatim (tier 4, W-ARCHIVE
+    /// milestone 4): a header that did not checksum and ended the walk, a name
+    /// that is not UTF-8, an entry with no recorded CRC-32.
+    Rar(RarWarning),
     /// An entry that is an image became a placeholder page. **The page count
     /// and every page number after it are unchanged**, which is the whole
     /// reason the entry was not dropped.
@@ -1223,6 +1252,7 @@ enum Reader<'a> {
     Zip(Archive<'a>),
     Tar(tar::Archive<'a>),
     SevenZip(sevenz::Archive<'a>),
+    Rar(rar::Archive<'a>),
 }
 
 impl<'a> Reader<'a> {
@@ -1258,6 +1288,15 @@ impl<'a> Reader<'a> {
                     directory: entry.is_directory(),
                 })
                 .collect(),
+            Reader::Rar(archive) => archive
+                .entries()
+                .iter()
+                .map(|entry| Listing {
+                    name: entry.name.clone(),
+                    index: entry.index,
+                    directory: entry.is_directory(),
+                })
+                .collect(),
         }
     }
 
@@ -1282,6 +1321,10 @@ impl<'a> Reader<'a> {
                 .read(index)
                 .map(Cow::Owned)
                 .map_err(PageDefect::SevenZipEntryRefused),
+            // The RAR reader's own `Cow`, carried rather than widened: a
+            // stored entry comes back borrowed, which is every entry this
+            // build reads.
+            Reader::Rar(archive) => archive.read(index).map_err(PageDefect::RarEntryRefused),
         }
     }
 
@@ -1303,6 +1346,11 @@ impl<'a> Reader<'a> {
                 .warnings()
                 .iter()
                 .map(|w| ArchiveWarning::SevenZip(*w))
+                .collect(),
+            Reader::Rar(archive) => archive
+                .warnings()
+                .iter()
+                .map(|w| ArchiveWarning::Rar(*w))
                 .collect(),
         }
     }
@@ -1469,10 +1517,54 @@ pub fn synthesise(
             let archive = open_sevenz(bytes, &limits.sevenz)?;
             pages_from_sevenz(archive, limits)
         }
-        // Recognised and refused. RAR is one more decompressor and it is not a
-        // page yet.
-        _ => Err(ArchiveRefusal::NotAZip),
+        Container::Rar => {
+            let archive = open_rar(bytes, &limits.rar)?;
+            pages_from_rar(archive, limits)
+        } // **No `_` arm, and its absence is load-bearing.** `Container` is
+          // `#[non_exhaustive]` for callers and exhaustive here, so every
+          // signature the sniff can return now has a reader behind it and a
+          // fifth one added later fails *this* build rather than silently
+          // falling through to a refusal nobody meant.
     }
+}
+
+/// Opens a RAR, mapping the reader's refusals onto this one's (tier 4,
+/// W-ARCHIVE milestone 4).
+///
+/// # Errors
+/// [`ArchiveRefusal::NotAZip`] for a file with no RAR signature **and for a
+/// RAR 4**, [`ArchiveRefusal::Encrypted`], [`ArchiveRefusal::MultiDisk`] for a
+/// volume of a set, [`ArchiveRefusal::TooLarge`] past a bound, and
+/// [`ArchiveRefusal::Damaged`] for a first header that does not checksum.
+///
+/// **RAR 4 lands on `NotAZip` rather than `Damaged`**, and the leaf keeps the
+/// distinction the facade cannot: `rar::Error::Rar4` is its own variant with
+/// its own sentence, because "this is a RAR of a version I do not read" is not
+/// "this file is broken". `docs/design/comic-archives.md` argues why there is
+/// no RAR 4 decoder — WinRAR 7.20 on this machine cannot produce a RAR 4, so
+/// one would have no first-party fixture to be held to (ruling 13).
+pub fn open_rar<'a>(
+    bytes: &'a [u8],
+    limits: &RarLimits,
+) -> Result<rar::Archive<'a>, ArchiveRefusal> {
+    rar::Archive::open(bytes, limits).map_err(|e| match e {
+        RarError::NotARar | RarError::Rar4 => ArchiveRefusal::NotAZip,
+        RarError::Encrypted => ArchiveRefusal::Encrypted,
+        RarError::MultiVolume => ArchiveRefusal::MultiDisk,
+        RarError::TooManyEntries => ArchiveRefusal::TooLarge,
+        _ => ArchiveRefusal::Damaged,
+    })
+}
+
+/// Pages an already-open RAR as a comic (tier 4, W-ARCHIVE milestone 4).
+///
+/// # Errors
+/// [`ArchiveRefusal`], one variant per refusal, each of them by name.
+pub fn pages_from_rar(
+    archive: rar::Archive<'_>,
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    pages_from_reader(Reader::Rar(archive), limits)
 }
 
 /// Opens a 7z, mapping the reader's refusals onto this one's (tier 4,
