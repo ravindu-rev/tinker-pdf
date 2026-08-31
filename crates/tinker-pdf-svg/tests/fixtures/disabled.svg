@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The two ways a subtree is removed from the rendering tree, each with a
+     refused element inside it so that "was it walked?" is observable.
+     §11.5 `display: none` takes the element and its children; §7.7 a viewBox
+     with no area "disables rendering of the element", which is a different
+     sentence from mapping it with an identity. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <g display="none">
+    <filter id="never-seen"/>
+  </g>
+  <svg width="50" height="50" viewBox="0 0 0 10">
+    <mask id="also-never-seen"/>
+  </svg>
+  <script>this one is seen</script>
+</svg>
