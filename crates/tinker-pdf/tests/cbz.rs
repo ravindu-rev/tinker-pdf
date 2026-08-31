@@ -97,21 +97,19 @@ fn a_pdf_carrying_the_zip_signature_is_still_a_pdf() {
     );
 }
 
-/// The three containers this build does not read are refused **by name**.
+/// The containers this build does not read are refused **by name**.
 ///
 /// "This is a CBR and I do not read CBR" is a different sentence from "this is
 /// not a PDF", and a host shows different things for them.
+///
+/// *Amended in tier 4's W-ARCHIVE lane.* The tar left this list when it gained
+/// a reader, and moved to the test below rather than being deleted — a row
+/// here may only ever move in that direction.
 #[test]
-fn a_cbr_a_cb7_and_a_cbt_are_refused_by_name() {
+fn a_cbr_and_a_cb7_are_refused_by_name() {
     for (what, bytes) in [
         (Container::Rar, b"Rar!\x1a\x07\x00rest of it".to_vec()),
         (Container::SevenZip, b"7z\xbc\xaf\x27\x1crest".to_vec()),
-        (Container::Tar, {
-            let mut block = vec![0u8; 1024];
-            block[..8].copy_from_slice(b"page1.jp");
-            block[257..262].copy_from_slice(b"ustar");
-            block
-        }),
     ] {
         assert_eq!(cbz::container(&bytes), Some(what));
         assert_eq!(
@@ -120,6 +118,27 @@ fn a_cbr_a_cb7_and_a_cbt_are_refused_by_name() {
             "{what:?}"
         );
     }
+}
+
+/// A `ustar` magic behind a header that does not checksum is **recognised, read
+/// and empty** — which is a different refusal from the one it used to get.
+///
+/// Before this build had a tar reader the answer was `NotAZip`, and the
+/// distinction is worth a test rather than a line: a host that is told "this is
+/// a container I do not read" shows a different thing from one told "I read
+/// this and it holds no pages". POSIX 1003.1's header checksum is what
+/// separates the two here — the block below has a magic and no valid sum, so
+/// the walk ends before its first entry.
+#[test]
+fn a_tar_whose_first_header_does_not_checksum_holds_no_pages() {
+    let mut block = vec![0u8; 1024];
+    block[..8].copy_from_slice(b"page1.jp");
+    block[257..262].copy_from_slice(b"ustar");
+    assert_eq!(cbz::container(&block), Some(Container::Tar));
+    assert_eq!(
+        Document::open(block).err(),
+        Some(OpenError::UnsupportedArchive(ArchiveRefusal::NoImages)),
+    );
 }
 
 // ---- Pages, order and geometry -----------------------------------------

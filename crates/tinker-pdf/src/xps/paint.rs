@@ -62,13 +62,16 @@ use tinker_pdf_cos::{
 };
 use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 
-use super::brush::{self, Brush, BrushError, ImageTile, Mask, Paint, TileMode, Units};
+use super::brush::{
+    self, Brush, BrushError, ImageTile, Mask, Paint, Placement, TileMode, Units, VisualTile,
+};
 use super::font::Fonts;
 use super::geometry::{self, Geometry, GeometryError};
 use super::glyphs::{self, RunError};
 use super::image::Images;
 use super::markup::{self, Budget, Node, Trouble};
 use super::opc::PartName;
+use super::resources::Remotes;
 use super::{XpsElementDefect, UNITS_TO_POINTS};
 use crate::cbz::PLACEHOLDER_GREY;
 
@@ -76,6 +79,11 @@ use crate::cbz::PLACEHOLDER_GREY;
 ///
 /// Declared in [`super::MAX_XPS_RESOURCE_DEPTH`], which carries the ledger.
 use super::MAX_XPS_RESOURCE_DEPTH;
+
+/// How deep a `VisualBrush` may nest inside another.
+///
+/// Declared in [`super::MAX_XPS_VISUAL_DEPTH`], which carries the ledger.
+use super::MAX_XPS_VISUAL_DEPTH;
 
 /// One fixed page, painted.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -157,6 +165,7 @@ impl Painter {
             around,
             defects: Vec::new(),
             dictionaries: Vec::new(),
+            visuals: Vec::new(),
         };
         let mut scopes = vec![Scope::root()];
         state.run(&mut reader, &mut scopes, budget)?;
@@ -185,6 +194,9 @@ pub struct Surroundings<'a> {
     pub fonts: &'a Fonts,
     /// The images [`super::image::Images::load`] placed for this part.
     pub images: &'a Images,
+    /// The remote resource dictionaries
+    /// [`super::resources::Remotes::load`] read for this part.
+    pub remotes: &'a Remotes,
     /// The page's own size, in XPS units.
     ///
     /// Needed for one thing and it is not the geometry: a tiling pattern's
@@ -241,6 +253,169 @@ impl Scope {
     }
 }
 
+/// What painting one brush can go wrong with, at the two altitudes it can.
+///
+/// Every other paint failure in this module is one [`XpsElementDefect`] and
+/// the element takes the placeholder grey. A `VisualBrush` is the first that
+/// can also fail at the *page's* altitude, because painting it re-enters the
+/// drawing walk — and that walk can exhaust one of gap 30's work totals, which
+/// refuses the package, or find markup that will not read, which refuses the
+/// page. Neither is a grey rectangle.
+///
+/// So the two are held apart in the type rather than by a convention: a
+/// [`Trouble`] that arrived through a brush is still a [`Trouble`] when it
+/// leaves, and there is no arm a caller can write that quietly turns an
+/// exhausted budget into a tile it draws anyway.
+#[derive(Debug)]
+enum Refused {
+    /// The brush is refused, named, and painted grey. The page continues.
+    Brush(XpsElementDefect),
+    /// The page or the package is refused, and nothing more is painted.
+    Page(Trouble),
+}
+
+impl From<XpsElementDefect> for Refused {
+    fn from(defect: XpsElementDefect) -> Refused {
+        Refused::Brush(defect)
+    }
+}
+
+impl From<Trouble> for Refused {
+    fn from(trouble: Trouble) -> Refused {
+        Refused::Page(trouble)
+    }
+}
+
+/// 15.3's placement, with its two unit modes already spent.
+///
+/// [`Placement`] is what the markup **said**; this is what it **means** once
+/// the source's own extent and the box being filled are known. Both brushes
+/// that tile — an `ImageBrush` over a picture and a `VisualBrush` over a
+/// subtree — differ in what goes in the cell and in nothing about where the
+/// cell goes, so the arithmetic is done once here rather than twice.
+///
+/// The one place they are not identical is what a `RelativeToBoundingBox`
+/// *viewbox* is a fraction of, and that is the `source` argument to
+/// [`Placed::of`]: an image's pixels are a second space with an extent of its
+/// own, and a visual's coordinates are already the brush's, so its source is
+/// the unit square and a relative viewbox on one is the whole of it.
+struct Placed {
+    /// `Viewbox`, in the source's own units, absolute.
+    viewbox: [f64; 4],
+    /// `Viewport`, in the element's units, absolute.
+    viewport: [f64; 4],
+    /// `TileMode`, carried because the step depends on it.
+    tile: TileMode,
+    /// `Transform`, which maps the brush's space into the element's.
+    transform: [f64; 6],
+}
+
+impl Placed {
+    /// Spends 15.3's two unit modes.
+    ///
+    /// `source` is the source's own extent, which only a
+    /// `RelativeToBoundingBox` viewbox needs. `bbox` is the box being filled,
+    /// which only a `RelativeToBoundingBox` viewport needs — and a relative
+    /// viewport with no box is [`XpsElementDefect::BrushUnreadable`] rather
+    /// than a box invented here.
+    fn of(
+        placement: &Placement,
+        source: (f64, f64),
+        bbox: Option<[f64; 4]>,
+    ) -> Result<Placed, XpsElementDefect> {
+        let viewbox = match placement.viewbox_units {
+            Units::Absolute => placement.viewbox,
+            Units::RelativeToBoundingBox => [
+                placement.viewbox[0] * source.0,
+                placement.viewbox[1] * source.1,
+                placement.viewbox[2] * source.0,
+                placement.viewbox[3] * source.1,
+            ],
+        };
+        let viewport = match placement.viewport_units {
+            Units::Absolute => placement.viewport,
+            Units::RelativeToBoundingBox => {
+                let Some(b) = bbox else {
+                    return Err(XpsElementDefect::BrushUnreadable);
+                };
+                let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
+                [
+                    b[0] + placement.viewport[0] * bw,
+                    b[1] + placement.viewport[1] * bh,
+                    placement.viewport[2] * bw,
+                    placement.viewport[3] * bh,
+                ]
+            }
+        };
+        if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 {
+            return Err(XpsElementDefect::BrushUnreadable);
+        }
+        Ok(Placed {
+            viewbox,
+            viewport,
+            tile: placement.tile,
+            transform: placement.transform,
+        })
+    }
+
+    /// The cell, in the source's own units, and how many sources across it is.
+    ///
+    /// The reflections are the only reason it is ever more than one: 8.7.3.1
+    /// gives a cell and two steps and **no reflection at all**, so `FlipX`,
+    /// `FlipY` and `FlipXY` are built by making the cell twice the source in
+    /// the flipped direction and drawing the source into it twice.
+    fn cell(&self) -> (f64, f64) {
+        let (x, y) = match self.tile {
+            TileMode::None | TileMode::Tile => (1.0, 1.0),
+            TileMode::FlipX => (2.0, 1.0),
+            TileMode::FlipY => (1.0, 2.0),
+            TileMode::FlipXY => (2.0, 2.0),
+        };
+        (self.viewbox[2] * x, self.viewbox[3] * y)
+    }
+
+    /// One `(x, y)` sign pair per copy the cell holds.
+    fn flips(&self) -> &'static [(f64, f64)] {
+        match self.tile {
+            TileMode::None | TileMode::Tile => &[(1.0, 1.0)],
+            TileMode::FlipX => &[(1.0, 1.0), (-1.0, 1.0)],
+            TileMode::FlipY => &[(1.0, 1.0), (1.0, -1.0)],
+            TileMode::FlipXY => &[(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)],
+        }
+    }
+
+    /// Where a mirrored copy's origin sits: on the far side of the cell,
+    /// drawing backwards into its own half.
+    fn mirror_origin(fx: f64, fy: f64, w: f64, h: f64) -> (f64, f64) {
+        let x = if fx < 0.0 { 2.0 * w } else { 0.0 };
+        let y = if fy < 0.0 { 2.0 * h } else { 0.0 };
+        (x, y)
+    }
+
+    /// Pattern space into the element's space: the viewbox-to-viewport scale
+    /// and the viewport's own offset, with the brush's `Transform` inside both.
+    ///
+    /// The two directions scale **independently**: 15.3 does not preserve the
+    /// aspect ratio, and a build that took one scale for both would letterbox
+    /// a picture the file said to stretch.
+    fn place(&self) -> [f64; 6] {
+        let sx = self.viewport[2] / self.viewbox[2];
+        let sy = self.viewport[3] / self.viewbox[3];
+        let fit = [
+            sx,
+            0.0,
+            0.0,
+            sy,
+            self.viewport[0] - self.viewbox[0] * sx,
+            self.viewport[1] - self.viewbox[1] * sy,
+        ];
+        // 15.3's `Transform` is stated in the brush's own space, so it runs
+        // *before* the fit into the viewport — the other order would scale the
+        // brush transform's translation by the viewbox-to-viewport factor.
+        markup::concat(self.transform, fit)
+    }
+}
+
 /// A resource dictionary and the scope depth it was declared at.
 ///
 /// 14.2.5 resolves a reference in the dictionary of the element it is written
@@ -257,12 +432,37 @@ struct State<'a> {
     around: &'a Surroundings<'a>,
     defects: Vec<XpsElementDefect>,
     dictionaries: Vec<Dictionary>,
+    /// The `VisualBrush`es currently being painted, innermost last.
+    ///
+    /// One entry per open brush whether or not it was keyed, so the length is
+    /// the *nest's* depth and not the keyed nest's: an inline `VisualBrush`
+    /// inside an inline one is exactly as deep as two keyed ones. An unkeyed
+    /// brush pushes `None`, which is never equal to a key — an
+    /// `Option<String>` rather than a sentinel string, so an `x:Key` that
+    /// happens to be empty cannot be mistaken for one.
+    visuals: Vec<Option<String>>,
 }
 
 impl State<'_> {
     fn warn(&mut self, defect: XpsElementDefect) {
         if !self.defects.contains(&defect) {
             self.defects.push(defect);
+        }
+    }
+
+    /// Splits a [`Refused`] at its two altitudes.
+    ///
+    /// The brush half is named and answered `Ok`, so the caller carries on and
+    /// paints the placeholder. The page half is handed straight back, so a
+    /// budget spent inside a `VisualBrush` still refuses the package rather
+    /// than becoming a grey rectangle on a page that keeps drawing.
+    fn refused(&mut self, error: Refused) -> Result<(), Trouble> {
+        match error {
+            Refused::Brush(defect) => {
+                self.warn(defect);
+                Ok(())
+            }
+            Refused::Page(trouble) => Err(trouble),
         }
     }
 
@@ -332,7 +532,7 @@ impl State<'_> {
                         scopes.push(done);
                         return Ok(());
                     }
-                    self.close(scopes, done);
+                    self.close(scopes, done, budget)?;
                 }
                 _ => {}
             }
@@ -356,22 +556,44 @@ impl State<'_> {
                     self.warn(XpsElementDefect::ElementUnknown);
                     return Ok(());
                 };
-                // 14.2.4's remote dictionary names another part, which is gap
-                // 30 milestone 8. Every key in it is unresolvable here, and
-                // saying so once is better than one `BrushUnresolved` per use.
-                if dictionary.attr("Source").is_some() {
-                    self.warn(XpsElementDefect::ResourceDictionaryRemote);
-                }
-                let mut entries = HashMap::new();
-                for entry in &dictionary.children {
-                    let Some(key) = entry.key.clone() else {
-                        // 14.2.2 makes `x:Key` mandatory on every entry; one
-                        // without a key can never be referenced.
-                        self.warn(XpsElementDefect::ElementUnknown);
-                        continue;
-                    };
-                    entries.insert(key, entry.clone());
-                }
+                // 14.2.4's `Source` names another part, whose entries were
+                // read before this walk began — `read_part` hands back a
+                // borrow this walk is already holding, so the table is filled
+                // by `resources::Remotes::load` and looked up here.
+                //
+                // `Source` and inline content are alternatives and not a pair:
+                // a dictionary that states a part **is** that part's, and the
+                // children written under it are not merged in behind it. A
+                // build that merged them would answer a key from whichever
+                // happened to be inserted second.
+                let entries = match dictionary.attr("Source") {
+                    Some(source) => match self.around.remotes.get(self.around.part, source) {
+                        Ok(entries) => entries.clone(),
+                        Err(defect) => {
+                            // The dictionary is named once and the scope opens
+                            // with nothing in it, so every `{StaticResource}`
+                            // that wanted it takes `BrushUnresolved` and the
+                            // placeholder grey. The page is not lost, which is
+                            // ruling 2's whole requirement.
+                            self.warn(defect);
+                            HashMap::new()
+                        }
+                    },
+                    None => {
+                        let mut entries = HashMap::new();
+                        for entry in &dictionary.children {
+                            let Some(key) = entry.key.clone() else {
+                                // 14.2.2 makes `x:Key` mandatory on every
+                                // entry; one without a key can never be
+                                // referenced.
+                                self.warn(XpsElementDefect::ElementUnknown);
+                                continue;
+                            };
+                            entries.insert(key, entry.clone());
+                        }
+                        entries
+                    }
+                };
                 self.dictionaries.push(Dictionary { entries });
                 if let Some(scope) = scopes.last_mut() {
                     scope.dictionaries += 1;
@@ -503,9 +725,19 @@ impl State<'_> {
     }
 
     /// Folds a closed canvas into its parent.
-    fn close(&mut self, scopes: &mut [Scope], done: Scope) {
+    ///
+    /// # Errors
+    /// The canvas's `OpacityMask` may be a `VisualBrush`, whose painting can
+    /// spend the page's budget — and that refuses the package rather than the
+    /// canvas.
+    fn close(
+        &mut self,
+        scopes: &mut [Scope],
+        done: Scope,
+        budget: &mut Budget,
+    ) -> Result<(), Trouble> {
         if scopes.is_empty() || done.refused || done.content.is_empty() {
-            return;
+            return Ok(());
         }
         let inner_box = union(&done.boxes);
 
@@ -522,15 +754,16 @@ impl State<'_> {
                     BrushError::Unsupported => XpsElementDefect::BrushUnsupported,
                     BrushError::Syntax => XpsElementDefect::BrushUnreadable,
                 })
-                .and_then(|mask| self.mask_gstate(&mask, inner_box));
+                .map_err(Refused::Brush)
+                .and_then(|mask| self.mask_gstate(&mask, inner_box, budget));
             match read {
                 Ok((alpha, gs)) => {
                     mask_alpha = alpha;
                     mask_gs = gs;
                 }
-                Err(defect) => {
-                    self.warn(defect);
-                    return;
+                Err(error) => {
+                    self.refused(error)?;
+                    return Ok(());
                 }
             }
         }
@@ -572,7 +805,7 @@ impl State<'_> {
         }
 
         let Some(parent) = scopes.last_mut() else {
-            return;
+            return Ok(());
         };
         parent.content.extend_from_slice(b"q\n");
         if done.transform != markup::IDENTITY {
@@ -606,6 +839,7 @@ impl State<'_> {
                 parent.boxes.push(bbox);
             }
         }
+        Ok(())
     }
 
     /// Draws one `Path`.
@@ -674,10 +908,10 @@ impl State<'_> {
         // ignored draws a whole shape where a sliver was meant.
         let mask = match self.mask_of(node, "Path", bbox) {
             None => None,
-            Some(Ok(mask)) => match self.mask_gstate(&mask, bbox) {
+            Some(Ok(mask)) => match self.mask_gstate(&mask, bbox, budget) {
                 Ok(applied) => Some(applied),
-                Err(defect) => {
-                    self.warn(defect);
+                Err(error) => {
+                    self.refused(error)?;
                     return Ok(());
                 }
             },
@@ -746,14 +980,23 @@ impl State<'_> {
                         Ok(name) => {
                             fill_with_pattern(&mut out, &name, &data);
                         }
-                        Err(defect) => grey_fill(self, &mut out, &data, defect),
+                        Err(error) => grey_fill(self, &mut out, &data, error)?,
+                    }
+                }
+                Paint::Visual(tile) => {
+                    let ctm = self.in_force(scopes, transform);
+                    match self.visual(&tile, bbox, ctm, budget) {
+                        Ok(name) => {
+                            fill_with_pattern(&mut out, &name, &data);
+                        }
+                        Err(error) => grey_fill(self, &mut out, &data, error)?,
                     }
                 }
             }
         }
         if let Some(brush) = stroke {
             let ctm = self.in_force(scopes, transform);
-            self.stroke(&mut out, node, &data, &brush, bbox, ctm);
+            self.stroke(&mut out, node, &data, &brush, ctm, budget)?;
         }
         out.extend_from_slice(b"Q\n");
 
@@ -923,10 +1166,10 @@ impl State<'_> {
         // reason where it will not read.
         let mask = match self.mask_of(node, "Glyphs", Some(bbox)) {
             None => None,
-            Some(Ok(mask)) => match self.mask_gstate(&mask, Some(bbox)) {
+            Some(Ok(mask)) => match self.mask_gstate(&mask, Some(bbox), budget) {
                 Ok(applied) => Some(applied),
-                Err(defect) => {
-                    self.warn(defect);
+                Err(error) => {
+                    self.refused(error)?;
                     return Ok(());
                 }
             },
@@ -983,8 +1226,15 @@ impl State<'_> {
             },
             Paint::Image(tile) => match self.tile(tile, Some(bbox), ctm) {
                 Ok(name) => fill_pattern_colour(&mut out, &name),
-                Err(defect) => {
-                    self.warn(defect);
+                Err(error) => {
+                    self.refused(error)?;
+                    markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+                }
+            },
+            Paint::Visual(tile) => match self.visual(tile, Some(bbox), ctm, budget) {
+                Ok(name) => fill_pattern_colour(&mut out, &name),
+                Err(error) => {
+                    self.refused(error)?;
                     markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
                 }
             },
@@ -1083,145 +1333,240 @@ impl State<'_> {
     /// left the last of those out would draw every tiled picture at the page's
     /// origin, which looks like a clipping bug and is not one.
     ///
-    /// # The flips have no PDF equivalent
+    /// # Only the cell's content is this method's own
     ///
-    /// 8.7.3.1 gives a cell and two steps and no reflection at all, so
-    /// `FlipX`, `FlipY` and `FlipXY` are built by making the cell **twice the
-    /// image in the flipped direction** and drawing the image into it twice,
-    /// once mirrored. `FlipXY` is four times the image and four drawings. That
-    /// is the whole of the difference between the five `TileMode`s, and each is
-    /// a rule rather than a variation on one.
+    /// Everything about *where* the tile goes — the two rectangles, their two
+    /// unit modes, the five `TileMode`s including the reflections PDF has no
+    /// operator for, and the `/Matrix` into default space — is [`Placed`]'s,
+    /// and is shared verbatim with [`State::visual`]. What is here is the one
+    /// thing an `ImageBrush` does that a `VisualBrush` does not: put a picture
+    /// in the cell, once per reflection.
     fn tile(
         &mut self,
         tile: &ImageTile,
         bbox: Option<[f64; 4]>,
         ctm: [f64; 6],
-    ) -> Result<Vec<u8>, XpsElementDefect> {
+    ) -> Result<Vec<u8>, Refused> {
         // The picture is not there, is a format this build refuses, or carries
         // a colour profile — each already named by `Images::get`. The *shape* is
         // still known, so the caller paints the placeholder and the rest of the
         // page is untouched, which is row 8's own requirement.
         let image = self.around.images.get(self.around.part, &tile.source)?;
         let resource = image.resource.clone();
-        let (image_w, image_h) = image.units();
-
-        // 15.3's units. An absolute viewbox is already in image units; a
-        // relative one is a fraction of the whole image.
-        let viewbox = match tile.viewbox_units {
-            Units::Absolute => tile.viewbox,
-            Units::RelativeToBoundingBox => [
-                tile.viewbox[0] * image_w,
-                tile.viewbox[1] * image_h,
-                tile.viewbox[2] * image_w,
-                tile.viewbox[3] * image_h,
-            ],
-        };
-        // A relative viewport is a fraction of the box being filled, which is
-        // why `brush::image_brush` refuses one with no box rather than
-        // inventing the box here.
-        let viewport = match tile.viewport_units {
-            Units::Absolute => tile.viewport,
-            Units::RelativeToBoundingBox => {
-                let Some(b) = bbox else {
-                    return Err(XpsElementDefect::BrushUnreadable);
-                };
-                let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
-                [
-                    b[0] + tile.viewport[0] * bw,
-                    b[1] + tile.viewport[1] * bh,
-                    tile.viewport[2] * bw,
-                    tile.viewport[3] * bh,
-                ]
-            }
-        };
-        if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 {
-            return Err(XpsElementDefect::BrushUnreadable);
-        }
-
-        // Viewbox to viewport, in each direction independently: 15.3 does not
-        // preserve the aspect ratio, and a build that took one scale for both
-        // would letterbox a picture the file said to stretch.
-        let sx = viewport[2] / viewbox[2];
-        let sy = viewport[3] / viewbox[3];
-
-        // The cell, in image units, and how many images wide it is. The flips
-        // are the only reason it is ever more than one.
-        let (cells_x, cells_y) = match tile.tile {
-            TileMode::None | TileMode::Tile => (1.0, 1.0),
-            TileMode::FlipX => (2.0, 1.0),
-            TileMode::FlipY => (1.0, 2.0),
-            TileMode::FlipXY => (2.0, 2.0),
-        };
-        let cell_w = viewbox[2] * cells_x;
-        let cell_h = viewbox[3] * cells_y;
+        let source = image.units();
+        let placed = Placed::of(&tile.placement, source, bbox)?;
 
         // The cell's content: the image drawn once per reflection. 8.9.5.2 puts
         // an image in the unit square, so the `cm` is the image's own extent
         // and a negative scale with a compensating translation is the mirror.
+        let (w, h) = (placed.viewbox[2], placed.viewbox[3]);
         let mut cell = Vec::new();
-        let flips: &[(f64, f64)] = match tile.tile {
-            TileMode::None | TileMode::Tile => &[(1.0, 1.0)],
-            TileMode::FlipX => &[(1.0, 1.0), (-1.0, 1.0)],
-            TileMode::FlipY => &[(1.0, 1.0), (1.0, -1.0)],
-            TileMode::FlipXY => &[(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)],
-        };
-        for (fx, fy) in flips {
-            let w = viewbox[2];
-            let h = viewbox[3];
-            // The origin of this copy: a mirrored copy sits on the far side of
-            // the cell and draws backwards into its own half.
-            let ox = if *fx < 0.0 { 2.0 * w } else { 0.0 };
-            let oy = if *fy < 0.0 { 2.0 * h } else { 0.0 };
+        for (fx, fy) in placed.flips() {
+            let (ox, oy) = Placed::mirror_origin(*fx, *fy, w, h);
             cell.extend_from_slice(b"q\n");
             markup::op(&mut cell, &[w * fx, 0.0, 0.0, h * fy, ox, oy], "cm");
             cell.push(b'/');
             cell.extend_from_slice(&resource);
             cell.extend_from_slice(b" Do\nQ\n");
         }
+        self.pattern(&placed, &cell, ctm)
+    }
 
-        // Pattern space into the page's default space. The element's own
-        // transform is composed in here rather than left to the `cm` in force,
-        // because 8.7.3.1 says a pattern ignores that one.
-        let place = [
-            sx,
-            0.0,
-            0.0,
-            sy,
-            viewport[0] - viewbox[0] * sx,
-            viewport[1] - viewbox[1] * sy,
-        ];
-        // `place` maps pattern space (image units) into the element's space and
-        // the CTM maps that into the page's, so `place` is the inner one. The
-        // other order scales the translation by the viewbox-to-viewport factor,
-        // which puts a 200-unit picture four thousand points down the page.
-        let matrix = markup::concat(place, ctm);
+    /// Writes a `VisualBrush`'s fill: a tiling pattern whose cell is a
+    /// **drawing** (15.4).
+    ///
+    /// # Only the cell's content differs from [`State::tile`]
+    ///
+    /// Everything about where a tile goes — 15.3's two rectangles, their two
+    /// unit modes, the five `TileMode`s including the reflections PDF has no
+    /// operator for, and 8.7.3.1's `/Matrix` into the page's default space — is
+    /// the same arithmetic, and it is done once in [`Placed`] rather than
+    /// twice. What changes is that the cell holds the subtree instead of one
+    /// `Do`.
+    ///
+    /// # Re-entering the drawing walk, and the two bounds on it
+    ///
+    /// The subtree is markup, so painting it means running the element handlers
+    /// again from inside a brush. Two things can go wrong and they are **two
+    /// rules**:
+    ///
+    /// - a `VisualBrush` whose subtree states another one is legal to any depth
+    ///   the file chooses, and is bounded by [`MAX_XPS_VISUAL_DEPTH`];
+    /// - a `VisualBrush` reached through a `{StaticResource}` whose own subtree
+    ///   names that key again never terminates, and no single lookup chain can
+    ///   see it because each lookup starts afresh — so the keys currently being
+    ///   painted are carried and a repeat is refused.
+    ///
+    /// They answer under [`XpsElementDefect::BrushTooDeep`] and
+    /// [`XpsElementDefect::BrushCyclic`], which are the names a
+    /// `{StaticResource}` chain already uses for the same two failures.
+    fn visual(
+        &mut self,
+        tile: &VisualTile,
+        bbox: Option<[f64; 4]>,
+        ctm: [f64; 6],
+        budget: &mut Budget,
+    ) -> Result<Vec<u8>, Refused> {
+        // The cycle is checked before the depth, so a brush that is both is
+        // reported as the cycle: a cycle is a statement about the file and a
+        // depth is a statement about this build's cap, and the first is the
+        // more useful of the two to be told.
+        if let Some(key) = &tile.key {
+            if self.visuals.iter().any(|open| open.as_ref() == Some(key)) {
+                return Err(Refused::Brush(XpsElementDefect::BrushCyclic));
+            }
+        }
+        if self.visuals.len() >= MAX_XPS_VISUAL_DEPTH {
+            return Err(Refused::Brush(XpsElementDefect::BrushTooDeep));
+        }
+        // Pushed whether or not the brush was keyed, so the depth is the
+        // nest's and not the keyed nest's.
+        self.visuals.push(tile.key.clone());
+        // One copy of the drawing, in the visual's own space, painted into a
+        // scope stack of its own. The root scope is this brush's cell and not
+        // the page's — a `Canvas` inside the visual still folds into its
+        // parent the ordinary way, and the page's own scopes are not reachable
+        // from here, which is what stops a visual's `Canvas` from closing one
+        // of them.
+        let mut scopes = vec![Scope::root()];
+        let drawn = self.draw_subtree(&mut scopes, &tile.visual, budget);
+        // Popped before the `?`, so a subtree that exhausted the budget still
+        // leaves the depth where it found it.
+        self.visuals.pop();
+        drawn?;
+        let root = scopes.pop();
+        let extent = root.as_ref().and_then(|root| union(&root.boxes));
+        let copy = root.map(|root| root.content).unwrap_or_default();
 
+        // The drawing is measured **before** it is placed, because 15.3's
+        // `ViewboxUnits` defaults to `RelativeToBoundingBox` and the box a
+        // visual's viewbox is a fraction of is the visual's *own* — the
+        // counterpart of the image's pixel extent, and the one thing about a
+        // `VisualBrush` that cannot be known until the subtree has been drawn.
+        // A visual that drew nothing has no extent; the unit square keeps the
+        // arithmetic finite and the cell is empty either way.
+        let source = extent.map_or((1.0, 1.0), |b| (b[2] - b[0], b[3] - b[1]));
+        let placed = Placed::of(&tile.placement, source, bbox)?;
+
+        // The reflections place that copy, mirrored, the way `tile` places the
+        // image — and unlike 8.9.5.2's image there is no unit square to scale
+        // out of, so the mirror is a bare `-1` about the far edge of the cell.
+        let (w, h) = (placed.viewbox[2], placed.viewbox[3]);
+        let mut cell = Vec::new();
+        for (fx, fy) in placed.flips() {
+            let (ox, oy) = Placed::mirror_origin(*fx, *fy, w, h);
+            cell.extend_from_slice(b"q\n");
+            markup::op(&mut cell, &[*fx, 0.0, 0.0, *fy, ox, oy], "cm");
+            cell.extend_from_slice(&copy);
+            cell.extend_from_slice(b"Q\n");
+        }
+        self.pattern(&placed, &cell, ctm)
+    }
+
+    /// Registers the tiling pattern a placed cell becomes.
+    ///
+    /// 8.7.3.1's `/Matrix` maps pattern space into the page's **default**
+    /// space and ignores the transform in force, so the element's own transform
+    /// arrives as `ctm` and is composed in here rather than left to the `cm`
+    /// the operator sits inside.
+    fn pattern(&mut self, placed: &Placed, cell: &[u8], ctm: [f64; 6]) -> Result<Vec<u8>, Refused> {
+        // `place` maps pattern space (the source's own units) into the
+        // element's space and the CTM maps that into the page's, so `place` is
+        // the inner one. The other order scales the translation by the
+        // viewbox-to-viewport factor, which puts a 200-unit picture four
+        // thousand points down the page.
+        let matrix = markup::concat(placed.place(), ctm);
+        let (cell_w, cell_h) = placed.cell();
         let name = self.painter.name("P");
         let pattern = TilingPattern {
             bbox: [0.0, 0.0, cell_w, cell_h],
-            // `TileMode::None` draws the picture once. PDF has no such thing —
+            // `TileMode::None` draws the source once. PDF has no such thing —
             // a pattern always repeats — so the step is made large enough that
             // no second cell can reach the shape, and the clip does the rest.
-            x_step: if tile.tile == TileMode::None {
+            x_step: if placed.tile == TileMode::None {
                 NO_TILE_STEP
             } else {
                 cell_w
             },
-            y_step: if tile.tile == TileMode::None {
+            y_step: if placed.tile == TileMode::None {
                 NO_TILE_STEP
             } else {
                 cell_h
             },
             matrix: Some(matrix),
             tiling_type: TilingType::ConstantSpacing,
-            content: &cell,
+            content: cell,
         };
         if !self.builder.add_tiling_pattern(&name, &pattern) {
             // A degenerate cell or a non-finite number: the writer refused it,
             // and the shape takes the placeholder rather than nothing.
-            return Err(XpsElementDefect::BrushUnreadable);
+            return Err(Refused::Brush(XpsElementDefect::BrushUnreadable));
         }
         Ok(name)
+    }
+
+    /// Draws a materialised subtree, which is what a `VisualBrush`'s cell is.
+    ///
+    /// [`State::run`]'s walk cannot serve here: its elements arrive as parser
+    /// events, and a brush's visual has already been materialised by
+    /// [`markup::subtree`] as part of the brush that carries it. Every
+    /// *element* handler is shared — `canvas`, `path`, `glyphs` and `property`
+    /// each take a [`Node`] — so what this adds is the dispatch over children,
+    /// not a second reading of sections 11 to 15.
+    ///
+    /// # A `Canvas` is opened on its attributes alone, exactly as `run` does
+    ///
+    /// [`State::canvas`] reads a transform from the element's attribute **or**
+    /// from its `Canvas.RenderTransform` child, because [`super::markup::leaf`]
+    /// hands it a node with no children and the child arrives separately as a
+    /// property event. Here the node is whole, so handing it over intact would
+    /// have `canvas` read the property element *and* the loop below hand the
+    /// same element to [`State::property`] — which composes rather than
+    /// assigns, and would square every canvas transform inside a brush. So the
+    /// canvas is opened on a leaf view and its children are dispatched, which
+    /// is the streamed walk's own division and produces the same answer by
+    /// construction rather than by agreement.
+    fn draw_subtree(
+        &mut self,
+        scopes: &mut Vec<Scope>,
+        node: &Node,
+        budget: &mut Budget,
+    ) -> Result<(), Trouble> {
+        budget.element()?;
+        if !node.xps {
+            // 14.1's foreign markup, named rather than passed over in silence,
+            // which is what `run` does with the same element.
+            self.warn(XpsElementDefect::ElementUnknown);
+            return Ok(());
+        }
+        let owner = scopes.last().map_or("FixedPage", |scope| scope.owner);
+        if node.property_of(owner).is_some() {
+            return self.property(scopes, node, budget);
+        }
+        match node.local.as_str() {
+            "Canvas" => {
+                let scope = self.canvas(scopes, &leaf_of(node), budget)?;
+                scopes.push(scope);
+                // A canvas's property elements are values and its drawables are
+                // children, and document order between the two does not matter
+                // — which is what the scope's own content buffer is for.
+                for child in &node.children {
+                    self.draw_subtree(scopes, child, budget)?;
+                }
+                if let Some(done) = scopes.pop() {
+                    self.dictionaries
+                        .truncate(self.dictionaries.len().saturating_sub(done.dictionaries));
+                    self.close(scopes, done, budget)?;
+                }
+                Ok(())
+            }
+            "Path" => self.path(scopes, node, budget),
+            "Glyphs" => self.glyphs(scopes, node, budget),
+            _ => {
+                self.warn(XpsElementDefect::ElementUnknown);
+                Ok(())
+            }
+        }
     }
 
     /// A gradient as a `/PatternType 2` pattern (8.7.4.5.5), which is the one
@@ -1297,15 +1642,20 @@ impl State<'_> {
         node: &Node,
         data: &Geometry,
         brush: &Brush,
-        bbox: Option<[f64; 4]>,
         ctm: [f64; 6],
-    ) {
+        budget: &mut Budget,
+    ) -> Result<(), Trouble> {
+        // The box a `RelativeToBoundingBox` brush is a fraction of is the
+        // shape's own, which is `data`'s — taken here rather than passed in,
+        // because the only caller derived it from `data` and two ways to know
+        // one thing is one of them eventually being wrong.
+        let bbox = data.bbox();
         let width = node
             .attr("StrokeThickness")
             .map_or(Some(1.0), markup::number);
         let Some(width) = width.filter(|w| *w >= 0.0) else {
             self.warn(XpsElementDefect::GeometryUnreadable);
-            return;
+            return Ok(());
         };
         markup::op(out, &[width], "w");
         if let Some(cap) = node.attr("StrokeStartLineCap").and_then(line_cap) {
@@ -1332,14 +1682,22 @@ impl State<'_> {
             },
             Paint::Image(tile) => match self.tile(tile, bbox, ctm) {
                 Ok(name) => stroke_with_pattern(out, &name),
-                Err(defect) => {
-                    self.warn(defect);
+                Err(error) => {
+                    self.refused(error)?;
+                    markup::op(out, &[PLACEHOLDER_GREY], "G");
+                }
+            },
+            Paint::Visual(tile) => match self.visual(tile, bbox, ctm, budget) {
+                Ok(name) => stroke_with_pattern(out, &name),
+                Err(error) => {
+                    self.refused(error)?;
                     markup::op(out, &[PLACEHOLDER_GREY], "G");
                 }
             },
         }
         data.emit(out, false);
         out.extend_from_slice(b"S\n");
+        Ok(())
     }
 
     /// The brush an attribute names, as markup.
@@ -1427,13 +1785,14 @@ impl State<'_> {
         &mut self,
         mask: &Mask,
         bbox: Option<[f64; 4]>,
-    ) -> Result<(f64, Option<Vec<u8>>), XpsElementDefect> {
+        budget: &mut Budget,
+    ) -> Result<(f64, Option<Vec<u8>>), Refused> {
         let Mask::Uniform(uniform) = mask else {
             // Everything but the uniform case is painted into a form, and a
             // form's `/BBox` is the element's own extent. An element with no
             // extent has nothing for a mask to vary across.
-            let bbox = bbox.ok_or(XpsElementDefect::BrushUnreadable)?;
-            return self.mask_form(mask, bbox);
+            let bbox = bbox.ok_or(Refused::Brush(XpsElementDefect::BrushUnreadable))?;
+            return self.mask_form(mask, bbox, budget);
         };
         Ok((*uniform, None))
     }
@@ -1443,7 +1802,8 @@ impl State<'_> {
         &mut self,
         mask: &Mask,
         bbox: [f64; 4],
-    ) -> Result<(f64, Option<Vec<u8>>), XpsElementDefect> {
+        budget: &mut Budget,
+    ) -> Result<(f64, Option<Vec<u8>>), Refused> {
         let (opacity, kind, content, space) = match mask {
             // Answered by `mask_gstate`, which is the only caller.
             Mask::Uniform(alpha) => return Ok((*alpha, None)),
@@ -1454,7 +1814,7 @@ impl State<'_> {
             } => {
                 let name = self.painter.name("Sh");
                 if !self.builder.add_shading(&name, shading) {
-                    return Err(XpsElementDefect::BrushUnreadable);
+                    return Err(Refused::Brush(XpsElementDefect::BrushUnreadable));
                 }
                 let mut content = Vec::new();
                 if *matrix != markup::IDENTITY {
@@ -1468,7 +1828,7 @@ impl State<'_> {
                 content.extend_from_slice(b" sh\n");
                 (*opacity, MaskKind::Luminosity, content, DeviceSpace::Gray)
             }
-            Mask::Alpha { tile, opacity } => {
+            Mask::Alpha { paint, opacity } => {
                 // 8.7.3.1's pattern matrix maps into the default space of the
                 // stream the pattern is used in, and this one is used inside
                 // the mask form — whose space is the element's, because
@@ -1476,7 +1836,18 @@ impl State<'_> {
                 // `gs` sets the mask. So the element's transform is *not*
                 // composed in here, which is the one place in this module
                 // where the answer differs from `tile`'s caller on a page.
-                let name = self.tile(tile, Some(bbox), markup::IDENTITY)?;
+                let name = match paint {
+                    Paint::Image(tile) => self.tile(tile, Some(bbox), markup::IDENTITY)?,
+                    Paint::Visual(tile) => {
+                        self.visual(tile, Some(bbox), markup::IDENTITY, budget)?
+                    }
+                    // `brush::mask_from_node` sends only the two tiling
+                    // brushes here; the other two carry their alpha somewhere
+                    // a constant or a shading can hold it.
+                    Paint::Solid(_) | Paint::Gradient { .. } => {
+                        return Err(Refused::Brush(XpsElementDefect::BrushUnreadable))
+                    }
+                };
                 let mut content = Vec::new();
                 fill_pattern_colour(&mut content, &name);
                 markup::op(
@@ -1507,7 +1878,7 @@ impl State<'_> {
                 content: &content,
             },
         ) {
-            return Err(XpsElementDefect::BrushUnreadable);
+            return Err(Refused::Brush(XpsElementDefect::BrushUnreadable));
         }
         let gs = self.painter.name("GS");
         if !self.builder.add_ext_gstate(
@@ -1525,7 +1896,7 @@ impl State<'_> {
                 ..ExtGState::default()
             },
         ) {
-            return Err(XpsElementDefect::BrushUnreadable);
+            return Err(Refused::Brush(XpsElementDefect::BrushUnreadable));
         }
         Ok((opacity, Some(gs)))
     }
@@ -1670,6 +2041,23 @@ impl State<'_> {
     }
 }
 
+/// A materialised element with its children dropped, which is what
+/// [`super::markup::leaf`] produces from a start tag.
+///
+/// One caller — [`State::draw_subtree`] opening a `Canvas` — and it is there
+/// so the buffered walk and the streamed walk hand [`State::canvas`] the same
+/// shape of node. See that method's own note for what handing it the whole
+/// subtree would do.
+fn leaf_of(node: &Node) -> Node {
+    Node {
+        local: node.local.clone(),
+        xps: node.xps,
+        key: node.key.clone(),
+        attrs: node.attrs.clone(),
+        children: Vec::new(),
+    }
+}
+
 /// 8.7.3.2's two operators, which are written together and never apart: a
 /// `scn` naming a pattern in a colour space that is not `/Pattern` is a name
 /// the reader is entitled to read as a number.
@@ -1699,12 +2087,18 @@ fn fill_with_pattern(out: &mut Vec<u8>, name: &[u8], data: &Geometry) {
 /// `rg` and not `g`, to match every other placeholder this module paints: a
 /// reader diffing two content streams should not have to know that one grey is
 /// three numbers and another is one.
-fn grey_fill(state: &mut State<'_>, out: &mut Vec<u8>, data: &Geometry, defect: XpsElementDefect) {
-    state.warn(defect);
+fn grey_fill(
+    state: &mut State<'_>,
+    out: &mut Vec<u8>,
+    data: &Geometry,
+    error: Refused,
+) -> Result<(), Trouble> {
+    state.refused(error)?;
     markup::op(out, &[PLACEHOLDER_GREY; 3], "rg");
     data.emit(out, true);
     out.extend_from_slice(data.fill_operator().as_bytes());
     out.push(b'\n');
+    Ok(())
 }
 
 /// A `{StaticResource key}` reference, or `None` for an ordinary value.

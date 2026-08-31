@@ -8,8 +8,8 @@
 //! shape "these bytes decode to those bytes". So the evidence has to be built,
 //! and it is built two ways, because the two fail differently.
 //!
-//! The forty files under `tests/brotli/` were produced **once**, on
-//! 2026-08-30, by Node v25.6.0's `zlib.brotliCompressSync` over plaintexts
+//! The forty-two files under `tests/brotli/` were produced **once** — forty on
+//! 2026-08-30 and the two `interleaved-periods` streams on 2026-08-31 — by Node v25.6.0's `zlib.brotliCompressSync` over plaintexts
 //! this repository wrote — the same plaintexts [`plaintext`] below
 //! reconstructs. Ruling 13 draws its line between a third party *adjudicating*
 //! and a third party *supplying*: nothing here asks another program whether an
@@ -23,7 +23,7 @@
 //! if the author misread §7.1's context tables, a hand-built fixture misreads
 //! them identically and the test passes. A real encoder's output cannot be
 //! wrong in the same direction, because it was written by somebody else from
-//! the same document. The forty vectors are that independent half.
+//! the same document. The forty-two vectors are that independent half.
 //!
 //! The other half is [`hand_built`]: three shapes a general-purpose encoder
 //! **never emits**, so no corpus of real streams would ever cover them —
@@ -31,7 +31,7 @@
 //! meta-block whose bytes are neither output nor window (§9.2). Those are
 //! written here bit by bit from §9.2, which is the only way they can exist.
 //!
-//! # What the forty cover
+//! # What the forty-two cover
 //!
 //! Nine plaintexts across five quality settings and two window sizes, chosen
 //! so that each turns on machinery the others leave off:
@@ -52,6 +52,15 @@
 //!   the window-size decode is not tested only at its default of 16.
 //! - `empty` and `one-byte` are the degenerate lengths, where a prefix code
 //!   can legally have **one symbol and zero bits**.
+//! - The two `interleaved-periods` streams are the only ones here chosen
+//!   against a *decoder* rather than against a clause. §4 says a distance
+//!   symbol 0 is not pushed to the ring buffer of last distances; a decoder
+//!   that pushed it decoded all forty of the others correctly, because none of
+//!   them follows a repeated distance with a short code counted against the
+//!   second-to-last. These two do, and they were found by generating a hundred
+//!   and sixty structured plaintexts and keeping the ones the two readings of
+//!   §4 disagree about. Eleven of the hundred and sixty did; these are the
+//!   shortest and the one with the most segments.
 
 use tinker_pdf_filters::{brotli_decode, BrotliError, Limits};
 
@@ -96,6 +105,18 @@ fn plaintext(name: &str) -> Vec<u8> {
             .repeat(4)
             .into_bytes(),
         "incompressible" => xorshift(600),
+        // Three runs of a short period over a four-symbol alphabet, the
+        // periods chosen so that none divides another. At quality 11 the
+        // encoder answers that with a **distance symbol 0** — "the same
+        // distance again" — and then, at the next period change, with a short
+        // code counted against the second-to-last distance. RFC 7932 §4 says
+        // the first of those must not enter the ring buffer, so the two are
+        // only consistent in a decoder that does not push it. This is the
+        // shape that found the decoder that did.
+        "interleaved-periods" => interleaved_periods(&[(4, 29), (9, 46), (5, 35)]),
+        "interleaved-periods-short" => {
+            interleaved_periods(&[(4, 24), (3, 44), (3, 36), (4, 9), (3, 11)])
+        }
         "sfnt-shaped" => (0..1500usize)
             .map(|i| {
                 if i % 97 == 0 {
@@ -107,6 +128,26 @@ fn plaintext(name: &str) -> Vec<u8> {
             .collect(),
         other => panic!("no plaintext is written down for the vector {other:?}"),
     }
+}
+
+/// A run of `repeats` copies of a `period`-long cycle, per segment, over four
+/// symbols.
+///
+/// The byte is `(position within the period * 7 + segment index) % 4`, so the
+/// same period in two segments is a *different* cycle and a back-reference has
+/// to reach past the nearer one. Four lines of arithmetic rather than a
+/// committed blob, for the reason [`xorshift`] is: a test that can say what it
+/// expects is worth more than one that can only point at a file.
+fn interleaved_periods(segments: &[(usize, usize)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (segment, &(period, repeats)) in segments.iter().enumerate() {
+        for _ in 0..repeats {
+            for j in 0..period {
+                out.push(((j * 7 + segment) % 4) as u8);
+            }
+        }
+    }
+    out
 }
 
 /// Every committed vector: `(file name, the plaintext key it decodes to)`.
@@ -123,6 +164,8 @@ macro_rules! vectors {
 }
 
 vectors! {
+    "interleaved-periods-q11.br" => "interleaved-periods",
+    "interleaved-periods-short-q11.br" => "interleaved-periods-short",
     "empty-q1.br" => "empty",
     "empty-q11.br" => "empty",
     "empty-w10.br" => "empty",
@@ -169,12 +212,12 @@ vectors! {
 
 /// **Every committed stream decodes to the plaintext it was made from.**
 ///
-/// Forty streams, nine plaintexts, and the whole of §3 to §10 between them.
-/// This is the test that says the decoder is a Brotli decoder rather than
-/// something that agrees with its author.
+/// Forty-two streams, eleven plaintexts, and the whole of §3 to §10 between
+/// them. This is the test that says the decoder is a Brotli decoder rather
+/// than something that agrees with its author.
 #[test]
 fn every_reference_stream_decodes_to_its_plaintext() {
-    assert_eq!(VECTORS.len(), 40, "the vector list and the directory agree");
+    assert_eq!(VECTORS.len(), 42, "the vector list and the directory agree");
     for (file, key, stream) in VECTORS {
         let want = plaintext(key);
         match brotli_decode(stream, &ROOMY) {

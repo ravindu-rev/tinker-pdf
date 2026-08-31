@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SVG 1.1 Appendix A's own document type declaration, which is the first
+     entry of tinker_pdf_xml::ALLOWED_PUBLIC_IDENTIFIERS and which every
+     drawing program that has ever exported an SVG writes. It carries no
+     internal subset, so Doctype::SkipExternalId reads and discards it. -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 4 2">
+  <g id="only"/>
+</svg>

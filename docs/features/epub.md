@@ -152,7 +152,7 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | A single box taller than a page **inside** a table band | `tinker_pdf_layout::Warning::TableRowTallerThanPage` | the band itself is now cut across pages (`css-break-3` §3.1's class-3 break), so what is left is one atomic box — a line box, or a nested band — that no cut can halve. It is drawn where it starts and overflows | [ROADMAP.md](../ROADMAP.md) |
 | The same inside a flex line | `tinker_pdf_layout::Warning::FlexLineTallerThanPage` | same, and still two variants: a host with no table in its book must not be told a table row overflowed | [ROADMAP.md](../ROADMAP.md) |
 | A float broken across pages | `tinker_pdf_layout::Warning::FloatBrokenAcrossPages` | warned rather than pushed; a reading-order defect in the float path is pinned in `epub_fetched.rs` | [ROADMAP.md](../ROADMAP.md) |
-| WOFF / WOFF2, `local()` sources | `ArchiveWarning::FontFace(FaceDefect)` | only sfnt programs are read; the family falls back | [ROADMAP.md](../ROADMAP.md) |
+| `local()` sources | `ArchiveWarning::FontFace(FaceDefect::LocalUnavailable)` | names a face installed on the reading system, and this engine reads no font directories **by policy** — that is an operating-system dependency `wasm32-unknown-unknown` does not have ([fonts](fonts.md)). Permanent for the engine; a host with installed faces answers it through `FontProvider`. **WOFF and WOFF2 left this row**: both are unpacked, and only a container that will not unpack is refused, by `FaceDefect::PackedContainer` carrying the decoder's own reason | [fonts](fonts.md) |
 | Characters no face covers | `ArchiveWarning::{UnrepresentedCharacters, UncoveredCharacters}` | counted, never silently dropped — conservation still holds for the text | [fonts](fonts.md) |
 | Fonts attached after open | `ArchiveWarning::FontsAttachedAfterPagination` | advances decide line breaks, so faces must arrive in `OpenOptions` | — |
 | Page box or font size the caller passed that cannot be used | `ArchiveWarning::UnusableOption(BookOptionDefect::{PageWidth, PageHeight, FontSize})` | the default is laid out instead and the caller is told which number was thrown away — a warning, not a refusal, because it is a claim about the caller, not the file | — |
@@ -167,10 +167,18 @@ books carrying a real producer's font through the `@font-face` path
 `epub_css.rs` asserts the layer count is zero rather than assuming it, and the
 three books added since do not change it, so `@layer` is verified against this
 engine's own reading of `css-cascade-5` §6.4.2 and against no producer at all.
-**No WOFF or WOFF2 file** is committed: no producer available emits one, and
-repacking a vendored face is barred by OFL-1.1's reserved-name clause, so the
-refusal row above has no committed file behind it. And three books carry **no
-epubcheck verdict** — they postdate the tool's removal under ruling 13, so
+**No book in the corpus carries a web font.** The row above is closed and the
+files behind it are real — seven of them, in
+`crates/tinker-pdf-font/tests/woff/`, from three encoders with no code in
+common — but they are packings of a face this repository wrote, not a book a
+producer shipped. The objection that kept the row open was never that WOFF
+could not be read: it was that no producer here emits one and OFL-1.1's
+reserved-name clause bars repacking a vendored face, and only the second half
+of that is answered. So the decoders are held against real encoders' output
+and the *`@font-face` path* is held against containers this repository packs
+in `epub_fonts.rs`; what nobody here has is a calibre or pandoc book with a
+`.woff2` in its ZIP. And three books carry **no epubcheck verdict** — they
+postdate the tool's removal under ruling 13, so
 `EPUBCHECK.tsv` marks them `-` rather than zero
 ([ROADMAP.md](../ROADMAP.md) Tier 4).
 
@@ -201,6 +209,20 @@ epubcheck verdict** — they postdate the tool's removal under ruling 13, so
   `epub_memory.rs`; the layout crate's own suite (`layout/src/tests.rs`,
   floats and tables step by step, UAX #14 conformance over the full pair
   table); the CSS crate's tokenizer, selector and cascade suites.
+- `epub_fonts.rs`'s WOFF half: a book whose `@font-face` names a WOFF or a
+  WOFF2 sets in **that face**, asserted on the resource the page draws with
+  rather than on the absence of a warning — a book that fell back to the
+  standard 14 reports nothing either, which is the failure this replaces. The
+  WOFF 1.0 side is packed in the test itself, every table **stored** rather
+  than deflated, because there is no zlib encoder in this tree and §5's own
+  signal for a stored table is `compLength == origLength`; the WOFF 2.0 side
+  is the committed `synthetic-2.woff2`, Brotli and transformed `glyf` and all.
+  What is embedded is asserted to be the sfnt **byte for byte** and not the
+  container, which is the one claim every other test here would pass without:
+  9.9 gives font programs `/FontFile2` and `/FontFile3` and neither has a
+  subtype for a web container, so a build that passed the WOFF through would
+  still name the face on the page. Three damaged containers keep the refusal
+  row and are asserted to carry the decoder's own reason.
 - `epub_validated.rs`: every synthesised book is held to the strict
   validator, its pages are read at the box the caller stated, its content
   streams are decoded operator by operator so a placeholder page and a page

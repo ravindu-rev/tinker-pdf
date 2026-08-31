@@ -901,32 +901,3 @@ fn a_page_with_an_image_brush_draws_ink() {
         .count();
     assert!(ink > 1_000, "the picture is on the page: {ink} pixels");
 }
-
-/// A `VisualBrush` is refused **by name**, and the plan's row 8 is amended
-/// rather than claimed.
-///
-/// Its cell is a subtree of markup rather than a part, so painting one means
-/// re-entering the drawing walk from inside a brush and carrying 18.2's
-/// cross-part depth with it. That is a milestone's worth of work on its own and
-/// it is not done, so the brush says so and the shape keeps the grey — which is
-/// the same answer every other unpainted brush gets, rather than a picture the
-/// file never described.
-#[test]
-fn a_visual_brush_is_refused_by_name_and_the_shape_survives() {
-    let body = r##"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
-        <VisualBrush Viewbox="0,0,1,1" Viewport="0,0,1,1">
-          <VisualBrush.Visual><Path Data="M0,0L1,0Z" Fill="#FF00FF00" /></VisualBrush.Visual>
-        </VisualBrush></Path.Fill></Path>"##;
-    let markup = format!(
-        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
-    );
-    let bytes = archive(with(
-        one_page_package(),
-        "Documents/1/Pages/1.fpage",
-        &markup,
-    ));
-    assert_eq!(defects(&bytes), [XpsElementDefect::BrushUnsupported]);
-    let content = stream(&bytes);
-    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
-    assert!(content.contains("200 0 l"), "{content}");
-}

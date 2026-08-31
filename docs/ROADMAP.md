@@ -340,34 +340,40 @@ an omission.
 Debts each container format recorded about itself, in its feature doc's
 refusal table.
 
-- **EPUB** ([features/epub.md](features/epub.md)): WOFF/WOFF2, refused
-  by name and with **no committed file behind the row** — no producer
-  here emits one and OFL-1.1's reserved-name clause bars repacking a
-  vendored face; the pinned float reading-order defect;
-  `row-gap`/`column-gap` between flex items; SVG content documents;
-  pseudo-elements (parsed, no box generated);
-  `css-cascade-5` §7.1's five explicit defaulting keywords, on every
-  property. `min`/`max` sizing is built, less one half of §10.7: a
-  `max-height` shorter than its content is named (`MaxHeightAsAuto`)
-  rather than obeyed. `vertical-align` is built, §10.8.1 and §17.5.3
-  both. Multi-column is built — §3.4's geometry, §4's balance, §5's
-  rule — less §6's `column-span: all`, which is named. Non-static
-  `position` is built, all four values: §9.4.3's `relative` as an
-  offset applied to the ink, §9.6's `absolute` out of flow against the
-  nearest positioned ancestor's padding box, §9.6.1's `fixed` on every
-  page, and `css-position-3` §3.4's `sticky`, which with no scrollport
-  is `relative` by the specification's own words. `z-index` orders
-  them, §9.9.1.
-- **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR
-  **reaching the page** — the decoder is built and `xps/image.rs` still
-  refuses the format at the element, which is the same shape TIFF was in
-  before it was wired; remote resource-dictionary parts; `IsSideways` and
-  odd `BidiLevel`.
-- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
-  honestly — each means a hand-rolled decompressor, and **RAR 4 has no
-  fixture this machine can produce**, so it closes as decoded-but-
-  unadjudicated by name or not at all. A design doc is owed with the
-  decoders.
+- **EPUB** ([features/epub.md](features/epub.md)): `local()` sources,
+  which name a face installed on the reading system and are permanent
+  for an engine that reads no font directories; **no book in the corpus
+  carries a web font**, so the `@font-face` WOFF path is held against
+  containers this repository packs rather than one a producer shipped;
+  the pinned float reading-order defect; `row-gap`/`column-gap`
+  between flex items; SVG content documents;
+  pseudo-elements (parsed, no box generated); `css-cascade-5` §7.1's
+  five explicit defaulting keywords, on every property. `min`/`max`
+  sizing is built, less one half of §10.7: a `max-height` shorter than
+  its content is named (`MaxHeightAsAuto`) rather than obeyed.
+  `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
+  built — §3.4's geometry, §4's balance, §5's rule — less §6's
+  `column-span: all`, which is named. Non-static `position` is built,
+  all four values: §9.4.3's `relative` as an offset applied to the ink,
+  §9.6's `absolute` out of flow against the nearest positioned
+  ancestor's padding box, §9.6.1's `fixed` on every page, and
+  `css-position-3` §3.4's `sticky`, which with no scrollport is
+  `relative` by the specification's own words. `z-index` orders them,
+  §9.9.1.
+  **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
+  and reach the page, against seven committed files from three encoders
+  with no code in common ([features/fonts.md](features/fonts.md)).
+- **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
+  an ICC profile; JPEG XR **reaching the page** — the decoder is built and
+  `xps/image.rs` still refuses the format at the element, which is the same
+  shape TIFF was in before it was wired; `IsSideways` and odd `BidiLevel`.
+- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, sized honestly — a
+  hand-rolled decompressor, and **RAR 4 has no fixture this machine can
+  produce**, so it closes as decoded-but-unadjudicated by name or not at
+  all. A design doc is owed with the decoders. **CBT and CB7 are done**:
+  `7z-tar.cbt` and `7z-lzma2.cb7` join the five ZIPs in `cbz_real.rs`'s
+  cross-producer identity and render the same five pictures, which is the
+  exit criterion the whole lane is held to.
 
 ## How this file changes
 

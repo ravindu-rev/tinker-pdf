@@ -12,6 +12,7 @@ members = [
   "crates/tinker-pdf-cos",
   "crates/tinker-pdf-filters",
   "crates/tinker-pdf-zip",
+  "crates/tinker-pdf-archive",
   "crates/tinker-pdf-xml",
   "crates/tinker-pdf-svg",
   "crates/tinker-pdf-css",
@@ -66,6 +67,7 @@ authors = ["tinker-pdf contributors"]
 tinker-pdf-cos = { path = "crates/tinker-pdf-cos", version = "0.0.1", default-features = false }
 tinker-pdf-filters = { path = "crates/tinker-pdf-filters", version = "0.0.1" }
 tinker-pdf-zip = { path = "crates/tinker-pdf-zip", version = "0.0.1" }
+tinker-pdf-archive = { path = "crates/tinker-pdf-archive", version = "0.0.1" }
 tinker-pdf-xml = { path = "crates/tinker-pdf-xml", version = "0.0.1" }
 tinker-pdf-css = { path = "crates/tinker-pdf-css", version = "0.0.1" }
 tinker-pdf-layout = { path = "crates/tinker-pdf-layout", version = "0.0.1" }

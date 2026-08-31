@@ -204,7 +204,7 @@ pub(crate) struct QpSet {
 impl QpSet {
     /// 8.4.22, 8.4.23 and 8.4.24 are the same structure over a different
     /// element name, so they are one function.
-    fn read(r: &mut BitReader<'_>, num_components: u32) -> Result<Self, JxrError> {
+    pub(crate) fn read(r: &mut BitReader<'_>, num_components: u32) -> Result<Self, JxrError> {
         let mode = if num_components == 1 {
             // 8.4.22.2: inferred to be UNIFORM when there is one component.
             ComponentMode::Uniform
@@ -249,7 +249,6 @@ impl QpSet {
     /// The QP for one component, saturating at the last entry. The vector is
     /// always `num_components` long by construction, so the fallback is a
     /// defence against a future caller rather than a reachable path.
-    #[allow(dead_code)] // Milestone 2: 9.7 reads it per component.
     pub(crate) fn get(&self, component: usize) -> u8 {
         self.per_component
             .get(component)
@@ -267,7 +266,11 @@ pub(crate) struct QpSets {
 }
 
 impl QpSets {
-    fn read(r: &mut BitReader<'_>, count: u32, num_components: u32) -> Result<Self, JxrError> {
+    pub(crate) fn read(
+        r: &mut BitReader<'_>,
+        count: u32,
+        num_components: u32,
+    ) -> Result<Self, JxrError> {
         let n = usize::try_from(count).map_err(|_| JxrError::Truncated)?;
         let mut sets = Vec::with_capacity(n);
         for _ in 0..count {
@@ -276,12 +279,10 @@ impl QpSets {
         Ok(Self { sets })
     }
 
-    #[allow(dead_code)] // Milestone 2: the tile headers build these.
     pub(crate) fn one(set: QpSet) -> Self {
         Self { sets: vec![set] }
     }
 
-    #[allow(dead_code)] // Milestone 2: 8.7.10.8's LP_QP_INDEX selects one.
     pub(crate) fn select(&self, index: usize) -> Option<&QpSet> {
         self.sets.get(index).or_else(|| self.sets.first())
     }

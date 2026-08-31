@@ -99,9 +99,18 @@ const COMIC_INFO_PATH: &str = "comicinfo.xml";
 pub enum ComicInfoDefect {
     /// Past [`MAX_COMIC_INFO_BYTES`], so the parse was never attempted.
     TooLarge,
-    /// The archive would not hand the entry's bytes over: encrypted, a
-    /// checksum failure, a compression method not read here.
-    EntryRefused(super::ZipEntryError),
+    /// The container would not hand the entry's bytes over: encrypted, a
+    /// checksum failure, a compression method not read here, a tar entry that
+    /// is not a file.
+    ///
+    /// **The container's own reason is not carried**, and that is a decision
+    /// rather than an omission. There is exactly one such entry in an archive
+    /// and a host's answer to every reason is the same — show the document
+    /// with no title — where [`super::PageDefect::EntryRefused`] keeps its
+    /// reason because a grey page in the middle of a comic is a thing a reader
+    /// will ask about. A variant per container here would be four spellings of
+    /// one sentence.
+    EntryRefused,
     /// Markup that is not well formed, an encoding that will not decode, a
     /// document type declaration, or one of `tinker-pdf-xml`'s four caps.
     Unreadable,
@@ -117,9 +126,7 @@ impl core::fmt::Display for ComicInfoDefect {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ComicInfoDefect::TooLarge => f.write_str("a ComicInfo.xml past the size this reads"),
-            ComicInfoDefect::EntryRefused(e) => {
-                write!(f, "a ComicInfo.xml the archive refused: {e}")
-            }
+            ComicInfoDefect::EntryRefused => f.write_str("a ComicInfo.xml the archive refused"),
             ComicInfoDefect::Unreadable => f.write_str("a ComicInfo.xml that could not be read"),
             ComicInfoDefect::NotComicInfo => {
                 f.write_str("an XML entry named ComicInfo.xml that is not one")

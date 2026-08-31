@@ -1333,6 +1333,11 @@ mod tests {
     /// way this assertion is meant to fail: a new crate with no internal
     /// dependency does **not** move it, so a number that did not need changing
     /// is evidence about the crate rather than about the test.
+    ///
+    /// **Fourteen** since tier 4's `tinker-pdf-archive`, with `archive →
+    /// filters`. This branch read it as twelve and set it to thirteen while
+    /// `svg` was setting it to thirteen on another — which is the collision
+    /// the paragraph above predicts, arriving for the second time.
     #[test]
     fn the_flag_is_what_makes_the_non_leaf_crates_provable() {
         let notes = |local: bool| -> usize {
@@ -1346,7 +1351,7 @@ mod tests {
                 .filter(|step| step.stage == Stage::Crates && step.registry_note.is_some())
                 .count()
         };
-        assert_eq!(notes(false), 13, "the crates a plain dry run cannot reach");
+        assert_eq!(notes(false), 14, "the crates a plain dry run cannot reach");
         assert_eq!(notes(true), 0, "and none of them once it can");
     }
 

@@ -62,6 +62,18 @@ impl<'a> BitReader<'a> {
         Ok(clean)
     }
 
+    /// The slice being read, with the reader's own lifetime rather than the
+    /// borrow's.
+    ///
+    /// Frequency mode needs a second reader over the same codestream — 8.7.9's
+    /// FLEXBITS packet is a byte range of its own, stepped alongside the
+    /// HIGHPASS packet — and returning `&'a [u8]` rather than `&'_ [u8]` is
+    /// what lets the caller hold both without the first borrow outliving the
+    /// call.
+    pub(crate) fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
     /// Byte offset of the next bit. Only meaningful when byte-aligned; used
     /// by the index-table seek, which 8.5.3 defines in bytes.
     pub(crate) fn byte_pos(&self) -> u64 {
@@ -70,9 +82,6 @@ impl<'a> BitReader<'a> {
 
     /// 8.7.1's `POS_SEEK( )`: absolute byte offset from the start of the
     /// coded image data.
-    // Milestone 2 (`docs/design/jpeg-xr.md`) is the first caller: 8.7.1's
-    // `POS_SEEK( )` seeks to a tile packet by the index table's offset.
-    #[allow(dead_code)]
     pub(crate) fn seek_byte(&mut self, offset: u64) -> Result<(), JxrError> {
         let bit = offset.checked_mul(8).ok_or(JxrError::Truncated)?;
         if bit > self.total_bits() {

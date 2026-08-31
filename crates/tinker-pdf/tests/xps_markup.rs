@@ -1237,15 +1237,21 @@ fn a_static_resource_chain_past_the_depth_cap_is_named() {
     assert!(drawn(&long).contains("0.749 0.749 0.749 rg"));
 }
 
-/// A `ResourceDictionary` naming another part is milestone 8's, and says so
+/// A `ResourceDictionary` naming a part **this package does not hold** says so
 /// once rather than once per key.
+///
+/// Remote dictionaries are read now, so this fixture no longer says "not
+/// supported" — it says "no such part", which is a fact about the file rather
+/// than about this build. The one-warning-per-dictionary property is the half
+/// that survived the change and is what this test is still for; the half that
+/// resolves lives in `xps_resources.rs`.
 #[test]
-fn a_resource_dictionary_in_another_part_is_named() {
+fn a_resource_dictionary_naming_no_part_is_named_once() {
     let body = r##"<FixedPage.Resources><ResourceDictionary Source="/Resources/d.xml" /></FixedPage.Resources><Path Fill="{StaticResource b0}" Data="M0,0L10,0Z" />"##;
     assert_eq!(
         body_defects(body),
         [
-            XpsElementDefect::ResourceDictionaryRemote,
+            XpsElementDefect::ResourceDictionaryUnresolved,
             XpsElementDefect::BrushUnresolved
         ]
     );
