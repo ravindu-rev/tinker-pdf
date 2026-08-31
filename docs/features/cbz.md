@@ -89,7 +89,7 @@ is RFC 1951 with no wrapper, exactly as ZIP method 8 is. Every other method is
 refused **by its own method id**, and a folder whose coder graph is not a chain
 (BCJ2 takes four input streams) is refused as that.
 
-**A `.cbr` is a RAR 5, and this one is honest about being unfinished.** The
+**A `.cbr` is a RAR 5, read as far as this repository's own rules allow.** The
 container is read in full: the signature, the `vint`, the header chain, file
 records and their extra areas. RAR checks itself twice — a CRC-32 over every
 header and a CRC-32 over every file's data — so the walk cannot go wrong
@@ -98,7 +98,7 @@ cover is believed. A stored entry is a contiguous range of the input and comes
 back **borrowed**.
 
 What is **not** read is RAR 5's compression, methods 1 to 5, and the committed
-fixture is why that is visible rather than theoretical. `winrar-rar5.cbr` holds
+fixture is why that is visible in the corpus rather than theoretical. `winrar-rar5.cbr` holds
 four stored PNGs, **one JPEG compressed with method 3**, and a `QO` quick-open
 service record. So a `.cbr` today is four fifths of a comic: four pages that
 are the ZIP's own pictures, and one placeholder that names its method — ruling

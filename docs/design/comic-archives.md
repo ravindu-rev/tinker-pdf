@@ -156,10 +156,21 @@ filename decoding, the empty-stream bit vectors. A mis-decoded filename changes
 page order and fails nothing, which is why that half is asserted by name
 against hand-built fixtures instead.
 
-The counted-injection tables in `tar/tests.rs` and `sevenz/tests.rs` are the
-measurement of that difference, and they came out the way the table predicts:
-six of the eight tar defects are caught once or twice, because there is nothing
-in the format to catch them but an assertion.
+The counted-injection tables in `tar/tests.rs`, `sevenz/tests.rs` and
+`rar/tests.rs` are the measurement of that difference, and they came out the
+way the table predicts. Six of the eight tar defects are caught once or twice,
+because there is nothing in the format to catch them but an assertion. Every
+one of the five defects injected into the LZMA decoder is caught, and caught
+**only** by the two `.cb7` corpus tests, because the archive's own CRC-32 rules
+on the decompressed bytes and no unit test here asserts anything about an LZMA
+distance.
+
+The other thing all three tables agree on: **each container has exactly one
+defect that costs a reader its place** rather than one field — tar's `advance`
+rounding a payload down (10), 7z's substream table read instead of inferred
+(12), RAR's data area not skipped (8) — and in all three it is the defect the
+corpus is most sensitive to, because losing your place loses every entry after
+it.
 
 ### The LZ77 window is the output
 

@@ -7,8 +7,49 @@
 //! that line; what lives here is the container, which is fully checkable.
 //!
 //! The `.cbr` a real archiver wrote is opened in the facade
-//! (`crates/tinker-pdf/tests/cbz_real.rs`), where its five pages are compared
-//! against the same five pages a ZIP produced.
+//! (`crates/tinker-pdf/tests/cbz_real.rs`), where its four *stored* pages are
+//! compared against the same pages a ZIP produced and its fifth is asserted to
+//! be a placeholder naming method 3.
+//!
+//! # Injection, counted
+//!
+//! Ten defects were reintroduced and the suite run to see what caught them.
+//!
+//! Counts are of every test binary that can reach this crate — its own suite,
+//! and the facade's `cbz` and `cbz_real`, which a grep for the four container
+//! names says are the only two of `tinker-pdf`'s that do. They are sums over
+//! the per-binary `test result:` lines of a run with **`--no-fail-fast`**, and
+//! that flag is not a detail: a plain `cargo test` stops at the first failing
+//! binary, so the first two attempts at this table under-counted six of its
+//! rows.
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the header's own CRC-32 not checked before its fields are believed | **1** |
+//! | the entry CRC-32 not checked before the bytes are handed over | **3** |
+//! | the RAR 4 signature read as an ordinary RAR | **2** |
+//! | the compression method taken from the wrong bits of the packed word | **3** |
+//! | a compressed entry handed back as though it were stored | **3** |
+//! | a solid entry read as an ordinary one | **2** |
+//! | the `vint` read most-significant-group first | **5** |
+//! | a stored entry's two declared sizes not compared | **1** |
+//! | a service record listed as an ordinary file | **1** |
+//! | the data area not skipped, so the walk lands inside a file | **8** |
+//!
+//! **The bottom row is the walk again**, and it is worth setting beside tar's
+//! `advance` at 10 and 7z's substream table at 12. All three containers have
+//! exactly one defect that costs a reader its *place* rather than one field,
+//! and in all three it is the defect the corpus is most sensitive to, because
+//! losing your place loses every entry after it. Everything else in this table
+//! is caught once or three times.
+//!
+//! **Two rows are about the line this module draws rather than about a bug.**
+//! Taking the method from the wrong bits, and skipping the method check
+//! altogether, both make `page3.jpg` look stored — and both are caught by
+//! `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`,
+//! which asserts the placeholder **by method number**. That is what stops the
+//! CBR row being closed by accident: an engine that silently started handing
+//! compressed bytes back as pages would fail there and nowhere else.
 
 use super::*;
 
