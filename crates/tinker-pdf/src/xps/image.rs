@@ -1,5 +1,4 @@
-//! Image parts: 9.1.5's four formats, two of which this engine refuses by name
-//! (gap 30, milestone 8).
+//! Image parts: 9.1.5's four formats, all four of which reach the page.
 //!
 //! # XPS has no image element
 //!
@@ -16,7 +15,7 @@
 //! file chooses. A pass over the markup before the walk costs time proportional
 //! to the part and **no** memory.
 //!
-//! # Nothing here decodes a picture
+//! # Almost nothing here decodes a picture
 //!
 //! Gap 29 built the pass-through this consumes, and its whole argument carries
 //! over unchanged: a JPEG's bytes are placed verbatim by `ImageData::Jpeg`, and
@@ -24,6 +23,14 @@
 //! which is what `/FlateDecode` with `/Predictor 15` expects. So a page's peak
 //! cost is a multiple of the *part* rather than *w × h × 3*, and a ten-page
 //! report with a photograph on every page costs what the package costs.
+//!
+//! **JPEG XR is the exception, and it is not one this engine chose.** No
+//! `/Filter` in ISO 32000-2 Table 6 reads an ITU-T T.832 codestream —
+//! `/JPXDecode` is JPEG 2000, a different format with a different syntax — so
+//! there is no route to choose and every JPEG XR image costs its pixels. That
+//! is stated here rather than buried in [`jxr_image`] because it is the one
+//! place a caller's peak memory depends on which of 9.1.5's formats a package
+//! happened to use.
 //!
 //! `png_image` is the one door, and it decides for itself which of the two
 //! routes a given PNG takes — Adam7 and interleaved alpha cannot pass through.
@@ -44,7 +51,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tinker_pdf_cos::{jpeg_shape, png_image, tiff_image, DocumentBuilder, ImageData, PngRoute};
+use tinker_pdf_cos::{
+    jpeg_shape, jxr_image, png_image, tiff_image, DocumentBuilder, ImageData, PngRoute,
+};
 use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_xml::{Doctype, Event, Source};
 
@@ -239,44 +248,46 @@ impl Images {
             .map_err(|_| XpsElementDefect::ImageUnresolved)?;
         let actual = Kind::from_magic(bytes);
 
-        // The two rules, and either one refusing is a refusal. A part whose
-        // content type says PNG and whose bytes say JPEG XR is not a PNG, and
-        // a part whose bytes say PNG and whose content type says JPEG XR is a
-        // package this build declines to guess about.
+        // **The pre-emptive refusal loop is gone, and its absence is the
+        // wiring.** It refused a format *before* either identification rule
+        // had decided what the part was, so a `Kind` named there could never
+        // reach a decoder however it was identified. TIFF left it when a TIFF
+        // decoder arrived; JPEG XR was the last one in it, and it leaves for
+        // the same reason. There is now no format 9.1.5 admits that this
+        // function declines before looking.
         //
-        // **TIFF left this loop when a TIFF decoder arrived**, and the
-        // asymmetry is the point: the loop refuses a format *before* either
-        // rule has decided which one the part is, so it can only hold formats
-        // nothing here draws. A format that is drawn belongs in the ordinary
-        // agreement below, where a content type and magic bytes that disagree
-        // is a named leniency rather than a refusal.
-        for kind in [declared, actual].into_iter().flatten() {
-            if matches!(kind, Kind::JpegXr) {
-                return Err(XpsElementDefect::ImageFormatUnsupported);
-            }
-        }
+        // What remains is the ordinary agreement between the two rules.
         let kind = match (declared, actual) {
             // They agree, or only one of them spoke.
             (Some(a), Some(b)) if a == b => a,
             (Some(a), None) => a,
             (None, Some(b)) => b,
-            // They disagree about two formats this build *can* draw. The bytes
+            // They disagree about two formats this build can draw. The bytes
             // win, because a decoder reads bytes.
             //
             // **And nothing says so, which ruling 10 wants and this does not
             // give.** The channel is the problem rather than the will: this
             // function returns `Result<Image, XpsElementDefect>`, so the only
             // thing it can report is a *refusal*, and a leniency has nowhere
-            // to go. The comment here used to claim the disagreement was named;
+            // to go. The comment here once claimed the disagreement was named;
             // it never was.
             //
-            // It mattered less while the arm was nearly unreachable — TIFF and
-            // JPEG XR were refused above before the two rules were compared, so
-            // only a PNG-versus-JPEG disagreement could arrive. Wiring the TIFF
-            // decoder made it ordinary. Pinned by
+            // **This arm has got steadily more reachable, and is now fully
+            // ordinary.** It was nearly dead when TIFF and JPEG XR were both
+            // refused above, so only PNG-versus-JPEG could arrive. Wiring TIFF
+            // made it ordinary for three formats. Wiring JPEG XR — and
+            // deleting the loop that used to refuse it — makes every one of
+            // 9.1.5's four formats reachable on both sides of the
+            // disagreement, so there are now twelve ordered pairs that take
+            // this arm where there were two.
+            //
+            // Closing it needs a leniency variant on `XpsElementDefect` and a
+            // push into `paint.rs`'s `defects`, which is a change to two files
+            // this commit deliberately does not touch. Pinned meanwhile by
             // `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing`
             // in `tests/xps_images.rs`, and carried as a row in
-            // `docs/features/xps.md`.
+            // `docs/features/xps.md` so that it is a known debt rather than a
+            // surprise.
             (Some(_), Some(b)) => b,
             (None, None) => return Err(XpsElementDefect::ImageFormatUnsupported),
         };
@@ -333,17 +344,35 @@ impl Images {
                     dpi,
                 }
             }
-            // 9.1.5.1's JPEG XR, refused above before either decoder was
-            // reached — so this arm is unreachable, and it is here because the
-            // alternative is a `match` that does not cover its own type.
+            // 9.1.5.1's JPEG XR, the format OPC recommends and nothing
+            // outside Microsoft's stack implements. Always decoded: see the
+            // module note on why there is no pass-through route for it.
             //
-            // The redundancy is measured rather than assumed: the injection
-            // matrix's "a picture the magic bytes say is drawn" removes the
-            // loop's `actual` and **survives**, because this arm refuses the
-            // same file a line later. That is the one injection of twenty-eight
-            // that changes no answer, and it says the rule is enforced twice
-            // rather than that a test is missing.
-            Kind::JpegXr => return Err(XpsElementDefect::ImageFormatUnsupported),
+            // `jxr_image` does the three rearrangements PDF needs — the BGR
+            // rows permuted into `/DeviceRGB` order, 16-bit samples swapped
+            // from A.7.3's little-endian to 8.9.5.2's big-endian, and A.3.2's
+            // alpha split out into an `/SMask` — so what arrives here is
+            // already an image XObject's worth of samples.
+            Kind::JpegXr => {
+                let jxr = jxr_image(bytes, &FilterLimits::new(limits.max_synthesised))
+                    .map_err(|_| XpsElementDefect::ImageUnreadable)?;
+                let data = jxr.image();
+                let (w, h) = (jxr.width(), jxr.height());
+                // Annex A's `WIDTH_RESOLUTION` and `HEIGHT_RESOLUTION` where
+                // the file states them, 13.4.1's 96 where it does not — the
+                // same rule the other three formats follow, and the reason
+                // all four defaults sit in this file rather than in four
+                // decoders.
+                let dpi = jxr.dpi().unwrap_or((DEFAULT_DPI, DEFAULT_DPI));
+                if !builder.add_image(&resource, &data) {
+                    return Err(XpsElementDefect::ImageUnreadable);
+                }
+                Image {
+                    resource,
+                    px: (f64::from(w), f64::from(h)),
+                    dpi,
+                }
+            }
         };
         self.next += 1;
         Ok(image)

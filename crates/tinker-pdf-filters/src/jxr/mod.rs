@@ -298,7 +298,11 @@ impl JxrWarning {
 }
 
 /// The output raster, plus everything needed to address a pixel in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`, because [`JxrImage::resolution`] is a pair of floats read from
+/// two IEEE-754 fields and has no total equality to offer. `PartialEq` is
+/// what a test comparing two decodes wants anyway.
+#[derive(Clone, Debug, PartialEq)]
 pub struct JxrImage {
     pub width: u32,
     pub height: u32,
@@ -310,6 +314,14 @@ pub struct JxrImage {
     /// [`crate::PngImage`], whose 16-bit samples are big-endian because PNG's
     /// are.
     pub data: Vec<u8>,
+    /// Pixels per inch, horizontally and vertically, from Annex A's
+    /// `WIDTH_RESOLUTION` and `HEIGHT_RESOLUTION`.
+    ///
+    /// `None` when the file states none, which is not the same as 96: what an
+    /// absent resolution means belongs to whatever is drawing the picture.
+    /// XPS 13.4.1 answers it with 96; a caller compositing into a raster of
+    /// its own may not care at all.
+    pub resolution: Option<(f32, f32)>,
     /// False when a tile had to be dropped or the codestream ran short — the
     /// same contract as [`crate::Decoded::complete`].
     pub complete: bool,
@@ -451,6 +463,7 @@ pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
         height: headers.image.height,
         format,
         data,
+        resolution: container.as_ref().and_then(|c| c.resolution),
         complete,
         warnings,
     })

@@ -369,9 +369,13 @@ refusal table.
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).
 - **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
-  an ICC profile; JPEG XR **reaching the page** — the decoder is built and
-  `xps/image.rs` still refuses the format at the element, which is the same
-  shape TIFF was in before it was wired.
+  an ICC profile. **JPEG XR is closed** — 9.1.5.1's format decodes and
+  draws, so all four of 9.1.5's image formats reach the page. Fifteen
+  fixtures decode bit-for-bit to rasters this repository authored; what
+  the three first-party evidence legs do *not* reach is listed by name in
+  [features/xps.md](features/xps.md) and
+  [design/jpeg-xr.md](design/jpeg-xr.md), the largest of it being the
+  quantised lossy path, which ruling 13 leaves without an oracle.
 
 ## How this file changes
 
