@@ -25,10 +25,13 @@
 //! element quietly skipped. The difference is what a caller can report: "this
 //! picture is incomplete and here is what is missing" against "this picture".
 
+use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits};
+
 use crate::document::{self, Node, Tree};
 use crate::shape::{self, Shape};
+use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
-use crate::{Colour, FillRule, Limits, Paint, Refusal, Scene, Warning};
+use crate::{Limits, Paint, Refusal, Scene, Stroke, Warning};
 
 /// The default viewport, in user units, for a document that states no size.
 ///
@@ -44,12 +47,15 @@ pub const DEFAULT_VIEWPORT: (f64, f64) = (300.0, 150.0);
 /// inheritance is per-element and a stack that has to be unwound is a stack
 /// that can be unwound wrong — the classic defect being an early `continue`
 /// that skips the pop.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Frame {
     /// The composed matrix from this element's own space to the scene's.
     matrix: [f64; 6],
     /// The viewport this element's percentages resolve against.
     viewport: (f64, f64),
+    /// The **resolved** style of the element above, which is what a child
+    /// inherits from. Resolved once on the way down and never looked back up.
+    style: Style,
 }
 
 /// The walk's own state: what it has spent and what it has to say.
@@ -62,6 +68,10 @@ struct Walk<'a> {
     /// refusal as one path of a million, which is the property a per-path cap
     /// does not have.
     segments: usize,
+    /// Every `<style>` element of the document, read once before the walk.
+    sheet: Sheet,
+    /// `tinker-pdf-css`'s own budget, which bounds selector matching.
+    css: CssBudget,
 }
 
 impl Walk<'_> {
@@ -172,21 +182,19 @@ impl Walk<'_> {
     }
 
     /// Walks one element and everything under it.
-    fn element(&mut self, index: usize, frame: Frame) -> Result<(), Refusal> {
+    fn element(&mut self, index: usize, outer: &Frame) -> Result<(), Refusal> {
         let Some(node) = self.tree.nodes.get(index) else {
             return Ok(());
         };
         if node.depth >= self.limits.max_depth {
             return Err(Refusal::TooDeep);
         }
-        // §5.1.1's `display` is structural: `none` removes the element **and
-        // its children** from the rendering tree, which is a different thing
-        // from `visibility: hidden` — that one lays the element out and does
-        // not paint it, and a child may turn it back on.
-        if node
-            .attr("display")
-            .is_some_and(|value| value.trim() == "none")
-        {
+        // §11.5's `display` is structural: `none` removes the element **and its
+        // children** from the rendering tree, which is a different thing from
+        // `visibility: hidden` — that one is a property a child can turn back
+        // on, and this one is not. Read as an attribute *and* as a property,
+        // because `style="display:none"` is how half the corpus spells it.
+        if self.display_none(node) {
             return Ok(());
         }
         if !node.is_svg() {
@@ -194,15 +202,29 @@ impl Walk<'_> {
             return Ok(());
         }
 
+        // §6.4's three sources, resolved against the parent's own resolved
+        // style. Done before the element is dispatched, because a container
+        // resolves a style for its children even though it paints nothing.
+        let resolved = style::resolve(self.tree, index, &self.sheet, &outer.style, &mut self.css)
+            .map_err(|_| Refusal::TooMuchStyle)?;
+        for name in resolved.unreadable {
+            self.warn(Warning::ValueUnreadable { attribute: name });
+        }
+        let frame = Frame {
+            style: resolved.style,
+            ..outer.clone()
+        };
+        let frame = &frame;
+
         match node.name.as_str() {
             // ---- containers ------------------------------------------------
             "svg" => self.viewport_element(index, node, frame),
             "g" | "a" => {
                 let inner = Frame {
                     matrix: self.matrix_of(node, frame.matrix),
-                    ..frame
+                    ..frame.clone()
                 };
-                self.children(index, inner)
+                self.children(index, &inner)
             }
             // §5.5: `<defs>` is never rendered where it stands. Its contents
             // are reached by reference and nowhere else, so walking into it
@@ -267,7 +289,7 @@ impl Walk<'_> {
     /// **The transform is applied here rather than carried**, which is the
     /// design's one irreversible decision: a consumer receives points and never
     /// a matrix. See this module's header.
-    fn shape(&mut self, node: &Node, frame: Frame) -> Result<(), Refusal> {
+    fn shape(&mut self, node: &Node, frame: &Frame) -> Result<(), Refusal> {
         let matrix = self.matrix_of(node, frame.matrix);
         let mut degraded = Vec::new();
         let read = shape::outline(node, frame.viewport, &mut degraded);
@@ -287,22 +309,105 @@ impl Walk<'_> {
             }
         };
         self.spend(outline.segments.len())?;
-        // §11.3's initial values, which is what a shape with no paint
-        // properties on it is: a black fill by the nonzero rule, and no
-        // stroke. Milestone 3 is where a document gets to say otherwise.
+        let style = &frame.style;
+        // §11.5: a hidden element is laid out and not painted, which for a
+        // display list means it is not in it. Distinct from `display: none`
+        // only in that a descendant could have turned it back on, and a
+        // shape has none.
+        if !style.visible {
+            return Ok(());
+        }
+        let fill = self.paint(&style.fill, style);
+        let stroke_paint = self.paint(&style.stroke, style);
+        // §11.4: a stroke with no paint, no width or a zero width puts no ink
+        // on the page. Answered here rather than carried, so a consumer never
+        // has to decide whether a `Stroke` of width zero draws.
+        let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
+            None
+        } else {
+            Some(Stroke {
+                paint: stroke_paint,
+                width: style.stroke_width,
+                cap: style.cap,
+                join: style.join,
+                miter_limit: style.miter_limit,
+                dashes: style.dashes.clone(),
+                dash_offset: style.dash_offset,
+                opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
+            })
+        };
+        // §14.5's group opacity, flattened into each descendant's own alpha.
+        // Named where it is observable: a shape painted **twice** — once
+        // filled and once stroked — composites the two against each other
+        // before the group is faded, so the overlap is darker here than §14.5
+        // asks for. A shape painted once is exact and says nothing.
+        if style.opacity < 1.0 && fill != Paint::None && stroke.is_some() {
+            self.warn(Warning::GroupOpacityFlattened);
+        }
         self.push(crate::Node::Path {
             outline: outline.transformed(matrix),
-            fill: Paint::Solid(Colour {
-                rgb: [0.0, 0.0, 0.0],
-            }),
-            rule: FillRule::NonZero,
-            fill_opacity: 1.0,
-            stroke: None,
+            fill,
+            rule: style.fill_rule,
+            fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
+            stroke,
+        })
+    }
+
+    /// §13.2's `<paint>`, with a `url(#name)` resolved against the document.
+    ///
+    /// A reference that names nothing this build can paint with falls through
+    /// to **the paint's own fallback** — which is §13.2's answer and not an
+    /// invention: a file that wrote `fill="url(#g) red"` said what to do when
+    /// the server is missing, and a build that drew nothing would be ignoring
+    /// the half of the value that was for exactly this.
+    fn paint(&mut self, spec: &PaintSpec, style: &Style) -> Paint {
+        match spec {
+            PaintSpec::None => Paint::None,
+            PaintSpec::Solid(colour) => Paint::Solid(*colour),
+            PaintSpec::Current => Paint::Solid(style.colour),
+            PaintSpec::Reference(name, fallback) => {
+                let target = self
+                    .tree
+                    .by_id(name)
+                    .map(|at| self.tree.nodes[at].name.clone());
+                match target.as_deref() {
+                    Some("pattern") => self.warn(Warning::PatternUnsupported),
+                    _ => self.warn(Warning::PaintServerUnresolved),
+                }
+                self.paint(fallback, style)
+            }
+        }
+    }
+
+    /// Whether §11.5's `display: none` applies, from either place it is
+    /// written.
+    ///
+    /// The attribute **and** `style="display:none"`, because both are in the
+    /// wild and a build that read only the first would draw what an Inkscape
+    /// file hid. It is not resolved through the cascade with the rest, because
+    /// `display` decides whether the cascade runs at all for the subtree —
+    /// asking for a style in order to find out whether to ask for a style is
+    /// the shape a first draft gets wrong.
+    fn display_none(&self, node: &Node) -> bool {
+        if node
+            .attr("display")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("none"))
+        {
+            return true;
+        }
+        node.style.as_deref().is_some_and(|text| {
+            text.split(';').any(|piece| {
+                let Some((name, value)) = piece.split_once(':') else {
+                    return false;
+                };
+                name.trim().eq_ignore_ascii_case("display")
+                    && value.trim().eq_ignore_ascii_case("none")
+            })
         })
     }
 
     /// §5.7's `<image>`.
-    fn image(&mut self, node: &Node, frame: Frame) -> Result<(), Refusal> {
+    fn image(&mut self, node: &Node, frame: &Frame) -> Result<(), Refusal> {
         let Some(href) = node.href() else {
             // §5.7 makes the reference required; without one there is nothing
             // to resolve and nothing was refused.
@@ -326,7 +431,12 @@ impl Walk<'_> {
     }
 
     /// An `<svg>`, root or nested: §7.9's establishment of a new viewport.
-    fn viewport_element(&mut self, index: usize, node: &Node, frame: Frame) -> Result<(), Refusal> {
+    fn viewport_element(
+        &mut self,
+        index: usize,
+        node: &Node,
+        frame: &Frame,
+    ) -> Result<(), Refusal> {
         let (outer_width, outer_height) = frame.viewport;
         // A nested `<svg>`'s `x` and `y` place its viewport inside its
         // parent's; the root's are ignored by §7.2 and are zero on every file
@@ -351,12 +461,13 @@ impl Walk<'_> {
             // viewport. A build that kept the outer one would size a nested
             // `<svg>`'s children against the page.
             viewport: (width, height),
+            style: frame.style.clone(),
         };
-        self.children(index, inner)
+        self.children(index, &inner)
     }
 
     /// Every child element of `index`, in document order.
-    fn children(&mut self, index: usize, frame: Frame) -> Result<(), Refusal> {
+    fn children(&mut self, index: usize, frame: &Frame) -> Result<(), Refusal> {
         let children: Vec<usize> = self.tree.element_children(index).collect();
         for child in children {
             self.element(child, frame)?;
@@ -390,12 +501,22 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         // file.
         _ => DEFAULT_VIEWPORT,
     };
+    // §6.2's `<style>` elements, read once for the document rather than once
+    // per element: two of them are one author stylesheet in source order, and
+    // that order is what `css-cascade-5` §6.1's last criterion compares.
+    let css_limits = CssLimits::DEFAULT;
+    let sheet = style::sheet(tree, css_limits.max_selector_parts);
     let mut walk = Walk {
         tree,
         limits,
         scene: Scene::default(),
         segments: limits.max_segments,
+        css: CssBudget::new(&css_limits),
+        sheet,
     };
+    if walk.sheet.at_rules > 0 {
+        walk.warn(Warning::AtRuleIgnored);
+    }
     let root = tree.root;
     let Some(node) = tree.nodes.get(root) else {
         return Err(Refusal::NotAnSvg);
@@ -406,9 +527,10 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
     let height = walk.length_of(node, "height", Some(viewport.1), viewport.1);
     walk.element(
         root,
-        Frame {
+        &Frame {
             matrix: IDENTITY,
             viewport,
+            style: Style::default(),
         },
     )?;
     let mut scene = walk.scene;
