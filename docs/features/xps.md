@@ -110,7 +110,7 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| `VisualBrush`, a `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | a brush whose content is arbitrary markup is a nested page; painted grey and named | [ROADMAP.md](../ROADMAP.md) |
+| A `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | no ICC pipeline, and 15.2.4's syntax has nowhere to put an sRGB fallback; painted grey and named | [rendering](rendering.md) |
 | Remote resource dictionary (`Source=` a separate part) | `XpsElementDefect::ResourceDictionaryRemote` | only in-page dictionaries are resolved | [ROADMAP.md](../ROADMAP.md) |
 | JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
 | A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |
