@@ -12,16 +12,22 @@
 //! # Injection, counted
 //!
 //! Eleven defects were reintroduced across this module and [`crate::lzma`] and
-//! the suite run to see what caught them. Counts are of the 1 2xx tests in
-//! `tinker-pdf-archive` and `tinker-pdf` together, which is every test in the
-//! workspace that can reach this code.
+//! the suite run to see what caught them.
+//!
+//! Counts are of every test binary that can reach this crate — its own suite,
+//! and the facade's `cbz` and `cbz_real`, which a grep for the four container
+//! names says are the only two of `tinker-pdf`'s that do. They are sums over
+//! the per-binary `test result:` lines of a run with **`--no-fail-fast`**, and
+//! that flag is not a detail: a plain `cargo test` stops at the first failing
+//! binary, so the first two attempts at this table under-counted six of its
+//! rows.
 //!
 //! | Injected | Caught by |
 //! | --- | ---: |
-//! | the entry CRC-32 not checked before the bytes are handed over | **1** |
+//! | the entry CRC-32 not checked before the bytes are handed over | **3** |
 //! | the start header's own CRC-32 not checked | **1** |
-//! | `NUMBER`'s high bits read as the *low* part of the value | **2** |
-//! | a substream's last size listed rather than inferred from the folder | **2** |
+//! | `NUMBER`'s high bits read as the *low* part of the value | **4** |
+//! | a substream's last size listed rather than inferred from the folder | **12** |
 //! | an empty stream always a directory, never an empty file | **1** |
 //! | the matched-literal path never taken (`state >= 7` ignored) | **2** |
 //! | the four remembered distances rotated the wrong way | **2** |
@@ -50,11 +56,18 @@
 //! in `lzma/tests.rs` is the fixture that reaches it, written *because* the
 //! count came back zero, and the row's second number is that test.
 //!
-//! The two CRC rows being **1** is not a weakness and is worth reading
+//! The start-header CRC row being **1** is not a weakness and is worth reading
 //! correctly: removing a check cannot fail a decode that was already correct,
 //! so what catches it is the one test that hands it a deliberately wrong
-//! archive. Their value is measured by the five rows above them, not by their
-//! own.
+//! archive. Its value is measured by the five decoder rows, not by its own.
+//!
+//! **The substream row at 12 is the opposite lesson.** `kSize` lists every
+//! substream but the last, and the last is whatever the folder's output has
+//! left; a reader that read a number there instead loses its place in the
+//! table and every entry after it, so it fails nine unit tests, both seed
+//! replays and both `.cb7` corpus checks. It is the 7z equivalent of tar's
+//! `advance`: the one defect that is about *the walk* rather than about one
+//! field, and the one the corpus is therefore strongest against.
 
 use super::*;
 

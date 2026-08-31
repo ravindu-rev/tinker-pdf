@@ -46,6 +46,7 @@
 //! implementation, written so `a_lazy_resolution_and_the_single_pass_agree` can
 //! compare the two; it is not the shipped route and its doc comment says so.
 
+use crate::longhand::Longhand;
 use crate::parser::{Declared, LayerPart, Report, StyleRule, Stylesheet};
 use crate::property::*;
 use crate::selector::{self, Index, Specificity};
@@ -764,7 +765,15 @@ pub fn cascade_from<E: Element>(
             None => initial.clone(),
         };
         let winners = matcher.winners(elements, index, &mut report, budget)?;
-        apply_winners(&winners, &mut style, root_font_size);
+        // The parent for §7.1's `inherit`. The root has none, and §7.2 gives
+        // it the initial values -- which is the same style `initial` reads, so
+        // an `inherit` on the root element and an `initial` on it agree, as
+        // they must.
+        let parent = match elements[index].parent() {
+            Some(parent) => styles[parent].clone(),
+            None => initial.clone(),
+        };
+        apply_winners(&winners, &mut style, &parent, initial, root_font_size);
         if elements[index].parent().is_none() {
             root_font_size = style.font_size;
         }
@@ -774,6 +783,35 @@ pub fn cascade_from<E: Element>(
     Ok(StyleTree { styles, report })
 }
 
+/// What the cascade decided for one property, before it is written down.
+///
+/// Two shapes because §7.1's defaulting keywords carry no value: a declaration
+/// that won with `inherit` names a property and a *place to read it from*, and
+/// the reading needs the parent's computed style, which the matcher does not
+/// have.
+///
+/// `revert` and `revert-layer` never reach here. They are resolved inside
+/// [`Matcher::winners`], where the losing declarations are still in hand --
+/// rolling back to a previous origin means *taking that origin's winner*, and
+/// there is nowhere else the loser is still known.
+#[derive(Clone, Debug)]
+enum Winner {
+    /// A declaration with a value.
+    Value(Property),
+    /// One of §7.1's first three keywords, on a named property.
+    Default(Longhand, Defaulting),
+}
+
+impl Winner {
+    /// Whether this is `font-size`, which [`apply_winners`] applies first.
+    fn is_font_size(&self) -> bool {
+        match self {
+            Winner::Value(property) => matches!(property, Property::FontSize(_)),
+            Winner::Default(longhand, _) => *longhand == Longhand::FontSize,
+        }
+    }
+}
+
 /// Applies the winning declarations, `font-size` first.
 ///
 /// The order is load-bearing and is not a tidiness choice: `text-indent: 2em`
@@ -781,15 +819,65 @@ pub fn cascade_from<E: Element>(
 /// `font-size` won. A single pass in cascade order resolves the em against
 /// whatever the parent had whenever `font-size` happens to sort later, which is
 /// right about half the time and wrong silently the rest.
-fn apply_winners(winners: &[Property], style: &mut ComputedStyle, root_font_size: f64) {
-    for property in winners {
-        if matches!(property, Property::FontSize(_)) {
-            apply(property, style, root_font_size);
+fn apply_winners(
+    winners: &[Winner],
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    initial: &ComputedStyle,
+    root_font_size: f64,
+) {
+    for winner in winners {
+        if winner.is_font_size() {
+            apply_winner(winner, style, parent, initial, root_font_size);
         }
     }
-    for property in winners {
-        if !matches!(property, Property::FontSize(_)) {
-            apply(property, style, root_font_size);
+    for winner in winners {
+        if !winner.is_font_size() {
+            apply_winner(winner, style, parent, initial, root_font_size);
+        }
+    }
+}
+
+/// One winner, written into the style.
+///
+/// The three keywords that reach here read a **computed** value out of another
+/// style, so there is no `root_font_size` in that path and there cannot be: the
+/// value was resolved on the element it is being taken from.
+///
+/// `unset` looks like a no-op through this code and very nearly is one:
+/// [`ComputedStyle::inherit_from`] has already started this element from the
+/// parent's inherited properties and the initial values of the rest, which is
+/// exactly what §7.1 defines `unset` to mean. It is written out anyway rather
+/// than skipped, because "it happens to be what the starting state already is"
+/// is a fact about `inherit_from`, and a build that relied on it silently would
+/// be wrong the day that function changes.
+fn apply_winner(
+    winner: &Winner,
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    initial: &ComputedStyle,
+    root_font_size: f64,
+) {
+    match winner {
+        Winner::Value(property) => apply(property, style, root_font_size),
+        Winner::Default(longhand, keyword) => {
+            let from = match keyword {
+                Defaulting::Inherit => parent,
+                Defaulting::Initial => initial,
+                // §7.1: `unset` is `inherit` for an inherited property and
+                // `initial` for the rest. The one keyword whose answer depends
+                // on the property it is written on.
+                Defaulting::Unset => {
+                    if longhand.inherited() {
+                        parent
+                    } else {
+                        initial
+                    }
+                }
+                // Resolved in `winners`; see [`Winner`].
+                Defaulting::Revert | Defaulting::RevertLayer => initial,
+            };
+            copy_computed(*longhand, from, style);
         }
     }
 }
@@ -1049,8 +1137,8 @@ impl<'a> Matcher<'a> {
         at: usize,
         report: &mut Report,
         budget: &mut Budget,
-    ) -> Result<Vec<Property>, Refusal> {
-        let mut matched: Vec<(CascadeKey, &Declared)> = Vec::new();
+    ) -> Result<Vec<Winner>, Refusal> {
+        let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
         for handle in self.index.candidates(&elements[at]) {
             let (rule_at, selector_at) = self.selectors[handle];
             let placed = &self.rules[rule_at];
@@ -1071,6 +1159,7 @@ impl<'a> Matcher<'a> {
                         specificity: selector.specificity,
                         order: placed.order,
                     },
+                    placed.origin,
                     declared,
                 ));
             }
@@ -1098,6 +1187,7 @@ impl<'a> Matcher<'a> {
                     specificity: Specificity::ZERO,
                     order: usize::MAX,
                 },
+                Origin::Author,
                 declared,
             ));
         }
@@ -1105,17 +1195,16 @@ impl<'a> Matcher<'a> {
         // A stable sort, so two declarations with an identical key keep the
         // order they were pushed in — which for two declarations of the same
         // property inside one rule is the order the author wrote them.
-        matched.sort_by_key(|(key, _)| *key);
+        matched.sort_by_key(|(key, _, _)| *key);
 
-        let mut winners: Vec<(&'static str, Property)> = Vec::new();
-        for (_, declared) in &matched {
+        let mut winners: Vec<(Longhand, usize)> = Vec::new();
+        for (index, (_, _, declared)) in matched.iter().enumerate() {
             match &declared.declaration {
                 crate::property::Declaration::Known(property) => {
-                    let name = property.name();
-                    match winners.iter_mut().find(|(n, _)| *n == name) {
-                        Some(slot) => slot.1 = property.clone(),
-                        None => winners.push((name, property.clone())),
-                    }
+                    note_winner(&mut winners, property.longhand(), index);
+                }
+                crate::property::Declaration::Defaulted { longhand, .. } => {
+                    note_winner(&mut winners, *longhand, index);
                 }
                 // Counted **here**, where it is known to have reached an
                 // element, rather than only at parse time. A `float: left` in
@@ -1128,8 +1217,115 @@ impl<'a> Matcher<'a> {
                 }
             }
         }
-        Ok(winners.into_iter().map(|(_, property)| property).collect())
+
+        Ok(winners
+            .into_iter()
+            .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
+            .collect())
     }
+}
+
+/// Records that `index` is the strongest declaration seen so far for
+/// `longhand`.
+fn note_winner(winners: &mut Vec<(Longhand, usize)>, longhand: Longhand, index: usize) {
+    match winners.iter_mut().find(|(l, _)| *l == longhand) {
+        Some(slot) => slot.1 = index,
+        None => winners.push((longhand, index)),
+    }
+}
+
+/// §7.1's two rollback keywords, resolved against the declarations that lost.
+///
+/// A `revert` **is** the cascaded value -- it beat everything else -- and what
+/// it means is *compute this property as though a whole cascade origin had said
+/// nothing about it*. So the answer is the winner of what is left after that
+/// origin is removed, which is why this runs here, over the sorted list, and
+/// not in `apply`: by the time a style is being written the losers are gone.
+///
+/// The two differ in what they remove, and this is the distinction that makes
+/// them two keywords:
+///
+/// * `revert` removes **its own origin and every origin above it**. An author
+///   `revert` leaves the user and user-agent declarations, which is §7.1's
+///   "as if no author-level rules were specified".
+/// * `revert-layer` removes **only what sorts at or above it inside its own
+///   cascade level** -- the same origin and importance, at its layer or a later
+///   one. Everything in an earlier layer of that level survives, and so does
+///   every lower level, which is what makes an unlayered `revert-layer` roll
+///   back to the previous origin rather than to nothing.
+///
+/// Rollbacks chain: the declaration a `revert` lands on may itself be one.
+/// Each step strictly shrinks the candidate set, so the loop ends; the bound is
+/// the list length and it is written down rather than assumed.
+///
+/// When nothing is left the property is `unset`, which §7.1 gives as the
+/// meaning of a `revert` with no origin beneath it.
+fn resolve_rollbacks(
+    longhand: Longhand,
+    from: usize,
+    matched: &[(CascadeKey, Origin, &Declared)],
+) -> Winner {
+    let mut at = from;
+    for _ in 0..=matched.len() {
+        let (key, origin, declared) = &matched[at];
+        let keyword = match &declared.declaration {
+            crate::property::Declaration::Known(property) => {
+                return Winner::Value(property.clone())
+            }
+            crate::property::Declaration::Defaulted { keyword, .. } => *keyword,
+            // Nothing else can be a winner: `note_winner` is only reached from
+            // the two arms above.
+            _ => return Winner::Default(longhand, Defaulting::Unset),
+        };
+        let (rank, layer, origin) = (key.rank, key.layer, *origin);
+        match keyword {
+            Defaulting::Inherit | Defaulting::Initial | Defaulting::Unset => {
+                return Winner::Default(longhand, keyword)
+            }
+            Defaulting::Revert => {
+                match strongest_below(longhand, &matched[..at], |_, other, _| other < origin) {
+                    Some(next) => at = next,
+                    None => return Winner::Default(longhand, Defaulting::Unset),
+                }
+            }
+            Defaulting::RevertLayer => {
+                let keep = |key: &CascadeKey, other: Origin, _: &Declared| {
+                    if other != origin {
+                        return other < origin;
+                    }
+                    key.rank < rank || (key.rank == rank && key.layer < layer)
+                };
+                match strongest_below(longhand, &matched[..at], keep) {
+                    Some(next) => at = next,
+                    None => return Winner::Default(longhand, Defaulting::Unset),
+                }
+            }
+        }
+    }
+    Winner::Default(longhand, Defaulting::Unset)
+}
+
+/// The strongest declaration for `longhand` among `earlier` that `keep` admits.
+///
+/// `earlier` is the already-sorted prefix, weakest first, so the last match is
+/// the strongest one.
+fn strongest_below(
+    longhand: Longhand,
+    earlier: &[(CascadeKey, Origin, &Declared)],
+    keep: impl Fn(&CascadeKey, Origin, &Declared) -> bool,
+) -> Option<usize> {
+    earlier
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, (key, origin, declared))| {
+            let names = match &declared.declaration {
+                crate::property::Declaration::Known(property) => property.longhand() == longhand,
+                crate::property::Declaration::Defaulted { longhand: l, .. } => *l == longhand,
+                _ => false,
+            };
+            (names && keep(key, *origin, declared)).then_some(i)
+        })
 }
 
 fn note(counts: &mut Vec<(&'static str, usize)>, name: &'static str) {
@@ -1178,11 +1374,12 @@ fn lazily<E: Element>(
     report: &mut Report,
     budget: &mut Budget,
 ) -> Result<ComputedStyle, Refusal> {
+    let parent_style = match elements[at].parent() {
+        Some(parent) => lazily(matcher, elements, parent, report, budget)?,
+        None => ComputedStyle::initial(),
+    };
     let mut style = match elements[at].parent() {
-        Some(parent) => {
-            let parent_style = lazily(matcher, elements, parent, report, budget)?;
-            ComputedStyle::inherit_from(&parent_style)
-        }
+        Some(_) => ComputedStyle::inherit_from(&parent_style),
         None => ComputedStyle::initial(),
     };
     let root_font_size = {
@@ -1200,6 +1397,143 @@ fn lazily<E: Element>(
         }
     };
     let winners = matcher.winners(elements, at, report, budget)?;
-    apply_winners(&winners, &mut style, root_font_size);
+    let initial = ComputedStyle::initial();
+    apply_winners(
+        &winners,
+        &mut style,
+        &parent_style,
+        &initial,
+        root_font_size,
+    );
     Ok(style)
+}
+
+/// Copies one property's **computed** value from one style into another.
+///
+/// This is what §7.1's defaulting keywords do once the cascade has decided
+/// which style to take the value from: `inherit` reads the parent's, `initial`
+/// reads the initial style's, and `unset` reads whichever of the two
+/// [`Longhand::inherited`] names.
+///
+/// Computed to computed, never specified to computed. `font-size: inherit`
+/// takes the parent's **resolved pixels**: turning that back into a
+/// `SpecifiedFontSize` would re-resolve `em` against the wrong element, and no
+/// specified value can express "whatever the parent computed" at all.
+///
+/// Exhaustive over [`Longhand`], so a property cannot be added that defaulting
+/// silently skips.
+fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedStyle) {
+    match longhand {
+        Longhand::Color => into.color = from.color,
+        // The one field that is not `Copy`, and therefore the one clone.
+        Longhand::FontFamily => into.font_family.clone_from(&from.font_family),
+        Longhand::FontSize => into.font_size = from.font_size,
+        Longhand::FontStyle => into.font_style = from.font_style,
+        Longhand::FontVariant => into.font_variant = from.font_variant,
+        Longhand::FontWeight => into.font_weight = from.font_weight,
+        Longhand::LineHeight => into.line_height = from.line_height,
+        Longhand::LetterSpacing => into.letter_spacing = from.letter_spacing,
+        Longhand::WordSpacing => into.word_spacing = from.word_spacing,
+        Longhand::TextAlign => into.text_align = from.text_align,
+        Longhand::TextIndent => into.text_indent = from.text_indent,
+        Longhand::TextDecoration => into.text_decoration = from.text_decoration,
+        Longhand::WhiteSpace => into.white_space = from.white_space,
+        Longhand::ListStyleType => into.list_style_type = from.list_style_type,
+        Longhand::Visibility => into.visibility = from.visibility,
+        Longhand::Display => into.display = from.display,
+        Longhand::Float => into.float = from.float,
+        Longhand::Clear => into.clear = from.clear,
+        Longhand::BoxSizing => into.box_sizing = from.box_sizing,
+        Longhand::Width => into.width = from.width,
+        Longhand::Height => into.height = from.height,
+        Longhand::MarginTop => into.margin.set(Side::Top, from.margin.get(Side::Top)),
+        Longhand::MarginRight => into.margin.set(Side::Right, from.margin.get(Side::Right)),
+        Longhand::MarginBottom => into.margin.set(Side::Bottom, from.margin.get(Side::Bottom)),
+        Longhand::MarginLeft => into.margin.set(Side::Left, from.margin.get(Side::Left)),
+        Longhand::PaddingTop => into.padding.set(Side::Top, from.padding.get(Side::Top)),
+        Longhand::PaddingRight => into.padding.set(Side::Right, from.padding.get(Side::Right)),
+        Longhand::PaddingBottom => into
+            .padding
+            .set(Side::Bottom, from.padding.get(Side::Bottom)),
+        Longhand::PaddingLeft => into.padding.set(Side::Left, from.padding.get(Side::Left)),
+        Longhand::BorderWidthTop => into
+            .border_width
+            .set(Side::Top, from.border_width.get(Side::Top)),
+        Longhand::BorderWidthRight => into
+            .border_width
+            .set(Side::Right, from.border_width.get(Side::Right)),
+        Longhand::BorderWidthBottom => into
+            .border_width
+            .set(Side::Bottom, from.border_width.get(Side::Bottom)),
+        Longhand::BorderWidthLeft => into
+            .border_width
+            .set(Side::Left, from.border_width.get(Side::Left)),
+        Longhand::BorderStyleTop => into
+            .border_style
+            .set(Side::Top, from.border_style.get(Side::Top)),
+        Longhand::BorderStyleRight => into
+            .border_style
+            .set(Side::Right, from.border_style.get(Side::Right)),
+        Longhand::BorderStyleBottom => into
+            .border_style
+            .set(Side::Bottom, from.border_style.get(Side::Bottom)),
+        Longhand::BorderStyleLeft => into
+            .border_style
+            .set(Side::Left, from.border_style.get(Side::Left)),
+        Longhand::BorderColorTop => into
+            .border_color
+            .set(Side::Top, from.border_color.get(Side::Top)),
+        Longhand::BorderColorRight => into
+            .border_color
+            .set(Side::Right, from.border_color.get(Side::Right)),
+        Longhand::BorderColorBottom => into
+            .border_color
+            .set(Side::Bottom, from.border_color.get(Side::Bottom)),
+        Longhand::BorderColorLeft => into
+            .border_color
+            .set(Side::Left, from.border_color.get(Side::Left)),
+        Longhand::BackgroundColor => into.background_color = from.background_color,
+        Longhand::PageBreakBefore => into.page_break_before = from.page_break_before,
+        Longhand::PageBreakAfter => into.page_break_after = from.page_break_after,
+        Longhand::PageBreakInside => into.page_break_inside = from.page_break_inside,
+        Longhand::Orphans => into.orphans = from.orphans,
+        Longhand::Widows => into.widows = from.widows,
+        Longhand::OverflowWrap => into.overflow_wrap = from.overflow_wrap,
+        Longhand::LineBreak => into.line_break = from.line_break,
+        Longhand::WordBreak => into.word_break = from.word_break,
+        Longhand::BorderCollapse => into.border_collapse = from.border_collapse,
+        Longhand::BorderSpacing => into.border_spacing = from.border_spacing,
+        Longhand::TableLayout => into.table_layout = from.table_layout,
+        Longhand::FlexDirection => into.flex_direction = from.flex_direction,
+        Longhand::FlexWrap => into.flex_wrap = from.flex_wrap,
+        Longhand::FlexGrow => into.flex_grow = from.flex_grow,
+        Longhand::FlexShrink => into.flex_shrink = from.flex_shrink,
+        Longhand::FlexBasis => into.flex_basis = from.flex_basis,
+        Longhand::JustifyContent => into.justify_content = from.justify_content,
+        Longhand::AlignItems => into.align_items = from.align_items,
+        Longhand::AlignSelf => into.align_self = from.align_self,
+        Longhand::AlignContent => into.align_content = from.align_content,
+        Longhand::Order => into.order = from.order,
+        Longhand::MinWidth => into.min_width = from.min_width,
+        Longhand::MaxWidth => into.max_width = from.max_width,
+        Longhand::MinHeight => into.min_height = from.min_height,
+        Longhand::MaxHeight => into.max_height = from.max_height,
+        Longhand::VerticalAlign => into.vertical_align = from.vertical_align,
+        Longhand::Position => into.position = from.position,
+        Longhand::InsetTop => into.inset.set(Side::Top, from.inset.get(Side::Top)),
+        Longhand::InsetRight => into.inset.set(Side::Right, from.inset.get(Side::Right)),
+        Longhand::InsetBottom => into.inset.set(Side::Bottom, from.inset.get(Side::Bottom)),
+        Longhand::InsetLeft => into.inset.set(Side::Left, from.inset.get(Side::Left)),
+        Longhand::ZIndex => into.z_index = from.z_index,
+        Longhand::ColumnCount => into.column_count = from.column_count,
+        Longhand::ColumnWidth => into.column_width = from.column_width,
+        Longhand::ColumnGap => into.column_gap = from.column_gap,
+        Longhand::RowGap => into.row_gap = from.row_gap,
+        Longhand::ColumnRuleWidth => into.column_rule_width = from.column_rule_width,
+        Longhand::ColumnRuleStyle => into.column_rule_style = from.column_rule_style,
+        Longhand::ColumnRuleColor => into.column_rule_color = from.column_rule_color,
+        Longhand::ColumnSpan => into.column_span = from.column_span,
+        Longhand::ColumnFill => into.column_fill = from.column_fill,
+        // <<< the compile-time proof's eighth arm goes here >>>
+    }
 }

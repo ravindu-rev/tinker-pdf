@@ -16,9 +16,11 @@ leaf crate that knows APPNOTE 6.3.10 and nothing else (ruling 8,
 PDF that happens to carry those four bytes inside a stream — an attachment, a
 compressed object, a font program — stays an ordinary PDF. RAR
 (`Rar!\x1A\x07`), 7z and tar (`ustar` at offset 257, where POSIX 1003.1 puts
-it) are recognised at fixed positions too. **A `.cbt` and a `.cb7` are read**;
-a `.cbr` is still refused by name, and by name matters: "this is a CBR and I do
-not read CBR" is a different sentence from "this is not a PDF". A ZIP
+it) are recognised at fixed positions too, and **all four now open**. What is
+refused is narrower than a container and is named at the entry: a RAR 5 entry
+compressed with methods 1-5, and a RAR 4 archive by its own signature. By name
+still matters: "this is a RAR of a version I do not read" is a different
+sentence from "this is not a PDF". A ZIP
 is one signature over several formats, so the archive is opened **once** and
 asked what it is: ECMA-388 E.3's three-step test routes an XPS package first
 ([xps](xps.md)), OCF's `META-INF/container.xml` routes an EPUB second
@@ -86,6 +88,40 @@ the argument. Coders read: Copy, LZMA, LZMA2 and Deflate — 7z method `040108`
 is RFC 1951 with no wrapper, exactly as ZIP method 8 is. Every other method is
 refused **by its own method id**, and a folder whose coder graph is not a chain
 (BCJ2 takes four input streams) is refused as that.
+
+**A `.cbr` is a RAR 5, read as far as this repository's own rules allow.** The
+container is read in full: the signature, the `vint`, the header chain, file
+records and their extra areas. RAR checks itself twice — a CRC-32 over every
+header and a CRC-32 over every file's data — so the walk cannot go wrong
+silently and neither can the extraction; both are checked before anything they
+cover is believed. A stored entry is a contiguous range of the input and comes
+back **borrowed**.
+
+What is **not** read is RAR 5's compression, methods 1 to 5, and the committed
+fixture is why that is visible in the corpus rather than theoretical. `winrar-rar5.cbr` holds
+four stored PNGs, **one JPEG compressed with method 3**, and a `QO` quick-open
+service record. So a `.cbr` today is four fifths of a comic: four pages that
+are the ZIP's own pictures, and one placeholder that names its method — ruling
+2 working as intended, and not the same claim as the container being finished.
+`.cbr` is deliberately **not** in `cbz_real.rs`'s `READ_CONTAINERS` for exactly
+that reason.
+
+**The compression is a named non-goal rather than a debt**, and the reason is
+not the fixture — `page3.jpg` is 169 bytes with its own recorded CRC-32 and the
+same picture sits in five ZIPs beside it, so it would adjudicate a decoder
+twice over. The reason is that there is nothing to write one *from*. Every
+decoder in this workspace names the document it was hand-rolled from
+(CONTRIBUTING rule 1); RARLAB's published RAR 5.0 note specifies the archive
+format and stops at the data area, and the compression has never been specified
+publicly. The only description is `unrar`'s source, whose licence `deny.toml`
+already records this repository will not derive from. So it is refused the way
+encryption is: by name, permanently, with the method number attached so a user
+can re-pack with `-m0`.
+
+**RAR 4 is refused by its own signature**, separately from "not a RAR": WinRAR
+7.20 here has no `-ma` switch and cannot write one, so a decoder would have
+nothing first-party to be held to (ruling 13). See
+[design/comic-archives.md](../design/comic-archives.md) for both arguments.
 
 **Pass-through is the design.** A non-interlaced PNG of colour type 0, 2 or 3
 passes through verbatim: its IDAT *is* a `/FlateDecode` stream with
@@ -250,12 +286,19 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   `.cb7`, over `tinker_pdf_archive::sevenz::Archive` — `open`, `entries()`,
   `read(&mut self, index)` (**owned bytes**, with the recorded CRC-32 already
   checked), `warnings()`.
+- `cbz::open_rar` and `cbz::pages_from_rar`, the same two halves for a `.cbr`,
+  over `tinker_pdf_archive::rar::Archive` — `open`, `entries()`,
+  `read(index)` (a `Cow`, borrowed for a stored entry, with the recorded
+  CRC-32 already checked), `warnings()`.
 
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| CBR | `ArchiveRefusal::NotAZip` | one more decompressor and it is not a page *yet* — staged in [design/comic-archives.md](../design/comic-archives.md) | [roadmap](../ROADMAP.md) |
+| A RAR 4 | `ArchiveRefusal::NotAZip` (leaf: `rar::Error::Rar4`) | recognised by its own signature and refused as *that version*; no producer here can write one, so a decoder would be unadjudicated (ruling 13) | [design/comic-archives.md](../design/comic-archives.md) |
+| A RAR entry compressed with methods 1–5 | `PageDefect::RarEntryRefused` | placeholder page naming the method. A **non-goal, not a debt**: RAR's compression has no published specification and the only implementation's licence bars deriving from it, so there is nothing rule 1 permits writing it from | [design/comic-archives.md](../design/comic-archives.md) |
+| A solid RAR entry | `PageDefect::RarEntryRefused` | its dictionary is the entry before it, and this build decompresses neither | — |
+| An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | named non-goals; the fragment that happens to be here is not the archive | — |
 | A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd — so a host can say what to re-pack without | — |
 | A 7z folder that is not a chain of coders | `ArchiveRefusal::NotAZip` | BCJ2 takes four input streams; a reader that walked it as a chain would hand back a quarter of a file | — |
 | An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 is a named non-goal, as it is for ZIP | — |

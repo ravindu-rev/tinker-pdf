@@ -476,6 +476,67 @@ a page that loses its illustration over a channel the caller may not use is
 the worse outcome. The warning is what distinguishes that from a file with no
 alpha plane at all, which produces the identical bytes.
 
+**Milestone 6.** Landed: `crates/tinker-pdf/src/xps/image.rs`'s
+`Kind::JpegXr` arm, `crates/tinker-pdf-cos/src/jxr_embed.rs`, and the docs.
+**A JPEG XR in an XPS package decodes and draws**, so all four of ISO/IEC
+29500-2 9.1.5's image formats reach the page and `docs/ROADMAP.md`'s Tier 4
+XPS row loses its JPEG XR entry.
+
+**The wiring was mostly a deletion.** `image.rs` carried a loop that refused
+JPEG XR *before* either identification rule had decided what the part was, so
+a `Kind` named there could never reach a decoder however it was identified.
+TIFF left that loop when its decoder arrived; JPEG XR was the last format in
+it. Removing it is the change — the `match` arm that replaces
+`ImageFormatUnsupported` with a decode is the smaller half.
+
+**No pass-through route exists, and that is a property of PDF rather than a
+limitation here.** `png_embed` and `tiff_embed` are mostly deciding modules: a
+non-interlaced PNG's IDAT already *is* a `/FlateDecode` stream with
+`/Predictor 15`, and four of TIFF 6.0's codings already have a `/Filter` name.
+No `/Filter` in ISO 32000-2 Table 6 reads a T.832 codestream — `/JPXDecode` is
+JPEG 2000 — so every JPEG XR image costs its pixels, and a page's peak is
+*w × h × 3* plus *w × h* for a soft mask where the other three formats cost a
+multiple of the part. Stated in `xps/image.rs`'s module note because it is the
+one place a caller's peak memory depends on which of 9.1.5's formats a package
+happened to use.
+
+**Three rearrangements PDF needs and the format does not have**, none of them
+optional and none a leniency: Table A.6's BGR rows permuted into
+`/DeviceRGB`'s one order; 16-bit samples swapped from A.7.3's little-endian to
+ISO 32000-2 8.9.5.2's big-endian; and A.3.2's alpha, which arrives interleaved,
+split out into 11.6.5.3's separate `/DeviceGray` `/SMask` image. Each is
+checked by a *relation* rather than a table of expected values — `rgb24` and
+`bgr24` are one raster in two channel orders, so after arrangement their
+samples must be byte-identical, which needs no expected values and which a
+build ignoring channel order fails outright.
+
+**Annex A's resolution tags are now read**, which they were not before. XPS
+13.4.1 makes 96 dpi the default and lets an image state otherwise, and an
+`ImageBrush` states its `Viewbox` in the image's own units — so a 300 dpi scan
+with an assumed 96 draws at three times its intended size. `WIDTH_RESOLUTION`
+and `HEIGHT_RESOLUTION` are the only FLOAT entries this decoder reads; they are
+metadata rather than samples, so ruling 4's ban on floats *on the pixel path*
+is untouched. `JxrImage` and `Container` lose their `Eq` because of it, which
+is the honest consequence of carrying a float.
+
+**One thing ruling 10 wants is still not done, and it got worse.** When a
+part's content type and its magic bytes disagree, the bytes win and **nothing
+reports that they did**: `Images::place_one` returns
+`Result<Image, XpsElementDefect>`, so the only thing it can say is a
+*refusal*, and a leniency has nowhere to go. That arm was nearly dead when TIFF
+and JPEG XR were both refused in front of it — only PNG-versus-JPEG could
+arrive. Wiring TIFF made it ordinary for three formats; wiring JPEG XR makes
+all four reachable on both sides, so there are now **twelve** ordered pairs
+that take it where there were two.
+
+Closing it needs a leniency variant on `XpsElementDefect` (in `xps.rs`) and a
+push into `paint.rs`'s `defects` — two files another lane was editing when
+this landed, and a public enum variant that nothing ever produces would be
+worse than the honest gap. So the comment in `image.rs` says plainly that the
+disagreement is unnamed, `docs/features/xps.md` carries it as a row, and
+`a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing`
+pins the behaviour meanwhile. It is a known debt, not a surprise.
+
 ### Decoded but unadjudicated
 
 Configurations this decoder will happily decode and **nothing here checks**.

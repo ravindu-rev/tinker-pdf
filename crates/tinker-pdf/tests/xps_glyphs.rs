@@ -148,6 +148,21 @@ fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
 }
 
 /// The defects one `Glyphs` element produces.
+/// Just the glyph tokens of a `TJ` array, with its pen adjustments dropped.
+///
+/// A right-to-left run carries a leading adjustment — the shift to 12.1.2's
+/// right-hand origin — and that is a statement about *where* the run is, which
+/// `an_odd_bidi_levels_origin_is_the_runs_right_edge` makes on its own. What is
+/// left here is the order, which is the other half.
+fn ids(stream: &str) -> String {
+    array(stream)
+        .replace(['[', ']'], "")
+        .split_whitespace()
+        .filter(|token| token.starts_with('<'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn run_defects(extra: &str) -> Vec<XpsElementDefect> {
     defects(&obfuscated(&run(extra)))
 }
@@ -944,28 +959,74 @@ fn a_unicode_string_escaped_with_braces_draws_the_text_and_not_the_braces() {
 }
 
 // ---- 12.1's three attributes that are never ignored ---------------------
+//
+// Two of the three are built and one is reported. `IsSideways` and `BidiLevel`
+// each have **two independent consequences** — what the glyphs are and where
+// the run is — and a test for one of them is not a test for the other, which
+// the injection matrix below is what proves rather than asserts.
+//
+// # Counted injections
+//
+// Each was verified by reintroducing the defect and running
+// `cargo test -p tinker-pdf --no-fail-fast`.
+//
+// | Injection | Caught by |
+// | --- | --- |
+// | the sideways text matrix is never used | 1 |
+// | the sideways *box* is never turned | 1 |
+// | the sideways matrix is negated (a mirror, not a turn) | 1 |
+// | UAX #9 is replaced by a plain reversal of the glyph list | 1 |
+// | the right-to-left run's right-hand origin is dropped | 1 |
+// | reordering is turned off entirely | 3 |
+// | the cluster's start is not carried, so glyphs reorder singly | 3 |
+//
+// Nothing fired zero, and the five single-test rows are five *different*
+// tests: each consequence has exactly one fixture that can see it. Two of
+// those fixtures exist because of an earlier injection run that fired nothing
+// — the sideways box was first asserted by comparing an upright document with
+// a sideways one, which differ by the text matrix regardless, and the cluster
+// rule had no multi-glyph right-to-left fixture at all.
 
-/// **`IsSideways` is refused by name rather than drawn upright**, and a run
-/// that says `false` — or says nothing — draws.
+/// **`IsSideways` turns the run a quarter turn and runs it down the page**,
+/// and a run that says `false` — or says nothing — is unchanged.
 ///
-/// Both halves, because a build that refused every `IsSideways` attribute
-/// would satisfy the first on its own, and every real producer writes the
-/// attribute out with its default value.
+/// Both halves, because a build that treated every `IsSideways` attribute as
+/// sideways would satisfy the first on its own, and every real producer writes
+/// the attribute out with its default value.
+///
+/// # The assertion is the text matrix, and it has to be
+///
+/// 12.1's sideways run is one `Tm` away from an upright one: a glyph advances
+/// along text-space `x` and stands along text-space `y`, so exchanging the two
+/// axes turns every glyph a quarter turn *and* runs the baseline down the page
+/// at once. The glyph array is identical either way — same glyphs, same
+/// advances, same order — so a test that read the `TJ` and not the `Tm` would
+/// pass with the feature deleted.
 #[test]
-fn is_sideways_is_refused_by_name_rather_than_drawn_upright() {
-    assert_eq!(
-        run_defects(r#"IsSideways="true" UnicodeString="A""#),
-        [XpsElementDefect::GlyphsSidewaysUnsupported]
+fn is_sideways_turns_the_run_and_runs_it_down_the_page() {
+    let upright = drawn(r#"UnicodeString="A""#);
+    let sideways = drawn(r#"IsSideways="true" UnicodeString="A""#);
+    assert_eq!(run_defects(r#"IsSideways="true" UnicodeString="A""#), []);
+
+    assert!(
+        upright.contains("1 0 0 -1 "),
+        "upright keeps 18.1's flip and nothing else: {upright}"
     );
     assert!(
-        !drawn(r#"IsSideways="true" UnicodeString="A""#).contains("TJ"),
-        "and nothing is drawn"
+        sideways.contains("0 1 1 0 "),
+        "sideways exchanges the axes: {sideways}"
     );
-    assert_eq!(run_defects(r#"IsSideways="false" UnicodeString="A""#), []);
     assert_eq!(
-        array(&drawn(r#"IsSideways="false" UnicodeString="A""#)),
-        "[<0001>]"
+        array(&sideways),
+        array(&upright),
+        "the glyphs and their advances are the run's own and do not change"
     );
+
+    // The default, in both spellings a producer writes it.
+    assert_eq!(run_defects(r#"IsSideways="false" UnicodeString="A""#), []);
+    assert!(drawn(r#"IsSideways="false" UnicodeString="A""#).contains("1 0 0 -1 "));
+    assert!(upright.contains("1 0 0 -1 "));
+
     assert_eq!(
         run_defects(r#"IsSideways="sideways" UnicodeString="A""#),
         [XpsElementDefect::GlyphsUnreadable],
@@ -973,33 +1034,185 @@ fn is_sideways_is_refused_by_name_rather_than_drawn_upright() {
     );
 }
 
-/// **An odd `BidiLevel` is refused by name and an even one draws.**
+/// A `Glyphs` run painted by a `RelativeToBoundingBox` gradient, saved.
 ///
-/// 12.1 makes an odd level a right-to-left run, whose origin is its *right*
-/// edge — so drawing it left to right is the same glyphs somewhere else, which
-/// is the wrong-place failure gap 30's refusal asymmetry exists for. An even
-/// level is a left-to-right run at some embedding depth and is ordinary text,
-/// so refusing every non-zero level would refuse text this build can draw
-/// exactly.
+/// 8.7.4.5.5's pattern `/Matrix` carries the box the brush was stated in
+/// fractions of, so this is how a test reads back **where the run is** rather
+/// than only what it drew. The two are independent consequences of most of
+/// 12.1's attributes, and a test for one of them is not a test for the other.
+fn with_gradient(extra: &str) -> String {
+    let body = format!(
+        r##"<Glyphs OriginX="10" OriginY="100" FontRenderingEmSize="100" FontUri="{}" {extra}>
+              <Glyphs.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1"
+                                     MappingMode="RelativeToBoundingBox">
+                  <LinearGradientBrush.GradientStops>
+                    <GradientStop Color="#FF000000" Offset="0" />
+                    <GradientStop Color="#FFFFFFFF" Offset="1" />
+                  </LinearGradientBrush.GradientStops>
+                </LinearGradientBrush>
+              </Glyphs.Fill>
+            </Glyphs>"##,
+        font_uri("odttf")
+    );
+    let bytes = obfuscated(&body);
+    let document = open(&bytes).unwrap_or_else(|e| panic!("{extra}: {e:?}"));
+    let out = document.editor().save(&Default::default());
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A sideways run's **box** turns with it, which is its second consequence.
+///
+/// The matrix decides where the glyphs are drawn; the box decides what a
+/// `RelativeToBoundingBox` brush is a fraction of and whether 14.3's overlap
+/// test fires. They are two independent consequences of one attribute, and a
+/// build that turned the matrix and left the box upright would draw the run
+/// correctly and paint it out of the wrong rectangle — which is exactly the
+/// shape "when a thing has two independent consequences, a test for one of
+/// them is not a test" names.
+///
+/// Four glyphs rather than one, so "the two axes were exchanged" and "the box
+/// happens to be square" are told apart: a one-glyph run of a hundred-unit em
+/// is very nearly square already.
 #[test]
-fn an_odd_bidi_level_is_refused_by_name_and_an_even_one_draws() {
+fn a_sideways_runs_box_turns_with_it() {
+    let upright = with_gradient(r#"UnicodeString="AAAA""#);
+    let sideways = with_gradient(r#"IsSideways="true" UnicodeString="AAAA""#);
+
+    // 8.7.4.5.5's pattern `/Matrix` carries the box: its two scales are the
+    // box's width and height in points, and 18.1's 0.75 is already in them.
+    // The run is four glyphs of a hundred-unit em, so upright it is 200 units
+    // along the baseline by 100 across — 150 by 75 points — and sideways it is
+    // exactly those two numbers exchanged. Read as a whole matrix rather than
+    // as "the two differ", because the two differ anyway: the *text* matrix is
+    // not the same either, and a build that turned the glyphs and left the box
+    // upright would still produce two different documents.
+    assert!(
+        upright.contains("/Matrix [150 0 0 -75 "),
+        "upright: 200 units of baseline by one em across: {upright}"
+    );
+    assert!(
+        sideways.contains("/Matrix [75 0 0 -150 "),
+        "sideways: the same box with its two axes exchanged: {sideways}"
+    );
+}
+
+/// **An odd `BidiLevel` draws the run right to left**, and an even one is
+/// unchanged.
+///
+/// 12.1 makes an odd level a right-to-left run. Only the **parity** is a fact
+/// about this run: every odd level reads right to left whatever its depth, and
+/// a build that refused every non-zero level would refuse ordinary text.
+///
+/// Explicit `Indices` rather than the font's own `cmap`, so each cluster has a
+/// glyph of its own and the assertion is about *order*: three Hebrew letters
+/// would otherwise all map to `.notdef` in this fixture's font and a reversal
+/// would be invisible.
+#[test]
+fn an_odd_bidi_level_draws_the_run_right_to_left() {
+    let run = |level: &str| {
+        format!(r#"BidiLevel="{level}" UnicodeString="&#1488;&#1489;&#1490;" Indices="1;3;5""#)
+    };
     for level in ["0", "2", "4"] {
-        let body = format!(r#"BidiLevel="{level}" UnicodeString="A""#);
-        assert_eq!(run_defects(&body), [], "level {level} is left to right");
-        assert_eq!(array(&drawn(&body)), "[<0001>]", "level {level}");
+        assert_eq!(run_defects(&run(level)), [], "level {level}");
+        assert_eq!(
+            ids(&drawn(&run(level))),
+            "<0001><0003><0005>",
+            "level {level} is left to right and is the order the file wrote"
+        );
     }
     for level in ["1", "3"] {
-        let body = format!(r#"BidiLevel="{level}" UnicodeString="A""#);
+        assert_eq!(run_defects(&run(level)), [], "level {level}");
         assert_eq!(
-            run_defects(&body),
-            [XpsElementDefect::GlyphsBidiUnsupported],
+            ids(&drawn(&run(level))),
+            "<0005><0003><0001>",
             "level {level} is right to left"
         );
-        assert!(!drawn(&body).contains("TJ"), "level {level} draws nothing");
     }
     assert_eq!(
         run_defects(r#"BidiLevel="rtl" UnicodeString="A""#),
-        [XpsElementDefect::GlyphsUnreadable]
+        [XpsElementDefect::GlyphsUnreadable],
+        "a level that is not a number is a different thing about the file"
+    );
+}
+
+/// **Digits inside a right-to-left run keep their own order**, which is why
+/// this is UAX #9 and not a reversal.
+///
+/// 12.1 states one level for the whole run, and the characters inside it still
+/// resolve levels of their own: European digits after a Hebrew letter are `EN`,
+/// which rule I1 raises to the next even level — so they are drawn **left to
+/// right** inside a run that is drawn right to left.
+///
+/// Logical `א 1 2 ב` at level 1 resolves to levels `1 2 2 1`, and L2 reverses
+/// the level-2 run and then the whole level-1 run: the visual order is
+/// `ב 1 2 א`. A build that reversed the glyph list would answer `ב 2 1 א` and
+/// render every price in an Arabic or Hebrew document with its digits
+/// backwards — a wrong picture that reads as a correct one, which is the
+/// failure this whole milestone is about.
+#[test]
+fn digits_inside_a_right_to_left_run_keep_their_own_order() {
+    let body = r#"BidiLevel="1" UnicodeString="&#1488;12&#1489;" Indices="1;3;5;7""#;
+    assert_eq!(run_defects(body), []);
+    assert_eq!(
+        ids(&drawn(body)),
+        "<0007><0003><0005><0001>",
+        "the Hebrew reverses and the digits do not"
+    );
+    // The same characters at an even level are left to right throughout, which
+    // is what makes the line above a statement about the level and not about
+    // the string.
+    let ltr = r#"BidiLevel="0" UnicodeString="&#1488;12&#1489;" Indices="1;3;5;7""#;
+    assert_eq!(ids(&drawn(ltr)), "<0001><0003><0005><0007>");
+}
+
+/// **What reorders is the cluster, not the glyph.**
+///
+/// 12.1.3's cluster is one character's shaping, so the glyphs inside it stay in
+/// the order the file wrote them and only the clusters move. A build that
+/// reordered per glyph would take a two-glyph ligature apart and draw its
+/// halves the wrong way round — an Arabic 'lam-alef' rendered as 'alef-lam',
+/// which is a different word.
+///
+/// `(2:2)1;3;5` over three Hebrew letters is one two-glyph cluster over the
+/// first two characters and then a third. Right to left the cluster moves as a
+/// unit: glyph 5 first, then 1 and 3 **in that order**. Reordering per glyph
+/// would answer `5 3 1`.
+#[test]
+fn a_cluster_moves_as_one_thing_when_a_run_reverses() {
+    let body = r#"BidiLevel="1" UnicodeString="&#1488;&#1489;&#1490;" Indices="(2:2)1;3;5""#;
+    assert_eq!(run_defects(body), []);
+    assert_eq!(
+        ids(&drawn(body)),
+        "<0005><0001><0003>",
+        "the cluster moved whole and its glyphs kept their order"
+    );
+}
+
+/// **An odd-level run's origin is its right edge**, which is its second
+/// consequence and not the same one.
+///
+/// 12.1.2 puts a right-to-left run's origin at its right, so the run grows
+/// *leftward* from `OriginX`. Reordering the glyphs and leaving the run
+/// growing rightward would draw the letters in the right order in the wrong
+/// place — the wrong-place failure gap 30's refusal asymmetry exists for — and
+/// the glyph array is identical either way, so the `TJ` cannot see it.
+///
+/// Read out of the pattern `/Matrix`, whose translation is the box's own left
+/// edge in points. Four glyphs of a hundred-unit em at `OriginX="10"`: left to
+/// right the box starts at 10 units — 7.5 points — and right to left it starts
+/// four ems earlier.
+#[test]
+fn an_odd_bidi_levels_origin_is_the_runs_right_edge() {
+    let ltr = with_gradient(r#"UnicodeString="AAAA""#);
+    let rtl = with_gradient(r#"BidiLevel="1" UnicodeString="AAAA""#);
+    assert!(
+        ltr.contains("/Matrix [150 0 0 -75 7.5 150]"),
+        "left to right, the box starts at the origin: {ltr}"
+    );
+    assert!(
+        rtl.contains("/Matrix [150 0 0 -75 -142.5 150]"),
+        "right to left, it ends there: {rtl}"
     );
 }
 

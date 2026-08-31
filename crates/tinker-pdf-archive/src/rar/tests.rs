@@ -7,8 +7,49 @@
 //! that line; what lives here is the container, which is fully checkable.
 //!
 //! The `.cbr` a real archiver wrote is opened in the facade
-//! (`crates/tinker-pdf/tests/cbz_real.rs`), where its five pages are compared
-//! against the same five pages a ZIP produced.
+//! (`crates/tinker-pdf/tests/cbz_real.rs`), where its four *stored* pages are
+//! compared against the same pages a ZIP produced and its fifth is asserted to
+//! be a placeholder naming method 3.
+//!
+//! # Injection, counted
+//!
+//! Ten defects were reintroduced and the suite run to see what caught them.
+//!
+//! Counts are of every test binary that can reach this crate — its own suite,
+//! and the facade's `cbz` and `cbz_real`, which a grep for the four container
+//! names says are the only two of `tinker-pdf`'s that do. They are sums over
+//! the per-binary `test result:` lines of a run with **`--no-fail-fast`**, and
+//! that flag is not a detail: a plain `cargo test` stops at the first failing
+//! binary, so the first two attempts at this table under-counted six of its
+//! rows.
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the header's own CRC-32 not checked before its fields are believed | **1** |
+//! | the entry CRC-32 not checked before the bytes are handed over | **3** |
+//! | the RAR 4 signature read as an ordinary RAR | **2** |
+//! | the compression method taken from the wrong bits of the packed word | **3** |
+//! | a compressed entry handed back as though it were stored | **3** |
+//! | a solid entry read as an ordinary one | **2** |
+//! | the `vint` read most-significant-group first | **5** |
+//! | a stored entry's two declared sizes not compared | **1** |
+//! | a service record listed as an ordinary file | **1** |
+//! | the data area not skipped, so the walk lands inside a file | **8** |
+//!
+//! **The bottom row is the walk again**, and it is worth setting beside tar's
+//! `advance` at 10 and 7z's substream table at 12. All three containers have
+//! exactly one defect that costs a reader its *place* rather than one field,
+//! and in all three it is the defect the corpus is most sensitive to, because
+//! losing your place loses every entry after it. Everything else in this table
+//! is caught once or three times.
+//!
+//! **Two rows are about the line this module draws rather than about a bug.**
+//! Taking the method from the wrong bits, and skipping the method check
+//! altogether, both make `page3.jpg` look stored — and both are caught by
+//! `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`,
+//! which asserts the placeholder **by method number**. That is what stops the
+//! CBR row being closed by accident: an engine that silently started handing
+//! compressed bytes back as pages would fail there and nowhere else.
 
 use super::*;
 
@@ -162,7 +203,11 @@ fn a_stored_rar_lists_its_files_and_hands_their_bytes_back_borrowed() {
     let files: &[Line<'_>] = &[
         ("page1.png", b"the first page", As::Stored),
         ("page10.png", b"the tenth", As::Stored),
-        ("page2.png", b"the second page, longer than the others", As::Stored),
+        (
+            "page2.png",
+            b"the second page, longer than the others",
+            As::Stored,
+        ),
     ];
     let bytes = archive(files);
     let a = open(&bytes);
@@ -171,14 +216,16 @@ fn a_stored_rar_lists_its_files_and_hands_their_bytes_back_borrowed() {
     assert_eq!(names, ["page1.png", "page10.png", "page2.png"]);
     assert_eq!(
         a.entries().iter().map(|e| e.size).collect::<Vec<_>>(),
-        [14, 9, 38]
+        [14, 9, 39]
     );
     assert!(a.entries().iter().all(|e| e.crc.is_some()));
     assert!(a.entries().iter().all(|e| e.method == 0));
 
     let base = bytes.as_ptr() as usize;
     for (index, (_, want, _)) in files.iter().enumerate() {
-        let got = a.read(index).unwrap_or_else(|e| panic!("entry {index}: {e}"));
+        let got = a
+            .read(index)
+            .unwrap_or_else(|e| panic!("entry {index}: {e}"));
         assert_eq!(got.as_ref(), *want, "entry {index}");
         assert!(
             matches!(got, Cow::Borrowed(_)),
@@ -190,7 +237,11 @@ fn a_stored_rar_lists_its_files_and_hands_their_bytes_back_borrowed() {
             "entry {index}'s bytes are not inside the archive"
         );
     }
-    assert_eq!(a.warnings(), &[], "a well-formed archive warns about nothing");
+    assert_eq!(
+        a.warnings(),
+        &[],
+        "a well-formed archive warns about nothing"
+    );
 }
 
 /// **A RAR 4 archive is recognised and refused by its own name.**
@@ -311,11 +362,19 @@ fn an_entry_with_no_recorded_crc_is_warned_about() {
 fn a_compressed_entry_is_refused_by_its_method_number() {
     for method in 1..=5u8 {
         let bytes = archive(&[
-            ("page1.png", b"pretend this is compressed", As::Compressed(method)),
+            (
+                "page1.png",
+                b"pretend this is compressed",
+                As::Compressed(method),
+            ),
             ("page2.png", b"the second page", As::Stored),
         ]);
         let a = open(&bytes);
-        assert_eq!(a.entries()[0].method, method, "method {method} is read back");
+        assert_eq!(
+            a.entries()[0].method,
+            method,
+            "method {method} is read back"
+        );
         assert_eq!(a.read(0), Err(EntryError::Compressed { method }));
         assert_eq!(
             a.read(1).as_deref(),
@@ -384,7 +443,10 @@ fn directories_and_service_records_are_listed_and_not_read() {
         [Kind::Directory, Kind::File, Kind::Service]
     );
     assert!(a.entries()[0].is_directory());
-    assert!(a.entries()[2].is_directory(), "a service record is not a page");
+    assert!(
+        a.entries()[2].is_directory(),
+        "a service record is not a page"
+    );
     assert_eq!(a.read(0), Err(EntryError::NotAFile));
     assert_eq!(a.read(2), Err(EntryError::NotAFile));
     assert_eq!(a.read(1).as_deref(), Ok(&b"a page"[..]));
@@ -448,7 +510,11 @@ fn a_damaged_name_costs_the_name_and_not_the_page() {
     let a = Archive::open(&bytes, &limits).expect("it opens");
     assert!(a.warnings().contains(&Warning::NameTruncated { index: 0 }));
     assert_eq!(a.entries()[0].name, "a".repeat(16));
-    assert_eq!(a.read(0).as_deref(), Ok(&b"a page"[..]), "and it still reads");
+    assert_eq!(
+        a.read(0).as_deref(),
+        Ok(&b"a page"[..]),
+        "and it still reads"
+    );
 
     // A name that is not UTF-8. The builder takes a `&str`, so the bytes are
     // damaged in the finished archive and the header CRC rebuilt over them.
@@ -509,17 +575,38 @@ fn every_cap_is_refused_by_name_and_can_actually_fire() {
         Some(Error::TooManyEntries)
     );
 
-    // A header larger than the cap is refused before its CRC is computed over
-    // it, which is the difference between a cap and a check.
-    let small = Limits {
+    // A header larger than the cap is refused **before its CRC is computed over
+    // it**, which is the difference between a cap and a check. Which refusal it
+    // is depends on which header is too big, and both halves are asserted
+    // because the first draft of this test asserted the wrong one: a main
+    // archive header is three bytes and a file header is thirty-odd, so a cap
+    // between them lets the walk start and stops it at the first file.
+    let stops_at_the_first_file = Limits {
         max_header_bytes: 4,
+        ..Limits::DEFAULT
+    };
+    let a = Archive::open(&bytes, &stops_at_the_first_file).expect("the main header fits");
+    assert_eq!(
+        a.entries(),
+        &[],
+        "no file header fits, so there are no entries"
+    );
+    assert!(
+        a.warnings()
+            .contains(&Warning::HeaderChecksumFailed { index: 0 }),
+        "and the walk says where it stopped: {:?}",
+        a.warnings()
+    );
+
+    let small = Limits {
+        max_header_bytes: 2,
         ..Limits::DEFAULT
     };
     assert_eq!(
         Archive::open(&bytes, &small).err(),
         Some(Error::FirstHeaderCorrupt),
-        "the first header past the cap is the same answer as one that will not \
-         checksum: neither can be walked past"
+        "a cap below even the main header is the same answer as a first header \
+         that will not checksum: neither can be walked past"
     );
 }
 
@@ -619,7 +706,11 @@ fn write_the_fuzz_seeds() {
         ("CMT", b"a comment", As::Service),
     ]);
     let methods = archive(&[
-        ("page1.png", b"pretend this is compressed", As::Compressed(3)),
+        (
+            "page1.png",
+            b"pretend this is compressed",
+            As::Compressed(3),
+        ),
         ("page2.png", b"a page", As::Solid),
         ("page3.png", b"ciphertext", As::Encrypted),
     ]);

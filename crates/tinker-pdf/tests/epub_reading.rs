@@ -870,9 +870,16 @@ fn the_unsupported_census_is_the_one_the_record_states() {
         .copied()
         .filter(|name| !measured.iter().any(|row| row.starts_with(name)))
         .collect();
+    // **Two books joined this list in tier 4 and neither was touched.** Both
+    // calibre books' whole remaining census was `vertical-align: inherit` and
+    // `text-align: inherit`, and `css-cascade-5` §7.1's defaulting keywords
+    // being implemented emptied them. A calibre book now has nothing in it this
+    // build does not read.
     assert_eq!(
         silent,
         [
+            "calibre-book-cover.epub",
+            "calibre-book-nocover.epub",
             "calibre-embedded-font.epub",
             "kcc-fixed-layout.epub",
             "pandoc-embedded-font.epub"
@@ -889,27 +896,34 @@ fn the_unsupported_census_is_the_one_the_record_states() {
 /// matching nine cells is nine and not one. A build that counted at parse time
 /// would report 1 for each.
 ///
-/// **The property this asserts on used to be `display`**, and milestone 11 took
-/// it away by implementing every `display: table*` value calibre writes. It
-/// became `vertical-align`, at eighteen elements, and tier 4 took **two** of
-/// those away — `.calibre11` and `.calibre14` write `vertical-align: middle`,
-/// which §17.5.4 now aligns. Sixteen are left and they are all one value:
-/// calibre writes `vertical-align: inherit` on its rows, its header cells and
-/// its data cells, and `inherit` is a `css-cascade-5` §7.1 explicit-defaulting
-/// keyword that this build implements on no property at all. So the fixture
-/// survives a milestone that implemented the property whole, and what it is now
-/// a fixture for is the (property, **value**) key rather than the property.
+/// **The book and the property this asserts on have both moved three times**,
+/// and each move was a milestone taking the gap away rather than a test being
+/// rewritten. It was `display` on a calibre book until milestone 11 implemented
+/// every `display: table*` value calibre writes. It became `vertical-align` at
+/// eighteen elements; tier 4's §17.5.4 alignment took two of those, leaving
+/// sixteen that were all one value — `vertical-align: inherit`. Then §7.1's
+/// defaulting keywords landed and took the remaining sixteen **and** the nine
+/// `text-align: inherit` beside them, which left both calibre books with
+/// nothing unimplemented in them at all and this fixture with no book.
+///
+/// It is now pandoc's `hyphens`, and it is a **better** fixture than either of
+/// its predecessors for the claim being made: pandoc writes `hyphens: manual`
+/// exactly **once**, in `code { … }`, and it reaches **six** elements. One
+/// declaration, six elements, and a build that counted at parse time would say
+/// one — where `vertical-align` was sixteen elements from three declarations
+/// and `display` was six from six, so neither could ever have shown a factor
+/// this cleanly.
 #[test]
 fn the_census_counts_elements_and_not_declarations() {
-    let doc = Document::open(corpus_book("calibre-book-cover.epub")).expect("a book");
+    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
     let entries = census(&doc);
     let aligned = entries
         .iter()
-        .find(|(property, _)| property == "vertical-align")
-        .expect("this book sets vertical-align: inherit on its cells");
+        .find(|(property, _)| property == "hyphens")
+        .expect("this book sets hyphens: manual on its code spans");
     assert_eq!(
-        aligned.1, 16,
-        "vertical-align was counted per declaration rather than per element: {aligned:?}"
+        aligned.1, 6,
+        "hyphens was counted per declaration rather than per element: {aligned:?}"
     );
     // And the ranking is by count, which is what makes the first line of a
     // report the thing worth reading.

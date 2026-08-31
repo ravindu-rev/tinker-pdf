@@ -79,5 +79,6 @@
 #![forbid(unsafe_code)]
 
 pub mod lzma;
+pub mod rar;
 pub mod sevenz;
 pub mod tar;

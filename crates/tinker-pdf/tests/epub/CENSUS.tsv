@@ -1,8 +1,4 @@
 book	property	elements
-calibre-book-cover.epub	vertical-align	16
-calibre-book-cover.epub	text-align	9
-calibre-book-nocover.epub	vertical-align	16
-calibre-book-nocover.epub	text-align	9
 pandoc-book-cover.epub	hyphens	6
 pandoc-book-cover.epub	background-color	5
 pandoc-book-cover.epub	color	5

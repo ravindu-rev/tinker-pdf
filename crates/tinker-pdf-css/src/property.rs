@@ -1487,6 +1487,18 @@ pub enum Declaration {
         /// The value as written, so a warning can say which value it was.
         value: String,
     },
+    /// One longhand set to one of §7.1's five defaulting keywords.
+    ///
+    /// One per longhand rather than one per declaration, so that `margin:
+    /// inherit` cascades as four declarations exactly as `margin: 0` does --
+    /// a `margin-top` written after it has to be able to beat one of them and
+    /// not the other three.
+    Defaulted {
+        /// Which property.
+        longhand: crate::longhand::Longhand,
+        /// Which keyword.
+        keyword: Defaulting,
+    },
     /// A name no CSS specification this build cites defines: a typo, a vendor
     /// extension, or a custom property.
     Unknown {
@@ -1509,6 +1521,18 @@ pub enum Parsed {
         property: &'static str,
         /// The value as written.
         value: String,
+    },
+    /// §7.1's explicit defaulting, on one longhand or on every longhand a
+    /// shorthand sets.
+    ///
+    /// The keyword travels with the *names* and not with a value, because it
+    /// has none: what it resolves to is decided in the cascade, where the
+    /// parent's computed style and the origins below this one are in hand.
+    Defaulted {
+        /// The longhands the keyword applies to, already expanded.
+        longhands: Vec<crate::longhand::Longhand>,
+        /// Which of the five.
+        keyword: Defaulting,
     },
     /// Not a name this build cites.
     Unknown,
@@ -1614,18 +1638,20 @@ pub fn parse_declaration(name: &str, values: &[ComponentValue]) -> Parsed {
     }
     // `inherit`, `initial`, `unset`, `revert` and `revert-layer` are
     // `css-cascade-5` §7.1's explicit defaulting keywords, valid on **every**
-    // property. This build implements none of them, and the fact is reported
-    // per property rather than per keyword because decision 5 keys on the
-    // (property, value) pair: `color: inherit` is a gap in `color`.
+    // property and on every shorthand. They are read here, before the value
+    // grammars, because §7.1 makes them valid *instead of* a property's own
+    // syntax rather than as part of it -- `float: inherit` is not a `float`
+    // value and a build that asked the `float` grammar first would discard it.
+    //
+    // They are only a defaulting keyword when they are the **whole** value:
+    // `margin: 0 inherit` is not §7.1 and is invalid, which is what the length
+    // check is for.
     if significant.len() == 1 {
         if let Some(Token::Ident(word)) = significant[0].token() {
             let lower = word.to_ascii_lowercase();
-            if CSS_WIDE_KEYWORDS.contains(&lower.as_str()) {
-                if let Some(known) = implemented_name(name) {
-                    return Parsed::Unsupported {
-                        property: known,
-                        value: lower,
-                    };
+            if let Some(keyword) = Defaulting::from_name(&lower) {
+                if let Some(longhands) = defaultable(name) {
+                    return Parsed::Defaulted { longhands, keyword };
                 }
             }
         }
@@ -1650,9 +1676,196 @@ pub fn parse_declaration(name: &str, values: &[ComponentValue]) -> Parsed {
     Parsed::Unknown
 }
 
-/// `css-cascade-5` §7.1's explicit defaulting keywords, valid on every
-/// property and implemented on none.
-const CSS_WIDE_KEYWORDS: &[&str] = &["inherit", "initial", "unset", "revert", "revert-layer"];
+/// The longhands a name defaults, whether it is one or a shorthand for several.
+///
+/// `None` for a name this build does not implement, which leaves the keyword to
+/// fall through to [`UNSUPPORTED_PROPERTIES`] and be counted there -- `zoom:
+/// inherit` is a gap in `zoom` and not a gap in defaulting.
+fn defaultable(name: &str) -> Option<Vec<crate::longhand::Longhand>> {
+    if let Some(one) = crate::longhand::Longhand::from_name(name) {
+        return Some(vec![one]);
+    }
+    let (_, names) = DEFAULTABLE_SHORTHANDS.iter().find(|(n, _)| *n == name)?;
+    Some(
+        names
+            .iter()
+            .filter_map(|n| crate::longhand::Longhand::from_name(n))
+            .collect(),
+    )
+}
+
+/// `css-cascade-5` §7.1's five explicit defaulting keywords.
+///
+/// Five keywords and **five different answers**, which is the whole reason
+/// they are one enum and not one boolean. The two pairs that look alike are
+/// the ones that are not:
+///
+/// * `unset` is not a third thing beside `inherit` and `initial`: §7.1 defines
+///   it as *whichever of the two* [`crate::longhand::Longhand::inherited`]
+///   names. A build that mapped it onto either one alone is right on half the
+///   properties.
+/// * `revert` and `revert-layer` differ in **what they roll back past**.
+///   `revert` drops a whole cascade origin -- an author `revert` is resolved as
+///   though the author stylesheet had said nothing about this property on this
+///   element -- and `revert-layer` drops one `@layer` inside the origin it is
+///   already in. Confusing them gives a book that renders, with the wrong
+///   value, and nothing anywhere to say so.
+///
+/// None of the five carries a value, which is why they are resolved against a
+/// [`crate::longhand::Longhand`] rather than folded into [`Property`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Defaulting {
+    /// `inherit`: the parent's computed value, whether or not the property
+    /// inherits by default.
+    Inherit,
+    /// `initial`: the property's initial value, whether or not it inherits.
+    Initial,
+    /// `unset`: `inherit` for an inherited property, `initial` otherwise.
+    Unset,
+    /// `revert`: roll back to the previous cascade **origin**.
+    Revert,
+    /// `revert-layer`: roll back to the previous cascade **layer** within this
+    /// origin, and to the previous origin when there is no earlier layer.
+    RevertLayer,
+}
+
+impl Defaulting {
+    /// The keyword as a stylesheet writes it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Defaulting::Inherit => "inherit",
+            Defaulting::Initial => "initial",
+            Defaulting::Unset => "unset",
+            Defaulting::Revert => "revert",
+            Defaulting::RevertLayer => "revert-layer",
+        }
+    }
+
+    /// Reads §7.1's keyword, case-insensitively as CSS keywords are.
+    #[must_use]
+    pub fn from_name(word: &str) -> Option<Defaulting> {
+        match word {
+            "inherit" => Some(Defaulting::Inherit),
+            "initial" => Some(Defaulting::Initial),
+            "unset" => Some(Defaulting::Unset),
+            "revert" => Some(Defaulting::Revert),
+            "revert-layer" => Some(Defaulting::RevertLayer),
+            _ => None,
+        }
+    }
+}
+
+/// The longhands each implemented shorthand sets, for defaulting only.
+///
+/// `margin: inherit` means all four margins inherit, so a defaulting keyword
+/// on a shorthand has to expand exactly as a value on it does. This table is
+/// **not** the expansion `implemented` performs -- that one parses values and
+/// this one only needs names -- and the two are asserted to agree in
+/// `every_shorthand_expands_the_same_way_for_a_value_and_a_keyword`, which
+/// parses a real value through the ordinary path and compares the longhand set.
+/// Two tables that must agree are worth one test; two tables that quietly
+/// disagree are `border: inherit` leaving the border colour behind.
+pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
+    ("background", &["background-color"]),
+    (
+        "border",
+        &[
+            "border-top-width",
+            "border-right-width",
+            "border-bottom-width",
+            "border-left-width",
+            "border-top-style",
+            "border-right-style",
+            "border-bottom-style",
+            "border-left-style",
+            "border-top-color",
+            "border-right-color",
+            "border-bottom-color",
+            "border-left-color",
+        ],
+    ),
+    (
+        "border-bottom",
+        &[
+            "border-bottom-width",
+            "border-bottom-style",
+            "border-bottom-color",
+        ],
+    ),
+    (
+        "border-color",
+        &[
+            "border-top-color",
+            "border-right-color",
+            "border-bottom-color",
+            "border-left-color",
+        ],
+    ),
+    (
+        "border-left",
+        &[
+            "border-left-width",
+            "border-left-style",
+            "border-left-color",
+        ],
+    ),
+    (
+        "border-right",
+        &[
+            "border-right-width",
+            "border-right-style",
+            "border-right-color",
+        ],
+    ),
+    (
+        "border-style",
+        &[
+            "border-top-style",
+            "border-right-style",
+            "border-bottom-style",
+            "border-left-style",
+        ],
+    ),
+    (
+        "border-top",
+        &["border-top-width", "border-top-style", "border-top-color"],
+    ),
+    (
+        "border-width",
+        &[
+            "border-top-width",
+            "border-right-width",
+            "border-bottom-width",
+            "border-left-width",
+        ],
+    ),
+    (
+        "column-rule",
+        &[
+            "column-rule-width",
+            "column-rule-style",
+            "column-rule-color",
+        ],
+    ),
+    ("columns", &["column-width", "column-count"]),
+    ("flex", &["flex-grow", "flex-shrink", "flex-basis"]),
+    ("flex-flow", &["flex-direction", "flex-wrap"]),
+    ("gap", &["row-gap", "column-gap"]),
+    (
+        "margin",
+        &["margin-top", "margin-right", "margin-bottom", "margin-left"],
+    ),
+    (
+        "padding",
+        &[
+            "padding-top",
+            "padding-right",
+            "padding-bottom",
+            "padding-left",
+        ],
+    ),
+];
 
 /// Reading a value that is supposed to be a length, three ways.
 ///

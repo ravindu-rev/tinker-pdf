@@ -7,8 +7,8 @@
 //! of them reaches *inside* the entropy decoder: the lossless identity is a
 //! whole-image comparison, so a transcription slip in a VLC table shows up as
 //! "the picture is wrong" with no indication of where. These tests close that
-//! gap for the part of the format that is pure data — thirty-odd code tables
-//! transcribed by hand from ITU-T T.832's Tables 51 to 91 — by checking the
+//! gap for the part of the format that is pure data — **twenty-seven** code
+//! tables transcribed by hand from ITU-T T.832's Tables 51 to 91 — by checking the
 //! *structural* properties a Huffman table has to have. A single wrong bit in
 //! any code almost always breaks one of them.
 //!
@@ -120,6 +120,15 @@ fn all_tables() -> Vec<(&'static str, &'static [tables::Code])> {
 }
 
 #[test]
+fn the_table_count_is_what_the_prose_says() {
+    // Every count in this file's header is a claim about `all_tables()`, and
+    // a claim in a comment drifts silently. Ten tables are named singly, and
+    // six constants carry the rest: ABS_LEVEL_INDEX and the three CBPHP pairs
+    // contribute two each, INDEX_A four, FIRST_INDEX five.
+    assert_eq!(all_tables().len(), 27, "the header's count is stale");
+}
+
+#[test]
 fn every_code_table_is_prefix_free() {
     for (name, table) in all_tables() {
         assert_eq!(prefix_violations(table), 0, "{name} is not a prefix code");
@@ -146,7 +155,7 @@ fn a_shortened_code_is_caught_as_a_prefix_violation() {
 #[test]
 fn every_code_table_is_a_complete_prefix_code() {
     // A complete code assigns every leaf of its binary tree, and **every one
-    // of T.832's thirty tables is complete**. There is no exception list, and
+    // of the twenty-seven is complete**. There is no exception list, and
     // that is the point: an earlier draft of this file transcribed Table 52's
     // code table 0 with its last two rows swapped, which left one leaf
     // unassigned. The table was still prefix-free, still decoded most

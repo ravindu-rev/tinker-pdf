@@ -121,6 +121,7 @@
 pub mod cascade;
 pub mod font_face;
 pub mod limits;
+pub mod longhand;
 pub mod media;
 pub mod parser;
 pub mod property;

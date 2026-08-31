@@ -230,7 +230,8 @@ fn the_unsupported_census_over_the_committed_corpus() {
 
     // The set, asserted rather than counted, because a set is what a reader can
     // act on and a count is a mood. Every name here is one two real producers
-    // write and this build does not read.
+    // write and this build does not read. Ten of them, and two left in tier 4
+    // when §7.1's defaulting keywords landed.
     let names: Vec<&str> = unsupported.iter().map(|(p, _)| *p).collect();
     assert_eq!(
         names,
@@ -264,22 +265,21 @@ fn the_unsupported_census_over_the_committed_corpus() {
             "overflow",
             "overflow-x",
             "quotes",
-            // And the third value gap, which is the one the injection matrix
-            // found first and this corroborates: calibre writes
-            // `text-align: inherit`, a `css-cascade-5` §7.1 keyword on a
-            // property whose own keywords are `left`, `right`, `center` and
-            // `justify`.
-            "text-align",
-            // **And the fourth, which is the one tier 4 expected to remove and
-            // did not.** §10.8.1's `vertical-align` is implemented at every one
-            // of its ten values; what is left here is calibre writing
-            // `vertical-align: inherit` on four of its five table classes,
-            // which is `text-align: inherit` four lines up — a `css-cascade-5`
-            // §7.1 explicit-defaulting keyword, valid on every property and
-            // implemented on none. So this row survives a milestone that
-            // implemented the property whole, and the set is what says which of
-            // the two facts it is reporting.
-            "vertical-align",
+            // **`text-align` and `vertical-align` used to be here and tier 4
+            // removed them both, in one edit, without touching either
+            // property.** Both were value gaps and both were the *same* value
+            // gap: calibre writes `text-align: inherit` and
+            // `vertical-align: inherit` on four of its five table classes, and
+            // `css-cascade-5` §7.1's five explicit defaulting keywords were
+            // implemented on no property at all.
+            //
+            // They are the strongest thing this census has said. Nothing about
+            // either property changed — `vertical-align` had already been
+            // implemented at all ten of its values a milestone earlier and this
+            // row survived it, which is what said the row was about the value.
+            // A census that counted names would have gone from twelve to ten
+            // and left a reader to guess which two, and guessing "the two most
+            // recently implemented properties" would have been wrong.
         ]
     );
 

@@ -1,5 +1,5 @@
-//! `ImageBrush`, its two rectangles, its five tile modes and the two formats
-//! this build refuses (gap 30, milestone 8).
+//! `ImageBrush`, its two rectangles, its five tile modes and all four of
+//! 9.1.5's image formats, every one of which now reaches the page.
 //!
 //! # Why the route is asserted and not only the picture
 //!
@@ -792,20 +792,134 @@ fn a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing
     );
 }
 
-/// A JPEG XR, which 9.1.5.1 recommends and nothing outside Microsoft's stack
-/// implements, is refused by name — and refused **before** either rule decides
-/// which format the part is, which is what the pre-emptive loop is for.
+/// One of the committed JPEG XR fixtures, whose rasters this repository
+/// authored and whose decode is held to them bit-for-bit by
+/// `crates/tinker-pdf-filters/tests/jxr_fixtures.rs`.
+///
+/// Read across the crate boundary rather than copied: a second copy of a
+/// fixture is a second thing to keep in step with the raster that defines it.
+fn jpeg_xr(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tinker-pdf-filters/tests/jxr")
+        .join(format!("{name}.jxr"));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// **A JPEG XR reaches the page.** 9.1.5.1 recommends the format and nothing
+/// outside Microsoft's stack implements it, which is why it was the last of
+/// 9.1.5's four still refused here.
+///
+/// The content type says PNG; only the magic bytes say JPEG XR. That is
+/// deliberate — it exercises the identification rule *and* the decoder in one
+/// package, and it is the case the old pre-emptive refusal loop caught before
+/// either rule had spoken.
 #[test]
-fn a_jpeg_xr_is_refused_by_name() {
-    let mut jxr = vec![0x49, 0x49, 0xBC, 0x01];
-    jxr.extend_from_slice(&[0u8; 32]);
+fn a_jpeg_xr_named_by_its_magic_bytes_is_drawn() {
     let bytes = package_with(
-        binary_part("Resources/i.png", jxr),
+        binary_part("Resources/i.png", jpeg_xr("rgb24")),
         r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
            ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
         None,
     );
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
+
+    assert_eq!(
+        defects(&bytes),
+        [],
+        "a JPEG XR this build reads owes nothing"
+    );
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the shape is not the placeholder grey: {content}"
+    );
+    assert!(
+        content.contains("/Pattern cs"),
+        "the picture reached the page through a tiling pattern: {content}"
+    );
+}
+
+/// And 9.1.5.1's own content type is recognised, which is the other half of
+/// the same pair.
+///
+/// `image/vnd.ms-photo` is what Windows writes. This package names it *and*
+/// carries the matching bytes, because that is the only way a content type can
+/// decide anything: where the two rules disagree the bytes win, so a package
+/// naming the type over some other format's bytes would prove the opposite of
+/// what it looks like it proves.
+#[test]
+fn the_jpeg_xr_content_type_is_recognised() {
+    let types = content_types_with(
+        r#"<Override PartName="/Resources/i.png" ContentType="image/vnd.ms-photo" />"#,
+    );
+    let bytes = package_with(
+        binary_part("Resources/i.png", jpeg_xr("rgb24")),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        Some(&types),
+    );
+
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the shape is not the placeholder grey: {content}"
+    );
+}
+
+/// A JPEG XR whose bytes are a header and nothing else is **unreadable**,
+/// which is a different sentence from a format this build does not read.
+///
+/// The distinction is the whole of what the decoder bought, and it is the same
+/// pair TIFF got when its decoder landed: before it existed both answered
+/// `ImageFormatUnsupported`, and a caller could not tell "this engine has no
+/// JPEG XR decoder" from "this JPEG XR is broken". Only one of those is worth
+/// re-exporting the package to fix.
+#[test]
+fn a_jpeg_xr_that_is_only_a_header_is_unreadable_rather_than_unsupported() {
+    let mut stub = vec![0x49, 0x49, 0xBC, 0x01];
+    stub.extend_from_slice(&[0u8; 32]);
+    let bytes = package_with(
+        binary_part("Resources/i.png", stub),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageUnreadable]);
+    let content = stream(&bytes);
+    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
+    assert!(
+        content.contains("200 0 l"),
+        "and the shape still draws: {content}"
+    );
+}
+
+/// A JPEG XR carrying A.3.2's separate alpha plane reaches the page with an
+/// `/SMask`.
+///
+/// The pair to the test above, and the reason it is a pair: an image that
+/// draws and an image that draws *with its transparency* are two claims. A
+/// build that dropped the alpha plane would pass every assertion in
+/// `a_jpeg_xr_named_by_its_magic_bytes_is_drawn` and put an opaque rectangle
+/// where the package asked for a cut-out.
+#[test]
+fn a_jpeg_xr_with_an_alpha_plane_reaches_the_page_with_a_soft_mask() {
+    let bytes = package_with(
+        binary_part("Resources/i.png", jpeg_xr("bgra32")),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    assert_eq!(defects(&bytes), []);
+    let saved = saved(&bytes);
+    assert!(
+        saved.contains("/SMask"),
+        "the alpha plane became an /SMask image XObject"
+    );
+    // And the colour half is still `/DeviceRGB` rather than the four-channel
+    // raster the file interleaves.
+    assert!(saved.contains("/DeviceRGB"), "the colour half is RGB");
 }
 
 // ---- JPEG, and the resolution --------------------------------------------

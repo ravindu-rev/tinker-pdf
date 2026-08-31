@@ -228,7 +228,17 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`). The encoder half is `deflate` and `zlib_compress`; the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
-`inflate_raw` and `crc32`.
+`inflate_raw`, `crc32` and `jxr_decode` (returns `JxrImage`).
+
+`jxr_decode` is deliberately **not** a `Filter` or an `ImageCodec` variant.
+Those two enums are PDF `/Filter` dispatch — what a `/Filter` *name* resolves
+to — and no `/Filter` in ISO 32000-2 Table 6 reaches ITU-T T.832;
+`/JPXDecode` is JPEG 2000, a different format. JPEG XR arrives only as an XPS
+image part, so it is a free function beside `png_decode` and carries its own
+`JxrWarning` set rather than widening `Warning`, which is the closed list of
+leniencies a *PDF stream filter* performs. `docs/design/jpeg-xr.md` argues
+this at length; the short version is that an entry nothing can name would
+make both enums wrong.
 
 ## Refused by name
 
@@ -253,6 +263,39 @@ half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
 | TIFF `Predictor` 3, `PlanarConfiguration` past 2, `BitsPerSample` outside {1,2,4,8,16}, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Nothing in the sample path carries two depths at once, and half-expanding one is worse than saying so | — |
 | BigTIFF (magic 43) | `TiffError::BigTiff` | Eight-byte offsets and a different directory layout wearing the same two order bytes | — |
 | TIFF past `MAX_TIFF_SAMPLES`, `MAX_TIFF_SEGMENTS` or the caller's ceiling | `TiffError::TooManySamples`, `TooManySegments`, `ExceedsOutputLimit` | Width, height and `StripOffsets`'s count are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
+| JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
+| JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
+| A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
+| JPEG XR packed output depths BD1WHITE1, BD1BLACK1, BD5, BD565, BD10 | `JxrRefusal::PackedOutputBitdepth` | 9.10.8.3 to 9.10.8.6's sub-byte and cross-byte packings | [design](../design/jpeg-xr.md) |
+| JPEG XR interleaved alpha image plane (8.3.18) | `JxrRefusal::InterleavedAlphaPlane` | A.3.2's *separate* plane is what the encoder on this machine emits and what decodes here; the interleaved form has no fixture, and building it against nothing is how a plausible wrong decode gets shipped | [design](../design/jpeg-xr.md) |
+| JPEG XR YUV420, YUV422 and YUVK internal colour formats | `JxrRefusal::SubsampledInternalFormat` | 9.10.3's chroma upsampling and a macroblock geometry that is not the 4:4:4 one this build implements — three whole branches of clauses 8.7, 9.5, 9.6 and 9.8, absent rather than written and untested | [design](../design/jpeg-xr.md) |
+| JPEG XR windowing with a non-zero top or left margin (8.3.13) | `JxrRefusal::WindowedOrigin` | It shifts the whole sample grid off the macroblock origin; the bottom and right margins are ordinary padding and are always handled | [design](../design/jpeg-xr.md) |
+| JPEG XR past `MAX_JXR_SAMPLES`, `MAX_JXR_TILES`, `MAX_JXR_COMPONENTS`, `MAX_JXR_MACROBLOCKS` or the caller's ceiling | `JxrError::TooManySamples`, `TooManyTiles`, `TooManyComponents`, `TooManyMacroblocks`, `ExceedsOutputLimit` | 8.3.23 permits 4096 tile columns, 8.4.12 permits 4111 components and 8.3.21's dimensions are 32-bit, and the standard bounds each factor without bounding the product; the budgets are **totals**, checked before any buffer exists (ruling 1) | [rulings](../rulings.md) |
+
+Every `JxrRefusal` variant is reached by a test in
+`src/jxr/tests/refusals.rs`, for the reason that file's header gives: a
+published refusal list nothing reaches is a claim rather than a check, and a
+refusal whose condition a later milestone made unreachable should fail a test
+rather than quietly become decoration.
+
+**JPEG XR damage is a warning, not a refusal.** A tile that will not parse is
+dropped to zero and reported as `JxrWarning::TileDroppedAsZero`, which is
+8.7.10.1's own NOTE 1 and ruling 2's degrade path; an alpha plane that will
+not decode leaves an opaque image and `JxrWarning::AlphaPlaneDropped`. Both
+set `complete` to false. The distinction is deliberate: damage that costs
+*pixels* leaves a partial image, and damage that costs *meaning* is refused.
+
+### JPEG XR: decoded but unadjudicated
+
+The refusals above are decisions. This is the other list — what decodes with
+**nothing checking that the result is right** — and it exists because JPEG XR
+is the only codec here with no second implementation available to this
+repository. Ruling 13 forbids asking one: a third party may generate an input
+and may never adjudicate an output. The list, the three first-party evidence
+legs that stand in place of an oracle, and what each of them cannot reach are
+in [design/jpeg-xr.md](../design/jpeg-xr.md) and
+[features/xps.md](xps.md); the largest single gap is the **quantised lossy
+path**, which the lossless identity does not touch at any quantizer but 1.
 
 Every JPX refusal also returns `FilterError::Unsupported(Capability::Jpx)`;
 the warning names the reason, because the refusal is an `Err` and ruling 10

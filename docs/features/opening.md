@@ -17,8 +17,10 @@ formats, so it is opened once and asked what it is: an XPS package is
 recognised by ECMA-388 E.3's three steps, an EPUB by OCF's
 `META-INF/container.xml`, and anything else falls through to the comic-archive
 path — each synthesised into a real document with a real catalog and page
-tree. **A tar and a 7z are read too** (tier 4), through
-`tinker-pdf-archive`; RAR is still refused by name. The signatures are tested at a
+tree. **A tar, a 7z and a RAR 5 open too** (tier 4), through
+`tinker-pdf-archive`; a RAR 4 is refused by its own signature, and a RAR 5
+entry this build cannot decompress is a placeholder page rather than a refused
+archive. The signatures are tested at a
 fixed position only, so a PDF carrying `PK\x03\x04` inside a stream is
 unaffected. See [cbz](cbz.md), [xps](xps.md) and [epub](epub.md); a
 reflowable book additionally takes `OpenOptions`, because its page count is a
@@ -123,7 +125,7 @@ exceed it routinely — declared in one place,
 | --- | --- | --- | --- |
 | Zero bytes | `OpenError::Empty` | Almost always a caller's bug — a path that did not exist — and telling that apart from a bad file matters | `crates/tinker-pdf/src/lib.rs` |
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
-| RAR | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | A recognised container, refused by name: one more decompressor, and it is not a page *yet* | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
+| A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
 | Encrypted, nothing authenticated | `DocumentError::PasswordRequired` | The document opened; reading it is the thing that waits | [encryption](encryption.md) |
 | Encryption handler not implemented | `DocumentError::UnsupportedEncryption` | A handler outside R2–R6 cannot be pretended at | [encryption](encryption.md) |
 | Decompression bomb | `WarningKind::Filter(Warning::OutputCapHit)` | `stream_decoded` output capped at `MAX_DECODED_STREAM` (128 MiB), so a 1 KB stream cannot buy unbounded memory | `limits.rs` |

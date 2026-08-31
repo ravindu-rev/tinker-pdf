@@ -331,9 +331,20 @@ opened. Scripts with no conformance fixture stay listed by name in
 
 Decision items, not commitments: **OCR** (if ever, as a host seam like
 `FontProvider`, not an in-engine engine) and **container writing** (CBZ,
-XPS and EPUB are read-only conversions today). Named permanent non-goal:
-**XFA** — removed in ISO 32000-2; stated so it is a decision rather than
-an omission.
+XPS and EPUB are read-only conversions today). Named permanent non-goals: **XFA**
+— removed in ISO 32000-2; stated so it is a decision rather than an
+omission — and **RAR's compression**, which is not the same shape as the
+rest of tier 4 and is recorded here rather than deleted. The RAR 5
+archive format is published and is read
+([features/cbz.md](features/cbz.md)); the compression under it never has
+been, and the only description of it is a decoder whose licence bars
+deriving a compatible implementation, which `deny.toml` already records.
+So a `.cbr` is read as far as a published document goes and no further:
+a stored entry is a page, a compressed one is a placeholder naming its
+method by number. **RAR 4** stops earlier still and for a second reason
+— no producer on this machine can write one, so under
+[ruling 13](rulings.md) there would be nothing first-party to hold a
+decoder to.
 
 ## Tier 4 — container depth
 
@@ -346,9 +357,8 @@ refusal table.
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
   the pinned float reading-order defect; `row-gap`/`column-gap`
-  between flex items; SVG content documents;
-  pseudo-elements (parsed, no box generated); `css-cascade-5` §7.1's
-  five explicit defaulting keywords, on every property. `min`/`max`
+  between flex items; SVG content documents; pseudo-elements (parsed,
+  no box generated). `min`/`max`
   sizing is built, less one half of §10.7: a `max-height` shorter than
   its content is named (`MaxHeightAsAuto`) rather than obeyed.
   `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
@@ -362,20 +372,24 @@ refusal table.
   §9.9.1. `display: inline-block` is a real atomic inline box, §9.2.2:
   its own formatting context at §10.3.9's shrink-to-fit width, placed
   on a line whole, aligned on §10.8.1's **last** line box.
+  **`css-cascade-5` §7.1's five explicit defaulting keywords are
+  closed** — `inherit`, `initial`, `unset`, `revert` and `revert-layer`,
+  on all eighty-three longhands and all sixteen shorthands. Closing them
+  emptied both calibre books' census: `vertical-align: inherit` and
+  `text-align: inherit` were their whole remaining gap, so a calibre
+  book now has nothing in it this build does not read
+  ([features/epub.md](features/epub.md)).
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).
 - **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
-  an ICC profile; JPEG XR **reaching the page** — the decoder is built and
-  `xps/image.rs` still refuses the format at the element, which is the same
-  shape TIFF was in before it was wired; `IsSideways` and odd `BidiLevel`.
-- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, sized honestly — a
-  hand-rolled decompressor, and **RAR 4 has no fixture this machine can
-  produce**, so it closes as decoded-but-unadjudicated by name or not at
-  all. A design doc is owed with the decoders. **CBT and CB7 are done**:
-  `7z-tar.cbt` and `7z-lzma2.cb7` join the five ZIPs in `cbz_real.rs`'s
-  cross-producer identity and render the same five pictures, which is the
-  exit criterion the whole lane is held to.
+  an ICC profile. **JPEG XR is closed** — 9.1.5.1's format decodes and
+  draws, so all four of 9.1.5's image formats reach the page. Fifteen
+  fixtures decode bit-for-bit to rasters this repository authored; what
+  the three first-party evidence legs do *not* reach is listed by name in
+  [features/xps.md](features/xps.md) and
+  [design/jpeg-xr.md](design/jpeg-xr.md), the largest of it being the
+  quantised lossy path, which ruling 13 leaves without an oracle.
 
 ## How this file changes
 
