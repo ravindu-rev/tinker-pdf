@@ -66,8 +66,8 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
     ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStyleType, MarginValue,
-    OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TableLayout, TextAlign,
-    VerticalAlign,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TableLayout, TextAlign,
+    VerticalAlign, ZIndex,
 };
 
 use crate::flex;
@@ -117,6 +117,14 @@ pub(crate) struct BlockRecord {
     pub border_color: Sides<Color>,
     /// Whether anything about it would be painted at all.
     pub painted: bool,
+    /// CSS 2.2 §9.4.3's relative offset, carried to **paint**.
+    ///
+    /// The horizontal half of the offset is folded into `x`, because a record's
+    /// `x` is already absolute; the vertical half cannot be, because a record's
+    /// `y` is its items' and its items are the flow's. §9.4.3 says the offset
+    /// *"does not affect the layout of any other box"*, and this field is that
+    /// sentence: the flow keeps the box where it was and only the ink moves.
+    pub dy: f64,
 }
 
 /// CSS 2.2 §13.3.3's first kind of break position: the margin between two
@@ -245,6 +253,18 @@ pub(crate) struct FloatRecord {
     pub top: f64,
     /// Margin-box bottom.
     pub bottom: f64,
+    /// Whether a box that does not fit the page it started on may be moved
+    /// whole to the next one.
+    ///
+    /// True for a float, which is `css-break-3`'s rule. **False for an
+    /// absolutely positioned box**, and that is the one difference between the
+    /// two at pagination: pushing it is moving it, and where it is is the whole
+    /// of what `position: absolute` said.
+    pub pushable: bool,
+    /// `z-index`, CSS 2.2 §9.9.1's painting order, with `auto` read as zero —
+    /// §9.9.1 puts an `auto` positioned box in the same layer as a `z-index: 0`
+    /// one, so the two are one number here rather than two.
+    pub z: i32,
 }
 
 /// A whole book as one continuous column, before it is cut into pages.
@@ -255,6 +275,13 @@ pub(crate) struct Flow {
     /// The floats, in the order they were met — which is document order, and
     /// therefore the order their text has to be read back in.
     pub floats: Vec<FloatRecord>,
+    /// The absolutely positioned boxes, §9.6, sorted by `z-index` and then by
+    /// the order they were met — §9.9.1's painting order, and a **stable** sort
+    /// for the reason `Page::runs` is stably sorted: two boxes in one layer are
+    /// painted in document order.
+    pub positioned: Vec<FloatRecord>,
+    /// The `fixed` boxes, §9.6.1, which are drawn on **every** page.
+    pub fixed: Vec<FloatRecord>,
     pub warnings: Vec<(Warning, usize)>,
 }
 
@@ -347,6 +374,27 @@ struct Builder<'a, M: Metrics> {
     ceiling_line: f64,
     /// Rule 4: the content top of the block container being filled.
     content_top: f64,
+    /// The page box, which is `position: fixed`'s containing block — CSS 2.2
+    /// §9.6.1's *"fixed with respect to the page box"*.
+    page: (f64, f64),
+    /// Whether the very next box [`Builder::block`] lays out has **already**
+    /// been taken out of flow.
+    ///
+    /// A third one-shot slot beside [`Builder::cell`] and [`Builder::flex_pass`]
+    /// and for their reason: [`Builder::positioned_box`] lays the box out by
+    /// asking `block` for it, and `block` is where the out-of-flow branch is,
+    /// so without this the box is taken out of flow for ever. It is `take`n
+    /// rather than read, so it applies to exactly one box — a `position:
+    /// absolute` figure **inside** a `position: absolute` sidebar is still
+    /// taken out of the sidebar's flow, which is §9.6's own rule.
+    placed: bool,
+    /// §9.6's containing blocks: the innermost positioned ancestor, or the
+    /// initial containing block where there is none.
+    ///
+    /// A stack rather than one slot, because *nearest* is the whole of §9.6's
+    /// rule: an absolutely positioned figure inside a relatively positioned
+    /// chapter inside a relatively positioned book belongs to the chapter.
+    positioned: Vec<crate::position::Containing>,
     /// What the table driver has decided about the very next box
     /// [`Builder::block`] lays out, CSS 2.2 §17.5.3 and §17.6.2.
     ///
@@ -650,6 +698,18 @@ pub(crate) fn build<M: Metrics>(
         ceiling_box: f64::NEG_INFINITY,
         ceiling_line: f64::NEG_INFINITY,
         content_top: 0.0,
+        page: (options.width, options.height),
+        placed: false,
+        // §10.1's initial containing block is the page box. Everything with no
+        // positioned ancestor is placed against this, which is what makes a
+        // `position: absolute` box in a book with no `position: relative`
+        // anywhere in it land where the stylesheet meant.
+        positioned: vec![crate::position::Containing {
+            left: 0.0,
+            top: 0.0,
+            width: options.width,
+            height: Some(options.height),
+        }],
         cell: None,
         flex_pass: None,
         sequence: 0,
@@ -664,6 +724,12 @@ pub(crate) fn build<M: Metrics>(
     // a warning list that changed between runs would change a report.
     warnings.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
     let mut flow = builder.flow;
+    // §9.9.1's painting order, and a **stable** sort: two positioned boxes in
+    // one layer are painted in the order the document generated them, which is
+    // the order this vector already holds. `z-index` decides the layer and
+    // nothing else decides anything.
+    flow.positioned.sort_by_key(|record| record.z);
+    flow.fixed.sort_by_key(|record| record.z);
     flow.warnings = warnings;
     Ok(flow)
 }
@@ -768,6 +834,16 @@ impl<M: Metrics> Builder<'_, M> {
             pass.apply(&mut style);
         }
         let style = style;
+        // §9.6: `absolute` and `fixed` are **out of flow**, so the box model
+        // below is not this box's -- it never becomes part of the column at
+        // all. The branch is here rather than lower for a float's own reason,
+        // one screen up in `gather`: everything after this line writes into the
+        // flow, and an out-of-flow box must not.
+        if matches!(style.position, Position::Absolute | Position::Fixed)
+            && !std::mem::take(&mut self.placed)
+        {
+            return self.positioned_box(node, &style, x, depth, avoid);
+        }
         self.budget.spend_box()?;
         let avoid = avoid || style.page_break_inside == PageBreakInside::Avoid;
 
@@ -853,6 +929,7 @@ impl<M: Metrics> Builder<'_, M> {
             border_style: style.border_style,
             border_color: style.border_color,
             painted: painted && style.visible,
+            dy: 0.0,
         };
         let block = self.flow.blocks.len();
         self.flow.blocks.push(record);
@@ -880,6 +957,20 @@ impl<M: Metrics> Builder<'_, M> {
         if style.page_break_inside == PageBreakInside::Avoid {
             self.open_avoid.push(block);
         }
+        // §9.6: a box with a `position` other than `static` is a containing
+        // block for its absolutely positioned descendants. Its **padding box**
+        // and not its content box, which §10.1 says in as many words and which
+        // a build reading `content_x` here would get wrong by the padding.
+        let anchors = style.position != Position::Static;
+        if anchors {
+            self.positioned.push(crate::position::Containing {
+                left: left + border.left,
+                top: self.cursor() + border.top,
+                width: (border_box_width - border.left - border.right).max(0.0),
+                height: None,
+            });
+        }
+        let floats_before = self.flow.floats.len();
         let top_edge = border.top + padding.top;
         if top_edge > 0.0 {
             // A border or a padding between the parent and its first child is
@@ -964,9 +1055,13 @@ impl<M: Metrics> Builder<'_, M> {
             self.emit(bottom_edge, ItemKind::Edge, true);
         }
         self.open.pop();
+        if anchors {
+            self.positioned.pop();
+        }
         if style.page_break_inside == PageBreakInside::Avoid {
             self.open_avoid.pop();
         }
+        self.offset_relative(&style, block, floats_before, content_x, before, containing);
 
         // The bottom margin joins the next adjoining position. When the box had
         // no border, no padding, no content and no height, its top margin is
@@ -982,6 +1077,75 @@ impl<M: Metrics> Builder<'_, M> {
             self.marker(&style, block, content_x, ordinal);
         }
         Ok(())
+    }
+
+    /// CSS 2.2 §9.4.3's offset, applied once the box is closed.
+    ///
+    /// **A method and not five lines inside [`Builder::block`]**, which is not
+    /// a style choice: `block` recurses once per level of the document and its
+    /// frame is what the depth cap is measured in stack against. Five more
+    /// locals in it took `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// from a named refusal to a stack overflow — the cap counted the same
+    /// depth and the frames no longer fitted. The fixture found it; this is
+    /// where the frame went.
+    #[allow(clippy::too_many_arguments)]
+    fn offset_relative(
+        &mut self,
+        style: &Consumed,
+        block: usize,
+        floats_before: usize,
+        content_x: f64,
+        before: f64,
+        containing: f64,
+    ) {
+        // §9.4.3, and `css-position-3` §3.4 for the second value: `sticky` is
+        // offset by how far its nearest scrollport has scrolled, and a
+        // paginated document has no scrollport, so §3.4's own answer is that it
+        // *"is the same as `relative`"*. Not a degradation -- the value of a
+        // parameter this medium does not have.
+        //
+        // **The offset is applied to the ink and not to the flow.** §9.4.3 says
+        // it *"does not affect the layout of any other box"*, and here that is
+        // load-bearing rather than merely true: this module is one column whose
+        // `y` never goes backwards, and a box moved up by `top: -10px` would
+        // put an item above the one before it.
+        if !matches!(style.position, Position::Relative | Position::Sticky) {
+            return;
+        }
+        {
+            let against = crate::position::Containing {
+                left: content_x,
+                top: before,
+                width: containing,
+                height: None,
+            };
+            let (dx, dy) = crate::position::relative_offset(&style.inset, &against);
+            if dx != 0.0 || dy != 0.0 {
+                let range = self.flow.blocks[block]
+                    .first
+                    .map(|first| (first, self.flow.blocks[block].last));
+                if let Some((first, last)) = range {
+                    shift(&mut self.flow.items[first..last], dx, dy);
+                }
+                // Every record from this box's own onwards is this box or a
+                // descendant of it: records are pushed in tree order and this
+                // box's siblings do not exist yet.
+                for record in &mut self.flow.blocks[block..] {
+                    record.x += dx;
+                    record.dy += dy;
+                }
+                // A float inside a relatively positioned box moves with it, and
+                // the floats from this box's onwards are exactly the ones it
+                // placed -- the same tree-order argument as the records.
+                for float in &mut self.flow.floats[floats_before..] {
+                    shift(&mut float.items, dx, dy);
+                    for record in &mut float.blocks {
+                        record.x += dx;
+                        record.dy += dy;
+                    }
+                }
+            }
+        }
     }
 
     /// A block container's children: block-level ones recursed into, runs of
@@ -1273,7 +1437,7 @@ impl<M: Metrics> Builder<'_, M> {
         if depth > self.limits.max_depth {
             return Err(Refusal::TooDeep { depth });
         }
-        let outer_width = self.float_width(node, style, containing, depth, avoid)?;
+        let outer_width = self.float_width(node, style, containing, depth, avoid, false)?;
         let Sublayout {
             mut items,
             mut blocks,
@@ -1328,8 +1492,125 @@ impl<M: Metrics> Builder<'_, M> {
             blocks,
             top,
             bottom: top + height,
+            // `css-break-3`'s rule: a float that would fit a page of its own
+            // belongs whole on the next one.
+            pushable: true,
+            z: 0,
         });
         self.flow.floats.append(&mut nested);
+        Ok(())
+    }
+
+    /// One absolutely positioned or fixed box, CSS 2.2 §9.6.
+    ///
+    /// Out of flow, which this crate already has a shape for: a
+    /// [`FloatRecord`] is items that are **not** in the column, carried with
+    /// the `y` they were placed at. An out-of-flow positioned box is the same
+    /// thing with a different placement rule and one difference at pagination,
+    /// which is why the record grew a flag rather than a twin.
+    ///
+    /// **`fixed` is not a degradation here.** §9.6.1: *"in the case of paged
+    /// media, fixed boxes are repeated on every page, and are fixed with
+    /// respect to the page box"*. That is the specification's own paged answer,
+    /// it is what a stylesheet asking for a running header meant, and it is
+    /// what this does.
+    fn positioned_box(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        x: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        self.budget.spend_box()?;
+        // §9.6.1 again: `fixed`'s containing block is the page box and
+        // `absolute`'s is the nearest positioned ancestor, which is what the
+        // stack's last entry is. The initial containing block sits at the
+        // bottom of that stack, so `absolute` with no positioned ancestor
+        // anywhere falls out of the same expression rather than a special case.
+        let against = if style.position == Position::Fixed {
+            crate::position::Containing {
+                left: 0.0,
+                top: 0.0,
+                width: self.page.0,
+                height: Some(self.page.1),
+            }
+        } else {
+            *self
+                .positioned
+                .last()
+                .expect("the initial containing block is never popped")
+        };
+
+        // §10.3.7: with **both** `left` and `right` stated and `width: auto`
+        // the box fills between them; otherwise the width is shrink-to-fit,
+        // which is a float's own rule and therefore a float's own function.
+        let left_inset =
+            crate::position::inset_px(style.inset.get(Side::Left), Some(against.width));
+        let right_inset =
+            crate::position::inset_px(style.inset.get(Side::Right), Some(against.width));
+        let outer_width = match (style.width, left_inset, right_inset) {
+            (Size::Auto, Some(left), Some(right)) => (against.width - left - right).max(0.0),
+            // Its two trial layouts go through `block` as well, so the
+            // one-shot has to be re-armed for each of them: that is what the
+            // last argument is, and it is a parameter rather than a field the
+            // trials read because a float's trials must **not** be armed.
+            _ => self.float_width(node, style, against.width, depth, avoid, true)?,
+        };
+
+        self.placed = true;
+        let Sublayout {
+            mut items,
+            mut blocks,
+            floats: nested,
+            height,
+        } = self.sublayout(node, outer_width, depth, avoid)?;
+
+        // §10.3.7's third case and §10.6.4's: with neither inset of a pair
+        // stated the box stays at its **static position** — where it would have
+        // been had it been `static`. That is the case nearly every real
+        // stylesheet takes and the one an implementation leaves out.
+        let left = crate::position::used_left(&style.inset, &against, x, outer_width);
+        let top = crate::position::used_top(&style.inset, &against, self.cursor(), height);
+        translate(&mut items, &mut blocks, left, top);
+        let mut nested = nested;
+        for record in &mut nested {
+            translate(&mut record.items, &mut record.blocks, left, top);
+            record.top += top;
+            record.bottom += top;
+        }
+        let z = match style.z_index {
+            ZIndex::Auto => 0,
+            ZIndex::Layer(layer) => layer,
+        };
+        let record = FloatRecord {
+            items,
+            blocks,
+            top,
+            bottom: top + height,
+            pushable: false,
+            z,
+        };
+        if style.position == Position::Fixed {
+            self.flow.fixed.push(record);
+        } else {
+            self.flow.positioned.push(record);
+        }
+        // A float **inside** an out-of-flow box belongs to that box's own
+        // formatting context and is drawn with it, so it joins the same list
+        // rather than the column's.
+        for mut inner in nested {
+            inner.pushable = false;
+            inner.z = z;
+            if style.position == Position::Fixed {
+                self.flow.fixed.push(inner);
+            } else {
+                self.flow.positioned.push(inner);
+            }
+        }
         Ok(())
     }
 
@@ -1352,6 +1633,7 @@ impl<M: Metrics> Builder<'_, M> {
         containing: f64,
         depth: usize,
         avoid: bool,
+        out_of_flow: bool,
     ) -> Result<f64, Refusal> {
         let margins =
             style.margin_px(Side::Left, containing) + style.margin_px(Side::Right, containing);
@@ -1376,7 +1658,9 @@ impl<M: Metrics> Builder<'_, M> {
         let right = style.padding_px(Side::Right, containing)
             + style.border_width.right
             + style.margin_px(Side::Right, containing);
+        self.placed = out_of_flow;
         let preferred = self.measure_content(node, MAX_MEASURE, depth, avoid)? + right;
+        self.placed = out_of_flow;
         let minimum = self.measure_content(node, 0.0, depth, avoid)? + right;
         Ok(containing.max(minimum).min(preferred).max(minimum))
     }
@@ -2081,6 +2365,7 @@ impl<M: Metrics> Builder<'_, M> {
                 border_style: Sides::all(BorderStyle::None),
                 border_color: Sides::all(Color::TRANSPARENT),
                 painted: true,
+                dy: 0.0,
             });
         }
         for (column, &(from, to, top)) in ranges.iter().enumerate() {
@@ -3450,6 +3735,7 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         border_style: style.border_style,
         border_color: style.border_color,
         painted: painted && style.visible,
+        dy: 0.0,
     }
 }
 
@@ -4011,6 +4297,38 @@ fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
 /// A run's `y` is not touched because a run has not got one yet: it is written
 /// at pagination out of its line box's position, so moving the item moves the
 /// text with it.
+/// CSS 2.2 §9.4.3's offset, applied to the **ink** and not to the flow.
+///
+/// [`translate`]'s twin, and the difference is the whole of §9.4.3: that one
+/// moves an item, this one moves what an item draws. A relatively positioned
+/// box keeps its place in the column — so the page cutter still sees a `y` that
+/// never goes backwards — and every run and every decoration inside it is drawn
+/// somewhere else.
+///
+/// A run's `y` is already §10.8.1's shift from its line's baseline, so the two
+/// offsets add: a `vertical-align: super` inside a `position: relative` span is
+/// raised twice, by two different rules, and that is right.
+fn shift(items: &mut [Item], dx: f64, dy: f64) {
+    for item in items {
+        match &mut item.kind {
+            ItemKind::Line(line) => {
+                for run in &mut line.runs {
+                    run.x += dx;
+                    run.y += dy;
+                }
+            }
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                shift(&mut band.items, dx, dy);
+                for record in &mut band.blocks {
+                    record.x += dx;
+                    record.dy += dy;
+                }
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+}
+
 fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
     for item in items {
         item.y += dy;

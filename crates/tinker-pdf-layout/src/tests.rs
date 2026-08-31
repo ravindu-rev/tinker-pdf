@@ -12,10 +12,10 @@
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
-    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, JustifyContent,
-    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
-    PageBreak, PageBreakInside, Side, Sides, Size, TextAlign, VerticalAlign, Visibility,
-    WhiteSpace,
+    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, Inset,
+    JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
+    VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::flex;
@@ -3123,6 +3123,256 @@ fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
         laid.warnings
     );
     assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- CSS 2.2 §9.4.3 and §9.6, the four positions that are not static -------
+
+/// A box at a stated `position` and insets.
+fn placed_at(
+    position: Position,
+    top: Option<f64>,
+    left: Option<f64>,
+    right: Option<f64>,
+) -> ComputedStyle {
+    let mut style = block();
+    style.position = position;
+    let one = |value: Option<f64>| match value {
+        Some(px) => Inset::Length(LengthPercentage::Px(px)),
+        None => Inset::Auto,
+    };
+    style.inset = Sides {
+        top: one(top),
+        right: one(right),
+        bottom: Inset::Auto,
+        left: one(left),
+    };
+    style
+}
+
+/// §9.4.3: a relatively positioned box is offset, and **nothing else moves**.
+///
+/// The second half is the clause: §9.4.3 says the offset *"does not affect the
+/// layout of any other box"*, so the paragraph after it stays exactly where it
+/// was. This module's flow is one column whose `y` never goes backwards, so a
+/// build that moved the item rather than the ink would have to move everything
+/// after it too — and could not move anything up at all.
+#[test]
+fn a_relative_offset_moves_the_ink_and_not_the_flow() {
+    let moved = BoxNode::element(
+        placed_at(Position::Relative, Some(5.0), Some(3.0), None),
+        vec![text("a")],
+    );
+    let tree = BoxNode::element(block(), vec![moved, para("b")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert!(close(ys[0], 14.0), "the box did not move: {ys:?}");
+    assert!(close(ys[1], 21.0), "the box after it moved: {ys:?}");
+    assert!(close(xs(&laid, 0)[0], 3.0), "{:?}", xs(&laid, 0));
+}
+
+/// `css-position-3` §3.4: with no scrollport, `sticky` **is** `relative`.
+///
+/// Not a fallback — the value of a parameter a paginated document does not
+/// have. Asserted as an equality against `relative` rather than against a
+/// number, so the day one of them changes the other has to as well.
+#[test]
+fn sticky_is_relative_because_a_page_does_not_scroll() {
+    let laid_out = |position: Position| {
+        let moved = BoxNode::element(
+            placed_at(position, Some(5.0), Some(3.0), None),
+            vec![text("a")],
+        );
+        let tree = BoxNode::element(block(), vec![moved, para("b")]);
+        let laid = run(&tree, 200.0, 400.0);
+        (xs(&laid, 0), baselines(&laid, 0))
+    };
+    assert_eq!(laid_out(Position::Sticky), laid_out(Position::Relative));
+}
+
+/// §9.6: an absolutely positioned box is **out of flow**, so the content after
+/// it closes up over the space it would have taken.
+#[test]
+fn an_absolute_box_leaves_the_flow_behind_it() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(100.0), None, None),
+        vec![text("x")],
+    );
+    let tree = BoxNode::element(block(), vec![para("a"), away, para("b")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // "a" at nine and "b" at twenty-one — the two lines of an ordinary flow —
+    // and "x" a hundred points down.
+    //
+    // **The order of this vector is the second half of the fixture.** A page's
+    // runs are sorted by the reading-order stamp and not by where they were
+    // drawn, so the box painted at a hundred and nine still reads between the
+    // two lines it was written between. A build that sorted by position would
+    // move every `position: absolute` sidebar to the end of its chapter for
+    // anything extracting the text.
+    assert!(close(ys[0], 9.0), "{ys:?}");
+    assert!(close(ys[1], 109.0), "{ys:?}");
+    assert!(close(ys[2], 21.0), "{ys:?}");
+    assert_eq!(
+        laid.text(),
+        "axb",
+        "and it still reads where it was written"
+    );
+}
+
+/// §10.1: with no positioned ancestor the containing block is the **initial**
+/// one, which in a paginated document is the page box.
+#[test]
+fn an_absolute_box_with_no_positioned_ancestor_is_against_the_page() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(40.0), Some(30.0), None),
+        vec![text("x")],
+    );
+    let tree = BoxNode::element(block(), vec![para("a"), away]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    let x = xs(&laid, 0);
+    assert!(close(ys[1], 49.0), "{ys:?}");
+    assert!(close(x[1], 30.0), "{x:?}");
+}
+
+/// §9.6: and with one, it is that ancestor's **padding box** — the nearest one,
+/// which is the whole of the rule.
+///
+/// **The ancestor has a border, and that is not decoration.** §10.1 says the
+/// containing block is the positioned ancestor's *padding* box, so the border
+/// is exactly the difference between reading the rule and reading the box: a
+/// twenty-point left margin, a thirty-point top margin and a four-point border
+/// put the padding box at twenty-four and thirty-four, and the child asks for
+/// seven and five from there. A build that used the initial containing block
+/// puts it at seven and five; one that used the *border* box misses by four in
+/// each direction, which is the size of a border and looks like a rounding
+/// error.
+#[test]
+fn an_absolute_box_is_placed_against_its_nearest_positioned_ancestor() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(5.0), Some(7.0), None),
+        vec![text("x")],
+    );
+    let mut anchor = placed_at(Position::Relative, None, None, None);
+    anchor.margin.top = px(30.0);
+    anchor.margin.left = px(20.0);
+    anchor.border_width = Sides::all(4.0);
+    anchor.border_style = Sides::all(BorderStyle::Solid);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(anchor, vec![para("a"), away])],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    let x = xs(&laid, 0);
+    assert!(close(ys[1], 48.0), "{ys:?}");
+    assert!(close(x[1], 31.0), "{x:?}");
+}
+
+/// §10.3.7 and §10.6.4: with neither inset of a pair stated the box stays at
+/// its **static position** — where `static` would have put it.
+///
+/// The case nearly every real stylesheet takes, and the one an implementation
+/// leaves out: a build that defaulted the missing insets to zero puts every
+/// unpositioned `position: absolute` box in the top-left corner of the page.
+#[test]
+fn an_absolute_box_with_no_insets_stays_where_static_would_have_put_it() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, None, None, None),
+        vec![text("x")],
+    );
+    let tree = BoxNode::element(block(), vec![para("a"), away]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // "a" is one twelve-point line, so the static position is twelve and the
+    // box's own baseline is nine below it.
+    assert!(close(ys[1], 21.0), "{ys:?}");
+    assert!(close(xs(&laid, 0)[1], 0.0), "{:?}", xs(&laid, 0));
+}
+
+/// §9.6.1: *"in the case of paged media, fixed boxes are repeated on every
+/// page"* — a specification's answer, not a print build's shrug.
+#[test]
+fn a_fixed_box_is_drawn_on_every_page() {
+    let header = BoxNode::element(
+        placed_at(Position::Fixed, Some(0.0), Some(0.0), None),
+        vec![text("F")],
+    );
+    let mut children = vec![header];
+    children.extend("abcdefgh".chars().map(|c| para(&c.to_string())));
+    let tree = BoxNode::element(block(), children);
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(laid.pages.len() > 1, "{} pages", laid.pages.len());
+    for at in 0..laid.pages.len() {
+        assert!(
+            page_text(&laid, at).contains('F'),
+            "page {at} has no fixed box on it: {:?}",
+            page_text(&laid, at)
+        );
+    }
+}
+
+/// §9.9.1: `z-index` decides which of two positioned boxes is painted over the
+/// other, and nothing else does.
+#[test]
+fn z_index_decides_which_positioned_box_is_painted_first() {
+    let layered = |layer: i32, red: u8| {
+        let mut style = placed_at(Position::Absolute, Some(0.0), Some(0.0), None);
+        style.z_index = ZIndex::Layer(layer);
+        style.background_color = Color {
+            r: red,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        BoxNode::element(style, vec![text("x")])
+    };
+    // Written high-then-low, so a build that painted them in document order
+    // gets the opposite answer.
+    let tree = BoxNode::element(block(), vec![layered(5, 50), layered(1, 10)]);
+    let laid = run(&tree, 200.0, 400.0);
+    let reds: Vec<u8> = laid.pages[0]
+        .boxes
+        .iter()
+        .map(|fragment| fragment.background.r)
+        .filter(|red| *red == 10 || *red == 50)
+        .collect();
+    assert_eq!(reds, vec![10, 50], "the lower layer is painted first");
+}
+
+/// An absolutely positioned box is **never pushed** to the next page.
+///
+/// `css-break-3` lets a float that does not fit the page it started on move
+/// whole to the next one, and that is exactly what `position: absolute`
+/// forbids: pushing it is moving it, and where it is is the whole of what the
+/// declaration said. So it is broken where it stands, as a float taller than a
+/// page is.
+#[test]
+fn an_absolute_box_is_broken_rather_than_pushed() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(15.0), Some(0.0), None),
+        vec![para("x"), para("y")],
+    );
+    let mut children = vec![away];
+    children.extend("abcd".chars().map(|c| para(&c.to_string())));
+    let tree = BoxNode::element(block(), children);
+    // A thirty-point page, and a box that starts at fifteen and is twenty-four
+    // points of two lines: its first line ends at twenty-seven and fits, its
+    // second ends at thirty-nine and does not, and the whole of it **would**
+    // fit a page of its own, which is exactly the shape `css-break-3` pushes a
+    // float for. A build that shared the float's rule moves all of it to page
+    // two, and page one has nothing where the stylesheet put something.
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(
+        page_text(&laid, 0).contains('x'),
+        "the box was pushed off the page it was placed on: {:?}",
+        page_text(&laid, 0)
+    );
+    assert!(
+        page_text(&laid, 1).contains('y'),
+        "and the rest of it is on the next page: {:?}",
+        page_text(&laid, 1)
+    );
 }
 
 // ---- `css-multicol-1`, the multi-column container --------------------------
