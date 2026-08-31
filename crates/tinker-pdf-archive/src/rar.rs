@@ -15,16 +15,21 @@
 //! ([`EntryError::Compressed`]), so an archive that mixes them pages its stored
 //! entries and puts a placeholder where the others are (ruling 2).
 //!
-//! That is not where the line would be if it were free to put anywhere, and
-//! the reason it is here is worth stating plainly rather than leaving as an
-//! omission. **The committed `winrar-rar5.cbr` stores every one of its five
-//! entries.** WinRAR compresses a file only when compressing makes it smaller,
-//! and a PNG or a JPEG never is — so the fixture this repository can produce
-//! from its own corpus exercises the container and *nothing* of the algorithm.
-//! Under ruling 13 a decoder with no first-party fixture cannot be called
-//! green, so the algorithm is not claimed. What the fixture does adjudicate,
-//! it adjudicates completely: five files, five recorded CRC-32s, and the same
-//! five pictures a `.cbz` of the same pages produces.
+//! **The line is where the work stopped, not where the format's is**, and the
+//! committed fixture says so rather than the other way round.
+//! `winrar-rar5.cbr` holds four stored PNGs, **one JPEG compressed with method
+//! 3**, and a `QO` quick-open service record. So the four PNGs come back as
+//! the ZIP's own pictures with their recorded CRC-32s matching, and
+//! `page3.jpg` is a placeholder page naming its method.
+//!
+//! Two consequences, and both are worth having in front of a reader of this
+//! module. The algorithm **has** a first-party fixture — 169 bytes with its
+//! own CRC-32, and the same picture in five ZIPs beside it — so writing the
+//! decompressor is adjudicable work rather than work blocked on a corpus
+//! nobody can produce. And until it is written, a `.cbr` is *four fifths of a
+//! comic*, which is ruling 2 doing its job and is not the same claim as the
+//! container being finished. `docs/design/comic-archives.md`'s milestone 5 is
+//! the piece that closes it.
 //!
 //! # What adjudicates this reader
 //!
@@ -424,7 +429,6 @@ impl<'a> Archive<'a> {
 /// One header's geometry, after its own CRC-32 has been checked.
 struct Header {
     kind: u64,
-    flags: u64,
     /// Where the type-specific fields begin.
     body: usize,
     /// Where the extra area begins, and how long it is.
@@ -458,6 +462,9 @@ impl Header {
         }
 
         let kind = vint(bytes, &mut p)?;
+        // Read and spent here rather than carried: the two flags that matter
+        // say whether the next two fields are present, and once they have been
+        // read there is nothing left in the word a caller needs.
         let flags = vint(bytes, &mut p)?;
         let extra_size = if flags & HAS_EXTRA != 0 {
             usize::try_from(vint(bytes, &mut p)?).ok()?
@@ -472,7 +479,6 @@ impl Header {
         let extra = (extra_size > 0).then(|| (end.saturating_sub(extra_size), extra_size));
         Some(Header {
             kind,
-            flags,
             body: p,
             extra,
             end,
@@ -489,6 +495,12 @@ fn file_entry(
     limits: &Limits,
     warnings: &mut Vec<Warning>,
 ) -> Option<Entry> {
+    // **Bounded by the header's own end**, so a field that runs long reads
+    // nothing rather than reading the next header's bytes. The header CRC has
+    // already passed at this point, so these bytes are the writer's -- but the
+    // writer is untrusted and a `NameLength` past the header is exactly what a
+    // hostile one writes.
+    let bytes = bytes.get(..header.end)?;
     // **Bounded by the header's own end**, so a field that runs long reads
     // nothing rather than reading the next header's bytes. The header CRC has
     // already passed at this point, so these bytes are the writer's -- but the

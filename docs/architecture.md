@@ -169,7 +169,7 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-color` | colour spaces and functions | 1 100 | [rendering](features/rendering.md) | — |
 | `tinker-pdf-math` | pinned transcendentals, `no_std` | 900 | [determinism](features/determinism.md) | — |
 | `tinker-pdf-zip` | ZIP reader | 3 000 | [cbz](features/cbz.md) | `zip_archive` |
-| `tinker-pdf-archive` | the containers that are not ZIP: tar, 7z, RAR | 3 500 | [cbz](features/cbz.md), [design/comic-archives.md](design/comic-archives.md) | `tar`, `sevenz` |
+| `tinker-pdf-archive` | the containers that are not ZIP: tar, 7z, RAR | 4 500 | [cbz](features/cbz.md), [design/comic-archives.md](design/comic-archives.md) | `tar`, `sevenz`, `rar` |
 | `tinker-pdf-xml` | XML pull parser | 4 100 | [xps](features/xps.md) | `xml` |
 | `tinker-pdf-css` | CSS engine | 10 800 | [epub](features/epub.md) | `css` |
 | `tinker-pdf-svg` | SVG geometry and paint | 1 500 | [epub](features/epub.md) | `svg` |

@@ -55,7 +55,9 @@ because a `-sys` crate's manifest says whatever its author typed.
   streams; a reader that walked it as a chain would hand back a quarter of a
   file.
 - **RAR 5 compression methods 1–5**, and **RAR 4 entirely.** Both have a
-  section of their own below, because both are decisions rather than omissions.
+  section of their own below, because both are decisions rather than omissions,
+  and the first of them is a *permanent* non-goal rather than a staged one —
+  which is not what this document said in its first draft.
 - **A trait over the three readers.** The next section is why.
 
 ## Design
@@ -121,8 +123,14 @@ at all: the pages are PNG and JPEG, so a single wrong byte is a raster that
 fails to decode or renders differently.
 
 A new container joins `READ_CONTAINERS` and is held to that same sentence
-rather than getting a check of its own. A container leaves `NOT_READ` only in
-the commit that gives it a reader.
+rather than getting a check of its own, in the commit that gives it a reader.
+
+**`winrar-rar5.cbr` is the one that cannot join it**, and rather than weaken the
+criterion for everyone it sits in a third list, `PARTLY_READ`, with its own
+check: five pages in reading order, four byte-identical to the ZIP's, and the
+fifth a placeholder naming the method that made it one. Filing it under either
+of the other two lists would be a claim this lane has not earned — "refused" is
+false, and "read" is what the exit criterion means.
 
 ### What adjudicates each decoder, which is not the same in the three
 
@@ -148,10 +156,21 @@ filename decoding, the empty-stream bit vectors. A mis-decoded filename changes
 page order and fails nothing, which is why that half is asserted by name
 against hand-built fixtures instead.
 
-The counted-injection tables in `tar/tests.rs` and `sevenz/tests.rs` are the
-measurement of that difference, and they came out the way the table predicts:
-six of the eight tar defects are caught once or twice, because there is nothing
-in the format to catch them but an assertion.
+The counted-injection tables in `tar/tests.rs`, `sevenz/tests.rs` and
+`rar/tests.rs` are the measurement of that difference, and they came out the
+way the table predicts. Six of the eight tar defects are caught once or twice,
+because there is nothing in the format to catch them but an assertion. Every
+one of the five defects injected into the LZMA decoder is caught, and caught
+**only** by the two `.cb7` corpus tests, because the archive's own CRC-32 rules
+on the decompressed bytes and no unit test here asserts anything about an LZMA
+distance.
+
+The other thing all three tables agree on: **each container has exactly one
+defect that costs a reader its place** rather than one field — tar's `advance`
+rounding a payload down (10), 7z's substream table read instead of inferred
+(12), RAR's data area not skipped (8) — and in all three it is the defect the
+corpus is most sensitive to, because losing your place loses every entry after
+it.
 
 ### The LZ77 window is the output
 
@@ -201,25 +220,35 @@ is the honest one, and it is cheap: `.cbr` files in the wild have been RAR 5
 since 2013.
 
 **RAR 5's compression methods 1–5 are a page-level refusal, by method number**,
-and this one is more uncomfortable, so it is stated plainly rather than left to
-be discovered. The committed `winrar-rar5.cbr` **stores every one of its five
-entries** — WinRAR compresses a file only when compressing makes it smaller,
-and a PNG or a JPEG never is. So the fixture this repository can produce from
-its own five pages exercises the container completely and the algorithm not at
-all.
+and the honest version of this is not the one this document was first written
+with. The first draft said the committed `winrar-rar5.cbr` stores every entry,
+reasoning that WinRAR compresses only what gets smaller and an image never
+does. **That was wrong, and reading the fixture rather than reasoning about it
+is what found it.** What `winrar-rar5.cbr` actually holds is six records:
 
-What that means for the exit criterion is worth being exact about: the
-identical-payload property *is* green for `.cbr`, because the property is about
-those five pages and those five pages are stored. It is green for the RAR
-**container** and says nothing about RAR compression, which is why the refusal
-row does not disappear when RAR lands — it changes from an archive-level row to
-a page-level one naming the method. An archive that mixes stored and compressed
-entries pages the stored ones.
+| Record | Method | |
+| --- | --- | --- |
+| `page1.png`, `page10.png`, `page11.png`, `page2.png` | 0 (store) | read |
+| `page3.jpg` | **3 (normal)** | refused, by method number |
+| `QO` | — | a quick-open index service record, listed and never a page |
 
-The route to closing it is known and is not taken here: `rar a -m5` over
-compressible data this repository owns would produce a first-party fixture, and
-RAR's own per-file CRC-32 would adjudicate the decoder against it. That is a
-milestone, not a caveat, and it is listed as one below.
+So the reasoning was right about the four PNGs and wrong about the JPEG, and
+the consequence runs both ways.
+
+**The good half:** RAR 5's compression *does* have a first-party fixture here
+after all. `page3.jpg` is 169 bytes with its own recorded CRC-32, written by
+WinRAR before any decoder existed, and the ZIP corpus holds the same picture —
+so a decompressor can be adjudicated exactly, by the format's own checksum and
+by the cross-container identity. Milestone 5 is therefore a real, checkable
+piece of work rather than one blocked on a fixture nobody can make.
+
+**The costly half:** the identical-payload property is **not** green for
+`.cbr`, and this lane does not claim it is. Four of the five pages come back as
+the ZIP's own pictures; the fifth is a placeholder that names its method. So
+`winrar-rar5.cbr` does not join `READ_CONTAINERS`, the row does not close, and
+what lands is the container, the store path and a page-level refusal — which is
+ruling 2 working as intended (four readable pages beat a refused archive) and
+is not the same thing as the criterion being met.
 
 ## Milestones
 
@@ -241,22 +270,69 @@ checked inside `read` rather than asserted beside it. The archive's header is
 LZMA-compressed, so listing it at all exercises the second front end.
 *Row: loses CB7.*
 
-**3. RAR 5, container and store.**
-Exit criterion: the same sentence for `winrar-rar5.cbr`, with its five recorded
-CRC-32s matching, and every header's own CRC-32 checked before its fields are
-believed. RAR 4 refused by its own signature.
-*Row: CBR leaves the archive-level table and a page-level row naming the
-compression methods takes its place.*
+**3. RAR 5, container and store. Done. It closes the row, in the shape a
+non-goal closes one.**
+Exit criterion, met: `winrar-rar5.cbr` opens, lists its six records in the
+order it holds them, and hands back the four stored pages with their recorded
+CRC-32s matching and their rasters identical to the ZIP's. Every header's own
+CRC-32 is checked before its fields are believed. RAR 4 is refused by its own
+signature.
+`page3.jpg` is method 3, so the archive is not five pictures and does not join
+`READ_CONTAINERS` — and under milestone 5 below it never will, so the
+cross-producer identity is not the criterion this container is held to. What it
+*is* held to is `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`:
+five pages in reading order, four of them byte-identical to the ZIP's, and the
+fifth a placeholder naming its method.
+*Row: CBR leaves the archive-level table; a page-level row naming the
+compression methods and a RAR 4 row take its place, both as non-goals.*
 
-**4. This document.** Owed by the roadmap; lands with the decoders.
+**4. This document. Done**, and it landed with the decoders rather than after
+them — three modules already linked to it, and a design doc that arrives after
+the design is a report.
 
-**Not scheduled, and listed so it is a decision rather than a gap:**
+**5. RAR 5's compression algorithm. Not scheduled, and not schedulable here.**
 
-**5. RAR 5's compression algorithm.** Needs a first-party fixture, which
-`rar a -m5` over compressible content this repository owns can produce — the
-producer generates and the format's own CRC-32 adjudicates, which is the half
-of ruling 13 that a real archiver is allowed to fill. Until that fixture is
-committed, the decoder would be unadjudicated and is not written.
+This was listed as a milestone in the first draft of this document, on the
+strength of the fixture: `page3.jpg` inside `winrar-rar5.cbr` is method 3, 169
+bytes unpacked, with its own recorded CRC-32, and the same picture sits in five
+ZIPs beside it — so a decoder would be adjudicated twice over and no producer
+would have to be run. That part is true and is why it looked like work.
+
+It is not work this repository can do, and the blocker is not the fixture. It
+is that **there is nothing to hand-roll from.**
+
+CONTRIBUTING rule 1 says every decoder here is written from the format, and
+every other decoder in this workspace names the document it was written from:
+DEFLATE from RFC 1951, CFF from Adobe TN 5176, tar from POSIX 1003.1, the 7z
+container from `7zFormat.txt`. **RAR has no such document for its
+compression.** RARLAB publishes a RAR 5.0 *archive format* note, and that note
+is exactly what the `rar` module was written from — the signature, the `vint`,
+the header chain, the file records, the flag words. It stops at the data area.
+The compression algorithm has never been specified publicly.
+
+What exists instead is one implementation, RARLAB's `unrar`, which every RAR
+reader in the world is a copy or a wrapper of. `deny.toml` already records this
+repository's position on it, in the entry that denies the `unrar` crates: its
+licence forbids using the source to write a compatible compressor, *"a
+restriction this repository's dual MIT/Apache-2.0 grant cannot pass on"*, and
+the RAR reader here is *"written from the published format note and from the
+committed fixture, and nothing of unrar is vendored, linked or read."* Writing
+the decompressor would mean transcribing that source from memory or from a
+copy, which is the one thing that entry says will not happen.
+
+So RAR 5 compression joins **encryption** in the non-goals: named, permanent,
+and refused with the reason attached rather than left as a debt that a future
+milestone quietly never reaches. The row in
+[features/cbz.md](../features/cbz.md) says which method it refused, so a user
+can re-pack with `-m0` and open the result — which is a real answer, and the
+best one available under rule 1.
+
+**What would change this:** a published specification of RAR's compression, or
+a clean-room description not derived from `unrar`. Neither exists today. If one
+appears, the fixture is already committed and the exit criterion is already
+written: `winrar-rar5.cbr` joins `READ_CONTAINERS` and
+`five_zip_writers_produce_the_same_five_pictures` passes over it with no
+placeholder.
 
 ## Risks
 
@@ -274,9 +350,22 @@ here rather than left implicit.
 `lzma/tests.rs`.** The round trip closes only over literals, and both halves
 are this repository's. They were transcribed separately — the carry chain in
 `shift_low` has no counterpart in the decoder at all — but a format read wrong
-in the same way twice would pass. The `.cb7`'s CRC is what actually rules on
-that, and it is why the round trip is described as covering the arithmetic
-coder rather than LZMA.
+in the same way twice would pass.
+
+**The injection campaign demonstrated this rather than leaving it as a worry,
+and the demonstration is worth keeping.** One of the eleven defects was
+`MOVE_BITS`, the probability adaptation rate, set to 1/16 instead of the
+format's 1/32. Both the decoder and the test encoder read that one constant, so
+the round trip closed perfectly on every input — and the defect was caught only
+by the two `.cb7` tests, through the archive's own CRC-32. Any property both
+halves share is invisible to the round trip *by construction*, which is why the
+round trip is described as covering the arithmetic coder's mechanics rather
+than LZMA, and why the fixture is the thing that rules.
+
+All five decoder defects landed the same way: `five_zip_writers_produce_the_same_five_pictures`
+and `the_7z_a_real_archiver_wrote_pages_in_natural_order`, twice each, and no
+unit test anywhere. The corpus is not a nice-to-have beside the unit tests here;
+for the decompressor it is the only instrument.
 
 **Hostile input, in three new parsers at once.** Every one of these formats is
 a length-prefixed structure walk over bytes a stranger wrote, and a comic
@@ -303,9 +392,26 @@ once rather than once per page, and it is the one place this lane spends more
 than `tinker-pdf-zip` would.
 
 **Doc drift about what is actually verified.** The uncomfortable sentence in
-this document is that `.cbr` support is a container with a store path and the
-compression is unwritten. It is easy for that to decay into "RAR is done" as
-the rows move. The mitigation is structural: the refusal row does not vanish
-when RAR lands, it changes shape, and `NOT_READ` in `cbz_real.rs` asserts it is
-non-empty so that a sweep with nothing to sweep fails rather than passing
-green.
+this document is that `.cbr` support is a container with a store path and that
+the compression will not be written. It is easy for that to decay into "RAR is
+done" as the rows move — and this lane has already watched a related sentence
+decay twice, once when the first draft claimed the fixture stored every entry
+and once when it rescheduled the algorithm as work.
+
+The mitigation is structural rather than editorial. `winrar-rar5.cbr` is in
+`PARTLY_READ` and not in `READ_CONTAINERS`, so it is held to
+`the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`
+— which asserts the placeholder **by name and by method number**, and fails if
+`page3.jpg` ever silently starts or stops being one. Closing the row later
+means deleting that test, which is a visible act in a diff, where letting a
+claim drift is not.
+
+**A count nobody re-measures.** The counted-injection tables in this lane were
+measured three times and were wrong the first two, in two different ways: a
+`error: test failed` line read as a build break, and then inline
+`test … FAILED` lines counted by regex when libtest interleaves them across
+parallel threads. The third measurement parses the per-binary `test result:`
+summary and passes `--no-fail-fast`, because a plain `cargo test` stops at the
+first failing binary and reports the count from whichever ran first. Any future
+table here should be produced the same way; the numbers are not reproducible by
+eye.

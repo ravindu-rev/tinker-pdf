@@ -16,14 +16,18 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **33 cargo-fuzz targets**
-cover every input format: `ascii_filters`, `ccitt`, `cff`,
+Ruling 1 makes a fuzz crash a release blocker. **38 cargo-fuzz targets**
+cover every input format: `ascii_filters`, `brotli`, `ccitt`, `cff`,
 `cff_subset`, `cmap`, `content_tokenizer`, `cos_document`,
 `cos_object`, `crypt`, `crypt_ciphers`, `css`, `form_script`,
-`icc_profile`, `inflate`, `jbig2`, `jpeg`, `jpx`, `layout`, `lzw`,
-`pki_cms`, `pki_der`, `png`, `render_page`, `sfnt`, `shape`,
-`shape_text`, `signatures`, `svg`, `tiff`, `truetype`, `type1`, `xml`,
-`zip_archive` — each landing in the same PR as its parser.
+`icc_profile`, `inflate`, `jbig2`, `jpeg`, `jpx`, `jxr`, `layout`, `lzw`,
+`pki_cms`, `pki_der`, `png`, `rar`, `render_page`, `sevenz`, `sfnt`,
+`shape`, `shape_text`, `signatures`, `svg`, `tar`, `tiff`, `truetype`,
+`type1`, `xml`, `zip_archive` — each landing in the same PR as its parser.
+
+**`fuzz/Cargo.toml` declares 38 `[[bin]]` targets and `fuzz/corpus/` holds 38
+directories**, and the two agreeing is the check `icc_profile` taught below
+rather than a coincidence worth leaving unstated.
 
 `cff_subset` is the one target that fuzzes a **writer**. Its assertion is
 not "it did not panic": whatever the subsetter emits must parse with this
@@ -34,11 +38,22 @@ subsetter that renumbered subroutine calls wrongly around the 107 / 1131 /
 and no other check in the pipeline would see it — the embed path takes the
 bytes and writes them into a `/FontFile3`. Short runs on
 every commit over committed seed corpora; a bounded nightly job runs
-longer. Twelve of the corpora are written by an `#[ignore]`d test in the
-crate that owns the fixtures, so the seeds and the fixtures cannot drift:
-`crypt`, `crypt_ciphers`, `png`, `cff`, `icc_profile`, `jbig2`,
-`zip_archive`, `render_page`, `pki_der`, `pki_cms`, `shape` and
-`signatures`.
+longer. **Seventeen** of the corpora are written by an `#[ignore]`d test in
+the crate that owns the fixtures, so the seeds and the fixtures cannot drift:
+`brotli`, `cff`, `crypt`, `crypt_ciphers`, `icc_profile`, `jxr`, `pki_cms`,
+`pki_der`, `png`, `rar`, `render_page`, `sevenz`, `shape`, `signatures`,
+`tar`, `tiff` and `zip_archive`.
+
+That count read *twelve* until tier 4's archive lane counted it, and it was
+wrong in both directions — which is the failure this section's own
+`icc_profile` story is about, arriving again. It was short by `brotli`, `jxr`
+and `tiff`, whose writers had landed without the sentence being updated, and by
+the three the archive lane added. And it listed **`jbig2`, which has no writer
+at all**: that corpus is twenty-two inputs a fuzzer found or a person wrote,
+replayed by `jbig2_seeds.rs` and never regenerated, which is a different
+guarantee and is the one thing on the old list that could not have been true.
+The number is measured now rather than remembered — every `fuzz/corpus/<name>`
+a crate test calls `fs::write` on.
 
 `icc_profile` joined that list late, and how it was found is the point:
 `fuzz/Cargo.toml`'s targets listed against `fuzz/corpus`'s directories, not

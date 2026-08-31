@@ -12,9 +12,15 @@
 //!
 //! Eight defects were reintroduced and the suite run to see what caught them,
 //! which is this repository's standing practice for a guard: a guard that
-//! catches nothing when its defect is injected is not one. Counts are of the
-//! 1 2xx tests in `tinker-pdf-archive` and `tinker-pdf` together, which is
-//! every test in the workspace that can reach this module.
+//! catches nothing when its defect is injected is not one.
+//!
+//! Counts are of every test binary that can reach this crate — its own suite,
+//! and the facade's `cbz` and `cbz_real`, which a grep for the four container
+//! names says are the only two of `tinker-pdf`'s that do. They are sums over
+//! the per-binary `test result:` lines of a run with **`--no-fail-fast`**, and
+//! that flag is not a detail: a plain `cargo test` stops at the first failing
+//! binary, so the first two attempts at this table under-counted six of its
+//! rows.
 //!
 //! | Injected | Caught by |
 //! | --- | ---: |
@@ -22,15 +28,15 @@
 //! | `checksum_matches` always true, so any 512 bytes are a header | **1** |
 //! | a GNU `L` pseudo-entry's name not carried to the entry after it | **2** |
 //! | ustar's 155-byte `prefix` never joined to the name | **1** |
-//! | a sparse file handed back with its holes closed up | **2** |
-//! | `advance` rounding the payload **down** to a whole block | **9** |
+//! | a sparse file handed back with its holes closed up | **3** |
+//! | `advance` rounding the payload **down** to a whole block | **10** |
 //! | GNU's base-256 numeric escape read as octal | **1** |
 //! | a PAX `size` record not overriding the header's size | **1** |
 //!
 //! Two things in that table are worth saying out loud.
 //!
-//! **`advance` is the only one the real-archive corpus catches.** Seven of its
-//! nine are here and the other two are `cbz_real.rs`'s
+//! **`advance` is the only one the real-archive corpus catches.** Eight of its
+//! ten are in this crate and the other two are `cbz_real.rs`'s
 //! `the_tar_a_real_archiver_wrote_pages_in_natural_order` and
 //! `five_zip_writers_produce_the_same_five_pictures` — and no other defect in
 //! the table reaches them at all. That is the shape of the whole lane: the
