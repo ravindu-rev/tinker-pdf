@@ -209,14 +209,16 @@ pub enum JxrRefusal {
     /// right margins are the ordinary padding to a multiple of 16 and are
     /// always handled; a top or left margin shifts the whole sample grid.
     WindowedOrigin,
-    /// 9.9's sample reconstruction: the two levels of inverse transform and
-    /// the overlap filter. Present while the milestones that implement them
-    /// are outstanding, so that a build which decodes every transform
-    /// coefficient and cannot yet turn them into samples **says so** rather
-    /// than returning the coefficients as a picture. It would be a picture:
-    /// the inverse transform is a smoothing operator over a lapped basis, so
-    /// its input is a plausible-looking image rather than noise.
-    SampleReconstruction,
+    /// 9.10's output formatting: the colour transform back to RGB or grey,
+    /// 9.10.5's bias, 9.10.6's scaling and 9.10.8's clipping and crop.
+    /// Present while the milestone that implements it is outstanding, so that
+    /// a build which has reconstructed every sample and cannot yet say what
+    /// the numbers *mean* **says so** rather than returning them as a
+    /// picture. They would look like one — the samples are a real image in
+    /// the internal colour format — and a raster whose channels are Y, U and
+    /// V presented as R, G and B is a plausible wrong photograph, which is
+    /// the failure mode this whole decoder's refusals exist to prevent.
+    OutputFormatting,
 }
 
 impl core::fmt::Display for JxrError {

@@ -10,9 +10,9 @@ fn limits() -> Limits {
 }
 
 /// The decode this build cannot finish, which every header test reaches when
-/// the headers were read successfully. The milestone that lands 9.9's sample
-/// reconstruction replaces it with a raster.
-const HEADERS_OK: JxrError = JxrError::Unsupported(JxrRefusal::SampleReconstruction);
+/// the headers were read successfully. The milestone that lands 9.10's output
+/// formatting replaces it with a raster.
+const HEADERS_OK: JxrError = JxrError::Unsupported(JxrRefusal::OutputFormatting);
 
 #[test]
 fn the_smallest_legal_file_parses_its_headers() {

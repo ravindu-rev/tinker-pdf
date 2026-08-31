@@ -255,14 +255,15 @@ fn a_reserved_overlap_mode_refuses_rather_than_choosing_one() {
 }
 
 #[test]
-fn sample_reconstruction_is_refused_by_name_until_it_lands() {
-    // The milestone that lands 9.9 deletes this test along with the variant.
-    // Until then a build that decodes every transform coefficient and cannot
-    // turn them into samples says so, rather than returning the coefficients
-    // as a picture — which they would look like, because 9.9's inverse
-    // transform is a smoothing operator over a lapped basis.
+fn output_formatting_is_refused_by_name_until_it_lands() {
+    // The milestone that lands 9.10 deletes this test along with the variant.
+    // Until then a build that has reconstructed every sample and cannot say
+    // what the numbers mean says so, rather than returning them as a picture
+    // — which they would look like, being a real image in the internal
+    // colour format, and a Y/U/V raster presented as R/G/B is a plausible
+    // wrong photograph.
     assert_eq!(
         refusal_of(Codestream::default(), 0x0D),
-        JxrRefusal::SampleReconstruction
+        JxrRefusal::OutputFormatting
     );
 }

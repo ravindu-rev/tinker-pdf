@@ -340,3 +340,96 @@ the two stay in step is checked by asserting the FLEXBITS packet also ends on
 its predicted byte, *separately* from the HIGHPASS one — if they drifted apart
 the highpass packet would still end correctly and only the picture would be
 wrong.
+
+**Milestone 3.** Landed: 9.9.2, 9.9.5 and 9.9.7's photo core transform, and
+9.9.4's coefficient combination. The overlap filter and 9.10's output
+formatting remain, so `JxrRefusal::SampleReconstruction` still fires.
+
+**One reading of the Recommendation had to be settled by measurement.**
+9.9.7.2's NOTE says "the inverse of `T2x2Th( )` is two successive applications
+of `T2x2Th`, operating on variables of the array `iCoeff[ ]` with the same
+value of `valRound`". Taken literally that makes the operator order three. It
+is not: two applications are the **identity**, so the operator is an
+involution and its inverse is one application. Measured over 20 000 random
+vectors at both values of `valRound`, and then pinned in
+`src/jxr/tests/transform.rs`. The distinction is not academic — building the
+forward operator on the literal reading gives something that is wrong
+everywhere, looks principled, and makes the round-trip evidence fail with no
+indication why.
+
+**The round trip is real evidence only because the forward direction is
+derived independently.** It is not a mirror of the inverse: each of 9.9.7's
+lifting steps is reversed from the clause's own text. Four injections applied
+to the inverse alone are caught on 256, 130, 256 and 256 of 256 vectors. The
+130 is `valRound`, which changes a result only when a parity works out.
+
+**What the transform's own evidence does not reach, by name.** A slip
+*mirrored* into both directions passes everything in that file, and the count
+is recorded as a zero: a bijection composed with its own inverse is the
+identity whatever the bijection is. The DC-flatness property, which is the
+only one derived from what the transform *means* rather than from its
+structure, catches one of the four injections and is blind to three — a
+DC-only block is degenerate, so most lifting positions carry zero through it.
+So the transform's own evidence is **necessary and not sufficient**, and the
+check that closes this stage is the lossless identity in milestone 5.
+
+**Milestone 4.** Landed: 9.9.3, 9.9.6 and 9.9.8's photo overlap transform, all
+three values of `OVERLAP_MODE`. 9.10's output formatting remains, so the
+refusal is now `JxrRefusal::OutputFormatting`.
+
+**The two levels turned out to be one geometry at two scales.** The
+Recommendation writes 9.9.3's first-level filter and 9.9.6's second-level
+filter as two long, unrelated-looking pseudocode functions — one indexed by
+macroblock and coefficient, the other by sample. Reading `MbDCLP[x][y][i][j]`
+as a sample at `(4x + j % 4, 4y + j / 4)` of a DC plane makes every one of
+9.9.3.2's index quadruples identical to 9.9.6's, with tile boundaries at
+`4 * LeftMBIndexOfTile[ ]` rather than `16 *`. Interior, all four edges, all
+four corners and all seven soft-tile cases line up. So there is one filter,
+called at scale 4 and at scale 16, and a transcription slip cannot hide in one
+level and not the other.
+
+**One index in the Recommendation does not line up, and this build departs
+from its text.** 9.9.3.2's "right edge for soft tiles" block reads
+`MbDCLP[x][y+1][i][4]` where its own non-soft counterpart reads `[3]` and
+where the geometry requires `[3]`: the filter runs down a single column, `[3]`
+is at `(4x + 3, 4y + 4)` and `[4]` is at `(4x, 4y + 5)` — a different column.
+This build implements `[3]`. **No fixture reaches that path**, so the choice
+is unadjudicated either way; it is listed below and in
+`docs/features/xps.md`.
+
+**The seam property is strongly discriminating, and the numbers are worth
+recording.** On a lossy ramp, the largest second difference at block-edge
+columns against the largest inside blocks:
+
+| Fixture | `OVERLAP_MODE` | Filtered | Second-level filter disabled |
+| --- | ---: | ---: | ---: |
+| `seam0` | 0 | 15 / 16 | 15 / 16 |
+| `seam1` | 1 | 23 / 31 | **90** / 33 |
+| `seam2` | 2 | 22 / 33 | **93** / 33 |
+
+With the filter correct the edge figure is *lower* than the interior one, so
+the ramp is genuinely smooth across the boundaries rather than merely no worse
+there. Disabled, the edge figure roughly quadruples while the interior figure
+does not move — the signature of a seam and of nothing else. The injection is
+counted at 2 of the 2 filtered modes, and `seam0`'s zero is a check in its own
+right: it says `OVERLAP_MODE` is being honoured rather than the filter applied
+unconditionally.
+
+### Decoded but unadjudicated, so far
+
+Named here rather than counted as covered:
+
+- **The first-level overlap filter across a soft tile boundary.** Needs a
+  multi-tile image at `OVERLAP_MODE` 2; both tiled fixtures were encoded at
+  mode 1. This is also the path where 9.9.3.2's text disagrees with its own
+  geometry.
+- **`HARD_TILING_FLAG`.** WIC does not expose it, so only the soft-tile path
+  has a fixture at all and both settings cannot be produced here.
+- **The quantised lossy path in general.** The lossless identity pins the
+  reversible transform and the QP-1 dequantization case and says nothing
+  about 9.8's `QuantMap( )` at other quantizers; the seam property is a
+  *relative* comparison within one image, so it would pass a filter that is
+  wrong by a constant everywhere; and the transform round trip is blind to a
+  mirrored error. Ruling 13 is why there is no fourth leg: WIC generates a
+  fixture and never judges an output, so "decode it with something else and
+  compare" is not available and will not become available.

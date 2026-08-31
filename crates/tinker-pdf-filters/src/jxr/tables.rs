@@ -361,6 +361,11 @@ pub(crate) const MODEL_WEIGHT_1: [[i32; 16]; 3] = [
 pub(crate) const TRANSPOSE_444: [usize; 16] =
     [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
 
+/// Table 164's `InvPermArr[i]`, 9.9.7.5: `arrayTemp[InvPermArr[i]]` takes
+/// `arrayInput[i]`, so this reads as "where coefficient `i` goes", not "where
+/// it comes from". Reading it the other way transposes the whole transform.
+pub(crate) const INV_PERM: [usize; 16] = [0, 8, 4, 13, 2, 15, 3, 14, 1, 12, 5, 9, 7, 11, 6, 10];
+
 /// `iHierScanOrder[ ]`, from Table 69: the hierarchical raster order in which
 /// 8.7.17.1 stores a macroblock's sixteen blocks.
 pub(crate) const HIER_SCAN_ORDER: [usize; 16] =
