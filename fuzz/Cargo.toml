@@ -245,3 +245,9 @@ name = "svg"
 path = "fuzz_targets/svg.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "woff"
+path = "fuzz_targets/woff.rs"
+test = false
+doc = false
