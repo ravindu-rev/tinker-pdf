@@ -42,6 +42,7 @@ pub mod document;
 pub mod path;
 pub mod scene;
 pub mod shape;
+pub mod style;
 pub mod transform;
 
 #[cfg(test)]
@@ -133,6 +134,14 @@ pub enum Refusal {
     TooManySegments,
     /// Past [`Limits::max_uses`], or a `<use>` that reaches itself.
     TooManyUses,
+    /// Selector matching crossed `tinker-pdf-css`'s own budget.
+    ///
+    /// Named apart from the four above because it is a different half of the
+    /// reader and a caller can act on the difference: a document with a million
+    /// path segments is [`Refusal::TooManySegments`] and one with a million
+    /// selector matches is this. `tinker_pdf::epub::SpineDefect` draws the same
+    /// line between `NotStyled` and `NotFragmented`, for the same reason.
+    TooMuchStyle,
 }
 
 /// Something the picture asked for that this build did not draw.
@@ -177,6 +186,22 @@ pub enum Warning {
     },
     /// A `<use>` whose `href` names nothing in the document.
     UseUnresolved,
+    /// A `fill` or `stroke` of `url(#name)` naming nothing this build can
+    /// paint with. The paint's own fallback stands, or `none` when it stated
+    /// none — which is §13.2's answer and not an invention here.
+    PaintServerUnresolved,
+    /// A non-unit `opacity` on something that draws more than once.
+    ///
+    /// §14.5 makes `opacity` a **group** operation: the subtree is composited
+    /// once and the result is faded. This build multiplies it into each
+    /// descendant's own fill and stroke alpha instead, which is *exact* for a
+    /// single shape painted one way and **too dark where two of them overlap**.
+    /// Reported only where it is observable — a lone filled shape at 60 % is
+    /// not a warning, because there is nothing wrong with it.
+    GroupOpacityFlattened,
+    /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
+    /// Skipped by the CSS specification's own recovery, and named.
+    AtRuleIgnored,
 }
 
 /// A colour, as three components in `[0, 1]`.
