@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_filters::{jxr_decode, JxrChannels, JxrError, Limits};
+use tinker_pdf_filters::{jxr_decode, JxrChannels, Limits};
 
 /// How a raster's samples are generated. Integer arithmetic only, so the
 /// fixture set is reproducible on any target (ruling 4).
@@ -499,32 +499,194 @@ fn every_committed_fixture_has_a_row_in_the_table() {
     );
 }
 
-/// Milestone 1's exit criterion: headers parse for every fixture.
+/// **The lossless identity: the primary gate, and the only check in this
+/// repository that compares JPEG XR pixels.**
 ///
-/// It asserts the *reported geometry* rather than only that parsing did not
-/// fail, because a header reader that returned the wrong dimensions would
-/// pass a "did it error" test and fail every later one for a reason that
-/// looked like a coefficient bug.
+/// [`RASTERS`] authors a raster in this file; `make-fixtures.ps1` hands those
+/// bytes to Windows Imaging Component's JPEG XR encoder with `Lossless =
+/// true`; this requires the decoder to return that raster, **bit for bit**.
+///
+/// Nothing third-party adjudicates it. The pixels going in are ours, so the
+/// comparison is against a value this repository chose rather than against
+/// another program's opinion of the picture. WIC is *supplying* bytes, which
+/// ruling 13 admits in as many words — "a third-party program may host this
+/// code, execute it, fetch bytes for it, or generate inputs for it" — and it
+/// never says whether the output is right.
+///
+/// It is a **total** check: one wrong bit anywhere in the entropy decoder,
+/// the prediction, the dequantization, either transform, the overlap filter
+/// or the colour pipeline fails it. That is what a format whose failure mode
+/// is a *plausible photograph* needs.
 #[test]
-fn every_fixture_reports_the_geometry_it_was_authored_with() {
+fn every_lossless_fixture_decodes_to_the_raster_this_repository_authored() {
+    let dir = fixture_dir();
+    let limits = Limits::new(1 << 24);
+    let mut checked = 0;
+    for spec in RASTERS {
+        if !spec.lossless {
+            continue;
+        }
+        let path = dir.join(format!("{}.jxr", spec.name));
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = jxr_decode(&bytes, &limits).unwrap_or_else(|e| panic!("{}: {e}", spec.name));
+        assert_eq!(image.width, spec.width, "{} width", spec.name);
+        assert_eq!(image.height, spec.height, "{} height", spec.name);
+        assert!(image.complete, "{} was not complete", spec.name);
+        let want = expected_output(spec, image.format.channels, image.bits_per_component());
+        assert_eq!(
+            image.data.len(),
+            want.len(),
+            "{}: {} bytes against {}",
+            spec.name,
+            image.data.len(),
+            want.len()
+        );
+        if image.data != want {
+            let differing = image.data.iter().zip(&want).filter(|(a, b)| a != b).count();
+            let (at, got, expected) = first_difference(&image.data, &want);
+            panic!(
+                "{}: {differing} of {} bytes differ; the first is byte {at}, \
+                 {got} against {expected}",
+                spec.name,
+                want.len()
+            );
+        }
+        checked += 1;
+    }
+    // A suite whose case count can shrink silently is not a suite.
+    assert_eq!(
+        checked,
+        RASTERS.iter().filter(|f| f.lossless).count(),
+        "not every lossless fixture was checked"
+    );
+    assert!(checked >= 15, "only {checked} lossless fixtures");
+}
+
+/// Where two rasters first differ, so a failure names a position instead of
+/// dumping two megabytes.
+fn first_difference(got: &[u8], want: &[u8]) -> (usize, u8, u8) {
+    for (i, (a, b)) in got.iter().zip(want).enumerate() {
+        if a != b {
+            return (i, *a, *b);
+        }
+    }
+    (0, 0, 0)
+}
+
+/// The **monotonicity property**, and the weakest of the three evidence legs.
+///
+/// One source encoded at rising quantization must decode monotonically
+/// further from it. It is here for exactly one reason: it is the only thing
+/// that reaches 9.8's `QuantMap( )` at quantizers the lossless identity never
+/// exercises, where QP is 1 and the map returns 1.
+///
+/// It catches a gross error — an inverted `QuantMap( )`, a QP index read from
+/// the wrong band, a shift in the wrong direction. It would not notice an
+/// error of a few least significant bits, and it is **not** evidence of
+/// correctness at any particular quality. `docs/features/xps.md` records the
+/// quantised path as unadjudicated for that reason.
+#[test]
+fn a_coarser_quantizer_decodes_further_from_the_source() {
+    let dir = fixture_dir();
+    let limits = Limits::new(1 << 24);
+    let mut errors = Vec::new();
+    for name in ["quant4", "quant16", "quant48"] {
+        let spec = RASTERS
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("{name} has no row in RASTERS"));
+        let bytes = std::fs::read(dir.join(format!("{name}.jxr"))).expect("a committed fixture");
+        let image = jxr_decode(&bytes, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let want = expected_output(spec, image.format.channels, image.bits_per_component());
+        // Total absolute error, which needs no floating point (ruling 4).
+        let total: u64 = image
+            .data
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum();
+        errors.push((name, total));
+    }
+    // `QualityLevel` is the codec's own QP: 1 is lossless and larger is
+    // coarser, so the error must rise across the three.
+    for pair in errors.windows(2) {
+        let [(finer_name, finer), (coarser_name, coarser)] = pair else {
+            continue;
+        };
+        assert!(
+            finer < coarser,
+            "{finer_name} ({finer}) should decode closer than {coarser_name} ({coarser})"
+        );
+    }
+    // And the finest of the three is still visibly lossy, which is what makes
+    // the comparison meaningful rather than three readings of zero.
+    assert!(errors[0].1 > 0, "quant4 decoded losslessly");
+}
+
+/// Every fixture decodes, including the lossy ones, at the geometry it was
+/// authored with.
+///
+/// Separate from the identity because it covers what the identity cannot: a
+/// lossy decode has no exact answer, but "it decoded at all, at the right
+/// size, without dropping a tile" is still a claim worth pinning.
+#[test]
+fn every_fixture_decodes_to_the_geometry_it_was_authored_with() {
     let dir = fixture_dir();
     let limits = Limits::new(1 << 24);
     let mut checked = 0;
     for spec in RASTERS {
         let path = dir.join(format!("{}.jxr", spec.name));
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        match jxr_decode(&bytes, &limits) {
-            Ok(image) => {
-                assert_eq!(image.width, spec.width, "{}", spec.name);
-                assert_eq!(image.height, spec.height, "{}", spec.name);
-                checked += 1;
-            }
-            // While the coefficient layers are outstanding the decode stops
-            // after the headers, so geometry is checked through the container
-            // instead. This arm goes away with milestone 2.
-            Err(JxrError::Unsupported(_)) => checked += 1,
-            Err(e) => panic!("{}: {e}", spec.name),
-        }
+        let image = jxr_decode(&bytes, &limits).unwrap_or_else(|e| panic!("{}: {e}", spec.name));
+        assert_eq!(image.width, spec.width, "{}", spec.name);
+        assert_eq!(image.height, spec.height, "{}", spec.name);
+        assert!(image.complete, "{} dropped a tile", spec.name);
+        let expected_len = spec.width as usize
+            * spec.height as usize
+            * usize::from(image.channels())
+            * usize::from(image.bits_per_component() / 8);
+        assert_eq!(image.data.len(), expected_len, "{}", spec.name);
+        checked += 1;
     }
     assert_eq!(checked, RASTERS.len());
+}
+
+/// The alpha fixtures really carry A.3.2's separate alpha plane, and it
+/// really reaches the output.
+///
+/// Worth its own test because an opaque alpha channel is also what an
+/// *absent* alpha plane produces: if the second `CODED_IMAGE( )` were being
+/// skipped, `bgra32` would still decode, still be the right size, and be
+/// wrong only where the source raster is transparent.
+#[test]
+fn the_alpha_fixtures_carry_a_separate_alpha_plane_that_is_not_all_opaque() {
+    let dir = fixture_dir();
+    let limits = Limits::new(1 << 24);
+    for name in ["bgra32", "rgba64"] {
+        let bytes = std::fs::read(dir.join(format!("{name}.jxr"))).expect("a committed fixture");
+        let image = jxr_decode(&bytes, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(image.format.channels.has_alpha(), "{name} has no alpha");
+        let channels = usize::from(image.channels());
+        let per = usize::from(image.bits_per_component() / 8);
+        let opaque = if per == 2 { 0xFFFFu16 } else { 0xFFu16 };
+        let mut transparent = 0;
+        let mut samples = 0;
+        for px in image.data.chunks_exact(channels * per) {
+            let at = (channels - 1) * per;
+            let a = if per == 2 {
+                u16::from_le_bytes([px[at], px[at + 1]])
+            } else {
+                u16::from(px[at])
+            };
+            samples += 1;
+            if a != opaque {
+                transparent += 1;
+            }
+        }
+        assert!(
+            transparent > 0,
+            "{name}: all {samples} alpha samples are opaque, so the separate \
+             alpha plane is not reaching the output"
+        );
+    }
 }

@@ -63,7 +63,7 @@
 use super::bitstream::BitReader;
 use super::headers::{BandsPresent, CodedImageHeaders, InternalClrFmt, PlaneHeader, QpSet, QpSets};
 use super::tables;
-use super::{JxrError, JxrRefusal, JxrWarning};
+use super::{JxrError, JxrWarning};
 
 /// The reconstructed image planes, one sample array per component, each in
 /// its own `ExtendedWidth[i]` x `ExtendedHeight[i]` geometry (6.2).
@@ -71,7 +71,6 @@ use super::{JxrError, JxrRefusal, JxrWarning};
 /// Every internal colour format this build accepts is 4:4:4, so all
 /// components share one geometry and the dimensions are scalars rather than
 /// per-component arrays.
-#[allow(dead_code)] // Milestone 4's colour.rs is the first reader.
 pub(crate) struct Planes {
     pub(crate) samples: Vec<Vec<i32>>,
     /// `ExtendedWidth[0]`, not the output width — cropping is `colour.rs`.
@@ -80,15 +79,12 @@ pub(crate) struct Planes {
     pub(crate) height: u32,
 }
 
-/// Decodes the primary image plane's coefficient layers and reconstructs its
-/// samples.
+/// Decodes one image plane's coefficient layers and reconstructs its samples.
 ///
-/// **This stops short of pixels.** All of clause 8 and all of clause 9.4 to
-/// 9.9 run: the samples are reconstructed, in the internal colour format and
-/// the extended geometry. What is outstanding is 9.10's output formatting —
-/// the colour transform back to RGB or grey, the bias, the bit depths and the
-/// crop — so the result is refused by name rather than returned as a raster
-/// whose numbers mean something other than what the file said.
+/// The result is in the **internal** colour format and the **extended**
+/// geometry — biased around zero, scaled by a power of two, and padded to a
+/// multiple of 16. `colour.rs` turns that into the channels and the byte
+/// layout Table A.6's pixel format names.
 pub(crate) fn decode_image(
     r: &mut BitReader<'_>,
     h: &CodedImageHeaders,
@@ -98,7 +94,11 @@ pub(crate) fn decode_image(
     let mut d = PlaneDecoder::new(&g)?;
     d.parse_tiles(r, h, &h.primary, warnings)?;
     d.reconstruct();
-    Err(JxrError::Unsupported(JxrRefusal::OutputFormatting))
+    Ok(Planes {
+        samples: d.plane,
+        width: h.image.extended_width,
+        height: h.image.extended_height,
+    })
 }
 
 // --- 8.8: adaptive VLC code table selection -----------------------------
@@ -628,8 +628,18 @@ pub(crate) struct PlaneDecoder<'a> {
     /// `ModelBitsMBHP[MBx][MBy][ ]`, which 8.7.19.2 needs when the flexbits
     /// arrive in a packet of their own.
     model_bits_hp: Vec<[i32; 2]>,
-    /// `MBDCMode` and `MBHPMode` for the macroblock being decoded.
-    mb_dc_mode: u8,
+    /// 9.6.1.3's `MBDCMode`, **per macroblock**.
+    ///
+    /// Not a single field, and the reason is frequency mode: 8.7.1 decodes
+    /// every tile's DC band before any tile's LP band, so by the time
+    /// 9.6.2.3 wants the DC prediction mode for macroblock *n* the decoder
+    /// has moved on. In spatial mode the two are adjacent and a scalar would
+    /// work, which is exactly why this is the kind of bug that passes every
+    /// spatial fixture and fails only the frequency ones.
+    mb_dc_mode: Vec<u8>,
+    /// 9.6.3.2's `MBHPMode` for the macroblock being decoded. A scalar is
+    /// correct here: it is computed and consumed inside one iteration, in
+    /// both codestream layouts.
     mb_hp_mode: u8,
     /// Where each packet's parse actually stopped, in bytes from the start of
     /// the coded image, indexed **exactly as 8.5.3's `IndexOffsetTile[ ]` is**
@@ -676,7 +686,7 @@ impl<'a> PlaneDecoder<'a> {
             qp_index_hp: vec![0; mbs],
             plane: vec![vec![0; plane_len]; g.components],
             model_bits_hp: vec![[0; 2]; mbs],
-            mb_dc_mode: 3,
+            mb_dc_mode: vec![3; mbs],
             mb_hp_mode: 2,
             packet_ends: Vec::new(),
         })
@@ -2053,9 +2063,10 @@ impl PlaneDecoder<'_> {
         for i in 0..nc {
             self.dclp_set(pos.index, i, 0, scratch.dc[i]);
         }
-        self.mb_dc_mode = self.calc_dc_pred_mode(plane, pos);
+        let mode = self.calc_dc_pred_mode(plane, pos);
+        self.mb_dc_mode[pos.index] = mode;
         // 9.6.1.4's `DCCoefficientPrediction( )`.
-        if self.mb_dc_mode != 3 {
+        if mode != 3 {
             for i in 0..nc {
                 let left = if pos.x > 0 {
                     self.pred_at(pos.index - 1, i, 0)
@@ -2068,7 +2079,7 @@ impl PlaneDecoder<'_> {
                     0
                 };
                 let base = self.dclp_at(pos.index, i, 0);
-                let v = match self.mb_dc_mode {
+                let v = match mode {
                     0 => base.wrapping_add(left),
                     1 => base.wrapping_add(top),
                     _ => base.wrapping_add(top.wrapping_add(left) >> 1),
@@ -2141,17 +2152,17 @@ impl PlaneDecoder<'_> {
         // 9.6.2.3's `CalcLPPredMode( )`: prediction is refused across a
         // quantizer change, which is what keeps it from crossing a boundary
         // the numbers no longer mean the same thing across.
-        let lp_mode = if self.mb_dc_mode == 0
-            && self.qp_index_lp[pos.index] == self.qp_index_lp[pos.index - 1]
-        {
-            0
-        } else if self.mb_dc_mode == 1
-            && self.qp_index_lp[pos.index] == self.qp_index_lp[pos.index - self.g.mb_width]
-        {
-            1
-        } else {
-            2
-        };
+        let dc_mode = self.mb_dc_mode[pos.index];
+        let lp_mode =
+            if dc_mode == 0 && self.qp_index_lp[pos.index] == self.qp_index_lp[pos.index - 1] {
+                0
+            } else if dc_mode == 1
+                && self.qp_index_lp[pos.index] == self.qp_index_lp[pos.index - self.g.mb_width]
+            {
+                1
+            } else {
+                2
+            };
         // 9.6.2.4's `LPCoefficientPrediction( )`.
         if lp_mode == 0 {
             let src = pos.index - 1;

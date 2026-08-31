@@ -415,21 +415,104 @@ counted at 2 of the 2 filtered modes, and `seam0`'s zero is a check in its own
 right: it says `OVERLAP_MODE` is being honoured rather than the filter applied
 unconditionally.
 
-### Decoded but unadjudicated, so far
+**Milestone 5.** Landed: 9.10's output formatting — the colour transform, the
+bias, the scaling, the post-scaling, the clip and the crop — plus A.3.2's
+separate alpha image plane. **`jxr_decode` returns a raster.** Frequency mode
+stops being refused, because milestone 2 already decoded it.
 
-Named here rather than counted as covered:
+**The lossless identity holds bit-exactly on all fifteen lossless fixtures**:
+eight pixel formats, all three overlap modes, both tiled layouts, both
+frequency-mode files, and both alpha formats. Zero bytes differ.
 
+Two findings, and the first is the most consequential thing in this document.
+
+### `WmpBitmapEncoder.Lossless` does nothing, and the primary evidence leg was vacuous
+
+`make-fixtures.ps1` set `$enc.Lossless = $true` and left `QualityLevel`
+unset for the lossless rows. The codec ignored it and encoded at its default
+QP of **10**. So every fixture the manifest called lossless was quantized, and
+the lossless identity — the leg the whole evidence design rests on — was
+comparing a decode against an encode that could never match it. It would have
+failed forever, for a reason that looks exactly like a decoder bug.
+
+It nearly was read as one. The decode was within ±3 of the source, which is
+precisely the shape a rounding error in a lifting step takes, and the first
+two hours went into the transform. What settled it was dumping `DC_QP` and
+finding 10 where lossless requires the quantizer to be the identity.
+
+`QualityLevel = 1` is what actually produces a lossless file, and the script
+now sets it for every row. Measured rather than assumed: the same 48 × 32 grey
+raster is **1016 bytes** at `Lossless` alone and decodes to within ±3, and
+**1378 bytes** at `QualityLevel = 1` and decodes **bit-exact**.
+
+This is the **third** silently-ignored encoder knob this fixture set has
+found, after `ImageQualityLevel` and the tile-slice counting. All three have
+the same shape and the same remedy: assert that the setting reached the
+codestream, because a knob that does nothing looks exactly like a knob that
+worked. The two earlier findings cost a fixture set each; this one cost the
+evidence design, and it is the reason
+`src/jxr/tests/fixtures.rs`'s assertions exist.
+
+### A scalar that had to be an array, and only frequency mode could show it
+
+9.6.1.3's `MBDCMode` was held in a single field, written by the DC decode and
+read by the LP decode. In spatial mode those are adjacent within one
+macroblock and a scalar is correct. In frequency mode 8.7.1 decodes **every**
+tile's DC band before **any** tile's LP band, so the LP decode read the DC
+mode of a different macroblock entirely.
+
+Every spatial fixture passed. Both frequency fixtures failed. That asymmetry
+is the argument for the fixture set carrying both codestream layouts rather
+than the one that is easier to produce — the bug is invisible in thirteen of
+fifteen files.
+
+### An unreadable alpha plane degrades rather than refusing
+
+A.3.2's separate alpha plane is a second, complete `CODED_IMAGE( )`. When it
+cannot be decoded the image is returned **opaque**, with
+`JxrWarning::AlphaPlaneDropped` and `complete` false, rather than refused
+(ruling 2): a damaged alpha channel costs transparency, not the picture, and
+a page that loses its illustration over a channel the caller may not use is
+the worse outcome. The warning is what distinguishes that from a file with no
+alpha plane at all, which produces the identical bytes.
+
+### Decoded but unadjudicated
+
+Configurations this decoder will happily decode and **nothing here checks**.
+Named rather than counted as covered, the treatment `docs/features/fonts.md`
+gives shaped-but-unverified scripts.
+
+- **The quantised lossy path in general.** This is the big one. The lossless
+  identity pins the reversible transform and the QP-1 dequantization case and
+  says *nothing* about 9.8's `QuantMap( )` at any other quantizer. The seam
+  property is a *relative* comparison within one image, so a filter wrong by a
+  constant everywhere passes it. The transform round trip is blind to an error
+  mirrored into both directions. And the monotonicity property only orders
+  three error totals — it would not notice an error of a few least significant
+  bits. A decoder that is exactly right losslessly and wrong at every other
+  quantizer passes everything in this repository.
+
+  There is no fourth leg available and there will not be. Ruling 13: WIC
+  generates a fixture and never judges an output, so "decode it with something
+  else and compare" is not a check this project can make.
 - **The first-level overlap filter across a soft tile boundary.** Needs a
-  multi-tile image at `OVERLAP_MODE` 2; both tiled fixtures were encoded at
-  mode 1. This is also the path where 9.9.3.2's text disagrees with its own
-  geometry.
+  multi-tile image at `OVERLAP_MODE` 2, and both tiled fixtures were encoded
+  at mode 1. This is also the one path where 9.9.3.2's text disagrees with its
+  own geometry, and where this build follows the geometry.
 - **`HARD_TILING_FLAG`.** WIC does not expose it, so only the soft-tile path
-  has a fixture at all and both settings cannot be produced here.
-- **The quantised lossy path in general.** The lossless identity pins the
-  reversible transform and the QP-1 dequantization case and says nothing
-  about 9.8's `QuantMap( )` at other quantizers; the seam property is a
-  *relative* comparison within one image, so it would pass a filter that is
-  wrong by a constant everywhere; and the transform round trip is blind to a
-  mirrored error. Ruling 13 is why there is no fourth leg: WIC generates a
-  fixture and never judges an output, so "decode it with something else and
-  compare" is not available and will not become available.
+  has a fixture and both settings cannot be produced here.
+- **`SHIFT_BITS`.** 8.4.13 reads it for BD16, and every BD16 fixture carries
+  zero, so 9.10.5's `iBias >> SHIFT_BITS` and 9.10.7.2's `sample <<
+  SHIFT_BITS` are exercised only at the value where they do nothing.
+- **`TRIM_FLEXBITS`.** 8.3.15's flag is clear in every fixture, so the trim in
+  8.7.19.2 is only ever zero.
+- **More than one QP per tile.** `NUM_LP_QPS_MINUS1` and `NUM_HP_QPS_MINUS1`
+  are non-zero in no fixture, so 8.7.10.10's `DECODE_QP_INDEX( )` and 9.7.2.2's
+  per-macroblock QP selection are reached only in their one-QP form.
+- **A damaged codestream's *values*.** The fuzz target proves a damaged file
+  does not panic and that a dropped tile is reported; it does not check that
+  what survives is what a conformant decoder would produce.
+
+Everything else in `docs/features/filters.md`'s refusal table is refused by
+name and reached by a test, which is a different thing from unadjudicated: a
+refusal is a decision, and this list is where decisions are absent.

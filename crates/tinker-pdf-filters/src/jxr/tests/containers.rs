@@ -2,22 +2,43 @@
 
 use super::writer::{wrap, Codestream};
 use crate::jxr::container::{self, JxrChannels};
-use crate::jxr::{jxr_decode, JxrError, JxrRefusal};
+use crate::jxr::{jxr_decode, JxrError, JxrRefusal, JxrWarning};
 use crate::Limits;
 
 fn limits() -> Limits {
     Limits::new(1 << 24)
 }
 
-/// The decode this build cannot finish, which every header test reaches when
-/// the headers were read successfully. The milestone that lands 9.10's output
-/// formatting replaces it with a raster.
-const HEADERS_OK: JxrError = JxrError::Unsupported(JxrRefusal::OutputFormatting);
+/// Asserts that a synthetic file decodes, and reports the geometry its
+/// headers declared.
+///
+/// These fixtures carry no real coefficient data — `writer.rs` builds the
+/// header layers and stops — so their tiles are dropped to zero and the
+/// picture is blank. That is the *point*: what is being checked is that the
+/// header layers were read correctly, and the geometry is what says so. An
+/// earlier version of this file asserted a refusal instead, which stopped
+/// meaning anything the moment the decoder could finish.
+fn decodes_to(file: &[u8], width: u32, height: u32) {
+    let image = match jxr_decode(file, &limits()) {
+        Ok(image) => image,
+        Err(e) => panic!("expected a decode, got {e}"),
+    };
+    assert_eq!(image.width, width, "width");
+    assert_eq!(image.height, height, "height");
+    // A blank tile is 8.7.10.1's own remedy and ruling 2's degrade path, so
+    // it is a warning and an incomplete decode rather than a failure.
+    assert!(
+        image.warnings.contains(&JxrWarning::TileDroppedAsZero),
+        "a header-only fixture has no coefficients to decode: {:?}",
+        image.warnings
+    );
+    assert!(!image.complete);
+}
 
 #[test]
 fn the_smallest_legal_file_parses_its_headers() {
     let file = wrap(&Codestream::default().build(), 0x0D);
-    assert_eq!(jxr_decode(&file, &limits()), Err(HEADERS_OK));
+    decodes_to(&file, 16, 16);
 }
 
 #[test]
@@ -26,7 +47,7 @@ fn a_bare_codestream_is_accepted_without_a_container() {
     // its own is the other case, and a caller holding bytes should not have
     // to decide which it has.
     let codestream = Codestream::default().build();
-    assert_eq!(jxr_decode(&codestream, &limits()), Err(HEADERS_OK));
+    decodes_to(&codestream, 16, 16);
 }
 
 #[test]
@@ -157,7 +178,7 @@ fn dimensions_that_do_not_fill_whole_macroblocks_are_padded_not_refused() {
         .build(),
         0x0D,
     );
-    assert_eq!(jxr_decode(&file, &limits()), Err(HEADERS_OK));
+    decodes_to(&file, 40, 24);
 }
 
 #[test]
@@ -198,7 +219,7 @@ fn a_legal_tile_grid_parses() {
         .build(),
         0x0D,
     );
-    assert_eq!(jxr_decode(&file, &limits()), Err(HEADERS_OK));
+    decodes_to(&file, 64, 64);
 }
 
 #[test]
