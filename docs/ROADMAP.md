@@ -344,8 +344,10 @@ refusal table.
   by name and with **no committed file behind the row** — no producer
   here emits one and OFL-1.1's reserved-name clause bars repacking a
   vendored face; the pinned float reading-order defect; multi-column;
-  non-static `position`; `min`/`max` sizing; `vertical-align`; SVG
-  content documents; pseudo-elements (parsed, no box generated).
+  non-static `position`; `vertical-align`; SVG content documents;
+  pseudo-elements (parsed, no box generated). `min`/`max` sizing is
+  built, less one half of §10.7: a `max-height` shorter than its
+  content is named (`MaxHeightAsAuto`) rather than obeyed.
 - **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR
   **reaching the page** — the decoder is built and `xps/image.rs` still
   refuses the format at the element, which is the same shape TIFF was in
