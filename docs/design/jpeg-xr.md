@@ -340,3 +340,35 @@ the two stay in step is checked by asserting the FLEXBITS packet also ends on
 its predicted byte, *separately* from the HIGHPASS one — if they drifted apart
 the highpass packet would still end correctly and only the picture would be
 wrong.
+
+**Milestone 3.** Landed: 9.9.2, 9.9.5 and 9.9.7's photo core transform, and
+9.9.4's coefficient combination. The overlap filter and 9.10's output
+formatting remain, so `JxrRefusal::SampleReconstruction` still fires.
+
+**One reading of the Recommendation had to be settled by measurement.**
+9.9.7.2's NOTE says "the inverse of `T2x2Th( )` is two successive applications
+of `T2x2Th`, operating on variables of the array `iCoeff[ ]` with the same
+value of `valRound`". Taken literally that makes the operator order three. It
+is not: two applications are the **identity**, so the operator is an
+involution and its inverse is one application. Measured over 20 000 random
+vectors at both values of `valRound`, and then pinned in
+`src/jxr/tests/transform.rs`. The distinction is not academic — building the
+forward operator on the literal reading gives something that is wrong
+everywhere, looks principled, and makes the round-trip evidence fail with no
+indication why.
+
+**The round trip is real evidence only because the forward direction is
+derived independently.** It is not a mirror of the inverse: each of 9.9.7's
+lifting steps is reversed from the clause's own text. Four injections applied
+to the inverse alone are caught on 256, 130, 256 and 256 of 256 vectors. The
+130 is `valRound`, which changes a result only when a parity works out.
+
+**What the transform's own evidence does not reach, by name.** A slip
+*mirrored* into both directions passes everything in that file, and the count
+is recorded as a zero: a bijection composed with its own inverse is the
+identity whatever the bijection is. The DC-flatness property, which is the
+only one derived from what the transform *means* rather than from its
+structure, catches one of the four injections and is blind to three — a
+DC-only block is degenerate, so most lifting positions carry zero through it.
+So the transform's own evidence is **necessary and not sufficient**, and the
+check that closes this stage is the lossless identity in milestone 5.

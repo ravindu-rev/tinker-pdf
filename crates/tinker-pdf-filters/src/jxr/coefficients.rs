@@ -80,16 +80,20 @@ pub(crate) struct Planes {
     pub(crate) height: u32,
 }
 
-/// Decodes the primary image plane's coefficient layers.
+/// Decodes the primary image plane's coefficient layers and runs as much of
+/// 9.9's sample reconstruction as exists.
 ///
-/// **This is milestone 1 of `docs/design/jpeg-xr.md` and stops short of
-/// pixels.** Clause 8's entropy layers and clause 9.4 to 9.8's remapping,
-/// prediction and dequantization all run — the codestream is fully consumed
-/// and every transform coefficient is in hand — but 9.9's two levels of
-/// inverse transform and overlap filtering are outstanding, so the result is
-/// refused by name rather than returned as a raster. A decoder that returned
-/// transform coefficients as samples would produce a picture, and a wrong
-/// JPEG XR picture looks like a photograph.
+/// **This stops short of pixels.** Clause 8's entropy layers, clause 9.4 to
+/// 9.8's remapping, prediction and dequantization, and 9.9.2, 9.9.4 and
+/// 9.9.5's two levels of inverse transform all run — but 9.9.3 and 9.9.6's
+/// overlap filtering and 9.10's output formatting are outstanding, so the
+/// result is refused by name rather than returned as a raster.
+///
+/// It would look like a raster. That is the whole reason for the refusal: the
+/// inverse transform is a smoothing operator over a lapped basis, so its
+/// output without the overlap filter is a soft, plausible picture with faint
+/// seams at the block edges — which is exactly what a human skimming a page
+/// does not see.
 pub(crate) fn decode_image(
     r: &mut BitReader<'_>,
     h: &CodedImageHeaders,
@@ -98,6 +102,7 @@ pub(crate) fn decode_image(
     let g = PlaneGeometry::from_headers(h, &h.primary)?;
     let mut d = PlaneDecoder::new(&g)?;
     d.parse_tiles(r, h, &h.primary, warnings)?;
+    d.reconstruct();
     Err(JxrError::Unsupported(JxrRefusal::SampleReconstruction))
 }
 
@@ -2293,9 +2298,31 @@ impl PlaneDecoder<'_> {
         }
     }
 
+    /// 9.9.1's `SampleReconstruction( )`, as far as it exists.
+    ///
+    /// The HP half of 9.9.4's combination already happened at parse time —
+    /// see [`Self::decode_hp`] — so what remains is the first level's
+    /// transform over `MbDCLP`, the DC and LP half of the combination, and
+    /// the second level's transform over the sample plane.
+    ///
+    /// **9.9.3 and 9.9.6's overlap filtering is not here yet.** The clause
+    /// puts the first-level filter between the two transforms and the
+    /// second-level filter after both, so the milestone that lands them
+    /// inserts two calls into this function and changes nothing else.
+    fn reconstruct(&mut self) {
+        let components = self.g.components;
+        let scaled = self.g.scaled;
+        let mb_count = self.g.mb_width * self.g.mb_height;
+        let (width, height) = (self.g.ext_width, self.g.ext_height);
+        super::transform::first_level(&mut self.dclp, components, scaled, mb_count);
+        self.combine_dclp();
+        for plane in &mut self.plane {
+            super::transform::second_level(plane, width, height);
+        }
+    }
+
     /// The DC and LP half of 9.9.4's `SecondLevelCoefficientCombination( )`.
-    #[allow(dead_code)] // Milestone 2 wires 9.9's reconstruction to it.
-    pub(crate) fn combine_dclp(&mut self) {
+    fn combine_dclp(&mut self) {
         for mby in 0..self.g.mb_height {
             for mbx in 0..self.g.mb_width {
                 let mb = mby * self.g.mb_width + mbx;
