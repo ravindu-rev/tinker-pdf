@@ -50,9 +50,13 @@ stream are the numbers in the markup. 11.2.3's abbreviated geometry syntax
 in both spellings real producers emit (`M0,0L200,0` and `M 0,0 L 200,0`);
 `Path`, `Canvas`, `RenderTransform`, `Clip`, `Opacity`, resource
 dictionaries with `{StaticResource}` lookup bounded against cycles and
-depth; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
-`RadialGradientBrush`, `ImageBrush` with `TileMode` (through a PDF tiling
-pattern) — with colours in both the eight- and six-digit spellings. A
+depth — in the page and in 14.2.4's **separate part**, whose `Source`
+chain is bounded the same two ways and read in a pass before the drawing
+walk; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
+`RadialGradientBrush`, `ImageBrush` and `VisualBrush` with `TileMode`
+(through a PDF tiling pattern, whose cell is a picture for the one and a
+**drawing** for the other) — with colours in both the eight- and
+six-digit spellings. A
 gradient strokes and sets text through a `/PatternType 2` shading pattern,
 because 8.7.4.1's `sh` floods a clip and neither a stroke nor a glyph
 outline is one. 14.3's `OpacityMask` is a brush used as an **alpha
@@ -111,7 +115,6 @@ the page synthesis.
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
 | A `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | no ICC pipeline, and 15.2.4's syntax has nowhere to put an sRGB fallback; painted grey and named | [rendering](rendering.md) |
-| Remote resource dictionary (`Source=` a separate part) | `XpsElementDefect::ResourceDictionaryRemote` | only in-page dictionaries are resolved | [ROADMAP.md](../ROADMAP.md) |
 | JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
 | A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |
 | `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | no ICC pipeline, and the syntax has nowhere to put an sRGB fallback, so the picture is refused rather than drawn in colours the file did not ask for | [rendering](rendering.md) |

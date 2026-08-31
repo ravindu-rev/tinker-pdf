@@ -130,6 +130,7 @@ mod image;
 pub mod markup;
 pub mod opc;
 pub mod paint;
+pub mod resources;
 
 use std::collections::HashMap;
 
@@ -692,10 +693,22 @@ pub enum XpsElementDefect {
     /// differ from each other, which one constant alpha cannot express, or a
     /// `ColorInterpolationMode` this build does not interpolate in.
     BrushApproximated,
-    /// A `ResourceDictionary` with a `Source`, naming another part (14.2.4).
-    /// Gap 30's milestone 8; every key in it is unresolvable until then, and
-    /// saying so once beats one `BrushUnresolved` per use.
-    ResourceDictionaryRemote,
+    /// A `ResourceDictionary` whose `Source` names no part this package holds,
+    /// or names one that cannot be read (14.2.4).
+    ///
+    /// Said **once**, on the element that named the dictionary, rather than
+    /// once per key that then fails to resolve: a dictionary that is not there
+    /// is one fact about the file, and one `BrushUnresolved` per use would
+    /// report the same fact as many times as the page happened to use it.
+    ResourceDictionaryUnresolved,
+    /// A `ResourceDictionary` part that is there and whose root is not 14.2.4's
+    /// `ResourceDictionary` in either dialect.
+    ///
+    /// Not the same as [`XpsElementDefect::ResourceDictionaryUnresolved`] and
+    /// never reported as one: "no such part" and "that part is not a
+    /// dictionary" are different facts, and only the second says the package is
+    /// internally inconsistent.
+    ResourceDictionaryUnreadable,
     /// A `Glyphs` whose `FontUri` names no part of this package, or a part
     /// that will not read. **Not painted** — a run whose font is unknown has
     /// no glyph indices to draw and no widths to place them at.
@@ -774,7 +787,12 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::BrushUnsupported => "a brush this build does not paint",
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
-            XpsElementDefect::ResourceDictionaryRemote => "a `ResourceDictionary` in another part",
+            XpsElementDefect::ResourceDictionaryUnresolved => {
+                "a `ResourceDictionary` naming no readable part"
+            }
+            XpsElementDefect::ResourceDictionaryUnreadable => {
+                "a `ResourceDictionary` part that is not one"
+            }
             XpsElementDefect::GlyphsFontUnresolved => "a `FontUri` naming no readable font part",
             XpsElementDefect::GlyphsFontFace => "a `FontUri` naming a face other than the first",
             XpsElementDefect::GlyphsFontObfuscation => {
@@ -1206,6 +1224,11 @@ fn synthesise(
     // And one image table, for the same reason and with the same lifetime: two
     // pages naming one `/XI0` for two different pictures would be one picture.
     let mut images = image::Images::default();
+    // And one dictionary table, for the reason the fonts and the images have
+    // one: 14.2.4's `Source` is resolved against the *part* it is written on,
+    // so two pages may spell one dictionary two ways and it is still one
+    // dictionary — read once and answered from a table.
+    let mut remotes = resources::Remotes::default();
     // Painted **once per part**, for the reason milestone 4 built its own
     // caches: a `FixedDocument` may show one page part four thousand times,
     // and `Source::new` walks every character of a part before it yields an
@@ -1237,6 +1260,13 @@ fn synthesise(
                 if let Err(Trouble::Exhausted) = images.load(package, part, &mut builder, limits) {
                     return Err(ArchiveRefusal::TooLarge);
                 }
+                // 14.2.4's remote dictionaries, in a third pass and before the
+                // walk for the same reason: a dictionary part read mid-walk
+                // would need the page's own bytes copied out. See
+                // `resources::Remotes::load`.
+                if let Err(Trouble::Exhausted) = remotes.load(package, part, limits, &mut budget) {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
                 let drawn = match package.read_part(part) {
                     Ok(bytes) => painter.page(
                         &mut builder,
@@ -1245,6 +1275,7 @@ fn synthesise(
                             part,
                             fonts: &fonts,
                             images: &images,
+                            remotes: &remotes,
                             page: (width, height),
                             xml: &limits.xml,
                         },

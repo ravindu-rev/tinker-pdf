@@ -71,6 +71,7 @@ use super::glyphs::{self, RunError};
 use super::image::Images;
 use super::markup::{self, Budget, Node, Trouble};
 use super::opc::PartName;
+use super::resources::Remotes;
 use super::{XpsElementDefect, UNITS_TO_POINTS};
 use crate::cbz::PLACEHOLDER_GREY;
 
@@ -193,6 +194,9 @@ pub struct Surroundings<'a> {
     pub fonts: &'a Fonts,
     /// The images [`super::image::Images::load`] placed for this part.
     pub images: &'a Images,
+    /// The remote resource dictionaries
+    /// [`super::resources::Remotes::load`] read for this part.
+    pub remotes: &'a Remotes,
     /// The page's own size, in XPS units.
     ///
     /// Needed for one thing and it is not the geometry: a tiling pattern's
@@ -552,22 +556,44 @@ impl State<'_> {
                     self.warn(XpsElementDefect::ElementUnknown);
                     return Ok(());
                 };
-                // 14.2.4's remote dictionary names another part, which is gap
-                // 30 milestone 8. Every key in it is unresolvable here, and
-                // saying so once is better than one `BrushUnresolved` per use.
-                if dictionary.attr("Source").is_some() {
-                    self.warn(XpsElementDefect::ResourceDictionaryRemote);
-                }
-                let mut entries = HashMap::new();
-                for entry in &dictionary.children {
-                    let Some(key) = entry.key.clone() else {
-                        // 14.2.2 makes `x:Key` mandatory on every entry; one
-                        // without a key can never be referenced.
-                        self.warn(XpsElementDefect::ElementUnknown);
-                        continue;
-                    };
-                    entries.insert(key, entry.clone());
-                }
+                // 14.2.4's `Source` names another part, whose entries were
+                // read before this walk began — `read_part` hands back a
+                // borrow this walk is already holding, so the table is filled
+                // by `resources::Remotes::load` and looked up here.
+                //
+                // `Source` and inline content are alternatives and not a pair:
+                // a dictionary that states a part **is** that part's, and the
+                // children written under it are not merged in behind it. A
+                // build that merged them would answer a key from whichever
+                // happened to be inserted second.
+                let entries = match dictionary.attr("Source") {
+                    Some(source) => match self.around.remotes.get(self.around.part, source) {
+                        Ok(entries) => entries.clone(),
+                        Err(defect) => {
+                            // The dictionary is named once and the scope opens
+                            // with nothing in it, so every `{StaticResource}`
+                            // that wanted it takes `BrushUnresolved` and the
+                            // placeholder grey. The page is not lost, which is
+                            // ruling 2's whole requirement.
+                            self.warn(defect);
+                            HashMap::new()
+                        }
+                    },
+                    None => {
+                        let mut entries = HashMap::new();
+                        for entry in &dictionary.children {
+                            let Some(key) = entry.key.clone() else {
+                                // 14.2.2 makes `x:Key` mandatory on every
+                                // entry; one without a key can never be
+                                // referenced.
+                                self.warn(XpsElementDefect::ElementUnknown);
+                                continue;
+                            };
+                            entries.insert(key, entry.clone());
+                        }
+                        entries
+                    }
+                };
                 self.dictionaries.push(Dictionary { entries });
                 if let Some(scope) = scopes.last_mut() {
                     scope.dictionaries += 1;
