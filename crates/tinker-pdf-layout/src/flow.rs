@@ -66,7 +66,7 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, Display, Float,
     LengthPercentage, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side,
-    Sides, Size, TableLayout, TextAlign,
+    Sides, Size, TableLayout, TextAlign, VerticalAlign,
 };
 
 use crate::flex;
@@ -521,6 +521,25 @@ impl FlexPass {
         }
     }
 }
+
+/// CSS 2.2 §10.8.1 leaves `super` to the user agent — *"the exact offset is
+/// not defined"* — and this is the number this build picked, as a fraction of
+/// the **parent's** font size, which is the box §10.8 says the offset is
+/// proper for the superscripts of.
+const SUPER_RISE: f64 = 1.0 / 3.0;
+
+/// The same for `sub`, and it is not the same number: a descender has less
+/// room under a baseline than an ascender has over it.
+const SUB_DROP: f64 = 1.0 / 5.0;
+
+/// `middle` needs an x-height and [`crate::Metrics`] does not carry one.
+///
+/// A face's `sxHeight` is an OS/2 field this crate's trait never asked for,
+/// and adding it would change every implementor for one value. Half the font
+/// size is the standing approximation, and it is written down **once** so that
+/// a milestone which adds the metric has one line to change rather than a
+/// search to do.
+const X_HEIGHT: f64 = 0.5;
 
 /// One flex item's box, which the document may not contain.
 ///
@@ -1707,6 +1726,56 @@ impl<M: Metrics> Builder<'_, M> {
             laid[at] = Some(self.sublayout(cell.content.node(), width, depth + 1, avoid)?);
         }
 
+        // **§17.5.3's `vertical-align`, which is where the property does most
+        // of its work in a real book.** Four values apply to a cell -- `top`,
+        // `middle`, `bottom` and `baseline` -- and §17.5.3 says the other four
+        // *"behave as `baseline`"*, which is why the match below has no arm for
+        // them rather than an arm that guesses.
+        //
+        // `baseline` is the initial value and it is **not** the same as `top`:
+        // it puts every cell's first line on one row baseline, so a row holding
+        // a large heading and small body text has them sitting on a line rather
+        // than both starting at the row's top edge. It is also the one value
+        // that changes how tall the row has to be, which is why it is settled
+        // here, before the heights, and the other three below them.
+        let alignment: Vec<VerticalAlign> = grid
+            .slots
+            .iter()
+            .map(|slot| {
+                let cell = &tree.groups[slot.group].rows[slot.row].cells[slot.cell];
+                consume(&cell.content.node().style).vertical_align
+            })
+            .collect();
+        let cell_baseline: Vec<f64> = laid
+            .iter()
+            .map(|sub| sub.as_ref().and_then(first_baseline).unwrap_or(0.0))
+            .collect();
+        // How far each cell's content is pushed down inside its own box.
+        let mut lead = vec![0.0f64; grid.slots.len()];
+        let mut row_baseline = vec![0.0f64; grid.rows];
+        for (at, slot) in grid.slots.iter().enumerate() {
+            // A spanning cell has no single row to share a baseline with, so
+            // §17.5.3's alignment is taken over its whole box below instead.
+            if slot.rows == 1 && matches!(alignment[at], VerticalAlign::Top) {
+                continue;
+            }
+            if slot.rows == 1
+                && !matches!(alignment[at], VerticalAlign::Middle | VerticalAlign::Bottom)
+            {
+                row_baseline[slot.top] = row_baseline[slot.top].max(cell_baseline[at]);
+            }
+        }
+        for (at, slot) in grid.slots.iter().enumerate() {
+            if slot.rows == 1
+                && !matches!(
+                    alignment[at],
+                    VerticalAlign::Top | VerticalAlign::Middle | VerticalAlign::Bottom
+                )
+            {
+                lead[at] = (row_baseline[slot.top] - cell_baseline[at]).max(0.0);
+            }
+        }
+
         // §17.5.3's row heights: the rows a cell does not span first, then the
         // ones it does. The order is the same as the width algorithm's and for
         // the same reason -- a spanning cell met first would put its whole
@@ -1721,7 +1790,11 @@ impl<M: Metrics> Builder<'_, M> {
         }
         for (at, slot) in grid.slots.iter().enumerate() {
             if slot.rows == 1 {
-                let height = laid[at].as_ref().map_or(0.0, |sub| sub.height);
+                // The lead is part of the height: a cell pushed down to reach
+                // its row's baseline needs the room it was pushed into, and a
+                // build that added the two the other way round draws the last
+                // line of the tallest-baselined cell over the row below.
+                let height = laid[at].as_ref().map_or(0.0, |sub| sub.height) + lead[at];
                 heights[slot.top] = heights[slot.top].max(height);
             }
         }
@@ -1739,6 +1812,27 @@ impl<M: Metrics> Builder<'_, M> {
                 }
             }
         }
+        // And now the three values that are measured against the cell's box
+        // rather than against its row's baseline, which needs the heights.
+        for (at, slot) in grid.slots.iter().enumerate() {
+            let alignment = alignment[at];
+            if !matches!(
+                alignment,
+                VerticalAlign::Top | VerticalAlign::Middle | VerticalAlign::Bottom
+            ) {
+                continue;
+            }
+            let box_height = heights[slot.top..slot.top + slot.rows].iter().sum::<f64>()
+                + (slot.rows.saturating_sub(1)) as f64 * vspacing;
+            let content = laid[at].as_ref().map_or(0.0, |sub| sub.height);
+            let free = (box_height - content).max(0.0);
+            lead[at] = match alignment {
+                VerticalAlign::Bottom => free,
+                VerticalAlign::Middle => free / 2.0,
+                _ => 0.0,
+            };
+        }
+
         let mut tops = Vec::with_capacity(grid.rows + 1);
         let mut y = 0.0;
         for height in &heights {
@@ -1806,6 +1900,7 @@ impl<M: Metrics> Builder<'_, M> {
                 &grid,
                 &rows_of,
                 &mut laid,
+                &lead,
                 &heights,
                 &tops,
                 &lefts,
@@ -2369,6 +2464,7 @@ impl<M: Metrics> Builder<'_, M> {
         grid: &Grid,
         rows_of: &[(usize, usize)],
         laid: &mut [Option<Sublayout>],
+        lead: &[f64],
         heights: &[f64],
         tops: &[f64],
         lefts: &[f64],
@@ -2439,7 +2535,10 @@ impl<M: Metrics> Builder<'_, M> {
                     floats,
                     height: _,
                 } = sub;
-                translate(&mut inner, &mut records, cell_x, cell_top);
+                // §17.5.3: the content moves inside the cell and the cell's
+                // own box does not. The spacer below is the box, which is why
+                // it is pushed at `cell_top` and this at `cell_top + lead`.
+                translate(&mut inner, &mut records, cell_x, cell_top + lead[at]);
                 // §17.5.3: a cell's box is its row's height, whatever its
                 // content came to. The spacer is what says so; without it a
                 // one-line cell in a five-line row is painted one line tall,
@@ -2469,7 +2568,12 @@ impl<M: Metrics> Builder<'_, M> {
                 // row it is in and there is nothing for the page cutter to
                 // carry forward.
                 for mut float in floats {
-                    translate(&mut float.items, &mut float.blocks, cell_x, cell_top);
+                    translate(
+                        &mut float.items,
+                        &mut float.blocks,
+                        cell_x,
+                        cell_top + lead[at],
+                    );
                     let float_base = items.len();
                     for mut record in float.blocks {
                         if let Some(first) = record.first {
@@ -2943,6 +3047,13 @@ impl<M: Metrics> Builder<'_, M> {
         let mut below = strut.descent + strut_leading;
 
         let mut runs: Vec<TextRun> = Vec::new();
+        // §10.8.1's alignment, kept beside each run rather than applied as it
+        // is met: **two of its values are defined by the line box** and the
+        // line box does not exist until every other value has had its say. So
+        // the shift a run knows now goes into `TextRun::y`, which [`LineBox`]
+        // documents as relative to the baseline, and the two that do not are
+        // decided below.
+        let mut aligned: Vec<(VerticalAlign, f64, f64)> = Vec::new();
         let mut width = 0.0;
         for (span_start, span_end, index) in spans {
             let lo = (*span_start).max(start);
@@ -2954,15 +3065,55 @@ impl<M: Metrics> Builder<'_, M> {
             let font = style.font();
             let vertical = self.metrics.vertical(&font);
             let leading = (style.line_height - vertical.height()) / 2.0;
-            above = above.max(vertical.ascent + leading);
-            below = below.max(vertical.descent + leading);
+            // The inline box's own extent either side of **its** baseline,
+            // which is the content area plus §10.8.1's half-leading and is
+            // what every one of the eight values is stated against.
+            let over = vertical.ascent + leading;
+            let under = vertical.descent + leading;
+            // Positive is **down**, because that is the direction this module's
+            // `y` runs. §10.8.1 states its lengths the other way up -- a
+            // positive `vertical-align` length *raises* the box -- so the one
+            // place the sign is flipped is the arm that reads the length.
+            let shift = match style.vertical_align {
+                VerticalAlign::Baseline => 0.0,
+                VerticalAlign::Sub => SUB_DROP * container.font_size,
+                VerticalAlign::Super => -SUPER_RISE * container.font_size,
+                // *"the top of the box with the top of the parent's content
+                // area"*. The parent here is the block container, because this
+                // build flattens an inline subtree into spans rather than
+                // nesting boxes -- so the parent's content area is the strut's,
+                // which is exactly what §10.8.1's strut is.
+                VerticalAlign::TextTop => vertical.ascent - strut.ascent,
+                VerticalAlign::TextBottom => strut.descent - vertical.descent,
+                // *"the vertical midpoint of the box with the baseline of the
+                // parent box plus half the x-height of the parent"*.
+                VerticalAlign::Middle => {
+                    -(X_HEIGHT * container.font_size) / 2.0
+                        - (vertical.descent - vertical.ascent) / 2.0
+                }
+                VerticalAlign::Length(LengthPercentage::Px(px)) => -px,
+                // A percentage is of this element's own `line-height` and
+                // `style::consume` has already resolved it to one, so this arm
+                // is unreachable rather than unhandled.
+                VerticalAlign::Length(LengthPercentage::Percent(_)) => 0.0,
+                // Decided below, against a line box that does not exist yet.
+                VerticalAlign::Top | VerticalAlign::Bottom => 0.0,
+            };
+            if !matches!(
+                style.vertical_align,
+                VerticalAlign::Top | VerticalAlign::Bottom
+            ) {
+                above = above.max(over - shift);
+                below = below.max(under + shift);
+            }
+            aligned.push((style.vertical_align, over, under));
             let text = content[lo..hi].to_string();
             let advance = self.advance_of(&text, &font)
                 + style.letter_spacing * text.chars().count() as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {
                 x: 0.0,
-                y: 0.0,
+                y: shift,
                 width: advance,
                 text,
                 font_size: style.font_size,
@@ -2980,6 +3131,27 @@ impl<M: Metrics> Builder<'_, M> {
                 order: pieces[*index].order,
             });
             width += advance;
+        }
+
+        // §10.8.1's `top` and `bottom` are aligned to the **line box**, which
+        // is why they could not be decided above. A box taller than the line it
+        // is aligned to grows it -- downward for `top`, upward for `bottom` --
+        // and one pass over each is where §10.8.1 stops being an algorithm and
+        // starts being a description. Growing in the other direction is what
+        // keeps the aligned edge where it was put.
+        for (align, over, under) in &aligned {
+            match align {
+                VerticalAlign::Top => below = below.max(over + under - above),
+                VerticalAlign::Bottom => above = above.max(over + under - below),
+                _ => {}
+            }
+        }
+        for (run, (align, over, under)) in runs.iter_mut().zip(&aligned) {
+            match align {
+                VerticalAlign::Top => run.y = over - above,
+                VerticalAlign::Bottom => run.y = below - under,
+                _ => {}
+            }
         }
 
         // §6's alignment. Justification distributes the slack over the spaces
