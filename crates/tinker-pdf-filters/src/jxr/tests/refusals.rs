@@ -255,13 +255,14 @@ fn a_reserved_overlap_mode_refuses_rather_than_choosing_one() {
 }
 
 #[test]
-fn the_coefficient_layers_are_refused_by_name_until_they_land() {
-    // The milestone that decodes 8.7 deletes this test along with the
-    // variant. Until then a build that reads headers and nothing else says
-    // so, rather than returning a blank raster that reads as a successful
-    // decode of a blank image.
+fn sample_reconstruction_is_refused_by_name_until_it_lands() {
+    // The milestone that lands 9.9 deletes this test along with the variant.
+    // Until then a build that decodes every transform coefficient and cannot
+    // turn them into samples says so, rather than returning the coefficients
+    // as a picture — which they would look like, because 9.9's inverse
+    // transform is a smoothing operator over a lapped basis.
     assert_eq!(
         refusal_of(Codestream::default(), 0x0D),
-        JxrRefusal::CoefficientLayers
+        JxrRefusal::SampleReconstruction
     );
 }

@@ -758,34 +758,50 @@ impl<M: Metrics> Builder<'_, M> {
         // `border-box` measures it as content plus padding plus border. The
         // difference is invisible on a box with neither, which is why a fixture
         // for it must have both.
+        //
+        // **`css-ui-3` §5.1 puts `min-width` and `max-width` inside the same
+        // sentence**: `border-box` measures *"the width and height ... and the
+        // respective min/max properties"* from the border box, so the
+        // conversion is one closure over all three rather than a special case
+        // for `width`. A build that converted `width` and not `max-width` gets
+        // every `box-sizing: border-box; max-width: 40em` figure wrong by the
+        // padding and the page looks entirely reasonable.
         let extra = padding.left + padding.right + border.left + border.right;
-        let (content_width, mut left) = match style.width {
-            Size::Auto => {
-                let available = containing - margin_left - margin_right - extra;
-                (available.max(0.0), x + margin_left)
+        let to_content = |specified: f64| {
+            match style.box_sizing {
+                tinker_pdf_css::property::BoxSizing::ContentBox => specified,
+                tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
             }
-            Size::Length(length) => {
-                let specified = match length {
-                    LengthPercentage::Px(px) => px,
-                    LengthPercentage::Percent(percent) => containing * percent / 100.0,
-                };
-                let content = match style.box_sizing {
-                    tinker_pdf_css::property::BoxSizing::ContentBox => specified,
-                    tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
-                }
-                .max(0.0);
-                // §10.3.3: with a specified width, two `auto` margins centre
-                // the box and the leftover is otherwise put on the right.
-                let outer = content + extra;
-                let both_auto = style.margin.left == MarginValue::Auto
-                    && style.margin.right == MarginValue::Auto;
-                let left = if both_auto {
-                    x + ((containing - outer) / 2.0).max(0.0)
-                } else {
-                    x + margin_left
-                };
-                (content, left)
-            }
+            .max(0.0)
+        };
+        let auto_width = (containing - margin_left - margin_right - extra).max(0.0);
+        let stated_width = match style.width {
+            Size::Auto => None,
+            Size::Length(length) => Some(to_content(resolve_length(length, containing))),
+        };
+        // §10.4: the tentative used width comes from §10.3, and then the whole
+        // of §10.3 is *"applied again"* with `max-width` as the width, and
+        // again with `min-width`. `style::clamp_size` is that order, which is
+        // not `f64::clamp`: a `min-width` larger than the `max-width` wins.
+        let tentative = stated_width.unwrap_or(auto_width);
+        let content_width = crate::style::clamp_size(
+            tentative,
+            crate::style::min_length(style.min_width, Some(containing)).map(to_content),
+            crate::style::max_length(style.max_width, Some(containing)).map(to_content),
+        );
+        // §10.3.3: with a used width that is not `auto`, two `auto` margins
+        // centre the box and the leftover is otherwise put on the right. An
+        // `auto` width that §10.4's clamp has narrowed reaches this too, and
+        // that is §10.4's own instruction rather than an extra rule: the second
+        // pass runs *"as if `width` were the clamped value"*, and by then it is
+        // not `auto`.
+        let both_auto =
+            style.margin.left == MarginValue::Auto && style.margin.right == MarginValue::Auto;
+        let definite = stated_width.is_some() || content_width < tentative;
+        let mut left = if both_auto && definite {
+            x + ((containing - (content_width + extra)) / 2.0).max(0.0)
+        } else {
+            x + margin_left
         };
         if content_width + extra > containing + 0.001 {
             self.warn(Warning::ContentOverflowedPage);
@@ -874,18 +890,38 @@ impl<M: Metrics> Builder<'_, M> {
         // A specified height is honoured by padding the flow out to it; a
         // content taller than the height overflows, which CSS 2.2 §10.6.3's
         // `overflow: visible` initial value asks for.
-        if let Size::Length(length) = style.height {
-            let wanted = match length {
-                LengthPercentage::Px(px) => px,
-                // §10.5: a percentage height against an `auto` containing
-                // block behaves as `auto`, which is why this is not resolved
-                // against the page.
-                LengthPercentage::Percent(_) => content_height,
-            };
-            if wanted > content_height {
-                self.commit_margin();
-                self.emit(wanted - content_height, ItemKind::Edge, true);
-            }
+        //
+        // §10.7 then clamps that tentative height, and the two halves of the
+        // clamp are not equally implementable here. `min-height` is padding and
+        // is exactly what `height` already does. `max-height` can only make a
+        // box **shorter**, and this module has already emitted the items its
+        // content came to -- the flow is one column whose `y` never goes
+        // backwards, so there is no negative edge to emit. So it clamps the
+        // padding, which is the whole of its effect on a box whose content
+        // fits, and says `MaxHeightAsAuto` by name on the box whose content
+        // does not. A build that stayed silent would draw a `max-height: 4em`
+        // figure at whatever height its caption came to and nothing anywhere
+        // would say so.
+        //
+        // The percentages resolve against `None` for §10.5's reason: this box's
+        // containing block has an `auto` height at this point in the pass, so a
+        // percentage `min-height` or `max-height` behaves as `auto` and `none`.
+        let stated_height = match style.height {
+            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+        };
+        let min_height = crate::style::min_length(style.min_height, None);
+        let max_height = crate::style::max_length(style.max_height, None);
+        let wanted = crate::style::clamp_size(
+            stated_height.unwrap_or(content_height),
+            min_height,
+            max_height,
+        );
+        if wanted > content_height {
+            self.commit_margin();
+            self.emit(wanted - content_height, ItemKind::Edge, true);
+        } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
+            self.warn(Warning::MaxHeightAsAuto);
         }
 
         let bottom_edge = border.bottom + padding.bottom;
@@ -1897,11 +1933,28 @@ impl<M: Metrics> Builder<'_, M> {
             };
             // `box-sizing: border-box` measures `width` — and `flex-basis`,
             // which §7.2.3 sizes *"as for `width`"* — from the border box, and
-            // every size in §9 is a content one.
+            // every size in §9 is a content one. `css-ui-3` §5.1 puts the
+            // min/max properties in the same sentence as `width`, so the two
+            // conversions below are the same closure at two insets rather than
+            // a special case for the size property.
             let to_content = |value: f64| match consumed.box_sizing {
                 BoxSizing::ContentBox => value.max(0.0),
                 BoxSizing::BorderBox => (value - inset_main).max(0.0),
             };
+            // The two main-axis sizing properties, which are **not** the same
+            // pair in the two directions: `min-width` is a main minimum in a
+            // row container and a cross one in a column container. A build that
+            // read `min_width` on the main axis of both honours half the books
+            // and silently ignores the other half.
+            let (min_main_size, max_main_size) = if row {
+                (consumed.min_width, consumed.max_width)
+            } else {
+                (consumed.min_height, consumed.max_height)
+            };
+            let stated_min_main =
+                crate::style::min_length(min_main_size, container_main_definite).map(to_content);
+            let stated_max_main =
+                crate::style::max_length(max_main_size, container_main_definite).map(to_content);
             let specified_main = definite_main(main_property).map(to_content);
             // §9.2 step 3: `flex-basis` first, and the main size property only
             // where it is `auto`. The two are read in that order rather than
@@ -1938,23 +1991,43 @@ impl<M: Metrics> Builder<'_, M> {
                     == AlignItems::Stretch
                     && matches!(cross_property, Size::Auto)
                     && !wrap.wraps();
+                // §9.4 step 11's stretch and `css-sizing-3`'s fit-content are
+                // both *"clamped by the used min and max cross sizes"*, and
+                // **the clamp is not written here**, which is a finding and not
+                // an omission. Every flex item is laid out again through
+                // [`Builder::block`], which applies §10.4 to the width it is
+                // given; a column container's cross size is always definite, so
+                // the line's own cross extent is the container's either way;
+                // and the two content measurements above go through the same
+                // block path and come back clamped. A clamp added here was
+                // reverted when its counted injection fired **zero** — there is
+                // no fixture that can tell the two builds apart, which is the
+                // definition of code that is not doing anything.
                 let cross = if stretched { available_cross } else { fit };
                 let height = self.trial_height(inner, cross, depth + 1, avoid)?;
                 (height, height, cross)
             };
             let base = basis.unwrap_or(max_main);
-            // §4.5's automatic minimum main size, *"further clamped by"* the
-            // item's own specified size where it has one — without which a
-            // `flex: 0 0 40px` item holding one long word could not be made
-            // narrower than the word, which is not what the declaration says.
-            let min = match specified_main {
-                Some(specified) => min_main.min(specified),
-                None => min_main,
+            // §4.5 applies to `min-width: auto` and to nothing else, so a
+            // stated minimum **replaces** the automatic one rather than losing
+            // to it. Where the value is `auto`: §4.5's content-based minimum,
+            // *"further clamped by"* the item's own specified size where it has
+            // one — without which a `flex: 0 0 40px` item holding one long word
+            // could not be made narrower than the word, which is not what the
+            // declaration says.
+            let min = match stated_min_main {
+                Some(stated) => stated,
+                None => match specified_main {
+                    Some(specified) => min_main.min(specified),
+                    None => min_main,
+                },
             };
             // §9.2 step 4: the hypothetical main size is the base size clamped
-            // by the used minimum, which is what makes `flex: 1` on three items
-            // of different content lengths still wrap where they must.
-            let hypothetical = base.max(min);
+            // by the used minimum **and maximum**, which is what makes `flex: 1`
+            // on three items of different content lengths still wrap where they
+            // must — and what stops a `max-width` item claiming a line's worth
+            // of space at §9.3 step 5 and then shrinking away from it.
+            let hypothetical = crate::style::clamp_size(base, Some(min), stated_max_main);
 
             items.push(FlexItem {
                 sizes: flex::Item {
@@ -1963,6 +2036,7 @@ impl<M: Metrics> Builder<'_, M> {
                     base,
                     hypothetical,
                     min,
+                    max: stated_max_main.unwrap_or(f64::INFINITY),
                     extra: margin_main + inset_main,
                 },
                 order: consumed.order,

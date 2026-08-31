@@ -345,10 +345,11 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  table-row and flex-line fragmentation (staged, not built); the pinned
-  float reading-order defect; multi-column; non-static `position`;
-  `min`/`max` sizing; `vertical-align`; SVG content documents;
-  pseudo-elements (parsed, no box generated).
+  the pinned float reading-order defect; multi-column; non-static
+  `position`; `vertical-align`; SVG content documents; pseudo-elements
+  (parsed, no box generated). `min`/`max` sizing is built, less one half
+  of §10.7: a `max-height` shorter than its content is named
+  (`MaxHeightAsAuto`) rather than obeyed.
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).

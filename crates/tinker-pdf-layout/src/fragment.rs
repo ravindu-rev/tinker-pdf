@@ -42,7 +42,7 @@
 //! first is blank. With it, the break happens and [`Warning::BreakForcedPastTheRules`]
 //! says where the rules had to be given up.
 
-use crate::flow::{BlockRecord, Flow, Item, ItemKind};
+use crate::flow::{Abreast, BlockRecord, Flow, Item, ItemKind};
 use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, Warning};
 
 /// Slack for a comparison against a page height, in points.
@@ -86,6 +86,126 @@ struct FloatCursor {
     started: bool,
 }
 
+/// The part of one band a page draws, in band-local coordinates.
+///
+/// A band is **one** flow item, so the page cutter's index cursor has no way to
+/// say "half of it". This is the other half of that sentence, and it is the
+/// idea [`FloatCursor`] already carries for a float: how much of one thing is
+/// drawn, kept across pages. It is a coordinate and not an index because a
+/// band's items are its cells' concatenated -- monotone within a cell and not
+/// across the band -- so "one past the last drawn" has no single index to be.
+#[derive(Clone, Copy, Debug)]
+struct Slice {
+    /// Band-local `y` above which everything is already on an earlier page.
+    from: f64,
+    /// And at or below which everything is on a later one.
+    to: f64,
+}
+
+impl Slice {
+    /// A band drawn whole, which is every band that fits a page.
+    ///
+    /// Unbounded on **both** sides rather than starting at zero, so a band
+    /// whose first item sits above its own origin is drawn exactly as it was
+    /// before there was a cut to express. A neutral value that quietly dropped
+    /// such an item would be a slicer that lost content on the books it was
+    /// not slicing.
+    const WHOLE: Slice = Slice {
+        from: f64::NEG_INFINITY,
+        to: f64::INFINITY,
+    };
+
+    /// Whether an atomic item belongs to this slice, **by its top edge**.
+    ///
+    /// The top and not the middle or the bottom, because [`slice`] takes the
+    /// cut where nothing atomic straddles it: every such item is wholly inside
+    /// the slice its top is in. The one exception is an item taller than a
+    /// whole page, which no cut avoids -- it is drawn on the page it starts on,
+    /// overflows it, and is what [`Warning::TableRowTallerThanPage`] and
+    /// [`Warning::FlexLineTallerThanPage`] now name.
+    fn holds(self, y: f64) -> bool {
+        y + EPSILON >= self.from && y + EPSILON < self.to
+    }
+}
+
+/// The one item on a page a half-open **index** range cannot describe: a band
+/// cut across pages, and how much of it this page draws.
+#[derive(Clone, Copy, Debug)]
+struct Cutting {
+    /// Its index into the flow.
+    at: usize,
+    /// The part of it this page draws.
+    slice: Slice,
+}
+
+impl Cutting {
+    /// A page cut only between items, which is nearly all of them.
+    const NONE: Cutting = Cutting {
+        at: usize::MAX,
+        slice: Slice::WHOLE,
+    };
+
+    /// What of the item at this index the page draws.
+    fn of(self, index: usize) -> Slice {
+        if index == self.at {
+            self.slice
+        } else {
+            Slice::WHOLE
+        }
+    }
+}
+
+/// Where this page's slice of a band ends, in band-local coordinates.
+///
+/// `css-break-3` §3.1's class-3 break -- a break **inside** a box, which CSS
+/// 2.2 §13.3.3 gives no position for at all. It is here because the
+/// alternative, and what this build did until now, is a band drawn over the
+/// bottom edge of the page with a warning saying so.
+///
+/// **A line box is atomic and so is a nested band.** The cut is taken at the
+/// top of the first thing that will not fit, so nothing that cannot be halved
+/// is halved. A border edge and a row's own spacer *are* divided, because a
+/// length can be and a box of text cannot -- and the decorations they anchor
+/// are clipped to the cut by [`draw_band`].
+///
+/// **The `rowspan` constraint is honoured one level up and not here.** A band
+/// is already the maximal run of grid rows a spanning cell joins, so any cut
+/// inside one crosses a `rowspan` by construction. That is the reason a band
+/// is cut only when it begins a page and overflows it anyway: an ordinary
+/// table break goes between bands, where [`permitted`] puts it, and this
+/// function is reached only when there is no page left to move the band to.
+///
+/// Returns the cut, and whether the page had to be overflowed to make it.
+fn slice(band: &Abreast, from: f64, available: f64) -> (f64, bool) {
+    let limit = from + available;
+    let mut cut = limit;
+    let mut forced = false;
+    for item in &band.items {
+        match item.kind {
+            ItemKind::Line(_) | ItemKind::Rows(_) | ItemKind::FlexLine(_) => {}
+            ItemKind::Margin(_) | ItemKind::Edge => continue,
+        }
+        if item.y + item.height <= limit + EPSILON {
+            continue;
+        }
+        if item.y <= from + EPSILON {
+            // It begins where this page begins and does not end on it. No cut
+            // avoids it, so it is drawn here and overflows.
+            forced = true;
+            continue;
+        }
+        cut = cut.min(item.y);
+    }
+    if cut <= from + EPSILON {
+        // Every candidate cut is the top of the page, which is a page with
+        // nothing on it and a loop with no end. Ruling 2: the page overflows
+        // and says so, rather than the book failing.
+        forced = true;
+        cut = limit;
+    }
+    (cut, forced)
+}
+
 /// Cuts a flow into pages.
 pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result<Layout, Refusal> {
     let mut warnings = flow.warnings.clone();
@@ -99,30 +219,16 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
         return Ok(Layout { pages, warnings });
     }
 
-    // **A band taller than a page has no break position inside it**, so it is
-    // drawn where it is and the fact is said out loud. Slicing a band -- every
-    // cell cut at the same height and continued on the next page -- is
-    // `css-break-3`'s and is the staged half of milestone 11; see
-    // [`Warning::TableRowTallerThanPage`] and gap 31's row, amended in place.
-    //
-    // **Two sentences and not one.** A flex line is the same shape and the same
-    // staged half, and a build that raised the table's warning for both would
-    // tell a host with no table in its book that a table row overflowed.
-    for item in &flow.items {
-        if item.height <= options.height + EPSILON {
-            continue;
-        }
-        match item.kind {
-            ItemKind::Rows(_) => warn(&mut warnings, Warning::TableRowTallerThanPage),
-            ItemKind::FlexLine(_) => warn(&mut warnings, Warning::FlexLineTallerThanPage),
-            ItemKind::Line(_) | ItemKind::Margin(_) | ItemKind::Edge => {}
-        }
-    }
-
     let mut cursor = 0usize;
+    // How much of the band at `cursor` is already on an earlier page. Zero
+    // whenever `cursor` names anything else, which is every item but a band --
+    // and zero again the moment `cursor` moves, which is what keeps one `f64`
+    // enough for a whole book: only the item the cutter is standing on can be
+    // half drawn.
+    let mut drawn = 0.0f64;
     let mut after = 0.0;
     while cursor < flow.items.len() {
-        let top = flow.items[cursor].y;
+        let top = flow.items[cursor].y + drawn;
         after = top + options.height;
         let limit = top + options.height;
         let mut forced_at = None;
@@ -142,6 +248,81 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             }
         }
 
+        // **Pushed, unless pushing it would not help.** This is the rule
+        // [`beside`] already states for a float and it is `css-break-3` §4.3's:
+        // a box that does not fit the space left goes whole to the next
+        // fragmentainer, and a box that would not fit an empty one either is
+        // broken where it stands rather than pushed for ever. For every other
+        // item `choose` is the push, because the break it finds is before the
+        // item. For a band it is this arm, because there is no break position
+        // *inside* one for `choose` to find.
+        //
+        // Getting this wrong is a blank page, not a wrong one, which is why it
+        // is worth the sentence: a band taller than a page that is pushed
+        // anyway leaves the page it came from empty and then overflows the
+        // next one.
+        let overflowing = overflow_at.and_then(|at| match &flow.items[at].kind {
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) => Some((at, &**band)),
+            ItemKind::Line(_) | ItemKind::Margin(_) | ItemKind::Edge => None,
+        });
+        if let Some((at, band)) = overflowing {
+            let from = if at == cursor { drawn } else { 0.0 };
+            let available = limit - flow.items[at].y - from;
+            let (end, forced) = slice(band, from, available);
+            // Cut it here if it begins this page -- there is nowhere left to
+            // move it to -- or if a page of its own would not hold it either
+            // and cutting it here costs no overflow. A cut that would overflow
+            // is worse than a push, because the push gets a whole page to try
+            // again with.
+            let hopeless = flow.items[at].height - from > options.height + EPSILON;
+            if available > EPSILON && (at == cursor || (hopeless && !forced)) {
+                if forced {
+                    // **Narrowed, not gone.** What overflows a page now is one
+                    // box *inside* the band that is itself taller than a page,
+                    // and no longer the band. That is why both warnings stay,
+                    // and why they are still two: a host with no table in its
+                    // book must not be told that a table row overflowed.
+                    warn(
+                        &mut warnings,
+                        match &flow.items[at].kind {
+                            ItemKind::FlexLine(_) => Warning::FlexLineTallerThanPage,
+                            _ => Warning::TableRowTallerThanPage,
+                        },
+                    );
+                }
+                let mut built = page(
+                    &flow,
+                    cursor,
+                    at + 1,
+                    top,
+                    Cutting {
+                        at,
+                        slice: Slice { from, to: end },
+                    },
+                );
+                beside(
+                    &flow,
+                    &mut floats,
+                    &mut built,
+                    top,
+                    options.height,
+                    &mut warnings,
+                );
+                order(&mut built);
+                pages.push(built);
+                if pages.len() > limits.max_pages {
+                    return Err(Refusal::TooManyPages { pages: pages.len() });
+                }
+                // `slice` never returns a cut that made no progress against a
+                // page with room on it; this is the assertion that says so
+                // rather than the hope that says so.
+                assert!(end > from, "a band slice made no progress");
+                cursor = at;
+                drawn = end;
+                continue;
+            }
+        }
+
         let cut = match (forced_at, overflow_at) {
             (Some(at), _) => Cut {
                 end: at,
@@ -154,7 +335,21 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             (None, Some(at)) => choose(&flow, cursor, at, &mut warnings),
         };
 
-        let mut built = page(&flow, cursor, cut.end, top);
+        // The band at `cursor`, if there is one being cut, finishes on this
+        // page: `drawn` is where its remainder starts and there is nothing
+        // below it left to clip.
+        let rest = if drawn > 0.0 {
+            Cutting {
+                at: cursor,
+                slice: Slice {
+                    from: drawn,
+                    to: f64::INFINITY,
+                },
+            }
+        } else {
+            Cutting::NONE
+        };
+        let mut built = page(&flow, cursor, cut.end, top, rest);
         beside(
             &flow,
             &mut floats,
@@ -173,6 +368,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
         // hope that says so.
         assert!(cut.next > cursor, "a page break made no progress");
         cursor = cut.next;
+        drawn = 0.0;
     }
 
     // **A float can outlive the column it was written in**, and this is the
@@ -275,7 +471,15 @@ fn beside(
             }
             cursor.next += 1;
         }
-        emit(&float.items, &float.blocks, start, cursor.next, offset, out);
+        emit(
+            &float.items,
+            &float.blocks,
+            start,
+            cursor.next,
+            offset,
+            Cutting::NONE,
+            out,
+        );
     }
 }
 
@@ -348,8 +552,15 @@ fn permitted(flow: &Flow, index: usize, tier: Tier) -> Option<Cut> {
         // answer for a different reason: **a break inside it would cut a cell
         // in half across a `rowspan`**, and §13.3.3 gives no position there
         // either. A table breaks between its bands, which are the `Margin`
-        // items §17.6.1's vertical spacing emits, and a band that is the whole
-        // page's worth is drawn where it is.
+        // items §17.6.1's vertical spacing emits.
+        //
+        // **This is still the answer now that a band can be cut**, and it is
+        // what honours the `rowspan`: a band is the maximal run of grid rows a
+        // spanning cell joins, so no cut inside one can avoid crossing one.
+        // `slice` is reached only when the band begins a page and overflows it
+        // anyway -- when the choice is a crossed `rowspan` or a page drawn
+        // over its own bottom edge -- and never when moving the band whole to
+        // the next page would do.
         ItemKind::Edge | ItemKind::Rows(_) | ItemKind::FlexLine(_) => (tier == Tier::WithoutAc)
             .then_some(Cut {
                 end: index,
@@ -359,9 +570,20 @@ fn permitted(flow: &Flow, index: usize, tier: Tier) -> Option<Cut> {
 }
 
 /// Builds one page out of a half-open range of flow items.
-fn page(flow: &Flow, start: usize, end: usize, top: f64) -> Page {
+///
+/// `cutting` names the one band this page draws only part of, if there is
+/// one, which is the only item a half-open **index** range cannot describe.
+fn page(flow: &Flow, start: usize, end: usize, top: f64, cutting: Cutting) -> Page {
     let mut out = Page::default();
-    emit(&flow.items, &flow.blocks, start, end, -top, &mut out);
+    emit(
+        &flow.items,
+        &flow.blocks,
+        start,
+        end,
+        -top,
+        cutting,
+        &mut out,
+    );
     out
 }
 
@@ -376,6 +598,7 @@ fn emit(
     start: usize,
     end: usize,
     offset: f64,
+    cutting: Cutting,
     out: &mut Page,
 ) {
     // Decorations first and in tree order, so an ancestor's background is
@@ -384,16 +607,26 @@ fn emit(
         if !block.painted {
             continue;
         }
-        let Some(first) = block.first else {
+        let Some(head) = block.first else {
             continue;
         };
-        let from = first.max(start);
+        let from = head.max(start);
         let to = block.last.min(end);
         if from >= to {
             continue;
         }
-        let box_top = items[from].y;
-        let box_bottom = items[to - 1].y + items[to - 1].height;
+        // A decoration anchored on a band this page only half draws is only
+        // half painted: the rest of it belongs to the page the rest of the
+        // band is on. `Slice::WHOLE`'s two infinities are what make this a
+        // no-op on every page that is cut between items rather than inside
+        // one.
+        let head_y = items[from].y;
+        let box_top = head_y.max(head_y + cutting.of(from).from);
+        let tail = &items[to - 1];
+        let box_bottom = (tail.y + tail.height).min(tail.y + cutting.of(to - 1).to);
+        if box_bottom < box_top {
+            continue;
+        }
         out.boxes.push(BoxFragment {
             x: block.x,
             y: box_top + offset,
@@ -405,7 +638,7 @@ fn emit(
             border_color: block.border_color,
         });
     }
-    for item in &items[start..end] {
+    for (at, item) in items[start..end].iter().enumerate() {
         match &item.kind {
             ItemKind::Line(line) => {
                 let baseline = item.y + offset + line.baseline;
@@ -415,18 +648,76 @@ fn emit(
                     out.runs.push(run);
                 }
             }
-            // A band is a flow of its own at the band's origin, which is the
-            // same shape a float is and is drawn by the same function. One
-            // function and not two, so a nested table's backgrounds cannot
-            // quietly stop being drawn.
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => emit(
-                &band.items,
-                &band.blocks,
-                0,
-                band.items.len(),
-                item.y + offset,
-                out,
-            ),
+            // A band is a flow of its own at the band's origin, and it is cut
+            // by height where this one is cut by index -- so it has its own
+            // function rather than this one recursing. One function still, and
+            // the same reason: every band in the book goes through
+            // [`draw_band`], nested or not and cut or not, so a nested table's
+            // backgrounds cannot quietly stop being drawn and a cut band's
+            // cannot quietly stop being clipped.
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+                draw_band(band, item.y + offset, cutting.of(start + at), out);
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+}
+
+/// Draws one band, or the part of one that belongs to this page.
+///
+/// `offset` puts the band's local origin in the page's coordinates. A band
+/// that began on an earlier page gets a **negative** one, which is what lands
+/// the item at band-local `window.from` on this page's top edge.
+fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
+    for block in &band.blocks {
+        if !block.painted {
+            continue;
+        }
+        let Some(head) = block.first else {
+            continue;
+        };
+        if head >= block.last || block.last > band.items.len() {
+            continue;
+        }
+        let box_top = band.items[head].y.max(window.from);
+        let tail = &band.items[block.last - 1];
+        let box_bottom = (tail.y + tail.height).min(window.to);
+        if box_bottom < box_top {
+            continue;
+        }
+        out.boxes.push(BoxFragment {
+            x: block.x,
+            y: box_top + offset,
+            width: block.width,
+            height: (box_bottom - box_top).max(0.0),
+            background: block.background,
+            border_width: block.border_width,
+            border_style: block.border_style,
+            border_color: block.border_color,
+        });
+    }
+    for item in &band.items {
+        if !window.holds(item.y) {
+            continue;
+        }
+        match &item.kind {
+            ItemKind::Line(line) => {
+                let baseline = item.y + offset + line.baseline;
+                for run in &line.runs {
+                    let mut run = run.clone();
+                    run.y = baseline;
+                    out.runs.push(run);
+                }
+            }
+            // A band inside a band is atomic here for a line box's reason:
+            // this cut is one height across every cell of the outer band, and
+            // the inner one has cells of its own that the same height would
+            // not cut in the same places. It is drawn whole on the page its
+            // top is on -- and if that overflows, [`slice`] has already said
+            // so by name.
+            ItemKind::Rows(inner) | ItemKind::FlexLine(inner) => {
+                draw_band(inner, item.y + offset, Slice::WHOLE, out);
+            }
             ItemKind::Margin(_) | ItemKind::Edge => {}
         }
     }
