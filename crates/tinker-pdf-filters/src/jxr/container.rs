@@ -32,6 +32,8 @@ mod tag {
     pub(super) const SPATIAL_XFRM_PRIMARY: u16 = 0xBC02;
     pub(super) const IMAGE_WIDTH: u16 = 0xBC80;
     pub(super) const IMAGE_HEIGHT: u16 = 0xBC81;
+    pub(super) const WIDTH_RESOLUTION: u16 = 0xBC82;
+    pub(super) const HEIGHT_RESOLUTION: u16 = 0xBC83;
     pub(super) const IMAGE_OFFSET: u16 = 0xBCC0;
     pub(super) const IMAGE_BYTE_COUNT: u16 = 0xBCC1;
     pub(super) const ALPHA_OFFSET: u16 = 0xBCC2;
@@ -197,7 +199,10 @@ pub(crate) fn is_table_a6_guid(guid: &[u8; 16]) -> bool {
 }
 
 /// What the container said, before a single codestream bit is read.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// Not `Eq`: `resolution` is a pair of floats, and a resolution read from two
+// IEEE-754 fields has no total equality to offer. `PartialEq` is what the
+// tests compare with and is all this ever needed.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Container {
     /// Byte range of the primary `CODED_IMAGE( )`, already checked to lie
     /// inside the file.
@@ -216,10 +221,17 @@ pub(crate) struct Container {
     /// 8.3.8 calls it a *preferred* transformation subordinate to the
     /// application, and this crate has no application.
     pub(crate) spatial_transform: u8,
-    /// Present when a *separate* alpha image plane is carried (A.3.2). This
-    /// build refuses it by name; the range is carried so the refusal can say
-    /// how large the thing it refused was.
+    /// Present when a *separate* alpha image plane is carried (A.3.2): a
+    /// second, complete `CODED_IMAGE( )` that decodes to the alpha channel.
     pub(crate) alpha: Option<core::ops::Range<usize>>,
+    /// 0xBC82 and 0xBC83, in pixels per inch.
+    ///
+    /// `None` when the file states neither, or states one without the other,
+    /// or states something that is not a positive finite number. XPS 13.4.1
+    /// makes 96 the default and that default is the *caller's* to apply —
+    /// what an absent resolution means is a question about the document, not
+    /// about the codec.
+    pub(crate) resolution: Option<(f32, f32)>,
     pub(crate) warnings: Vec<JxrWarning>,
 }
 
@@ -272,6 +284,26 @@ impl Entry {
 
     /// A single unsigned integer from a BYTE, USHORT or ULONG entry — the
     /// three types Table A.4 allows for every offset and dimension tag.
+    /// Table A.4's `WIDTH_RESOLUTION` and `HEIGHT_RESOLUTION` are the only
+    /// FLOAT entries this decoder reads, and they are metadata rather than
+    /// samples: a resolution says how large to *draw* the picture, never what
+    /// is in it. So this is the one float in the whole `jxr` directory, it is
+    /// a reinterpretation of four bytes rather than any arithmetic, and
+    /// ruling 4's ban on floats on the pixel path is untouched by it.
+    ///
+    /// `None` for anything that is not a single finite positive float —
+    /// a zero, a negative, a NaN or an infinity is not a resolution, and the
+    /// caller's default is better than a division by one of them.
+    fn float_scalar(&self, file: &[u8]) -> Option<f32> {
+        if self.count != 1 || self.element_type != 11 {
+            return None;
+        }
+        let payload = self.payload(file)?;
+        let [a, b, c, d] = payload else { return None };
+        let value = f32::from_bits(u32::from_le_bytes([*a, *b, *c, *d]));
+        (value.is_finite() && value > 0.0).then_some(value)
+    }
+
     fn scalar(&self, file: &[u8]) -> Option<u32> {
         if self.count != 1 {
             return None;
@@ -425,6 +457,17 @@ pub(crate) fn read(file: &[u8]) -> Result<Container, JxrError> {
         _ => None,
     };
 
+    // Both or neither: a file that states one axis has not stated a
+    // resolution, and pairing a stated axis with an assumed one draws the
+    // picture at the wrong aspect ratio rather than the wrong size.
+    let resolution = match (
+        find(tag::WIDTH_RESOLUTION).and_then(|e| e.float_scalar(file)),
+        find(tag::HEIGHT_RESOLUTION).and_then(|e| e.float_scalar(file)),
+    ) {
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => None,
+    };
+
     Ok(Container {
         image: start..end,
         format,
@@ -433,6 +476,7 @@ pub(crate) fn read(file: &[u8]) -> Result<Container, JxrError> {
         height,
         spatial_transform,
         alpha,
+        resolution,
         warnings,
     })
 }

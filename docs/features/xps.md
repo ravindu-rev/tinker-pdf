@@ -115,8 +115,8 @@ the page synthesis.
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
 | A `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | no ICC pipeline, and 15.2.4's syntax has nowhere to put an sRGB fallback; painted grey and named | [rendering](rendering.md) |
-| JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
-| A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |
+| An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |
+| A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing`. **Wiring JPEG XR made this worse rather than better**: with all four formats drawn there are now twelve ordered pairs that take the arm where there were two. Closing it needs a leniency variant on `XpsElementDefect` and a push into `paint.rs`'s `defects` | [rulings](../rulings.md) ruling 10 |
 | `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | no ICC pipeline, and the syntax has nowhere to put an sRGB fallback, so the picture is refused rather than drawn in colours the file did not ask for | [rendering](rendering.md) |
 | `IsSideways` glyph runs | `XpsElementDefect::GlyphsSidewaysUnsupported` | vertical-rotated runs not laid out | — |
 | Odd `BidiLevel` (right-to-left runs) | `XpsElementDefect::GlyphsBidiUnsupported` | no bidi reordering | [ROADMAP.md](../ROADMAP.md) (shaping) |
@@ -126,6 +126,35 @@ the page synthesis.
 | Broken fixed representation, interleaved parts, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic | [cbz](cbz.md) |
 | Page-level defects | `XpsPageDefect::{SourceUnresolved, DocumentUnresolved, Unreadable, ContentUnreadable, SizeUnusable, MediaTypeMismatch, PageBoxUnusable}` | the page becomes a placeholder that keeps its number | — |
 | Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | — |
+
+### Decoded but unadjudicated
+
+A refusal is a decision and every row above is reached by a test. This is the
+other list: configurations that **decode** and that nothing here checks the
+*correctness* of. Named rather than counted as covered, the treatment
+[fonts.md](fonts.md) gives shaped-but-unverified scripts.
+
+All of them are JPEG XR, because it is the only one of 9.1.5's four formats
+with no second implementation available to this repository. Ruling 13 is why
+that matters and why the list will not shrink by testing harder: a third party
+may generate an input and may never adjudicate an output, so "decode it with
+something else and compare" is not a check this project can make. The full
+reasoning, and the evidence that *is* available, is in
+[design/jpeg-xr.md](../design/jpeg-xr.md).
+
+| What decodes unchecked | Why nothing checks it |
+| --- | --- |
+| **The quantised lossy path, in general** | The lossless identity pins ITU-T T.832 9.8's dequantization at QP 1 and says nothing about `QuantMap( )` at any other quantizer. The seam property is a *relative* comparison within one image, so a filter wrong by a constant everywhere passes it. The transform round trip is blind to an error mirrored into both directions. Monotonicity only orders three error totals. A decoder exactly right losslessly and wrong at every other quantizer passes everything here |
+| The first-level overlap filter across a **soft tile boundary** | Needs a multi-tile image at `OVERLAP_MODE` 2; both tiled fixtures were encoded at mode 1. It is also the one path where 9.9.3.2's text disagrees with its own geometry, and where this build follows the geometry |
+| `HARD_TILING_FLAG` | The Windows encoder does not expose it, so both settings cannot be produced on this machine and only the soft-tile path has a fixture |
+| `SHIFT_BITS`, `TRIM_FLEXBITS`, more than one QP per tile | Every fixture carries the value at which each of these does nothing, so the code paths run only in their degenerate form |
+| A damaged codestream's **values** | `fuzz_jxr` proves a damaged file does not panic and that a dropped tile is reported; it does not check that what survives is what a conformant decoder would produce |
+
+**What *is* checked, so that the list above is read in proportion**: fifteen
+committed fixtures — eight pixel formats, all three overlap modes, both tiled
+layouts, both frequency-mode layouts and both alpha formats — decode
+**bit-for-bit** to rasters this repository authored, through a Windows encoder
+that supplied bytes and never judged them.
 
 **What the corpus is**: thirteen committed packages from **three serialisers
 and two vendors** — six WPF `.xps`, two XPSOM `.oxps`, and five written by
