@@ -360,11 +360,13 @@ refusal table.
   `xps/image.rs` still refuses the format at the element, which is the same
   shape TIFF was in before it was wired; remote resource-dictionary parts;
   `IsSideways` and odd `BidiLevel`.
-- **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
+- **CBZ** ([features/cbz.md](features/cbz.md)): CBR and CB7, sized
   honestly — each means a hand-rolled decompressor, and **RAR 4 has no
   fixture this machine can produce**, so it closes as decoded-but-
   unadjudicated by name or not at all. A design doc is owed with the
-  decoders.
+  decoders. **CBT is done**: `7z-tar.cbt` joins the five ZIPs in
+  `cbz_real.rs`'s cross-producer identity and renders the same five
+  pictures, which is the exit criterion the whole lane is held to.
 
 ## How this file changes
 

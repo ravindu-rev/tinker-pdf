@@ -542,6 +542,7 @@ name = "tinker-pdf"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "tinker-pdf-archive",
  "tinker-pdf-color",
  "tinker-pdf-content",
  "tinker-pdf-cos",
@@ -556,6 +557,13 @@ dependencies = [
  "tinker-pdf-shape",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
+]
+
+[[package]]
+name = "tinker-pdf-archive"
+version = "0.0.1"
+dependencies = [
+ "tinker-pdf-filters",
 ]
 
 [[package]]

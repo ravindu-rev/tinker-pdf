@@ -531,6 +531,53 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// The direction is safe for the third amendment's reasons. All three edges
 /// point **down to leaves**, and none of `xml`, `css` or `math` has any reason
 /// to know that SVG exists, so there is no path back.
+///
+/// **`archive -> filters` is the eleventh amendment, and it is the eighth
+/// leaf-to-leaf edge.** The edge itself is the third copy of an argument this
+/// file has already made twice — `font -> filters` and `zip -> filters` — so
+/// what needs writing down is not the edge. It is the crate: **why
+/// `tinker-pdf-archive` exists at all instead of three modules inside
+/// `tinker-pdf-zip`.**
+///
+/// The answer is a measurement rather than a preference.
+/// `tinker_pdf_zip::Archive::read` returns a `Cow` and hands a **stored entry
+/// back borrowed**, copied nowhere, and that crate's own test suite pins it
+/// with the reason attached: *the moment this copies, a 3.6 GB peak comes
+/// back.* The comic path places image bytes into a PDF stream verbatim, so a
+/// copy per entry is a copy of the whole archive, and a 200-page scan is the
+/// size at which that stops being a detail.
+///
+/// tar keeps the property and strengthens it — every entry is a contiguous
+/// byte range of the input, so `tar::Archive::read` returns a plain `&[u8]`
+/// with no `Cow` at all. **7z cannot have it.** A solid block decodes many
+/// files from one LZMA stream, so there is no range in the input that is any
+/// one file and the read must return owned bytes in the general case. A trait
+/// unifying all four containers would therefore have to return the weakest
+/// signature of the four, which deletes the exact property that ZIP test
+/// exists to hold — in the crate that has it, to give four unrelated readers
+/// one name.
+///
+/// So there is no trait, and the two crates stay two. `tinker-pdf-zip`'s
+/// charter is recorded twice as APPNOTE 6.3.10 and nothing else
+/// (`docs/architecture.md`, and ruling 8's own example), and a crate whose
+/// charter names one specification is not the place to put three more.
+///
+/// What the new crate is instead: **one crate, three modules, three error
+/// enums, three entry types, and no trait over them.** What tar, 7z and RAR
+/// share is a negative — the archive containers that are not ZIP — which is
+/// weaker than `filters`' "decoders" and is honestly weaker. It is still real,
+/// and it buys one node and one edge here instead of three of each. The
+/// failure it avoids is visible one layer up and is why the rule is written
+/// into the crate's own header: `tinker_pdf::ArchiveRefusal` is a
+/// twenty-variant union of three formats' vocabularies of which only seven are
+/// reachable from a comic archive, because three formats were once given one
+/// enum to fail through.
+///
+/// The edge points down into `filters` for two things and no third: CRC-32,
+/// which 7z and RAR both record per file and which is the whole of this
+/// crate's verification argument, and `inflate_raw`, because 7z method 040108
+/// is RFC 1951 with no wrapper exactly as ZIP method 8 is. It cannot cycle,
+/// because `filters` depends on nothing.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -543,6 +590,16 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // fuzzed differently. See the seventh amendment above.
     ("tinker-pdf-pki", &["tinker-pdf-crypto"]),
     ("tinker-pdf-zip", &["tinker-pdf-filters"]),
+    // The fourteenth leaf, and the eighth leaf-to-leaf edge. A second
+    // archive crate rather than three more modules in `tinker-pdf-zip`,
+    // because that crate hands a stored entry back **borrowed** and a 7z solid
+    // block cannot. See the eleventh amendment above.
+    //
+    // Filed here next to `zip` because that is where it is read from, but
+    // numbered last: the ordinals in this table are positions in
+    // `docs/architecture.md`'s leaf list, and inserting into the middle of
+    // that list renumbers every comment below.
+    ("tinker-pdf-archive", &["tinker-pdf-filters"]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
     // The ninth, and the fourth crate here with no internal dependency at all.
@@ -637,6 +694,12 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-filters",
             "tinker-pdf-color",
             "tinker-pdf-zip",
+            // Tier 4's W-ARCHIVE lane. `src/cbz.rs` reads a `.cbt`, a `.cb7`
+            // and a `.cbr` through it, and the facade is where the four
+            // containers converge because deciding what a page *is* needs
+            // document types and a leaf may not have them (ruling 8). The edge
+            // goes down into a leaf, which ruling 8 allows without argument.
+            "tinker-pdf-archive",
             "tinker-pdf-xml",
             "tinker-pdf-css",
             "tinker-pdf-layout",
