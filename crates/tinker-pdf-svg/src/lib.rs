@@ -210,6 +210,17 @@ pub enum Warning {
     /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
     /// Skipped by the CSS specification's own recovery, and named.
     AtRuleIgnored,
+    /// §10.4's per-glyph positioning: an `x`, `y`, `dx`, `dy` or `rotate`
+    /// with **more than one number** in it.
+    ///
+    /// The first is used and the rest are dropped, which sets the run as one
+    /// piece at the right place instead of spreading its letters. Naming it is
+    /// the point: a build that took the first number silently would set a
+    /// deliberately-spaced line as an ordinary one and look entirely correct.
+    TextPositionListIgnored,
+    /// `<textPath>`, `<tref>` and `<altGlyph>` — §10.13's text on a path and
+    /// its two relatives. Each is a second layout engine.
+    TextLayoutUnsupported,
     /// §13.2.3's `spreadMethod` of `reflect` or `repeat`.
     ///
     /// `pad` is drawn instead, which is the initial value and the one every
@@ -289,6 +300,42 @@ pub enum Paint {
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
     },
+}
+
+/// §10.9's `text-anchor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextAnchor {
+    /// `start`, the initial value.
+    #[default]
+    Start,
+    /// `middle`.
+    Middle,
+    /// `end`.
+    End,
+}
+
+/// The font a run is set in, as **properties rather than a face**.
+///
+/// Every field is what the document said, and none of them is a font: this
+/// crate has no font vocabulary at all, which is ruling 8 and the reason
+/// [`Node::Text`] exists in this shape. See that variant's own note.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextStyle {
+    /// `font-family`, in the author's order, with the generic families left
+    /// in — a caller resolving `serif` is answering a question about the faces
+    /// it has, which this crate does not have.
+    pub families: Vec<String>,
+    /// `font-size`, in user units, already resolved through `em` and `%`.
+    pub size: f64,
+    /// `font-weight`, as a number in `[100, 900]`.
+    pub weight: u16,
+    /// Whether `font-style` is `italic` or `oblique`. The two are one question
+    /// for a caller that has at most one slanted face per family, which is
+    /// every caller this repository has.
+    pub italic: bool,
+    /// `text-anchor`, which decides where the **chunk** sits once its width is
+    /// known — and its width is known only to whoever has the metrics.
+    pub anchor: TextAnchor,
 }
 
 /// §14.3's clipping path, as geometry.
@@ -388,6 +435,57 @@ pub enum Node {
         stroke: Option<Box<Stroke>>,
         /// §14.3's clip, or `None` for a node that is not clipped.
         clip: Option<Clip>,
+    },
+    /// A run of text, carried **unshaped**.
+    ///
+    /// # The seam, and why it is here
+    ///
+    /// Ruling 8 forbids this crate from learning what a font is, and setting
+    /// text needs one: a face has to be matched per character
+    /// (`css-fonts-4` §5.3), shaped through `GSUB`/`GPOS`, and turned into
+    /// glyph indices. All three live in `tinker-pdf-font` and
+    /// `tinker-pdf-shape`, which this crate does not take an edge to and must
+    /// not — an SVG reader that carried a shaper would be unfuzzable on its
+    /// own and unpublishable apart from them.
+    ///
+    /// So the split is: **everything about the document happens here** —
+    /// reading `<text>` and `<tspan>`, resolving `x`/`y`/`dx`/`dy` into an
+    /// anchor, composing the matrix, and resolving the font *properties*
+    /// through the same §6.4 machinery every other element uses — and
+    /// **everything about a font happens in the caller**, which is
+    /// `crates/tinker-pdf/src/epub/`, using the same `choose` and the same
+    /// shaper that set the rest of the book. That is the property worth
+    /// having: SVG text and XHTML text in one book cannot be set in two
+    /// different faces by two different matchers.
+    ///
+    /// [`Node::Image`] is the same seam read once already — the crate carries
+    /// what the document said and the caller resolves it against what it has.
+    ///
+    /// # Chunks
+    ///
+    /// §10.9 starts a **text chunk** at every absolute position, and
+    /// [`Node::Text::anchor`] is `None` for a run that continues the one
+    /// before it. Where a continuing run *begins* depends on how wide the
+    /// previous one was, which is a metric — so the pen is the caller's to
+    /// track, and so is `text-anchor`, which cannot be applied until a whole
+    /// chunk's width is known.
+    Text {
+        /// The characters, with `xml:space`'s default white-space handling
+        /// already applied.
+        text: String,
+        /// Where this run starts, in the space `matrix` maps out of, or `None`
+        /// to continue from where the previous run ended.
+        anchor: Option<[f64; 2]>,
+        /// The matrix from that space into the scene's.
+        matrix: [f64; 6],
+        /// The font properties, resolved but not matched.
+        font: TextStyle,
+        /// How the glyphs are filled.
+        fill: Paint,
+        /// `fill-opacity` times every `opacity` above it.
+        fill_opacity: f64,
+        /// How the glyphs are outlined, if at all.
+        stroke: Option<Box<Stroke>>,
     },
     /// An `<image>`, carried **unresolved**.
     ///

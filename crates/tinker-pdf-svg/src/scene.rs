@@ -27,12 +27,13 @@
 
 use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits};
 
+use crate::document::Child;
 use crate::document::{self, Node, Tree};
 use crate::gradient;
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
-use crate::{Limits, Paint, Refusal, Scene, Stroke, Warning};
+use crate::{Limits, Paint, Refusal, Scene, Stroke, TextStyle, Warning};
 
 /// The default viewport, in user units, for a document that states no size.
 ///
@@ -79,6 +80,10 @@ struct Walk<'a> {
     segments: usize,
     /// Every `<style>` element of the document, read once before the walk.
     sheet: Sheet,
+    /// The last absolute text position seen, so a `<tspan>` that states only a
+    /// `y` keeps the `x` the chunk before it had — §10.4's rule, and the one a
+    /// build that defaulted the missing axis to zero gets wrong.
+    pen: [f64; 2],
     /// [`Limits::max_uses`], spent across the whole document.
     uses: usize,
     /// The `<use>` targets currently being expanded, innermost last.
@@ -285,6 +290,16 @@ impl Walk<'_> {
             // §5.6's `<use>`, which is the one place an SVG grows
             // multiplicatively.
             "use" => self.use_element(node, frame),
+
+            // §10's text.
+            "text" => self.text_element(index, node, frame),
+            // §10.13's text on a path, and its two relatives. Each is a second
+            // layout engine rather than a property, and none has a file behind
+            // it here (ruling 3).
+            "textPath" | "tref" | "altGlyph" => {
+                self.warn(Warning::TextLayoutUnsupported);
+                Ok(())
+            }
             "pattern" => {
                 self.warn(Warning::PatternUnsupported);
                 Ok(())
@@ -553,6 +568,191 @@ impl Walk<'_> {
         self.element(target, frame)
     }
 
+    /// §10.4's `<text>`, as one or more runs.
+    ///
+    /// **The pen is not tracked here and that is the milestone's whole
+    /// decision.** Where a `<tspan>` with no `x` of its own begins depends on
+    /// how wide the text before it was, and a width is a *font metric* — which
+    /// this crate cannot have without an edge to `tinker-pdf-font`, and ruling
+    /// 8 forbids that edge. So a run that continues carries `anchor: None` and
+    /// the caller, which has the metrics because it set the rest of the book
+    /// with them, advances the pen. §10.9's `text-anchor` is the same argument
+    /// one level up: a chunk cannot be centred until its whole width is known.
+    ///
+    /// What this *does* do is everything about the document: white space, the
+    /// `x`/`y`/`dx`/`dy` grammar, the nesting of `<tspan>`s, and the font
+    /// properties through the same §6.4 machinery every other element uses.
+    fn text_element(&mut self, index: usize, node: &Node, frame: &Frame) -> Result<(), Refusal> {
+        let matrix = self.matrix_of(node, frame.matrix);
+        let inner = Frame {
+            matrix,
+            ..frame.clone()
+        };
+        self.text_runs(index, node, &inner, true)
+    }
+
+    /// One `<text>` or `<tspan>`, and everything under it.
+    ///
+    /// `absolute` says whether this element opened a chunk, which §10.9 makes
+    /// true of every `<text>` and of a `<tspan>` that states an `x` or a `y`.
+    fn text_runs(
+        &mut self,
+        index: usize,
+        node: &Node,
+        frame: &Frame,
+        mut absolute: bool,
+    ) -> Result<(), Refusal> {
+        // §10.4: `x`, `y`, `dx` and `dy` are **lists**, one number per glyph.
+        // The first is used and the rest are named: a build that took the
+        // first silently would set a deliberately-spaced line as an ordinary
+        // one and look entirely correct.
+        let x = self.text_number(node, "x", frame.viewport.0);
+        let y = self.text_number(node, "y", frame.viewport.1);
+        let dx = self
+            .text_number(node, "dx", frame.viewport.0)
+            .unwrap_or(0.0);
+        let dy = self
+            .text_number(node, "dy", frame.viewport.1)
+            .unwrap_or(0.0);
+        if x.is_some() || y.is_some() {
+            absolute = true;
+        }
+        // A `<tspan>` that shifts by `dx`/`dy` and states nothing absolute is
+        // still a continuation — §10.9 opens a chunk on an *absolute*
+        // position — so the shift travels with the run rather than opening one.
+        let anchor =
+            absolute.then(|| [x.unwrap_or(self.pen[0]) + dx, y.unwrap_or(self.pen[1]) + dy]);
+        if let Some(anchor) = anchor {
+            self.pen = anchor;
+        }
+        let mut pending = anchor;
+        let mut shift = if anchor.is_some() {
+            [0.0, 0.0]
+        } else {
+            [dx, dy]
+        };
+
+        let children = self.tree.nodes[index].children.clone();
+        for child in children {
+            match child {
+                Child::Text(text) => {
+                    // `xml:space="default"` is §10.15's own rule and the one
+                    // every producer relies on: newlines and tabs become
+                    // spaces, runs of space collapse to one, and the leading
+                    // and trailing space of the *element* goes. Applied per
+                    // run rather than across the element, which is where this
+                    // build differs from a full implementation — named in
+                    // `docs/design/svg.md` rather than hidden.
+                    let text = collapse(&text);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.push_text(&text, pending, shift, frame)?;
+                    pending = None;
+                    shift = [0.0, 0.0];
+                }
+                Child::Element(at) => {
+                    let element = self.tree.nodes[at].clone();
+                    if !element.is_svg() || element.name != "tspan" {
+                        // Anything else inside a `<text>` — a `<textPath>`, an
+                        // `<a>`, an `<altGlyph>` — goes through the ordinary
+                        // dispatch, which names what it declines.
+                        self.element(at, frame)?;
+                        continue;
+                    }
+                    let resolved =
+                        style::resolve(self.tree, at, &self.sheet, &frame.style, &mut self.css)
+                            .map_err(|_| Refusal::TooMuchStyle)?;
+                    for name in resolved.unreadable {
+                        self.warn(Warning::ValueUnreadable { attribute: name });
+                    }
+                    let child_frame = Frame {
+                        matrix: self.matrix_of(&element, frame.matrix),
+                        style: resolved.style,
+                        depth: frame.depth + 1,
+                        viewport: frame.viewport,
+                    };
+                    if child_frame.depth >= self.limits.max_depth {
+                        return Err(Refusal::TooDeep);
+                    }
+                    self.text_runs(at, &element, &child_frame, false)?;
+                    pending = None;
+                    shift = [0.0, 0.0];
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One run of characters, as a node.
+    fn push_text(
+        &mut self,
+        text: &str,
+        anchor: Option<[f64; 2]>,
+        shift: [f64; 2],
+        frame: &Frame,
+    ) -> Result<(), Refusal> {
+        let style = &frame.style;
+        if !style.visible {
+            return Ok(());
+        }
+        // A `dx`/`dy` on a **continuing** run is an offset from a pen this
+        // crate does not have, so it is carried in the *matrix* — the one
+        // place a shift can live without a metric. On a run that opens a chunk
+        // the shift is already in the anchor, and `text_runs` zeroes it there
+        // so that it cannot be counted twice.
+        let matrix = if anchor.is_none() && shift != [0.0, 0.0] {
+            transform::concat([1.0, 0.0, 0.0, 1.0, shift[0], shift[1]], frame.matrix)
+        } else {
+            frame.matrix
+        };
+        let fill = self.paint(&style.fill, style, matrix, [0.0, 0.0, 0.0, 0.0]);
+        let stroke_paint = self.paint(&style.stroke, style, matrix, [0.0, 0.0, 0.0, 0.0]);
+        let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
+            None
+        } else {
+            Some(Box::new(Stroke {
+                paint: stroke_paint,
+                width: style.stroke_width,
+                cap: style.cap,
+                join: style.join,
+                miter_limit: style.miter_limit,
+                dashes: style.dashes.clone(),
+                dash_offset: style.dash_offset,
+                opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
+            }))
+        };
+        self.push(crate::Node::Text {
+            text: text.to_owned(),
+            anchor,
+            matrix,
+            font: TextStyle {
+                families: style.families.clone(),
+                size: style.font_size,
+                weight: style.font_weight,
+                italic: style.font_italic,
+                anchor: style.text_anchor,
+            },
+            fill,
+            fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
+            stroke,
+        })
+    }
+
+    /// The **first** number of a `<list-of-coordinates>`, naming the rest.
+    fn text_number(&mut self, node: &Node, name: &str, basis: f64) -> Option<f64> {
+        let text = node.attr(name)?;
+        let numbers = transform::numbers(text)?;
+        if numbers.len() > 1 {
+            self.warn(Warning::TextPositionListIgnored);
+        }
+        let first = *numbers.first()?;
+        // A bare number is user units; a length with a unit goes through §4.2's
+        // grammar, which is what `1em` in an `x` attribute means.
+        document::length(text.split_whitespace().next().unwrap_or(text), Some(basis))
+            .or(Some(first))
+    }
+
     /// §5.7's `<image>`.
     fn image(&mut self, node: &Node, frame: &Frame) -> Result<(), Refusal> {
         let Some(href) = node.href() else {
@@ -641,6 +841,34 @@ impl Walk<'_> {
 /// §7.7's "rendering of the element is disabled".
 struct Disabled;
 
+/// §10.15's `xml:space="default"`, which is what a document that says nothing
+/// means.
+///
+/// *"First, it will remove all newline characters. Then it will convert all tab
+/// characters into space characters. Then, it will strip off all leading and
+/// trailing space characters. Then, all contiguous space characters will be
+/// consolidated."* Written in that order because the order matters: a newline
+/// removed **before** the collapse joins two words that a newline turned into a
+/// space would have kept apart.
+fn collapse(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for character in text.chars() {
+        match character {
+            '\n' | '\r' => {}
+            ' ' | '\t' => space = true,
+            other => {
+                if space && !out.is_empty() {
+                    out.push(' ');
+                }
+                space = false;
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
 /// Builds a scene from a tree, against a viewport in user units.
 ///
 /// `viewport` is what a percentage on the root resolves against and what the
@@ -677,6 +905,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         sheet,
         uses: 0,
         expanding: Vec::new(),
+        pen: [0.0, 0.0],
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);

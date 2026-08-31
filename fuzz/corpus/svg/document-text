@@ -1,0 +1,2 @@
+‹<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" font-family="Georgia, Times New Roman, 'Zapf Chancery'" font-size="12" text-anchor="middle"><text x="10 20 30" y="1e999" dx="-5" font-weight="bolder">a<tspan font-size="2em" transform="scale(0)">b</tspan><tspan x="80" dy="1em" font-style="oblique">  c 	
+ d  </tspan><tspan y="60" visibility="hidden">e</tspan><textPath href="#p">f</textPath></text><text font-size="smaller" font-weight="0">g</text></svg>
