@@ -92,6 +92,55 @@ pub enum Paint {
     /// `Package::read_part` hands back a borrow the painter is already holding,
     /// which is why images are resolved in a pass before the drawing walk.
     Image(Box<ImageTile>),
+    /// A `VisualBrush` (15.4), which becomes a PDF tiling pattern whose cell is
+    /// a **drawing** rather than a picture.
+    ///
+    /// The subtree is carried unresolved for [`Paint::Image`]'s reason, one step
+    /// further along: a picture needs the package looked up once, and a visual
+    /// needs the *drawing walk* re-entered from inside a brush -- with the
+    /// fonts, the pictures, the resource dictionaries in scope and the element
+    /// budget all of which live in [`super::paint`]. Answering with the subtree
+    /// unresolved is what keeps this module pure, and it is the shape
+    /// [`Paint::Image`] already set.
+    Visual(Box<VisualTile>),
+}
+
+/// Where a tile goes, which 15.3 states in six values.
+///
+/// One value rather than six fields on each of the two brushes that state
+/// them: an `ImageBrush` and a `VisualBrush` differ in **what** they tile and
+/// in nothing about where, and two copies would be two places for the relative
+/// units to stop being read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// `Viewbox`, as `x y width height` in the source's own units.
+    pub viewbox: [f64; 4],
+    /// `Viewport`, as `x y width height` in the element's units.
+    pub viewport: [f64; 4],
+    /// Whether `Viewbox` is absolute or a fraction of the source.
+    pub viewbox_units: Units,
+    /// Whether `Viewport` is absolute or a fraction of the filled box.
+    pub viewport_units: Units,
+    /// `TileMode` (15.3.1).
+    pub tile: TileMode,
+    /// `Transform`, which maps the brush's space into the element's.
+    pub transform: [f64; 6],
+}
+
+/// A `VisualBrush`, parsed but not painted (15.4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisualTile {
+    /// The one drawable under `VisualBrush.Visual`.
+    pub visual: Node,
+    /// The `x:Key` this brush was reached through, when it was reached through
+    /// one at all.
+    ///
+    /// Carried for the cycle guard and for nothing else: a `VisualBrush` whose
+    /// own subtree names it again through a `{StaticResource}` is a cycle that
+    /// no single lookup chain can see, because each lookup starts afresh.
+    pub key: Option<String>,
+    /// Where the tile goes.
+    pub placement: Placement,
 }
 
 /// An `ImageBrush`, parsed but not resolved (15.3).
@@ -106,18 +155,8 @@ pub enum Paint {
 pub struct ImageTile {
     /// `ImageSource`, verbatim. Resolved against the fixed page part's own name.
     pub source: String,
-    /// `Viewbox`, as `x y width height` in the image's own units.
-    pub viewbox: [f64; 4],
-    /// `Viewport`, as `x y width height` in the element's units.
-    pub viewport: [f64; 4],
-    /// Whether `Viewbox` is absolute or a fraction of the image.
-    pub viewbox_units: Units,
-    /// Whether `Viewport` is absolute or a fraction of the filled box.
-    pub viewport_units: Units,
-    /// `TileMode` (15.3.1).
-    pub tile: TileMode,
-    /// `Transform`, which maps the brush's space into the element's.
-    pub transform: [f64; 6],
+    /// Where the tile goes.
+    pub placement: Placement,
 }
 
 /// 15.3's `ViewboxUnits` and `ViewportUnits`.
@@ -303,13 +342,7 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
         }
         "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox, Channel::Colour),
         "ImageBrush" => image_brush(node, bbox),
-        // `VisualBrush` is row 8's and is not built. Its cell is a *subtree* of
-        // markup rather than a part, so painting one means re-entering the
-        // drawing walk from inside a brush -- with 18.2's cross-part depth to
-        // carry -- and this module is deliberately pure. Refused by name rather
-        // than drawn as its first child, which would be a picture the file
-        // never described. See the plan's amended row 8.
-        "VisualBrush" => Err(BrushError::Unsupported),
+        "VisualBrush" => visual_brush(node, bbox),
         _ => Err(BrushError::Syntax),
     }
 }
@@ -376,12 +409,15 @@ pub enum Mask {
         /// The brush's own `Opacity`, which multiplies every stop's alpha.
         opacity: f64,
     },
-    /// The alpha is a picture's own, which only the picture can supply — so
-    /// the brush is painted normally and 11.6.5.2's `/Alpha` reads the alpha
-    /// the painting produced.
+    /// The alpha is what painting the brush produces — a picture's own alpha,
+    /// or a drawing's coverage — which nothing but the painting can supply.
+    /// So the brush is painted as it stands and 11.6.5.2's `/Alpha` reads the
+    /// result.
     Alpha {
-        /// The tile, carried unresolved for [`Paint::Image`]'s reason.
-        tile: Box<ImageTile>,
+        /// The brush, as the paint it would be anywhere else. Only
+        /// [`Paint::Image`] and [`Paint::Visual`] reach here; the other two
+        /// carry their alpha somewhere a shading or a constant can hold it.
+        paint: Paint,
         /// The brush's own `Opacity`.
         opacity: f64,
     },
@@ -424,15 +460,14 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
                 _ => Err(BrushError::Syntax),
             }
         }
-        "ImageBrush" => {
-            let opacity = opacity_of(node)?;
-            let brush = image_brush(node, bbox)?;
-            match brush.paint {
-                Paint::Image(tile) => Ok(Mask::Alpha { tile, opacity }),
-                _ => Err(BrushError::Syntax),
-            }
-        }
-        "VisualBrush" => Err(BrushError::Unsupported),
+        "ImageBrush" => Ok(Mask::Alpha {
+            paint: image_brush(node, bbox)?.paint,
+            opacity: opacity_of(node)?,
+        }),
+        "VisualBrush" => Ok(Mask::Alpha {
+            paint: visual_brush(node, bbox)?.paint,
+            opacity: opacity_of(node)?,
+        }),
         _ => Err(BrushError::Syntax),
     }
 }
@@ -445,8 +480,59 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
 /// which is `gradient`'s rule and for the same reason.
 fn image_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
     let source = node.attr("ImageSource").ok_or(BrushError::Syntax)?;
-    // 15.3 makes both rectangles required on an `ImageBrush`; there is no
-    // sensible default for "which part of the image" or "where it goes".
+    let placement = placement_of(node, bbox)?;
+    Ok(Brush {
+        paint: Paint::Image(Box::new(ImageTile {
+            source: source.to_string(),
+            placement,
+        })),
+        alpha: opacity_of(node)?,
+        approximated: false,
+    })
+}
+
+/// Reads a `VisualBrush` (15.4).
+///
+/// The `Visual` is carried as **markup**, for [`Paint::Image`]'s reason one
+/// step further along: painting it means re-entering the drawing walk, which
+/// needs the package for the fonts and pictures the subtree may name, and this
+/// module is pure. What is read here is everything a tile needs *around* the
+/// subtree, which is 15.3's own vocabulary and the same six values an
+/// `ImageBrush` states.
+fn visual_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+    // 15.4's `Visual` is a property element holding exactly one drawable. A
+    // brush stating none paints nothing, which is not the same as a brush this
+    // build cannot paint -- so it is `Syntax` and takes the placeholder grey by
+    // name rather than being drawn as an empty cell nobody asked for.
+    let visual = node
+        .children
+        .iter()
+        .find(|child| child.xps && child.local == "VisualBrush.Visual")
+        .and_then(|property| property.children.iter().find(|child| child.xps))
+        .ok_or(BrushError::Syntax)?;
+    // The box a `RelativeToBoundingBox` viewport is a fraction of is the box
+    // being *filled* — the element's, exactly as for an `ImageBrush` — and not
+    // the visual's own. It has to be threaded, because 15.3 makes
+    // `RelativeToBoundingBox` the **default** for both unit attributes: a
+    // build that passed `None` here would refuse every `VisualBrush` that did
+    // not spell `ViewportUnits="Absolute"` out, which is nearly all of them.
+    let placement = placement_of(node, bbox)?;
+    Ok(Brush {
+        paint: Paint::Visual(Box::new(VisualTile {
+            visual: visual.clone(),
+            key: node.key.clone(),
+            placement,
+        })),
+        alpha: opacity_of(node)?,
+        approximated: false,
+    })
+}
+
+/// The six values 15.3 states about where a tile goes, shared by both brushes
+/// that state them.
+fn placement_of(node: &Node, bbox: Option<[f64; 4]>) -> Result<Placement, BrushError> {
+    // 15.3 makes both rectangles required; there is no sensible default for
+    // "which part of the source" or "where it goes".
     let viewbox = rect(node.attr("Viewbox").ok_or(BrushError::Syntax)?)?;
     let viewport = rect(node.attr("Viewport").ok_or(BrushError::Syntax)?)?;
     let viewbox_units = units_of(node, "ViewboxUnits")?;
@@ -470,19 +556,13 @@ fn image_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError>
     if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 || viewport[2] <= 0.0 || viewport[3] <= 0.0 {
         return Err(BrushError::Syntax);
     }
-
-    Ok(Brush {
-        paint: Paint::Image(Box::new(ImageTile {
-            source: source.to_string(),
-            viewbox,
-            viewport,
-            viewbox_units,
-            viewport_units,
-            tile,
-            transform,
-        })),
-        alpha: opacity_of(node)?,
-        approximated: false,
+    Ok(Placement {
+        viewbox,
+        viewport,
+        viewbox_units,
+        viewport_units,
+        tile,
+        transform,
     })
 }
 
