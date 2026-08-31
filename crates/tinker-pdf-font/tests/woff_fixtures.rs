@@ -192,6 +192,99 @@ fn the_source_face_is_the_synthetic_one_plus_seven() {
     );
 }
 
+/// **`PROVENANCE.tsv` names every committed file, and every row is true.**
+///
+/// The record exists because a reader who opens `tests/woff/` has to be able
+/// to tell where the bytes came from without reading this file or the
+/// generator — which command produced each one, from which face, on what day,
+/// and that the producers **generated** and did not adjudicate (ruling 13).
+///
+/// It is asserted rather than trusted for the reason every count in this
+/// repository is: a record nothing checks is a record that stops being true
+/// the first time a fixture is regenerated. Both directions are checked — a
+/// file with no row and a row with no file are different mistakes, and the
+/// second is the one that reads as documentation.
+#[test]
+fn the_provenance_record_names_every_file_and_every_row_is_true() {
+    let dir = format!("{}/tests/woff", env!("CARGO_MANIFEST_DIR"));
+    let record = std::fs::read_to_string(format!("{dir}/PROVENANCE.tsv"))
+        .expect("tests/woff/PROVENANCE.tsv");
+
+    // Ruling 13 is stated in the record itself, not only in this file's
+    // header, because the record is what a reader of the directory finds.
+    assert!(
+        record.contains("GENERATED") && record.contains("ADJUDICATES"),
+        "the record does not say which half of ruling 13 its producers are"
+    );
+
+    let mut rows: Vec<(String, usize, String)> = Vec::new();
+    let mut seen_header = false;
+    for line in record.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !seen_header {
+            assert!(
+                line.starts_with("file\tbytes\tproducer\tversion\tfrom\twritten\trole"),
+                "unexpected header: {line}"
+            );
+            seen_header = true;
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 7, "a row with the wrong shape: {line}");
+        let bytes: usize = fields[1].parse().expect("a byte count");
+        assert!(!fields[2].is_empty(), "a row with no producer: {line}");
+        assert!(!fields[3].is_empty(), "a row with no version: {line}");
+        assert!(!fields[4].is_empty(), "a row with no source: {line}");
+        assert_eq!(fields[5], "2026-08-31", "a row with a different date");
+        rows.push((fields[0].to_owned(), bytes, fields[2].to_owned()));
+    }
+    assert_eq!(rows.len(), 7, "seven committed files, seven rows");
+
+    // Every row names a file of exactly that size.
+    for (name, bytes, _) in &rows {
+        let on_disk = std::fs::metadata(format!("{dir}/{name}"))
+            .unwrap_or_else(|e| panic!("{name} is named in the record and not there: {e}"))
+            .len() as usize;
+        assert_eq!(on_disk, *bytes, "{name}: the record's byte count is stale");
+    }
+
+    // And every file has a row. The generator is the only thing in the
+    // directory that is not a fixture.
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the fixture directory")
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name != "make-fixtures.py" && name != "PROVENANCE.tsv")
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 7, "seven committed files: {files:?}");
+    for file in &files {
+        assert!(
+            rows.iter().any(|(name, _, _)| name == file),
+            "{file} is committed and the record does not name it"
+        );
+    }
+
+    // The three producers, asserted by name and by number: the whole case for
+    // two encoders per format is that they have no code in common, and a
+    // regenerated corpus that quietly came from one of them would still pass
+    // every other test in this file.
+    let mut producers: Vec<String> = rows.iter().map(|(_, _, p)| p.clone()).collect();
+    producers.sort();
+    producers.dedup();
+    assert_eq!(
+        producers,
+        vec![
+            "fontTools".to_owned(),
+            "ttf2woff".to_owned(),
+            "wawoff2".to_owned()
+        ],
+        "three encoders with no code in common"
+    );
+}
+
 // ---- the property ------------------------------------------------------------
 
 /// Every container unpacks to a font of exactly the source face's length.

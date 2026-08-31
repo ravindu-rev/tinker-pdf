@@ -35,11 +35,11 @@ mod epub_support;
 
 use std::sync::{Arc, Mutex};
 
-use epub_support::typeface::{covering, origin_of, shown_glyphs, text_objects, Face};
+use epub_support::typeface::{as_woff, covering, origin_of, shown_glyphs, text_objects, Face};
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::epub::obfuscation::{adobe_key, deobfuscate, idpf_key, KeyDefect};
 use tinker_pdf::epub::ocf::{Ocf, ADOBE_OBFUSCATION, IDPF_OBFUSCATION};
-use tinker_pdf::epub::typeface::{load, FaceDefect};
+use tinker_pdf::epub::typeface::{load, FaceDefect, WoffError};
 use tinker_pdf::epub::Limits;
 use tinker_pdf::{ArchiveWarning, Document, FontProvider, FontRequest, OpenOptions, RenderOptions};
 use tinker_pdf_zip::Archive;
@@ -680,8 +680,15 @@ fn a_face_declared_in_every_chapter_is_loaded_once_and_every_rule_is_counted() {
         vec![
             ("shared".to_owned(), FaceDefect::NoUsableSource, 2),
             (
+                // Not `UnsupportedFormat`: the hint stopped refusing `woff2`
+                // when the decoder landed, so these bytes are now *read* and
+                // the refusal names what the container did rather than what
+                // the sheet claimed.
                 "shared".to_owned(),
-                FaceDefect::UnsupportedFormat("woff2".to_owned()),
+                FaceDefect::PackedContainer {
+                    format: "woff2",
+                    why: WoffError::Malformed("more tables than a font plausibly has"),
+                },
                 2
             ),
         ],
@@ -844,61 +851,131 @@ fn an_embedded_face_removes_the_overflow_ceiling_and_the_warning() {
     );
 }
 
-// ---- WOFF and WOFF2, refused by name -------------------------------------------
+// ---- WOFF and WOFF2, unpacked ------------------------------------------------
 
-/// **WOFF and WOFF2 are refused by name, by the hint and by the bytes, and the
-/// two are different findings.**
+/// The WOFF2 that `crates/tinker-pdf-font/tests/woff/` holds, packed from this
+/// repository's own face by fontTools on 2026-08-31.
 ///
-/// Four cases, and no two of them are the same code path:
+/// Reached across the crate boundary rather than rebuilt here, because there
+/// is no Brotli **encoder** in this tree and there is not going to be one
+/// (`CONTRIBUTING.md` rule 1). Its provenance — which command produced it,
+/// from which face, and the argument that fontTools generated it and
+/// adjudicates nothing (ruling 13) — is written down in
+/// `crates/tinker-pdf-font/tests/woff_fixtures.rs` and in the generator beside
+/// the file.
 ///
-/// - a `format("woff")` and a `format("woff2")` are refused **without reading
-///   the entry**, which is what §4.3 says a hint is for;
-/// - and a file whose sheet gave no hint at all is refused on its **signature**,
-///   which is the commoner book: a producer that omits `format()` is more
-///   common than one that lies in it.
+/// It covers U+0020..U+00FF, so a book set in ASCII finds every glyph.
+const WOFF2_FIXTURE: &[u8] = include_bytes!("../../tinker-pdf-font/tests/woff/synthetic-1.woff2");
+
+/// **A WOFF and a WOFF2 both reach the page, and neither the hint nor the
+/// signature stops them any more.**
 ///
-/// A build with only the hint check passes on the first two and sets the last
-/// two in Times in silence; a build with only the sniff downloads and inflates
-/// a file it already knew it could not use, and names the wrong defect.
+/// Four cases, and no two are the same code path:
+///
+/// - a WOFF whose sheet gave **no** `format()`, recognised on its signature —
+///   the commoner book, because a producer that omits the hint is commoner
+///   than one that lies in it;
+/// - the same WOFF with `format("woff")`, which used to be refused *without
+///   reading the entry* and now is not;
+/// - a real WOFF2, Brotli and transformed `glyf` and all;
+/// - and the same WOFF2 with `format("woff2")`.
+///
+/// The assertion is the same for all four and it is not "no warning": the
+/// **face is on the page**. A book that fell back to the standard 14 reports
+/// nothing either, and that is precisely the failure this replaces.
 #[test]
-fn woff_and_woff2_are_refused_by_name_on_the_hint_and_on_the_bytes() {
-    let sfnt = covering("Real", "ABC");
-    let mut woff = sfnt.clone();
-    woff[0..4].copy_from_slice(b"wOFF");
-    let mut woff2 = sfnt.clone();
-    woff2[0..4].copy_from_slice(b"wOF2");
-
-    let cases: [(&str, &str, Vec<u8>, FaceDefect); 4] = [
-        (
-            "HintedWoff",
-            r#"url(fonts/a.woff) format("woff")"#,
-            sfnt.clone(),
-            FaceDefect::UnsupportedFormat("woff".to_owned()),
-        ),
-        (
-            "HintedWoff2",
-            r#"url(fonts/a.woff) format("woff2")"#,
-            sfnt.clone(),
-            FaceDefect::UnsupportedFormat("woff2".to_owned()),
-        ),
+fn a_woff_and_a_woff2_are_unpacked_and_set_the_book() {
+    let cases: [(&str, &str, Vec<u8>); 4] = [
         (
             "SniffedWoff",
             "url(fonts/a.woff)",
-            woff,
-            FaceDefect::PackedContainer("woff"),
+            as_woff(&covering("Real", "ABC")),
         ),
         (
-            "SniffedWoff2",
-            "url(fonts/a.woff)",
-            woff2,
-            FaceDefect::PackedContainer("woff2"),
+            "HintedWoff",
+            "url(fonts/a.woff) format(\"woff\")",
+            as_woff(&covering("Real", "ABC")),
+        ),
+        ("SniffedWoff2", "url(fonts/a.woff)", WOFF2_FIXTURE.to_vec()),
+        (
+            "HintedWoff2",
+            "url(fonts/a.woff) format(\"woff2\")",
+            WOFF2_FIXTURE.to_vec(),
         ),
     ];
 
-    for (family, src, bytes, expected) in cases {
+    for (family, src, bytes) in cases {
         let style = format!(
             "{}p {{ font-family: \"{family}\", serif; }}",
             font_face(&family.to_ascii_lowercase(), src)
+        );
+        let doc = Document::open(book(
+            &package(
+                IDENTIFIER,
+                r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
+            ),
+            &chapter(&style, "ABC"),
+            &[("EPUB/fonts/a.woff", bytes)],
+        ))
+        .expect("a book");
+
+        let warnings = face_warnings(&doc);
+        assert!(
+            warnings.is_empty(),
+            "{family}: a container that unpacked still reported a defect: {warnings:?}"
+        );
+
+        // The embedded face, not the standard 14. `Bf0` is the first
+        // `@font-face` resource; `Bk` is what a fallback draws with.
+        let content = page_content(&doc);
+        assert_eq!(
+            text_objects(&content)
+                .first()
+                .map(|(name, _)| name.clone())
+                .unwrap_or_default(),
+            "Bf0",
+            "{family}: the container did not become the face: {content}"
+        );
+    }
+}
+
+/// **A container that will not unpack keeps its row, and says why.**
+///
+/// The row this replaces said only "the file is a woff container", which was
+/// the whole truth when nothing could read one. Now the interesting cases are
+/// the damaged files, and a producer told *which table failed and how* can fix
+/// one — ruling 10, and the reason the defect carries a `WoffError` rather
+/// than only a format name.
+///
+/// Three shapes, because they are three different conversations: a container
+/// that ends early is a stopped download, a table whose checksum disagrees is
+/// an intact container around a damaged font, and a transform this build has
+/// no reverse for is a file from the future.
+#[test]
+fn a_container_that_will_not_unpack_is_refused_with_the_reason() {
+    let good = as_woff(&covering("Broken", "ABC"));
+
+    let mut short = good.clone();
+    short.truncate(60);
+
+    // Inside the first directory entry's `origChecksum`.
+    let mut wrong_sum = good.clone();
+    wrong_sum[60] ^= 0x01;
+
+    // A WOFF2 whose first table claims a transform version nothing reverses.
+    let mut future = WOFF2_FIXTURE.to_vec();
+    future[48] |= 0b1100_0000;
+
+    let cases: [(&str, Vec<u8>, &str); 3] = [
+        ("Stopped", short, "ended early"),
+        ("Damaged", wrong_sum, "checksum"),
+        ("FromTheFuture", future, "transform version"),
+    ];
+
+    for (family, bytes, expected) in cases {
+        let style = format!(
+            "{}p {{ font-family: \"{family}\", serif; }}",
+            font_face(&family.to_ascii_lowercase(), "url(fonts/a.woff)")
         );
         let doc = Document::open(book(
             &package(
@@ -909,23 +986,150 @@ fn woff_and_woff2_are_refused_by_name_on_the_hint_and_on_the_bytes() {
             &[("EPUB/fonts/a.woff", bytes)],
         ))
         .expect("a book");
+
         let warnings = face_warnings(&doc);
+        let described = warnings
+            .iter()
+            .find_map(|(_, defect, _)| match defect {
+                FaceDefect::PackedContainer { format, .. } => {
+                    assert!(
+                        *format == "woff" || *format == "woff2",
+                        "{family}: the container was not named"
+                    );
+                    Some(defect.describe())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{family}: no container defect in {warnings:?}"));
         assert!(
-            warnings.iter().any(|(_, defect, _)| *defect == expected),
-            "{family}: expected {expected:?}, got {warnings:?}"
+            described.contains(expected),
+            "{family}: the reason does not say {expected:?}: {described}"
         );
-        // And the rule as a whole is reported too, because *"this entry failed"*
-        // and *"the family has no file"* are two facts a producer acts on
-        // differently.
+
+        // And the rule as a whole is reported too, because *"this entry
+        // failed"* and *"the family has no file"* are two facts a producer
+        // acts on differently.
         assert!(
             warnings
                 .iter()
                 .any(|(_, defect, _)| *defect == FaceDefect::NoUsableSource),
             "{family}: the family was left without a stated reason: {warnings:?}"
         );
-        // The book still sets, in the standard 14, which is the failure mode
-        // the warning exists to make visible rather than to prevent.
+        // The book still sets, in the standard 14 (ruling 2): a face that
+        // cannot be read loses the face, never the book.
         assert!(page_content(&doc).contains("BT /Bk"));
+    }
+}
+
+/// **What is embedded is the sfnt, byte for byte, and not the container.**
+///
+/// The assertion every other test in this file would pass without: 9.9 gives
+/// font programs `/FontFile2` and `/FontFile3` and neither has a subtype for a
+/// web container, so a build that passed the WOFF through would write a PDF
+/// whose font stream no reader can parse — and the page would still *name* the
+/// face, so every "the face reached the page" claim above would hold.
+///
+/// Made through `load` rather than through a rendered page for the same reason
+/// [`loaded_program`] is: the bytes are the claim, and a header that survived
+/// would let a page draw something.
+///
+/// Byte identity and not equivalence, because WOFF 1.0 is a repackaging and
+/// `as_woff` preserves the physical table order — so the only correct answer
+/// is the input.
+#[test]
+fn what_reaches_the_pdf_is_the_unpacked_sfnt_byte_for_byte() {
+    let original = covering("packed", "ABC");
+    let packed = as_woff(&original);
+    assert_ne!(packed, original, "the fixture did not pack anything");
+    assert_eq!(&packed[0..4], b"wOFF", "the fixture is a container");
+
+    let style = format!(
+        "{}p {{ font-family: \"packed\"; }}",
+        font_face("packed", "url(fonts/a.woff)")
+    );
+    let entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+        OcfEntry::deflated(
+            "EPUB/content.opf",
+            package(
+                IDENTIFIER,
+                r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
+            )
+            .as_bytes(),
+        ),
+        OcfEntry::deflated("EPUB/ch1.xhtml", chapter(&style, "ABC").as_bytes()),
+        OcfEntry::stored("EPUB/fonts/a.woff", &packed),
+    ];
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    let bytes = ocf_zip(&entries, &directory);
+
+    let limits = Limits::DEFAULT;
+    let archive =
+        Archive::open(&bytes, &tinker_pdf_zip::Limits::DEFAULT).expect("a fixture container");
+    let mut ocf = Ocf::open(archive, &limits);
+    let encryption = ocf.encryption().expect("no encryption").clone();
+    let rules = vec![tinker_pdf_css::font_face::FontFace {
+        family: "packed".to_owned(),
+        sources: vec![tinker_pdf_css::font_face::FontSource::Url {
+            url: "fonts/a.woff".to_owned(),
+            format: None,
+        }],
+        weight: (400, 400),
+        style: tinker_pdf_css::property::FontStyle::Normal,
+        base: Some("EPUB/ch1.xhtml".to_owned()),
+    }];
+    let set = load(&mut ocf, &rules, Some(IDENTIFIER), &encryption, &limits);
+    assert!(
+        set.defects().is_empty(),
+        "the container did not unpack: {:?}",
+        set.defects()
+    );
+    let face = set.faces().first().expect("one face was loaded");
+    assert_eq!(
+        face.program, original,
+        "the embedded program is not the sfnt the container held"
+    );
+    assert!(
+        !face
+            .program
+            .windows(4)
+            .any(|w| w == b"wOFF" || w == b"wOF2"),
+        "a container signature survived into the embedded program"
+    );
+}
+
+/// **`embedded-opentype` and `svg` are what is left on the hint list.**
+///
+/// That the list is not empty is the point: `woff` and `woff2` left it the day
+/// the decoders landed, and a build that emptied it by accident would download
+/// and sniff every EOT in the world to discover what §4.3 already told it.
+#[test]
+fn the_format_hint_still_refuses_the_two_formats_with_no_reader() {
+    for (family, keyword) in [("Eot", "embedded-opentype"), ("Svgf", "svg")] {
+        let style = format!(
+            "{}p {{ font-family: \"{family}\", serif; }}",
+            font_face(
+                &family.to_ascii_lowercase(),
+                &format!("url(fonts/a.woff) format(\"{keyword}\")")
+            )
+        );
+        let doc = Document::open(book(
+            &package(
+                IDENTIFIER,
+                r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
+            ),
+            &chapter(&style, "Words."),
+            &[("EPUB/fonts/a.woff", covering("Real", "ABC"))],
+        ))
+        .expect("a book");
+        let warnings = face_warnings(&doc);
+        assert!(
+            warnings
+                .iter()
+                .any(|(_, defect, _)| *defect == FaceDefect::UnsupportedFormat(keyword.to_owned())),
+            "{family}: the hint was not honoured: {warnings:?}"
+        );
     }
 }
 
@@ -968,7 +1172,10 @@ fn a_src_list_is_walked_past_a_refused_entry_and_the_refusal_is_still_named() {
         warnings,
         vec![(
             "pref".to_owned(),
-            FaceDefect::UnsupportedFormat("woff2".to_owned()),
+            FaceDefect::PackedContainer {
+                format: "woff2",
+                why: WoffError::Truncated,
+            },
             1
         )],
         "the refused entry is named and the rule is not reported as a whole failure"

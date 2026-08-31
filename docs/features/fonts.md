@@ -568,17 +568,22 @@ could show was right.
 
 ## Verified
 
-- `crates/tinker-pdf-font/tests/woff_fixtures.rs` — **the WOFF decoders
-  against seven committed files**, in `crates/tinker-pdf-font/tests/woff/`,
+- `crates/tinker-pdf-font/tests/woff_fixtures.rs` — 12 tests, **the WOFF
+  decoders against seven committed files**, in `crates/tinker-pdf-font/tests/woff/`,
   written on 2026-08-31 by `make-fixtures.py` from `cargo xtask synth-face` —
   a face this project owns, which is why they can exist at all: OFL-1.1
   reserves the name of every face the corpus vendors, and no producer in the
-  corpus tooling emits a web font. Five packings by **four encoders with no
-  code in common** — fontTools 4.63.0, `ttf2woff` 3.0.0, and `wawoff2` 2.0.1,
+  corpus tooling emits a web font. Five packings by **three encoders with
+  no code in common** — fontTools 4.63.0, `ttf2woff` 3.0.0, and
+  `wawoff2` 2.0.1,
   which is Google's reference C++ encoder built to WebAssembly. fontTools
   **generated** these files and adjudicates nothing (ruling 13): no program
   runs at test time, and every assertion compares this build against the
-  source face committed beside the containers.
+  source face committed beside the containers. `tests/woff/PROVENANCE.tsv`
+  records all of that per file — producer, version, the face it was made
+  from, the day, and ruling 13's two halves — and a test holds it to the
+  directory in both directions, because a record nothing checks stops being
+  true the first time a fixture is regenerated.
   The claim is **identical glyph outlines through `Sfnt`** over all 263
   glyphs — 230 that draw and 33 that do not, asserted by number — plus
   identical `cmap` answers, identical advances, and a `head` whose

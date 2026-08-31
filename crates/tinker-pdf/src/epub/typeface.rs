@@ -3,8 +3,8 @@
 //!
 //! `tinker-pdf-css` reads the rule and says nothing about whether any of it
 //! resolves, because it has no archive and is not acquiring one. This is the
-//! file that opens the `url()`, undoes whatever obfuscation covers it, refuses
-//! the containers this build has no reader for **by name**, and hands
+//! file that opens the `url()`, undoes whatever obfuscation covers it, unpacks
+//! the web containers, refuses what is left **by name**, and hands
 //! [`super::paint`] a set of faces with a `cmap` in them.
 //!
 //! # Every failure is named, and there are seven of them
@@ -22,24 +22,47 @@
 //! # `format()` is a hint and the bytes are the answer
 //!
 //! §4.3 lets a sheet say what a file is and browsers use it to skip a download.
-//! This build does the same — a `format("woff2")` is refused without reading
-//! the entry — **and** sniffs the bytes of everything it does read, because a
-//! `format()` that lies is a real file and a producer that omits it is
-//! commoner still. The two checks catch different books and a build with only
-//! one of them would be wrong about the other's.
+//! This build does the same — a `format("svg")` is refused without reading the
+//! entry — **and** sniffs the bytes of everything it does read, because a
+//! `format()` that lies is a real file and a producer that omits it is commoner
+//! still. The two checks catch different books and a build with only one of
+//! them would be wrong about the other's.
 //!
-//! # WOFF and WOFF2 are refused rather than decoded
+//! The hint list is the part that moves. `woff` and `woff2` sat on it until
+//! this build could read them, and a sheet writing
+//! `url(x.woff2) format("woff2"), url(x.otf) format("opentype")` — which is
+//! what a modern producer writes — reached the second entry and now reaches
+//! the first. What is left on it is `embedded-opentype` and `svg`, two formats
+//! with no reader here and no plan for one.
+//!
+//! # WOFF and WOFF2 are unpacked
 //!
 //! Both are a container around an sfnt: WOFF 1.0 deflates each table, WOFF2
 //! rewrites `glyf` into a transformed form and Brotli-compresses the lot.
-//! Undoing the first is a table-directory rebuild and undoing the second is a
-//! Brotli decoder plus a glyph re-encoder, and neither is in gap 31's scope.
-//! What is in scope is that a book whose only face is a WOFF2 **says so**, so a
-//! host can convert it, rather than quietly setting the book in Times.
+//! `tinker_pdf_font::woff` undoes both, and this file calls it on any `src`
+//! entry whose bytes carry either signature — **after** de-obfuscation, since a
+//! WOFF2 a book obfuscated is `wOF2` only once the XOR is undone.
+//!
+//! What is embedded is the sfnt that came out, because a PDF cannot carry a
+//! WOFF: 9.9's font file streams are `/FontFile2` and `/FontFile3`, and neither
+//! has a subtype for a web container. So the unpacking is not an optimisation,
+//! it is the only way the face reaches a page.
+//!
+//! A container that will not unpack keeps its own row. It is now the *damaged*
+//! ones rather than all of them, and [`FaceDefect::PackedContainer`] carries
+//! the reason the decoder gave rather than only the format (ruling 10) — a
+//! producer told "the glyf table's checksum disagrees" can fix a file, where
+//! one told "the file is a woff container" can only be told again.
 
 use tinker_pdf_css::font_face::{FontFace, FontFormat, FontSource};
 use tinker_pdf_css::property::FontStyle;
+use tinker_pdf_font::woff;
 use tinker_pdf_font::Sfnt;
+
+/// Why a WOFF container did not unpack, re-exported so that a caller matching
+/// on [`FaceDefect::PackedContainer`] does not have to name
+/// `tinker-pdf-font` to do it (ruling 11).
+pub use tinker_pdf_font::woff::WoffError;
 
 use super::obfuscation::{deobfuscate, KeyDefect};
 use super::ocf::{resolve_reference, Encryption, Ocf};
@@ -48,6 +71,20 @@ use super::Limits;
 /// `hhea`, as a big-endian table tag.
 const HHEA: u32 = 0x6868_6561;
 
+/// The largest sfnt a `@font-face` container is allowed to unpack to.
+///
+/// Not advisory, and not the same number as the entry's own size. A WOFF2
+/// table directory states its lengths in `UIntBase128`, which reaches
+/// 2^32 - 1 in five bytes — so a forty-byte entry in a book's ZIP can ask a
+/// decoder for four gigabytes, and the ZIP's own bound says nothing about it
+/// (ruling 1).
+///
+/// Sixteen megabytes is roughly twice the largest face in the fetched corpora,
+/// which are CJK, and about forty times the largest a `@font-face` in the
+/// committed books carries. A book that wanted more gets the row and the
+/// family it fell back to, which is ruling 2 working as intended.
+const MAX_UNPACKED_FACE: usize = 16 << 20;
+
 /// Why one `@font-face` did not become a face.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -55,13 +92,19 @@ pub enum FaceDefect {
     /// The `src` entry declared a `format()` this build has no reader for,
     /// with the keyword the sheet wrote.
     UnsupportedFormat(String),
-    /// The bytes are a WOFF or WOFF2 container whatever the sheet said.
+    /// The bytes are a WOFF or WOFF2 container that would not unpack.
     ///
-    /// Distinct from [`FaceDefect::UnsupportedFormat`] because the two are
-    /// found by different means and a book can have either without the other:
-    /// a `src` with no `format()` at all reaches this one, and a `format()`
-    /// naming a file that is really an OpenType reaches the other.
-    PackedContainer(&'static str),
+    /// Before the decoders existed this was *every* WOFF: the container was
+    /// recognised and declined. Now it is only the damaged ones, so the reason
+    /// the decoder gave travels with it — ruling 10, and the difference
+    /// between a producer who can fix a file and one who can only be told the
+    /// format again.
+    PackedContainer {
+        /// The `css-fonts-4` §4.3 keyword for the container the bytes are.
+        format: &'static str,
+        /// What the decoder said, unabridged.
+        why: WoffError,
+    },
     /// `local()`: a face installed on the reading system, which this one has
     /// none of.
     LocalUnavailable,
@@ -88,7 +131,9 @@ impl FaceDefect {
     pub fn describe(&self) -> String {
         match self {
             FaceDefect::UnsupportedFormat(name) => format!("src format({name}) is not read here"),
-            FaceDefect::PackedContainer(name) => format!("the file is a {name} container"),
+            FaceDefect::PackedContainer { format, why } => {
+                format!("the {format} container would not unpack: {why}")
+            }
             FaceDefect::LocalUnavailable => {
                 "local() names a face this build has none of".to_owned()
             }
@@ -328,22 +373,22 @@ fn weight_distance(range: (u16, u16), wanted: u16) -> u32 {
 /// a hint naming a plain sfnt both mean.
 fn refused_by_hint(format: Option<&FontFormat>) -> Option<String> {
     match format? {
-        FontFormat::OpenType | FontFormat::TrueType | FontFormat::Collection => None,
+        // `Woff` and `Woff2` joined this list the day the decoders landed.
+        // They are the reason the hint is checked at all — a sheet that writes
+        // `url(x.woff2) format("woff2"), url(x.otf) format("opentype")` used to
+        // reach the second entry because the first was refused unread, and now
+        // reaches the first.
+        FontFormat::OpenType
+        | FontFormat::TrueType
+        | FontFormat::Collection
+        | FontFormat::Woff
+        | FontFormat::Woff2 => None,
         // An unrecognised keyword is **not** refused on the hint: §4.3 makes
         // `format()` advisory, and a sheet that wrote a vendor keyword over a
         // perfectly ordinary OpenType file should still get its font. The
         // bytes decide.
         FontFormat::Other(_) => None,
         other => Some(other.name().to_owned()),
-    }
-}
-
-/// Whether the bytes are a packed container rather than a bare sfnt.
-fn packed_container(bytes: &[u8]) -> Option<&'static str> {
-    match bytes.get(..4) {
-        Some(b"wOFF") => Some("woff"),
-        Some(b"wOF2") => Some("woff2"),
-        _ => None,
     }
 }
 
@@ -464,9 +509,22 @@ fn load_one(
         // After de-obfuscation and not before: a WOFF2 that a book obfuscated
         // is `wOF2` only once the XOR is undone, and a build that sniffed the
         // obfuscated bytes would see neither the packed container nor a font.
-        if let Some(name) = packed_container(&program) {
-            defects.push((rule.family.clone(), FaceDefect::PackedContainer(name)));
-            continue;
+        // §4.3's `format()` is a hint and these bytes are the answer, so the
+        // signature decides here as it decides everywhere else in this file.
+        if let Some(packing) = woff::packaging(&program) {
+            match woff::decode(&program, MAX_UNPACKED_FACE) {
+                Ok(sfnt) => program = sfnt,
+                Err(why) => {
+                    defects.push((
+                        rule.family.clone(),
+                        FaceDefect::PackedContainer {
+                            format: packing.name(),
+                            why,
+                        },
+                    ));
+                    continue;
+                }
+            }
         }
         if Sfnt::parse(&program).is_none() {
             defects.push((rule.family.clone(), FaceDefect::NotAFont));

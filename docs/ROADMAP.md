@@ -340,13 +340,18 @@ an omission.
 Debts each container format recorded about itself, in its feature doc's
 refusal table.
 
-- **EPUB** ([features/epub.md](features/epub.md)): WOFF/WOFF2, refused
-  by name and with **no committed file behind the row** — no producer
-  here emits one and OFL-1.1's reserved-name clause bars repacking a
-  vendored face; table-row and flex-line fragmentation (staged, not
-  built); the pinned float reading-order defect; multi-column; non-static
-  `position`; `min`/`max` sizing; `vertical-align`; SVG content
-  documents; pseudo-elements (parsed, no box generated).
+- **EPUB** ([features/epub.md](features/epub.md)): `local()` sources,
+  which name a face installed on the reading system and are permanent
+  for an engine that reads no font directories; **no book in the corpus
+  carries a web font**, so the `@font-face` WOFF path is held against
+  containers this repository packs rather than one a producer shipped;
+  table-row and flex-line fragmentation (staged, not built); the pinned
+  float reading-order defect; multi-column; non-static `position`;
+  `min`/`max` sizing; `vertical-align`; SVG content documents;
+  pseudo-elements (parsed, no box generated).
+  **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
+  and reach the page, against seven committed files from three encoders
+  with no code in common ([features/fonts.md](features/fonts.md)).
 - **XPS** ([features/xps.md](features/xps.md)): `VisualBrush`; JPEG XR
   **reaching the page** — the decoder is built and `xps/image.rs` still
   refuses the format at the element, which is the same shape TIFF was in

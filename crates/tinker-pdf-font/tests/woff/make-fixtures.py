@@ -410,6 +410,56 @@ wawoff2.compress(source).then((packed) => {
 """
 
 
+PROVENANCE_HEADER = "file\tbytes\tproducer\tversion\tfrom\twritten\trole\n"
+
+# One row per committed file. `tests/woff_fixtures.rs` asserts that this names
+# every file in the directory and that every row names a file of that size, so
+# a fixture that is regenerated and a record that is not cannot both survive.
+PROVENANCE_ROWS = [
+    ("synthetic-1.ttf", "fontTools", "4.63.0", "cargo xtask synth-face",
+     "the source face: synth-face's 256 glyphs plus seven that reach the rest "
+     "of WOFF2's glyf transform"),
+    ("synthetic-1.woff", "fontTools", "4.63.0", "synthetic-1.ttf",
+     "WOFF 1.0, table order preserved, so the round trip is byte identity"),
+    ("synthetic-1-ttf2woff.woff", "ttf2woff", "3.0.0", "synthetic-1.ttf",
+     "WOFF 1.0 from a second encoder, which sorts its tables"),
+    ("synthetic-1.woff2", "fontTools", "4.63.0", "synthetic-1.ttf",
+     "WOFF 2.0; loca sits four entries after glyf, which 5.5 permits"),
+    ("synthetic-1-wawoff2.woff2", "wawoff2", "2.0.1", "synthetic-1.ttf",
+     "WOFF 2.0 from Google's reference C++ encoder built to WebAssembly"),
+    ("synthetic-1-aligned.ttf", "fontTools", "4.63.0", "synthetic-1.ttf",
+     "the same outlines with every lsb equal to its xMin"),
+    ("synthetic-1-aligned-hmtx.woff2", "fontTools", "4.63.0",
+     "synthetic-1-aligned.ttf",
+     "WOFF 2.0 with hmtx transform 1, which no encoder applies unasked"),
+]
+
+# Ruling 13, restated where a reader of the record will see it rather than only
+# in this file's header.
+PROVENANCE_NOTE = (
+    "# Written by make-fixtures.py. Every producer named here GENERATED a\n"
+    "# file and none of them ADJUDICATES one (ruling 13): no program runs at\n"
+    "# test time, and tests/woff_fixtures.rs compares this build against\n"
+    "# synthetic-1.ttf, which is committed beside the containers.\n")
+
+
+def write_provenance(written):
+    """The record, regenerated with the files so the two cannot disagree."""
+    path = os.path.join(HERE, "PROVENANCE.tsv")
+    with open(path, "w", encoding="utf-8", newline="\n") as out:
+        out.write(PROVENANCE_NOTE)
+        out.write(PROVENANCE_HEADER)
+        for name, producer, version, source, role in PROVENANCE_ROWS:
+            full = os.path.join(HERE, name)
+            if not os.path.exists(full):
+                sys.exit("PROVENANCE_ROWS names %s and it was not written"
+                         % name)
+            out.write("%s\t%d\t%s\t%s\t%s\t%s\t%s\n"
+                      % (name, os.path.getsize(full), producer, version,
+                         source, written, role))
+    print("provenance: PROVENANCE.tsv (%d rows)" % len(PROVENANCE_ROWS))
+
+
 def main():
     prepared, num_glyphs = prepared_source()
     ttf = os.path.join(HERE, "synthetic-1.ttf")
@@ -475,6 +525,11 @@ def main():
     open(script, "w", encoding="utf-8", newline="\n").write(INDEPENDENT_JS)
     subprocess.run(["node", script, ttf, HERE], cwd=node, check=True)
     os.remove(script)
+
+    # Last, so it records the sizes of the files that were just written. The
+    # date is an argument rather than a clock: re-running this on a later day
+    # must not silently restate when the committed bytes were made.
+    write_provenance(os.environ.get("WOFF_WRITTEN", "2026-08-31"))
 
 
 if __name__ == "__main__":
