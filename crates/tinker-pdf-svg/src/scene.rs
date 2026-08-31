@@ -28,6 +28,7 @@
 use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits};
 
 use crate::document::{self, Node, Tree};
+use crate::gradient;
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
@@ -56,6 +57,14 @@ struct Frame {
     /// The **resolved** style of the element above, which is what a child
     /// inherits from. Resolved once on the way down and never looked back up.
     style: Style,
+    /// How deep the *walk* is, which a `<use>` makes different from how deep
+    /// the element sits in the tree.
+    ///
+    /// `Node::depth` is where an element is written; this is where it is being
+    /// drawn. A `<use>` of a subtree three deep, from six deep, draws at nine —
+    /// and a build that capped on the first number would let a chain of
+    /// `<use>`s nest without bound while every element in it looked shallow.
+    depth: usize,
 }
 
 /// The walk's own state: what it has spent and what it has to say.
@@ -70,6 +79,19 @@ struct Walk<'a> {
     segments: usize,
     /// Every `<style>` element of the document, read once before the walk.
     sheet: Sheet,
+    /// [`Limits::max_uses`], spent across the whole document.
+    uses: usize,
+    /// The `<use>` targets currently being expanded, innermost last.
+    ///
+    /// **This is the cycle guard and it is the only one.** A `<use>` whose
+    /// target is an ancestor of itself is the classic SVG bomb, and the
+    /// obvious check — "is the target an ancestor of the `<use>`?" — is the
+    /// *special case*: expanding the target re-reaches the `<use>`, which
+    /// names the target again, and the target is already on this stack. An
+    /// indirect cycle through three elements has no ancestor relation at all
+    /// and is caught here just the same. Milestone 4's injection matrix is why
+    /// there is one rule rather than two.
+    expanding: Vec<usize>,
     /// `tinker-pdf-css`'s own budget, which bounds selector matching.
     css: CssBudget,
 }
@@ -186,7 +208,7 @@ impl Walk<'_> {
         let Some(node) = self.tree.nodes.get(index) else {
             return Ok(());
         };
-        if node.depth >= self.limits.max_depth {
+        if outer.depth >= self.limits.max_depth {
             return Err(Refusal::TooDeep);
         }
         // §11.5's `display` is structural: `none` removes the element **and its
@@ -218,7 +240,7 @@ impl Walk<'_> {
 
         match node.name.as_str() {
             // ---- containers ------------------------------------------------
-            "svg" => self.viewport_element(index, node, frame),
+            "svg" => self.viewport_element(index, node, frame, (None, None)),
             "g" | "a" => {
                 let inner = Frame {
                     matrix: self.matrix_of(node, frame.matrix),
@@ -253,10 +275,16 @@ impl Walk<'_> {
                 self.warn(Warning::MaskUnsupported);
                 Ok(())
             }
-            "clipPath" => {
-                self.warn(Warning::ClipPathUnsupported);
-                Ok(())
-            }
+            // §14.3: a `<clipPath>` is never rendered where it stands — it
+            // is reached by a `clip-path` reference and nowhere else, so
+            // walking into it here would draw every clip's own geometry as
+            // though it were a shape. `<defs>`'s reason exactly, and the
+            // reason `<linearGradient>` is beside it.
+            "clipPath" | "linearGradient" | "radialGradient" | "symbol" => Ok(()),
+
+            // §5.6's `<use>`, which is the one place an SVG grows
+            // multiplicatively.
+            "use" => self.use_element(node, frame),
             "pattern" => {
                 self.warn(Warning::PatternUnsupported);
                 Ok(())
@@ -309,7 +337,12 @@ impl Walk<'_> {
             }
         };
         self.spend(outline.segments.len())?;
-        let style = &frame.style;
+        let style = frame.style.clone();
+        let style = &style;
+        // §7.11's object bounding box, in the element's **own** user space —
+        // which is what `objectBoundingBox` units are a fraction of, and why
+        // it is taken before the matrix rather than after.
+        let bounds = gradient::bounds(&outline);
         // §11.5: a hidden element is laid out and not painted, which for a
         // display list means it is not in it. Distinct from `display: none`
         // only in that a descendant could have turned it back on, and a
@@ -317,15 +350,29 @@ impl Walk<'_> {
         if !style.visible {
             return Ok(());
         }
-        let fill = self.paint(&style.fill, style);
-        let stroke_paint = self.paint(&style.stroke, style);
+        let fill = self.paint(&style.fill, style, matrix, bounds);
+        let stroke_paint = self.paint(&style.stroke, style, matrix, bounds);
+        // §14.3's clip, resolved against the same two numbers a gradient uses.
+        // A `clip-path` naming nothing is **not** a clip: §14.3.1 makes a
+        // reference to a non-existent element an error, and ruling 2 draws the
+        // element rather than losing it.
+        let clip = match &style.clip_path {
+            None => None,
+            Some(name) => match gradient::clip(self.tree, name, matrix, bounds, style) {
+                Some(clip) => Some(clip),
+                None => {
+                    self.warn(Warning::ClipPathUnsupported);
+                    None
+                }
+            },
+        };
         // §11.4: a stroke with no paint, no width or a zero width puts no ink
         // on the page. Answered here rather than carried, so a consumer never
         // has to decide whether a `Stroke` of width zero draws.
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {
-            Some(Stroke {
+            Some(Box::new(Stroke {
                 paint: stroke_paint,
                 width: style.stroke_width,
                 cap: style.cap,
@@ -334,7 +381,7 @@ impl Walk<'_> {
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
                 opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
-            })
+            }))
         };
         // §14.5's group opacity, flattened into each descendant's own alpha.
         // Named where it is observable: a shape painted **twice** — once
@@ -350,6 +397,7 @@ impl Walk<'_> {
             rule: style.fill_rule,
             fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
             stroke,
+            clip,
         })
     }
 
@@ -360,21 +408,38 @@ impl Walk<'_> {
     /// invention: a file that wrote `fill="url(#g) red"` said what to do when
     /// the server is missing, and a build that drew nothing would be ignoring
     /// the half of the value that was for exactly this.
-    fn paint(&mut self, spec: &PaintSpec, style: &Style) -> Paint {
+    fn paint(
+        &mut self,
+        spec: &PaintSpec,
+        style: &Style,
+        matrix: [f64; 6],
+        bounds: [f64; 4],
+    ) -> Paint {
         match spec {
             PaintSpec::None => Paint::None,
             PaintSpec::Solid(colour) => Paint::Solid(*colour),
             PaintSpec::Current => Paint::Solid(style.colour),
             PaintSpec::Reference(name, fallback) => {
-                let target = self
-                    .tree
-                    .by_id(name)
-                    .map(|at| self.tree.nodes[at].name.clone());
-                match target.as_deref() {
+                let target = self.tree.by_id(name);
+                let kind = target.map(|at| self.tree.nodes[at].name.as_str());
+                if let (Some(at), Some("linearGradient" | "radialGradient")) = (target, kind) {
+                    if let Some(resolved) = gradient::resolve(self.tree, at, matrix, bounds, style)
+                    {
+                        if resolved.spread_unsupported {
+                            self.warn(Warning::SpreadMethodUnsupported);
+                        }
+                        return resolved.paint;
+                    }
+                    // §13.2.4: a gradient with no stops paints **as if `none`
+                    // were specified** — which is not the same as falling
+                    // through to the fallback, because the server was found.
+                    return Paint::None;
+                }
+                match kind {
                     Some("pattern") => self.warn(Warning::PatternUnsupported),
                     _ => self.warn(Warning::PaintServerUnresolved),
                 }
-                self.paint(fallback, style)
+                self.paint(fallback, style, matrix, bounds)
             }
         }
     }
@@ -404,6 +469,88 @@ impl Walk<'_> {
                     && value.trim().eq_ignore_ascii_case("none")
             })
         })
+    }
+
+    /// §5.6's `<use>`: the referenced element, drawn again here.
+    ///
+    /// **Walked rather than cloned.** §5.6 describes a deep clone into a
+    /// shadow tree, and building one would double the memory of every document
+    /// that reuses anything — `Tsuru_wiki-1b.svg` reuses its gradients
+    /// sixteen times. Walking the original with a different matrix and a
+    /// different inherited style produces the same scene, because a scene is
+    /// what the clone would have been walked into anyway.
+    ///
+    /// What that costs is one thing, and it is paid explicitly: the walk's
+    /// depth stops being the element's depth, so [`Frame::depth`] exists.
+    fn use_element(&mut self, node: &Node, frame: &Frame) -> Result<(), Refusal> {
+        let Some(href) = node.href() else {
+            // §5.6 makes the reference required; without one there is nothing
+            // to instantiate and nothing was refused.
+            return Ok(());
+        };
+        // Only a same-document reference. `other.svg#thing` names a resource
+        // this crate cannot fetch — no container, no filesystem, no network —
+        // so it is named rather than silently drawing nothing.
+        let Some(name) = href.trim().strip_prefix('#') else {
+            self.warn(Warning::UseUnresolved);
+            return Ok(());
+        };
+        let Some(target) = self.tree.by_id(name) else {
+            self.warn(Warning::UseUnresolved);
+            return Ok(());
+        };
+        // The bomb, refused **by name** rather than recursed into.
+        if self.expanding.contains(&target) {
+            return Err(Refusal::TooManyUses);
+        }
+        if self.uses >= self.limits.max_uses {
+            return Err(Refusal::TooManyUses);
+        }
+        self.uses += 1;
+
+        // §5.6: `x` and `y` are *"an additional transformation
+        // translate(x, y)"*, appended after the element's own — so a `<use>`
+        // that both translates and scales scales first, which is the order a
+        // `transform` list would have given it.
+        let matrix = self.matrix_of(node, frame.matrix);
+        let x = self.length_of(node, "x", Some(frame.viewport.0), 0.0);
+        let y = self.length_of(node, "y", Some(frame.viewport.1), 0.0);
+        let matrix = transform::concat([1.0, 0.0, 0.0, 1.0, x, y], matrix);
+
+        let inner = Frame {
+            matrix,
+            viewport: frame.viewport,
+            // §5.6: the referenced content inherits from the `<use>`, not from
+            // where it was written. A `<use fill="red">` of a shape that
+            // states no fill draws it red, and that is the whole reason a
+            // symbol library is useful.
+            style: frame.style.clone(),
+            depth: frame.depth + 1,
+        };
+        self.expanding.push(target);
+        let drawn = self.instance(target, node, &inner);
+        self.expanding.pop();
+        drawn
+    }
+
+    /// One instance of a `<use>`'s target.
+    ///
+    /// §5.6 gives `<symbol>` and `<svg>` their own rule: the `<use>`'s `width`
+    /// and `height` **override** the referenced element's, and a `<symbol>`
+    /// becomes an `<svg>`. Every other element is drawn as itself.
+    fn instance(&mut self, target: usize, node: &Node, frame: &Frame) -> Result<(), Refusal> {
+        let referenced = &self.tree.nodes[target];
+        if referenced.is_svg() && matches!(referenced.name.as_str(), "symbol" | "svg") {
+            let width = node
+                .attr("width")
+                .and_then(|text| document::length(text, Some(frame.viewport.0)));
+            let height = node
+                .attr("height")
+                .and_then(|text| document::length(text, Some(frame.viewport.1)));
+            let referenced = referenced.clone();
+            return self.viewport_element(target, &referenced, frame, (width, height));
+        }
+        self.element(target, frame)
     }
 
     /// §5.7's `<image>`.
@@ -436,6 +583,7 @@ impl Walk<'_> {
         index: usize,
         node: &Node,
         frame: &Frame,
+        override_size: (Option<f64>, Option<f64>),
     ) -> Result<(), Refusal> {
         let (outer_width, outer_height) = frame.viewport;
         // A nested `<svg>`'s `x` and `y` place its viewport inside its
@@ -443,8 +591,17 @@ impl Walk<'_> {
         // that has them, so one code path answers both.
         let x = self.length_of(node, "x", Some(outer_width), 0.0);
         let y = self.length_of(node, "y", Some(outer_height), 0.0);
-        let width = self.length_of(node, "width", Some(outer_width), outer_width);
-        let height = self.length_of(node, "height", Some(outer_height), outer_height);
+        // §5.6's override, which applies only through a `<use>` and is the
+        // reason this is a parameter rather than a second function: a
+        // `<symbol>` sized by its instance and one sized by itself must map
+        // their view boxes the same way, and two code paths would eventually
+        // stop doing so.
+        let width = override_size
+            .0
+            .unwrap_or_else(|| self.length_of(node, "width", Some(outer_width), outer_width));
+        let height = override_size
+            .1
+            .unwrap_or_else(|| self.length_of(node, "height", Some(outer_height), outer_height));
         // §7.7: a viewport with no area draws nothing, and neither does
         // anything inside it.
         if !(width > 0.0 && height > 0.0) {
@@ -462,6 +619,7 @@ impl Walk<'_> {
             // `<svg>`'s children against the page.
             viewport: (width, height),
             style: frame.style.clone(),
+            depth: frame.depth,
         };
         self.children(index, &inner)
     }
@@ -469,8 +627,12 @@ impl Walk<'_> {
     /// Every child element of `index`, in document order.
     fn children(&mut self, index: usize, frame: &Frame) -> Result<(), Refusal> {
         let children: Vec<usize> = self.tree.element_children(index).collect();
+        let inner = Frame {
+            depth: frame.depth + 1,
+            ..frame.clone()
+        };
         for child in children {
-            self.element(child, frame)?;
+            self.element(child, &inner)?;
         }
         Ok(())
     }
@@ -513,6 +675,8 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         segments: limits.max_segments,
         css: CssBudget::new(&css_limits),
         sheet,
+        uses: 0,
+        expanding: Vec::new(),
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);
@@ -531,6 +695,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
             matrix: IDENTITY,
             viewport,
             style: Style::default(),
+            depth: 0,
         },
     )?;
     let mut scene = walk.scene;
