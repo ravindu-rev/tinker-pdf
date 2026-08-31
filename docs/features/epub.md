@@ -49,7 +49,11 @@ keeps ruling 8's boundary real: `xml:lang` beats `lang` there, an `<a>` is a
 link only with an `href`, and white-space-only character data does not stop a
 cell being `:empty`. `css-cascade-5`'s complete sort order (origin, layer,
 specificity, order) with the UA sheet (`read::UA_STYLESHEET`, derived from
-HTML §15), author sheets and `style=""` attributes; `@media` evaluated
+HTML §15), author sheets and `style=""` attributes; §7.1's five explicit
+defaulting keywords on every property and every shorthand — `inherit`,
+`initial`, `unset`, and the two that roll the cascade back rather than
+replacing a value, `revert` to the previous **origin** and `revert-layer` to
+the previous **layer**; `@media` evaluated
 against a `MediaContext`; `@import` with cycle and depth bounds;
 `@font-face` descriptors collected into a `FaceSet`; `@layer` in all three
 syntaxes — block, statement and anonymous — with dotted and nested names
@@ -141,7 +145,6 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | `column-span: all` | `tinker_pdf_layout::Warning::ColumnSpanAsNone` | `css-multicol-1` §6: a spanning box interrupts the columns and resumes them below itself, which is three column sets where this build has one. The box is laid out in the column it fell in, counted per box | [ROADMAP.md](../ROADMAP.md) |
 | A single box taller than a page inside a multi-column container | `tinker_pdf_layout::Warning::ColumnTallerThanPage` | the third of the three `Abreast` shapes and the same sentence as the other two: the container is cut across pages, and what is left is one atomic box no cut can halve | [ROADMAP.md](../ROADMAP.md) |
 | A `max-height` shorter than the content | `tinker_pdf_layout::Warning::MaxHeightAsAuto` | CSS 2.2 §10.7's clamp, and its two halves land differently here: `min-height` pads the flow out and `max-height` would have to shorten it, which a column whose `y` never goes backwards cannot do once the items are emitted. So the box is its content's height and the declaration is named rather than half honoured — `InlineBlockAsInline`'s shape | [ROADMAP.md](../ROADMAP.md) |
-| `inherit`, `initial`, `unset`, `revert`, `revert-layer` — `css-cascade-5` §7.1's explicit defaulting keywords, on **every** property | `ArchiveWarning::UnimplementedProperty { property, elements }` | counted against the property the keyword was written on, because decision 5 keys on the (property, value) pair: `color: inherit` is a gap in `color`. This is what the two remaining `vertical-align` rows in `tests/epub/CENSUS.tsv` are — calibre writes `vertical-align: inherit` on its table rows and cells — so implementing §17.5.3 did not take them to zero and could not have | — |
 | Other at-rules (`@supports`, `@page`, …) | `tinker_pdf_css::Warning::AtRuleUnsupported(name)` | skipped by the spec's own recovery, named | — |
 | `:hover`, `:focus`, `:focus-within`, `:focus-visible`, `:active`, `:target`, `:visited` — **seven, and the whole of what never matches** | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | each names a state of a reading *session*: a pointer, a focus ring, a press, a fragment the reader navigated to, a history. A paginated document has none of them, for any element, ever — so never matching is `selectors-4`'s **answer** here and not this build's gap. Still counted, because a rule that had no effect is something the book said (ruling 10), and the count is asserted by number so a shrinking list cannot read as a passing one | — |
 | `:nth-child(An+B of S)` | `parser::Report::discarded_rules` | the only pseudo-class syntax refused outright. Reading it as the `An+B` without the `of` would style every second row instead of every second `.a`, which is a book that renders beautifully and is wrong; §3.1 drops the rule instead, counted | [ROADMAP.md](../ROADMAP.md) |
@@ -181,6 +184,32 @@ postdate the tool's removal under ruling 13, so
 ([ROADMAP.md](../ROADMAP.md) Tier 4).
 
 ## Verified
+
+- `crates/tinker-pdf-css/src/tests/defaulting.rs` — **§7.1's five keywords,
+  arranged around the two pairs that are easy to collapse into one.** `unset`
+  against `inherit` and `initial`, asserted on an inherited and a
+  non-inherited property in the same fixture because either one alone agrees
+  with two of the three keywords; and `unset` asserted to be exactly *not
+  declaring the property* over **all eighty-three longhands**, not a sample,
+  because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
+  the same rule written twice. `revert` against `revert-layer` in one fixture
+  with a user-agent rule and two author layers, where the two keywords have
+  **different** answers — the only shape that can tell them apart, and the
+  reason it is one fixture asserting both rather than two that could each pass
+  alone. Eight counted injections, each measured by making the edit; none
+  fires zero, and the pair `revert`/`revert-layer` fires 1 and 2, which is
+  what says a single fixture carries that distinction.
+- `crates/tinker-pdf-css/tests/unimplemented_property_does_not_build.rs` — the
+  compile-time proof, which **said nothing about a value** until this landed.
+  It proved a *property* with no consumer does not build; a defaulting keyword
+  is a value, valid on every property, and nothing stopped one being added
+  with nothing to write it down. `Longhand` and its three exhaustive consumers
+  are the answer, and three new injections withhold each: the sharpest is a
+  property name the cascade cannot write a defaulted value into, which is
+  `inherit` parsing, cascading, winning, and doing nothing. `Longhand::ALL` is
+  a list and not a `match`, so `rustc` cannot check it — `defaulting.rs`
+  checks it against `IMPLEMENTED_NAMES` instead, and the proof does not
+  pretend to.
 
 - **Nine committed books from three real producers** (pandoc 3.10.2 and 3.11,
   calibre 9.13.0 and 9.14.0, KCC 11.0.1) over text authored here, in

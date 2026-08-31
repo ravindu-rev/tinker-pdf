@@ -358,13 +358,19 @@ refusal table.
   containers this repository packs rather than one a producer shipped;
   the pinned float reading-order defect; non-static `position`;
   `row-gap`/`column-gap` between flex items; SVG content documents;
-  pseudo-elements (parsed, no box generated); `css-cascade-5` §7.1's
-  five explicit defaulting keywords, on every property. `min`/`max`
+  pseudo-elements (parsed, no box generated). `min`/`max`
   sizing is built, less one half of §10.7: a `max-height` shorter than
   its content is named (`MaxHeightAsAuto`) rather than obeyed.
   `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
   built — §3.4's geometry, §4's balance, §5's rule — less §6's
   `column-span: all`, which is named.
+  **`css-cascade-5` §7.1's five explicit defaulting keywords are
+  closed** — `inherit`, `initial`, `unset`, `revert` and `revert-layer`,
+  on all eighty-three longhands and all sixteen shorthands. Closing them
+  emptied both calibre books' census: `vertical-align: inherit` and
+  `text-align: inherit` were their whole remaining gap, so a calibre
+  book now has nothing in it this build does not read
+  ([features/epub.md](features/epub.md)).
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).

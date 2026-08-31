@@ -2,14 +2,15 @@
 //! 5's three-way split.
 
 use super::sheet;
+use crate::longhand::Longhand;
 use crate::media::{MediaContext, MediaType};
 use crate::parser::{parse, Declared, LayerName, LayerPart};
 use crate::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, Color, ColumnCount, ColumnFill, ColumnSpan,
-    Declaration, Display, FlexDirection, FlexWrap, Float, JustifyContent, Len, LengthPercentage,
-    MarginValue, Position, Property, Side, Size, SpecifiedColumnWidth, SpecifiedGap,
-    SpecifiedInset, SpecifiedMargin, SpecifiedMaxSize, SpecifiedMinSize, SpecifiedSize,
-    SpecifiedVerticalAlign, ZIndex, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
+    Declaration, Defaulting, Display, FlexDirection, FlexWrap, Float, JustifyContent, Len,
+    LengthPercentage, MarginValue, Position, Property, Side, Size, SpecifiedColumnWidth,
+    SpecifiedGap, SpecifiedInset, SpecifiedMargin, SpecifiedMaxSize, SpecifiedMinSize,
+    SpecifiedSize, SpecifiedVerticalAlign, ZIndex, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
 };
 use crate::{Budget, ImportResolver, Limits, NoImports, Warning};
 
@@ -679,8 +680,6 @@ fn a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour() {
         ),
         ("p { color: rebeccapurple }", "color", "rebeccapurple"),
         ("p { width: 50vw }", "width", "50vw"),
-        ("p { color: inherit }", "color", "inherit"),
-        ("p { display: initial }", "display", "initial"),
     ] {
         let declared = declarations(source);
         assert_eq!(
@@ -764,54 +763,96 @@ fn a_declaration_that_does_not_start_with_an_identifier_is_counted() {
         assert_eq!(known(source).len(), 1, "{source}");
     }
 }
-
-/// `css-cascade-5` §7.1's explicit defaulting keywords are **this build's gap**
-/// on every property, including the ones whose values are lengths.
+/// **§7.1's five keywords are values, on a length-valued property too.**
 ///
-/// The other survivor, and it is milestone 3's shape exactly: the rule was
-/// enforced twice and only one half was reachable. Disabling the CSS-wide
-/// keyword branch entirely changed no answer for `color: inherit` or
-/// `display: initial`, because a colour that is not a colour and a keyword that
-/// is not one of a property's own keywords are **already** `Unsupported` by the
-/// (property, value) rule. The half nobody reached is a *length*-valued
-/// property, where an identifier that is not one of its keywords is `Invalid` —
-/// so `margin-top: inherit` would have been filed as the author's typo rather
-/// than as a gap in this engine, and the one number the milestone is judged on
-/// would have been short by every `inherit` in every real book.
+/// This test was `a_css_wide_keyword_is_a_gap_on_a_length_valued_property_too`
+/// and asserted the opposite, for a reason worth keeping: the keywords used to
+/// be a gap, and the branch that filed them as one was reachable only here. A
+/// colour that is not a colour is already `Unsupported` by the (property,
+/// value) rule, so `color: inherit` reached the right answer either way; but an
+/// identifier that is not one of a *length's* keywords is `Invalid`, so
+/// `margin-top: inherit` would have been filed as the author's typo. The same
+/// asymmetry is why this is still the test that matters now the keywords are
+/// implemented -- if the defaulting branch were removed, `color: inherit` would
+/// quietly become `Unsupported` and `margin-top: inherit` would quietly become
+/// a discarded typo, and only the second of those loses the declaration
+/// entirely.
+///
+/// All five keywords, on both shapes of property, and on a shorthand.
 #[test]
-fn a_css_wide_keyword_is_a_gap_on_a_length_valued_property_too() {
-    for (source, property, value) in [
-        ("p { margin-top: inherit }", "margin-top", "inherit"),
-        ("p { width: initial }", "width", "initial"),
-        ("p { padding: unset }", "padding", "unset"),
-        ("p { text-indent: revert }", "text-indent", "revert"),
+fn a_css_wide_keyword_is_a_value_on_a_length_valued_property_too() {
+    for (source, longhand, keyword) in [
+        (
+            "p { margin-top: inherit }",
+            Longhand::MarginTop,
+            Defaulting::Inherit,
+        ),
+        ("p { width: initial }", Longhand::Width, Defaulting::Initial),
+        (
+            "p { text-indent: revert }",
+            Longhand::TextIndent,
+            Defaulting::Revert,
+        ),
         (
             "p { border-top-width: inherit }",
-            "border-top-width",
-            "inherit",
+            Longhand::BorderWidthTop,
+            Defaulting::Inherit,
         ),
         (
             "p { line-height: revert-layer }",
-            "line-height",
-            "revert-layer",
+            Longhand::LineHeight,
+            Defaulting::RevertLayer,
         ),
-        ("p { letter-spacing: inherit }", "letter-spacing", "inherit"),
+        (
+            "p { letter-spacing: inherit }",
+            Longhand::LetterSpacing,
+            Defaulting::Inherit,
+        ),
+        ("p { color: inherit }", Longhand::Color, Defaulting::Inherit),
+        (
+            "p { display: initial }",
+            Longhand::Display,
+            Defaulting::Initial,
+        ),
     ] {
         assert_eq!(
             declarations(source)[0].declaration,
-            Declaration::Unsupported {
-                property,
-                value: value.to_string()
-            },
+            Declaration::Defaulted { longhand, keyword },
             "{source}"
         );
     }
+
+    // A shorthand expands, exactly as it does for a value: four declarations
+    // and not one, so a `padding-top` written after it beats one of them.
+    let padding = declarations("p { padding: unset }");
+    assert_eq!(padding.len(), 4, "padding expands to four longhands");
+    assert!(padding.iter().all(|d| matches!(
+        d.declaration,
+        Declaration::Defaulted {
+            keyword: Defaulting::Unset,
+            ..
+        }
+    )));
+
     // And the direction that says this is about the five keywords and not about
     // identifiers in general: an identifier that is not one of them is not CSS
     // for a length at all, and is the author's error rather than this build's.
     let typo = sheet("p { margin-top: red }");
     assert_eq!(typo.report.discarded_declarations, 1);
     assert!(typo.report.unsupported.is_empty());
+
+    // Nor is a keyword a keyword when it is only part of the value: §7.1 makes
+    // the five valid *instead of* a property's own syntax, never inside it.
+    // `margin: 0 inherit` reaches the `margin` grammar, which does not have
+    // `inherit` in it, and comes out as this build's gap in `margin` rather
+    // than as four defaulted longhands.
+    let partial = declarations("p { margin: 0 inherit }");
+    assert!(
+        !partial
+            .iter()
+            .any(|d| matches!(d.declaration, Declaration::Defaulted { .. })),
+        "a keyword inside a value is not §7.1 defaulting: {partial:?}"
+    );
 }
 
 /// A property this build implements, at a value that is not CSS at all, is a

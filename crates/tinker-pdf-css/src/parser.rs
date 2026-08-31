@@ -1084,6 +1084,17 @@ fn declarations_from(
                     });
                 }
             }
+            // One `Declared` per longhand, as the shorthand arm above does,
+            // and charged once for the same reason.
+            property::Parsed::Defaulted { longhands, keyword } => {
+                budget.spend_declaration()?;
+                for longhand in longhands {
+                    out.push(Declared {
+                        declaration: Declaration::Defaulted { longhand, keyword },
+                        important,
+                    });
+                }
+            }
             property::Parsed::Unsupported { property, value } => {
                 budget.spend_declaration()?;
                 report.note_unsupported(property);
