@@ -356,14 +356,24 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  the pinned float reading-order defect; non-static `position`;
-  `row-gap`/`column-gap` between flex items; SVG content documents;
+  the pinned float reading-order defect; SVG content documents;
   pseudo-elements (parsed, no box generated). `min`/`max`
   sizing is built, less one half of §10.7: a `max-height` shorter than
   its content is named (`MaxHeightAsAuto`) rather than obeyed.
   `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
   built — §3.4's geometry, §4's balance, §5's rule — less §6's
-  `column-span: all`, which is named.
+  `column-span: all`, which is named. Non-static `position` is built,
+  all four values: §9.4.3's `relative` as an offset applied to the ink,
+  §9.6's `absolute` out of flow against the nearest positioned
+  ancestor's padding box, §9.6.1's `fixed` on every page, and
+  `css-position-3` §3.4's `sticky`, which with no scrollport is
+  `relative` by the specification's own words. `z-index` orders them,
+  §9.9.1. `display: inline-block` is a real atomic inline box, §9.2.2:
+  its own formatting context at §10.3.9's shrink-to-fit width, placed
+  on a line whole, aligned on §10.8.1's **last** line box.
+  `css-align-3` §8.1's `row-gap` and `column-gap` are built for flex
+  containers, on the axis each names rather than the direction the
+  container runs in.
   **`css-cascade-5` §7.1's five explicit defaulting keywords are
   closed** — `inherit`, `initial`, `unset`, `revert` and `revert-layer`,
   on all eighty-three longhands and all sixteen shorthands. Closing them

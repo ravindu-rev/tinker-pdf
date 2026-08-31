@@ -42,7 +42,7 @@
 //! first is blank. With it, the break happens and [`Warning::BreakForcedPastTheRules`]
 //! says where the rules had to be given up.
 
-use crate::flow::{Abreast, BlockRecord, Flow, Item, ItemKind};
+use crate::flow::{Abreast, BlockRecord, FloatRecord, Flow, Item, ItemKind};
 use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, Warning};
 
 /// Slack for a comparison against a page height, in points.
@@ -214,7 +214,11 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
     let mut warnings = flow.warnings.clone();
     let mut pages: Vec<Page> = Vec::new();
     let mut floats: Vec<FloatCursor> = vec![FloatCursor::default(); flow.floats.len()];
-    if flow.items.is_empty() && flow.floats.is_empty() {
+    // §9.6's out-of-flow boxes get cursors of their own rather than joining the
+    // floats': they are drawn **after** every float, which is §9.9.1's painting
+    // order, and they are never pushed.
+    let mut placed: Vec<FloatCursor> = vec![FloatCursor::default(); flow.positioned.len()];
+    if flow.items.is_empty() && flow.floats.is_empty() && flow.positioned.is_empty() {
         // A book with nothing in it is one empty page rather than none: a
         // caller that got zero pages would have to invent one, and inventing
         // one is where a page of the wrong size comes from.
@@ -306,9 +310,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                         slice: Slice { from, to: end },
                     },
                 );
-                beside(
+                outside(
                     &flow,
                     &mut floats,
+                    &mut placed,
                     &mut built,
                     top,
                     options.height,
@@ -356,9 +361,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             Cutting::NONE
         };
         let mut built = page(&flow, cursor, cut.end, top, rest);
-        beside(
+        outside(
             &flow,
             &mut floats,
+            &mut placed,
             &mut built,
             top,
             options.height,
@@ -385,15 +391,12 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
     // never drawn — which is text conservation's own example of the defect it
     // exists for, and it renders beautifully.
     let mut top = after;
-    while floats
-        .iter()
-        .zip(&flow.floats)
-        .any(|(cursor, float)| cursor.next < float.items.len())
-    {
+    while unfinished(&floats, &flow.floats) || unfinished(&placed, &flow.positioned) {
         let mut built = Page::default();
-        beside(
+        outside(
             &flow,
             &mut floats,
+            &mut placed,
             &mut built,
             top,
             options.height,
@@ -419,6 +422,51 @@ fn order(page: &mut Page) {
     page.runs.sort_by_key(|run| run.order);
 }
 
+/// Whether any of these records still has something left to draw.
+fn unfinished(cursors: &[FloatCursor], records: &[FloatRecord]) -> bool {
+    cursors
+        .iter()
+        .zip(records)
+        .any(|(cursor, record)| cursor.next < record.items.len())
+}
+
+/// Everything on a page that is not in the column, in CSS 2.2 §9.9.1's order.
+///
+/// Floats first, then the absolutely positioned boxes, then the `fixed` ones —
+/// §9.9.1's layers 5, 8 and 8 again, with `fixed` last because §9.6.1 makes it
+/// the one thing that is on every page and therefore over everything on each of
+/// them. The reading-order stamp still decides where its **text** goes: `order`
+/// sorts the runs afterwards, so a running header printed on every page reads
+/// where the document wrote it and not where the page drew it.
+#[allow(clippy::too_many_arguments)]
+fn outside(
+    flow: &Flow,
+    floats: &mut [FloatCursor],
+    placed: &mut [FloatCursor],
+    out: &mut Page,
+    top: f64,
+    height: f64,
+    warnings: &mut Vec<(Warning, usize)>,
+) {
+    beside(&flow.floats, floats, out, top, height, warnings);
+    beside(&flow.positioned, placed, out, top, height, warnings);
+    // **§9.6.1's paged answer, in one loop.** *"In the case of paged media,
+    // fixed boxes are repeated on every page, and are fixed with respect to the
+    // page box."* Their own cursors are not kept, because a box that is drawn
+    // whole on every page has nothing to carry forward.
+    for record in &flow.fixed {
+        emit(
+            &record.items,
+            &record.blocks,
+            0,
+            record.items.len(),
+            0.0,
+            Cutting::NONE,
+            out,
+        );
+    }
+}
+
 /// Draws whatever of each float belongs on this page.
 ///
 /// A float is placed in the column's coordinates and drawn in the page's, and
@@ -428,14 +476,14 @@ fn order(page: &mut Page) {
 /// is a different layout of the text beside it and not a different position for
 /// the box — see [`Warning::FloatBrokenAcrossPages`].
 fn beside(
-    flow: &Flow,
+    records: &[FloatRecord],
     cursors: &mut [FloatCursor],
     out: &mut Page,
     top: f64,
     height: f64,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
-    for (float, cursor) in flow.floats.iter().zip(cursors.iter_mut()) {
+    for (float, cursor) in records.iter().zip(cursors.iter_mut()) {
         if cursor.next >= float.items.len() {
             continue;
         }
@@ -459,8 +507,13 @@ fn beside(
             // instead, and the fixture named for the push passed. The
             // injection campaign is what said so — see the plan's milestone 10
             // note.
+            //ic **And an absolutely positioned box is never pushed.** The
+            // push moves a box to the next page, which is the one thing
+            // `position: absolute` forbids: where the box is is the whole of
+            // what the declaration said. So a positioned box that does not fit
+            // is broken exactly where a float taller than a page is.
             let fits = float.bottom <= top + height + EPSILON;
-            if !fits && float.bottom - float.top <= height + EPSILON {
+            if float.pushable && !fits && float.bottom - float.top <= height + EPSILON {
                 continue;
             }
             cursor.started = true;
@@ -636,7 +689,10 @@ fn emit(
         }
         out.boxes.push(BoxFragment {
             x: block.x,
-            y: box_top + offset,
+            // CSS 2.2 §9.4.3's offset, which the flow deliberately does not
+            // carry: a relatively positioned box keeps its place in the column
+            // and only its ink moves.
+            y: box_top + offset + block.dy,
             width: block.width,
             height: (box_bottom - box_top).max(0.0),
             background: block.background,
@@ -657,6 +713,20 @@ fn emit(
                     // where the two become one number on a page.
                     run.y += baseline;
                     out.runs.push(run);
+                }
+                // §9.2.2's atomic boxes, each a flow of its own hung from this
+                // line's baseline. Its runs keep their own reading-order
+                // stamps, so an `inline-block` reads where it was written.
+                for placed in &line.boxes {
+                    emit(
+                        &placed.items,
+                        &placed.blocks,
+                        0,
+                        placed.items.len(),
+                        baseline + placed.dy,
+                        Cutting::NONE,
+                        out,
+                    );
                 }
             }
             // A band is a flow of its own at the band's origin, and it is cut
@@ -698,7 +768,7 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
         }
         out.boxes.push(BoxFragment {
             x: block.x,
-            y: box_top + offset,
+            y: box_top + offset + block.dy,
             width: block.width,
             height: (box_bottom - box_top).max(0.0),
             background: block.background,
@@ -722,6 +792,20 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                     // where the two become one number on a page.
                     run.y += baseline;
                     out.runs.push(run);
+                }
+                // The same atomic boxes, drawn the same way: one function
+                // for a band and one for the column, and neither of them
+                // gets to forget an `inline-block`.
+                for placed in &line.boxes {
+                    emit(
+                        &placed.items,
+                        &placed.blocks,
+                        0,
+                        placed.items.len(),
+                        baseline + placed.dy,
+                        Cutting::NONE,
+                        out,
+                    );
                 }
             }
             // A band inside a band is atomic here for a line box's reason:

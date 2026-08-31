@@ -113,6 +113,7 @@ pub mod flow;
 pub mod fragment;
 pub mod limits;
 pub mod metrics;
+mod position;
 pub mod style;
 pub mod table;
 pub mod text;
@@ -662,18 +663,6 @@ pub enum Warning {
     /// so is the difference between a known gap and a figure that quietly
     /// straddles a page.
     FloatBrokenAcrossPages,
-    /// `display: inline-block`, laid out as ordinary inline text: its `width`,
-    /// its `height` and its vertical margins do not apply to it.
-    ///
-    /// **It used to say the opposite, and it used to be unreachable.** The
-    /// variant was `InlineBlockAsBlock` and it was raised where a block-level
-    /// box is built — which an `inline-block` never reaches, because
-    /// `Consumed::is_block_level` sends it down the inline path. Milestone 10
-    /// found it by needing a warning it could count, and the two halves of the
-    /// fix are one change: it is raised where inline content is gathered, and
-    /// it now names what is actually done. See the refusal table in
-    /// `docs/features/epub.md`.
-    InlineBlockAsInline,
     /// An inline box with a block-level child, laid out as a block container.
     /// CSS 2.2 §9.2.1.1 splits the inline instead.
     BlockInInline,
@@ -713,7 +702,7 @@ pub enum Warning {
     /// it out as a block-level flex container, which gets the box's *outside*
     /// wrong and everything inside it right. It takes the second.
     ///
-    /// **Distinct from [`Warning::InlineBlockAsInline`], which took the other
+    /// **Distinct from an approximation, which takes the other
     /// answer**, and the two disagree for a reason rather than by accident: an
     /// `inline-block` holding a sentence set as inline text is very nearly
     /// right, and a flex container set as inline text is a column of words with
@@ -740,7 +729,8 @@ pub enum Warning {
     /// So the clamp is applied to the padding, which is its whole effect on a
     /// box whose content fits, and this is raised on the box whose content does
     /// not. **The box is its content's height and the declaration did nothing**,
-    /// which is `InlineBlockAsInline`'s shape: what was done, named, rather
+    /// which is this crate's shape for a half-honoured value: what was done,
+    /// named, rather
     /// than a property quietly half-honoured.
     MaxHeightAsAuto,
     /// A column of a multi-column container that is taller than a page.
@@ -772,9 +762,6 @@ impl fmt::Display for Warning {
         match self {
             Warning::FloatBrokenAcrossPages => {
                 f.write_str("a float did not fit its page and was broken across the boundary")
-            }
-            Warning::InlineBlockAsInline => {
-                f.write_str("display: inline-block is laid out as inline text")
             }
             Warning::BlockInInline => {
                 f.write_str("an inline box holds a block, and is laid out as one")

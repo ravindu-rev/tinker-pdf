@@ -12,10 +12,10 @@
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
-    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, JustifyContent,
-    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
-    PageBreak, PageBreakInside, Side, Sides, Size, TextAlign, VerticalAlign, Visibility,
-    WhiteSpace,
+    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, Gap, Inset,
+    JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
+    VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::flex;
@@ -1643,31 +1643,48 @@ fn a_float_with_no_width_is_shrunk_to_fit() {
 /// is plausible and wrong is the failure this whole plan is organised against.
 #[test]
 fn an_unimplemented_property_is_named_rather_than_approximated() {
-    let mut style = block();
-    style.display = Display::InlineBlock;
-    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("a")])]);
+    // `column-span: all` rather than `display: inline-block`, which used to
+    // stand here and is now built. The claim is about the **shape** and not
+    // about either property: a value this build does not implement reaches the
+    // caller by name instead of being approximated into something plausible.
+    let mut spanning = block();
+    spanning.column_span = ColumnSpan::All;
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            vec![BoxNode::element(spanning, vec![text("a")])],
+        )],
+    );
     let laid = run(&tree, 200.0, 400.0);
     assert!(laid
         .warnings
         .iter()
-        .any(|(w, _)| *w == Warning::InlineBlockAsInline));
+        .any(|(w, _)| *w == Warning::ColumnSpanAsNone));
 }
 
 /// A warning is counted, not repeated — ruling 10's shape and
 /// `tinker_pdf_css::parser::Report`'s.
 #[test]
 fn warnings_are_deduplicated_with_a_count() {
-    let mut style = block();
-    style.display = Display::InlineBlock;
+    let mut spanning = block();
+    spanning.column_span = ColumnSpan::All;
     let children: Vec<BoxNode> = (0..5)
-        .map(|_| BoxNode::element(style.clone(), vec![text("a")]))
+        .map(|_| BoxNode::element(spanning.clone(), vec![text("a")]))
         .collect();
-    let laid = run(&BoxNode::element(block(), children), 200.0, 400.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            children,
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
     let entry = laid
         .warnings
         .iter()
-        .find(|(w, _)| *w == Warning::InlineBlockAsInline)
-        .expect("the display value was named");
+        .find(|(w, _)| *w == Warning::ColumnSpanAsNone)
+        .expect("the value was named");
     assert_eq!(entry.1, 5);
 }
 
@@ -3123,6 +3140,439 @@ fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
         laid.warnings
     );
     assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- CSS 2.2 §9.2.2, the atomic inline-level box ---------------------------
+
+/// An `inline-block` at a stated width, holding the given text.
+fn inline_block(width: Option<f64>, body: &str) -> BoxNode {
+    let mut style = block();
+    style.display = Display::InlineBlock;
+    if let Some(width) = width {
+        style.width = Size::Length(LengthPercentage::Px(width));
+    }
+    BoxNode::element(style, vec![text(body)])
+}
+
+/// §9.2.2: an atomic inline box takes **its own** width on the line, and the
+/// text after it starts past that width and not past its letters.
+///
+/// A hundred-point `inline-block` holding one ten-point letter: the letter is
+/// at ten and the text after the box is at a hundred and ten. A build that
+/// poured its text into the line puts that text at twenty, and the page is a
+/// paragraph with a hole in the middle of it that nothing names.
+#[test]
+fn an_inline_block_takes_its_own_width_on_the_line() {
+    let tree = BoxNode::element(
+        block(),
+        vec![text("x"), inline_block(Some(100.0), "a"), text("y")],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 10.0, 110.0]);
+    assert_eq!(
+        laid.text(),
+        "xay",
+        "and the replacement character is not text"
+    );
+}
+
+/// §10.3.9: with `width: auto` the width is **shrink-to-fit**, which is a
+/// float's own rule.
+#[test]
+fn an_auto_width_inline_block_shrinks_to_fit() {
+    let tree = BoxNode::element(
+        block(),
+        vec![text("x"), inline_block(None, "abc"), text("y")],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    // Three ten-point letters is thirty points of box, so the text after it
+    // starts at forty.
+    assert_eq!(xs(&laid, 0), vec![0.0, 10.0, 40.0]);
+}
+
+/// §10.8.1: an inline-block's baseline is the baseline of its **last** line
+/// box.
+///
+/// The last and not the first, and the fixture is built so the two differ. A
+/// forty-point strut holds the line's own baseline at thirty-six whatever the
+/// box does; the box is two ten-point lines, twenty-four tall, with baselines
+/// at nine and twenty-one of its own. Aligned on its last, its first line lands
+/// at twenty-four and its second **on** the paragraph's baseline. Aligned on
+/// its first, the whole box drops twelve points and its second line hangs below
+/// the line it is on — which is what every book with a two-line inline caption
+/// looks like in a build that read the wrong sentence.
+#[test]
+fn an_inline_blocks_baseline_is_its_last_line() {
+    let mut big = block();
+    big.font_size = 40.0;
+    let mut inner = block();
+    inner.display = Display::InlineBlock;
+    let box_of_two = BoxNode::element(inner, vec![para("a"), para("b")]);
+    let tree = BoxNode::element(big, vec![BoxNode::text(base(), "x"), box_of_two]);
+    let laid = run(&tree, 400.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert_eq!(ys.len(), 3, "{ys:?}");
+    // "a", "b", then the paragraph's own "x" — the box's runs were stamped
+    // inside it and read before the piece that holds it.
+    assert!(
+        close(ys[0], 36.0),
+        "the paragraph own baseline moved: {ys:?}"
+    );
+    assert!(close(ys[1], 24.0), "{ys:?}");
+    assert!(
+        close(ys[2], 36.0),
+        "the box last line is not on the paragraph baseline: {ys:?}"
+    );
+}
+
+/// §9.2.2: it is **atomic** — the whole box moves to the next line rather than
+/// breaking inside itself.
+///
+/// A hundred-point measure, eighty points of text, a forty-point box: the box
+/// does not fit beside the text, so all of it goes to line two. A build that
+/// set its content inline would put the first of its letters at eighty and the
+/// second on the next line, splitting a box across a line break, which is the
+/// one thing "atomic" forbids.
+#[test]
+fn an_inline_block_moves_to_the_next_line_whole() {
+    let tree = BoxNode::element(
+        block(),
+        vec![text("xxxxxxxx "), inline_block(Some(40.0), "ab")],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    let ys = baselines(&laid, 0);
+    let x = xs(&laid, 0);
+    assert_eq!(ys.len(), 2, "{ys:?}");
+    assert!(close(ys[0], 9.0), "{ys:?}");
+    assert!(close(ys[1], 21.0), "the box did not move whole: {ys:?}");
+    assert!(
+        close(x[1], 0.0),
+        "the box did not start the second line: {x:?}"
+    );
+    assert_eq!(conservable(&laid.text()), conservable("xxxxxxxx ab"));
+}
+
+/// §16.2: the line's **width** counts the box, which is what `text-align`
+/// aligns against.
+///
+/// A build that placed the box and did not add its width to the line's total
+/// gets every left-aligned page right and every centred or right-aligned one
+/// wrong by the width of the box. Two hundred points of measure, a
+/// hundred-point box and one ten-point letter: right-aligned, the letter sits
+/// at ninety and the box at a hundred. Forget the box and the line is ten
+/// points long, the letter goes to a hundred and ninety, and the box runs off
+/// the page.
+#[test]
+fn an_inline_blocks_width_is_part_of_the_line_it_is_aligned_on() {
+    let mut right = block();
+    right.text_align = TextAlign::Right;
+    let tree = BoxNode::element(right, vec![text("x"), inline_block(Some(100.0), "a")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(close(x[0], 90.0), "{x:?}");
+    assert!(close(x[1], 100.0), "{x:?}");
+}
+
+/// A line that is **moved** takes its boxes with it.
+///
+/// A line box is moved horizontally whenever it is inside something placed
+/// beside something else — a table cell, a float, a flex item, a column — and
+/// there are four such places. The box on it is a flow of its own, so a build
+/// that moved the runs and not the boxes leaves every `inline-block` at the
+/// left edge of the page: the second column of a two-column container puts its
+/// text at a hundred and its `inline-block` at zero.
+#[test]
+fn an_inline_block_moves_with_the_line_that_holds_it() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            vec![
+                para("a"),
+                BoxNode::element(block(), vec![inline_block(Some(30.0), "b")]),
+            ],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 2, "{x:?}");
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(
+        close(x[1], 100.0),
+        "the box stayed at the paragraph's origin: {x:?}"
+    );
+}
+
+/// And its height makes the line taller, which is the half a build that
+/// ignored `height` on an `inline-block` lost.
+#[test]
+fn an_inline_blocks_height_makes_its_line_taller() {
+    let mut style = block();
+    style.display = Display::InlineBlock;
+    style.height = Size::Length(LengthPercentage::Px(40.0));
+    let tall = BoxNode::element(style, vec![text("a")]);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(tinted(block()), vec![text("x"), tall])],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    // Nine points over the baseline and thirty-one under it: the box's own
+    // baseline is its one line's, nine from its top, and it is forty tall.
+    assert!(
+        close(laid.pages[0].boxes[0].height, 40.0),
+        "{}",
+        laid.pages[0].boxes[0].height
+    );
+}
+
+// ---- CSS 2.2 §9.4.3 and §9.6, the four positions that are not static -------
+
+/// A box at a stated `position` and insets.
+fn placed_at(
+    position: Position,
+    top: Option<f64>,
+    left: Option<f64>,
+    right: Option<f64>,
+) -> ComputedStyle {
+    let mut style = block();
+    style.position = position;
+    let one = |value: Option<f64>| match value {
+        Some(px) => Inset::Length(LengthPercentage::Px(px)),
+        None => Inset::Auto,
+    };
+    style.inset = Sides {
+        top: one(top),
+        right: one(right),
+        bottom: Inset::Auto,
+        left: one(left),
+    };
+    style
+}
+
+/// §9.4.3: a relatively positioned box is offset, and **nothing else moves**.
+///
+/// The second half is the clause: §9.4.3 says the offset *"does not affect the
+/// layout of any other box"*, so the paragraph after it stays exactly where it
+/// was. This module's flow is one column whose `y` never goes backwards, so a
+/// build that moved the item rather than the ink would have to move everything
+/// after it too — and could not move anything up at all.
+#[test]
+fn a_relative_offset_moves_the_ink_and_not_the_flow() {
+    let moved = BoxNode::element(
+        placed_at(Position::Relative, Some(5.0), Some(3.0), None),
+        vec![text("a")],
+    );
+    let tree = BoxNode::element(block(), vec![moved, para("b")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert!(close(ys[0], 14.0), "the box did not move: {ys:?}");
+    assert!(close(ys[1], 21.0), "the box after it moved: {ys:?}");
+    assert!(close(xs(&laid, 0)[0], 3.0), "{:?}", xs(&laid, 0));
+}
+
+/// `css-position-3` §3.4: with no scrollport, `sticky` **is** `relative`.
+///
+/// Not a fallback — the value of a parameter a paginated document does not
+/// have. Asserted as an equality against `relative` rather than against a
+/// number, so the day one of them changes the other has to as well.
+#[test]
+fn sticky_is_relative_because_a_page_does_not_scroll() {
+    let laid_out = |position: Position| {
+        let moved = BoxNode::element(
+            placed_at(position, Some(5.0), Some(3.0), None),
+            vec![text("a")],
+        );
+        let tree = BoxNode::element(block(), vec![moved, para("b")]);
+        let laid = run(&tree, 200.0, 400.0);
+        (xs(&laid, 0), baselines(&laid, 0))
+    };
+    assert_eq!(laid_out(Position::Sticky), laid_out(Position::Relative));
+}
+
+/// §9.6: an absolutely positioned box is **out of flow**, so the content after
+/// it closes up over the space it would have taken.
+#[test]
+fn an_absolute_box_leaves_the_flow_behind_it() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(100.0), None, None),
+        vec![text("x")],
+    );
+    let tree = BoxNode::element(block(), vec![para("a"), away, para("b")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // "a" at nine and "b" at twenty-one — the two lines of an ordinary flow —
+    // and "x" a hundred points down.
+    //
+    // **The order of this vector is the second half of the fixture.** A page's
+    // runs are sorted by the reading-order stamp and not by where they were
+    // drawn, so the box painted at a hundred and nine still reads between the
+    // two lines it was written between. A build that sorted by position would
+    // move every `position: absolute` sidebar to the end of its chapter for
+    // anything extracting the text.
+    assert!(close(ys[0], 9.0), "{ys:?}");
+    assert!(close(ys[1], 109.0), "{ys:?}");
+    assert!(close(ys[2], 21.0), "{ys:?}");
+    assert_eq!(
+        laid.text(),
+        "axb",
+        "and it still reads where it was written"
+    );
+}
+
+/// §10.1: with no positioned ancestor the containing block is the **initial**
+/// one, which in a paginated document is the page box.
+#[test]
+fn an_absolute_box_with_no_positioned_ancestor_is_against_the_page() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(40.0), Some(30.0), None),
+        vec![text("x")],
+    );
+    let tree = BoxNode::element(block(), vec![para("a"), away]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    let x = xs(&laid, 0);
+    assert!(close(ys[1], 49.0), "{ys:?}");
+    assert!(close(x[1], 30.0), "{x:?}");
+}
+
+/// §9.6: and with one, it is that ancestor's **padding box** — the nearest one,
+/// which is the whole of the rule.
+///
+/// **The ancestor has a border, and that is not decoration.** §10.1 says the
+/// containing block is the positioned ancestor's *padding* box, so the border
+/// is exactly the difference between reading the rule and reading the box: a
+/// twenty-point left margin, a thirty-point top margin and a four-point border
+/// put the padding box at twenty-four and thirty-four, and the child asks for
+/// seven and five from there. A build that used the initial containing block
+/// puts it at seven and five; one that used the *border* box misses by four in
+/// each direction, which is the size of a border and looks like a rounding
+/// error.
+#[test]
+fn an_absolute_box_is_placed_against_its_nearest_positioned_ancestor() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(5.0), Some(7.0), None),
+        vec![text("x")],
+    );
+    let mut anchor = placed_at(Position::Relative, None, None, None);
+    anchor.margin.top = px(30.0);
+    anchor.margin.left = px(20.0);
+    anchor.border_width = Sides::all(4.0);
+    anchor.border_style = Sides::all(BorderStyle::Solid);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(anchor, vec![para("a"), away])],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    let x = xs(&laid, 0);
+    assert!(close(ys[1], 48.0), "{ys:?}");
+    assert!(close(x[1], 31.0), "{x:?}");
+}
+
+/// §10.3.7 and §10.6.4: with neither inset of a pair stated the box stays at
+/// its **static position** — where `static` would have put it.
+///
+/// The case nearly every real stylesheet takes, and the one an implementation
+/// leaves out: a build that defaulted the missing insets to zero puts every
+/// unpositioned `position: absolute` box in the top-left corner of the page.
+#[test]
+fn an_absolute_box_with_no_insets_stays_where_static_would_have_put_it() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, None, None, None),
+        vec![text("x")],
+    );
+    let tree = BoxNode::element(block(), vec![para("a"), away]);
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // "a" is one twelve-point line, so the static position is twelve and the
+    // box's own baseline is nine below it.
+    assert!(close(ys[1], 21.0), "{ys:?}");
+    assert!(close(xs(&laid, 0)[1], 0.0), "{:?}", xs(&laid, 0));
+}
+
+/// §9.6.1: *"in the case of paged media, fixed boxes are repeated on every
+/// page"* — a specification's answer, not a print build's shrug.
+#[test]
+fn a_fixed_box_is_drawn_on_every_page() {
+    let header = BoxNode::element(
+        placed_at(Position::Fixed, Some(0.0), Some(0.0), None),
+        vec![text("F")],
+    );
+    let mut children = vec![header];
+    children.extend("abcdefgh".chars().map(|c| para(&c.to_string())));
+    let tree = BoxNode::element(block(), children);
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(laid.pages.len() > 1, "{} pages", laid.pages.len());
+    for at in 0..laid.pages.len() {
+        assert!(
+            page_text(&laid, at).contains('F'),
+            "page {at} has no fixed box on it: {:?}",
+            page_text(&laid, at)
+        );
+    }
+}
+
+/// §9.9.1: `z-index` decides which of two positioned boxes is painted over the
+/// other, and nothing else does.
+#[test]
+fn z_index_decides_which_positioned_box_is_painted_first() {
+    let layered = |layer: i32, red: u8| {
+        let mut style = placed_at(Position::Absolute, Some(0.0), Some(0.0), None);
+        style.z_index = ZIndex::Layer(layer);
+        style.background_color = Color {
+            r: red,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        BoxNode::element(style, vec![text("x")])
+    };
+    // Written high-then-low, so a build that painted them in document order
+    // gets the opposite answer.
+    let tree = BoxNode::element(block(), vec![layered(5, 50), layered(1, 10)]);
+    let laid = run(&tree, 200.0, 400.0);
+    let reds: Vec<u8> = laid.pages[0]
+        .boxes
+        .iter()
+        .map(|fragment| fragment.background.r)
+        .filter(|red| *red == 10 || *red == 50)
+        .collect();
+    assert_eq!(reds, vec![10, 50], "the lower layer is painted first");
+}
+
+/// An absolutely positioned box is **never pushed** to the next page.
+///
+/// `css-break-3` lets a float that does not fit the page it started on move
+/// whole to the next one, and that is exactly what `position: absolute`
+/// forbids: pushing it is moving it, and where it is is the whole of what the
+/// declaration said. So it is broken where it stands, as a float taller than a
+/// page is.
+#[test]
+fn an_absolute_box_is_broken_rather_than_pushed() {
+    let away = BoxNode::element(
+        placed_at(Position::Absolute, Some(15.0), Some(0.0), None),
+        vec![para("x"), para("y")],
+    );
+    let mut children = vec![away];
+    children.extend("abcd".chars().map(|c| para(&c.to_string())));
+    let tree = BoxNode::element(block(), children);
+    // A thirty-point page, and a box that starts at fifteen and is twenty-four
+    // points of two lines: its first line ends at twenty-seven and fits, its
+    // second ends at thirty-nine and does not, and the whole of it **would**
+    // fit a page of its own, which is exactly the shape `css-break-3` pushes a
+    // float for. A build that shared the float's rule moves all of it to page
+    // two, and page one has nothing where the stylesheet put something.
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(
+        page_text(&laid, 0).contains('x'),
+        "the box was pushed off the page it was placed on: {:?}",
+        page_text(&laid, 0)
+    );
+    assert!(
+        page_text(&laid, 1).contains('y'),
+        "and the rest of it is on the next page: {:?}",
+        page_text(&laid, 1)
+    );
 }
 
 // ---- `css-multicol-1`, the multi-column container --------------------------
@@ -4676,11 +5126,11 @@ fn a_flex_line_always_takes_one_item() {
         },
     ];
     assert_eq!(
-        flex::lines(&items, 100.0, FlexWrap::Wrap),
+        flex::lines(&items, 100.0, FlexWrap::Wrap, 0.0),
         vec![(0, 1), (1, 2)]
     );
     assert_eq!(
-        flex::lines(&items, 100.0, FlexWrap::NoWrap),
+        flex::lines(&items, 100.0, FlexWrap::NoWrap, 0.0),
         vec![(0, 2)],
         "and `nowrap` is one line whatever it costs"
     );
@@ -4942,6 +5392,149 @@ fn a_max_width_clamps_a_column_containers_cross_size() {
         close(x[0], 90.0),
         "a twenty-point item centred in two hundred points starts at ninety: {x:?}"
     );
+}
+
+// ---- `css-align-3` §8.1, the gap between flex items ------------------------
+
+/// A flex container with the two gaps stated.
+fn gapped(direction: FlexDirection, wrap: FlexWrap, column: f64, row: f64) -> ComputedStyle {
+    let mut style = flex_container(direction, wrap);
+    style.column_gap = Gap::Length(LengthPercentage::Px(column));
+    style.row_gap = Gap::Length(LengthPercentage::Px(row));
+    style
+}
+
+/// §8.1: `column-gap` separates the **items** of a row container, and it goes
+/// between them and not after the last.
+///
+/// Three fifty-point items and a twenty-point gap: the second starts at
+/// seventy and the third at a hundred and forty. A build that added a gap after
+/// the last one would put the same items in the same places and only be wrong
+/// about how much room they took, which is why the wrapping fixture below
+/// exists as well.
+#[test]
+fn a_column_gap_separates_a_row_containers_items() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Row, FlexWrap::NoWrap, 20.0, 0.0),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(50.0)),
+            flex_item("b", 0.0, 0.0, basis(50.0)),
+            flex_item("c", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 70.0, 140.0]);
+}
+
+/// §8.1's axis mapping: in a **column** container it is `row-gap` that
+/// separates the items, because `row-gap` is the block-axis gap and a column
+/// container's main axis is the block axis.
+///
+/// The same declaration on the same items in the other direction. A build that
+/// read `column-gap` as "the gap between flex items" gets every row container
+/// right and every column container wrong, and no fixture written in one
+/// direction can tell.
+#[test]
+fn a_column_containers_items_are_separated_by_the_row_gap() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Column, FlexWrap::NoWrap, 99.0, 20.0),
+        vec![para("a"), para("b")],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // Twelve-point lines: the second item's baseline is twelve plus twenty of
+    // gap below the first's.
+    assert!(close(ys[1] - ys[0], 32.0), "{ys:?}");
+}
+
+/// §9.3 step 5: the gap is part of what a line has to **fit**, so it decides
+/// where the container wraps.
+///
+/// Two fifty-point items in a hundred-and-ten-point container: with no gap
+/// they share a line, and with a twenty-point gap they cannot — a hundred and
+/// twenty is more than a hundred and ten. A build that collected lines without
+/// the gaps keeps them on one line and then overflows by exactly the gap it
+/// forgot.
+#[test]
+fn the_gap_decides_where_a_flex_container_wraps() {
+    let laid_out = |gap: f64| {
+        let tree = BoxNode::element(
+            gapped(FlexDirection::Row, FlexWrap::Wrap, gap, 0.0),
+            vec![
+                flex_item("a", 0.0, 0.0, basis(50.0)),
+                flex_item("b", 0.0, 0.0, basis(50.0)),
+            ],
+        );
+        let laid = run(&tree, 110.0, 400.0);
+        baselines(&laid, 0)
+    };
+    let together = laid_out(0.0);
+    assert!(close(together[0], together[1]), "{together:?}");
+    let apart = laid_out(20.0);
+    assert!(
+        !close(apart[0], apart[1]),
+        "the gap did not push the second item onto its own line: {apart:?}"
+    );
+}
+
+/// §9.7: the gaps are **not free space**, so a `flex-grow` item does not grow
+/// into them.
+///
+/// Two items of no basis at all in a two-hundred-point container with a
+/// twenty-point gap: a hundred and eighty points to share, ninety each, and the
+/// second starts at a hundred and ten. A build that gave §9.7 the whole
+/// container makes them a hundred each, and the line is twenty points too long.
+#[test]
+fn a_growing_item_does_not_grow_into_the_gap() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Row, FlexWrap::NoWrap, 20.0, 0.0),
+        vec![
+            flex_item("a", 1.0, 0.0, basis(0.0)),
+            flex_item("b", 1.0, 0.0, basis(0.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(close(x[1], 110.0), "{x:?}");
+}
+
+/// §8.2: and `justify-content` measures its free space against a line that
+/// includes the gaps.
+///
+/// Two fifty-point items, a twenty-point gap and a two-hundred-point
+/// container: the line is a hundred and twenty long, eighty is free, and
+/// centring puts the first item at forty. A build that left the gap out of the
+/// line's length centres a hundred points and starts at fifty.
+#[test]
+fn justify_content_counts_the_gap_in_the_lines_length() {
+    let mut style = gapped(FlexDirection::Row, FlexWrap::NoWrap, 20.0, 0.0);
+    style.justify_content = JustifyContent::Center;
+    let tree = BoxNode::element(
+        style,
+        vec![
+            flex_item("a", 0.0, 0.0, basis(50.0)),
+            flex_item("b", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![40.0, 110.0]);
+}
+
+/// §8.1: and `row-gap` separates the **lines** of a row container.
+#[test]
+fn a_row_gap_separates_a_row_containers_lines() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Row, FlexWrap::Wrap, 0.0, 20.0),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(120.0)),
+            flex_item("b", 0.0, 0.0, basis(120.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // Two lines of twelve points with twenty between them.
+    assert!(close(ys[1] - ys[0], 32.0), "{ys:?}");
 }
 
 /// §4: a run of child text becomes an anonymous flex item, and a run that is
