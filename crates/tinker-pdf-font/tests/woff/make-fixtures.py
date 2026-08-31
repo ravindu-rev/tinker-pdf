@@ -22,7 +22,7 @@ repacking a *vendored* face is barred: OFL-1.1 reserves the font name, and a
 under a reserved name.
 
 Neither applies to a face this repository wrote. `cargo xtask synth-face`
-writes `target/fonts/tinker-synthetic-1.ttf` -- every glyph from 32 up the
+writes `target/fonts/tinker-synthetic-2.ttf` -- every glyph from 32 up the
 same filled box, three tables, no licence on it but this project's. That face
 can be packed, and this packs it.
 
@@ -80,14 +80,14 @@ reach the rest of the transform:
 `hmtx` is written so most glyphs have `lsb == xMin` and one in seven does not,
 which is what decides whether an encoder may apply transform 1 -- so neither
 encoder applies it, and the reverse would have no fixture at all. Hence the
-seventh file: `synthetic-1-aligned.ttf` is the same face with the bearings
-aligned, and `synthetic-1-aligned-hmtx.woff2` is fontTools packing it with
+seventh file: `synthetic-2-aligned.ttf` is the same face with the bearings
+aligned, and `synthetic-2-aligned-hmtx.woff2` is fontTools packing it with
 `woff2TransformedTableTags` widened to include `hmtx`. The setting is unusual
 and the bytes are still a real encoder's.
 
 The square's *outline* is what survives, not its bytes. `synth-face` writes
 every delta as a word; fontTools' compiler re-encodes the small ones as bytes,
-so `synthetic-1.ttf` is smaller than the face it came from and holds the same
+so `synthetic-2.ttf` is smaller than the face it came from and holds the same
 shape. That is the property the test asserts about it, and the same property
 it asserts about both containers.
 
@@ -100,7 +100,6 @@ that affects the output, or a hash-map iteration order.
 """
 
 import os
-import struct
 import subprocess
 import sys
 
@@ -113,56 +112,24 @@ from fontTools.ttLib.tables._g_l_y_f import Glyph, GlyphComponent
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
-SOURCE = os.path.join(ROOT, "target", "fonts", "tinker-synthetic-1.ttf")
+SOURCE = os.path.join(ROOT, "target", "fonts", "tinker-synthetic-2.ttf")
 
-# ---- the synthetic face, given the `maxp` fontTools needs to read it --------
-
-
-def read_sfnt(data):
-    """The table directory of a plain sfnt, as {tag: bytes}."""
-    count = struct.unpack_from(">H", data, 4)[0]
-    tables = {}
-    for i in range(count):
-        tag, _sum, off, length = struct.unpack_from(">4sIII", data, 12 + i * 16)
-        tables[tag.decode("latin1")] = data[off:off + length]
-    return tables
+# ---- the synthetic face --------------------------------------------------
 
 
-def write_sfnt(tables):
-    """An sfnt from {tag: bytes}: directory in tag order, tables padded."""
-    order = sorted(tables)
-    count = len(order)
-    selector = max(0, count.bit_length() - 1)
-    search = 16 * (1 << selector)
-    out = bytearray(
-        struct.pack(">IHHHH", 0x00010000, count, search, selector,
-                    count * 16 - search))
-    body = bytearray()
-    for tag in order:
-        data = tables[tag]
-        out += struct.pack(">4sIII", tag.encode("latin1"), 0,
-                           12 + count * 16 + len(body), len(data))
-        body += data
-        while len(body) % 4:
-            body += b"\0"
-    return bytes(out + body)
+def source_face():
+    """`synth-face`'s bytes, opened directly.
 
-
-def prepared_source():
-    """`synth-face`'s bytes with a `maxp` bolted on.
-
-    fontTools will not decompile `loca` without one -- it reads `numGlyphs` to
-    check the length -- and the synthetic face has three tables and no more.
-    The count comes out of `loca` itself, so this invents nothing.
+    Until 2026-08-31 this had to bolt a `maxp` onto the face before fontTools
+    would open it: `synthetic-1` had three tables and none of them carried
+    `numGlyphs`, so `loca` could not be interpreted and fontTools declined the
+    file. `xtask::face` was fixed rather than worked around, and the twenty
+    lines that did the bolting are gone with it.
     """
     if not os.path.exists(SOURCE):
         sys.exit("run `cargo run -p xtask -- synth-face` first: %s" % SOURCE)
-    tables = read_sfnt(open(SOURCE, "rb").read())
-    num_glyphs = len(tables["loca"]) // 4 - 1
-    tables["maxp"] = struct.pack(">IH", 0x00010000, num_glyphs) + b"\0" * 26
-    path = os.path.join(HERE, "_prepared.ttf")
-    open(path, "wb").write(write_sfnt(tables))
-    return path, num_glyphs
+    font = TTFont(SOURCE, recalcTimestamp=False)
+    return font["maxp"].numGlyphs
 
 
 # ---- the seven glyphs that reach the rest of the transform ------------------
@@ -207,13 +174,13 @@ def all_offcurve(p):
     p.closePath()
 
 
-def build(path, num_glyphs, out):
+def build(num_glyphs, out):
     # `recalcTimestamp=False` or the whole exercise is not reproducible:
     # fontTools stamps `head.modified` with the clock on every compile, which
     # moves the table, moves the Brotli stream, and gives a different file
     # every run. Pinning `head.created`/`head.modified` below is necessary and
     # on its own not sufficient, because the stamp happens after that.
-    font = TTFont(path, recalcTimestamp=False)
+    font = TTFont(SOURCE, recalcTimestamp=False)
     glyf = font["glyf"]
     order = list(font.getGlyphOrder())
 
@@ -329,7 +296,7 @@ def build(path, num_glyphs, out):
     name_table = newTable("name")
     name_table.names = []
     for name_id, text in ((1, "Tinker Synthetic"), (2, "Regular"),
-                          (3, "tinker-pdf synthetic-1"),
+                          (3, "tinker-pdf synthetic-2"),
                           (4, "Tinker Synthetic"),
                           (6, "TinkerSynthetic-Regular")):
         name_table.setName(text, name_id, 3, 1, 0x409)
@@ -399,13 +366,13 @@ const source = fs.readFileSync(process.argv[2]);
 const out = process.argv[3];
 
 const woff = Buffer.from(ttf2woff(new Uint8Array(source)).buffer);
-fs.writeFileSync(path.join(out, "synthetic-1-ttf2woff.woff"), woff);
-console.log("ttf2woff  woff  -> synthetic-1-ttf2woff.woff (" + woff.length + ")");
+fs.writeFileSync(path.join(out, "synthetic-2-ttf2woff.woff"), woff);
+console.log("ttf2woff  woff  -> synthetic-2-ttf2woff.woff (" + woff.length + ")");
 
 wawoff2.compress(source).then((packed) => {
   const buf = Buffer.from(packed);
-  fs.writeFileSync(path.join(out, "synthetic-1-wawoff2.woff2"), buf);
-  console.log("wawoff2   woff2 -> synthetic-1-wawoff2.woff2 (" + buf.length + ")");
+  fs.writeFileSync(path.join(out, "synthetic-2-wawoff2.woff2"), buf);
+  console.log("wawoff2   woff2 -> synthetic-2-wawoff2.woff2 (" + buf.length + ")");
 });
 """
 
@@ -416,21 +383,21 @@ PROVENANCE_HEADER = "file\tbytes\tproducer\tversion\tfrom\twritten\trole\n"
 # every file in the directory and that every row names a file of that size, so
 # a fixture that is regenerated and a record that is not cannot both survive.
 PROVENANCE_ROWS = [
-    ("synthetic-1.ttf", "fontTools", "4.63.0", "cargo xtask synth-face",
+    ("synthetic-2.ttf", "fontTools", "4.63.0", "cargo xtask synth-face",
      "the source face: synth-face's 256 glyphs plus seven that reach the rest "
      "of WOFF2's glyf transform"),
-    ("synthetic-1.woff", "fontTools", "4.63.0", "synthetic-1.ttf",
+    ("synthetic-2.woff", "fontTools", "4.63.0", "synthetic-2.ttf",
      "WOFF 1.0, table order preserved, so the round trip is byte identity"),
-    ("synthetic-1-ttf2woff.woff", "ttf2woff", "3.0.0", "synthetic-1.ttf",
+    ("synthetic-2-ttf2woff.woff", "ttf2woff", "3.0.0", "synthetic-2.ttf",
      "WOFF 1.0 from a second encoder, which sorts its tables"),
-    ("synthetic-1.woff2", "fontTools", "4.63.0", "synthetic-1.ttf",
+    ("synthetic-2.woff2", "fontTools", "4.63.0", "synthetic-2.ttf",
      "WOFF 2.0; loca sits four entries after glyf, which 5.5 permits"),
-    ("synthetic-1-wawoff2.woff2", "wawoff2", "2.0.1", "synthetic-1.ttf",
+    ("synthetic-2-wawoff2.woff2", "wawoff2", "2.0.1", "synthetic-2.ttf",
      "WOFF 2.0 from Google's reference C++ encoder built to WebAssembly"),
-    ("synthetic-1-aligned.ttf", "fontTools", "4.63.0", "synthetic-1.ttf",
+    ("synthetic-2-aligned.ttf", "fontTools", "4.63.0", "synthetic-2.ttf",
      "the same outlines with every lsb equal to its xMin"),
-    ("synthetic-1-aligned-hmtx.woff2", "fontTools", "4.63.0",
-     "synthetic-1-aligned.ttf",
+    ("synthetic-2-aligned-hmtx.woff2", "fontTools", "4.63.0",
+     "synthetic-2-aligned.ttf",
      "WOFF 2.0 with hmtx transform 1, which no encoder applies unasked"),
 ]
 
@@ -440,7 +407,7 @@ PROVENANCE_NOTE = (
     "# Written by make-fixtures.py. Every producer named here GENERATED a\n"
     "# file and none of them ADJUDICATES one (ruling 13): no program runs at\n"
     "# test time, and tests/woff_fixtures.rs compares this build against\n"
-    "# synthetic-1.ttf, which is committed beside the containers.\n")
+    "# synthetic-2.ttf, which is committed beside the containers.\n")
 
 
 def write_provenance(written):
@@ -461,15 +428,14 @@ def write_provenance(written):
 
 
 def main():
-    prepared, num_glyphs = prepared_source()
-    ttf = os.path.join(HERE, "synthetic-1.ttf")
-    count = build(prepared, num_glyphs, ttf)
-    os.remove(prepared)
-    print("source face: synthetic-1.ttf (%d glyphs, %d bytes)"
+    num_glyphs = source_face()
+    ttf = os.path.join(HERE, "synthetic-2.ttf")
+    count = build(num_glyphs, ttf)
+    print("source face: synthetic-2.ttf (%d glyphs, %d bytes)"
           % (count, os.path.getsize(ttf)))
 
-    for flavor, name in (("woff", "synthetic-1.woff"),
-                         ("woff2", "synthetic-1.woff2")):
+    for flavor, name in (("woff", "synthetic-2.woff"),
+                         ("woff2", "synthetic-2.woff2")):
         font = TTFont(ttf, recalcTimestamp=False)
         font.flavor = flavor
         out = os.path.join(HERE, name)
@@ -480,7 +446,7 @@ def main():
     # ---- the hmtx transform, which needs a face that qualifies for it -------
     #
     # WOFF2 §5.4 lets an encoder delete the left side bearings only when every
-    # one of them equals the glyph's xMin, and `synthetic-1.ttf` is written so
+    # one of them equals the glyph's xMin, and `synthetic-2.ttf` is written so
     # one in seven does not. So neither encoder applies the transform to it,
     # and a decoder with no fixture behind that branch has a reverse nobody has
     # ever run.
@@ -491,23 +457,23 @@ def main():
     # `woff2TransformedTableTags` defaults to ('glyf', 'loca'), and the
     # reference encoder declines this face too. A real producer wrote the
     # bytes; what is unusual is the setting, not the file.
-    aligned = os.path.join(HERE, "synthetic-1-aligned.ttf")
+    aligned = os.path.join(HERE, "synthetic-2-aligned.ttf")
     font = TTFont(ttf, recalcTimestamp=False)
     glyf, hmtx = font["glyf"], font["hmtx"]
     for name in font.getGlyphOrder():
         advance, _lsb = hmtx.metrics[name]
         hmtx.metrics[name] = (advance, getattr(glyf[name], "xMin", 0))
     font.save(aligned)
-    print("aligned face: synthetic-1-aligned.ttf (%d bytes)"
+    print("aligned face: synthetic-2-aligned.ttf (%d bytes)"
           % os.path.getsize(aligned))
 
     woff2.woff2TransformedTableTags = ("glyf", "loca", "hmtx")
     font = TTFont(aligned, recalcTimestamp=False)
     font.flavor = "woff2"
-    out = os.path.join(HERE, "synthetic-1-aligned-hmtx.woff2")
+    out = os.path.join(HERE, "synthetic-2-aligned-hmtx.woff2")
     font.save(out)
     woff2.woff2TransformedTableTags = ("glyf", "loca")
-    print("fontTools woff2 -> synthetic-1-aligned-hmtx.woff2 (%d bytes, hmtx "
+    print("fontTools woff2 -> synthetic-2-aligned-hmtx.woff2 (%d bytes, hmtx "
           "transform 1)" % os.path.getsize(out))
 
     # The two independent encoders live in a node_modules this repository does
