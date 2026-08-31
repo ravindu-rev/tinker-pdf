@@ -64,9 +64,10 @@ use std::collections::HashMap;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, Display, Float,
-    LengthPercentage, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side,
-    Sides, Size, TableLayout, TextAlign, VerticalAlign,
+    AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
+    ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStyleType, MarginValue,
+    OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TableLayout, TextAlign,
+    VerticalAlign,
 };
 
 use crate::flex;
@@ -156,9 +157,9 @@ pub(crate) struct LineBox {
 
 /// A set of boxes that sit **beside** one another and cannot be separated.
 ///
-/// Two things in this crate are that shape and they arrived one milestone
-/// apart, so the type is named for what it is rather than for the first of
-/// them:
+/// Three things in this crate are that shape and they arrived one milestone
+/// apart each, so the type is named for what it is rather than for the first
+/// of them:
 ///
 /// - **One band of table rows**, CSS 2.2 §17. A band and not a row, and the
 ///   difference is `rowspan`: a page may break between two rows and may not
@@ -169,6 +170,10 @@ pub(crate) struct LineBox {
 /// - **One flex line**, `css-flexbox-1` §9. A row container's items sit beside
 ///   each other along the main axis; a column container's whole content is one
 ///   of these, because its lines sit beside each other too.
+/// - **A whole multi-column container**, `css-multicol-1`. Its columns are the
+///   same content read top to bottom and then left to right, which is the one
+///   thing a flow whose `y` never goes backwards cannot express -- so the
+///   container is one item and its `N` columns are inside it.
 ///
 /// They are separate [`ItemKind`] variants over one payload rather than one
 /// variant, because the fragmenter has a different sentence to say about each
@@ -204,6 +209,11 @@ pub(crate) enum ItemKind {
     /// another along the main axis, so the page cutter cannot order them and
     /// they are kept out of the column for [`Abreast`]'s reason.
     FlexLine(Box<Abreast>),
+    /// One multi-column container, whole, `css-multicol-1`. Its columns are
+    /// `N` slices of one flow placed side by side, which is the same shape
+    /// again -- and being one item is what lets [`crate::fragment`] cut a
+    /// container taller than a page at one height across every column of it.
+    Columns(Box<Abreast>),
 }
 
 /// One piece of the continuous column.
@@ -900,6 +910,11 @@ impl<M: Metrics> Builder<'_, M> {
                 self.warn(Warning::InlineFlexAsBlock);
             }
             self.flex(node, &style, content_x, content_width, depth, avoid)?;
+        } else if style.is_multicol() {
+            // `css-multicol-1`, and the same sentence a third time: a
+            // multi-column container is an ordinary block box on the outside,
+            // and everything above this line is that box.
+            self.columns(node, &style, content_x, content_width, depth, avoid)?;
         } else {
             self.children(node, &style, content_x, content_width, depth, avoid, block)?;
         }
@@ -1403,7 +1418,7 @@ impl<M: Metrics> Builder<'_, M> {
                             *width = width.max(run.x + run.width);
                         }
                     }
-                    ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+                    ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                         extend(&band.items, width);
                     }
                     ItemKind::Margin(_) | ItemKind::Edge => {}
@@ -1432,6 +1447,23 @@ impl<M: Metrics> Builder<'_, M> {
         depth: usize,
         avoid: bool,
     ) -> Result<Sublayout, Refusal> {
+        self.subflow(node, None, measure, depth, avoid)
+    }
+
+    /// The same, for a box whose **own** box model has already been paid.
+    ///
+    /// `inside` lays out only the node's children at the stated width, which is
+    /// what a multi-column container needs: [`Builder::block`] has already
+    /// applied its margins, border, padding and width, and laying the box out
+    /// again would pay for every one of them twice.
+    fn subflow(
+        &mut self,
+        node: &BoxNode,
+        inside: Option<&Consumed>,
+        measure: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<Sublayout, Refusal> {
         let items = std::mem::take(&mut self.flow.items);
         let blocks = std::mem::take(&mut self.flow.blocks);
         let floats = std::mem::take(&mut self.flow.floats);
@@ -1444,7 +1476,21 @@ impl<M: Metrics> Builder<'_, M> {
         let ceiling_line = std::mem::replace(&mut self.ceiling_line, f64::NEG_INFINITY);
         let content_top = std::mem::replace(&mut self.content_top, 0.0);
 
-        let result = self.block(node, measure, 0.0, depth, avoid, 0);
+        let result = match inside {
+            None => self.block(node, measure, 0.0, depth, avoid, 0),
+            Some(style) => {
+                // A record for the container itself, so the sub-flow's records
+                // are numbered from zero exactly as `block` numbers them and
+                // the line filler has an index to patch. **Not painted**: this
+                // box's background and border belong to the flow that called
+                // this one, and a second copy would draw them once per column.
+                let mut record = decorate(node, 0.0, measure);
+                record.painted = false;
+                self.flow.blocks.push(record);
+                self.open.push(0);
+                self.children(node, style, 0.0, measure, depth, avoid, 0)
+            }
+        };
         if result.is_ok() {
             // The same reason `build` does it: without this the float's bottom
             // margin is not part of its height, and a float whose height is
@@ -1922,6 +1968,173 @@ impl<M: Metrics> Builder<'_, M> {
         // And below the last one, which is what makes the table's own content
         // height include §17.6.1's last spacing.
         self.emit(vspacing, ItemKind::Margin(spacing_break), true);
+        Ok(())
+    }
+
+    /// A multi-column container's content, `css-multicol-1`.
+    ///
+    /// **One flow item, `N` columns inside it.** A column of a multi-column
+    /// container reads to its bottom and then jumps back to the top of the next
+    /// one, which is the one thing a flow whose `y` never goes backwards cannot
+    /// say — so the container is an [`Abreast`], the same answer a table band
+    /// and a flex line already are, and [`crate::fragment`] cuts it across
+    /// pages at one height over every column of it.
+    ///
+    /// The steps are §3's and §4's, and each has an answer of its own:
+    ///
+    /// 1. §3.4's pseudo-algorithm turns `column-count`, `column-width` and the
+    ///    gap into a used count and a used width — [`column_geometry`];
+    /// 2. the content is laid out **once**, at one column's width, in a flow of
+    ///    its own;
+    /// 3. §4's `column-fill: balance` finds the shortest height that still fits
+    ///    the content in that many columns — [`balance`] over [`fill_columns`];
+    /// 4. the flow is sliced at that height and the slices are placed side by
+    ///    side;
+    /// 5. §5's rule is drawn down the middle of each gap.
+    ///
+    /// The content is laid out once and sliced, rather than laid out per
+    /// column: a column is not a narrower rendering of the content, it is the
+    /// **same** rendering cut in a different place, and a build that re-laid
+    /// each column would break the same paragraph twice and lose the join.
+    fn columns(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        content_x: f64,
+        content_width: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        // §5.1's gap is `css-align-3` §8.1's, and `normal` is one em **because
+        // this box turned out to be multi-column** — which is why the value is
+        // carried unresolved as far as here.
+        let gap = style.gap_px(style.column_gap, content_width);
+        let (count, width) = column_geometry(style, content_width, gap);
+        // §6's `column-span` is a property of a **child** of the container and
+        // not of the container, which is why this reads the children: a
+        // spanning box interrupts the columns and resumes them below itself,
+        // and this build has one column set per container. Counted per box, so
+        // a book with one spanning heading and a book with four hundred are
+        // different numbers.
+        if let Content::Children(children) = &node.content {
+            for child in children {
+                if consume(&child.style).column_span == ColumnSpan::All {
+                    self.warn(Warning::ColumnSpanAsNone);
+                }
+            }
+        }
+
+        let sub = self.subflow(node, Some(style), width, depth, avoid)?;
+        if sub.items.is_empty() {
+            return Ok(());
+        }
+        // §4: `balance` is the shortest height that still fits; `auto` fills
+        // each column in turn, and a container with no stated height has no
+        // bottom for the first column to reach — so all of it is the first
+        // column, which is exactly what asking for the content's own height
+        // produces rather than a special case.
+        let target = match style.column_fill {
+            ColumnFill::Balance => balance(&sub.items, count),
+            ColumnFill::Auto => sub.height,
+        };
+        let starts = fill_columns(&sub.items, target);
+
+        let mut band = Abreast {
+            items: Vec::new(),
+            blocks: Vec::new(),
+        };
+        // The rules first, so a column's own backgrounds are drawn over them
+        // rather than under. Their spacers are `Edge` items: nothing to read,
+        // divisible by the page cutter, and the anchor a `BlockRecord` needs
+        // for its height — the same device a table row's spacer is.
+        let rules = if style.column_rule_width > 0.0 && style.column_rule_color.a != 0 {
+            starts.len().saturating_sub(1)
+        } else {
+            0
+        };
+        let mut height = 0.0f64;
+        let mut ranges: Vec<(usize, usize, f64)> = Vec::new();
+        for (column, &from) in starts.iter().enumerate() {
+            let to = starts.get(column + 1).copied().unwrap_or(sub.items.len());
+            let top = sub.items[from].y;
+            let bottom = sub.items[to - 1].y + sub.items[to - 1].height;
+            height = height.max(bottom - top);
+            ranges.push((from, to, top));
+        }
+        for rule in 0..rules {
+            let spacer = band.items.len();
+            band.items.push(Item {
+                y: 0.0,
+                height,
+                kind: ItemKind::Edge,
+            });
+            // §5.1: *"the column rule is drawn in the middle of the gap"*, so
+            // it is centred in the gap and not laid against either column.
+            let gap_left = content_x + (rule + 1) as f64 * width + rule as f64 * gap;
+            band.blocks.push(BlockRecord {
+                x: gap_left + (gap - style.column_rule_width) / 2.0,
+                width: style.column_rule_width,
+                first: Some(spacer),
+                last: spacer + 1,
+                background: style.column_rule_color,
+                border_width: Sides::all(0.0),
+                border_style: Sides::all(BorderStyle::None),
+                border_color: Sides::all(Color::TRANSPARENT),
+                painted: true,
+            });
+        }
+        for (column, &(from, to, top)) in ranges.iter().enumerate() {
+            let base = band.items.len();
+            let dx = content_x + column as f64 * (width + gap);
+            let mut slice: Vec<Item> = sub.items[from..to].to_vec();
+            let mut records: Vec<BlockRecord> = Vec::new();
+            // A box that spans a column boundary is two fragments, which is the
+            // page cutter's own rule met one level down: its record is clipped
+            // to the slice and copied into each column it reaches.
+            for record in &sub.blocks {
+                let Some(first) = record.first else {
+                    continue;
+                };
+                let lo = first.max(from);
+                let hi = record.last.min(to);
+                if lo >= hi {
+                    continue;
+                }
+                let mut copy = record.clone();
+                copy.first = Some(lo - from + base);
+                copy.last = hi - from + base;
+                records.push(copy);
+            }
+            translate(&mut slice, &mut records, dx, -top);
+            band.items.append(&mut slice);
+            band.blocks.append(&mut records);
+        }
+        // A float inside a column stays inside it: its formatting context is
+        // the container's own flow, so it belongs to the column its top fell
+        // in and there is nothing for the page cutter to carry forward. The
+        // same sentence a cell's float already carries.
+        for float in sub.floats {
+            let column = ranges
+                .iter()
+                .rposition(|(_, _, top)| float.top + EPSILON >= *top)
+                .unwrap_or(0);
+            let (_, _, top) = ranges[column];
+            let dx = content_x + column as f64 * (width + gap);
+            let mut float = float;
+            translate(&mut float.items, &mut float.blocks, dx, -top);
+            let base = band.items.len();
+            for mut record in float.blocks {
+                if let Some(first) = record.first {
+                    record.first = Some(first + base);
+                    record.last += base;
+                }
+                band.blocks.push(record);
+            }
+            band.items.extend(float.items);
+        }
+
+        self.commit_margin();
+        self.emit(height, ItemKind::Columns(Box::new(band)), true);
         Ok(())
     }
 
@@ -3532,6 +3745,155 @@ fn flex_boxes(container: &BoxNode) -> Vec<ItemBox<'_>> {
     out
 }
 
+/// `css-multicol-1` §3.4's pseudo-algorithm: the used column count and width.
+///
+/// §3.4 is four cases over two properties and it is written out rather than
+/// folded, because the two-stated case is **not** the minimum of the two
+/// answers taken separately: `column-count: 3; column-width: 10em` in a box
+/// with room for five ten-em columns is three columns of a third of the box
+/// each, not three of ten em.
+///
+/// The `(auto, auto)` case cannot be reached — [`Consumed::is_multicol`] is
+/// exactly its negation — and is answered as one column rather than left to a
+/// panic, which is ruling 1.
+fn column_geometry(style: &Consumed, available: f64, gap: f64) -> (usize, f64) {
+    let stated = match style.column_count {
+        ColumnCount::Auto => None,
+        ColumnCount::Count(count) => Some(usize::from(count).max(1)),
+    };
+    let wanted = match style.column_width {
+        ColumnWidth::Auto => None,
+        // A zero or negative `column-width` would divide by zero below. §3.1
+        // makes the value non-negative and a zero one meaningless, so it is
+        // read as `auto` rather than obeyed.
+        ColumnWidth::Px(px) if px > 0.0 => Some(px),
+        ColumnWidth::Px(_) => None,
+    };
+    // §3.4's *"floor((available + gap) / (width + gap))"*, at least one.
+    let fits = |width: f64| -> usize {
+        let step = width + gap;
+        if step <= 0.0 {
+            return 1;
+        }
+        let count = ((available + gap) / step).floor();
+        if (1.0..1_000.0).contains(&count) {
+            count as usize
+        } else if count >= 1_000.0 {
+            // A container a thousand columns wide is a stylesheet accident and
+            // a work bomb. Ruling 2: it is capped rather than refused.
+            1_000
+        } else {
+            1
+        }
+    };
+    let count = match (stated, wanted) {
+        (Some(count), None) => count,
+        (None, Some(width)) => fits(width),
+        (Some(count), Some(width)) => count.min(fits(width)),
+        (None, None) => 1,
+    };
+    let count = count.max(1);
+    let width = ((available - (count - 1) as f64 * gap) / count as f64).max(0.0);
+    (count, width)
+}
+
+/// Fills columns of a stated height, greedily, and returns the first item index
+/// of each.
+///
+/// A column ends **before** the first item that would take it past the height,
+/// which is `css-break-3`'s class-2 break — between line boxes — with a box's
+/// own padding edge allowed as well, exactly as [`crate::fragment`]'s last tier
+/// allows it.
+///
+/// A column always takes at least one item, however tall it is. Without that
+/// clause a box taller than the target starts a new column for ever, which is
+/// §9.3's own `"if the very first uncollected item wouldn't fit, collect just
+/// it"` met in a different specification.
+fn fill_columns(items: &[Item], height: f64) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    let Some(first) = items.first() else {
+        return starts;
+    };
+    let mut top = first.y;
+    for (at, item) in items.iter().enumerate().skip(1) {
+        if item.y + item.height > top + height + EPSILON && at > *starts.last().unwrap_or(&0) {
+            starts.push(at);
+            top = item.y;
+        }
+    }
+    starts
+}
+
+/// `css-multicol-1` §4's `balance`: the shortest height that still fits the
+/// content in `count` columns.
+///
+/// **A search and not a division.** `total / count` is the answer only when the
+/// content can be cut anywhere, and it cannot: the cuts are between items, so
+/// the even share usually needs one more column than there is. The predicate
+/// — *does this height fit in `count` columns* — is monotone in the height, so
+/// a bisection finds the boundary.
+///
+/// Sixty-four halvings, which takes an interval of any real page height below
+/// the last bit of an `f64`. The number is stated rather than tuned: the value
+/// returned is only ever fed back through [`fill_columns`], whose comparisons
+/// carry `EPSILON`, so the last bits cannot reach the page.
+///
+/// Ruling 4: `floor` and halving are exact in IEEE-754 and identical on every
+/// target, which is why the balance is arithmetic rather than a transcendental.
+fn balance(items: &[Item], count: usize) -> f64 {
+    let (Some(first), Some(last)) = (items.first(), items.last()) else {
+        return 0.0;
+    };
+    let total = last.y + last.height - first.y;
+    if count <= 1 || total <= 0.0 {
+        return total.max(0.0);
+    }
+    let mut lo = 0.0f64;
+    let mut hi = total;
+    for _ in 0..64 {
+        let mid = lo + (hi - lo) / 2.0;
+        if fill_columns(items, mid).len() <= count {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    // **The bisection's answer is a hair too small and the hair is visible.**
+    // `fill_columns` keeps a line whose bottom lands on the boundary to within
+    // `EPSILON`, so the smallest height it *accepts* is a hair under the height
+    // it then comes to -- and at that height the first column drops its last
+    // line while the second still takes it. Seven lines into two columns split
+    // three and four instead of four and three, which is a page that looks
+    // deliberate.
+    //
+    // So the height is settled by asking the fill what it actually came to and
+    // filling again at that. The second answer is a fixed point of the first,
+    // and the loop is bounded rather than trusted.
+    let mut height = hi;
+    for _ in 0..4 {
+        let actual = tallest(items, &fill_columns(items, height));
+        if actual <= height + EPSILON {
+            break;
+        }
+        height = actual;
+    }
+    height
+}
+
+/// The tallest of the columns a fill produced.
+fn tallest(items: &[Item], starts: &[usize]) -> f64 {
+    let mut height = 0.0f64;
+    for (column, &from) in starts.iter().enumerate() {
+        let to = starts.get(column + 1).copied().unwrap_or(items.len());
+        if from >= to {
+            continue;
+        }
+        let bottom = items[to - 1].y + items[to - 1].height;
+        height = height.max(bottom - items[from].y);
+    }
+    height
+}
+
 /// §4's anonymous block container around a run of text.
 fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
     let mut style = ComputedStyle::inherit_from(parent);
@@ -3555,7 +3917,7 @@ fn first_baseline(sub: &Sublayout) -> Option<f64> {
     for item in &sub.items {
         match &item.kind {
             ItemKind::Line(line) => return Some(item.y + line.baseline),
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                 for inner in &band.items {
                     if let ItemKind::Line(line) = &inner.kind {
                         return Some(item.y + inner.y + line.baseline);
@@ -3661,7 +4023,7 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
             // A band's items are already relative to the band, so only the
             // horizontal half of the move reaches inside it. A build that
             // passed `dy` down as well would move a table inside a float twice.
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                 translate(&mut band.items, &mut band.blocks, dx, 0.0);
             }
             ItemKind::Margin(_) | ItemKind::Edge => {}
