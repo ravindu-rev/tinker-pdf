@@ -26,8 +26,9 @@
 //! picture is incomplete and here is what is missing" against "this picture".
 
 use crate::document::{self, Node, Tree};
+use crate::shape::{self, Shape};
 use crate::transform::{self, IDENTITY};
-use crate::{Limits, Refusal, Scene, Warning};
+use crate::{Colour, FillRule, Limits, Paint, Refusal, Scene, Warning};
 
 /// The default viewport, in user units, for a document that states no size.
 ///
@@ -56,9 +57,33 @@ struct Walk<'a> {
     tree: &'a Tree,
     limits: &'a Limits,
     scene: Scene,
+    /// [`Limits::max_segments`], spent across the **whole document** and never
+    /// refunded — so a thousand paths of a thousand segments each is the same
+    /// refusal as one path of a million, which is the property a per-path cap
+    /// does not have.
+    segments: usize,
 }
 
 impl Walk<'_> {
+    /// Charges `count` segments, refusing by name when the document is past
+    /// its budget.
+    fn spend(&mut self, count: usize) -> Result<(), Refusal> {
+        if count > self.segments {
+            return Err(Refusal::TooManySegments);
+        }
+        self.segments -= count;
+        Ok(())
+    }
+
+    /// Adds one node to the scene, refusing by name when it is full.
+    fn push(&mut self, node: crate::Node) -> Result<(), Refusal> {
+        if self.scene.nodes.len() >= self.limits.max_nodes {
+            return Err(Refusal::TooManyNodes);
+        }
+        self.scene.nodes.push(node);
+        Ok(())
+    }
+
     /// Records a warning once, whatever it names.
     ///
     /// **Deduplicated, and capped.** Ruling 10 wants the fact reported; it does
@@ -188,6 +213,15 @@ impl Walk<'_> {
             // says these do not paint.
             "title" | "desc" | "metadata" => Ok(()),
 
+            // ---- §9's basic shapes -----------------------------------------
+            "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {
+                self.shape(node, frame)
+            }
+            // §5.7's `<image>`, carried unresolved: this crate has no
+            // container, no filesystem and no network, which is what makes it
+            // a leaf.
+            "image" => self.image(node, frame),
+
             // ---- refused by name -------------------------------------------
             "filter" => {
                 self.warn(Warning::FilterUnsupported);
@@ -226,6 +260,69 @@ impl Walk<'_> {
                 Ok(())
             }
         }
+    }
+
+    /// One of §9's basic shapes, as a node in the scene's own space.
+    ///
+    /// **The transform is applied here rather than carried**, which is the
+    /// design's one irreversible decision: a consumer receives points and never
+    /// a matrix. See this module's header.
+    fn shape(&mut self, node: &Node, frame: Frame) -> Result<(), Refusal> {
+        let matrix = self.matrix_of(node, frame.matrix);
+        let mut degraded = Vec::new();
+        let read = shape::outline(node, frame.viewport, &mut degraded);
+        for attribute in degraded {
+            self.warn(Warning::ValueUnreadable {
+                attribute: attribute.to_owned(),
+            });
+        }
+        let outline = match read {
+            Some(Shape::Outline(outline)) => outline,
+            Some(Shape::Nothing) | None => return Ok(()),
+            Some(Shape::Unreadable(attribute)) => {
+                self.warn(Warning::ValueUnreadable {
+                    attribute: attribute.to_owned(),
+                });
+                return Ok(());
+            }
+        };
+        self.spend(outline.segments.len())?;
+        // §11.3's initial values, which is what a shape with no paint
+        // properties on it is: a black fill by the nonzero rule, and no
+        // stroke. Milestone 3 is where a document gets to say otherwise.
+        self.push(crate::Node::Path {
+            outline: outline.transformed(matrix),
+            fill: Paint::Solid(Colour {
+                rgb: [0.0, 0.0, 0.0],
+            }),
+            rule: FillRule::NonZero,
+            fill_opacity: 1.0,
+            stroke: None,
+        })
+    }
+
+    /// §5.7's `<image>`.
+    fn image(&mut self, node: &Node, frame: Frame) -> Result<(), Refusal> {
+        let Some(href) = node.href() else {
+            // §5.7 makes the reference required; without one there is nothing
+            // to resolve and nothing was refused.
+            return Ok(());
+        };
+        let matrix = self.matrix_of(node, frame.matrix);
+        let x = self.length_of(node, "x", Some(frame.viewport.0), 0.0);
+        let y = self.length_of(node, "y", Some(frame.viewport.1), 0.0);
+        let width = self.length_of(node, "width", Some(frame.viewport.0), 0.0);
+        let height = self.length_of(node, "height", Some(frame.viewport.1), 0.0);
+        // §5.7: a zero or negative width or height disables rendering.
+        if !(width > 0.0 && height > 0.0) {
+            return Ok(());
+        }
+        self.push(crate::Node::Image {
+            href: href.to_owned(),
+            rect: [x, y, width, height],
+            matrix,
+            preserve: node.attr("preserveAspectRatio").map(str::to_owned),
+        })
     }
 
     /// An `<svg>`, root or nested: §7.9's establishment of a new viewport.
@@ -297,6 +394,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         tree,
         limits,
         scene: Scene::default(),
+        segments: limits.max_segments,
     };
     let root = tree.root;
     let Some(node) = tree.nodes.get(root) else {

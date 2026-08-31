@@ -41,6 +41,7 @@
 pub mod document;
 pub mod path;
 pub mod scene;
+pub mod shape;
 pub mod transform;
 
 #[cfg(test)]
@@ -312,10 +313,22 @@ pub enum Node {
     Image {
         /// The `href`, verbatim.
         href: String,
-        /// Where it goes, as `x y width height` after transforms.
+        /// Where it goes, as `x y width height`, in the element's **own** user
+        /// space — the space `matrix` maps out of.
         rect: [f64; 4],
-        /// The matrix mapping the unit image into `rect`'s space.
+        /// The matrix from that space into the scene's, every ancestor's
+        /// transform and every viewport composed in.
         matrix: [f64; 6],
+        /// `preserveAspectRatio`, verbatim, or `None` for §7.8's initial
+        /// `xMidYMid meet`.
+        ///
+        /// **Carried unresolved for the reason `href` is.** Fitting an image
+        /// into `rect` needs the image's *intrinsic* size, which is inside
+        /// bytes this crate never sees. The caller that decoded it passes both
+        /// to [`transform::view_box`], which is where the grammar already
+        /// lives — so the string travels and the reading of it does not
+        /// happen twice.
+        preserve: Option<String>,
     },
 }
 
