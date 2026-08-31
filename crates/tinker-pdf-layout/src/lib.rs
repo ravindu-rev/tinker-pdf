@@ -729,6 +729,37 @@ pub enum Warning {
     /// is one line whatever its length, so this is the warning a long
     /// `flex-direction: column` raises.
     FlexLineTallerThanPage,
+    /// A `max-height` shorter than the content, which did **not** shorten the
+    /// box. CSS 2.2 §10.7.
+    ///
+    /// §10.7's clamp is one sentence and its two halves land differently here.
+    /// `min-height` is padding, which [`flow`] already does for `height`.
+    /// `max-height` makes a box shorter, and by the time it is known this
+    /// module has emitted the items the content came to -- the flow is one
+    /// column whose `y` never goes backwards, and there is no negative edge.
+    /// So the clamp is applied to the padding, which is its whole effect on a
+    /// box whose content fits, and this is raised on the box whose content does
+    /// not. **The box is its content's height and the declaration did nothing**,
+    /// which is `InlineBlockAsInline`'s shape: what was done, named, rather
+    /// than a property quietly half-honoured.
+    MaxHeightAsAuto,
+    /// A column of a multi-column container that is taller than a page.
+    ///
+    /// The third of `Abreast`'s three shapes and the same sentence the other
+    /// two carry: the container is cut across pages like any band, and this is
+    /// raised only when one **atomic** box inside a column -- a line box, or a
+    /// band inside it -- is itself taller than a whole page, which no cut can
+    /// halve.
+    ColumnTallerThanPage,
+    /// `column-span: all`, laid out in its column.
+    ///
+    /// `css-multicol-1` §6: a spanning box interrupts the columns, is laid out
+    /// across the full width of the container, and the columns resume beneath
+    /// it. That is three column sets where this build has one, so the box is
+    /// laid out in the column it fell in and the fact is named. Counted per
+    /// box, for `UnimplementedProperty`'s reason: the same declaration on four
+    /// hundred figures is four hundred.
+    ColumnSpanAsNone,
     /// `display: table-column` or `table-column-group` carrying a `width`,
     /// which this build reads, beside anything else on it, which it does not:
     /// a column box's background and borders are §17.5.1's two rendering
@@ -759,8 +790,17 @@ impl fmt::Display for Warning {
             Warning::RowspanPastTheRowGroup => {
                 f.write_str("a rowspan reaches past its row group and was clamped")
             }
+            Warning::ColumnTallerThanPage => {
+                f.write_str("a multi-column container holds a box taller than a page")
+            }
+            Warning::ColumnSpanAsNone => {
+                f.write_str("column-span: all is laid out in its own column")
+            }
             Warning::ColumnBoxNotPainted => {
                 f.write_str("a table column box's background and borders are not painted")
+            }
+            Warning::MaxHeightAsAuto => {
+                f.write_str("a max-height shorter than the content did not shorten the box")
             }
             Warning::InlineFlexAsBlock => {
                 f.write_str("display: inline-flex is laid out as a block-level flex container")

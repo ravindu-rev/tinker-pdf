@@ -790,11 +790,21 @@ fn report(task: &str, outcome: Result<(), Vec<String>>) -> ExitCode {
 /// the MSVC runtime, Apple's libm and the wasm shim each round them their own
 /// way. `tinker-pdf-math` exists to replace them; this makes sure nobody
 /// quietly goes back.
+/// **`tinker-pdf-svg` is the fifth, added when it stopped being geometry alone.**
+/// Its `Cargo.toml` already argues the `tinker-pdf-math` edge on ruling 4 —
+/// F.6.5's endpoint-to-centre conversion needs `cos`, `sin` and an `atan2` and
+/// *"a platform transcendental on a path that decides where ink lands is
+/// exactly what `cargo xtask libm` fails the build over"*. That sentence was
+/// true and this check was not looking, so the rule was a comment rather than a
+/// check for as long as the crate had one file in it. It passes on the day it
+/// is added, which is the point: a list a crate joins only once it has already
+/// broken the rule is a list that ratifies the breakage.
 const PIXEL_PATHS: &[&str] = &[
     "tinker-pdf-raster",
     "tinker-pdf-color",
     "tinker-pdf-render",
     "tinker-pdf-content",
+    "tinker-pdf-svg",
 ];
 
 /// Method calls that are not correctly rounded, and so differ between

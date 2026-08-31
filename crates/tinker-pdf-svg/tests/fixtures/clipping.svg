@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §14.3's clipping. `#crop` holds two rectangles, because §14.3.5 makes a
+     clipping path the **union** of its children's silhouettes — a build that
+     intersected them would clip away everything the two did not share, which
+     for these two is everything. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <defs>
+    <clipPath id="crop">
+      <rect x="0" y="0" width="10" height="10"/>
+      <rect x="20" y="0" width="10" height="10"/>
+    </clipPath>
+    <clipPath id="fraction" clipPathUnits="objectBoundingBox">
+      <rect x="0" y="0" width="0.5" height="1"/>
+    </clipPath>
+    <clipPath id="empty"/>
+  </defs>
+
+  <!-- Outside `<defs>`, which is legal and common: §14.3 says a `<clipPath>`
+       is never rendered wherever it sits, so this one must draw nothing here
+       and still clip `#ruled` below. -->
+  <clipPath id="loose">
+    <circle cx="5" cy="5" r="5"/>
+  </clipPath>
+
+  <rect id="clipped"  clip-path="url(#crop)"     x="0" y="0" width="40" height="40"/>
+  <rect id="fraction" clip-path="url(#fraction)" x="10" y="20" width="10" height="20"/>
+  <rect id="voided"   clip-path="url(#empty)"    x="0" y="0" width="40" height="40"/>
+  <rect id="missing"  clip-path="url(#nothing)"  x="0" y="0" width="40" height="40"/>
+  <rect id="ruled"    clip-path="url(#crop)" clip-rule="evenodd"
+        x="0" y="0" width="40" height="40"/>
+  <!-- §14.3: `clip-path` is not inherited, so the child is not clipped by its
+       parent's path a second time. -->
+  <g clip-path="url(#crop)">
+    <rect id="child" x="0" y="0" width="40" height="40"/>
+  </g>
+</svg>

@@ -70,6 +70,13 @@ pub enum JxrChannels {
 }
 
 impl JxrChannels {
+    /// Whether Table A.6's row carries an alpha channel, which is what
+    /// decides whether A.3.2's separate alpha image plane has anywhere to go.
+    #[must_use]
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Self::Bgra | Self::Rgba)
+    }
+
     /// Samples per pixel in the decoded raster.
     #[must_use]
     pub const fn count(self) -> u8 {

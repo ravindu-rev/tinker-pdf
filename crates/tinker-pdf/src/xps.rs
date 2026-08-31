@@ -130,6 +130,7 @@ mod image;
 pub mod markup;
 pub mod opc;
 pub mod paint;
+pub mod resources;
 
 use std::collections::HashMap;
 
@@ -304,6 +305,38 @@ pub const MAX_XPS_GLYPHS: usize = 1 << 21;
 /// Reachable: `a_static_resource_chain_past_the_depth_cap_is_named`, against
 /// `tinker_pdf_xml::limits::MAX_XML_TOKENS` entries one dictionary could hold.
 pub const MAX_XPS_RESOURCE_DEPTH: usize = 16;
+
+/// How deep a `VisualBrush` may nest inside another one.
+///
+/// 15.4's `VisualBrush` paints a **subtree of markup** as its tile, and that
+/// subtree may state a `VisualBrush` of its own — legally, and to any depth the
+/// file chooses. So this is not the resource chain's problem wearing a
+/// different hat: a nest four deep holds no repeated key, resolves nothing
+/// twice and is still an exponential amount of drawing.
+///
+/// | | Brushes deep |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 2 |
+/// | Anything in the thirteen committed packages | 0 |
+/// | **This cap** | **8** |
+///
+/// Eight rather than sixteen because the work is not linear in the depth the
+/// way an alias chain's is: each level paints the whole of the level below it
+/// into a pattern cell, so what the depth bounds is a product. The element,
+/// segment and glyph totals in [`MAX_XPS_ELEMENTS`], [`MAX_XPS_SEGMENTS`] and
+/// [`MAX_XPS_GLYPHS`] are spent by every level and never refunded, which is
+/// what actually stops a hostile file; this cap stops the *stack*.
+///
+/// **The depth cap and the cycle guard are two rules**, for
+/// [`MAX_XPS_RESOURCE_DEPTH`]'s reason and answering under its two names: a
+/// `VisualBrush` reached through a `{StaticResource}` its own subtree names
+/// again is [`XpsElementDefect::BrushCyclic`], and a nest past this cap is
+/// [`XpsElementDefect::BrushTooDeep`]. Neither is the other, and a build with
+/// only one of them passes every test written for the one it has.
+///
+/// Reachable: `a_visual_brush_nested_past_the_depth_cap_is_named` and
+/// `a_visual_brush_that_reaches_itself_is_a_cycle_and_not_a_depth`.
+pub const MAX_XPS_VISUAL_DEPTH: usize = 8;
 
 /// The two relations, in `const` blocks so a build that broke either **does not
 /// compile**.
@@ -627,19 +660,32 @@ pub enum XpsElementDefect {
     /// A `{StaticResource}` naming a key no dictionary in scope holds.
     /// **Painted grey.**
     BrushUnresolved,
-    /// A `{StaticResource}` chain that returns to a key it already passed
-    /// through. **Painted grey**, and refused rather than recursed.
-    BrushCyclic,
-    /// A `{StaticResource}` chain longer than [`MAX_XPS_RESOURCE_DEPTH`].
-    /// **Painted grey.** Not the same as a cycle and never reported as one.
-    BrushTooDeep,
-    /// A brush this build does not paint: a `VisualBrush` (15.4), or a
-    /// `ContextColor` naming an ICC profile. **Painted grey.**
+    /// A brush that reaches itself. **Painted grey**, and refused rather than
+    /// recursed.
     ///
-    /// Two things this used to name and no longer does, because both are
-    /// painted now: an `ImageBrush`, and a gradient asked to stroke or to fill
-    /// text — the second needed 8.7.4.5.5's shading pattern, which the writer
-    /// had no API for.
+    /// Two constructions, one name, because a reader cannot tell them apart
+    /// and would not act differently if it could: a `{StaticResource}` chain
+    /// that returns to a key it already passed through, and a `VisualBrush`
+    /// whose own subtree names through a `{StaticResource}` the key that
+    /// brush was reached by. The second is invisible to the first's guard —
+    /// each lookup starts afresh, so no single chain ever repeats a key.
+    BrushCyclic,
+    /// A brush nested past its depth cap. **Painted grey.** Not the same as a
+    /// cycle and never reported as one.
+    ///
+    /// Two caps under one name, for [`XpsElementDefect::BrushCyclic`]'s
+    /// reason: a `{StaticResource}` chain longer than
+    /// [`MAX_XPS_RESOURCE_DEPTH`], and a `VisualBrush` nest deeper than
+    /// [`MAX_XPS_VISUAL_DEPTH`].
+    BrushTooDeep,
+    /// A brush this build does not paint: a `ContextColor` naming an ICC
+    /// profile. **Painted grey.**
+    ///
+    /// Three things this used to name and no longer does, because all three
+    /// are painted now: an `ImageBrush`; a gradient asked to stroke or to fill
+    /// text — which needed 8.7.4.5.5's shading pattern, and the writer had no
+    /// API for it; and a `VisualBrush` (15.4), whose cell is a subtree of
+    /// markup and so needed the drawing walk re-entered from inside a brush.
     BrushUnsupported,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
@@ -647,10 +693,22 @@ pub enum XpsElementDefect {
     /// differ from each other, which one constant alpha cannot express, or a
     /// `ColorInterpolationMode` this build does not interpolate in.
     BrushApproximated,
-    /// A `ResourceDictionary` with a `Source`, naming another part (14.2.4).
-    /// Gap 30's milestone 8; every key in it is unresolvable until then, and
-    /// saying so once beats one `BrushUnresolved` per use.
-    ResourceDictionaryRemote,
+    /// A `ResourceDictionary` whose `Source` names no part this package holds,
+    /// or names one that cannot be read (14.2.4).
+    ///
+    /// Said **once**, on the element that named the dictionary, rather than
+    /// once per key that then fails to resolve: a dictionary that is not there
+    /// is one fact about the file, and one `BrushUnresolved` per use would
+    /// report the same fact as many times as the page happened to use it.
+    ResourceDictionaryUnresolved,
+    /// A `ResourceDictionary` part that is there and whose root is not 14.2.4's
+    /// `ResourceDictionary` in either dialect.
+    ///
+    /// Not the same as [`XpsElementDefect::ResourceDictionaryUnresolved`] and
+    /// never reported as one: "no such part" and "that part is not a
+    /// dictionary" are different facts, and only the second says the package is
+    /// internally inconsistent.
+    ResourceDictionaryUnreadable,
     /// A `Glyphs` whose `FontUri` names no part of this package, or a part
     /// that will not read. **Not painted** — a run whose font is unknown has
     /// no glyph indices to draw and no widths to place them at.
@@ -724,12 +782,17 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::ClipUnreadable => "a `Clip` that is not 11.2's geometry",
             XpsElementDefect::OpacityUnreadable => "an `Opacity` that is not a number in [0, 1]",
             XpsElementDefect::BrushUnresolved => "a `{StaticResource}` naming no resource",
-            XpsElementDefect::BrushCyclic => "a `{StaticResource}` chain that returns to itself",
-            XpsElementDefect::BrushTooDeep => "a `{StaticResource}` chain past the depth cap",
+            XpsElementDefect::BrushCyclic => "a brush that reaches itself",
+            XpsElementDefect::BrushTooDeep => "a brush nested past the depth cap",
             XpsElementDefect::BrushUnsupported => "a brush this build does not paint",
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
-            XpsElementDefect::ResourceDictionaryRemote => "a `ResourceDictionary` in another part",
+            XpsElementDefect::ResourceDictionaryUnresolved => {
+                "a `ResourceDictionary` naming no readable part"
+            }
+            XpsElementDefect::ResourceDictionaryUnreadable => {
+                "a `ResourceDictionary` part that is not one"
+            }
             XpsElementDefect::GlyphsFontUnresolved => "a `FontUri` naming no readable font part",
             XpsElementDefect::GlyphsFontFace => "a `FontUri` naming a face other than the first",
             XpsElementDefect::GlyphsFontObfuscation => {
@@ -1161,6 +1224,11 @@ fn synthesise(
     // And one image table, for the same reason and with the same lifetime: two
     // pages naming one `/XI0` for two different pictures would be one picture.
     let mut images = image::Images::default();
+    // And one dictionary table, for the reason the fonts and the images have
+    // one: 14.2.4's `Source` is resolved against the *part* it is written on,
+    // so two pages may spell one dictionary two ways and it is still one
+    // dictionary — read once and answered from a table.
+    let mut remotes = resources::Remotes::default();
     // Painted **once per part**, for the reason milestone 4 built its own
     // caches: a `FixedDocument` may show one page part four thousand times,
     // and `Source::new` walks every character of a part before it yields an
@@ -1192,6 +1260,13 @@ fn synthesise(
                 if let Err(Trouble::Exhausted) = images.load(package, part, &mut builder, limits) {
                     return Err(ArchiveRefusal::TooLarge);
                 }
+                // 14.2.4's remote dictionaries, in a third pass and before the
+                // walk for the same reason: a dictionary part read mid-walk
+                // would need the page's own bytes copied out. See
+                // `resources::Remotes::load`.
+                if let Err(Trouble::Exhausted) = remotes.load(package, part, limits, &mut budget) {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
                 let drawn = match package.read_part(part) {
                     Ok(bytes) => painter.page(
                         &mut builder,
@@ -1200,6 +1275,7 @@ fn synthesise(
                             part,
                             fonts: &fonts,
                             images: &images,
+                            remotes: &remotes,
                             page: (width, height),
                             xml: &limits.xml,
                         },

@@ -92,3 +92,30 @@ crates/tinker-pdf-filters/data/** -text linguist-vendored
 # encoder emitted once, on a named day; a normalised line ending inside one is
 # a different stream, and several have no structure that would survive it.
 crates/tinker-pdf-filters/tests/brotli/** binary
+
+# The WOFF corpus (tier 4, `crates/tinker-pdf-font/tests/woff/`). Two faces and
+# five packings of them, named binary for a reason that is sharper here than
+# for any other fixture in this tree.
+#
+# A WOFF 1.0 is a table directory of byte offsets over per-table zlib streams,
+# and a WOFF 2.0 is a table directory of byte offsets over one Brotli stream:
+# a rewritten line ending anywhere in either moves every offset after it, and
+# the file stops being a font rather than becoming a slightly different one.
+# The `.ttf` pair beside them is the same argument -- an sfnt directory carries
+# offsets and lengths, which is already why `crates/tinker-pdf-shape/data/**`
+# is spelled out.
+#
+# What is different here is that these *are* regenerable, byte for byte, by
+# `tests/woff/make-fixtures.py` -- and that argues for this line rather than
+# against it, exactly as it does for the five Ghostscript packages above. What
+# regenerability buys is that damage would be repairable, not that it would be
+# absent; and repairing it needs fontTools, Node and two npm packages that no
+# CI job here installs, so in practice a normalised byte would be found by a
+# test failure and fixed by nobody.
+#
+# `*.woff` and `*.woff2` are named rather than left to `text=auto`, which
+# decides by looking for a NUL in the first 8 KB. A Brotli stream of a small
+# font is a few hundred bytes of entropy that may well have none.
+*.woff binary
+*.woff2 binary
+crates/tinker-pdf-font/tests/woff/*.ttf binary

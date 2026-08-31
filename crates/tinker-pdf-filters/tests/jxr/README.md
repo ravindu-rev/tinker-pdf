@@ -81,10 +81,21 @@ a third party's image.
 | Seams | `seam0`, `seam1`, `seam2` | A horizontal ramp, **lossy**, at each overlap mode. Lossy on purpose: a lossless ramp reconstructs exactly whatever the overlap filter does, so the seam property would only be measuring the identity again. |
 | Monotonicity | `quant48`, `quant16`, `quant4` | One source at three quantization parameters, for the weakest of the three checks. |
 
-**Two encoder findings are recorded here because they cost a fixture set
-each, and both are the same failure — a knob that is silently ignored looks
+**Three encoder findings are recorded here because each cost a fixture set,
+and all three are the same failure — a knob that is silently ignored looks
 exactly like a knob that worked.**
 
+- **`Lossless` does nothing on its own, and this one emptied the whole
+  evidence design.** With `$enc.Lossless = $true` and no `QualityLevel`, the
+  codec encodes at its default QP of 10: the files were *quantized* while the
+  manifest called them lossless, so the lossless identity — the primary leg of
+  everything in `docs/design/jpeg-xr.md` — was comparing a decode against an
+  encode that could never match it, and would have failed forever for a reason
+  that looked like a decoder bug. `QualityLevel = 1` is what actually produces
+  a lossless file, and the script now sets it for every row. Measured, not
+  assumed: the same 48 x 32 grey raster is **1016 bytes** at `Lossless` alone
+  and decodes to within +/-3, and **1378 bytes** at `QualityLevel = 1` and
+  decodes **bit-exact**.
 - `ImageQualityLevel` has **no effect** once `UseCodecOptions` is set. Three
   fixtures asked for 30 %, 60 % and 90 % of it and came back byte-identical.
   The quantization fixtures use `QualityLevel` — the codec's own QP, where 1

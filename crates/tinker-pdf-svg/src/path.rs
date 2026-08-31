@@ -299,7 +299,13 @@ fn raise(from: [f64; 2], control: [f64; 2], to: [f64; 2]) -> ([f64; 2], [f64; 2]
 /// taken as their absolute values; and radii too small to span the endpoints
 /// are scaled *up* until they exactly do (F.6.6.2), which is what stops a
 /// rounding error in somebody's exporter from producing no arc at all.
-fn arc_to_curves(
+///
+/// **Public because [`crate::shape`] draws every curved basic shape with it.**
+/// §9.2's rounded rectangle, §9.3's circle and §9.4's ellipse are each defined
+/// by the specification as arcs, and a second quarter-turn approximation
+/// written beside this one would be a second answer to how round a corner is —
+/// visible only where the two meet.
+pub fn arc_to_curves(
     from: [f64; 2],
     radii: [f64; 2],
     rotation_degrees: f64,

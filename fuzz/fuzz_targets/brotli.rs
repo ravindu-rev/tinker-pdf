@@ -37,6 +37,32 @@
 //! - **A refusal at one ceiling is never a panic at another.** The tightest
 //!   ceiling there is runs on every input, because `ExceedsOutputLimit` is the
 //!   one refusal that has nothing to do with the stream's contents.
+//!
+//! # What this target cannot find, and what has to cover it instead
+//!
+//! Every assertion above is about the decoder's **agreement with itself**: it
+//! did not panic, it stayed under its ceiling, it gave the same answer under a
+//! roomier one, it named the ceiling it refused for. None of them asks whether
+//! the bytes are what the stream *means*, because nothing here knows — there is
+//! no encoder in this tree to round-trip against (`CONTRIBUTING.md` rule 1) and
+//! ruling 13 bars asking another decoder.
+//!
+//! So this target is blind, by construction, to a whole class: **a stream that
+//! decodes to the wrong bytes**. On 2026-08-31 one of those was found — §4's
+//! rule that a distance symbol 0 is not pushed to the ring buffer of last
+//! distances, which this decoder was not honouring. It produced output of the
+//! right length, with no panic, identically under every ceiling, from a
+//! perfectly valid stream. Every assertion in this file passes on it. No
+//! budget, no corpus and no amount of running time would have surfaced it here.
+//!
+//! What found it was a real encoder's output whose plaintext was already known
+//! — a WOFF2 fontTools packed, decoding to a `glyf` substream that did not
+//! reconstruct — and what pins it now is `tests/brotli_vectors.rs`, whose
+//! forty-two committed streams a third party produced and whose plaintexts this
+//! repository can state in arithmetic. That file is where a correctness
+//! regression in this decoder gets caught; this one covers the shapes a corpus
+//! of well-formed streams never contains. The two are not substitutes and the
+//! seed corpus here is not evidence of correctness.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

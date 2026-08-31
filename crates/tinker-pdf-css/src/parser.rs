@@ -1154,7 +1154,24 @@ fn layer_names(prelude: &[ComponentValue]) -> Option<Vec<LayerName>> {
 }
 
 /// Every component value in a token list, for a source with no rules around it.
-fn component_values(tokens: Vec<Token>) -> Vec<ComponentValue> {
+///
+/// **Public since `tinker-pdf-svg`**, and the reason is the one CONTRIBUTING
+/// rule 1 is about. An SVG states its properties three ways — a presentation
+/// attribute, a `style=""` attribute and a `<style>` element — and all three
+/// are CSS values; but almost none of the *properties* are ones this crate
+/// implements. `fill`, `stroke-linejoin` and `stop-color` are SVG's, so
+/// [`crate::property::parse_declaration`] answers `Unknown` for each of them
+/// and the value it could not use is gone. What that caller needs is §5.4.7's
+/// structure and nothing above it, and the alternative to handing it over is a
+/// **second component-value builder in this repository** — two readings of the
+/// same clause, differing on an unterminated string or a stray bracket, with no
+/// test that could see the difference.
+///
+/// What is deliberately *not* exported beside it is a raw rule reader.
+/// Splitting a value list on `{ }` and `;` is structural walking over what this
+/// returns rather than a second parse, and it belongs where the document
+/// language's vocabulary is.
+pub fn component_values(tokens: Vec<Token>) -> Vec<ComponentValue> {
     let mut stream = Stream { tokens, at: 0 };
     let mut out = Vec::new();
     while let Some(token) = stream.next() {

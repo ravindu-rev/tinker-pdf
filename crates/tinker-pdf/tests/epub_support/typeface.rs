@@ -1102,3 +1102,106 @@ pub fn shown_glyphs(object: &str) -> String {
     }
     out
 }
+
+/// Wraps an sfnt in a WOFF 1.0 container, storing every table uncompressed.
+///
+/// §5 lets a producer store a table rather than deflate it, and says how a
+/// decoder tells: `compLength == origLength` means the bytes are the table.
+/// Real producers do it for tables compression would not help; this does it
+/// for all of them, because the alternative is a zlib **encoder** and there is
+/// none in this tree (`CONTRIBUTING.md` rule 1, and nothing else here would
+/// want one).
+///
+/// So this is a container a decoder has to read correctly without ever
+/// inflating anything, which makes it exactly the right shape for the EPUB
+/// tests: they are about a face reaching a page, and the compression is
+/// `crates/tinker-pdf-font/tests/woff_fixtures.rs`'s subject, held against
+/// files two real encoders wrote.
+///
+/// The directory is written in ascending tag order, which §5 requires of a
+/// producer as well as of a decoder, and the tables are laid down in the order
+/// the input had them so that the round trip is byte identity.
+#[must_use]
+pub fn as_woff(sfnt: &[u8]) -> Vec<u8> {
+    let count = usize::from(u16::from_be_bytes([sfnt[4], sfnt[5]]));
+    let mut entries: Vec<(u32, usize, usize)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = 12 + i * 16;
+        let tag = u32::from_be_bytes([sfnt[at], sfnt[at + 1], sfnt[at + 2], sfnt[at + 3]]);
+        let offset =
+            u32::from_be_bytes([sfnt[at + 8], sfnt[at + 9], sfnt[at + 10], sfnt[at + 11]]) as usize;
+        let length =
+            u32::from_be_bytes([sfnt[at + 12], sfnt[at + 13], sfnt[at + 14], sfnt[at + 15]])
+                as usize;
+        entries.push((tag, offset, length));
+    }
+    // The physical order is what the container records; the directory is
+    // sorted by tag. Writing the entries out of one and the blocks out of the
+    // other is the whole of what makes the round trip reproduce the input.
+    let mut physical = entries.clone();
+    physical.sort_by_key(|&(_, offset, _)| offset);
+    entries.sort_by_key(|&(tag, _, _)| tag);
+
+    let header = 44 + count * 20;
+    let mut blocks: Vec<(u32, usize, usize)> = Vec::with_capacity(count);
+    let mut body = Vec::new();
+    for &(tag, offset, length) in &physical {
+        let at = header + body.len();
+        body.extend_from_slice(&sfnt[offset..offset + length]);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        blocks.push((tag, at, length));
+    }
+
+    let mut sfnt_size = 12 + count * 16;
+    let mut out = vec![0u8; header];
+    out[0..4].copy_from_slice(b"wOFF");
+    out[4..8].copy_from_slice(&sfnt[0..4]);
+    out[12..14].copy_from_slice(&u16::try_from(count).unwrap_or(0).to_be_bytes());
+    for (i, &(tag, _, length)) in entries.iter().enumerate() {
+        let (_, at, _) = *blocks
+            .iter()
+            .find(|&&(other, _, _)| other == tag)
+            .expect("every table is placed");
+        let entry = 44 + i * 20;
+        out[entry..entry + 4].copy_from_slice(&tag.to_be_bytes());
+        out[entry + 4..entry + 8].copy_from_slice(&u32::try_from(at).unwrap_or(0).to_be_bytes());
+        // Stored, not deflated: §5's own signal for it is these two being equal.
+        let length32 = u32::try_from(length).unwrap_or(0);
+        out[entry + 8..entry + 12].copy_from_slice(&length32.to_be_bytes());
+        out[entry + 12..entry + 16].copy_from_slice(&length32.to_be_bytes());
+        let (_, offset, _) = *physical
+            .iter()
+            .find(|&&(other, _, _)| other == tag)
+            .expect("every table is in the input");
+        out[entry + 16..entry + 20]
+            .copy_from_slice(&woff_checksum(tag, &sfnt[offset..offset + length]).to_be_bytes());
+        sfnt_size += (length + 3) & !3;
+    }
+    out[16..20].copy_from_slice(&u32::try_from(sfnt_size).unwrap_or(0).to_be_bytes());
+    out.extend_from_slice(&body);
+    let total = u32::try_from(out.len()).unwrap_or(0);
+    out[8..12].copy_from_slice(&total.to_be_bytes());
+    out
+}
+
+/// A table's checksum as an sfnt directory states it: the sum of its
+/// big-endian words, with `head`'s `checkSumAdjustment` taken as zero.
+fn woff_checksum(tag: u32, data: &[u8]) -> u32 {
+    let mut owned;
+    let data = if tag == 0x6865_6164 && data.len() >= 12 {
+        owned = data.to_vec();
+        owned[8..12].fill(0);
+        &owned[..]
+    } else {
+        data
+    };
+    let mut sum = 0u32;
+    for chunk in data.chunks(4) {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum = sum.wrapping_add(u32::from_be_bytes(word));
+    }
+    sum
+}

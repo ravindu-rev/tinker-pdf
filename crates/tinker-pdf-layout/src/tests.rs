@@ -11,10 +11,11 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, Display,
-    FlexDirection, FlexWrap, Float, JustifyContent, LengthPercentage, LineHeight, ListStyleType,
-    MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TextAlign,
-    Visibility, WhiteSpace,
+    AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
+    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, JustifyContent,
+    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
+    PageBreak, PageBreakInside, Side, Sides, Size, TextAlign, VerticalAlign, Visibility,
+    WhiteSpace,
 };
 
 use crate::flex;
@@ -3004,24 +3005,863 @@ fn a_rowspan_keeps_its_rows_on_one_page() {
     assert_eq!(laid.text(), "abcde");
 }
 
-/// A band taller than a page is drawn where it is and **says so**, which is
-/// the staged half of table fragmentation named rather than left silent.
+/// `css-break-3` §3.1's class-3 break: a band taller than a page is **cut**,
+/// and every cell of it continues on the next page at the same height.
+///
+/// The arithmetic is the file's own. A forty-point line holds four ten-point
+/// characters and breaks at a space, so `"a b c d ..."` wraps to `"a b"`,
+/// `"c d"`, ... — thirteen lines of twelve points, a hundred and fifty-six
+/// points of cell against a thirty-point page. That is seven pages, and what
+/// this asserts is that it is more than one and that the twenty-six letters
+/// are still all there, in order, once.
 #[test]
-fn a_row_taller_than_a_page_is_drawn_and_says_so() {
-    let tall = cell_of("a b c d e f g h i j k l m n o p q r s t u v w x y z");
-    let tree = table_of(vec![row_of(vec![tall])]);
+fn a_band_taller_than_a_page_is_cut_at_a_line_box() {
+    let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let tree = table_of(vec![row_of(vec![cell_of(body)])]);
     let laid = run(&tree, 40.0, 30.0);
     assert!(
-        laid.warnings
-            .iter()
-            .any(|(warning, _)| *warning == Warning::TableRowTallerThanPage),
-        "{:?}",
-        laid.warnings
+        laid.pages.len() > 1,
+        "the band was drawn on one page rather than cut: {} pages",
+        laid.pages.len()
     );
     assert_eq!(
         conservable(&laid.text()),
-        conservable("a b c d e f g h i j k l m n o p q r s t u v w x y z"),
-        "and nothing was lost by overflowing"
+        conservable(body),
+        "the cut lost or repeated a character"
+    );
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::TableRowTallerThanPage),
+        "a band that was cut is not a band that overflowed: {:?}",
+        laid.warnings
+    );
+    // No line box straddles a page: every line of a page is inside it. A cut
+    // taken anywhere but the top of an item that did not fit would put half a
+    // line on each of two pages, which reads as a page of text either way.
+    for (at, page) in laid.pages.iter().enumerate() {
+        for glyph in &page.runs {
+            assert!(
+                glyph.y >= 0.0 && glyph.y <= 30.0,
+                "a run of page {at} sits at {} on a thirty-point page",
+                glyph.y
+            );
+        }
+    }
+}
+
+/// And the row's own background is cut with it: one fragment per page, each
+/// no taller than the page, and the heights add up to the row.
+///
+/// CSS 2.2 §17.5.1's row layer, `css-break-3` §4's fragment. A build that cut
+/// the text and not the decoration draws the whole row's background on **every**
+/// page of it, starting above the top margin on all but the first.
+#[test]
+fn a_cut_band_paints_one_row_fragment_per_page() {
+    let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let mut row = styled(Display::TableRow);
+    row.background_color = Color {
+        r: 9,
+        g: 9,
+        b: 9,
+        a: 255,
+    };
+    let tree = table_of(vec![BoxNode::element(row, vec![cell_of(body)])]);
+    let laid = run(&tree, 40.0, 30.0);
+    let mut total = 0.0;
+    let mut fragments = 0usize;
+    for (at, page) in laid.pages.iter().enumerate() {
+        for fragment in &page.boxes {
+            if fragment.background.r != 9 {
+                continue;
+            }
+            fragments += 1;
+            total += fragment.height;
+            assert!(
+                fragment.y >= -1e-9,
+                "page {at} paints the row from {}, above its own top edge",
+                fragment.y
+            );
+            assert!(
+                fragment.y + fragment.height <= 30.0 + 1e-9,
+                "page {at} paints the row to {}, past its own bottom edge",
+                fragment.y + fragment.height
+            );
+        }
+    }
+    assert!(
+        fragments > 1,
+        "the row was painted as one fragment rather than one per page"
+    );
+    assert!(
+        close(total, 13.0 * 12.0),
+        "the fragments come to {total} and the row is {} tall",
+        13.0 * 12.0
+    );
+}
+
+/// The narrowed warning: what overflows a page now is one box **inside** a
+/// band that is itself taller than a page, which no cut can avoid.
+///
+/// A line box is atomic, so a font big enough that one line is taller than the
+/// page has no cut position anywhere. The band is drawn, the page overflows,
+/// and `TableRowTallerThanPage` is what says so — the same variant, a smaller
+/// claim.
+#[test]
+fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
+    let mut huge = base();
+    huge.font_size = 60.0;
+    let cell = BoxNode::element(styled(Display::TableCell), vec![BoxNode::text(huge, "x")]);
+    let tree = table_of(vec![row_of(vec![cell])]);
+    let laid = run(&tree, 400.0, 30.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::TableRowTallerThanPage),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- `css-multicol-1`, the multi-column container --------------------------
+//
+// Two hundred points of container, ten-point text, twelve-point lines
+// throughout. A paragraph of one word is one line and twelve points tall.
+
+/// A multi-column container at a stated count, width and gap.
+fn multicol(count: Option<u16>, width: Option<f64>, gap: Option<f64>) -> ComputedStyle {
+    let mut style = block();
+    style.column_count = match count {
+        Some(count) => ColumnCount::Count(count),
+        None => ColumnCount::Auto,
+    };
+    style.column_width = match width {
+        Some(width) => ColumnWidth::Px(width),
+        None => ColumnWidth::Auto,
+    };
+    if let Some(gap) = gap {
+        style.column_gap = tinker_pdf_css::property::Gap::Length(LengthPercentage::Px(gap));
+    }
+    style
+}
+
+/// Four one-line paragraphs, which is forty-eight points of content.
+fn four_paragraphs() -> Vec<BoxNode> {
+    vec![para("a"), para("b"), para("c"), para("d")]
+}
+
+/// §3.4 and §4 together: two columns of a two-hundred-point box with no gap
+/// are a hundred points each, and forty-eight points of content is balanced
+/// twenty-four and twenty-four.
+///
+/// Both halves in one fixture on purpose — the geometry and the balance are
+/// separately asserted below, and what this one holds is that they agree.
+#[test]
+fn two_columns_split_the_box_and_the_content_evenly() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            four_paragraphs(),
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 0.0, 100.0, 100.0]);
+    assert_eq!(baselines(&laid, 0), vec![9.0, 21.0, 9.0, 21.0]);
+    // And the text still reads in document order, which is the whole reason a
+    // container is one item rather than its columns spliced into the flow.
+    assert_eq!(laid.text(), "abcd");
+}
+
+/// §3.4: `column-width` alone decides the **count**, and the used width is the
+/// box's share rather than the length that was asked for.
+///
+/// Sixty points into two hundred with no gap is three columns, and three
+/// columns of two hundred points is sixty-six and two thirds each — not sixty
+/// with twenty left over. A build that used the stated width leaves a ragged
+/// right edge on every book that writes `column-width`.
+#[test]
+fn a_column_width_decides_the_count_and_not_the_used_width() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(None, Some(60.0), Some(0.0)),
+            vec![para("a"), para("b"), para("c")],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 3, "{x:?}");
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(close(x[1], 200.0 / 3.0), "{x:?}");
+    assert!(close(x[2], 400.0 / 3.0), "{x:?}");
+}
+
+/// §3.4's fit counts the gaps **between** the columns and not after the last
+/// one, which is what the `+ gap` in `floor((available + gap) / (width + gap))`
+/// is for.
+///
+/// A hundred and sixty points, forty-point columns, twenty-point gaps: three
+/// columns and two gaps is a hundred and sixty exactly, so three fit. A build
+/// that divided by the step without adding the gap back finds two — and the
+/// book gets two seventy-point columns where its stylesheet asked for three of
+/// forty. The fixture is the boundary case because the boundary is the whole
+/// of what the term does.
+#[test]
+fn the_column_fit_counts_the_gaps_between_the_columns() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(None, Some(40.0), Some(20.0)),
+            vec![para("a"), para("b"), para("c")],
+        )],
+    );
+    let laid = run(&tree, 160.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 60.0, 120.0]);
+}
+
+/// §3.4: with **both** stated the count is the smaller of the two answers, and
+/// the width is still the box's share.
+///
+/// Three columns would fit and two were asked for, so it is two of a hundred —
+/// not two of sixty, and not three.
+#[test]
+fn both_column_properties_take_the_smaller_count() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), Some(60.0), Some(0.0)),
+            four_paragraphs(),
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 0.0, 100.0, 100.0]);
+}
+
+/// `css-align-3` §8.1: `column-gap: normal` is **one em in a multi-column
+/// container** and zero everywhere else, which is why the value is carried to
+/// layout unresolved.
+///
+/// Ten-point text, so ten points of gap: two columns of ninety-five, and the
+/// second starts at a hundred and five.
+#[test]
+fn a_normal_column_gap_is_one_em() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, None),
+            four_paragraphs(),
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x, vec![0.0, 0.0, 105.0, 105.0], "{x:?}");
+}
+
+/// §4: `column-fill: auto` fills each column in turn, so a container with no
+/// stated height puts all of it in the first.
+///
+/// The other value is the initial one and is asserted above; this is the half
+/// that says the property is read at all.
+#[test]
+fn column_fill_auto_puts_everything_in_the_first_column() {
+    let mut style = multicol(Some(2), None, Some(0.0));
+    style.column_fill = ColumnFill::Auto;
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, four_paragraphs())]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(baselines(&laid, 0), vec![9.0, 21.0, 33.0, 45.0]);
+}
+
+/// §4's balance is a **search and not a division**: five lines into two columns
+/// is three and two, because thirty is the shortest height that fits.
+///
+/// `total / count` is thirty-six halved, which is thirty — and here the two
+/// agree. What a division cannot do is the case where the even share lands
+/// inside a line box: seven lines is eighty-four, half is forty-two, and
+/// forty-two points of column holds three lines and a half. The search returns
+/// forty-eight, which is four lines and three.
+#[test]
+fn the_balance_is_a_search_and_lands_on_a_line_boundary() {
+    let seven = vec![
+        para("a"),
+        para("b"),
+        para("c"),
+        para("d"),
+        para("e"),
+        para("f"),
+        para("g"),
+    ];
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(multicol(Some(2), None, Some(0.0)), seven)],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    let first: usize = x.iter().filter(|at| close(**at, 0.0)).count();
+    assert_eq!(first, 4, "the first column does not hold four lines: {x:?}");
+    assert_eq!(x.len(), 7, "{x:?}");
+    assert_eq!(laid.text(), "abcdefg");
+}
+
+/// §5.1: the column rule is drawn **in the middle of the gap**, at the height
+/// of the columns.
+///
+/// Twenty points of gap between two ninety-point columns, and a four-point
+/// rule: the gap runs from ninety to a hundred and ten and the rule from
+/// ninety-eight.
+#[test]
+fn a_column_rule_is_drawn_down_the_middle_of_the_gap() {
+    let mut style = multicol(Some(2), None, Some(20.0));
+    style.column_rule_width = 4.0;
+    style.column_rule_style = BorderStyle::Solid;
+    style.column_rule_color = Color {
+        r: 7,
+        g: 7,
+        b: 7,
+        a: 255,
+    };
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, four_paragraphs())]);
+    let laid = run(&tree, 200.0, 400.0);
+    let rule = laid.pages[0]
+        .boxes
+        .iter()
+        .find(|fragment| fragment.background.r == 7)
+        .expect("the rule was not drawn");
+    assert!(close(rule.x, 98.0), "{rule:?}");
+    assert!(close(rule.width, 4.0), "{rule:?}");
+    assert!(close(rule.height, 24.0), "{rule:?}");
+    // And there is exactly one, because one gap has one rule in it.
+    assert_eq!(
+        laid.pages[0]
+            .boxes
+            .iter()
+            .filter(|fragment| fragment.background.r == 7)
+            .count(),
+        1
+    );
+}
+
+/// §6: `column-span: all` is read on the **child** and named, because a
+/// spanning box makes three column sets where this build has one.
+#[test]
+fn column_span_all_is_named_on_the_child_that_asked_for_it() {
+    let mut spanning = block();
+    spanning.column_span = ColumnSpan::All;
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            vec![
+                para("a"),
+                BoxNode::element(spanning, vec![text("b")]),
+                para("c"),
+            ],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert!(
+        laid.warnings.contains(&(Warning::ColumnSpanAsNone, 1)),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "abc", "and it is still on the page");
+}
+
+/// A container taller than a page is **cut**, which it gets for nothing: it is
+/// an `Abreast` and the page cutter already cuts those at one height across
+/// every column.
+#[test]
+fn a_multi_column_container_taller_than_a_page_is_cut() {
+    let many: Vec<BoxNode> = "abcdefghij".chars().map(|c| para(&c.to_string())).collect();
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(multicol(Some(2), None, Some(0.0)), many)],
+    );
+    // Ten lines balanced into two columns is sixty points; a thirty-point page
+    // takes two of them.
+    let laid = run(&tree, 200.0, 30.0);
+    assert!(laid.pages.len() > 1, "{} pages", laid.pages.len());
+    assert_eq!(conservable(&laid.text()), conservable("abcdefghij"));
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::ColumnTallerThanPage),
+        "a container that was cut is not one that overflowed: {:?}",
+        laid.warnings
+    );
+}
+
+// ---- CSS 2.2 §10.8.1 and §17.5.3, `vertical-align` -------------------------
+//
+// The arithmetic throughout: a ten-point font is eight points of ascent and
+// two of descent, `line-height: normal` is 1.2, so the half-leading is one
+// point and an inline box is nine points over its baseline and three under.
+// A twenty-point font is eighteen and six.
+
+/// A run of text at its own size and alignment, which is what makes it a span
+/// of its own rather than part of the paragraph's.
+fn inline_at(body: &str, size: f64, align: VerticalAlign) -> BoxNode {
+    let mut style = base();
+    style.font_size = size;
+    style.vertical_align = align;
+    BoxNode::text(style, body)
+}
+
+/// One plain run and one aligned one, and the distance between their
+/// baselines, which is the whole of what `vertical-align` decides.
+fn shift_of(size: f64, align: VerticalAlign) -> f64 {
+    let tree = BoxNode::element(block(), vec![text("a"), inline_at("b", size, align)]);
+    let laid = run(&tree, 400.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert_eq!(ys.len(), 2, "{ys:?}");
+    ys[1] - ys[0]
+}
+
+/// §10.8.1: `super` raises the box and `sub` lowers it, and **not by the same
+/// amount** — a descender has less room under a baseline than an ascender has
+/// over it. Both offsets are undefined by §10.8.1 and named in `flow.rs`.
+#[test]
+fn super_raises_a_run_and_sub_lowers_it_by_a_different_amount() {
+    assert!(
+        close(shift_of(10.0, VerticalAlign::Super), -10.0 / 3.0),
+        "{}",
+        shift_of(10.0, VerticalAlign::Super)
+    );
+    assert!(
+        close(shift_of(10.0, VerticalAlign::Sub), 2.0),
+        "{}",
+        shift_of(10.0, VerticalAlign::Sub)
+    );
+}
+
+/// §10.8.1: a **positive** length raises the box, which is the one place this
+/// module's downward `y` and the specification's wording disagree in sign.
+///
+/// A build that dropped the flip puts every `vertical-align: 0.2em` marker
+/// below the line instead of above it, and the page still reads.
+#[test]
+fn a_positive_vertical_align_length_raises_the_box() {
+    assert!(
+        close(
+            shift_of(10.0, VerticalAlign::Length(LengthPercentage::Px(5.0))),
+            -5.0
+        ),
+        "{}",
+        shift_of(10.0, VerticalAlign::Length(LengthPercentage::Px(5.0)))
+    );
+}
+
+/// §10.8.1: `text-top` aligns the top of the box with the top of the
+/// **parent's content area**, and `text-bottom` the bottoms.
+///
+/// A five-point run in a ten-point paragraph: four points of ascent against
+/// eight, so its baseline rises four; one point of descent against two, so it
+/// falls one. Two different numbers from one fixture, which is what makes it a
+/// test of the clause rather than of a sign.
+#[test]
+fn text_top_and_text_bottom_are_the_parents_content_area() {
+    assert!(
+        close(shift_of(5.0, VerticalAlign::TextTop), -4.0),
+        "{}",
+        shift_of(5.0, VerticalAlign::TextTop)
+    );
+    assert!(
+        close(shift_of(5.0, VerticalAlign::TextBottom), 1.0),
+        "{}",
+        shift_of(5.0, VerticalAlign::TextBottom)
+    );
+}
+
+/// §10.8.1: `middle` puts the box's midpoint on the parent's baseline plus
+/// half the parent's x-height.
+///
+/// Half of ten points of font is five of x-height by this build's stated
+/// approximation, so two and a half above the baseline; a five-point run's
+/// midpoint is one and a half above its own. The difference is one point up.
+#[test]
+fn middle_is_the_parents_baseline_plus_half_an_x_height() {
+    assert!(
+        close(shift_of(5.0, VerticalAlign::Middle), -1.0),
+        "{}",
+        shift_of(5.0, VerticalAlign::Middle)
+    );
+}
+
+/// §10.8.1: `top` and `bottom` are aligned to the **line box**, which is why
+/// they cannot be decided when the box is met.
+///
+/// A five-point run is four and a half over its baseline and one and a half
+/// under; the line box is nine over and three under. `top` puts its top on the
+/// line's, so its baseline sits four and a half below the paragraph's; `bottom`
+/// puts its bottom on the line's, one and a half below.
+#[test]
+fn top_and_bottom_are_aligned_to_the_line_box() {
+    assert!(
+        close(shift_of(5.0, VerticalAlign::Top), -4.5),
+        "{}",
+        shift_of(5.0, VerticalAlign::Top)
+    );
+    assert!(
+        close(shift_of(5.0, VerticalAlign::Bottom), 1.5),
+        "{}",
+        shift_of(5.0, VerticalAlign::Bottom)
+    );
+}
+
+/// §10.8.1: a raised box **grows the line box**, because the line box is the
+/// extent of everything on it.
+///
+/// Without this the superscript is drawn over the line above and the paragraph
+/// is exactly as tall as it was, which is a page that looks right until two
+/// lines are close together.
+#[test]
+fn a_raised_box_makes_its_line_taller() {
+    let plain = BoxNode::element(tinted(block()), vec![text("a"), text("b")]);
+    let raised = BoxNode::element(
+        tinted(block()),
+        vec![text("a"), inline_at("b", 10.0, VerticalAlign::Super)],
+    );
+    let height = |tree: BoxNode| {
+        let laid = run(&BoxNode::element(block(), vec![tree]), 400.0, 400.0);
+        laid.pages[0].boxes[0].height
+    };
+    let flat = height(plain);
+    assert!(close(flat, 12.0), "{flat}");
+    // Nine over the baseline plus the three and a third the superscript rose,
+    // and three under it.
+    let tall = height(raised);
+    assert!(close(tall, 12.0 + 10.0 / 3.0), "{tall}");
+}
+
+/// And a `top`-aligned box taller than the line grows it **downward**, which
+/// is what keeps the edge it was aligned to where it was put.
+///
+/// A twenty-point run is eighteen over and six under, twenty-four in all,
+/// against a line that is nine over and three under. Aligned to the top, the
+/// nine over is kept and the three under becomes fifteen — and its own
+/// baseline lands nine below the paragraph's.
+#[test]
+fn a_tall_top_aligned_box_grows_the_line_downward() {
+    let tree = BoxNode::element(
+        tinted(block()),
+        vec![text("a"), inline_at("b", 20.0, VerticalAlign::Top)],
+    );
+    let laid = run(&BoxNode::element(block(), vec![tree]), 400.0, 400.0);
+    assert!(
+        close(laid.pages[0].boxes[0].height, 24.0),
+        "{}",
+        laid.pages[0].boxes[0].height
+    );
+    let ys = baselines(&laid, 0);
+    assert!(close(ys[1] - ys[0], 9.0), "{ys:?}");
+}
+
+// ---- §17.5.3, `vertical-align` on a table cell ------------------------------
+
+/// A cell at its own font size and alignment.
+fn cell_aligned(body: &str, size: f64, align: VerticalAlign) -> BoxNode {
+    let mut cell = styled(Display::TableCell);
+    cell.vertical_align = align;
+    cell.font_size = size;
+    let mut inner = base();
+    inner.font_size = size;
+    BoxNode::element(cell, vec![BoxNode::text(inner, body)])
+}
+
+/// The baselines of a two-cell row whose first cell is twenty-point and whose
+/// second is ten-point and aligned as stated.
+fn row_baselines(align: VerticalAlign) -> Vec<f64> {
+    let tree = table_of(vec![row_of(vec![
+        cell_aligned("A", 20.0, VerticalAlign::Baseline),
+        cell_aligned("b", 10.0, align),
+    ])]);
+    let laid = run(&tree, 400.0, 400.0);
+    baselines(&laid, 0)
+}
+
+/// §17.5.3: `baseline` is the initial value and it is **not** `top`.
+///
+/// A twenty-point cell is eighteen points over its baseline and a ten-point
+/// one is nine, so the small cell is pushed nine points down to sit on the
+/// row's baseline — and both first lines are on one line, which is what a row
+/// of a heading and its body is supposed to look like. `top` leaves the small
+/// one at nine and the two are nine points apart.
+#[test]
+fn a_cells_initial_vertical_align_is_baseline_and_not_top() {
+    let on_the_baseline = row_baselines(VerticalAlign::Baseline);
+    assert!(
+        close(on_the_baseline[0], on_the_baseline[1]),
+        "the two cells are not on one baseline: {on_the_baseline:?}"
+    );
+    let at_the_top = row_baselines(VerticalAlign::Top);
+    assert!(
+        close(at_the_top[0] - at_the_top[1], 9.0),
+        "`top` did not leave the small cell at the row's top edge: {at_the_top:?}"
+    );
+}
+
+/// §17.5.3's other two: `bottom` puts the content at the foot of the cell box
+/// and `middle` halfway.
+///
+/// The row is twenty-four points tall, which is the tall cell's line box. The
+/// short cell's own is twelve, so twelve points are free: `bottom` spends all
+/// of them and `middle` half.
+#[test]
+fn bottom_and_middle_spend_a_cells_free_height() {
+    let bottom = row_baselines(VerticalAlign::Bottom);
+    // Twelve points down, and nine more to its own baseline.
+    assert!(close(bottom[1], 21.0), "{bottom:?}");
+    let middle = row_baselines(VerticalAlign::Middle);
+    assert!(close(middle[1], 15.0), "{middle:?}");
+}
+
+/// §17.5.3: *"other values behave as `baseline`"* — the four §10.8.1 values a
+/// cell has no way to honour.
+///
+/// Read exactly, so a build cannot quietly treat `super` on a cell as a raise
+/// and put the cell's whole content three points above its own box.
+#[test]
+fn an_inline_only_value_on_a_cell_behaves_as_baseline() {
+    assert_eq!(
+        row_baselines(VerticalAlign::Super),
+        row_baselines(VerticalAlign::Baseline)
+    );
+    assert_eq!(
+        row_baselines(VerticalAlign::TextTop),
+        row_baselines(VerticalAlign::Baseline)
+    );
+}
+
+/// §17.5.3: a cell pushed down to reach its row's baseline needs the room it
+/// was pushed into, so the **row** is taller than its tallest cell.
+///
+/// A ten-point cell whose baseline is nine, beside a twenty-point one whose
+/// baseline is eighteen: the small one is pushed nine down and its twelve
+/// points of line now end at twenty-one, which fits the tall cell's
+/// twenty-four. Make the small cell two lines and it ends at thirty-three, and
+/// a build that sized the row from the cell heights alone draws its last line
+/// over the row below.
+#[test]
+fn a_row_is_tall_enough_for_the_baseline_it_imposed() {
+    let mut cell = styled(Display::TableCell);
+    cell.font_size = 10.0;
+    let mut inner = base();
+    inner.font_size = 10.0;
+    let tree = table_of(vec![
+        row_of(vec![
+            cell_aligned("A", 20.0, VerticalAlign::Baseline),
+            BoxNode::element(cell, vec![BoxNode::text(inner, "b b")]),
+        ]),
+        row_of(vec![cell_aligned("c", 10.0, VerticalAlign::Baseline)]),
+    ]);
+    let laid = run(&tree, 20.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // "b b" wraps to two lines at twenty points of column, so the second cell
+    // runs from nine to thirty-three and the row must be thirty-three tall.
+    // The next row's first baseline is thirty-three plus its own nine.
+    let last = ys.last().copied().expect("a run on the second row");
+    assert!(
+        close(last, 42.0),
+        "the second row started before the first one ended: {ys:?}"
+    );
+}
+
+// ---- CSS 2.2 §10.4 and §10.7, the min/max clamps ---------------------------
+//
+// Every number below is the file's own arithmetic. A two-hundred-point
+// containing block, a ten-point font, one point of advance per point.
+
+/// Shorthands for the two sizing properties, so a fixture reads as the
+/// declaration it stands for.
+fn min_px(value: f64) -> MinSize {
+    MinSize::Length(LengthPercentage::Px(value))
+}
+
+fn max_px(value: f64) -> MaxSize {
+    MaxSize::Length(LengthPercentage::Px(value))
+}
+
+/// The width of the first painted box on a page, which is what the clamp moves.
+fn first_width(laid: &Layout, page: usize) -> f64 {
+    laid.pages[page].boxes[0].width
+}
+
+fn tinted(mut style: ComputedStyle) -> ComputedStyle {
+    style.background_color = Color {
+        r: 1,
+        g: 2,
+        b: 3,
+        a: 255,
+    };
+    style
+}
+
+/// §10.4: `max-width` narrows an `auto` width, and `min-width` widens it.
+///
+/// An `auto` width fills the two-hundred-point containing block; a
+/// `max-width: 80px` makes the used width eighty, and a `min-width: 150px` on
+/// a box whose `width: 40px` would have been forty makes it a hundred and
+/// fifty. Two boxes and not one, because a build that clamped one way and not
+/// the other passes every fixture written for the other.
+#[test]
+fn a_max_width_narrows_a_box_and_a_min_width_widens_one() {
+    let mut narrowed = tinted(block());
+    narrowed.max_width = max_px(80.0);
+    let mut widened = tinted(block());
+    widened.width = Size::Length(LengthPercentage::Px(40.0));
+    widened.min_width = min_px(150.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            BoxNode::element(narrowed, vec![text("x")]),
+            BoxNode::element(widened, vec![text("y")]),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let widths: Vec<f64> = laid.pages[0].boxes.iter().map(|b| b.width).collect();
+    assert_eq!(widths, vec![80.0, 150.0]);
+}
+
+/// §10.4 **is not `clamp`**: the maximum is applied first and the minimum
+/// second, so a `min-width` larger than the `max-width` wins.
+///
+/// This is the clause a build gets wrong by reaching for the obvious library
+/// function — which would also panic on the pair, and ruling 1 says never.
+#[test]
+fn a_min_width_larger_than_the_max_width_wins() {
+    let mut style = tinted(block());
+    style.min_width = min_px(150.0);
+    style.max_width = max_px(50.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(first_width(&laid, 0), 150.0);
+}
+
+/// `css-ui-3` §5.1: `box-sizing: border-box` measures the **min/max**
+/// properties from the border box too, not only `width`.
+///
+/// The fixture has a border and a padding, because on a box with neither the
+/// two readings give the same answer — the same shape `box_sizing_is_the_
+/// difference_between_a_hundred_and_a_hundred_and_thirty` has.
+#[test]
+fn box_sizing_measures_the_max_width_from_the_border_box_as_well() {
+    let make = |sizing: BoxSizing| {
+        let mut style = tinted(block());
+        style.box_sizing = sizing;
+        style.padding = Sides::all(LengthPercentage::Px(10.0));
+        style.border_width = Sides::all(5.0);
+        style.border_style = Sides::all(BorderStyle::Solid);
+        style.max_width = max_px(100.0);
+        let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+        first_width(&run(&tree, 200.0, 400.0), 0)
+    };
+    // The painted fragment is the border box either way. `content-box` reads
+    // the hundred as the content and adds thirty; `border-box` reads it as the
+    // whole and the content is seventy.
+    assert_eq!(make(BoxSizing::ContentBox), 130.0);
+    assert_eq!(make(BoxSizing::BorderBox), 100.0);
+}
+
+/// §10.4: a percentage `max-width` is a percentage of the containing block.
+#[test]
+fn a_percentage_max_width_is_of_the_containing_block() {
+    let mut style = tinted(block());
+    style.max_width = MaxSize::Length(LengthPercentage::Percent(25.0));
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(first_width(&laid, 0), 50.0);
+}
+
+/// §10.3.3: two `auto` margins centre a box the **clamp** made narrow, not
+/// only one the book gave a `width`.
+///
+/// §10.4's second pass runs *"as if `width` were the clamped value"*, and by
+/// then it is not `auto`. A build that keyed the centring on the declared
+/// `width` alone leaves every `max-width`-narrowed figure hard against the
+/// left margin, which is a page that looks deliberate.
+#[test]
+fn a_max_width_narrowed_box_with_auto_margins_is_centred() {
+    let mut style = tinted(block());
+    style.max_width = max_px(100.0);
+    style.margin.left = MarginValue::Auto;
+    style.margin.right = MarginValue::Auto;
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.pages[0].boxes[0].x, 50.0);
+    assert_eq!(first_width(&laid, 0), 100.0);
+}
+
+/// §10.7: `min-height` pads the flow out to it, exactly as `height` does.
+#[test]
+fn a_min_height_pads_the_flow_out_to_it() {
+    let mut style = tinted(block());
+    style.min_height = min_px(100.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    // One line of twelve points, padded out to a hundred.
+    assert_eq!(laid.pages[0].boxes[0].height, 100.0);
+}
+
+/// §10.7: a `max-height` **taller** than the content clamps a `height` that
+/// would have padded past it.
+#[test]
+fn a_max_height_clamps_the_height_it_would_have_padded_to() {
+    let mut style = tinted(block());
+    style.height = Size::Length(LengthPercentage::Px(200.0));
+    style.max_height = max_px(100.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.pages[0].boxes[0].height, 100.0);
+}
+
+/// And a `max-height` **shorter** than the content is named rather than half
+/// honoured.
+///
+/// This module's flow is one column whose `y` never goes backwards, so by the
+/// time a box's height is known its items are emitted and there is no negative
+/// edge to shorten it with. The box is its content's height and the
+/// declaration did nothing — which is [`Warning::MaxHeightAsAuto`]'s whole
+/// sentence, and `InlineBlockAsInline`'s shape.
+#[test]
+fn a_max_height_shorter_than_the_content_says_so() {
+    let mut style = tinted(block());
+    style.max_height = max_px(6.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::MaxHeightAsAuto),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.pages[0].boxes[0].height, 12.0, "and it is its content");
+}
+
+/// §10.5: a percentage `min-height` against a containing block whose height is
+/// `auto` behaves as `auto`, so it pads nothing.
+///
+/// The same sentence `height` already obeys. A build that resolved it against
+/// the page instead makes every `min-height: 100%` book one screen per
+/// paragraph.
+#[test]
+fn a_percentage_min_height_against_an_auto_height_is_auto() {
+    let mut style = tinted(block());
+    style.min_height = MinSize::Length(LengthPercentage::Percent(100.0));
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.pages[0].boxes[0].height, 12.0);
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::MaxHeightAsAuto),
+        "an `auto` minimum is not a maximum that did nothing: {:?}",
+        laid.warnings
     );
 }
 
@@ -3772,6 +4612,7 @@ fn the_flexible_length_resolution_redistributes_after_a_minimum_bites() {
             base: 100.0,
             hypothetical: 100.0,
             min: 90.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
         flex::Item {
@@ -3780,6 +4621,7 @@ fn the_flexible_length_resolution_redistributes_after_a_minimum_bites() {
             base: 100.0,
             hypothetical: 100.0,
             min: 0.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
     ];
@@ -3800,6 +4642,7 @@ fn flex_factors_below_one_leave_the_rest_of_the_space_empty() {
         base: 0.0,
         hypothetical: 0.0,
         min: 0.0,
+        max: f64::INFINITY,
         extra: 0.0,
     }];
     let used = flex::resolve(&items, 200.0);
@@ -3819,6 +4662,7 @@ fn a_flex_line_always_takes_one_item() {
             base: 500.0,
             hypothetical: 500.0,
             min: 0.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
         flex::Item {
@@ -3827,6 +4671,7 @@ fn a_flex_line_always_takes_one_item() {
             base: 500.0,
             hypothetical: 500.0,
             min: 0.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
     ];
@@ -3873,10 +4718,14 @@ fn a_flex_container_conserves_its_text() {
     assert_eq!(laid.text(), "onetwothreefour");
 }
 
-/// A flex container taller than a page is drawn where it is and **says so**,
-/// which is the same staged half a table row has.
+/// A flex line taller than a page is **cut**, which is the same class-3 break
+/// a table band gets and the reason the two are one payload.
+///
+/// Six paragraphs of one twelve-point line each is seventy-two points of
+/// column container against a thirty-point page: two lines a page, three
+/// pages, and the letters in order.
 #[test]
-fn a_flex_line_taller_than_a_page_is_named() {
+fn a_flex_line_taller_than_a_page_is_cut() {
     let tree = BoxNode::element(
         flex_container(FlexDirection::Column, FlexWrap::NoWrap),
         vec![
@@ -3890,12 +4739,26 @@ fn a_flex_line_taller_than_a_page_is_named() {
     );
     let laid = run(&tree, 200.0, 30.0);
     assert!(
-        laid.warnings
-            .contains(&(Warning::FlexLineTallerThanPage, 1)),
-        "{:?}",
+        laid.pages.len() > 1,
+        "the line was drawn on one page rather than cut: {} pages",
+        laid.pages.len()
+    );
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::FlexLineTallerThanPage),
+        "a line that was cut is not a line that overflowed: {:?}",
         laid.warnings
     );
     assert_eq!(laid.text(), "abcdef");
+    let per_page: Vec<String> = (0..laid.pages.len())
+        .map(|at| page_text(&laid, at))
+        .collect();
+    assert!(
+        per_page.iter().all(|page| !page.is_empty()),
+        "the cut left a page with nothing on it: {per_page:?}"
+    );
 }
 
 /// A row container of several lines **can** be broken between two of them,
@@ -3921,6 +4784,164 @@ fn a_row_container_breaks_between_its_lines() {
         laid.warnings
     );
     assert_eq!(laid.text(), "abc");
+}
+
+/// A flex item with one property tweaked, so a clause can be a fixture without
+/// a second constructor per property.
+fn tweaked_item(
+    body: &str,
+    grow: f64,
+    shrink: f64,
+    basis_value: Size,
+    tweak: impl FnOnce(&mut ComputedStyle),
+) -> BoxNode {
+    let mut style = block();
+    style.flex_grow = grow;
+    style.flex_shrink = shrink;
+    style.flex_basis = basis_value;
+    tweak(&mut style);
+    BoxNode::element(style, vec![text(body)])
+}
+
+/// `css-flexbox-1` §9.7 step 4d: a `max-width` stops a `flex-grow` item, and
+/// the space it refused goes to the other one.
+///
+/// Two items of a hundred points of basis in a three-hundred-point container:
+/// a hundred points of free space, shared equally by `flex-grow: 1` each, and
+/// both would be a hundred and fifty. A `max-width: 120px` on the first freezes
+/// it at a hundred and twenty and §9.7's **loop** — not a division — gives the
+/// other the thirty it gave back, so it is a hundred and eighty.
+#[test]
+fn a_max_width_freezes_a_growing_item_and_the_rest_absorbs_it() {
+    let capped = tweaked_item("a", 1.0, 1.0, basis(100.0), |style| {
+        style.max_width = max_px(120.0);
+    });
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![capped, flex_item("b", 1.0, 1.0, basis(100.0))],
+    );
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 2, "{x:?}");
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(
+        close(x[1], 120.0),
+        "the capped item did not stop at its maximum: {x:?}"
+    );
+}
+
+/// §4.5: a **stated** `min-width` replaces the automatic minimum rather than
+/// losing to it.
+///
+/// §4.5 applies to `min-width: auto` and to nothing else. The automatic
+/// minimum of an item holding `"wide"` is forty points — its longest word —
+/// and a `min-width: 10px` says the item may be ten. A build that took the
+/// larger of the two could never make a flex item narrower than a word,
+/// however small a minimum the book wrote.
+#[test]
+fn a_stated_min_width_replaces_the_automatic_minimum() {
+    let make = |minimum: MinSize| {
+        let item = tweaked_item("wide", 0.0, 1.0, basis(100.0), |style| {
+            style.min_width = minimum;
+        });
+        let tree = BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            vec![item, flex_item("b", 0.0, 1.0, basis(100.0))],
+        );
+        let laid = run(&tree, 60.0, 400.0);
+        xs(&laid, 0)[1]
+    };
+    // Two hundred points of basis into sixty: a hundred and forty to shrink
+    // away, shared equally by the scaled factors, so both items want thirty.
+    // `"wide"` is forty points of automatic minimum and **does** bite at
+    // thirty: the first item freezes at forty and §9.7's loop gives the second
+    // what is left, which is twenty. So the second item's left edge is at
+    // forty.
+    //
+    // A stated `min-width: 10px` is smaller than the automatic minimum, and
+    // the whole clause is that it **replaces** it rather than losing to it: no
+    // minimum bites, both items are thirty, and the second starts at thirty. A
+    // build that took the larger of the two gives forty for both values, which
+    // is why the fixture is a minimum below the automatic one and not above it.
+    assert!(
+        close(make(MinSize::Auto), 40.0),
+        "the automatic minimum did not bite: {}",
+        make(MinSize::Auto)
+    );
+    assert!(
+        close(make(min_px(10.0)), 30.0),
+        "a stated minimum smaller than the automatic one did not replace it: {}",
+        make(min_px(10.0))
+    );
+}
+
+/// §9.2 step 4 and §9.3 step 5: the **hypothetical** main size is what lines
+/// are collected against, so a `max-width` decides how many lines there are.
+///
+/// Three items of a hundred points of basis, each capped at fifty, in a
+/// two-hundred-and-fifty-point container. Clamped, the hypothetical sizes are
+/// fifty and a hundred and fifty fits one line. Unclamped they are a hundred,
+/// two fit and the third wraps — and every item still ends up fifty wide,
+/// because §9.7 step 4d clamps them anyway. The sizes are right and the book
+/// has a line break in it that nothing asked for, which is why this clause
+/// needs a fixture of its own.
+#[test]
+fn a_max_width_decides_how_many_flex_lines_there_are() {
+    let capped = || {
+        tweaked_item("x", 0.0, 0.0, basis(100.0), |style| {
+            style.max_width = max_px(50.0);
+        })
+    };
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::Wrap),
+        vec![capped(), capped(), capped()],
+    );
+    let laid = run(&tree, 250.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert_eq!(ys.len(), 3, "{ys:?}");
+    assert!(
+        close(ys[0], ys[1]) && close(ys[1], ys[2]),
+        "the items wrapped onto more than one line: {ys:?}"
+    );
+}
+
+/// §9.4 step 11: a column container's item is stretched across the cross axis
+/// *"clamped by the used min and max cross sizes"* — which for a column
+/// container is `max-width`.
+///
+/// The axis mapping is the clause: `max-width` is a **cross** maximum here and
+/// a main one in a row container, and a build that read it on the main axis of
+/// both honours half the books.
+/// **What this asserts is where the item sits, not how wide it is.** A flex
+/// item is laid out again through the ordinary block path, which clamps its
+/// width a second time — so a build that skipped the clamp *here* still paints
+/// a box of the right width, and a fixture that only measured the width would
+/// pass with this step missing entirely. What such a build gets wrong is the
+/// item's **cross size as §8.3 sees it**, which is the number the alignment is
+/// computed against: `align-items: center` then centres a hundred and seventy
+/// points of box that is drawn twenty wide, and the paragraph starts fifteen
+/// points from the left of a two-hundred-point page instead of ninety.
+#[test]
+fn a_max_width_clamps_a_column_containers_cross_size() {
+    let mut container = flex_container(FlexDirection::Column, FlexWrap::NoWrap);
+    container.align_items = AlignItems::Center;
+    let mut item = tinted(block());
+    item.max_width = max_px(20.0);
+    let tree = BoxNode::element(
+        container,
+        vec![BoxNode::element(item, vec![text("aa bb cc dd ee ff")])],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(
+        first_width(&laid, 0),
+        20.0,
+        "the stretch ran past the maximum"
+    );
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[0], 90.0),
+        "a twenty-point item centred in two hundred points starts at ninety: {x:?}"
+    );
 }
 
 /// §4: a run of child text becomes an anonymous flex item, and a run that is
@@ -4361,6 +5382,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 0.0,
                 hypothetical: 50.0,
                 min: 50.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
             flex::Item {
@@ -4369,6 +5391,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 0.0,
                 hypothetical: 0.0,
                 min: 0.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
         ],
@@ -4390,6 +5413,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 50.0,
                 hypothetical: 90.0,
                 min: 90.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
             flex::Item {
@@ -4398,6 +5422,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 100.0,
                 hypothetical: 100.0,
                 min: 0.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
         ],

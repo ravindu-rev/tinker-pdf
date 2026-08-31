@@ -84,15 +84,25 @@ foreach ($row in $rows) {
     # UseCodecOptions is what makes the codec honour the knobs below rather
     # than the single ImageQualityLevel dial.
     $enc.UseCodecOptions = $true
+    # QualityLevel is the codec's own quantization parameter, and 1 is what
+    # actually produces a lossless file. It is set for EVERY row, including
+    # the lossless ones, because `Lossless` on its own does nothing.
+    #
+    # That is the third silently-ignored knob this fixture set has found, and
+    # it cost the most: with `Lossless = $true` and no QualityLevel the codec
+    # encodes at its default QP of 10, so the files this script used to write
+    # were quantized while claiming to be lossless — and the lossless
+    # identity, which is the primary evidence leg of the whole decoder, was
+    # comparing against an encode that could never match. Measured, not
+    # assumed: the same raster at `Lossless` alone is 1016 bytes and decodes
+    # to within +/-3, and at `QualityLevel = 1` is 1378 bytes and decodes
+    # bit-exact.
+    #
+    # `Lossless` is still set, because the codec may use it to choose among
+    # otherwise equivalent encodings, and because a reader comparing this
+    # script with the manifest should see the column honoured.
     $enc.Lossless = $row.Lossless
-    if (-not $row.Lossless) {
-        # QualityLevel is the codec's own quantization parameter: 1 is
-        # lossless and larger is coarser. ImageQualityLevel is deliberately
-        # NOT used - it has no effect once UseCodecOptions is set, which was
-        # measured rather than assumed: three fixtures asked for 30 %, 60 %
-        # and 90 % of it came back byte-identical.
-        $enc.QualityLevel = $row.Quant
-    }
+    $enc.QualityLevel = if ($row.Lossless) { 1 } else { $row.Quant }
     $enc.OverlapLevel = $row.Overlap
     $enc.HorizontalTileSlices = $row.HTiles
     $enc.VerticalTileSlices = $row.VTiles
