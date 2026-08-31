@@ -192,14 +192,8 @@ pub enum JxrRefusal {
     /// 8.3.20's BD1WHITE1, BD1BLACK1, BD5, BD565 and BD10 — the packed
     /// sub-byte and cross-byte output depths of 9.10.8.3 to 9.10.8.6.
     PackedOutputBitdepth,
-    /// A.3.2's separate alpha image plane: a second `CODED_IMAGE( )` at
-    /// `ALPHA_OFFSET`. Refused rather than dropped, because dropping it
-    /// returns an opaque image where the file said transparent.
-    SeparateAlphaPlane,
     /// 8.3.18's interleaved alpha image plane.
     InterleavedAlphaPlane,
-    /// 8.3.7's frequency-mode codestream layout.
-    FrequencyMode,
     /// Table 28's YUV420, YUV422 and YUVK internal colour formats — the
     /// subsampled and four-component internal layouts, whose chroma
     /// upsampling is 9.10.3 and whose macroblock geometry is not the
@@ -209,16 +203,6 @@ pub enum JxrRefusal {
     /// right margins are the ordinary padding to a multiple of 16 and are
     /// always handled; a top or left margin shifts the whole sample grid.
     WindowedOrigin,
-    /// 9.10's output formatting: the colour transform back to RGB or grey,
-    /// 9.10.5's bias, 9.10.6's scaling and 9.10.8's clipping and crop.
-    /// Present while the milestone that implements it is outstanding, so that
-    /// a build which has reconstructed every sample and cannot yet say what
-    /// the numbers *mean* **says so** rather than returning them as a
-    /// picture. They would look like one — the samples are a real image in
-    /// the internal colour format — and a raster whose channels are Y, U and
-    /// V presented as R, G and B is a plausible wrong photograph, which is
-    /// the failure mode this whole decoder's refusals exist to prevent.
-    OutputFormatting,
 }
 
 impl core::fmt::Display for JxrError {
@@ -286,6 +270,15 @@ pub enum JxrWarning {
     /// The image was decoded but the container asked for an orientation
     /// (Table 21) that this crate reports rather than applies.
     SpatialTransformNotApplied,
+    /// A.3.2's separate alpha image plane was present and could not be
+    /// decoded, so the image is opaque where the file said transparent.
+    ///
+    /// A warning rather than a refusal, and the choice is ruling 2's: an
+    /// unreadable alpha plane costs *transparency*, not the picture, and a
+    /// page that loses its illustration because a channel it may not even use
+    /// was damaged is the worse outcome. It sets `complete` to false, so a
+    /// caller that does care can tell.
+    AlphaPlaneDropped,
 }
 
 impl JxrWarning {
@@ -299,6 +292,7 @@ impl JxrWarning {
             Self::ContainerDimensionsDisagree => "jxr-container-dimensions-disagree",
             Self::TileDroppedAsZero => "jxr-tile-dropped-as-zero",
             Self::SpatialTransformNotApplied => "jxr-spatial-transform-not-applied",
+            Self::AlphaPlaneDropped => "jxr-alpha-plane-dropped",
         }
     }
 }
@@ -370,9 +364,6 @@ pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
         if c.format_known_unsupported {
             return Err(JxrError::Unsupported(JxrRefusal::UnknownPixelFormat));
         }
-        if c.alpha.is_some() {
-            return Err(JxrError::Unsupported(JxrRefusal::SeparateAlphaPlane));
-        }
         if c.spatial_transform != 0 {
             push_once(&mut warnings, JxrWarning::SpatialTransformNotApplied);
         }
@@ -425,8 +416,33 @@ pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
     }
 
     let planes = coefficients::decode_image(&mut reader, &headers, &mut warnings)?;
-    let complete = !warnings.contains(&JxrWarning::TileDroppedAsZero);
-    let data = colour::format_output(&planes, &headers, format)?;
+
+    // A.3.2's separate alpha image plane: a second, complete `CODED_IMAGE( )`
+    // at `ALPHA_OFFSET`, with its own header, its own `SCALED_FLAG` and its
+    // own `SHIFT_BITS`. It is decoded here rather than inside `colour.rs`
+    // because it is a whole image, not a channel — and only when the pixel
+    // format actually has an alpha channel to put it in, so that a file
+    // carrying one for a format Table A.6 gives no alpha does not spend the
+    // budget decoding something with nowhere to go.
+    let alpha_range = container
+        .as_ref()
+        .filter(|_| format.channels.has_alpha())
+        .and_then(|c| c.alpha.clone());
+    let alpha = match alpha_range {
+        Some(range) => {
+            let decoded = decode_alpha_plane(bytes, range, &headers, &mut warnings);
+            if decoded.is_none() {
+                push_once(&mut warnings, JxrWarning::AlphaPlaneDropped);
+            }
+            decoded
+        }
+        None => None,
+    };
+
+    let complete = !warnings.contains(&JxrWarning::TileDroppedAsZero)
+        && !warnings.contains(&JxrWarning::AlphaPlaneDropped);
+    let alpha_ref = alpha.as_ref().map(|(p, h)| (p, &h.primary));
+    let data = colour::format_output(&planes, &headers, format, alpha_ref)?;
 
     warnings.sort();
     warnings.dedup();
@@ -440,6 +456,43 @@ pub fn jxr_decode(bytes: &[u8], limits: &Limits) -> Result<JxrImage, JxrError> {
     })
 }
 
+/// A.3.2's separate alpha image plane: a second, complete `CODED_IMAGE( )`.
+///
+/// Returns `None` for anything wrong with it, which the caller turns into
+/// [`JxrWarning::AlphaPlaneDropped`] and an opaque image (ruling 2). The
+/// checks are 8.4.2's and Table 30's: one YONLY component at the primary's
+/// dimensions. A plane that disagrees has not said what its transparency is,
+/// and inventing it is worse than admitting the loss.
+fn decode_alpha_plane(
+    bytes: &[u8],
+    range: core::ops::Range<usize>,
+    primary: &headers::CodedImageHeaders,
+    warnings: &mut Vec<JxrWarning>,
+) -> Option<(coefficients::Planes, headers::CodedImageHeaders)> {
+    let slice = bytes.get(range)?;
+    let mut r = bitstream::BitReader::new(slice);
+    // The alpha plane's own leniencies are its own; they are collected into a
+    // scratch list and discarded, because a warning that says "the padding
+    // bit was set" without saying which plane it was in is worse than none.
+    let mut scratch = Vec::new();
+    let h = headers::CodedImageHeaders::read(&mut r, &mut scratch).ok()?;
+    if h.image.width != primary.image.width
+        || h.image.height != primary.image.height
+        || h.primary.num_components != 1
+        || h.primary.internal_clr_fmt != headers::InternalClrFmt::YOnly
+    {
+        return None;
+    }
+    refuse_unsupported(&h).ok()?;
+    let planes = coefficients::decode_image(&mut r, &h, &mut scratch).ok()?;
+    // A dropped tile inside the alpha plane still costs transparency, so it
+    // is promoted to the one warning the caller can attribute.
+    if scratch.contains(&JxrWarning::TileDroppedAsZero) {
+        push_once(warnings, JxrWarning::TileDroppedAsZero);
+    }
+    Some((planes, h))
+}
+
 /// Records a warning at most once (ruling 10's dedup contract).
 fn push_once(warnings: &mut Vec<JxrWarning>, w: JxrWarning) {
     if !warnings.contains(&w) {
@@ -451,9 +504,6 @@ fn push_once(warnings: &mut Vec<JxrWarning>, w: JxrWarning) {
 fn refuse_unsupported(h: &headers::CodedImageHeaders) -> Result<(), JxrError> {
     use headers::{InternalClrFmt, OutputBitdepth, OutputClrFmt};
 
-    if h.image.frequency_mode {
-        return Err(JxrError::Unsupported(JxrRefusal::FrequencyMode));
-    }
     if h.image.alpha_image_plane {
         return Err(JxrError::Unsupported(JxrRefusal::InterleavedAlphaPlane));
     }
